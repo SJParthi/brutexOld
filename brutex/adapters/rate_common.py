@@ -87,6 +87,14 @@ STEP_RPS: float = 1.0
 STEP_DOWN_HITS: int = 3
 STEP_DOWN_WINDOW: float = 60.0
 
+#: Rolling window (seconds) for the optional per-minute governor — a HARD ceiling on
+#: the number of requests ISSUED inside any trailing 60 s, orthogonal to the AIMD
+#: per-second ladder (DEC-GROWW-RATE-PERMIN-001). Mirrors :data:`STEP_DOWN_WINDOW`'s
+#: 60 s eviction idiom but governs an issue-count cap, not the step ladder. The cap
+#: itself is INJECTED per vendor (``ceiling_per_min``); this controller stays free of
+#: vendor numbers (mirrors :data:`CEILING_RPS`'s injected-width policy).
+PER_MIN_WINDOW: float = 60.0
+
 #: The DEEPER floor the **429** ladder may reach under a SUSTAINED rate-limit storm
 #: (DEC-DHAN-RATE-STORM-FLOOR-001). The 429 ladder reaches the soft :data:`FLOOR_RPS`
 #: (3) quickly on a brief burst — a mere quota nudge is no reason to crawl — but a
@@ -132,6 +140,15 @@ STEP_UP_WINDOW: float = 300.0
 #: that still slips through self-heals in-run (DEC-DHAN-429-RETRY-001, #466).
 BURST: int = 1
 
+#: Safety cap on the per-minute governor's re-check loop (DEC-GROWW-RATE-PERMIN-001).
+#: Mirrors :class:`~brutex.orchestrator.rate_limiter.AdaptiveTokenBucket`'s acquire
+#: loop cap: under contention a worker may wake to find its freed slot already taken
+#: by a peer, so it must re-evict + re-test. This bounds that re-contend loop so a
+#: pathological INJECTED clock (one that never advances) can't spin forever — after
+#: the cap the governor fails OPEN (lets the call through) exactly as the bucket's
+#: acquire cap forces a token, keeping behaviour consistent (CLAUDE.md §11 COMMON).
+_GOVERNOR_LOOP_CAP: int = 64
+
 
 class RateController:
     """Adaptive [1..5] r/s controller: start 5, step down on heavy 429s, recover up.
@@ -171,6 +188,7 @@ class RateController:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         ceiling_rps: float = CEILING_RPS,
+        ceiling_per_min: int | None = None,
     ) -> None:
         """Build a controller starting at the ceiling rate (default 5 r/s).
 
@@ -190,12 +208,29 @@ class RateController:
             feeds the UNVERIFIED Groww backtesting rate). The 429/timeout ladders
             still step DOWN to their existing soft/deep floors — only the start +
             upshift cap moves.
+        ceiling_per_min
+            Optional HARD cap on the number of requests ISSUED inside any rolling
+            :data:`PER_MIN_WINDOW` (60 s). ``None`` (the default) = NO per-minute
+            governor = byte-for-byte backward-compatible (the only blocking gate
+            stays the per-second token bucket). Orthogonal to the AIMD per-second
+            ladder: a 429/timeout step-down lowers ``_rps`` but NEVER changes this
+            cap, and a recovery step-up never raises it — it is a true fixed
+            ceiling (DEC-GROWW-RATE-PERMIN-001). The Groww live path injects the
+            operator-confirmed backtesting cap (500/min); at ``ceiling_rps ≤ 5``
+            the governor is mathematically never the binding gate (5×60 = 300 < a
+            300/500 cap), so existing 5 r/s behaviour is unchanged even when a cap
+            is injected.
         """
         self._clock = clock
         self._sleep = sleep
         self._quota = quota_tracker
         self._ceiling: float = ceiling_rps
         self._rps: float = ceiling_rps
+        #: Per-minute governor (DEC-GROWW-RATE-PERMIN-001): the injected HARD cap +
+        #: the rolling deque of issue instants. ``None`` cap ⇒ governor disabled, the
+        #: deque stays empty + ``pace`` skips both governor phases entirely.
+        self._ceiling_per_min: int | None = ceiling_per_min
+        self._issues: deque[float] = deque()
         self._hits: deque[float] = deque()
         #: Server-stress stalls (timeout / transport / 5xx) inside the rolling
         #: STEP_DOWN_WINDOW — the gentle adaptive timeout ladder's evidence
@@ -244,26 +279,79 @@ class RateController:
         with self._lock:
             return self._rps
 
-    def pace(self) -> None:
-        """Block until a token is available at the current rate — **O(1)** fast path.
+    def _governor_wait_locked(self, now: float) -> float:
+        """Evict the rolling window; return seconds to wait before an issue may proceed.
 
-        CRITICAL (DEC-DHAN-PARALLEL-INGEST-001): the controller lock is taken
-        ONLY to copy the current ``_bucket`` reference into a local, then
-        RELEASED before ``local.acquire()`` (which may sleep until a token frees
-        up). Holding ``self._lock`` across that sleep would serialise every
-        worker through a single mutex and collapse the achieved rate back to
-        ~1 r/s — exactly the bug this change removes. The bucket itself is
-        thread-safe (its own lock is the shared rate gate, Rule #6), so N workers
-        acquiring on the SAME bucket object correctly share one ≤ ``current_rps``
-        token stream. A concurrent step changes that one bucket's rate IN PLACE
-        (:meth:`AdaptiveTokenBucket.set_rate`) — the object reference never
-        changes, so a worker that copied the bucket simply paces its next call at
-        whatever rate the step set, still on the single shared stream (no
-        dual-bucket over-issue; DEC-DHAN-RATE-SINGLE-BUCKET-001).
+        The caller MUST hold ``self._lock``. **O(1) amortized** (each issue instant is
+        appended once + popped once; ``len`` on a deque is O(1)). Returns ``0.0`` when
+        the governor is disabled (``ceiling_per_min is None``) OR the rolling
+        :data:`PER_MIN_WINDOW` has room; otherwise the seconds until the OLDEST
+        in-window issue ages out — ``(oldest + PER_MIN_WINDOW) - now``, clamped
+        ``>= 0`` — which is the soonest a new slot can free (DEC-GROWW-RATE-PERMIN-001).
         """
+        cap = self._ceiling_per_min
+        if cap is None:
+            return 0.0
+        # Evict any issue that has reached PER_MIN_WINDOW age, using the SAME
+        # ``(oldest + WINDOW) - now`` arithmetic as the wait below — so float rounding
+        # at the 60 s boundary cannot make eviction and the wait disagree (which would
+        # admit a cap+1 overshoot when the oldest is ~exactly 60 s old). After the loop
+        # every remaining issue has a strictly-positive remaining lifetime.
+        while self._issues and (self._issues[0] + PER_MIN_WINDOW) - now <= 0.0:
+            self._issues.popleft()
+        if len(self._issues) < cap:
+            return 0.0
+        # Window full: wait until the oldest reaches PER_MIN_WINDOW age (then the next
+        # pass evicts it and a slot frees). Strictly > 0 here — anything <= 0 was just
+        # evicted — so no clamp is needed.
+        return (self._issues[0] + PER_MIN_WINDOW) - now
+
+    def pace(self) -> None:
+        """Block until both rate gates allow an issue — **O(1)** amortized fast path.
+
+        TWO sequenced gates (DEC-GROWW-RATE-PERMIN-001):
+
+        1. **Per-minute governor** (only when ``ceiling_per_min`` is set) — a HARD
+           ceiling on the issue count inside any rolling :data:`PER_MIN_WINDOW`. It
+           runs its own compute-under-lock / sleep-outside-lock / re-check loop,
+           mirroring :meth:`AdaptiveTokenBucket.acquire` (CLAUDE.md §11 COMMON). When
+           the window is full, N woken workers re-evict + re-test under the lock so
+           only the freed slots pass — no overshoot.
+        2. **Per-second token bucket** — the unchanged two-phase delegation below.
+
+        CRITICAL (DEC-DHAN-PARALLEL-INGEST-001): the controller lock is taken ONLY
+        for O(1) state work and is RELEASED before EVERY sleep (the governor sleep
+        AND ``bucket.acquire()``). Holding ``self._lock`` across a sleep would
+        serialise every worker through one mutex and collapse the achieved rate to
+        ~1 r/s. The two gates SEQUENCE (never nest), so there is no lock-ordering
+        cycle: the governor never holds ``self._lock`` when the bucket acquires its
+        own lock. The issue instant is recorded only AFTER both gates clear, under
+        the lock, so the deque counts true issue instants and can never exceed the
+        cap. A concurrent per-second step mutates the one bucket IN PLACE
+        (:meth:`AdaptiveTokenBucket.set_rate`) and never touches the governor state.
+        """
+        # ── Gate 1: per-minute governor (skipped entirely when disabled). ──
+        if self._ceiling_per_min is not None:
+            iterations = 0
+            while True:
+                with self._lock:
+                    wait = self._governor_wait_locked(self._clock())
+                    if wait <= 0.0:
+                        break  # window has room — fall through to the token bucket
+                iterations += 1
+                if iterations > _GOVERNOR_LOOP_CAP:
+                    break  # fail-OPEN after the cap (mirrors the bucket's acquire cap)
+                # lock RELEASED before sleeping; re-evict + re-test on the next pass.
+                self._sleep(wait)
+        # ── Gate 2: per-second token bucket (two-phase: copy ref under lock, sleep
+        #    outside it). ──
         with self._lock:
             bucket = self._bucket
         bucket.acquire()
+        # ── Record the issue instant AFTER both gates cleared (governor only). ──
+        if self._ceiling_per_min is not None:
+            with self._lock:
+                self._issues.append(self._clock())
 
     def on_rate_limit(self) -> None:
         """Record a rate-limit hit; step **down** 1 r/s on sustained pressure — O(1).
@@ -427,10 +515,19 @@ class RateController:
         to avoid nesting the controller lock over the tracker's own lock + LMDB read.
         """
         with self._lock:
+            # Evict aged-out issue instants first so ``recent_minute`` is an accurate
+            # rolling-60s gauge (DEC-GROWW-RATE-PERMIN-001). No-op when disabled (the
+            # deque is always empty in that case).
+            if self._ceiling_per_min is not None:
+                now = self._clock()
+                while self._issues and (self._issues[0] + PER_MIN_WINDOW) - now <= 0.0:
+                    self._issues.popleft()
             snap: dict[str, object] = {
                 "current_rps": self._rps,
                 "recent_hits": len(self._hits),
                 "recent_timeouts": len(self._timeouts),
+                "recent_minute": len(self._issues),
+                "ceiling_per_min": self._ceiling_per_min,
             }
         if self._quota is not None:
             snap["quota_used"] = self._quota.current_count()
@@ -455,6 +552,7 @@ __all__ = [
     "BURST",
     "CEILING_RPS",
     "FLOOR_RPS",
+    "PER_MIN_WINDOW",
     "RATE_LIMIT_STORM_FLOOR_RPS",
     "STEP_DOWN_HITS",
     "STEP_DOWN_TIMEOUT_HITS",

@@ -16,8 +16,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from brutex.adapters.rate_common import (
+    _GOVERNOR_LOOP_CAP,
     CEILING_RPS,
     FLOOR_RPS,
+    PER_MIN_WINDOW,
     RATE_LIMIT_STORM_FLOOR_RPS,
     STEP_DOWN_HITS,
     STEP_DOWN_TIMEOUT_HITS,
@@ -72,7 +74,14 @@ def _hammer(ctl: RateController, clock: _Clock, *, hits: int, spread: float = 1.
 def test_starts_at_ceiling() -> None:
     ctl = _controller(_Clock())
     assert ctl.current_rps == CEILING_RPS  # 5.0
-    assert ctl.snapshot() == {"current_rps": 5.0, "recent_hits": 0, "recent_timeouts": 0}
+    # Governor disabled by default → recent_minute 0, ceiling_per_min None.
+    assert ctl.snapshot() == {
+        "current_rps": 5.0,
+        "recent_hits": 0,
+        "recent_timeouts": 0,
+        "recent_minute": 0,
+        "ceiling_per_min": None,
+    }
 
 
 def test_step_down_5_to_4_to_3_on_sustained_429s() -> None:
@@ -535,11 +544,14 @@ class TestQuotaWiring:
         assert snap["quota_limit"] == 10
 
     def test_snapshot_omits_quota_without_tracker(self) -> None:
-        # The default (test) controller has no tracker → snapshot is byte-unchanged.
+        # The default (test) controller has no tracker → no quota keys; the base rate
+        # fields + the always-present governor gauges are the full set.
         assert set(_controller(_Clock()).snapshot()) == {
             "current_rps",
             "recent_hits",
             "recent_timeouts",
+            "recent_minute",
+            "ceiling_per_min",
         }
 
     def test_quota_exhausted_true_at_limit(self, tmp_path: Path) -> None:
@@ -557,3 +569,125 @@ class TestQuotaWiring:
     def test_quota_exhausted_false_without_tracker(self) -> None:
         # No tracker wired (the bucket-only mode) → never the limit.
         assert _controller(_Clock()).quota_exhausted() is False
+
+
+#: A high per-second ceiling (10 r/s ⇒ 600/min) used to prove the per-minute cap is
+#: the binding gate. Mirrors the UNVERIFIED Groww backtesting r/s without importing
+#: the vendor constant into this vendor-neutral controller's tests.
+GROWW_CEILING: float = 10.0
+
+
+def _governed(
+    cap: int | None, *, ceiling_rps: float = CEILING_RPS
+) -> tuple[RateController, _Clock, list[float]]:
+    """Build a governed controller + its clock + a sleep-log that advances the clock."""
+    clock = _Clock()
+    slept: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    ctl = RateController(clock=clock, sleep=_sleep, ceiling_rps=ceiling_rps, ceiling_per_min=cap)
+    return ctl, clock, slept
+
+
+class TestPerMinuteGovernor:
+    """The per-minute sliding-window governor (DEC-GROWW-RATE-PERMIN-001)."""
+
+    def test_disabled_skips_governor(self) -> None:
+        # Default controller: cap None → pace() touches neither governor phase, the
+        # issue deque stays empty, and the snapshot gauges report the disabled state.
+        ctl, _clock, slept = _governed(None)
+        ctl.pace()
+        ctl.pace()
+        assert slept == [1.0 / CEILING_RPS, 1.0 / CEILING_RPS]  # only the bucket paced
+        assert len(ctl._issues) == 0
+        snap = ctl.snapshot()
+        assert snap["recent_minute"] == 0
+        assert snap["ceiling_per_min"] is None
+
+    def test_wait_disabled_returns_zero(self) -> None:
+        # The helper is safe to call regardless of cap: None ⇒ always 0.0 (no governor).
+        ctl = _controller(_Clock())  # cap None
+        assert ctl._governor_wait_locked(ctl._clock()) == 0.0
+
+    def test_empty_window_has_room(self) -> None:
+        # cap=3, fresh window: the first pace sees 0 governor wait (empty deque), so it
+        # only pays the bucket's opening 1/rps; recent_minute + ceiling_per_min surface.
+        ctl, _clock, slept = _governed(3)
+        ctl.pace()
+        assert slept == [1.0 / CEILING_RPS]  # governor added no wait
+        snap = ctl.snapshot()
+        assert snap["recent_minute"] == 1
+        assert snap["ceiling_per_min"] == 3
+
+    def test_blocks_at_cap_then_frees(self) -> None:
+        # cap=2 at 5 r/s: the 3rd pace fills the window, so the governor BLOCKS until the
+        # oldest issue ages out (59.8 s), then admits exactly one — never overshooting.
+        ctl, _clock, slept = _governed(2)
+        ctl.pace()  # issue @1000.2 (bucket 0.2)
+        ctl.pace()  # issue @1000.4 (bucket 0.2)
+        assert slept == [0.2, 0.2]
+        assert ctl.snapshot()["recent_minute"] == 2
+        ctl.pace()  # window full → governor waits 0.2+60-0.4 = 59.8, then frees one
+        assert any(abs(s - 59.8) < 1e-6 for s in slept)  # the governor block fired
+        assert ctl.snapshot()["recent_minute"] == 2  # cap held, no overshoot
+
+    def test_window_roll_evicts_all(self) -> None:
+        # cap=2 filled, then >60 s passes with no issues → the next pace evicts BOTH
+        # aged issues in one sweep (the while-loop runs twice) and admits freely.
+        ctl, clock, _slept = _governed(2)
+        ctl.pace()
+        ctl.pace()
+        assert ctl.snapshot()["recent_minute"] == 2
+        clock.advance(PER_MIN_WINDOW + 1.0)  # whole window ages out
+        ctl.pace()
+        assert ctl.snapshot()["recent_minute"] == 1  # both old evicted, one fresh
+
+    def test_loop_cap_fails_open(self) -> None:
+        # A pathological clock that NEVER advances (sleep is a no-op): the governor's
+        # re-check loop must not spin forever — it breaks after _GOVERNOR_LOOP_CAP and
+        # fails OPEN (admits the call), mirroring the bucket's acquire cap.
+        clock = _Clock()
+        slept: list[float] = []
+        ctl = RateController(
+            clock=clock, sleep=slept.append, ceiling_rps=CEILING_RPS, ceiling_per_min=1
+        )
+        ctl.pace()  # records one issue @1000.0 (bucket also fails open on the frozen clock)
+        slept.clear()
+        ctl.pace()  # window full + frozen clock → governor spins to the cap, then fails open
+        # Each governor iteration computes wait == PER_MIN_WINDOW (oldest+60-now, now frozen).
+        assert slept.count(PER_MIN_WINDOW) == _GOVERNOR_LOOP_CAP
+        assert ctl.snapshot()["recent_minute"] == 2  # fail-open admitted the extra call
+
+    def test_orthogonal_to_stepdown(self) -> None:
+        # The per-second AIMD ladder and the per-minute cap share no mutable state: a
+        # 429 storm steps _rps down but leaves ceiling_per_min + the issue deque intact.
+        ctl, clock, _slept = _governed(300, ceiling_rps=GROWW_CEILING)
+        ctl.pace()
+        before = ctl.snapshot()["recent_minute"]
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # storm → step down
+        assert ctl.current_rps < GROWW_CEILING  # ladder moved
+        snap = ctl.snapshot()
+        assert snap["ceiling_per_min"] == 300  # cap untouched by the ladder
+        assert snap["recent_minute"] == before  # on_rate_limit never touched _issues
+
+    def test_snapshot_evicts_aged_issues(self) -> None:
+        # snapshot() evicts aged issues before reporting recent_minute so the gauge is
+        # an accurate rolling-60s count even with no intervening pace().
+        ctl, clock, _slept = _governed(5)
+        ctl.pace()
+        ctl.pace()
+        assert ctl.snapshot()["recent_minute"] == 2
+        clock.advance(PER_MIN_WINDOW + 1.0)
+        assert ctl.snapshot()["recent_minute"] == 0  # both aged out on read
+
+    def test_cap_binds_over_high_rps(self) -> None:
+        # cap=3 with a 10 r/s ceiling (would otherwise allow 600/min): the governor is
+        # the binding gate — recent_minute never exceeds the cap across many paces.
+        ctl, _clock, _slept = _governed(3, ceiling_rps=GROWW_CEILING)
+        for _ in range(12):
+            ctl.pace()
+            recent = ctl.snapshot()["recent_minute"]
+            assert isinstance(recent, int) and recent <= 3

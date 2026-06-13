@@ -1969,11 +1969,19 @@ def cmd_fetch(
             # UNVERIFIED (constants.GROWW_RATE_LIMIT_RPS_UNVERIFIED), so we feed that
             # rate as the controller's CEILING into the existing adaptive token-bucket
             # MECHANISM rather than hardcoding a verified rate (Golden Rule #1/#10).
-            from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_UNVERIFIED
+            from brutex.adapters.groww.constants import (
+                GROWW_RATE_LIMIT_PER_MIN,
+                GROWW_RATE_LIMIT_RPS_UNVERIFIED,
+            )
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
 
-            _rate = RateController(ceiling_rps=GROWW_RATE_LIMIT_RPS_UNVERIFIED)
+            # Per-second ceiling stays UNVERIFIED; the operator-confirmed 500/min
+            # governor (DEC-GROWW-RATE-PERMIN-001) is the binding backtesting cap.
+            _rate = RateController(
+                ceiling_rps=GROWW_RATE_LIMIT_RPS_UNVERIFIED,
+                ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+            )
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
             # best-effort Telegram push (coalesced by the notifier's 60 s dedupe).
