@@ -45,6 +45,7 @@ import csv
 import io
 import json
 import os
+import re
 import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -117,6 +118,16 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY TOTAL MKT": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
     "NIFTYTOTALMKT": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
     "NIFTY_TOTAL_MKT": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    # DEC-INDEX-CONSTITUENTS-COVERAGE-001: the Groww instrument master spells the
+    # NIFTY Total Market index ``NIFTYTOTALMCAP`` (engine ``symbol_name``; display
+    # name "Nifty Total Market" — OPERATOR-VERIFIED on the live ``/universe`` row,
+    # 2026-06-13). Without this alias the "⊕ tick its constituents" button resolved
+    # to "unknown-index" for the very index BruteX admits with ~750 constituents
+    # (``ntm_admitted constituents=755``). Same operator-verified niftyindices CSV
+    # as the MARKET/MKT spellings above; the equivalence is traceable to the
+    # vendor master row, NOT hardcoded membership (CLAUDE.md §1).
+    "NIFTYTOTALMCAP": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    "NIFTY_TOTAL_MCAP": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
 }
 
 #: Operator override env var (DEC-CONSTITUENTS-OVERRIDE-001): a JSON object
@@ -269,6 +280,30 @@ def constituent_url(index_symbol: str) -> str | None:
     return f"{NSE_CONSTITUENTS_BASE_URL}/{value}"
 
 
+def convention_constituent_url(index_symbol: str) -> str | None:
+    """Derive a BEST-EFFORT NSE constituent-CSV URL by NSE's PUBLIC filename convention.
+
+    NSE publishes per-index constituent CSVs as ``ind_<index>list.csv`` under
+    :data:`NSE_CONSTITUENTS_BASE_URL` (``nseindia.com`` — e.g. the verified
+    ``ind_nifty50list.csv`` / ``ind_niftybanklist.csv`` / ``ind_niftypharmalist.csv``
+    entries in :data:`INDEX_CSV_FILENAMES`). This derives that candidate for an
+    index that has no explicit/override mapping: the engine symbol lower-cased,
+    stripped to ASCII letters+digits, wrapped as ``ind_<safe>list.csv`` (so
+    ``NIFTYPHARMA`` → ``…/ind_niftypharmalist.csv``).
+
+    HONESTY (CLAUDE.md §1): this is a SELF-VALIDATING candidate, never an assertion
+    that NSE serves the file — the caller fetches it and a 404 / empty body simply
+    yields **no data** (the route then shows its honest "unavailable" note), never
+    WRONG data. The actual constituent symbols always come from NSE's response, so
+    nothing is fabricated. Returns ``None`` when the symbol has no alphanumeric
+    characters (no filename can be formed) — the only remaining "unknown-index".
+    """
+    safe = re.sub(r"[^a-z0-9]", "", index_symbol.strip().lower())
+    if not safe:
+        return None
+    return f"{NSE_CONSTITUENTS_BASE_URL}/ind_{safe}list.csv"
+
+
 #: Bounded retry budget for the live niftyindices fetch — a single 10 s attempt
 #: read-timed-out for the operator; 3 attempts × 30 s clears a slow first-byte.
 _FETCH_MAX_RETRIES: int = 3
@@ -376,6 +411,21 @@ def fetch_constituent_csv(
     return fetch(url)
 
 
+def fetch_symbols_at_url(url: str, *, opener: Callable[[str], str] | None = None) -> list[str]:
+    """Fetch + parse the constituent symbols at an EXACT *url* (no symbol re-derivation).
+
+    The direct-URL sibling of :func:`fetch_constituent_symbols`: callers that
+    resolve a URL themselves (e.g. the convention fallback in
+    :func:`~brutex.dashboard.constituents_cache.resolve_constituents`, which must
+    fetch :func:`convention_constituent_url` — a URL ``constituent_url`` would not
+    re-derive) pass it here. *opener* defaults to the real urllib opener
+    (:func:`_default_opener`, ``# pragma: no cover`` live surface); tests inject a
+    fake. Fetch errors PROPAGATE (the caller maps them to the honest degrade).
+    """
+    fetch = opener if opener is not None else _default_opener
+    return parse_symbols(fetch(url))
+
+
 def intersect_with_universe(
     constituents: Iterable[str],
     fno_symbols: Iterable[str],
@@ -462,8 +512,10 @@ __all__ = [
     "NSE_CONSTITUENTS_BASE_URL",
     "ConstituentRow",
     "constituent_url",
+    "convention_constituent_url",
     "fetch_constituent_csv",
     "fetch_constituent_symbols",
+    "fetch_symbols_at_url",
     "intersect_with_universe",
     "members_in_universe",
     "parse_constituents",

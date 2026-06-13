@@ -19,8 +19,10 @@ from brutex.dashboard.nse_constituents import (
     NSE_CONSTITUENTS_BASE_URL,
     ConstituentRow,
     constituent_url,
+    convention_constituent_url,
     fetch_constituent_csv,
     fetch_constituent_symbols,
+    fetch_symbols_at_url,
     intersect_with_universe,
     members_in_universe,
     parse_constituents,
@@ -345,3 +347,40 @@ class TestConstituentUrlOverride:
     def test_empty_env_value_is_no_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(self._ENV, "")
         assert nc._override_filenames() == {}
+
+
+class TestConventionConstituentUrl:
+    """NSE public-filename-convention candidate (DEC-INDEX-CONSTITUENTS-COVERAGE-001)."""
+
+    def test_derives_ind_list_filename_under_nse_base(self) -> None:
+        assert (
+            convention_constituent_url("NIFTYPHARMA")
+            == f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftypharmalist.csv"
+        )
+
+    def test_strips_spaces_and_lowercases(self) -> None:
+        # "NIFTY PSU BANK" → ind_niftypsubanklist.csv (spaces dropped, lower-cased).
+        assert (
+            convention_constituent_url("NIFTY PSU BANK")
+            == f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftypsubanklist.csv"
+        )
+
+    def test_symbolless_index_has_no_candidate(self) -> None:
+        # No alphanumerics → no filename can be formed → None (the only unknown-index).
+        assert convention_constituent_url("@@@") is None
+        assert convention_constituent_url("   ") is None
+
+
+class TestFetchSymbolsAtUrl:
+    """Direct-URL fetch helper (DEC-INDEX-CONSTITUENTS-COVERAGE-001)."""
+
+    def test_fetches_and_parses_the_exact_url(self) -> None:
+        calls: list[str] = []
+
+        def _opener(url: str) -> str:
+            calls.append(url)
+            return _FIXTURE_CSV
+
+        symbols = fetch_symbols_at_url("https://x/ind_niftypharmalist.csv", opener=_opener)
+        assert symbols == ["RELIANCE", "M&M", "GVT&D", "HDFCBANK"]
+        assert calls == ["https://x/ind_niftypharmalist.csv"]

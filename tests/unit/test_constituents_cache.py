@@ -179,17 +179,53 @@ class TestResolveConstituents:
     # ── branch 1: unknown index ───────────────────────────────────────────────
 
     def test_unknown_index_returns_unknown(self, tmp_path: Path) -> None:
+        # Only a SYMBOLLESS index (no alphanumerics → no verified mapping AND no
+        # NSE filename-convention candidate) remains "unknown-index"
+        # (DEC-INDEX-CONSTITUENTS-COVERAGE-001). The opener is never called.
         opener = _CountingOpener()
         result = resolve_constituents(
-            "NIFTY IT",
+            "@@@",
             cache_root=tmp_path,
             opener=opener,
             now=_FIXED_NOW,
         )
         assert result == ConstituentResult((), "unknown-index", None)
-        assert opener.calls == [], "opener must NOT be called for an unknown index"
-        # No file should be written.
-        assert not (tmp_path / "index_constituents").exists()
+        assert opener.calls == []
+
+    def test_unmapped_index_resolves_via_nse_convention(self, tmp_path: Path) -> None:
+        # An index with no explicit/override mapping now resolves via NSE's PUBLIC
+        # filename convention (``ind_<symbol>list.csv``), fetched + cached
+        # (DEC-INDEX-CONSTITUENTS-COVERAGE-001). The symbols come from NSE's
+        # response (the fixture), never fabricated.
+        opener = _CountingOpener()
+        result = resolve_constituents(
+            "NIFTYPHARMA",
+            cache_root=tmp_path,
+            opener=opener,
+            now=_FIXED_NOW,
+        )
+        assert result.source == "nse"
+        assert result.symbols == ("RELIANCE", "HDFCBANK")
+        assert len(opener.calls) == 1
+        assert opener.calls[0].endswith("/ind_niftypharmalist.csv")
+
+    def test_symbolless_index_still_serves_stale_cache_on_force_refresh(
+        self, tmp_path: Path
+    ) -> None:
+        # force_refresh skips the early cache return; for a symbolless index the
+        # URL is None, but a prior cache is STILL served (never lost).
+        write_cache(tmp_path, "@@@", ["RELIANCE"], fetched_at=_FIXED_TS, source_url="seed")
+        opener = _CountingOpener()
+        result = resolve_constituents(
+            "@@@",
+            cache_root=tmp_path,
+            opener=opener,
+            now=_FIXED_NOW,
+            force_refresh=True,
+        )
+        assert result.source == "cache"
+        assert result.symbols == ("RELIANCE",)
+        assert opener.calls == []
 
     # ── branch 2: cache miss + fetch success ──────────────────────────────────
 

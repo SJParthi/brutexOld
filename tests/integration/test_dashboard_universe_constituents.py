@@ -148,13 +148,36 @@ def test_fetch_failure_degrades_gracefully_no_500(
 
 
 def test_unknown_index_returns_unknown_source(client: TestClient) -> None:
-    """An index with no NSE CSV mapping → 200 ``source:"unknown-index"``."""
-    r = client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY IT"})
+    """A SYMBOLLESS index → 200 ``source:"unknown-index"`` (no fetch, no network).
+
+    DEC-INDEX-CONSTITUENTS-COVERAGE-001: a real index name now resolves via NSE's
+    filename convention, so only a symbolless index (no ``ind_<x>list.csv`` can be
+    formed) stays unknown — and it short-circuits BEFORE any fetch.
+    """
+    r = client.get("/api/v1/universe/index-constituents", params={"symbol": "@@@"})
     assert r.status_code == 200
     body = r.json()
     assert body["source"] == "unknown-index"
     assert body["members"] == []
     assert "superset" in body["note"]
+
+
+def test_unmapped_index_resolves_via_nse_convention(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmapped index (NIFTY PHARMA) now resolves via NSE's filename convention.
+
+    DEC-INDEX-CONSTITUENTS-COVERAGE-001: ``constituent_url`` has no entry for
+    ``NIFTYPHARMA`` but the convention candidate ``ind_niftypharmalist.csv`` is
+    fetched (here via the monkeypatched opener — NO real network) → ``source:"nse"``
+    with the held members intersected.
+    """
+    monkeypatch.setattr(nc, "_default_opener", lambda _url: _FIXTURE_CSV)
+    r = client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTYPHARMA"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "nse"
+    assert body["members"] == ["RELIANCE", "HDFCBANK", "M&M"]
 
 
 def test_second_call_serves_from_cache_even_when_live_fetch_breaks(
