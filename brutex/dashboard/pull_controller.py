@@ -688,25 +688,31 @@ def _build_live_controller() -> RateController:  # pragma: no cover — live Gro
     :class:`SessionRateController` (DEC-DHAN-PERSIST-RATE-001) so the learned rate
     carries over instead of every pull restarting at the 5 r/s ceiling.
 
-    The controller is now wired with the persisted IST-midnight
-    :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`
-    (DEC-AUTO-RESUME-QUOTA-001): previously the dashboard built a controller with
-    ``quota_tracker=None``, so dashboard pulls were NOT counted against the
-    mandatory 100,000/day Groww quota at all. Wiring the SAME persisted tracker the
-    CLI/orchestrator use (``~/.brutex/quota/quota.lmdb``, global to the API key)
-    makes every paced dashboard call increment + check the quota, surfaces the
-    gauge on the rate panel, and gives the auto-resume loop its hard brake.
+    The controller is built with **NO** :class:`~brutex.orchestrator.quota_tracker.\
+DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
+    ``get_historical_candles`` has **no daily quota** (operator-confirmed 2026-06-13),
+    so the dashboard pull no longer imposes the phantom 100,000/day cap that
+    DEC-AUTO-RESUME-QUOTA-001 had wired — that cap would have wrongly HALTED a large
+    multi-day backfill (e.g. the full option-chain pull, which exceeds 100k calls/day).
+    This matches the already-merged CLI Groww spot path (``cli.py`` also passes
+    ``quota_tracker=None``). The per-minute 500/min governor + the adaptive per-second
+    bucket remain the live pacing gates. Consequence: the controller's
+    :meth:`~brutex.adapters.rate_common.RateController.quota_exhausted` is always
+    ``False`` (no tracker), so the auto-resume ``stop_quota`` branch is DORMANT for the
+    dashboard pull (it never burns a non-existent quota); the separate read-only
+    ``/api/v1/quota`` endpoint keeps its own informational tracker (display only, no
+    enforcement) and is unaffected.
     """
     from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_PER_MIN
     from brutex.adapters.rate_common import RateController
-    from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 
-    # Operator-confirmed 500/min backtesting governor (DEC-GROWW-RATE-PERMIN-001) —
-    # a HARD per-minute cap on top of the adaptive per-second bucket.
-    return RateController(
-        quota_tracker=DailyQuotaTracker(),
-        ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
-    )
+    # Operator-confirmed Groww backtesting limits (DEC-GROWW-NO-DAILY-QUOTA-001):
+    # 500 req/min (the HARD per-minute governor, DEC-GROWW-RATE-PERMIN-001) AND NO
+    # daily quota — so NO DailyQuotaTracker is wired here, matching the CLI Groww
+    # spot path (cli.py also builds the controller with quota_tracker=None). The
+    # phantom 100,000/day cap would have wrongly HALTED a large multi-day backfill,
+    # since Groww backtesting has no daily quota (operator-confirmed 2026-06-13).
+    return RateController(ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN)
 
 
 class SessionRateController:
