@@ -146,13 +146,17 @@ class TestDashboardGaugeWithLivePull:
     def test_quota_route_200_with_pull_tracker_already_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``GET /api/v1/quota`` must return 200 while a pull-side tracker
-        already holds the same (default-path) env in this process.
+        """``GET /api/v1/quota`` returns the "no daily quota" sentinel and NEVER
+        opens an LMDB tracker, even while a pull-side tracker already holds the same
+        (default-path) env in this process.
 
-        Pre-fix this was the live 500: the route's lazy
-        ``DailyQuotaTracker()`` (DEC-DASHBOARD-QUOTA-PERSISTED-001) hit
-        LMDB's already-open-in-this-process rule against the pull
-        controller's tracker (DEC-AUTO-RESUME-QUOTA-001).
+        Pre-fix this was the live 500: the route's lazy ``DailyQuotaTracker()``
+        (DEC-DASHBOARD-QUOTA-PERSISTED-001) hit LMDB's already-open-in-this-process
+        rule against the pull controller's tracker (DEC-AUTO-RESUME-QUOTA-001). The
+        live vendor (Groww) has NO daily quota (DEC-GROWW-RATE-PERMIN-001), so an
+        uninjected route now returns ``quota_limit=-1`` WITHOUT constructing a second
+        tracker — the double-open 500 is structurally impossible, and the gauge hides
+        instead of showing a fabricated ``X / 100,000``.
         """
         pytest.importorskip("fastapi")
         from brutex.dashboard.app import DashboardState, build_app
@@ -177,12 +181,8 @@ class TestDashboardGaugeWithLivePull:
         with TestClient(app) as client:
             resp = client.get("/api/v1/quota")
 
-        assert resp.status_code == 200  # pre-fix: lmdb.Error → 500
-        body = resp.json()
-        # Read the expectation through the pull side AFTER the route call
-        # so both observations share the same IST day even at midnight.
-        expected_used = pull_side.current_count()
-        assert body["quota_used"] == expected_used
-        assert body["quota_limit"] == pull_side.daily_limit
-        assert body["quota_remaining"] == pull_side.daily_limit - expected_used
+        assert resp.status_code == 200  # pre-fix: lazy DailyQuotaTracker → lmdb.Error → 500
+        # No injected tracker → honest "no daily quota" sentinel (Groww has none),
+        # and the route constructs NO tracker, so the double-open 500 cannot recur.
+        assert resp.json() == {"quota_used": 0, "quota_limit": -1, "quota_remaining": 0}
         pull_side.close()

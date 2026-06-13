@@ -44,10 +44,10 @@
     color:#1A1300; background:linear-gradient(90deg,var(--yellow),#FFD089);
     padding:4px 10px; border-radius:20px; box-shadow:0 0 18px rgba(255,183,77,.5);
     animation: pulse 2.4s ease-in-out infinite; display:none; }
-  /* Groww daily API-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001) — the 100,000/day
-     budget the operator could not previously SEE on the page where pulls happen.
-     Lights up once a pull reports usage; green < 80%, amber ≥ 80%, red ≥ 95% — so
-     "did I hit the daily limit?" is answerable at a glance. Resets at IST midnight. */
+  /* Daily API-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001). Shown ONLY for a vendor
+     that genuinely caps calls/day. The live vendor (Groww) has NO daily quota
+     (DEC-GROWW-RATE-PERMIN-001) so the route returns the -1 sentinel and this stays
+     hidden — never a fabricated budget. Green < 80%, amber ≥ 80%, red ≥ 95%. */
   .quota-gauge { display:flex; align-items:center; gap:8px; font-size:11px;
     color:var(--muted); margin-left:auto; }
   .quota-gauge .qg-num { color:var(--text); font-variant-numeric:tabular-nums; }
@@ -304,8 +304,8 @@
     </nav>
     <div class="badge" id="previewBadge">● PREVIEW · synthetic data</div>
     <div class="quota-gauge" id="quotaGauge" style="display:none"
-         title="Groww daily API quota — 100,000 calls/day, resets at IST midnight (DEC-DASHBOARD-QUOTA-GAUGE-001)">
-      <span>Groww quota</span>
+         title="Daily API quota — shown only for a vendor that caps calls/day; the live vendor (Groww) has no daily quota, so this stays hidden (DEC-GROWW-RATE-PERMIN-001)">
+      <span>Daily quota</span>
       <span class="qg-num"><b id="qgUsed">-</b> / <span id="qgLimit">-</span></span>
       <div class="qg-bar"><div id="qgFill"></div></div>
       <span><span id="qgRem">-</span> left · <span id="qgPct">-</span>%</span>
