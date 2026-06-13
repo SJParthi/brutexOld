@@ -51,20 +51,24 @@ _INDEX = load_index_from_csv("\n".join([_HEADER, _NIFTY, _FUT]) + "\n")
 
 
 class _FakeSDK:
-    def __init__(self) -> None:
+    def __init__(self, *, expiries=None, contracts=None) -> None:
         self.calls = 0
         self.last_kwargs: dict[str, object] = {}
+        self.expiry_years: list[object] = []
+        self._expiries = expiries or (lambda _kw: {})
+        self._contracts = contracts or (lambda _kw: {})
 
     def get_historical_candles(self, **kwargs: object) -> Mapping[str, object]:
         self.calls += 1
         self.last_kwargs = kwargs
         return {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 999, None]]}
 
-    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
-        return {}
+    def get_expiries(self, **kw: object) -> Mapping[str, object]:
+        self.expiry_years.append(kw.get("year"))
+        return self._expiries(kw)
 
-    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
-        return {}
+    def get_contracts(self, **kw: object) -> Mapping[str, object]:
+        return self._contracts(kw)
 
 
 def _adapter() -> tuple[GrowwMarketAdapter, _FakeSDK]:
@@ -96,9 +100,30 @@ def test_list_instruments_one_page_then_exhausted() -> None:
     assert adapter.list_instruments(cursor="x").instruments == ()
 
 
-def test_list_derivatives_empty() -> None:
+def test_list_derivatives_empty_when_vendor_lists_none() -> None:
+    # An empty-expiries SDK yields no contracts (the brute-force spot scope keeps
+    # has_derivatives=False; this enumerator is the LAKE/reference-only surface).
     adapter, _ = _adapter()
     assert list(adapter.list_derivatives(underlying_symbol="NIFTY", exchange=Exchange.NSE)) == []
+
+
+def test_capabilities_has_derivatives_false_engine_scope() -> None:
+    # The flag describes the brute-force ENGINE scope (spot-only), NOT the Groww
+    # market — list_derivatives can still enumerate the lake chain (CLAUDE.md §3).
+    assert GROWW_CAPABILITIES.has_derivatives is False
+
+
+def test_list_derivatives_enumerates_lake_chain() -> None:
+    sdk = _FakeSDK(
+        expiries=lambda kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
+        contracts=lambda _kw: {"contracts": ["NSE-NIFTY-25Jan24-100-CE", "NSE-NIFTY-25Jan24-FUT"]},
+    )
+    adapter = GrowwMarketAdapter(client=GrowwClient(sdk=sdk, sleep=lambda _s: None), index=_INDEX)
+    chain = list(adapter.list_derivatives(underlying_symbol="NIFTY", exchange=Exchange.NSE))
+    assert {c.symbol for c in chain} == {"NSE-NIFTY-25Jan24-100-CE", "NSE-NIFTY-25Jan24-FUT"}
+    assert {c.contract_type for c in chain} == {"CE", "FUT"}
+    # one get_expiries call per historical year (EARLIEST_HISTORY .. current year)
+    assert 2024 in sdk.expiry_years and len(sdk.expiry_years) >= 5
 
 
 def test_fetch_ohlcv_index_reconstructs_symbol_and_drops_volume() -> None:
