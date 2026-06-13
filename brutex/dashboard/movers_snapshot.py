@@ -233,7 +233,7 @@ def _by_volume(snaps: Sequence[MoverSnapshot], top_n: int) -> list[MoverSnapshot
     return pool[:top_n]
 
 
-def _row(snap: MoverSnapshot, *, with_volume_first: bool = False) -> dict[str, Any]:
+def _row(snap: MoverSnapshot) -> dict[str, Any]:
     """Project one snapshot to a Dhan-style JSON row (money 2dp, metrics full-precision)."""
     return {
         "symbol": snap.instrument.symbol,
@@ -268,7 +268,7 @@ def build_snapshot_payload(
     """
     gainers = [_row(s) for s in _gainers(snapshots, top_n)]
     losers = [_row(s) for s in _losers(snapshots, top_n)]
-    volume = [_row(s, with_volume_first=True) for s in _by_volume(snapshots, top_n)]
+    volume = [_row(s) for s in _by_volume(snapshots, top_n)]
     instrument_count = len(snapshots) + skipped
     if instrument_count == 0:
         note = (
