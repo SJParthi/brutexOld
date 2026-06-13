@@ -19,11 +19,13 @@ This module is the thin, fully-testable seam that:
 1. downloads + parses the Groww instrument master into an in-memory
    :class:`~brutex.adapters.groww.instruments.InstrumentIndex` (the SSRF-guarded,
    **no-auth** public-CSV path), then
-2. derives the F&O-eligible equity set from the parsed derivative legs and
-   **full-snapshot upserts the LEAN universe** (every admitted IDX + every
-   F&O-eligible EQ; the ~tens-of-thousands of FUT / CE / PE legs are parsed for
-   eligibility then DISCARDED per DEC-INSTRUMENT-UNIVERSE-FAST-001) into the
-   vendor-neutral :class:`~brutex.data.instrument_store.InstrumentStore`, then
+2. derives the F&O-eligible equity set + the per-underlying tradable lot/freeze
+   from the parsed derivative legs and **full-snapshot upserts the LEAN universe**
+   (every admitted IDX + every F&O-eligible EQ + every admitted REFERENCE_ONLY NTM
+   constituent, each stamped with its F&O lot + freeze from its legs per
+   DEC-GROWW-LEG-ECONOMICS-001; the ~tens-of-thousands of FUT / CE / PE legs are
+   then DISCARDED per DEC-INSTRUMENT-UNIVERSE-FAST-001) into the vendor-neutral
+   :class:`~brutex.data.instrument_store.InstrumentStore`, then
 3. reads the snapshot back and summarises it with the COMMON
    :func:`brutex.dashboard.universe_query.universe_summary` classifier
    (no re-derivation of the index-vs-stock split).
@@ -39,15 +41,32 @@ CSV against a REAL temp
 :class:`~brutex.data.instrument_store.InstrumentStore`, so every non-pragma line
 + branch in this module is covered offline.
 
-## NTM (NIFTY Total Market) enrichment — gated OFF on Groww
+## NTM (NIFTY Total Market) enrichment — re-enabled on Groww
 
-The retired-vendor loader auto-admitted NIFTY Total Market + its ~750
-constituents (DEC-NIFTY-TOTAL-MARKET-LOAD-001) via a vendor-specific NTM
-discovery. That discovery has **no Groww twin** yet, so — per Golden Rule #1
-(no invented vendor behaviour) — NTM enrichment is a clean **no-op** here: the
-returned ``ntm`` note is always
-``{"admitted": False, "reason": "<NTM discovery has no Groww equivalent; …>"}``. NTM can
-return in a later PR once a Groww discovery path exists.
+The retired-vendor loader auto-admitted NIFTY Total Market's ~750 constituents
+(DEC-NIFTY-TOTAL-MARKET-LOAD-001) as REFERENCE_ONLY lake rows. This module
+re-enables that on Groww (DEC-NTM-GROWW-REPOINT-001) by mirroring the SEMANTICS,
+not the retired vendor calls:
+
+* the constituent SOURCE is already vendor-agnostic — NSE's per-index CSV from
+  ``niftyindices.com`` (:func:`brutex.dashboard.nse_constituents.fetch_constituent_csv`)
+  with a last-good disk-cache fallback
+  (:mod:`brutex.dashboard.ntm_cache`); the Groww master itself carries NO index
+  membership (Golden Rule #1);
+* each constituent is matched to its Groww **NSE cash-equity** row by the COMMON
+  vendor-neutral resolver (:func:`brutex.universe_constituents.resolve_constituents`
+  — ISIN-primary, ticker / ``trading_symbol`` fallback, O(1) per lookup);
+* the **non-F&O** matches are admitted as REFERENCE_ONLY (tagged on the
+  ``reference_only`` column); a matched constituent that is ALSO F&O-eligible
+  stays ``reference_only=FALSE`` so it keeps its real option chain
+  (DEC-OPTIONS-PULL-GUARD-001).
+
+HARD SCOPE GUARD (CLAUDE.md §3): NTM constituents are lake / REFERENCE_ONLY only
+— NEVER in the 52-condition vocabulary or the brute-force engine, which stays
+exactly NIFTY / BANKNIFTY / SENSEX (locked by
+DEC-ENGINE-ISOLATION-INVARIANT-001). On a network miss with no cache the load
+degrades HONESTLY to the F&O-eligible base set with a ``reason`` note (never a
+500, never invented constituents — Golden Rule #1).
 """
 
 from __future__ import annotations
@@ -55,31 +74,40 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
 from brutex.adapters.groww.instruments import InstrumentIndex
+from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
+from brutex.dashboard.ntm_cache import (
+    default_cache_dir,
+    load_cached_constituent_csv,
+    save_constituent_csv,
+)
 from brutex.dashboard.universe_query import universe_summary
-from brutex.models import Instrument
-from brutex.universe import build_fno_eligible_underlyings, is_universe_underlying
+from brutex.models import Exchange, Instrument, InstrumentType
+from brutex.universe import (
+    UnderlyingEconomics,
+    build_fno_eligible_underlyings,
+    build_underlying_economics,
+    is_reference_only,
+    is_universe_underlying,
+)
+from brutex.universe_constituents import resolve_constituents
 
 _LOG = structlog.get_logger(__name__)
 
-#: NTM (NIFTY Total Market) is NOT auto-admitted on Groww — the retired-vendor
-#: NTM discovery has no Groww twin yet, and we do not invent vendor behaviour
-#: (Golden Rule #1). The keyless load returns this fixed note so the operator
-#: SEES that NTM was deliberately skipped (not silently dropped).
-_NTM_SKIPPED_NOTE: dict[str, Any] = {
-    "admitted": False,
-    "reason": (
-        "NIFTY Total Market auto-admission has no Groww equivalent yet — its "
-        "discovery was a retired-vendor feature (Golden Rule #1, no invented "
-        "vendor behaviour); it can return in a later PR"
-    ),
-}
+#: The index NAME whose constituent CSV is fetched for NTM enrichment — the key
+#: :func:`~brutex.dashboard.nse_constituents.constituent_url` maps to the
+#: operator-verified niftyindices URL (DEC-NIFTY-TOTAL-MARKET-URL-001). Every
+#: spelling alias ("NIFTY TOTAL MKT", "NIFTYTOTALMARKET", …) resolves to the same
+#: CSV, so the canonical full name is sufficient here.
+_NTM_INDEX_NAME = "NIFTY TOTAL MARKET"
 
 #: Serialises concurrent keyless loads (DEC-UNDERLYING-ECONOMICS-001). Two
 #: overlapping ``load-instruments`` POSTs each do a full-snapshot upsert which
@@ -93,22 +121,234 @@ _NTM_SKIPPED_NOTE: dict[str, Any] = {
 _LOAD_LOCK: threading.Lock = threading.Lock()
 
 
-def _lean_universe(index: InstrumentIndex) -> tuple[list[Instrument], int]:
+def _resolve_constituent_csv(
+    opener: Callable[[str], str] | None,
+    *,
+    cache_dir: Path,
+) -> tuple[str, bool]:
+    """Live NTM constituent fetch with a last-good disk-cache fallback.
+
+    DEC-NTM-CONSTITUENT-CACHE-001. Returns ``(csv_text, from_cache)``:
+
+    * a successful NON-EMPTY live fetch → ``(live, False)`` and REFRESHES the cache
+      (so the next outage has a fresh fallback);
+    * a live failure (``niftyindices`` timeout / bot-block) OR an empty live result
+      → fall back to the cache → ``(cached, True)`` when a cache exists, else
+      ``("", False)`` (no live source AND no cache).
+
+    The live ``OSError`` is swallowed ONLY when a cache can cover it; with NO cache
+    the exception PROPAGATES so the caller's single fail-soft handler notes why
+    (keeping one tested except site instead of a provably-dead nested one).
+    """
+    try:
+        live = fetch_constituent_csv(_NTM_INDEX_NAME, opener=opener) or ""
+    except OSError:
+        cached = load_cached_constituent_csv(cache_dir=cache_dir)
+        if cached:
+            return cached, True
+        raise  # no cache to cover it → let the caller's fail-soft handler note why
+    if live:
+        save_constituent_csv(live, cache_dir=cache_dir)
+        return live, False
+    cached = load_cached_constituent_csv(cache_dir=cache_dir)
+    return (cached, True) if cached else ("", False)
+
+
+def _ntm_admission(
+    index: InstrumentIndex,
+    *,
+    fno_eligible: frozenset[tuple[Exchange, str]],
+    constituent_opener: Callable[[str], str] | None,
+    cache_dir: Path,
+) -> tuple[frozenset[int], dict[str, Any]]:
+    """Resolve NIFTY-Total-Market constituents → REFERENCE_ONLY ``SECURITY_ID``s.
+
+    Mirrors the retired DEC-NIFTY-TOTAL-MARKET-LOAD-001 semantics against the Groww
+    :class:`InstrumentIndex` (DEC-NTM-GROWW-REPOINT-001): fetch NTM's constituent
+    CSV (best-effort + last-good cache), match each member to its Groww NSE
+    cash-equity row by the COMMON resolver, and return the NON-F&O matches as the
+    set to ADMIT + TAG ``reference_only=TRUE``.
+
+    Returns ``(reference_security_ids, note)``. ``note`` always carries
+    ``"admitted"``; on a skip it adds a ``"reason"``; on success it adds the
+    coverage counts (``constituents`` / ``matched`` / ``reference`` / ``unmatched``
+    / ``from_cache``) for the operator's at-a-glance audit.
+
+    **Fail-soft (Golden Rule #1 + #10):** any miss (no equities to match,
+    niftyindices unreachable with no cache, an empty CSV) returns an EMPTY set + an
+    honest ``reason`` — a network hiccup NEVER breaks the keyless core load, and we
+    NEVER invent constituents. ``require_full_coverage`` is implicitly ``False``
+    here: a constituent the Groww master does not list is reported in ``unmatched``,
+    not admitted.
+    """
+    note: dict[str, Any] = {"admitted": False}
+
+    # An NTM constituent can only ever be an NSE cash equity, so with none in the
+    # master there is nothing to match — skip the niftyindices fetch entirely.
+    nse_equities = [
+        inst
+        for inst in index.universe
+        if inst.instrument == InstrumentType.EQ and inst.exch_id == Exchange.NSE
+    ]
+    if not nse_equities:
+        note["reason"] = "no NSE cash equities in the master to match NTM constituents against"
+        return frozenset(), note
+
+    # F&O-eligible NSE-equity SECURITY_IDs stay reference_only=FALSE even when they
+    # are ALSO NTM constituents — they keep their real F&O option chain
+    # (DEC-OPTIONS-PULL-GUARD-001). Only the NON-F&O matches become reference rows.
+    fno_security_ids = frozenset(
+        inst.security_id
+        for inst in nse_equities
+        if (inst.exch_id, inst.symbol_name) in fno_eligible
+    )
+
+    # Best-effort live NTM constituent CSV with a last-good disk-cache fallback
+    # (niftyindices.com bot-blocks / times out plain HTTP clients — a live failure
+    # would otherwise crater the universe from ~750 to the F&O-eligible base set).
+    try:
+        csv_text, from_cache = _resolve_constituent_csv(constituent_opener, cache_dir=cache_dir)
+    except OSError as exc:
+        note["reason"] = (
+            "NIFTY Total Market constituents need niftyindices.com, currently "
+            f"unreachable ({exc}) with no last-good cache — the universe falls back "
+            "to the F&O-eligible base set. One-time fix: download "
+            "ind_niftytotalmarket_list.csv in your browser and drop it at "
+            "~/.brutex/cache/ntm_constituents.csv."
+        )
+        return frozenset(), note
+    if not csv_text:
+        note["reason"] = (
+            "no NIFTY Total Market constituent CSV available (live source returned "
+            "nothing and no last-good cache) — the universe falls back to the "
+            "F&O-eligible base set"
+        )
+        return frozenset(), note
+
+    # Match each constituent → its Groww NSE cash-equity SECURITY_ID (ISIN-primary,
+    # ticker/trading_symbol fallback) via the COMMON vendor-neutral resolver, then
+    # keep ONLY the non-F&O matches as the new REFERENCE_ONLY admissions.
+    report = resolve_constituents(parse_constituents(csv_text), index.universe)
+    reference_security_ids = frozenset(report.security_ids) - fno_security_ids
+
+    note.update(
+        admitted=bool(reference_security_ids),
+        constituents=report.total,
+        matched=len(report.matched),
+        reference=len(reference_security_ids),
+        unmatched=len(report.unmatched),
+        from_cache=from_cache,
+    )
+    if from_cache:
+        note["constituent_note"] = (
+            "live NTM constituent source unavailable — used last-good cache "
+            "(~/.brutex/cache/ntm_constituents.csv)"
+        )
+    return reference_security_ids, note
+
+
+def _reference_only_of(
+    reference_security_ids: frozenset[int],
+) -> Callable[[Instrument], bool]:
+    """Build the ``reference_only`` upsert predicate.
+
+    Returns a callable that is ``True`` for India VIX (the index-level
+    :func:`brutex.universe.is_reference_only` flag) OR any admitted NTM constituent
+    (``security_id`` in *reference_security_ids*) — the single, unified
+    REFERENCE_ONLY encoding (DEC-NIFTY-TOTAL-MARKET-REFTAG-001 /
+    DEC-NTM-GROWW-REPOINT-001) the lean upsert tags onto the ``reference_only``
+    column. Replacing the store's default ``is_reference_only`` MUST keep India VIX
+    tagged, so the VIX clause stays first.
+    """
+
+    def _is_reference_only(instr: Instrument) -> bool:
+        """True for India VIX or an admitted NTM constituent (matched by security_id)."""
+        return is_reference_only(instr) or instr.security_id in reference_security_ids
+
+    return _is_reference_only
+
+
+def _summarise_stored(store: Any) -> dict[str, int]:
+    """Read the stored universe underlyings back and summarise the index/stock split.
+
+    Lean-store-correct (DEC-INSTRUMENT-UNIVERSE-FAST-001): the store holds ONLY the
+    universe underlyings (no option/future legs), so summarise from the IDX + EQ
+    candidates plus the SQL-derived eligible set — the COMMON ``universe_summary``
+    classifier. A REFERENCE_ONLY constituent counts as a "stock" here (every
+    persisted NSE EQ is eligible-by-storage), so the operator sees the full
+    ~750-name universe.
+    """
+    eligible = store.fno_eligible_underlyings()
+    candidates = store.list_index_equity_instruments()
+    return universe_summary(candidates, fno_eligible=eligible)
+
+
+def _fold_leg_economics(
+    instruments: list[Instrument],
+    economics: dict[tuple[Exchange, str], UnderlyingEconomics],
+) -> list[Instrument]:
+    """Stamp each underlying with its TRADABLE F&O lot + freeze from its legs.
+
+    DEC-GROWW-LEG-ECONOMICS-001 — the Groww twin of the retired-vendor
+    ``DEC-UNDERLYING-LEG-ECONOMICS-001`` fold. In the Groww master an IDX / EQ
+    row carries only its CASH economics (placeholder ``lot_size = 1`` for an
+    equity, ``0`` for an index); the real *tradable* F&O lot + freeze live on the
+    derivative legs. *economics* maps each ``(exchange, underlying_symbol)`` to
+    ``(lot_size, tick_size, freeze_quantity)`` harvested once from those legs by
+    :func:`brutex.universe.build_underlying_economics`. For every underlying with
+    a leg carrying a real lot (``> 0``) we SUPERSEDE its lot + freeze with the
+    leg's, but KEEP the row's own ``tick_size`` (a spot tick differs from its
+    future's). A non-F&O underlying (no legs — a reference-only NTM constituent
+    or a non-F&O index) is returned unchanged. A leg whose own freeze is blank
+    leaves the underlying row's freeze intact. The leg's ``lot_size`` is always
+    ``> 0`` (``Instrument.__post_init__`` enforces it for every FUT / CE / PE), so
+    a folded equity can never violate the ``lot_size > 0`` invariant.
+
+    Without this fold every F&O equity keeps the placeholder ``lot_size = 1``,
+    which leaves
+    :meth:`~brutex.data.instrument_store.InstrumentStore.has_placeholder_stock_economics`
+    permanently ``True`` and makes the dashboard auto-heal
+    (:func:`brutex.dashboard.auto_pull.should_reload_instrument_master`) re-load
+    the master on every startup — a silent reload loop this fold closes.
+    """
+    folded: list[Instrument] = []
+    for inst in instruments:
+        leg = economics.get((inst.exch_id, inst.symbol_name))
+        if leg is None:
+            folded.append(inst)  # non-F&O underlying (no legs) → keep own economics
+            continue
+        # Supersede lot + freeze (keep the row's own spot tick). A leg without its
+        # own freeze leaves the underlying row's freeze untouched.
+        lot_size, freeze_qty = leg[0], leg[2]
+        new_freeze = freeze_qty if freeze_qty is not None else inst.sm_freeze_qty
+        folded.append(replace(inst, lot_size=lot_size, sm_freeze_qty=new_freeze))
+    return folded
+
+
+def _lean_universe(
+    index: InstrumentIndex,
+    *,
+    fno_eligible: frozenset[tuple[Exchange, str]],
+    reference_security_ids: frozenset[int],
+) -> tuple[list[Instrument], int]:
     """Select the LEAN universe to persist + count the dropped derivative legs.
 
     The Groww :class:`InstrumentIndex` carries every in-scope row INCLUDING the
     FUT / CE / PE legs. The lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001)
-    persists ONLY the universe underlyings — every admitted IDX + every
-    F&O-eligible EQ — and discards the legs (they are parsed only to discover
-    which equities are F&O-eligible). Returns ``(lean_rows, legs_dropped)`` where
-    ``legs_dropped`` is the count of in-scope rows NOT persisted (the legs +
-    any non-F&O equity), so the caller can report the accounting like the
-    retired-vendor refresh did. The F&O-eligibility rule is delegated to the COMMON
-    :func:`brutex.universe.build_fno_eligible_underlyings` /
+    persists ONLY the universe underlyings — every admitted IDX, every
+    F&O-eligible EQ, and every admitted REFERENCE_ONLY NTM constituent (an EQ
+    whose ``security_id`` is in *reference_security_ids*) — and discards the legs
+    (they are parsed only to discover which equities are F&O-eligible). Returns
+    ``(lean_rows, legs_dropped)`` where ``legs_dropped`` is the count of in-scope
+    rows NOT persisted (the legs + any non-admitted non-F&O equity), so the caller
+    can report the accounting. The admission rule is delegated to the COMMON
     :func:`brutex.universe.is_universe_underlying` (CLAUDE.md §11 COMMON).
     """
-    fno_eligible = build_fno_eligible_underlyings(index.universe)
-    lean = [inst for inst in index.universe if is_universe_underlying(inst, fno_eligible)]
+    lean = [
+        inst
+        for inst in index.universe
+        if is_universe_underlying(inst, fno_eligible, reference_security_ids)
+    ]
     legs_dropped = len(index.universe) - len(lean)
     return lean, legs_dropped
 
@@ -118,12 +358,18 @@ def load_instrument_master(
     *,
     http_get: Callable[[str], str] | None = None,
     run_id_factory: Callable[[], str] | None = None,
+    constituent_opener: Callable[[str], str] | None = None,
+    constituent_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Keylessly download + parse the Groww instrument master into *store*.
 
     Downloads the public Groww instrument-master CSV (NO Groww token), parses it
     into the O(1) :class:`~brutex.adapters.groww.instruments.InstrumentIndex`,
-    full-snapshot upserts the LEAN universe (IDX + F&O-eligible EQ) into *store*,
+    resolves the NIFTY-Total-Market constituents to REFERENCE_ONLY admissions
+    (best-effort — DEC-NTM-GROWW-REPOINT-001), stamps each underlying with its
+    tradable F&O lot + freeze harvested from its derivative legs
+    (DEC-GROWW-LEG-ECONOMICS-001), full-snapshot upserts the LEAN universe
+    (IDX + F&O-eligible EQ + the matched REFERENCE_ONLY constituents) into *store*,
     prunes to the newest snapshot, then reads the snapshot back and returns
     headline counts for the ``/universe`` page.
 
@@ -140,6 +386,21 @@ def load_instrument_master(
         restricted to the Groww asset host) is used.
     run_id_factory
         Optional ``() -> run_id`` stamped on the upsert for audit lineage.
+    constituent_opener
+        Injected ``url -> CSV text`` for the NTM constituent fetch (offline
+        tests). When ``None`` (production) the real best-effort niftyindices
+        opener is used. The fetch runs only when the master carries NSE
+        equities to match against, so an index-only / empty master never touches
+        the network here.
+    constituent_cache_dir
+        Directory for the last-good NTM constituent CSV cache
+        (DEC-NTM-CONSTITUENT-CACHE-001). ``None`` (production) uses
+        :func:`~brutex.dashboard.ntm_cache.default_cache_dir` (``~/.brutex/cache/``).
+        A successful live fetch refreshes the cache; a failed/empty fetch falls back
+        to it, so a transient niftyindices timeout no longer craters the universe to
+        the base set. The operator can also seed the fallback by dropping the
+        browser-downloaded ``ind_niftytotalmarket_list.csv`` at
+        ``<cache_dir>/ntm_constituents.csv``. Tests inject a tmp dir for isolation.
 
     Returns
     -------
@@ -151,8 +412,9 @@ def load_instrument_master(
         skips out-of-scope MCX / COMMODITY rows BEFORE they reach the index, so
         ``parsed`` already counts only in-scope rows) and ``quarantined`` is
         always ``0`` (the Groww parser **fails closed** on a malformed in-scope
-        row — Golden Rule #1 — rather than quarantining). ``ntm`` is the fixed
-        :data:`_NTM_SKIPPED_NOTE` (NTM auto-admission has no Groww equivalent).
+        row — Golden Rule #1 — rather than quarantining). ``ntm`` is the
+        NIFTY-Total-Market admission note (``{"admitted": bool, ...}`` —
+        DEC-NTM-GROWW-REPOINT-001).
 
     Raises
     ------
@@ -176,28 +438,47 @@ def load_instrument_master(
         csv_sha256 = hashlib.sha256(master_text.encode("utf-8")).hexdigest()
         index = load_index(lambda _url: master_text)
         parsed = len(index.universe)
+        fno_eligible = build_fno_eligible_underlyings(index.universe)
+
+        # NTM enrichment is fail-soft — it never blocks the keyless core load
+        # (DEC-NTM-GROWW-REPOINT-001). The returned ids ADMIT the non-F&O
+        # constituents into the lean set AND tag them reference_only at upsert.
+        reference_security_ids, ntm_note = _ntm_admission(
+            index,
+            fno_eligible=fno_eligible,
+            constituent_opener=constituent_opener,
+            cache_dir=(
+                constituent_cache_dir if constituent_cache_dir is not None else default_cache_dir()
+            ),
+        )
+        if ntm_note.get("admitted"):
+            _LOG.info("universe.load.ntm_admitted", **ntm_note)
+        else:
+            _LOG.info("universe.load.ntm_skipped", **ntm_note)
 
         # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): persist ONLY the
-        # universe underlyings (IDX + F&O-eligible EQ); the FUT / CE / PE legs are
-        # parsed for eligibility then dropped. Full-snapshot replace so the day's
-        # rows are EXACTLY the lean set (idempotent on re-pull).
-        lean, legs_dropped = _lean_universe(index)
+        # universe underlyings (IDX + F&O-eligible EQ + REFERENCE_ONLY NTM
+        # constituents); the FUT / CE / PE legs are parsed for eligibility then
+        # dropped. Full-snapshot replace so the day's rows are EXACTLY the lean
+        # set (idempotent on re-pull).
+        lean, legs_dropped = _lean_universe(
+            index, fno_eligible=fno_eligible, reference_security_ids=reference_security_ids
+        )
+        # Stamp each underlying with its TRADABLE F&O lot + freeze from its legs
+        # (DEC-GROWW-LEG-ECONOMICS-001) — the legs carry the real economics; the
+        # IDX / EQ row carries only its cash placeholder. This also keeps
+        # ``has_placeholder_stock_economics`` False so the auto-heal does not loop.
+        lean = _fold_leg_economics(lean, build_underlying_economics(index.universe))
         store.upsert_many(
             lean,
             snapshot_date=date.today(),
             run_id=run_id,
             csv_source_sha256=csv_sha256,
             replace_snapshot=True,
+            reference_only_of=_reference_only_of(reference_security_ids),
         )
         pruned = store.prune_to_latest_snapshot()
-
-        # Lean-store-correct summary (DEC-INSTRUMENT-UNIVERSE-FAST-001): the store
-        # now holds ONLY the universe underlyings (no option/future legs), so
-        # summarise from the IDX + EQ candidates plus the SQL-derived eligible set
-        # — the COMMON ``universe_summary`` classifier.
-        eligible = store.fno_eligible_underlyings()
-        candidates = store.list_index_equity_instruments()
-        summary = universe_summary(candidates, fno_eligible=eligible)
+        summary = _summarise_stored(store)
 
     _LOG.info(
         "universe.load.groww",
@@ -208,6 +489,7 @@ def load_instrument_master(
         pruned=pruned,
         index_count=summary["index_count"],
         stock_count=summary["stock_count"],
+        ntm_reference=ntm_note.get("reference", 0),
     )
     return {
         "parsed": parsed,
@@ -221,8 +503,10 @@ def load_instrument_master(
         "index_count": summary["index_count"],
         "stock_count": summary["stock_count"],
         "total": summary["total"],
-        # NTM auto-admission has no Groww equivalent (Golden Rule #1) — a fixed skipped note.
-        "ntm": dict(_NTM_SKIPPED_NOTE),
+        # NTM admission status (DEC-NTM-GROWW-REPOINT-001) — surfaced so the
+        # operator SEES whether NIFTY Total Market's constituents were admitted
+        # this load (and, if skipped, the honest reason).
+        "ntm": ntm_note,
     }
 
 

@@ -5,11 +5,11 @@ DEC-INSTRUMENT-UNIVERSE-FAST-001:
 
 * **Lean universe** — only the universe underlyings (every admitted index + every
   F&O-eligible single-stock SPOT) persist; the FUT/CE/PE legs are parsed for
-  eligibility then dropped (recoverable on demand). Unlike the retired Dhan
-  loader, the Groww :class:`~brutex.adapters.groww.instruments.InstrumentIndex`
-  carries NO nearest-expiry leg-economics enrichment (the Dhan-only
-  DEC-UNDERLYING-LEG-ECONOMICS-001 lot/freeze fold has no Groww twin): each
-  persisted underlying keeps ITS OWN row's lot / tick / freeze.
+  eligibility then dropped (recoverable on demand). Each persisted underlying is
+  stamped with its **tradable F&O lot + freeze** harvested from its derivative
+  legs (DEC-GROWW-LEG-ECONOMICS-001 — the Groww twin of the retired Dhan
+  DEC-UNDERLYING-LEG-ECONOMICS-001 fold): RELIANCE → 500, NIFTY → 75, superseding
+  the EQ/INDEX row's cash lot (1 / 0); the spot ``tick_size`` is preserved.
 * **Concurrency (FIX 3)** — concurrent ``load_instrument_master`` calls are
   serialised by a module-level lock so a snapshot wipe can never interleave
   another load's insert (the "25 indices · 0 stocks" corruption).
@@ -55,6 +55,16 @@ def _make_http_get(body: str) -> Any:
     return _get
 
 
+def _no_constituents(_url: str) -> str:
+    """A constituent opener returning nothing — keeps NTM enrichment a no-op offline.
+
+    These tests assert the lean-ingest economics, not NTM admission
+    (DEC-NTM-GROWW-REPOINT-001), so an empty live NTM CSV keeps the counts focused
+    on the F&O-eligible base set without touching the live niftyindices source.
+    """
+    return ""
+
+
 def _build_store(tmp_path: Path) -> InstrumentStore:
     """Open a fresh on-disk InstrumentStore under *tmp_path*."""
     pytest.importorskip("duckdb")  # gate on the data extra
@@ -65,9 +75,9 @@ def _economics_csv() -> str:
     """Groww-shaped CSV: a F&O index (NIFTY) + its FUT/CE legs, a F&O stock
     (RELIANCE) made eligible by an option leg, and a no-leg index (BANKNIFTY).
 
-    Unlike the Dhan fixture, the persisted underlyings keep their OWN row
-    economics (no leg-fold), so NIFTY/BANKNIFTY carry the blank index lot/freeze
-    (0) and RELIANCE carries its own EQ lot/tick/freeze.
+    The leg-economics fold (DEC-GROWW-LEG-ECONOMICS-001) stamps NIFTY → 75 (its
+    FUT leg) and RELIANCE → 500 (its CE leg); BANKNIFTY has no leg so it keeps its
+    blank index lot (0). The spot ``tick_size`` is always preserved.
     """
     return _csv(
         _row(
@@ -151,38 +161,47 @@ def _economics_csv() -> str:
 
 
 def test_persists_underlying_economics(tmp_path: Path) -> None:
-    """The lean universe persists each underlying with its OWN row economics."""
+    """Each underlying is stamped with its TRADABLE F&O lot + freeze from its legs."""
     store = _build_store(tmp_path)
     result = load_instrument_master(
-        store, http_get=_make_http_get(_economics_csv()), run_id_factory=lambda: "t"
+        store,
+        http_get=_make_http_get(_economics_csv()),
+        run_id_factory=lambda: "t",
+        constituent_opener=_no_constituents,
+        constituent_cache_dir=tmp_path / "cache",
     )
     assert result["index_count"] == 2  # NIFTY + BANKNIFTY (both allow-listed)
     assert result["stock_count"] == 1  # RELIANCE
     assert result["persisted"] == 3
     assert result["legs_dropped"] == 3  # NIFTY FUT + NIFTY CE + RELIANCE option
 
-    # The Groww loader carries NO nearest-expiry leg-economics fold (the Dhan-only
-    # DEC-UNDERLYING-LEG-ECONOMICS-001 has no Groww twin — Golden Rule #1): each
-    # persisted underlying keeps ITS OWN row's lot / tick / freeze. The store is
-    # keyed by ``symbol_name`` (the engine symbol = Groww ``trading_symbol``); the
-    # numeric id lives in ``security_id`` (the Groww ``exchange_token``).
+    # The Groww loader now folds each underlying's TRADABLE F&O lot + freeze from
+    # its derivative legs (DEC-GROWW-LEG-ECONOMICS-001 — the Groww twin of the
+    # retired Dhan DEC-UNDERLYING-LEG-ECONOMICS-001): RELIANCE → 500 (its CE leg),
+    # NIFTY → 75 (its FUT leg). The EQ/INDEX row's own cash lot (1 / 0) + freeze are
+    # SUPERSEDED by the leg's; the ``tick_size`` is NOT (a spot tick differs from
+    # its future's). The store is keyed by ``symbol_name`` (the engine symbol =
+    # Groww ``trading_symbol``); the numeric id lives in ``security_id``.
     rel = store.get("RELIANCE")
     assert rel is not None
     assert rel.security_id == 2885
-    assert rel.lot_size == 1  # the EQ row's OWN cash lot (no leg fold)
-    assert str(rel.tick_size) == "0.0500"  # the EQ row's own spot tick
-    assert rel.sm_freeze_qty == 5000  # the EQ row's own freeze
+    assert rel.lot_size == 500  # F&O lot from the CE leg (was the cash 1)
+    assert str(rel.tick_size) == "0.0500"  # spot tick PRESERVED (not the leg's)
+    assert rel.sm_freeze_qty == 10000  # freeze from the leg (was the EQ row's 5000)
 
     nifty = store.get("NIFTY")
     assert nifty is not None
-    assert nifty.lot_size == 0  # the index row's own (blank → 0) lot, no FUT fold
-    assert nifty.sm_freeze_qty is None  # no freeze on the blank index row
+    assert nifty.lot_size == 75  # F&O lot from the FUT leg (was the index 0)
+    assert nifty.sm_freeze_qty == 1800  # freeze from the FUT leg (was blank/None)
 
     # BANKNIFTY has NO F&O leg in this fixture → keeps its cash index lot (0).
     n100 = store.get("BANKNIFTY")
     assert n100 is not None
     assert n100.lot_size == 0
 
+    # The fold lifts every F&O equity above the placeholder lot 1, so the
+    # auto-heal probe is False — no reload loop (DEC-GROWW-LEG-ECONOMICS-001).
+    assert store.has_placeholder_stock_economics() is False
     # No FUT/CE/PE leg ever lands (lean ingest fingerprint stays clean).
     assert store.has_derivative_legs() is False
     store.close()
@@ -192,13 +211,25 @@ def test_two_sequential_refreshes_deterministic(tmp_path: Path) -> None:
     """Re-ingest yields the SAME full counts (no '25 indices · 0 stocks' loss)."""
     store = _build_store(tmp_path)
     http = _make_http_get(_economics_csv())
-    first = load_instrument_master(store, http_get=http, run_id_factory=lambda: "r1")
-    second = load_instrument_master(store, http_get=http, run_id_factory=lambda: "r2")
+    first = load_instrument_master(
+        store,
+        http_get=http,
+        run_id_factory=lambda: "r1",
+        constituent_opener=_no_constituents,
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    second = load_instrument_master(
+        store,
+        http_get=http,
+        run_id_factory=lambda: "r2",
+        constituent_opener=_no_constituents,
+        constituent_cache_dir=tmp_path / "cache",
+    )
     assert (first["index_count"], first["stock_count"]) == (2, 1)
     assert (second["index_count"], second["stock_count"]) == (2, 1)
     assert store.has_derivative_legs() is False
     rel = store.get("RELIANCE")
-    assert rel is not None and rel.lot_size == 1  # its own EQ lot, deterministic across re-ingest
+    assert rel is not None and rel.lot_size == 500  # F&O leg lot, deterministic across re-ingest
     store.close()
 
 

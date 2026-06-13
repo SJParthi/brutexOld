@@ -126,6 +126,31 @@ hostile-review pass._
    row). The BRUTE-FORCE ENGINE is UNAFFECTED. So "the LAKE is the expanded
    surface" is narrowed: the lake = the universe underlyings; the legs are
    derived/recoverable, not stored.
+
+   **Leg-economics fold (DEC-GROWW-LEG-ECONOMICS-001, 2026-06-13, MIGRATION.md
+   entry #696):** before the legs are discarded, each persisted underlying is
+   **stamped with its tradable F&O lot + freeze** harvested from its derivative
+   legs (`universe.build_underlying_economics` →
+   `dashboard/instrument_loader._fold_leg_economics`) — RELIANCE → 500, NIFTY →
+   75 — SUPERSEDING the IDX/EQ row's cash placeholder (`lot_size` 1 / 0); the
+   spot `tick_size` is preserved (a spot tick differs from its future's). This is
+   the Groww twin of the retired-vendor fold; without it every F&O equity kept
+   the placeholder `lot_size = 1`, which left `has_placeholder_stock_economics`
+   permanently True and made the dashboard auto-heal re-load the master on every
+   startup (a silent loop this closes).
+
+   **Re-amended by DEC-NTM-GROWW-REPOINT-001 (2026-06-13, MIGRATION.md entry
+   #694):** the lean universe ALSO persists the matched **NIFTY Total Market
+   constituents** as REFERENCE_ONLY rows — the ~540 non-F&O names on top of the
+   ~212 F&O-eligible stocks + the admitted indices, widening the lake to **~750
+   underlyings**. The constituents are fetched best-effort from niftyindices
+   (vendor-agnostic) and matched to Groww NSE cash-equity rows by ISIN / ticker
+   (`dashboard/instrument_loader.py` `_ntm_admission`). The **BRUTE-FORCE ENGINE
+   remains UNCHANGED** (NIFTY/BANKNIFTY/SENSEX) — NTM constituents are
+   lake/REFERENCE_ONLY only, NEVER in the 52-condition vocabulary (the hard
+   scope guard; an F&O-eligible name that is ALSO an NTM constituent stays
+   tradable, `reference_only=FALSE`). On a network miss with no cache the load
+   degrades honestly to the F&O-eligible base set, never invents constituents.
 4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
@@ -424,6 +449,7 @@ bruteX/
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
 | Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name) | `groww/errors.py:36-108`; `groww/api-reference/05-exceptions.md:9-70` |
 | F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set; **212** single stocks verified in the operator instrument master (lake scope) | `groww/constants.py:103-104`; `groww/instruments.py:174` |
+| NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved via `by_groww_symbol` | `groww/constants.py:97-100`; `groww/instruments.py:124-136`; `groww/adapter.py:45-58` |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
