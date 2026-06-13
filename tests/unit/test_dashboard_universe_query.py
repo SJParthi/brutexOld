@@ -231,7 +231,9 @@ class TestListUnderlyings:
 
         # An F&O stock as it is STORED after the leg-economics fold: lot 500,
         # spot tick 0.10 (kept), freeze 15001. The option leg makes it eligible.
-        rel = replace(_equity("RELIANCE"), lot_size=500, tick_size=Decimal("0.10"), sm_freeze_qty=15001)
+        rel = replace(
+            _equity("RELIANCE"), lot_size=500, tick_size=Decimal("0.10"), sm_freeze_qty=15001
+        )
         rows = list_underlyings([rel, _option("RELIANCE")], kind=KIND_STOCK)
         assert len(rows) == 1
         row = rows[0]
