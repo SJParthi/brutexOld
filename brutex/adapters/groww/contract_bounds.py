@@ -47,8 +47,8 @@ Honest envelope (Golden Rule #10)
   preceded by a one-time **O(P) reconcile** (each Parquet opened once to read its
   ``timestamp`` column + an ``sha256`` over the bytes — see
   :func:`~brutex.data.catalog_reconcile.reconcile_catalog_from_lake`); this mirrors
-  the blessed :func:`brutex.dashboard.movers_reader.run_movers_screen` "reconcile
-  once per interval, then read many symbols" pattern. NEITHER is O(1)-total and no
+  the blessed :func:`brutex.engine.cascade_wire.load_bars_for_manifest` "reconcile
+  once, then read many" pattern. NEITHER is O(1)-total and no
   such claim is made.
 * The per-contract window LOOKUP from the returned map (the spine's hot use) is
   **O(1)**; the network pull it bounds is O(windows), I/O-bound, NOT O(1)-total.
@@ -83,7 +83,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.nse import IST
 from brutex.data.errors import CatalogError
 
-if TYPE_CHECKING:  # pragma: no cover — typing-only (duckdb stays lazy, mirrors movers_reader)
+if TYPE_CHECKING:  # pragma: no cover — typing-only (duckdb stays lazy, mirrors cascade_wire)
     from pathlib import Path
 
     from brutex.data.catalog import Catalog
@@ -254,7 +254,7 @@ def derive_contract_minute_windows(
     catalog ONCE for the whole ``FNO``/*interval* space from the on-disk Parquet
     (the dashboard/derivative pull builds its sink with ``catalog=None``, so the
     ``partitions`` table is empty until reconciled — the same reason
-    :func:`brutex.dashboard.movers_reader.run_movers_screen` reconciles), then reads
+    :func:`brutex.engine.cascade_wire.load_bars_for_manifest` reconciles), then reads
     each contract's coverage (a pure O(partitions) catalog lookup) and converts it to
     a half-open minute window via :func:`coverage_to_minute_window`.
 
@@ -294,7 +294,7 @@ def derive_contract_minute_windows(
     """
     contract_list = list(contracts)
     if reconcile:
-        # Lazy import (mirrors movers_reader): pulls polars/pyarrow only when run, so
+        # Lazy import (mirrors cascade_wire): pulls polars/pyarrow only when run, so
         # importing this module never requires the P2 [data] extras.
         from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
