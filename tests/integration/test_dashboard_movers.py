@@ -417,11 +417,14 @@ class TestMoversApi:
         assert resp.status_code == 400
         assert "malformed time" in resp.json()["detail"]
 
-    def test_futures_tab_is_pending_not_500(self, store: InstrumentStore) -> None:
+    def test_options_tab_is_pending_not_500(self, store: InstrumentStore) -> None:
+        # Options ships after Futures — still an honest "ships after Spot" pending
+        # payload (Milestone 2 wired Futures; the Futures tab is covered by
+        # test_dashboard_movers_futures.py).
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        body = client.get("/api/v1/movers", params={"asset": "futures"}).json()
+        body = client.get("/api/v1/movers", params={"asset": "options"}).json()
         assert body["instrument_count"] == 0
-        assert "Futures" in body["note"]
+        assert "Options" in body["note"]
         assert "Spot" in body["note"]
 
     def test_empty_lake_degrades_honestly(self, store: InstrumentStore) -> None:

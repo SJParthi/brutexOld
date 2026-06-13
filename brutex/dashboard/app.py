@@ -74,6 +74,7 @@ from brutex.dashboard.derivatives_pull import (
     resolve_contract_types,
     resolve_pull_intervals,
 )
+from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
 from brutex.dashboard.movers_snapshot import (
     DEFAULT_INTERVAL,
     DEFAULT_TOP_N,
@@ -2072,8 +2073,8 @@ def build_app(
         """
         store = _require_store()
         try:
-            if asset != "spot":
-                # Milestone 1 wires the Spot tab; Futures + Options follow.
+            if asset not in ("spot", "futures"):
+                # Milestone 1 wired Spot; Milestone 2 wires Futures; Options follow.
                 return JSONResponse(
                     pending_asset_payload(
                         asset,
@@ -2086,19 +2087,33 @@ def build_app(
             store_path = getattr(store, "path", None)
             if not isinstance(store_path, Path):
                 # No lake root wired → honest empty payload (never a 500), mirroring
-                # the /api/v1/coverage/spot no-lake-root degrade.
+                # the /api/v1/coverage/spot no-lake-root degrade. Futures degrade
+                # to their own "pull the F&O futures first" empty payload.
+                empty_date = parse_snapshot_date(date).isoformat()
+                if asset == "futures":
+                    return JSONResponse(
+                        build_futures_payload(
+                            [],
+                            interval=interval,
+                            date=empty_date,
+                            time=time,
+                            top_n=top_n,
+                            skipped=0,
+                        )
+                    )
                 return JSONResponse(
                     build_snapshot_payload(
                         [],
                         interval=interval,
-                        date=parse_snapshot_date(date).isoformat(),
+                        date=empty_date,
                         time=time,
                         top_n=top_n,
                         skipped=0,
                     )
                 )
+            runner = run_futures_snapshot if asset == "futures" else run_movers_snapshot
             payload = await run_in_threadpool(
-                run_movers_snapshot,
+                runner,
                 lake_root=store_path.parent,
                 interval=interval,
                 date=date,
