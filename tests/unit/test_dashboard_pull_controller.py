@@ -787,12 +787,24 @@ class TestSessionRateController:
         assert len(built) == 1  # built ONCE, not per pull
 
     def test_default_factory_builds_a_real_controller(self) -> None:
+        # DEC-GROWW-NO-DAILY-QUOTA-001: the dashboard controller is built with NO
+        # DailyQuotaTracker (Groww backtesting has no daily quota, operator-confirmed),
+        # matching the CLI Groww path — so it never halts on a phantom daily cap, while
+        # the 500/min per-minute governor stays wired.
+        from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_PER_MIN
         from brutex.adapters.rate_common import RateController
 
         holder = SessionRateController()  # default factory = _build_live_controller
         ctl = holder.get()
         assert isinstance(ctl, RateController)
         assert holder.get() is ctl  # cached on subsequent calls
+        # No daily quota wired → quota_exhausted is always False + the snapshot omits
+        # the quota-gauge keys (the rate panel then hides the gauge via its -1 sentinel).
+        assert ctl.quota_exhausted() is False
+        snap = ctl.snapshot()
+        assert "quota_limit" not in snap and "quota_used" not in snap
+        # The per-minute 500/min governor IS still wired.
+        assert snap["ceiling_per_min"] == GROWW_RATE_LIMIT_PER_MIN
 
 
 # ── parse_symbol_list + resolve_pull_symbols — the multi-select pull ──
