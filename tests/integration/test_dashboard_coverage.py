@@ -21,6 +21,7 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 
+from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.app import (
     DashboardState,
     _coverage_years,
@@ -240,7 +241,7 @@ class TestSpotCoverageApi:
         ledger = WindowLedger()
         ledger.record(
             WindowKey(
-                market="spot",
+                market=GROWW_COVERAGE_MARKET,  # the REAL spot namespace the rollup matches
                 security_id="NSE-NIFTY",
                 interval="1minute",
                 start=date(2024, 3, 1),
@@ -293,7 +294,7 @@ class TestWindowStatusApi:
         assert resp.json() == {
             "source": "status_log",
             "count": 0,
-            "counts": {"spot": {}, "options": {}},
+            "counts": {"spot": {}, "options": {}, "futures": {}},
             "empty_threshold": 3,
             "matched": 0,
             "returned": 0,
