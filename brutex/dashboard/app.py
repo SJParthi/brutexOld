@@ -1112,7 +1112,7 @@ def build_app(
         (DEC-DASHBOARD-PULL-ASYNC-001).
         """
         from brutex.dashboard.constituents_cache import resolve_constituents
-        from brutex.dashboard.nse_constituents import intersect_with_universe
+        from brutex.universe_constituents import held_members
 
         store = _require_store()
         eligible = store.fno_eligible_underlyings()
@@ -1150,11 +1150,16 @@ def build_app(
             cache_root=lake_root.parent,
             force_refresh=refresh,
         )
-        members = intersect_with_universe(result.symbols, held_symbols)
+        # ISIN-primary, ticker-fallback match (DEC-INDEX-CONSTITUENTS-NSE-001):
+        # a constituent whose NSE ticker was renamed still matches by its
+        # globally-unique ISIN, so the tick is rename-proof. Reuses the COMMON
+        # resolver (CLAUDE.md §11) over the held universe rows.
+        members = held_members(result.rows, candidates, held_symbols)
         notes = {
             "nse": (
                 f"{len(members)} constituent(s) of {symbol} ticked — "
-                "fresh from NSE + cached (verify; membership rebalances). "
+                "fresh from NSE + cached, matched by ISIN→ticker (rename-proof; "
+                "verify, membership rebalances). "
                 "Toggle 'F&O only' to narrow to option-pullable members."
             ),
             "cache": (
