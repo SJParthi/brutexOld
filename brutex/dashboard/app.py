@@ -75,6 +75,7 @@ from brutex.dashboard.derivatives_pull import (
     resolve_pull_intervals,
 )
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
+from brutex.dashboard.movers_options import build_options_payload, run_options_snapshot
 from brutex.dashboard.movers_snapshot import (
     DEFAULT_INTERVAL,
     DEFAULT_TOP_N,
@@ -2051,8 +2052,10 @@ def build_app(
         Query parameters
         ----------------
         asset
-            ``spot`` (this milestone). ``futures`` / ``options`` return an honest
-            "ships after Spot" payload until their readers land.
+            ``spot`` / ``futures`` / ``options`` — all three wired to the lake.
+            Any other (unknown) asset returns an honest "ships after Spot"
+            pending payload. (The Options ``expiry`` Near/Next/Far filter is
+            deferred — all expiries are ranked; the payload note says so.)
         interval
             The lake timeframe to snapshot (default ``1day``); the 21-timeframe
             vocab (1minute … 1day). An unknown label degrades to "pull spot first".
@@ -2073,8 +2076,9 @@ def build_app(
         """
         store = _require_store()
         try:
-            if asset not in ("spot", "futures"):
-                # Milestone 1 wired Spot; Milestone 2 wires Futures; Options follow.
+            if asset not in ("spot", "futures", "options"):
+                # Milestone 1 wired Spot; Milestone 2 Futures; Milestone 3 Options.
+                # Any other (unknown) asset still gets an honest pending payload.
                 return JSONResponse(
                     pending_asset_payload(
                         asset,
@@ -2087,12 +2091,23 @@ def build_app(
             store_path = getattr(store, "path", None)
             if not isinstance(store_path, Path):
                 # No lake root wired → honest empty payload (never a 500), mirroring
-                # the /api/v1/coverage/spot no-lake-root degrade. Futures degrade
-                # to their own "pull the F&O futures first" empty payload.
+                # the /api/v1/coverage/spot no-lake-root degrade. Futures / Options
+                # degrade to their own "pull the F&O … first" empty payloads.
                 empty_date = parse_snapshot_date(date).isoformat()
                 if asset == "futures":
                     return JSONResponse(
                         build_futures_payload(
+                            [],
+                            interval=interval,
+                            date=empty_date,
+                            time=time,
+                            top_n=top_n,
+                            skipped=0,
+                        )
+                    )
+                if asset == "options":
+                    return JSONResponse(
+                        build_options_payload(
                             [],
                             interval=interval,
                             date=empty_date,
@@ -2111,7 +2126,11 @@ def build_app(
                         skipped=0,
                     )
                 )
-            runner = run_futures_snapshot if asset == "futures" else run_movers_snapshot
+            runner = (
+                run_options_snapshot
+                if asset == "options"
+                else (run_futures_snapshot if asset == "futures" else run_movers_snapshot)
+            )
             payload = await run_in_threadpool(
                 runner,
                 lake_root=store_path.parent,
