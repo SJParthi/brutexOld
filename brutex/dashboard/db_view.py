@@ -45,7 +45,11 @@ from zoneinfo import ZoneInfo
 import duckdb
 import structlog
 
-from brutex.adapters.ingest_common import COVERAGE_MARKET
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+)
+from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.data.partition import (
     VALID_EXCHANGES,
     VALID_INTERVALS,
@@ -1612,21 +1616,28 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
-#: The SPOT fetch-window market namespace. MUST MATCH the spot ingest's
-#: ``_MARKET`` — sourced from the canonical
-#: :data:`~brutex.adapters.ingest_common.COVERAGE_MARKET` (the vendor-neutral
-#: relocation home, NOT the vendor adapter) so the VALUE stays byte-identical to
-#: every persisted ledger row. The EXACT-match filter matters:
-#: ``_window_market_bucket`` maps EVERY non-option market to the "spot" display
-#: bucket, which is a rendering choice, not a join identity
-#: (DEC-SPOT-COVERAGE-COMPLETENESS-001).
-_SPOT_WINDOW_MARKET: Final[str] = COVERAGE_MARKET
+#: The SPOT fetch-window market namespace. MUST MATCH what the Groww spot ingest
+#: actually persists — ``GROWW_COVERAGE_MARKET`` (``"groww"``,
+#: ``brutex/adapters/groww/ingest.py:106`` ``_MARKET = GROWW_COVERAGE_MARKET``), NOT
+#: the legacy vendor-neutral ``COVERAGE_MARKET`` (``"spot"``). Before
+#: DEC-COVERAGE-GROWW-NAMESPACE-001 this pointed at ``"spot"``, so
+#: :func:`spot_window_rollup`'s EXACT-match filter skipped every real ``"groww"``
+#: window and the /coverage spot chips rendered EMPTY after a live pull. The
+#: ``_window_market_bucket`` catch-all still folds any other namespace into "spot".
+_SPOT_WINDOW_MARKET: Final[str] = GROWW_COVERAGE_MARKET
 
-#: The unified ledger's option-window namespace — must match the coverage-key
-#: builder used by the option ingest (``_COVERAGE_MARKET``). Composed from the
-#: canonical spot namespace (:data:`_SPOT_WINDOW_MARKET`) so the VALUE stays
-#: byte-identical to the persisted ledger rows.
-_OPTION_WINDOW_MARKET = f"{_SPOT_WINDOW_MARKET}-option"
+#: The unified ledger's option-window namespace — MUST MATCH what the Groww option
+#: ingest persists: ``GROWW_OPTION_COVERAGE_MARKET`` (``"groww-option"``,
+#: ``option_ingest.py:179`` default). Before DEC-COVERAGE-GROWW-NAMESPACE-001 this
+#: was the legacy ``"spot-option"`` and never matched a real Groww option window,
+#: so options were mislabelled into the "spot" bucket.
+_OPTION_WINDOW_MARKET: Final[str] = GROWW_OPTION_COVERAGE_MARKET
+
+#: The unified ledger's FUTURE-window namespace — ``GROWW_FUTURE_COVERAGE_MARKET``
+#: (``"groww-future"``, DEC-GROWW-FUTURE-INGEST-001). Without this, ``groww-future``
+#: windows fell into the "spot" catch-all (mislabelled); they now get their own
+#: "futures" bucket (DEC-COVERAGE-GROWW-NAMESPACE-001).
+_FUTURE_WINDOW_MARKET: Final[str] = GROWW_FUTURE_COVERAGE_MARKET
 
 #: The option coverage key's folded-interval arity:
 #: ``OPT|<flag>|<code>|<strike>|<type>`` (option_ingest._coverage_key).
@@ -1748,8 +1759,17 @@ def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
 
 
 def _window_market_bucket(market: str) -> str:
-    """Map a ledger ``market`` namespace to the page's filter bucket."""
-    return "options" if market == _OPTION_WINDOW_MARKET else "spot"
+    """Map a ledger ``market`` namespace to the page's display/filter bucket.
+
+    Three buckets (DEC-COVERAGE-GROWW-NAMESPACE-001): ``"options"``
+    (``groww-option``), ``"futures"`` (``groww-future`` — previously mislabelled),
+    and ``"spot"`` (the ``groww`` spot namespace + any other/legacy catch-all).
+    """
+    if market == _OPTION_WINDOW_MARKET:
+        return "options"
+    if market == _FUTURE_WINDOW_MARKET:
+        return "futures"
+    return "spot"
 
 
 #: mtime-keyed single-entry cache for the spot completeness GROUPING — the
@@ -1829,7 +1849,8 @@ def build_window_payload(
 
     Server-side scale guards (DEC-OPTION-WINDOW-PLAN-001, hostile C3 — measured
     at the pre-planned universe scale of ~841k rows): ``counts`` (status ×
-    spot/options bucket) are ALWAYS computed over EVERY record; the ROW list is
+    spot/options/futures bucket — DEC-COVERAGE-GROWW-NAMESPACE-001) are ALWAYS
+    computed over EVERY record; the ROW list is
     filtered (*market*/*status*), ordered severity-first
     (:data:`_WINDOW_STATUS_ORDER` — FAILED/EMPTY can never be hidden by the
     cap), and truncated to *limit*. ``PLANNED`` rows are returned ONLY when
@@ -1849,7 +1870,7 @@ def build_window_payload(
         the coverage key carries (``25|NSE_FNO``). ``None`` / a missing id
         keeps the raw coordinate — display-only, never a data change.
     market
-        ``"spot"`` / ``"options"`` row filter (``None`` = both).
+        ``"spot"`` / ``"options"`` / ``"futures"`` row filter (``None`` = all).
     status
         Exact status row filter (``"FAILED"`` …). ``"PLANNED"`` is the ONLY way
         PLANNED rows enter the row list.
@@ -1876,7 +1897,7 @@ def build_window_payload(
         source = "status_log"
         records = tuple(load_window_status(lake_root).records())
 
-    counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}}
+    counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}, "futures": {}}
     for r in records:
         bucket = counts[_window_market_bucket(r.market)]
         bucket[r.status] = bucket.get(r.status, 0) + 1
