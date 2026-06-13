@@ -2193,10 +2193,12 @@ def build_app(
         :func:`brutex.adapters.groww.live.build_live_client`, and runs
         :func:`brutex.adapters.groww.probe.run_probe`. Returns
         ``{"results": [...]}`` — each :class:`ProbeResult` as a dict. Missing
-        credentials → 400; a :class:`GrowwAuthError` → 400 with the redacting
-        ``safe_message``; any other :class:`GrowwError` → 502. No secret value is
-        ever surfaced (every message goes through ``str(exc)``, which is the
-        redacted form for the auth/groww errors).
+        credentials → 400; the optional ``.[groww]`` extra (growwapi + pyotp)
+        not installed → 400 with an actionable install hint (``ImportError``,
+        DEC-GROWW-CREDS-TEST-IMPORT-400-001); a :class:`GrowwAuthError` → 400 with
+        the redacting ``safe_message``; any other :class:`GrowwError` → 502. No
+        secret value is ever surfaced (every message goes through ``str(exc)``,
+        which is the redacted form for the auth/groww errors).
         """
         from dataclasses import asdict
 
@@ -2219,6 +2221,20 @@ def build_app(
             try:
                 client = build_live_client(creds)
                 results = run_probe(client)
+            except ImportError as exc:
+                # The live probe lazily imports the optional `.[groww]` extra
+                # (growwapi + pyotp). When it is not installed, the raw
+                # ModuleNotFoundError used to escape as a 500 the frontend
+                # mis-rendered as "not valid JSON" — return a clean, actionable
+                # 400 instead (DEC-GROWW-CREDS-TEST-IMPORT-400-001). `str(exc)` is
+                # just "No module named '…'" — no secret value.
+                return 400, {
+                    "detail": (
+                        "Groww live probe needs the optional dependencies — install "
+                        "them with `pip install -e '.[groww]'` (growwapi + pyotp). "
+                        f"({exc})"
+                    )
+                }
             except GrowwAuthError as exc:
                 return 400, {"detail": str(exc)}
             except GrowwError as exc:
