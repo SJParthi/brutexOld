@@ -35,6 +35,7 @@ from brutex.universe import (
     is_index_underlying,
     is_option_pullable,
     is_reference_only,
+    is_spot_only_index,
     is_universe_underlying,
 )
 
@@ -449,6 +450,43 @@ class TestBuildOptionsEligibleUnderlyings:
 
     def test_empty_iterable(self) -> None:
         assert build_options_eligible_underlyings([]) == frozenset()
+
+
+class TestIsSpotOnlyIndex:
+    """The spot-only-index rule (DEC-NON-OPTION-INDEX-REFTAG-001).
+
+    An ``IDX`` with no listed options that is not a brute-force index is
+    "spot-only" → tagged reference_only at ingest → NOT option-pullable on the
+    dashboard. The 3 brute-force indices and the options-bearing indices are
+    NOT spot-only (they keep their pullable chain).
+    """
+
+    #: FINNIFTY has a listed option chain (a CE/PE leg names it) in this universe.
+    _OPTIONS = frozenset({(Exchange.NSE, "FINNIFTY")})
+
+    def test_non_option_sectoral_index_is_spot_only(self) -> None:
+        # A sectoral / broad-market index with no option leg → spot-only.
+        assert is_spot_only_index(_make_idx(Exchange.NSE, "NIFTYIT"), self._OPTIONS) is True
+        assert is_spot_only_index(_make_idx(Exchange.NSE, "NIFTY100"), self._OPTIONS) is True
+
+    def test_india_vix_is_spot_only(self) -> None:
+        # INDIA VIX is a reference index with no options → spot-only too.
+        assert is_spot_only_index(_make_idx(Exchange.NSE, "INDIAVIX"), self._OPTIONS) is True
+
+    def test_options_bearing_index_is_not_spot_only(self) -> None:
+        # FINNIFTY has options (in the eligible set) → NOT spot-only → keeps OPT.
+        assert is_spot_only_index(_make_idx(Exchange.NSE, "FINNIFTY"), self._OPTIONS) is False
+
+    def test_brute_force_index_is_never_spot_only(self) -> None:
+        # The 3 brute-force indices are always individually tradable → never
+        # spot-only, even SENSEX which has no NSE option leg (BSE options are
+        # outside the NSE-only options set) — the brute-force guard wins first.
+        for exch, sym in BRUTE_FORCE_INDEX_UNDERLYINGS:
+            assert is_spot_only_index(_make_idx(exch, sym), self._OPTIONS) is False
+
+    def test_equity_is_not_spot_only(self) -> None:
+        # A non-IDX row (equity) is decided by F&O-eligibility, not this rule.
+        assert is_spot_only_index(_make_equity(Exchange.NSE, "RELIANCE"), self._OPTIONS) is False
 
 
 class TestIsInFetchScope:

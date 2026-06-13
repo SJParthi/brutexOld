@@ -134,6 +134,55 @@ _VIX = _row(
     segment="CASH",
 )
 
+# SENSEX: a BSE brute-force index — always individually tradable (option-pullable),
+# never tagged reference_only, even though it has no NSE option leg
+# (DEC-NON-OPTION-INDEX-REFTAG-001).
+_SENSEX = _row(
+    exchange="BSE",
+    exchange_token="SENSEX",
+    trading_symbol="SENSEX",
+    groww_symbol="BSE-SENSEX",
+    name="BSE SENSEX",
+    instrument_type="IDX",
+    segment="CASH",
+)
+# FINNIFTY: an NSE index with a listed option chain (the FINNIFTY CE leg names it),
+# so it is options-eligible → NOT spot-only → keeps its OPT badge.
+_FINNIFTY = _row(
+    exchange="NSE",
+    exchange_token="FINNIFTY",
+    trading_symbol="FINNIFTY",
+    groww_symbol="NSE-FINNIFTY",
+    name="NIFTY FIN SERVICE",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_FINNIFTY_CE = _row(
+    exchange="NSE",
+    exchange_token="60001",
+    trading_symbol="FINNIFTY2661620000CE",
+    groww_symbol="NSE-FINNIFTY-16Jun26-20000-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="FINNIFTY",
+    underlying_exchange_token="60002",
+    expiry_date="2026-06-16",
+    strike_price="20000",
+    lot_size="65",
+    tick_size="0.05",
+)
+# NIFTY IT: an NSE sectoral index with NO option leg → spot-only → tagged
+# reference_only → NOT option-pullable (the bug this closes).
+_NIFTYIT = _row(
+    exchange="NSE",
+    exchange_token="NIFTYIT",
+    trading_symbol="NIFTYIT",
+    groww_symbol="NSE-NIFTYIT",
+    name="NIFTY IT",
+    instrument_type="IDX",
+    segment="CASH",
+)
+
 _ROWS = [_NIFTY, _BANKNIFTY, _WIPRO, _WIPRO_CE, _COMMODITY]
 
 #: ``security_id``s the Groww parser assigns from the ``exchange_token`` column.
@@ -395,6 +444,46 @@ def test_india_vix_and_ntm_constituent_both_reference_only(tmp_path: Path) -> No
     assert refs == frozenset({vix.security_id, _SMALLCO_ID})
     # India VIX has no option chain; SMALLCO is a reference-only constituent.
     assert is_option_pullable(vix, reference_only_ids=refs) is False
+
+
+def test_spot_only_indices_tagged_reference_options_indices_pullable(tmp_path: Path) -> None:
+    """A non-option index is tagged reference_only (no OPT); option indices keep it.
+
+    DEC-NON-OPTION-INDEX-REFTAG-001 — the bug fix: every non-F&O index used to show
+    "OPT" + survive the dashboard "F&O only" filter because only India VIX + the NTM
+    stocks were tagged reference_only. Now a spot-only index (NIFTY IT — no option
+    leg, not brute-force) is also tagged, while an options-bearing index (FINNIFTY —
+    a CE leg names it) and the brute-force trio (NIFTY / BANKNIFTY / SENSEX) stay
+    option-pullable.
+    """
+    store = _store(tmp_path)
+    rows = [_NIFTY, _BANKNIFTY, _SENSEX, _FINNIFTY, _FINNIFTY_CE, _NIFTYIT, _WIPRO, _WIPRO_CE]
+    load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=_empty_opener,  # no NTM admission — isolate the index rule
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    refs = store.reference_only_security_ids()
+    nifty = store.get("NIFTY")
+    banknifty = store.get("BANKNIFTY")
+    sensex = store.get("SENSEX")
+    finnifty = store.get("FINNIFTY")
+    nifty_it = store.get("NIFTYIT")
+    assert None not in (nifty, banknifty, sensex, finnifty, nifty_it)
+    assert nifty is not None and banknifty is not None and sensex is not None
+    assert finnifty is not None and nifty_it is not None
+    # The spot-only sectoral index is the ONLY reference row here.
+    assert refs == frozenset({nifty_it.security_id})
+    # NIFTY IT has no options → NOT pullable (no "OPT" badge, filtered by "F&O only").
+    assert is_option_pullable(nifty_it, reference_only_ids=refs) is False
+    # FINNIFTY has a listed option chain → pullable.
+    assert is_option_pullable(finnifty, reference_only_ids=refs) is True
+    # The 3 brute-force indices are always individually tradable → pullable
+    # (SENSEX too, even though its options live on BSE, not the NSE-only set).
+    assert is_option_pullable(nifty, reference_only_ids=refs) is True
+    assert is_option_pullable(banknifty, reference_only_ids=refs) is True
+    assert is_option_pullable(sensex, reference_only_ids=refs) is True
 
 
 def test_ntm_uses_cache_when_live_empty(tmp_path: Path) -> None:
