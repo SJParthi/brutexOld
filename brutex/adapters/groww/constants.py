@@ -125,6 +125,13 @@ OPTION_SEGMENT: Final[str] = "FNO"
 #: option windows never collide with spot windows on the shared lake ledger and
 #: the dashboard can surface the two coverage surfaces apart.
 GROWW_OPTION_COVERAGE_MARKET: Final[str] = "groww-option"
+#: The coverage-ledger market namespace stamped on every FUTURE fetch window
+#: (DEC-GROWW-FUTURE-INGEST-001), kept DISTINCT from both the spot ``"groww"`` and
+#: the option ``"groww-option"`` namespaces so futures windows never collide with
+#: spot/option windows on the shared lake ledger and the dashboard can surface the
+#: three coverage surfaces apart. FUT contracts ride the SAME ``OPTION_SEGMENT``
+#: (``FNO``) BarSink path — only the ledger namespace differs.
+GROWW_FUTURE_COVERAGE_MARKET: Final[str] = "groww-future"
 
 # ── UNVERIFIED — OPEN Phase-0 probe gates (ADR-0009 §3.1/§4) ─────────────────
 #: Backtesting rate-limit ceiling is UNDOCUMENTED. The "Live Data" 10 r/s figure
@@ -156,6 +163,7 @@ __all__ = [
     "GROWW_CSV_ALLOWED_HOST",
     "GROWW_DAILY_QUOTA_UNVERIFIED",
     "GROWW_EXCHANGES",
+    "GROWW_FUTURE_COVERAGE_MARKET",
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
     "GROWW_OPTION_COVERAGE_MARKET",

@@ -207,10 +207,21 @@ def resolve_contracts(
 def option_contracts(contracts: Iterable[DerivativeContract]) -> list[DerivativeContract]:
     """Filter a contract chain to the OPTION (``CE`` / ``PE``) legs only.
 
-    The task feeds **CE/PE** symbols to the candle fetch (futures are resolved for
-    completeness but are not the option lake's subject). O(n), order-preserving.
+    The option ingest feeds **CE/PE** symbols to the candle fetch; the FUT legs are
+    the subject of :func:`future_contracts` instead. O(n), order-preserving.
     """
     return [c for c in contracts if c.contract_type in _OPTION_TYPES]
+
+
+def future_contracts(contracts: Iterable[DerivativeContract]) -> list[DerivativeContract]:
+    """Filter a contract chain to the FUTURE (``FUT``) legs only.
+
+    The mirror of :func:`option_contracts` for the futures ingest
+    (DEC-GROWW-FUTURE-INGEST-001): one expiry-dated future per expiry (no strike
+    fan), fed to the SAME contract-agnostic candle fetch as options. O(n),
+    order-preserving.
+    """
+    return [c for c in contracts if c.contract_type == _FUTURE]
 
 
 def enumerate_contracts(
@@ -246,6 +257,7 @@ def enumerate_contracts(
 
 __all__ = [
     "enumerate_contracts",
+    "future_contracts",
     "option_contracts",
     "parse_contract_symbol",
     "resolve_contracts",

@@ -24,7 +24,11 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww import option_ingest as _oi
 from brutex.adapters.groww.client import GrowwClient
-from brutex.adapters.groww.constants import GROWW_OPTION_COVERAGE_MARKET, OPTION_SEGMENT
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+    OPTION_SEGMENT,
+)
 from brutex.adapters.groww.option_ingest import (
     GrowwOptionIngestReport,
     OptionPairFailure,
@@ -32,6 +36,7 @@ from brutex.adapters.groww.option_ingest import (
     contract_exchange,
     fetch_option_candles,
     ingest_option_contract,
+    ingest_underlying_futures,
     ingest_underlying_options,
     run_groww_option_ingest,
 )
@@ -576,6 +581,79 @@ def test_ingest_underlying_options_full_path() -> None:
     # only the CE leg is ingested (futures are filtered by option_contracts)
     assert set(report.pairs) == {("NSE-NIFTY-25Jan24-100-CE", "1day")}
     assert report.bars_appended == 1
+
+
+def test_ingest_underlying_futures_full_path() -> None:
+    # DEC-GROWW-FUTURE-INGEST-001: the futures mirror — the FUT leg is the subject,
+    # the CE leg is filtered out by future_contracts; reuses the shared driver.
+    sdk = _FakeSDK(
+        payload=_candles(),
+        expiries=lambda **kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
+        contracts=lambda **_kw: {
+            "contracts": [
+                "NSE-NIFTY-25Jan24-100-CE",
+                "NSE-NIFTY-25Jan24-FUT",
+            ]  # the CE leg is filtered out
+        },
+    )
+    sink = _Sink()
+    report = ingest_underlying_futures(
+        _client(sdk),
+        sink,
+        exchange="NSE",
+        underlying_symbol="NIFTY",
+        years=[2024],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 26),
+        now_ist=_now,
+    )
+    # only the FUT leg is ingested (options are filtered by future_contracts)
+    assert set(report.pairs) == {("NSE-NIFTY-25Jan24-FUT", "1day")}
+    assert report.bars_appended == 1
+
+
+def test_ingest_option_contract_futures_namespace() -> None:
+    # DEC-GROWW-FUTURE-INGEST-001: a FUT contract pulled with market=
+    # GROWW_FUTURE_COVERAGE_MARKET records its window under the DISTINCT
+    # "groww-future" namespace (never the "groww-option" one), so future + option
+    # windows never collide on the shared lake ledger.
+    sdk = _FakeSDK(payload=_candles())
+    ledger = WindowLedger()
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol="NSE-NIFTY-25Jan24-FUT",
+        contract_type="FUT",
+        strike=None,
+    )
+    ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=contract,
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        now_ist=_now,
+        market=GROWW_FUTURE_COVERAGE_MARKET,
+    )
+    fut_key = WindowKey(
+        market=GROWW_FUTURE_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-25Jan24-FUT",
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    opt_key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-25Jan24-FUT",
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert ledger.is_skippable(fut_key)  # recorded under "groww-future"
+    assert not ledger.is_skippable(opt_key)  # the option namespace is DISTINCT
 
 
 def test_ingest_underlying_options_resolution_error_propagates() -> None:
