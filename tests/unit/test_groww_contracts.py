@@ -16,6 +16,7 @@ import pytest
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contracts import (
     enumerate_contracts,
+    future_contracts,
     option_contracts,
     parse_contract_symbol,
     resolve_contracts,
@@ -233,6 +234,17 @@ class TestOptionContractsFilter:
         ]
         kept = option_contracts(chain)
         assert [c.contract_type for c in kept] == ["CE", "PE"]
+
+    def test_future_contracts_keeps_only_fut(self) -> None:
+        chain = [
+            _contract("NSE-NIFTY-02Jan25-FUT", "FUT", None),
+            _contract("NSE-NIFTY-02Jan25-100-CE", "CE", 100.0),
+            _contract("NSE-NIFTY-02Jan25-100-PE", "PE", 100.0),
+        ]
+        kept = future_contracts(chain)
+        assert [c.contract_type for c in kept] == ["FUT"]
+        # the two filters are complementary over the chain
+        assert len(kept) + len(option_contracts(chain)) == len(chain)
 
 
 class TestEnumerateContracts:

@@ -57,22 +57,24 @@ def _core_deps() -> set[str]:
 
 
 def _make_run_install_set() -> set[str]:
-    """Everything ``make run`` installs: core deps + the ``data`` + ``ui`` extras."""
+    """Everything ``make run`` installs: core deps + the ``data`` + ``ui`` + ``groww`` extras."""
     project = _project_table()
     pkgs = _core_deps()
     extras = project.get("optional-dependencies")
     extras = extras if isinstance(extras, dict) else {}
-    for extra in ("data", "ui"):  # `make run` runs `pip install -e ".[data,ui]"`
+    # `make run` runs `pip install -e ".[data,ui,groww]"` (the live Groww SDK + pyotp
+    # are needed for the creds probe + the live pull — DEC-MAKE-RUN-GROWW-EXTRA-001).
+    for extra in ("data", "ui", "groww"):
         for spec in _str_list(extras.get(extra)):
             pkgs.add(_norm(spec))
     return pkgs
 
 
-def test_make_run_installs_data_and_ui_extras() -> None:
-    """Ground the test's assumption: `make run` really installs `.[data,ui]`."""
+def test_make_run_installs_data_ui_groww_extras() -> None:
+    """Ground the test's assumption: `make run` really installs `.[data,ui,groww]`."""
     makefile = MAKEFILE.read_text(encoding="utf-8")
-    assert '".[data,ui]"' in makefile, (
-        "make run no longer installs .[data,ui] — update _make_run_install_set "
+    assert '".[data,ui,groww]"' in makefile, (
+        "make run no longer installs .[data,ui,groww] — update _make_run_install_set "
         "to match the new extras it installs."
     )
 
