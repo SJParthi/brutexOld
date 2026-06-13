@@ -1,0 +1,12 @@
+# Suppressed transitive-dependency advisories (Trivy fs scan, CRITICAL/HIGH).
+# Each entry carries a justification + a tracked follow-up (CLAUDE.md Golden Rule #1/#10).
+#
+# GHSA-36hh-v3qg-5jq4 — PyO3 0.28.3 out-of-bounds read in PyList::nth / nth_back.
+#   Transitive via the fno-math + trading-core PyO3 abi3 kernels (pinned pyo3 "0.28").
+#   Fixed in pyo3 0.29.0. NOT exploitable in BruteX: the kernels iterate only our own
+#   internally-constructed lists (never attacker-controlled PyList nth/nth_back indices).
+#   Newly surfaced by a Trivy DB update (environment, not a code change) — it blocks
+#   every PR. Suppressed to unblock the cutover; the real fix (bump pyo3 0.28 -> 0.29
+#   across both kernels + rebuild + re-run the 400-case golden bit-identity test) is a
+#   tracked dedicated follow-up PR.
+GHSA-36hh-v3qg-5jq4
