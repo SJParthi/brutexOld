@@ -14,83 +14,60 @@
   }
   * { box-sizing:border-box; }
   html, body { margin:0; background:var(--bg); height:100%; }
-  body {
-    font-family:-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  body { font-family:-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
     color:var(--text); min-height:100vh; display:flex; flex-direction:column;
-    background:
-      radial-gradient(ellipse at top, rgba(91,141,239,0.06), transparent 50%),
-      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
-      var(--bg);
-  }
-  header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:6;
-    background:rgba(10,13,17,.82); -webkit-backdrop-filter:blur(11px); backdrop-filter:blur(11px);
-  }
+    background:radial-gradient(ellipse at top, rgba(91,141,239,0.06), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%), var(--bg); }
+  header { display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:6; background:rgba(10,13,17,.82); backdrop-filter:blur(11px); }
   .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
     background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
     -webkit-background-clip:text; background-clip:text; color:transparent; }
   .sub { color:var(--muted); font-size:12px; }
   nav { margin-left:18px; display:flex; gap:14px; font-size:13px; }
-  nav a { color:var(--blue); text-decoration:none; }
-  nav a:hover { color:var(--green); }
-  .wrap { flex:1; padding:20px 24px; max-width:1320px; width:100%; }
+  nav a { color:var(--blue); text-decoration:none; } nav a:hover { color:var(--green); }
+  .wrap { flex:1; padding:20px 24px; max-width:1340px; width:100%; }
   .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
-
-  /* Asset tabs (Spot · Futures · Options) — Dhan's Stocks/Options/Futures row */
   .tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:12px; }
   .tab { padding:8px 16px; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer;
     color:var(--muted); background:transparent; border:1px solid transparent; user-select:none; }
   .tab.on { color:var(--green-bright); background:rgba(38,217,176,.10); border-color:var(--green); }
-
-  /* category pills + right-side controls */
   .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
   .pill { padding:6px 12px; border-radius:999px; font-size:12.5px; cursor:pointer; user-select:none;
     color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
   .pill.on { color:var(--yellow); border-color:var(--yellow); background:rgba(255,183,77,.10); }
   .spacer { margin-left:auto; }
-  .toggle { display:inline-flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); }
-  .toggle b { color:var(--text-bright); }
-  .seg { display:inline-flex; border:1px solid var(--border-strong); border-radius:999px; overflow:hidden; }
-  .seg span { padding:5px 12px; font-size:12.5px; cursor:pointer; user-select:none; color:var(--muted); }
-  .seg span.on.gain { color:#06231c; background:var(--green); font-weight:700; }
-  .seg span.on.lose { color:#2a0c0c; background:var(--red); font-weight:700; }
-  select, input[type=date], input[type=number] {
-    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:9px; padding:7px 10px; font-size:12.5px; }
+  select, input[type=date], input[type=number] { background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:9px; padding:7px 10px; font-size:12.5px; }
   input[type=number]{ width:64px; }
   label.ctl { display:inline-flex; flex-direction:column; gap:3px; font-size:10px; color:var(--muted);
     text-transform:uppercase; letter-spacing:.4px; }
-  button.go { background:linear-gradient(180deg, rgba(38,217,176,.12), transparent);
-    border:1px solid var(--green); color:var(--green-bright); border-radius:9px; padding:8px 14px;
-    font-size:13px; font-weight:700; cursor:pointer; align-self:flex-end; }
-
-  /* the Dhan-style movers table */
+  button.go { background:linear-gradient(180deg, rgba(38,217,176,.12), transparent); border:1px solid var(--green);
+    color:var(--green-bright); border-radius:9px; padding:8px 14px; font-size:13px; font-weight:700; cursor:pointer; align-self:flex-end; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:right; padding:10px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
   thead th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
-    position:sticky; top:64px; background:var(--surface); }
+    position:sticky; top:64px; background:var(--surface); cursor:pointer; user-select:none; }
+  thead th:hover { color:var(--text-bright); }
+  thead th.sorted { color:var(--blue); }
   td.name { color:var(--text-bright); font-weight:600; }
-  td.name small { display:block; color:var(--muted); font-weight:400; font-size:11px; }
   td.pos { color:var(--green); } td.neg { color:var(--red); }
   tbody tr:hover { background:var(--surface-2); }
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
   #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
-  .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; }
-  .note b { color:var(--text); }
+  .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
   .preview-badge { font-size:10px; font-weight:700; color:var(--yellow); border:1px solid var(--yellow);
     border-radius:999px; padding:2px 8px; background:rgba(255,183,77,.10); }
   .empty { color:var(--muted); text-align:center; padding:24px 0; }
-  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
-    outline:2px solid var(--blue); outline-offset:2px; border-radius:8px; }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:8px; }
   @media (prefers-reduced-motion: reduce){ *{ animation:none!important; transition:none!important; } }
 </style>
 </head>
 <body>
   <header>
     <div class="logo">BruteX</div>
-    <div class="sub">Movers — point-in-time gainers / losers · volume · value · OI (reference-only lake view)</div>
+    <div class="sub">Movers — point-in-time gainers/losers · volume · value · OI · click any column to sort (reference-only lake view)</div>
     <nav>
       <a href="/groww-credentials">Credentials</a>
       <a href="/db">Database</a>
@@ -102,28 +79,19 @@
 
   <div class="wrap">
     <div class="card">
-      <!-- Asset tabs: Spot · Futures · Options -->
       <div class="tabs" id="tabs">
         <div class="tab on" data-asset="spot">📈 Spot</div>
         <div class="tab" data-asset="futures">🔮 Futures</div>
         <div class="tab" data-asset="options">🎯 Options</div>
       </div>
 
-      <!-- category pills (left) + gainers/losers + exchange + expiry (right) -->
       <div class="bar">
         <span id="pills"></span>
         <span class="spacer"></span>
-        <span class="toggle" id="sideWrap">
-          <span class="seg">
-            <span class="on gain" data-side="gainers" id="sideGain">Gainers</span>
-            <span data-side="losers" id="sideLose">Losers</span>
-          </span>
-        </span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
 
-      <!-- controls: single date + timeframe + time + top N -->
       <div class="controls-row">
         <label class="ctl">Date<input type="date" id="date" /></label>
         <label class="ctl">Timeframe
@@ -137,7 +105,7 @@
           </select>
         </label>
         <label class="ctl">Time<select id="time"><option value="">(daily)</option></select></label>
-        <label class="ctl">Top N<input type="number" id="topn" min="1" max="100" value="20" /></label>
+        <label class="ctl">Top N<input type="number" id="topn" min="1" max="200" value="50" /></label>
         <button class="go" id="refresh">↻ Refresh</button>
         <span id="asof"></span>
       </div>
@@ -152,58 +120,98 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { asset:"spot", category:"price", side:"gainers", interval:"1day", time:"", expiry:"" };
 
-/* Per-asset category pills (mirrors the Dhan Stocks/Futures/Options tabs). */
-const CATEGORIES = {
-  spot:    [["price","Price Movers"],["volume","Top Volume"],["value","Top Value"]],
-  futures: [["price","Price Movers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
-  options: [["oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price","Price Movers"]],
+/* ── Per-asset config: ALL category sections + sortable columns ──
+   Each column = [label, field, type]; every column header is click-to-sort. */
+const ASSETS = {
+  spot: {
+    cats: [["price_gainers","Price Gainers"],["price_losers","Price Losers"],["volume","Top Volume"],["value","Top Value"]],
+    cols: [["Name","name","str"],["LTP","ltp","money"],["Change","change","money"],["Change %","pct_change","num"],["Value (Cr)","value_cr","num"],["Volume","volume","int"]],
+  },
+  futures: {
+    cats: [["price_gainers","Price Gainers"],["price_losers","Price Losers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
+    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+  },
+  options: {
+    cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+  },
 };
-/* Per-asset table columns (Dhan's column sets). */
-const COLUMNS = {
-  spot:    ["Name","LTP","Change","Change %","Value (Cr)","Volume"],
-  futures: ["Name","LTP","Spot","Premium","Change %","OI","OI Chg %","Volume"],
-  options: ["Name","Spot","LTP","Change %","OI","OI Chg","OI Chg %","Volume"],
-};
-/* timeframe → bar length (minutes) → auto-fill the time dropdown (09:15 → 15:30). */
 const TF_MIN = {"1minute":1,"5minute":5,"15minute":15,"30minute":30,"1hour":60,"1day":375};
+const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
+let rowsData = [];
+
+/* Clearly-labelled SAMPLE rows so the page shows the layout standalone (no backend). NOT real data. */
+const SAMPLE = {
+  spot: [
+    {name:"NIFTY 50", ltp:"₹23,622.90", change:"+461.30", pct_change:"1.99", value_cr:"12,304.50", volume:"1,23,45,678"},
+    {name:"RELIANCE", ltp:"₹1,293.00", change:"+30.00", pct_change:"2.38", value_cr:"996.41", volume:"81,01,241"},
+    {name:"HDFC BANK", ltp:"₹772.45", change:"-9.60", pct_change:"-1.23", value_cr:"440.82", volume:"99,46,830"},
+  ],
+  futures: [
+    {name:"NIFTY 30 JUN FUT", ltp:"₹23,650.00", spot:"₹23,622.90", premium:"+27.10", pct_change:"1.99", oi:"1,12,500", oi_chg_pct:"3.2", volume:"45,62,940"},
+    {name:"RELIANCE 30 JUN FUT", ltp:"₹1,296.50", spot:"₹1,293.00", premium:"+3.50", pct_change:"2.40", oi:"2,33,500", oi_chg_pct:"-1.1", volume:"8,200"},
+  ],
+  options: [
+    {name:"NIFTY 30 JUN 24000 CALL", spot:"₹23,622.90", ltp:"₹164.00", pct_change:"179.62", oi:"76,10,235", oi_chg:"-3,00,440", oi_chg_pct:"-3.80", volume:"1,47,65,790"},
+    {name:"BANKNIFTY 30 JUN 56000 CALL", spot:"₹56,814.80", ltp:"₹1,414.00", pct_change:"138.97", oi:"10,43,760", oi_chg:"89,640", oi_chg_pct:"9.40", volume:"59,83,260"},
+    {name:"NIFTY 30 JUN 23000 PUT", spot:"₹23,622.90", ltp:"₹73.50", pct_change:"-67.50", oi:"60,92,940", oi_chg:"8,82,770", oi_chg_pct:"16.94", volume:"1,06,25,485"},
+  ],
+};
 
 function fillTimes() {
-  const m = TF_MIN[$("interval").value] || 375;
-  const sel = $("time");
+  const m = TF_MIN[$("interval").value] || 375, sel = $("time");
   if (m >= 375) { sel.innerHTML = '<option value="">(daily)</option>'; sel.disabled = true; state.time=""; return; }
-  sel.disabled = false;
-  let opts = "", t = 9*60+15;
-  while (t < 15*60+30) { const hh=String(Math.floor(t/60)).padStart(2,"0"), mm=String(t%60).padStart(2,"0"); opts += `<option>${hh}:${mm}</option>`; t += m; }
-  sel.innerHTML = opts;
-  state.time = sel.value;
+  sel.disabled = false; let opts = "", t = 9*60+15;
+  while (t < 15*60+30) { opts += `<option>${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}</option>`; t += m; }
+  sel.innerHTML = opts; state.time = sel.value;
 }
-
 function renderPills() {
-  $("pills").innerHTML = CATEGORIES[state.asset].map(([k,label]) =>
-    `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${label}</span>`).join("");
+  $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
   $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); load(); });
-  // expiry dropdown only for F&O.
   $("expiry").style.display = (state.asset==="spot") ? "none" : "";
   if (state.asset!=="spot" && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
 }
-function renderHead() { $("head").innerHTML = COLUMNS[state.asset].map(c=>`<th>${c}</th>`).join(""); }
-
-/* SAMPLE rows so this file shows the layout when opened standalone (no backend).
-   Clearly a PREVIEW — not real market data (Golden Rule #1). */
-const SAMPLE = {
-  spot: [["NIFTY 50","₹23,622.90","+461.30","+1.99%","12,304.50","1,23,45,678"],
-         ["RELIANCE","₹1,293.00","+30.00","+2.38%","996.41","81,01,241"],
-         ["HDFC Bank","₹772.45","+27.85","+3.74%","440.82","99,46,830"]],
-};
-function sampleRow(cells, side){ const cls = side==="losers"?"neg":"pos";
-  return "<tr>"+cells.map((c,i)=>`<td class="${i===0?'name':(i===2||i===3?cls:'')}">${c}</td>`).join("")+"</tr>"; }
-
+function renderHead() {
+  const cols = ASSETS[state.asset].cols;
+  $("head").innerHTML = cols.map(([label],i) => {
+    const arrow = state.sort.idx===i ? (state.sort.dir>0?" ▲":" ▼") : "";
+    return `<th data-i="${i}" class="${state.sort.idx===i?'sorted':''}">${label}${arrow}</th>`;
+  }).join("");
+  $("head").querySelectorAll("th").forEach(th => th.onclick = () => {
+    const i = +th.dataset.i;
+    state.sort = { idx:i, dir: (state.sort.idx===i ? -state.sort.dir : 1) };
+    renderHead(); renderRows();
+  });
+}
+function numify(v){ const n = parseFloat(String(v ?? "").replace(/[₹,%\s]/g,"").replace(/,/g,"")); return isNaN(n)?null:n; }
+function renderRows() {
+  const cols = ASSETS[state.asset].cols;
+  let data = rowsData.slice();
+  if (state.sort.idx !== null) {
+    const [,field,type] = cols[state.sort.idx], d = state.sort.dir;
+    data.sort((a,b) => {
+      if (type === "str") return String(a[field]||"").localeCompare(String(b[field]||"")) * d;
+      const x = numify(a[field]), y = numify(b[field]);
+      if (x===null && y===null) return 0; if (x===null) return 1; if (y===null) return -1;
+      return (x - y) * d;
+    });
+  }
+  const tb = $("rows");
+  if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; return; }
+  tb.innerHTML = data.map(row => "<tr>" + cols.map(([,field],i) => {
+    let v = row[field]; if (v===undefined||v===null) v = "—";
+    let cls = i===0 ? "name" : "";
+    if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
+      const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
+      if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + n.toFixed(2) + "%";
+    }
+    return `<td class="${cls}">${v}</td>`;
+  }).join("") + "</tr>").join("");
+}
 async function load() {
   $("note").innerHTML = "Loading…";
-  const p = new URLSearchParams({ asset:state.asset, category:state.category, side:state.side,
-    interval:$("interval").value, top_n:$("topn").value||"20" });
+  const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"50" });
   if ($("date").value) p.set("date", $("date").value);
   if (state.time) p.set("time", state.time);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
@@ -211,35 +219,27 @@ async function load() {
     const r = await fetch("/api/v1/movers?"+p.toString());
     if (!r.ok) throw new Error("HTTP "+r.status);
     const j = await r.json();
-    const list = state.side==="losers" ? (j.losers||[]) : (j.gainers||j.volume_movers||[]);
-    renderHead();
-    if (!list.length) { $("rows").innerHTML = `<tr><td colspan="${COLUMNS[state.asset].length}" class="empty">📭 ${j.note||"no movers in this snapshot"}</td></tr>`; }
-    else { $("rows").innerHTML = list.map(row => sampleRow(
-      [row.name||row.symbol, row.ltp, row.change??"—", (row.pct_change!=null?Number(row.pct_change).toFixed(2)+"%":"—"), row.value_cr??"—", row.volume??"—"], state.side)).join(""); }
+    rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
+    renderHead(); renderRows();
     $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
     $("note").innerHTML = "<b>Note:</b> "+(j.note||"");
   } catch (e) {
-    // Standalone preview (no backend): show the SAMPLE layout, clearly badged.
-    renderHead();
-    $("rows").innerHTML = (SAMPLE[state.asset]||SAMPLE.spot).map(c=>sampleRow(c.concat(Array(Math.max(0,COLUMNS[state.asset].length-c.length)).fill("—")), state.side)).join("");
+    rowsData = SAMPLE[state.asset] || SAMPLE.spot;
+    renderHead(); renderRows();
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
-    $("note").innerHTML = "<b>Note:</b> preview of the layout with sample rows — run the dashboard for live lake data (reference-only, % vs prev-day close, fresh-session volume).";
+    $("note").innerHTML = "<b>Note:</b> preview of the layout with sample rows — run the dashboard for live lake data (reference-only, % vs prev-day close, fresh-session volume, click any column to sort).";
   }
 }
-
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("tabs").querySelectorAll(".tab").forEach(x=>x.classList.remove("on")); t.classList.add("on");
-  state.asset = t.dataset.asset; state.category = CATEGORIES[state.asset][0][0];
-  renderPills(); renderHead(); load();
+  state.asset = t.dataset.asset; state.category = ASSETS[state.asset].cats[0][0]; state.sort = {idx:null,dir:1};
+  renderPills(); load();
 });
-$("sideGain").onclick = () => { state.side="gainers"; $("sideGain").className="on gain"; $("sideLose").className=""; load(); };
-$("sideLose").onclick = () => { state.side="losers"; $("sideLose").className="on lose"; $("sideGain").className="gain"; load(); };
 $("interval").onchange = () => { fillTimes(); load(); };
 $("time").onchange = () => { state.time = $("time").value; load(); };
 ["exchange","expiry","topn","date"].forEach(id => $(id).onchange = load);
 $("refresh").onclick = load;
-
-fillTimes(); renderPills(); renderHead(); load();
+fillTimes(); renderPills(); load();
 </script>
 </body>
 </html>
