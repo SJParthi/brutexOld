@@ -697,10 +697,16 @@ def _build_live_controller() -> RateController:  # pragma: no cover — live Gro
     makes every paced dashboard call increment + check the quota, surfaces the
     gauge on the rate panel, and gives the auto-resume loop its hard brake.
     """
+    from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_PER_MIN
     from brutex.adapters.rate_common import RateController
     from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 
-    return RateController(quota_tracker=DailyQuotaTracker())
+    # Operator-confirmed 500/min backtesting governor (DEC-GROWW-RATE-PERMIN-001) —
+    # a HARD per-minute cap on top of the adaptive per-second bucket.
+    return RateController(
+        quota_tracker=DailyQuotaTracker(),
+        ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+    )
 
 
 class SessionRateController:

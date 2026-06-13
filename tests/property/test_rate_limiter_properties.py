@@ -15,6 +15,7 @@ i.e. the achieved throughput never beats the cap. Promoted from the catalog
 
 from __future__ import annotations
 
+from brutex.adapters.rate_common import PER_MIN_WINDOW, RateController
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -97,3 +98,37 @@ def test_p_18_burst_then_steady_pacing(rate: int, burst: int) -> None:
     assert paced, "expected pacing waits after the burst was spent"
     floor = 1.0 / rate
     assert all(w >= floor - 1e-9 for w in paced)
+
+
+@given(
+    cap=st.integers(min_value=1, max_value=10),
+    n_calls=st.integers(min_value=1, max_value=40),
+)
+@settings(max_examples=300)
+def test_p_19_per_minute_governor_never_exceeds_cap(cap: int, n_calls: int) -> None:
+    """P-19 (DEC-GROWW-RATE-PERMIN-001): the per-minute governor physically cannot
+    issue more than ``cap`` requests inside any rolling :data:`PER_MIN_WINDOW`.
+
+    Drives ``RateController.pace`` at a high per-second ceiling (so the governor — not
+    the token bucket — is the binding gate) through a fake clock advanced only by the
+    controller's own sleeps, records every issue instant, and asserts the defining
+    safety invariant over arbitrary cap/call-count combos: no 60 s window holds > cap.
+    """
+    clock = _FakeClock()
+    ctl = RateController(
+        clock=clock.now,
+        sleep=clock.sleep,
+        ceiling_rps=50.0,  # high → 50×60 = 3000/min ≫ cap, so the governor binds
+        ceiling_per_min=cap,
+    )
+
+    issued: list[float] = []
+    for _ in range(n_calls):
+        ctl.pace()
+        issued.append(ctl._issues[-1])  # pyright: ignore[reportPrivateUsage]
+
+    # Sliding-window invariant: for every issue, the count of issues within the
+    # trailing PER_MIN_WINDOW (exclusive lower bound) never exceeds the cap.
+    for i, t_i in enumerate(issued):
+        in_window = [t for t in issued[: i + 1] if (t + PER_MIN_WINDOW) - t_i > 0.0]
+        assert len(in_window) <= cap
