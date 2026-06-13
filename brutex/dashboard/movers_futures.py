@@ -1,0 +1,755 @@
+"""Point-in-time "movers" snapshot core for the 🔮 **Futures** tab (DEC-MOVERS-FUTURES-001).
+
+Milestone 2 of the redesigned ``/movers`` page: the Futures twin of the Spot
+reader (:mod:`brutex.dashboard.movers_snapshot`). It answers the same single
+question — *"who are the movers as of one date, on one timeframe, at one
+time?"* — but over the **near-month index / stock FUTURES** the operator pulled
+into the lake, computing the futures-specific columns (premium / discount vs the
+underlying spot, open-interest change) the markets-screen Futures tab renders.
+
+## Reuse, not re-implementation (CLAUDE.md §11 COMMON)
+
+The session-time vocabulary lives in exactly ONE place — the Spot reader. This
+module IMPORTS :func:`~brutex.dashboard.movers_snapshot.interval_minutes`,
+:func:`~brutex.dashboard.movers_snapshot.session_bar_times`,
+:func:`~brutex.dashboard.movers_snapshot.parse_snapshot_date`,
+:func:`~brutex.dashboard.movers_snapshot._cutoff_minute`, and the prior-day
+1-day-close reader :func:`~brutex.dashboard.movers_snapshot._prev_day_close`. It
+adds only what futures need: the contract-symbol parser, the near-month picker,
+the raw-1-minute reader that PRESERVES ``open_interest`` (the shared
+``make_lake_read_1m`` path drops OI), the prior-day OI reader, and the
+futures ranking + payload.
+
+## The locked calculation rules (operator-confirmed 2026-06-13)
+
+For each underlying that has a future in the lake (one row per underlying — its
+near-month contract):
+
+* **Near-month** = the contract with the earliest expiry ``>= snapshot_date``
+  (front month). All-expired underlyings are SKIPPED (no live contract — honest,
+  Golden Rule #1), never faked.
+* **LTP / volume / OI** come from the future's own session bars (raw 1-minute,
+  resampled by the same minute math the Spot reader uses, sliced to the selected
+  ``time``). ``ltp`` is the last bar's close (2dp money), ``volume`` is the
+  cumulative session quantity, ``oi`` is the last bar's open interest.
+* **% change** is vs the future's OWN previous trading-day 1-day close.
+* **Premium / discount** = ``ltp − underlying_spot_ltp`` (the underlying's spot
+  read the SAME way — its INDEX or CASH 1-minute bars). ``None`` when the
+  underlying spot is absent. ``premium > 0`` → the *premium* bucket;
+  ``premium < 0`` → the *discount* bucket.
+* **OI % change** is vs the future's prior 1-day bar's open interest.
+
+## Honesty (Golden Rule #1 / #10)
+
+REFERENCE_ONLY over the **ingested lake** (CLAUDE.md §3) — never a live feed
+(Track-1 has none — CLAUDE.md §1). Money is 2dp (``DEC-MONEY-2DP-001``); the
+% / OI-% metrics keep FULL precision (a statistical metric, never money-rounded
+— CLAUDE.md §4). An empty / futures-less lake (or an unknown interval) yields an
+honest "pull the F&O futures first" payload — never a 500, never a fabricated
+mover.
+"""
+
+# pyright: reportPrivateUsage=none
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date as date_cls
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Final
+
+from brutex.dashboard.movers_snapshot import (
+    _DAILY_MIN_FLOOR,
+    _IST,
+    _cutoff_minute,
+    _prev_day_close,
+    interval_minutes,
+    parse_snapshot_date,
+)
+from brutex.data.spot_features import pct_change
+from brutex.money import format_inr, round_money, rupees_to_paisa
+
+__all__ = [
+    "DEFAULT_FUTURES_INTERVAL",
+    "DEFAULT_FUTURES_TOP_N",
+    "FuturesMover",
+    "build_futures_payload",
+    "compute_futures_mover",
+    "parse_future_symbol",
+    "run_futures_snapshot",
+    "select_near_month",
+]
+
+#: The Futures tab opens on the coarse 1-day timeframe (cheapest, always
+#: populated if ANY future was pulled) and a generous depth — mirrors the Spot
+#: tab defaults (CLAUDE.md §11 COMMON keeps the two pages aligned).
+DEFAULT_FUTURES_INTERVAL: Final[str] = "1day"
+DEFAULT_FUTURES_TOP_N: Final[int] = 50
+
+#: The FNO segment every futures (and options) contract partition lives under in
+#: the lake (``bars/<exch>/FNO/<contract>/<interval>/...``). Mirrors the
+#: instrument-master backtesting segment (CLAUDE.md §6).
+_FNO_SEGMENT: Final[str] = "FNO"
+
+#: The two spot segments an underlying's cash/index series can live under — an
+#: index future's underlying rides ``INDEX``; a stock future's rides ``CASH``.
+#: Tried in this order when resolving the underlying spot LTP for premium.
+_SPOT_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH")
+
+#: A FUT contract groww_symbol ends with this suffix (``EXCH-UNDERLYING-DDMmmYY-FUT``).
+#: Options share the FNO segment but their symbol carries a strike + ``-CE`` /
+#: ``-PE`` suffix, so this anchor keeps options out of the futures universe.
+_FUT_SUFFIX: Final[str] = "-FUT"
+
+#: Three-letter month abbreviation → month number, for the ``DDMmmYY`` expiry
+#: token (``30Sep25`` → 2025-09-30). The single parse table (CLAUDE.md §11).
+_MONTHS: Final[dict[str, int]] = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
+
+#: The two-digit year in the expiry token is in the 2000s (``25`` → 2025).
+_CENTURY: Final[int] = 2000
+
+#: The expiry token's fixed character length (``DDMmmYY`` = 2 + 3 + 2).
+_EXPIRY_TOKEN_LEN: Final[int] = 7
+
+#: The minimum hyphen-split arity of a FUT contract groww_symbol
+#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts; a stock name never hyphenates,
+#: vendor symbols use hyphen only as the field separator).
+_MIN_FUT_PARTS: Final[int] = 4
+
+
+def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
+    """Parse a FUT contract groww_symbol into ``(underlying, expiry_date)`` or ``None``.
+
+    The contract groww_symbol is ``EXCH-UNDERLYING-DDMmmYY-FUT`` (hyphen-joined),
+    e.g. ``"NSE-NIFTY-30Sep25-FUT"`` → ``("NIFTY", date(2025, 9, 30))``. Returns
+    ``None`` for any non-future symbol (an option symbol ends ``-CE`` / ``-PE``,
+    so its last hyphen part is not ``FUT``) and for any junk / unparseable expiry
+    token — the caller then skips it, never raising (Golden Rule #1).
+
+    Parameters
+    ----------
+    symbol
+        A candidate contract groww_symbol from the lake's FNO datasets.
+
+    Returns
+    -------
+    tuple[str, datetime.date] | None
+        ``(underlying_symbol, expiry_date)`` when *symbol* is a well-formed
+        future, else ``None``.
+    """
+    parts = symbol.split("-")
+    # Need at least EXCH, UNDERLYING, expiry, FUT — and the last part must be FUT.
+    if len(parts) < _MIN_FUT_PARTS or parts[-1] != "FUT":
+        return None
+    underlying = parts[1]
+    expiry = _parse_expiry_token(parts[-2])
+    if not underlying or expiry is None:
+        return None
+    return underlying, expiry
+
+
+def _parse_expiry_token(token: str) -> date_cls | None:
+    """Parse a ``DDMmmYY`` expiry token (``30Sep25``) into a date, or ``None``.
+
+    The token is exactly 7 chars: a 2-digit day, a 3-letter month abbreviation
+    (title-case, in :data:`_MONTHS`), and a 2-digit year (``20YY``). Any other
+    shape, an unknown month, or an out-of-range day yields ``None`` so the
+    caller skips the malformed contract rather than raising.
+    """
+    if len(token) != _EXPIRY_TOKEN_LEN:
+        return None
+    day_str, month_abbr, year_str = token[:2], token[2:5], token[5:]
+    if not (day_str.isdigit() and year_str.isdigit()):
+        return None
+    month = _MONTHS.get(month_abbr)
+    if month is None:
+        return None
+    try:
+        return date_cls(_CENTURY + int(year_str), month, int(day_str))
+    except ValueError:
+        # Day out of range for the month (e.g. 31Feb) — malformed, skip honestly.
+        return None
+
+
+def select_near_month(items: Iterable[tuple[str, date_cls]], *, on_date: date_cls) -> str | None:
+    """Return the front-month contract symbol for *on_date*, or ``None``.
+
+    *items* are ``(symbol, expiry)`` pairs (the FUT contracts of ONE underlying).
+    The near-month is the contract with the EARLIEST expiry that is ``>= on_date``
+    (a contract expiring today is still live). When every contract has already
+    expired (all expiries ``< on_date``) there is no live future, so the
+    underlying is dropped — ``None`` (Golden Rule #1, honest). Ties on the expiry
+    date break on the symbol string so the pick is deterministic (Rule #4).
+
+    Parameters
+    ----------
+    items
+        ``(symbol, expiry_date)`` pairs for one underlying's FUT contracts.
+    on_date
+        The snapshot date the near-month is selected as-of.
+
+    Returns
+    -------
+    str | None
+        The chosen contract symbol, or ``None`` when all contracts are expired.
+    """
+    live = [(expiry, symbol) for symbol, expiry in items if expiry >= on_date]
+    if not live:
+        return None
+    live.sort()
+    return live[0][1]
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesMover:
+    """One near-month future's as-of-snapshot metrics (the locked rules, full precision).
+
+    Attributes
+    ----------
+    underlying
+        The underlying symbol (``NIFTY`` / ``RELIANCE``) — the row's display name.
+    symbol
+        The near-month contract groww_symbol (``NSE-NIFTY-30Sep25-FUT``) — the
+        deterministic tiebreak key, never shown.
+    exchange, segment
+        The future's lake partition coordinates (segment is always ``FNO``);
+        used only for the stable ``(symbol, exchange, segment)`` tiebreak.
+    ltp
+        The future's last traded price — the selected bar's close, 2dp money.
+    spot
+        The underlying's spot LTP (2dp money), or ``None`` when the underlying
+        spot is absent from the lake.
+    premium
+        ``ltp − spot`` (2dp money, may be negative), or ``None`` when *spot* is
+        ``None``. Positive ⇒ the future trades at a premium, negative ⇒ discount.
+    pct_change
+        ``(ltp − prev_close) / prev_close × 100`` at FULL precision (a statistical
+        metric, never money-rounded — CLAUDE.md §4), or ``None`` when there is no
+        prior day.
+    oi
+        The selected bar's open interest, or ``None`` when the bar omits it.
+    oi_chg_pct
+        OI % change vs the future's prior 1-day open interest at full precision,
+        or ``None`` when there is no prior day / a zero-or-missing prior OI / a
+        missing current OI.
+    volume
+        Cumulative fresh-session traded quantity 09:15 → the selected bar.
+    """
+
+    underlying: str
+    symbol: str
+    exchange: str
+    segment: str
+    ltp: Decimal
+    spot: Decimal | None
+    premium: Decimal | None
+    pct_change: Decimal | None
+    oi: int | None
+    oi_chg_pct: Decimal | None
+    volume: int
+
+    @property
+    def ltp_inr(self) -> str:
+        """The future's LTP as a 2dp ``₹`` display string."""
+        return format_inr(rupees_to_paisa(self.ltp))
+
+    @property
+    def spot_inr(self) -> str | None:
+        """The underlying spot LTP as a 2dp ``₹`` string, or ``None`` if absent."""
+        return format_inr(rupees_to_paisa(self.spot)) if self.spot is not None else None
+
+    @property
+    def premium_inr(self) -> str | None:
+        """The premium as a 2dp ``₹`` string (can be negative), or ``None`` if absent."""
+        return format_inr(rupees_to_paisa(self.premium)) if self.premium is not None else None
+
+
+def _sort_key(mover: FuturesMover) -> tuple[str, str, str]:
+    """Deterministic tiebreak so equal metrics never reorder run-to-run (Rule #4)."""
+    return (mover.symbol, mover.exchange, mover.segment)
+
+
+def rank_price_gainers(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures with ``pct_change > 0``, descending (stable tiebreak)."""
+    pool = [m for m in movers if m.pct_change is not None and m.pct_change > 0]
+    pool.sort(key=lambda m: (-(m.pct_change or Decimal(0)), _sort_key(m)))
+    return pool[:top_n]
+
+
+def rank_price_losers(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures with ``pct_change < 0``, ascending (most negative first)."""
+    pool = [m for m in movers if m.pct_change is not None and m.pct_change < 0]
+    pool.sort(key=lambda m: ((m.pct_change or Decimal(0)), _sort_key(m)))
+    return pool[:top_n]
+
+
+def rank_premium(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures trading at a PREMIUM (``premium > 0``), descending."""
+    pool = [m for m in movers if m.premium is not None and m.premium > 0]
+    pool.sort(key=lambda m: (-(m.premium or Decimal(0)), _sort_key(m)))
+    return pool[:top_n]
+
+
+def rank_discount(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures trading at a DISCOUNT (``premium < 0``), most negative first."""
+    pool = [m for m in movers if m.premium is not None and m.premium < 0]
+    pool.sort(key=lambda m: ((m.premium or Decimal(0)), _sort_key(m)))
+    return pool[:top_n]
+
+
+def rank_volume(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures by cumulative fresh-session volume, descending."""
+    pool = [m for m in movers if m.volume > 0]
+    pool.sort(key=lambda m: (-m.volume, _sort_key(m)))
+    return pool[:top_n]
+
+
+def rank_oi_gainers(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures with ``oi_chg_pct > 0``, descending (stable tiebreak)."""
+    pool = [m for m in movers if m.oi_chg_pct is not None and m.oi_chg_pct > 0]
+    pool.sort(key=lambda m: (-(m.oi_chg_pct or Decimal(0)), _sort_key(m)))
+    return pool[:top_n]
+
+
+def rank_oi_losers(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures with ``oi_chg_pct < 0``, ascending (most negative first)."""
+    pool = [m for m in movers if m.oi_chg_pct is not None and m.oi_chg_pct < 0]
+    pool.sort(key=lambda m: ((m.oi_chg_pct or Decimal(0)), _sort_key(m)))
+    return pool[:top_n]
+
+
+#: Futures category key → ranking function (the Futures tab's pill set, in the
+#: template's order). Mirrors ``movers_snapshot._SPOT_CATEGORIES``.
+_FUTURES_CATEGORIES: Final[dict[str, Any]] = {
+    "price_gainers": rank_price_gainers,
+    "price_losers": rank_price_losers,
+    "premium": rank_premium,
+    "discount": rank_discount,
+    "volume": rank_volume,
+    "oi_gainers": rank_oi_gainers,
+    "oi_losers": rank_oi_losers,
+}
+
+
+def compute_futures_mover(
+    *,
+    underlying: str,
+    symbol: str,
+    exchange: str,
+    ltp: Decimal,
+    volume: int,
+    oi: int | None,
+    prev_close: Decimal | None,
+    spot_ltp: Decimal | None,
+    prev_oi: int | None,
+) -> FuturesMover:
+    """Reduce one near-month future's reads to a :class:`FuturesMover` (pure).
+
+    *ltp* / *volume* / *oi* are the future's session reduction (last close,
+    cumulative volume, last OI). *prev_close* is the future's prior 1-day close
+    (``None`` ⇒ no % change). *spot_ltp* is the underlying's spot LTP (``None`` ⇒
+    no premium). *prev_oi* is the future's prior 1-day OI. The premium uses
+    money-snapped prices; the % / OI-% metrics keep full precision (CLAUDE.md §4).
+
+    Parameters
+    ----------
+    underlying
+        Underlying symbol (the display name).
+    symbol, exchange
+        The future's contract symbol + exchange (segment is always ``FNO``).
+    ltp, volume, oi
+        The future's session LTP (rupees), cumulative volume, last OI (or ``None``).
+    prev_close
+        The future's previous trading-day 1-day close (rupees), or ``None``.
+    spot_ltp
+        The underlying's spot LTP (rupees), or ``None`` when absent.
+    prev_oi
+        The future's previous trading-day 1-day open interest, or ``None``.
+
+    Returns
+    -------
+    FuturesMover
+        The fully-computed row (money 2dp, statistical metrics full-precision).
+    """
+    snapped_ltp = round_money(ltp)
+    snapped_spot = round_money(spot_ltp) if spot_ltp is not None else None
+    premium = (snapped_ltp - snapped_spot) if snapped_spot is not None else None
+    snapped_prev = round_money(prev_close) if prev_close is not None else None
+    pct = pct_change(snapped_ltp, snapped_prev) if snapped_prev is not None else None
+    oi_chg_pct = (
+        pct_change(Decimal(oi), Decimal(prev_oi))
+        if (oi is not None and prev_oi is not None and prev_oi != 0)
+        else None
+    )
+    return FuturesMover(
+        underlying=underlying,
+        symbol=symbol,
+        exchange=exchange,
+        segment=_FNO_SEGMENT,
+        ltp=snapped_ltp,
+        spot=snapped_spot,
+        premium=premium,
+        pct_change=pct,
+        oi=oi,
+        oi_chg_pct=oi_chg_pct,
+        volume=volume,
+    )
+
+
+def _futures_row(mover: FuturesMover) -> dict[str, Any]:
+    """Project one mover to a markets-screen Futures row (money 2dp, metrics full-precision)."""
+    return {
+        "name": mover.underlying,
+        "symbol": mover.symbol,
+        "exchange": mover.exchange,
+        "segment": mover.segment,
+        "ltp": mover.ltp_inr,
+        "spot": mover.spot_inr,
+        "premium": mover.premium_inr,
+        "pct_change": str(mover.pct_change) if mover.pct_change is not None else None,
+        "oi": mover.oi,
+        "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
+        "volume": mover.volume,
+    }
+
+
+def build_futures_payload(
+    movers: Sequence[FuturesMover],
+    *,
+    interval: str,
+    date: str,
+    time: str | None,
+    top_n: int,
+    skipped: int,
+) -> dict[str, Any]:
+    """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
+
+    Builds one ranked list **per futures category** (``price_gainers`` /
+    ``price_losers`` / ``premium`` / ``discount`` / ``volume`` / ``oi_gainers`` /
+    ``oi_losers`` — the Futures tab's pills), keyed by the category name so the
+    page's ``j[category]`` lookup picks the active one. Adds the echo of the
+    chosen ``date`` / ``interval`` / ``time`` and an honest ``note``. Every value
+    is JSON-native (money is a ``₹`` string, statistical metrics are
+    full-precision strings, OI / volume are ints) so Starlette's ``JSONResponse``
+    never chokes on a ``Decimal``.
+
+    Parameters
+    ----------
+    movers
+        The computed near-month future rows (one per live underlying).
+    interval, date, time, top_n
+        Echoed snapshot coordinates.
+    skipped
+        Count of underlyings/contracts dropped (all-expired, no session bars) —
+        reported honestly, never hidden (Golden Rule #1).
+
+    Returns
+    -------
+    dict[str, Any]
+        The Futures-tab payload: the seven ranked category lists + the echo +
+        ``instrument_count`` / ``skipped_count`` / ``note``.
+    """
+    ranked: dict[str, list[dict[str, Any]]] = {
+        category: [_futures_row(m) for m in rank_fn(movers, top_n)]
+        for category, rank_fn in _FUTURES_CATEGORIES.items()
+    }
+    instrument_count = len(movers) + skipped
+    if instrument_count == 0:
+        note = (
+            "No futures in the lake yet — pull the F&O futures first on the Coverage "
+            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+        )
+    elif not any(ranked.values()):
+        note = (
+            f"{instrument_count} future(s) in the lake, but none had a bar at "
+            f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
+        )
+    else:
+        note = (
+            f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
+            "(CLAUDE.md §3); % is vs the future's previous close, premium is vs the spot."
+        )
+    return {
+        "interval": interval,
+        "date": date,
+        "time": time,
+        "top_n": top_n,
+        "instrument_count": instrument_count,
+        "skipped_count": skipped,
+        "note": note,
+        **ranked,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Live orchestration — reads the lake (raw 1m for OI), snapshots (futures)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _read_future_session(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    day: date_cls,
+    cutoff_min: int | None,
+) -> tuple[Decimal, int, int | None] | None:
+    """Read *day*'s raw 1-minute bars for one series, preserving open interest.
+
+    Reads ``<lake>/bars/<exchange>/<segment>/<symbol>/1minute/**/*.parquet`` with
+    polars DIRECTLY (NOT the shared ``make_lake_read_1m`` reader, which selects
+    only OHLCV and DROPS ``open_interest`` — the futures tab needs OI). Filters to
+    the IST trading *day*, sorts, and for an intraday timeframe keeps bars whose
+    IST minute-of-day ``≤ cutoff_min`` (the Int32-cast minute math the Spot
+    reader uses — ``dt.hour()`` / ``dt.minute()`` are narrow Int8 and overflow
+    otherwise). A daily timeframe passes ``cutoff_min=None`` ⇒ no cutoff. From
+    the kept bars: the LTP is the last close (2dp money), the volume is the sum,
+    and the OI is the last bar's ``open_interest`` (``None`` when the column is
+    null). Returns ``None`` when the directory is missing or no bar falls on the
+    day / within the cutoff (the caller counts it skipped, never fabricated —
+    Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+    exchange, segment, symbol
+        Partition coordinates of the series to read (a future under ``FNO`` or
+        an underlying spot under ``INDEX`` / ``CASH``).
+    day
+        The IST trading day to snapshot.
+    cutoff_min
+        Intraday minute-of-day cutoff, or ``None`` for the whole day.
+
+    Returns
+    -------
+    tuple[Decimal, int, int | None] | None
+        ``(ltp, volume, oi)`` for the kept bars, or ``None`` when there are none.
+    """
+    import polars as pl
+
+    base = lake_root / "bars" / exchange / segment / symbol / "1minute"
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return None
+    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+    ist = pl.col("timestamp").dt.convert_time_zone(_IST)
+    day_df = df.filter(ist.dt.date() == day).sort("timestamp")
+    if cutoff_min is not None:
+        # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
+        # narrow Int8 (15*60 overflows), so the cast gives the true minute-of-day
+        # (mirrors movers_snapshot._read_session_bars — CLAUDE.md §11 COMMON).
+        minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+        day_df = day_df.filter(minute_of_day <= cutoff_min)
+    if day_df.is_empty():
+        return None
+    last = day_df.tail(1)
+    ltp = round_money(Decimal(str(last.get_column("close")[0])))
+    volume = int(day_df.get_column("volume").sum())
+    raw_oi = last.get_column("open_interest")[0]
+    oi = None if raw_oi is None else int(raw_oi)
+    return ltp, volume, oi
+
+
+def _prev_day_oi(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> int | None:
+    """Return the previous trading day's 1-day open interest before *day*, or ``None``.
+
+    The OI twin of :func:`~brutex.dashboard.movers_snapshot._prev_day_close`:
+    reads the symbol's stored ``1day`` partitions and returns the
+    ``open_interest`` of the last bar whose IST trading date is strictly before
+    *day*. ``None`` when there is no 1-day data, no prior day, or the prior bar's
+    OI column is null — the OI % change is then an honest ``None``, never faked.
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+    exchange, segment, symbol
+        The future's partition coordinates (segment ``FNO``).
+    day
+        The snapshot day; the prior 1-day bar is strictly before it.
+
+    Returns
+    -------
+    int | None
+        The prior trading day's open interest, or ``None``.
+    """
+    import polars as pl
+
+    base = lake_root / "bars" / exchange / segment / symbol / "1day"
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return None
+    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+    prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+        "timestamp"
+    )
+    if prior.is_empty():
+        return None
+    raw_oi = prior.tail(1).get_column("open_interest")[0]
+    return None if raw_oi is None else int(raw_oi)
+
+
+def _underlying_spot_ltp(
+    lake_root: Path, *, exchange: str, underlying: str, day: date_cls, cutoff_min: int | None
+) -> Decimal | None:
+    """Return the underlying's spot LTP for *day* (try ``INDEX`` then ``CASH``), or ``None``.
+
+    An index future's underlying spot lives under ``INDEX``; a stock future's
+    under ``CASH``. We probe the segments in :data:`_SPOT_SEGMENTS` order and
+    return the first that yields a session read (its last close, 2dp money).
+    ``None`` when the underlying spot is absent from both — the premium is then an
+    honest ``None`` (Golden Rule #1).
+    """
+    for segment in _SPOT_SEGMENTS:
+        read = _read_future_session(
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=underlying,
+            day=day,
+            cutoff_min=cutoff_min,
+        )
+        if read is not None:
+            return read[0]
+    return None
+
+
+def _discover_futures(lake_root: Path) -> dict[str, list[tuple[str, str, date_cls]]]:
+    """Group the lake's FUT datasets by underlying → ``[(symbol, exchange, expiry)]``.
+
+    Walks :func:`~brutex.dashboard.db_view.list_candle_datasets`, keeps ONLY the
+    ``FNO`` ``1minute`` datasets whose symbol ends ``-FUT`` (options share the
+    FNO segment but carry a strike + ``-CE`` / ``-PE`` suffix), parses each into
+    ``(underlying, expiry)`` (a non-parsing symbol is skipped), and buckets by
+    underlying. Returns ``{}`` when no futures are present.
+    """
+    from brutex.dashboard.db_view import list_candle_datasets
+
+    by_underlying: dict[str, list[tuple[str, str, date_cls]]] = {}
+    for dataset in list_candle_datasets(lake_root):
+        if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
+            continue
+        symbol = dataset["symbol"]
+        if not symbol.endswith(_FUT_SUFFIX):
+            continue
+        parsed = parse_future_symbol(symbol)
+        if parsed is None:
+            continue
+        underlying, expiry = parsed
+        by_underlying.setdefault(underlying, []).append((symbol, dataset["exchange"], expiry))
+    return by_underlying
+
+
+def run_futures_snapshot(
+    *,
+    lake_root: Path,
+    interval: str,
+    date: str | None,
+    time: str | None,
+    top_n: int,
+    names: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compute the futures movers snapshot over the lake → the ``/api/v1/movers`` payload.
+
+    Discovers every near-month FUT contract (one per underlying — the front-month
+    selected as-of *date*), reads each future's selected-day session (raw 1-minute,
+    OI preserved) up to *time*, takes the future's prior 1-day close + OI and the
+    underlying spot's LTP, computes the per-underlying :class:`FuturesMover`, and
+    ranks them into the per-category payload. An empty / futures-less lake (or an
+    unknown interval) yields an honest "pull the F&O futures first" payload —
+    never a 500, never a fabricated mover (Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+    interval, date, time, top_n
+        The snapshot coordinates (mirrors :func:`run_movers_snapshot`).
+    names
+        Optional ``underlying → display name`` map; defaults to the underlying
+        symbol itself when absent.
+
+    Returns
+    -------
+    dict[str, Any]
+        The Futures-tab ``/api/v1/movers`` payload.
+
+    Raises
+    ------
+    ValueError
+        On a malformed *date* / *time* (the route maps it to a 400).
+    """
+    minutes = interval_minutes(interval)
+    day = parse_snapshot_date(date)
+    date_str = day.isoformat()
+    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    resolved_names = names or {}
+    by_underlying = _discover_futures(lake_root)
+    if minutes is None or not by_underlying:
+        return build_futures_payload(
+            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
+        )
+
+    movers: list[FuturesMover] = []
+    skipped = 0
+    for underlying, contracts in by_underlying.items():
+        chosen = select_near_month([(sym, exp) for sym, _exch, exp in contracts], on_date=day)
+        if chosen is None:  # every contract has expired → no live future, honest skip.
+            skipped += 1
+            continue
+        exchange = next(exch for sym, exch, _exp in contracts if sym == chosen)
+        read = _read_future_session(
+            lake_root,
+            exchange=exchange,
+            segment=_FNO_SEGMENT,
+            symbol=chosen,
+            day=day,
+            cutoff_min=cutoff_min,
+        )
+        if read is None:  # no session bar on the selected day/time → skip, never faked.
+            skipped += 1
+            continue
+        ltp, volume, oi = read
+        prev_close = _prev_day_close(
+            lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
+        )
+        prev_oi = _prev_day_oi(
+            lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
+        )
+        spot_ltp = _underlying_spot_ltp(
+            lake_root, exchange=exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
+        )
+        movers.append(
+            compute_futures_mover(
+                underlying=resolved_names.get(underlying, underlying),
+                symbol=chosen,
+                exchange=exchange,
+                ltp=ltp,
+                volume=volume,
+                oi=oi,
+                prev_close=prev_close,
+                spot_ltp=spot_ltp,
+                prev_oi=prev_oi,
+            )
+        )
+
+    return build_futures_payload(
+        movers, interval=interval, date=date_str, time=time, top_n=top_n, skipped=skipped
+    )
