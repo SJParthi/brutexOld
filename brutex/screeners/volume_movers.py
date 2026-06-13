@@ -165,7 +165,7 @@ class LakeBarReader(Protocol):
         self, target: ScreenTarget, *, start: datetime, end: datetime
     ) -> Sequence[CandleBar]:
         """Return *target*'s chronological bars within ``[start, end]``."""
-        ...  # pragma: no cover
+        raise NotImplementedError
 
 
 # ────────────────────────────────────────────────────────────────────────
