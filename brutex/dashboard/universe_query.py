@@ -73,6 +73,7 @@ EXPLORER_KINDS: Final[tuple[str, ...]] = (KIND_INDEX, KIND_STOCK)
 def classify_instrument(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
+    reference_security_ids: frozenset[int] = frozenset(),
 ) -> str | None:
     """Classify *instrument* into an explorer kind, or ``None``.
 
@@ -99,6 +100,15 @@ def classify_instrument(
         Set of NSE F&O-eligible ``(exchange, symbol)`` pairs, typically
         built once via
         :func:`brutex.universe.build_fno_eligible_underlyings`.
+    reference_security_ids
+        Set of admitted REFERENCE_ONLY constituent ``security_id``\\s
+        (DEC-NIFTY-TOTAL-MARKET-ADMIT-001 / DEC-INDEX-CONSTITUENTS-FULL-001).
+        When supplied, a non-F&O NTM constituent EQ — whose ``symbol_name``
+        is the long company name, so the F&O ticker key cannot match — is
+        ALSO classified ``"stock"`` (so the explorer can show + tick the full
+        ~750-stock universe, not just the ~212 F&O names). Defaults empty →
+        byte-identical to the prior F&O-only classification (every existing
+        caller that omits it, e.g. :func:`universe_summary`, is unchanged).
 
     Notes
     -----
@@ -109,7 +119,7 @@ def classify_instrument(
     KIND label (``"index"`` vs ``"stock"``) on top of that single rule:
     an admitted ``IDX`` → ``"index"``; an admitted ``EQ`` → ``"stock"``.
     """
-    if not is_universe_underlying(instrument, fno_eligible_underlyings):
+    if not is_universe_underlying(instrument, fno_eligible_underlyings, reference_security_ids):
         return None
     return KIND_INDEX if instrument.instrument == InstrumentType.IDX else KIND_STOCK
 
@@ -226,7 +236,12 @@ def list_underlyings(
         fno_eligible = build_fno_eligible_underlyings(instruments)
     rows: list[dict[str, Any]] = []
     for instrument in instruments:
-        classified = classify_instrument(instrument, fno_eligible)
+        # Propagate reference_only_ids so admitted REFERENCE_ONLY NTM constituents
+        # (non-F&O equities) classify as "stock" too — the explorer then shows + ticks
+        # the FULL held universe, not just the F&O names (DEC-INDEX-CONSTITUENTS-FULL-001).
+        # The same set already drives ``option_pullable`` below, so a reference row is a
+        # "stock" with ``option_pullable=False`` (greys the options-pull button).
+        classified = classify_instrument(instrument, fno_eligible, reference_only_ids)
         if classified is None:
             continue
         if kind is not None and classified != kind:

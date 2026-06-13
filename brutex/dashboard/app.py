@@ -1118,11 +1118,17 @@ def build_app(
         store = _require_store()
         eligible = store.fno_eligible_underlyings()
         candidates = store.list_index_equity_instruments()
-        # The bare engine symbols of the F&O-eligible single stocks we hold
-        # (the exact rows the multi-select renders) — reuse the COMMON
-        # classifier (CLAUDE.md §11) rather than re-deriving the split.
-        stock_rows = list_underlyings(candidates, kind="stock", fno_eligible=eligible)
-        fno_symbols = [row["symbol"] for row in stock_rows]
+        reference_only_ids = store.reference_only_security_ids()
+        # The bare engine symbols of EVERY single stock we hold — F&O-eligible AND
+        # admitted REFERENCE_ONLY NTM constituents (DEC-INDEX-CONSTITUENTS-FULL-001).
+        # Passing reference_only_ids classifies the non-F&O constituents as "stock"
+        # too, so the tick covers the index's FULL membership (not just the ~212 F&O
+        # names); the frontend "F&O only" toggle then narrows to the option-pullable
+        # rows. Reuse the COMMON classifier (CLAUDE.md §11) — no re-derived split.
+        stock_rows = list_underlyings(
+            candidates, kind="stock", fno_eligible=eligible, reference_only_ids=reference_only_ids
+        )
+        held_symbols = [row["symbol"] for row in stock_rows]
 
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
@@ -1145,14 +1151,15 @@ def build_app(
             cache_root=lake_root.parent,
             force_refresh=refresh,
         )
-        members = intersect_with_universe(result.symbols, fno_symbols)
+        members = intersect_with_universe(result.symbols, held_symbols)
         notes = {
             "nse": (
-                f"{len(members)} F&O-eligible constituent(s) of {symbol} ticked — "
-                "fresh from NSE + cached (verify; membership rebalances)."
+                f"{len(members)} constituent(s) of {symbol} ticked — "
+                "fresh from NSE + cached (verify; membership rebalances). "
+                "Toggle 'F&O only' to narrow to option-pullable members."
             ),
             "cache": (
-                f"{len(members)} F&O-eligible constituent(s) of {symbol} ticked — "
+                f"{len(members)} constituent(s) of {symbol} ticked — "
                 f"from cache (fetched {result.as_of}; pass refresh=true after a rebalance)."
             ),
             "unknown-index": (

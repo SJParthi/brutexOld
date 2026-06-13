@@ -332,3 +332,41 @@ class TestListUnderlyings:
 
     def test_explorer_kinds_constant(self) -> None:
         assert EXPLORER_KINDS == (KIND_INDEX, KIND_STOCK)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Reference-only constituents become tickable "stock" rows
+# (DEC-INDEX-CONSTITUENTS-FULL-001)
+# ────────────────────────────────────────────────────────────────────────
+def test_classify_reference_only_equity_needs_reference_ids() -> None:
+    """A non-F&O NTM constituent EQ classifies as "stock" ONLY with reference ids.
+
+    Its security_id is in the reference set but it is NOT F&O-eligible (its
+    symbol_name is the long company name, so the ticker key cannot match). Supplying
+    ``reference_security_ids`` admits it as "stock"; omitting it preserves the prior
+    F&O-only behaviour (dropped → None).
+    """
+    ref_eq = _equity("RELIANCE INDUSTRIES LTD")  # not in any fno_eligible set
+    assert classify_instrument(ref_eq, frozenset()) is None
+    assert classify_instrument(ref_eq, frozenset(), frozenset({ref_eq.security_id})) == KIND_STOCK
+
+
+def test_list_underlyings_includes_reference_stocks_when_ids_passed() -> None:
+    """``list_underlyings`` surfaces reference-only stocks (option_pullable False) with ids.
+
+    Without ``reference_only_ids`` the non-F&O constituent is excluded (F&O-only);
+    with it the explorer shows + can tick the FULL held universe
+    (DEC-INDEX-CONSTITUENTS-FULL-001).
+    """
+    ref_eq = _equity("RELIANCE INDUSTRIES LTD")
+    assert list_underlyings([ref_eq], kind=KIND_STOCK, fno_eligible=frozenset()) == []
+    rows = list_underlyings(
+        [ref_eq],
+        kind=KIND_STOCK,
+        fno_eligible=frozenset(),
+        reference_only_ids=frozenset({ref_eq.security_id}),
+    )
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "RELIANCE INDUSTRIES LTD"
+    assert rows[0]["kind"] == KIND_STOCK
+    assert rows[0]["option_pullable"] is False
