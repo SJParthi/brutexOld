@@ -96,7 +96,7 @@ def test_download_form_and_routes_unchanged() -> None:
 
 def test_reports_date_pickers_prefilled_with_canonical_default() -> None:
     """DEC-DEFAULT-DATE-RANGE-001: the /reports From/To pickers are PRE-FILLED with
-    the SAME canonical [2021-01-01, previous day] default as the spot/options pickers."""
+    the SAME canonical [2020-01-01, previous day] default as the spot/options pickers."""
     from brutex.dashboard.app import _render_reports_html
     from brutex.dashboard.pull_controller import default_date_range
 

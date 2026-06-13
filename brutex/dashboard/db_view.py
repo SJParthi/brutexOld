@@ -779,7 +779,7 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
-    stored, NOT whether the full ``2021 → today`` range is complete.
+    stored, NOT whether the full ``2020 → today`` range is complete.
     Partial-date-range detection is an explicit follow-up, not claimed here.
 
     Parameters
@@ -848,7 +848,7 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
 
     **Honest envelope (Golden Rule #10):** a series PRESENT in the lake counts
     as *pulled*; ``series`` / ``bars`` / ``first_date`` / ``last_date`` describe
-    WHAT is stored, NOT whether the full ``2021 → today`` range is complete —
+    WHAT is stored, NOT whether the full ``2020 → today`` range is complete —
     partial-range detection is an explicit follow-up, mirroring the spot side.
 
     Parameters

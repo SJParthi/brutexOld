@@ -328,19 +328,19 @@
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
-    <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → previous trading day</b>; options fan
-      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute.
-      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The pull <b>fetches + stores 1-minute + 1-day only</b> — the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
+    <div class="hsub">Spot pulls your chosen <b>granularity</b> from <b>2020-01-01 → previous trading day</b> — pick <b>1-day only</b> (the <b>verify-first</b> default), <b>1-minute only</b>, or <b>both</b> from the granularity dropdown below; the idea is pull 1-day first, cross-check it against the official NSE/BSE bhavcopy, THEN widen to 1-minute. Options fan
+      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1day-first.
+      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). When you fetch 1-minute the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
     <div class="bulkgrid">
       <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
         <span class="shine"></span><span class="bnum">①</span>
         <span class="bicon">📈</span><span class="blabel">Indices · Spot</span>
-        <span class="bmeta">all index 1m + 1d</span>
+        <span class="bmeta">all index · granularity ↓ (1d default)</span>
       </button>
       <button class="bulkbtn stk" id="bulkStkSpot" data-surface="spot" data-kind="stock">
         <span class="shine"></span><span class="bnum">②</span>
         <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
-        <span class="bmeta">all F&amp;O stock 1m + 1d</span>
+        <span class="bmeta">all F&amp;O stock · granularity ↓ (1d default)</span>
       </button>
       <button class="bulkbtn idx" id="bulkIdxDeriv" data-surface="derivatives" data-kind="index">
         <span class="shine"></span><span class="bnum">③</span>
@@ -397,10 +397,16 @@
 
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — defaults to 2021-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — defaults to 2020-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
-    <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
+    <label style="color:var(--muted); font-size:12px;" title="Verify-first granularity: pull 1-day, cross-check it against the official NSE/BSE bhavcopy, THEN widen to 1-minute or both. Defaults to 1-day.">granularity
+      <select id="spotInterval" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;">
+        <option value="1day" selected>1 day only · verify-first</option>
+        <option value="1minute">1 minute only</option>
+        <option value="both">both · 1day + 1minute</option>
+      </select></label>
+    <button class="pullbtn" id="pullbtn" title="Pull the selected granularity (1-day only by default — verify-first; pick 1-minute or both from the dropdown once the OHLCV-vs-bhavcopy check passes). Tick rows for many, or click one. Blank dates = full history (2020 → prev day)." disabled>⤓ Pull spot</button>
     <button class="loadbtn" id="verifybtn" title="Cross-check the highlighted symbol's pulled spot 1-day data against the official NSE for the 'to' date — the trust anchor before any bulk pull. An INDEX checks 4 OHLC fields (NIFTY / BANKNIFTY; SENSEX needs an operator-verified BSE source); a STOCK checks full OHLCV including VOLUME vs the NSE security bhavcopy." disabled>🛡 Verify vs NSE</button>
     <button class="loadbtn" id="pullDerivBtn" title="Pull the ENTIRE F&amp;O chain (all expiries × all listed strikes, Jan-2020 → today) for the selected instrument(s) — interval + contract-type set by the dropdowns above. Re-click is safe (already-pulled windows are skipped)." disabled>⛓ Pull expiries + contracts</button>
     <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
@@ -826,17 +832,21 @@ async function runPull(symbol, label) {
   panel.classList.add("on", "running");   // beam animates only while in flight
   btn.disabled = true;
   /* The from/to date picker scopes EVERY pull path (spot / future / CE-PE).
-     Blank ends default server-side to 2021-01-01 / previous trading day and are clamped
+     Blank ends default server-side to 2020-01-01 / previous trading day and are clamped
      into the Groww-served window, so a malformed range can't waste quota. */
   const fromDate = document.getElementById("fromDate").value;
   const toDate = document.getElementById("toDate").value;
+  const spotInterval = (document.getElementById("spotInterval") || {}).value || "1day";
   let qs = '/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol);
   if (fromDate) qs += '&from_date=' + encodeURIComponent(fromDate);
   if (toDate) qs += '&to_date=' + encodeURIComponent(toDate);
+  qs += '&spot_interval=' + encodeURIComponent(spotInterval);
   const range = (fromDate || toDate)
-    ? ` · ${fromDate || "2021-01-01"} → ${toDate || "prev day"}`
+    ? ` · ${fromDate || "2020-01-01"} → ${toDate || "prev day"}`
     : "";
-  document.getElementById("pulltitle").textContent = `Pulling ${label} · 1-minute${range}`;
+  const ivLabel = spotInterval === "both" ? "1-day + 1-minute"
+    : (spotInterval === "1minute" ? "1-minute" : "1-day");
+  document.getElementById("pulltitle").textContent = `Pulling ${label} · ${ivLabel}${range}`;
   windowsBucket = 'spot';
   refreshWindowsLine();
   const grid = document.getElementById("tfgrid");
@@ -901,7 +911,7 @@ async function runPull(symbol, label) {
    many. If rows are ticked it pulls each in turn (sequential — the one shared
    5 r/s budget is respected + each shows in the live panel); otherwise it pulls
    the single highlighted instrument. The from/to date rule lives in runPull
-   (blank = full history 2021 → prev day). A re-entrancy guard stops a
+   (blank = full history 2020 → prev day). A re-entrancy guard stops a
    double-click from launching two loops. ── */
 let spotPullInFlight = false;
 function spotSelection() {
@@ -913,13 +923,15 @@ document.getElementById("pullbtn").onclick = async () => {
   if (spotPullInFlight) return;
   const items = spotSelection();
   if (!items.length) return;
-  /* The from/to date picker scopes every spot pull (blank = full 2021 → prev-day
+  /* The from/to date picker scopes every spot pull (blank = full 2020 → prev-day
      history; clamped + defaulted server-side). */
   const fromDate = document.getElementById("fromDate").value;
   const toDate = document.getElementById("toDate").value;
+  const spotInterval = (document.getElementById("spotInterval") || {}).value || "1day";
   let dq = "";
   if (fromDate) dq += "&from_date=" + encodeURIComponent(fromDate);
   if (toDate) dq += "&to_date=" + encodeURIComponent(toDate);
+  dq += "&spot_interval=" + encodeURIComponent(spotInterval);
   if (items.length > 1) {
     /* DEC-DHAN-SPOT-MULTI-SATURATE-001: fan ALL ticked symbols in ONE server-side
        bulk pass via /universe/pull-all?symbols= — the cross-symbol window flatten
@@ -1223,7 +1235,9 @@ BULK_BTNS.forEach(btn => {
       const path = '/api/v1/universe/pull-derivatives?kind=' + encodeURIComponent(kind) + derivKnobs();
       startAndPoll(path, `ALL ${noun} derivatives`);
     } else {
-      const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
+      const iv = (document.getElementById('spotInterval') || {}).value || '1day';
+      const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind)
+        + '&spot_interval=' + encodeURIComponent(iv);
       startAndPoll(path, `ALL ${noun} spot`);
     }
   });

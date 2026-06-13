@@ -658,8 +658,8 @@ function candleControlsHtml() {
   }).join("");
   return '<div class="qbar">'
     + '<div class="qrow"><span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>'
-    + '<span class="lab">From</span><input type="date" id="cstart" min="2021-01-01" value="' + esc(cstate.start) + '">'
-    + '<span class="lab">To</span><input type="date" id="cend" min="2021-01-01" value="' + esc(cstate.end) + '"></div>'
+    + '<span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '">'
+    + '<span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></div>'
     + '<div class="qrow"><span class="lab">Columns</span><div class="colbox">' + colChecks + '</div></div>'
     + '<div class="qrow"><span class="lab">Sort</span>'
     + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select>'

@@ -97,6 +97,7 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     pull_all_spot,
     pull_candles,
+    resolve_fetch_intervals,
     resolve_pull_symbols,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
@@ -1210,6 +1211,7 @@ def build_app(
         year: int | None = Query(default=None),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        spot_interval: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull — ingest one instrument's candles.
 
@@ -1222,13 +1224,17 @@ def build_app(
         a 400 (DEC-PULL-ERROR-VISIBILITY-001).
         ``from_date`` / ``to_date`` are optional inclusive ISO
         ``YYYY-MM-DD`` bounds (the from/to candle picker); when either is
-        given they select an explicit, clamped ``[2021-01-01, today]``
+        given they select an explicit, clamped ``[2020-01-01, today]``
         range (a blank ``to_date`` defaults to the previous day — today is
         included only via an explicit ``to_date`` reaching it), otherwise
         the full calendar ``year``, else (no dates, no year) the full
-        Track-1 history ``[2021-01-01, previous day]``. A malformed date or
+        Track-1 history ``[2020-01-01, previous day]``. A malformed date or
         a ``from`` after ``to`` surfaces as a 400 with the real reason
         (DEC-PULL-ERROR-VISIBILITY-001).
+        ``spot_interval`` is the verify-first granularity selector
+        (DEC-PULL-1DAY-FIRST-001): ``"1day"`` (the default — pull 1-day, verify vs
+        the official bhavcopy per CLAUDE.md §6, then widen), ``"1minute"``, or
+        ``"both"``; a blank / unknown value safely defaults to 1-day only.
         ``dry_run`` is forced ``True`` automatically when Groww
         credentials are not present (via the testable
         :func:`brutex.config.credentials.groww_credentials_present`
@@ -1243,6 +1249,7 @@ def build_app(
             year=year,
             from_date=from_date,
             to_date=to_date,
+            spot_interval=spot_interval,
             dry_run=dry_run,
         )
         store = _require_store()
@@ -1269,6 +1276,7 @@ def build_app(
                 year=year,
                 from_date=from_date,
                 to_date=to_date,
+                intervals=resolve_fetch_intervals(spot_interval),
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
@@ -1354,11 +1362,12 @@ def build_app(
         year: int | None = Query(default=None),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        spot_interval: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-all — start a bulk / multi / per-symbol SPOT pull.
 
         Backs BOTH the one-click "⤓ Pull ALL indices / stocks spot" buttons
-        (``?kind=index|stock``, full ``[2021-01-01, previous day]`` 1m + 1d) AND the
+        (``?kind=index|stock``, full ``[2020-01-01, previous day]`` 1m + 1d) AND the
         unified multi-select "⤓ Pull spot" (``?symbols=a,b,c`` — the ticked
         SELECTION fanned in ONE saturating pass over the from/to picker range,
         DEC-DHAN-SPOT-MULTI-SATURATE-001). Precedence: ``symbols`` (ticked many) >
@@ -1411,8 +1420,13 @@ def build_app(
             from_date=from_date,
             to_date=to_date,
             year=year,
+            spot_interval=spot_interval,
             dry_run=dry_run,
         )
+        # Verify-first granularity (DEC-PULL-1DAY-FIRST-001): the operator's
+        # dropdown choice → 1day-only (default) / 1minute-only / both. Drives BOTH
+        # the fetch AND the progress total (symbols × intervals).
+        fetch_intervals = resolve_fetch_intervals(spot_interval)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: bulk-pull every selected spot symbol, streaming progress.
@@ -1443,6 +1457,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 year=year,
+                intervals=fetch_intervals,
                 on_progress=_spot_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
@@ -1452,15 +1467,17 @@ def build_app(
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
-        # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.
-        started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
+        # total = symbols × the chosen fetch intervals (1d / 1m / both) — the unit
+        # the progress hook fires on (DEC-PULL-1DAY-FIRST-001).
+        unit_total = len(instruments) * len(fetch_intervals)
+        started = _pull_job.start(_work, total=unit_total, detail=detail)
         return JSONResponse(
             {
                 "started": started,
                 "kind": kind,
                 "symbol": symbol,
                 "symbols": symbols,
-                "total": len(instruments) * 2,
+                "total": unit_total,
                 "dry_run": dry_run,
             }
         )
@@ -1581,6 +1598,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         year: int | None = Query(default=None),
+        spot_interval: str | None = Query(default=None),
         until_clean: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/retry-failed — MANUAL re-pull of ONLY the leftover failed windows.
@@ -1628,8 +1646,12 @@ def build_app(
             symbol=symbol,
             symbols=symbols,
             count=len(instruments),
+            spot_interval=spot_interval,
             dry_run=dry_run,
         )
+        # Verify-first granularity (DEC-PULL-1DAY-FIRST-001): match the original
+        # pull's interval choice so a retry re-plans the SAME windows.
+        fetch_intervals = resolve_fetch_intervals(spot_interval)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: re-pull every selected symbol with auto-retry on.
@@ -1653,6 +1675,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 year=year,
+                intervals=fetch_intervals,
                 on_progress=_spot_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
@@ -1662,14 +1685,15 @@ def build_app(
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
-        started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
+        unit_total = len(instruments) * len(fetch_intervals)
+        started = _pull_job.start(_work, total=unit_total, detail=detail)
         return JSONResponse(
             {
                 "started": started,
                 "kind": kind,
                 "symbol": symbol,
                 "symbols": symbols,
-                "total": len(instruments) * 2,
+                "total": unit_total,
                 "dry_run": dry_run,
                 "retry_failed": True,
                 "until_clean": until_clean,
@@ -1870,7 +1894,7 @@ def build_app(
         :func:`brutex.dashboard.coverage_view.build_coverage_payload`. The
         expected universe×years grid is derived from the lake's IDX + EQ
         candidates (:func:`brutex.universe.derive_lake_underlyings`) × the
-        vendor history window (2021 → current year); the actual rows come
+        vendor history window (2020 → current year); the actual rows come
         from ``store.list_coverage()`` (indexed read). All projection logic
         lives in the (coverage-tested) ``coverage_view`` module.
         """
@@ -3270,7 +3294,7 @@ def _load_universe_template() -> str:
 
 
 def _fill_default_dates(html: str) -> str:
-    """Substitute the canonical ``[2021-01-01, previous day]`` into the picker tokens.
+    """Substitute the canonical ``[2020-01-01, previous day]`` into the picker tokens.
 
     DEC-DEFAULT-DATE-RANGE-001. The from/to date inputs carry ``value=``
     placeholder tokens (``__BRUTEX_DATE_FROM__`` / ``__BRUTEX_DATE_TO__``); this
@@ -3302,7 +3326,7 @@ def _render_universe_html() -> str:
     """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001).
 
     Pre-fills the spot/options from/to date pickers with the canonical
-    ``[2021-01-01, previous day]`` default (DEC-DEFAULT-DATE-RANGE-001).
+    ``[2020-01-01, previous day]`` default (DEC-DEFAULT-DATE-RANGE-001).
     """
     return _fill_default_dates(_load_universe_template())
 
@@ -3446,7 +3470,7 @@ def _load_reports_template() -> str:
 def _render_reports_html() -> str:
     """Return the pre-open report page HTML (DEC-PREOPEN-REPORT-001).
 
-    Pre-fills the From/To date pickers with the canonical ``[2021-01-01, previous
+    Pre-fills the From/To date pickers with the canonical ``[2020-01-01, previous
     day]`` default (DEC-DEFAULT-DATE-RANGE-001) — the SAME range the spot/options
     pickers and a blank report use.
     """
@@ -3480,7 +3504,7 @@ def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, dat
     """Resolve a pre-open report's inclusive ``[from, to]`` — blanks DEFAULT to the canon range.
 
     DEC-DEFAULT-DATE-RANGE-001. A blank ``from`` / ``to`` falls back to the SAME
-    canonical ``[2021-01-01, previous day]`` window the spot/options pickers + a
+    canonical ``[2020-01-01, previous day]`` window the spot/options pickers + a
     blank pull use (via :func:`~brutex.dashboard.pull_controller.default_date_range`),
     so a report is consistent with everything else and a cleared field never 400s.
     Pure + framework-free (raises :class:`ValueError`; the route maps it to a 400),
@@ -3505,12 +3529,15 @@ def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, dat
 
 
 def _coverage_years() -> list[int]:
-    """Return the expected coverage years — Track-1 vendor history floor 2021 → now.
+    """Return the expected coverage years — Track-1 vendor history floor 2020 → now.
 
-    The operational floor is **2021-01-01** (DEC-DHAN-PULL-SCOPE-001); the
-    2020 floor was a stale Groww-era carryover (DEC-DHAN-COVERAGE-RESCOPE-001).
+    The operational floor is **2020-01-01** (DEC-PULL-FLOOR-2020-001, which
+    supersedes the prior conservative 2021-01-01 floor of DEC-DHAN-PULL-SCOPE-001
+    now that the Phase-0 granularity probe confirmed 1-minute data exists from
+    2020-01-01T09:15:00). The coverage grid starts at the SAME floor the pull
+    pickers default to, so a pulled 2020 cell is never invisible on /coverage.
     """
-    return list(range(2021, datetime.now(UTC).year + 1))
+    return list(range(2020, datetime.now(UTC).year + 1))
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"

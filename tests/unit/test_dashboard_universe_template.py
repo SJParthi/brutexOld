@@ -50,17 +50,31 @@ def test_js_flags_running_at_start_and_clears_it_on_finish() -> None:
 
 def test_date_pickers_prefilled_with_canonical_default() -> None:
     """DEC-DEFAULT-DATE-RANGE-001: the from/to pickers are PRE-FILLED with the
-    canonical [2021-01-01, previous day] default, and no token leaks through."""
+    canonical [2020-01-01, previous day] default, and no token leaks through."""
     from brutex.dashboard.app import _render_universe_html
     from brutex.dashboard.pull_controller import default_date_range
 
     html = _render_universe_html()
     from_iso, to_iso = default_date_range()
     max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
-    assert from_iso == "2021-01-01"
-    assert f'id="fromDate" min="2021-01-01" max="{max_iso}" value="{from_iso}"' in html
-    assert f'id="toDate" min="2021-01-01" max="{max_iso}" value="{to_iso}"' in html
+    assert from_iso == "2020-01-01"
+    assert f'id="fromDate" min="2020-01-01" max="{max_iso}" value="{from_iso}"' in html
+    assert f'id="toDate" min="2020-01-01" max="{max_iso}" value="{to_iso}"' in html
     assert "__BRUTEX_DATE_" not in html  # the placeholder tokens were all substituted
+
+
+def test_spot_interval_dropdown_defaults_to_one_day() -> None:
+    """DEC-PULL-1DAY-FIRST-001: the spot pull carries a granularity dropdown
+    (1day / 1minute / both) whose DEFAULT selected option is 1-day (verify-first),
+    and the pull JS threads the choice as ``&spot_interval=``."""
+    html = _render_universe_html()
+    assert 'id="spotInterval"' in html
+    # 1-day is the pre-selected default; 1-minute + both are also offered.
+    assert '<option value="1day" selected>' in html
+    assert '<option value="1minute">' in html
+    assert '<option value="both">' in html
+    # the choice is threaded into both the single + bulk pull query strings.
+    assert "spot_interval=" in html
 
 
 def test_instrument_rows_render_contract_economics() -> None:
