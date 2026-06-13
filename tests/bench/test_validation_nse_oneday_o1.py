@@ -31,9 +31,10 @@ from tests.bench._o1_tiers import ratio_ceiling
 
 pytestmark = pytest.mark.bench
 
-#: Iteration tiers for the per-call-cost ratio.
-N_SMALL = 10_000
-N_BIG = 1_000_000
+#: Iteration tiers for the per-call-cost ratio (mirrors tests/bench/test_bar_lookup_o1.py
+#: sizing — big enough to dwarf timer noise, small enough to stay fast on shared CI).
+N_SMALL = 1_000
+N_BIG = 100_000
 #: Robust shared-CI ceiling (the strict 1.1× tier engages on the M4-Pro runner).
 _SHARED_CI_CEILING = 5.0
 _WARMUP = 256
