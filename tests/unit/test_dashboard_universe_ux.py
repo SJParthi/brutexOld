@@ -103,8 +103,9 @@ def test_multi_select_wiring_present() -> None:
 def test_timeframe_storage_is_explained_honestly() -> None:
     """The page states only 1m+1d are stored; intraday TFs are derived, not written to disk."""
     html = _render_universe_html()
-    assert "fetches + stores 1-minute + 1-day only" in html, (
-        "the page must state the pull stores ONLY 1m + 1d (no 19-timeframe local-drive bloat)"
+    assert "the 19 intraday timeframes are" in html, (
+        "the page must state the pull stores ONLY 1m + 1d — the 19 intraday timeframes are "
+        "derived, not written to the local drive (no 19-timeframe local-drive bloat)"
     )
     assert "derived on demand, NOT written to your drive" in html, (
         "the page must state the intraday timeframes are derived on demand, not materialised; "
