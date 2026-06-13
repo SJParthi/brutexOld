@@ -2228,11 +2228,6 @@ jobs:
           severity: 'CRITICAL,HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
-          # Honour the repo-root .trivyignore (the action does NOT pass --ignorefile
-          # unless this input is set, so trivy's default cwd lookup was skipped in the
-          # container). Suppresses the justified transitive PyO3 0.28.3 advisory
-          # GHSA-36hh-v3qg-5jq4 (see .trivyignore); the real pyo3 0.29 bump is tracked.
-          trivyignores: .trivyignore
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@v7

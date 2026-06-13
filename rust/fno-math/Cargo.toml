@@ -34,7 +34,7 @@ crate-type = ["cdylib", "rlib"]
 # `extension-module` strips the host Python lib link so the .so/.dylib
 # loads under any compatible CPython; `abi3-py312` pins the stable
 # ABI floor to BruteX's CLAUDE.md §4 Python 3.12 baseline.
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
 
 # DEC-P0-052 (PR-M): blake3 hash function — foundational for the deferred
 # sha256 → blake3 combo_hash 9-field migration (DEC-P0-044 Q-02). Blake3
