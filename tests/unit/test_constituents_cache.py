@@ -214,9 +214,7 @@ class TestResolveConstituents:
     ) -> None:
         # force_refresh skips the early cache return; for a symbolless index the
         # URL is None, but a prior cache is STILL served (never lost).
-        write_cache(
-            tmp_path, "@@@", ["RELIANCE"], fetched_at=_FIXED_TS, source_url="seed"
-        )
+        write_cache(tmp_path, "@@@", ["RELIANCE"], fetched_at=_FIXED_TS, source_url="seed")
         opener = _CountingOpener()
         result = resolve_constituents(
             "@@@",
