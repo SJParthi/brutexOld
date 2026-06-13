@@ -268,6 +268,29 @@ def test_non_fno_equity_dropped_from_lean_universe(tmp_path: Path) -> None:
     assert result["stock_count"] == 1
 
 
+def test_fno_lot_freeze_folded_from_legs(tmp_path: Path) -> None:
+    """An F&O underlying is stamped with its leg's tradable lot; a blank leg freeze
+    leaves the row's own freeze intact (DEC-GROWW-LEG-ECONOMICS-001)."""
+    store = _store(tmp_path)
+    load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(_ROWS),
+        constituent_opener=_empty_opener,
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    wipro = store.get("WIPRO")
+    assert wipro is not None
+    # WIPRO's only leg (WIPRO_CE) carries lot 1500 → folded over the cash lot 1.
+    assert wipro.lot_size == 1500
+    # WIPRO_CE has no freeze → the equity keeps its own (blank → None) freeze.
+    assert wipro.sm_freeze_qty is None
+    # An index with no leg in this master keeps its own (blank → 0) lot.
+    nifty = store.get("NIFTY")
+    assert nifty is not None and nifty.lot_size == 0
+    # The fold lifts the only F&O equity above placeholder lot 1 → no auto-heal loop.
+    assert store.has_placeholder_stock_economics() is False
+
+
 def test_ntm_admits_non_fno_constituents_as_reference(tmp_path: Path) -> None:
     """An NTM constituent that is non-F&O is admitted as a REFERENCE_ONLY stock.
 
