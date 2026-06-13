@@ -101,10 +101,19 @@ def test_multi_select_wiring_present() -> None:
 
 
 def test_timeframe_storage_is_explained_honestly() -> None:
-    """The page states only 1m+1d are stored; intraday TFs are derived, not written to disk."""
+    """The page explains the verify-first granularity + that intraday TFs are derived, not stored.
+
+    The pull-granularity copy was reworded by DEC-PULL-1DAY-FIRST-001 (the verify-first
+    1-day/1-minute/both dropdown) — the old "fetches + stores 1-minute + 1-day only"
+    phrasing was replaced by the verify-first explanation; this asserts the current
+    wording. The storage-honesty intent is still covered by the derived-on-demand
+    assertion below (DEC-NSE-EQUITY-VERIFY-001 merge-reconcile — the prior phrase was
+    left stale on main).
+    """
     html = _render_universe_html()
-    assert "fetches + stores 1-minute + 1-day only" in html, (
-        "the page must state the pull stores ONLY 1m + 1d (no 19-timeframe local-drive bloat)"
+    assert "pull 1-day first, cross-check it against the official NSE/BSE bhavcopy" in html, (
+        "the page must explain the verify-first granularity (pull 1-day first, cross-check "
+        "vs the official bhavcopy, THEN widen to 1-minute)"
     )
     assert "derived on demand, NOT written to your drive" in html, (
         "the page must state the intraday timeframes are derived on demand, not materialised; "
