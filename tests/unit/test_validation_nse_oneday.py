@@ -725,3 +725,66 @@ class TestValidateBruteForceIndices:
 def test_module_exports_are_public() -> None:
     for name in m.__all__:
         assert hasattr(m, name)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# All-indices snapshot (Route A — the live index universe), REFERENCE_ONLY
+# ────────────────────────────────────────────────────────────────────────────
+
+_SNAPSHOT_CSV = (
+    "Index Name,Index Date,Open Index Value,High Index Value,Low Index Value,"
+    "Closing Index Value,Volume\n"
+    "Nifty 50,24-Sep-2025,24000.10,24100.20,23950.30,24080.40,0\n"
+    "Nifty Bank,24-Sep-2025,52000.00,52250.50,51900.00,52100.25,0\n"
+    ",24-Sep-2025,1,2,3,4,0\n"  # blank index name → skipped by parse, dropped by names
+    "Nifty Bad,24-Sep-2025,not-a-number,2,3,4,0\n"  # malformed price → skipped by parse
+)
+
+
+def test_daily_indices_url_uses_ddmmyyyy_token() -> None:
+    # Route A token is DDMMYYYY (NOT the bhavcopy's YYYYMMDD).
+    assert m.daily_indices_url(date(2026, 5, 1)).endswith(
+        "/content/indices/ind_close_all_01052026.csv"
+    )
+
+
+class TestListIndexNames:
+    def test_lists_unique_sorted_names_blank_dropped(self) -> None:
+        # Names come from the file's `Index Name` column; the malformed-price row
+        # ("Nifty Bad") STILL appears (names don't parse prices); blank dropped.
+        assert m.list_index_names(_SNAPSHOT_CSV) == ["Nifty 50", "Nifty Bad", "Nifty Bank"]
+
+    def test_empty_text_returns_empty(self) -> None:
+        assert m.list_index_names("") == []
+
+    def test_missing_required_column_returns_empty(self) -> None:
+        assert m.list_index_names("Foo,Bar\n1,2\n") == []
+
+
+class TestParseIndexSnapshot:
+    def test_parses_good_rows_skips_blank_and_malformed(self) -> None:
+        rows = m.parse_index_snapshot(_SNAPSHOT_CSV, _DATE)
+        assert [r.index_name for r in rows] == ["Nifty 50", "Nifty Bank"]
+        nifty = rows[0]
+        assert nifty.close == Decimal("24080.40")
+        assert nifty.open == Decimal("24000.10")
+        assert nifty.trade_date == _DATE
+
+    def test_empty_text_returns_empty(self) -> None:
+        assert m.parse_index_snapshot("", _DATE) == []
+
+    def test_missing_required_column_returns_empty(self) -> None:
+        assert m.parse_index_snapshot("Index Name,Foo\nNifty 50,1\n", _DATE) == []
+
+
+class TestFetchIndexSnapshot:
+    def test_success_returns_rows(self) -> None:
+        rows = m.fetch_index_snapshot(_DATE, official_opener=lambda _url: _SNAPSHOT_CSV)
+        assert rows is not None
+        assert [r.index_name for r in rows] == ["Nifty 50", "Nifty Bank"]
+
+    def test_oserror_degrades_to_none(self) -> None:
+        def _boom(_url: str) -> str:
+            raise OSError("blocked / weekend 404")
+
+        assert m.fetch_index_snapshot(_DATE, official_opener=_boom) is None
