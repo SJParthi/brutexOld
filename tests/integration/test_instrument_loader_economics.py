@@ -55,6 +55,16 @@ def _make_http_get(body: str) -> Any:
     return _get
 
 
+def _no_constituents(_url: str) -> str:
+    """A constituent opener returning nothing — keeps NTM enrichment a no-op offline.
+
+    These tests assert the lean-ingest economics, not NTM admission
+    (DEC-NTM-GROWW-REPOINT-001), so an empty live NTM CSV keeps the counts focused
+    on the F&O-eligible base set without touching the live niftyindices source.
+    """
+    return ""
+
+
 def _build_store(tmp_path: Path) -> InstrumentStore:
     """Open a fresh on-disk InstrumentStore under *tmp_path*."""
     pytest.importorskip("duckdb")  # gate on the data extra
@@ -154,7 +164,11 @@ def test_persists_underlying_economics(tmp_path: Path) -> None:
     """The lean universe persists each underlying with its OWN row economics."""
     store = _build_store(tmp_path)
     result = load_instrument_master(
-        store, http_get=_make_http_get(_economics_csv()), run_id_factory=lambda: "t"
+        store,
+        http_get=_make_http_get(_economics_csv()),
+        run_id_factory=lambda: "t",
+        constituent_opener=_no_constituents,
+        constituent_cache_dir=tmp_path / "cache",
     )
     assert result["index_count"] == 2  # NIFTY + BANKNIFTY (both allow-listed)
     assert result["stock_count"] == 1  # RELIANCE
@@ -192,8 +206,20 @@ def test_two_sequential_refreshes_deterministic(tmp_path: Path) -> None:
     """Re-ingest yields the SAME full counts (no '25 indices · 0 stocks' loss)."""
     store = _build_store(tmp_path)
     http = _make_http_get(_economics_csv())
-    first = load_instrument_master(store, http_get=http, run_id_factory=lambda: "r1")
-    second = load_instrument_master(store, http_get=http, run_id_factory=lambda: "r2")
+    first = load_instrument_master(
+        store,
+        http_get=http,
+        run_id_factory=lambda: "r1",
+        constituent_opener=_no_constituents,
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    second = load_instrument_master(
+        store,
+        http_get=http,
+        run_id_factory=lambda: "r2",
+        constituent_opener=_no_constituents,
+        constituent_cache_dir=tmp_path / "cache",
+    )
     assert (first["index_count"], first["stock_count"]) == (2, 1)
     assert (second["index_count"], second["stock_count"]) == (2, 1)
     assert store.has_derivative_legs() is False
