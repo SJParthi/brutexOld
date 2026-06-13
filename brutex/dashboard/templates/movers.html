@@ -96,6 +96,7 @@
         <span id="pills"></span>
         <span class="spacer"></span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
+        <select id="track" title="Expiry cadence (Options)" style="display:none;"></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
 
@@ -178,6 +179,9 @@ function renderPills() {
   $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); load(); });
   $("expiry").style.display = (state.asset==="spot") ? "none" : "";
   if (state.asset!=="spot" && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
+  /* Options-only: the All/Monthly/Weekly cadence the Near/Next/Far tier ranks within. */
+  $("track").style.display = (state.asset==="options") ? "" : "none";
+  if (state.asset==="options" && !$("track").innerHTML) $("track").innerHTML = ["All","Monthly","Weekly"].map(e=>`<option>${e}</option>`).join("");
 }
 function renderHead() {
   const cols = ASSETS[state.asset].cols;
@@ -222,6 +226,7 @@ async function load() {
   if ($("date").value) p.set("date", $("date").value);
   if (state.time) p.set("time", state.time);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
+  if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
     if (!r.ok) throw new Error("HTTP "+r.status);
@@ -244,7 +249,7 @@ $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
 });
 $("interval").onchange = () => { fillTimes(); load(); };
 $("time").onchange = () => { state.time = $("time").value; load(); };
-["exchange","expiry","topn","date"].forEach(id => $(id).onchange = load);
+["exchange","expiry","track","topn","date"].forEach(id => $(id).onchange = load);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();
 </script>
