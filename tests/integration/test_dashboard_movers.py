@@ -205,3 +205,15 @@ class TestMoversPage:
         again = client.get("/movers")
         assert again.status_code == 200
         assert again.text == resp.text
+
+    def test_movers_link_in_every_pages_nav(self, store: InstrumentStore) -> None:
+        # DEC-INDEX-CONSTITUENTS-COVERAGE-001: the /movers page must be reachable
+        # from the top menu of EVERY page — not just by typing the URL. Each page's
+        # nav now carries a "Movers" link (alongside Database · Coverage · Reports).
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # The v29 main dashboard ("/") uses its own live-sweep layout (no standard
+        # top nav); the standard-nav pages all carry the Movers link.
+        for path in ("/welcome", "/coverage", "/reports", "/db", "/universe", "/groww-credentials"):
+            resp = client.get(path)
+            assert resp.status_code == 200, path
+            assert 'href="/movers"' in resp.text, f"{path} is missing the Movers nav link"
