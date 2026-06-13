@@ -429,7 +429,7 @@ class WorkItemStore:
     def exists_terminal(self, phase: IngestPhase, content_hash: str) -> bool:
         """Fast dedup check — True iff an item exists AND is terminal.
 
-        Used by every worker before making a Dhan API call. If this
+        Used by every worker before making a vendor API call. If this
         returns True, the call is skipped entirely (deduplication
         guarantee + O(1) lookup).
 
@@ -457,7 +457,7 @@ class WorkItemStore:
         (see :meth:`brutex.orchestrator.bloom.BloomFilter.might_contain`).
         The L2 LMDB layer is ground-truth; the worst case is an
         unnecessary L2 lookup on a future call, never a duplicate
-        Dhan fetch.
+        vendor fetch.
 
         Performance promise: when Bloom is configured, ``False`` returns
         in sub-µs (Rust-backed bit-vector probe); ``True`` returns in

@@ -8,7 +8,7 @@ build the :class:`~brutex.adapters.groww.instruments.InstrumentIndex`.
 Injecting ``http_get`` keeps the parse/index logic 100% unit-testable without a
 network; the real :func:`urllib_http_get` (SSRF-guarded ``urllib`` shim to
 ``growwapi-assets.groww.in``) is the only ``# pragma: no cover`` surface, exactly
-like the Dhan loader. The instrument master is a point-in-time snapshot (expiries
+like the prior loader. The instrument master is a point-in-time snapshot (expiries
 roll), so production fetches it fresh each ingest run.
 """
 

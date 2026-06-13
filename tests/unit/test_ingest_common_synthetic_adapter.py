@@ -47,7 +47,7 @@ def test_is_a_market_adapter() -> None:
 
 def test_capabilities() -> None:
     caps = SyntheticSpotAdapter().capabilities
-    assert caps.market_id == "dhan"
+    assert caps.market_id == "spot"
     assert caps.has_derivatives is False
     assert caps.supported_intervals == frozenset({"1minute", "1day"})
 

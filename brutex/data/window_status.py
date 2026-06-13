@@ -77,7 +77,7 @@ def classify_window_status(raw_bars: int, error_type: str | None) -> str:
         count — a re-pull whose bars are all already stored still has
         ``raw_bars > 0`` and is ``SUCCESS``).
     error_type
-        The error class name (e.g. ``"DhanTimeoutError"``) when the fetch raised
+        The error class name (e.g. ``"GrowwTimeoutError"``) when the fetch raised
         a retryable/terminal error, else ``None``.
 
     Returns

@@ -11,10 +11,10 @@ After ``pip install -e .``, the ``brutex`` command is on PATH.
 
 This CLI was rewritten on 2026-05-15 and re-baselined on 2026-05-26
 (DEC-VENDOR-PIVOT-001). Per DEC-GROWW-DHAN-REVERT-001 / ADR-0002 the live
-vendor is the Dhan Data API v2. Legacy ingest subcommands were
+vendor is the Groww Trade API. Legacy ingest subcommands were
 vendor-specific and are dropped. Track 1 will reintroduce
-``brutex track1 ingest`` once the Dhan adapter lands in Phase 1+ of the
-phase plan (see ``brutex/adapters/dhan/``).
+``brutex track1 ingest`` once the Groww adapter lands in Phase 1+ of the
+phase plan (see ``brutex/adapters/groww/``).
 
 ## Commands (Track 1 minimum)
 
@@ -38,7 +38,7 @@ phase plan (see ``brutex/adapters/dhan/``).
         ``make run`` / ``python -m brutex run`` / the IDE Run target invoke.
 
     brutex fetch [--dry-run] [--inspect] [...]
-        Fetch historical candles into the lake (Dhan adapter).
+        Fetch historical candles into the lake (Groww adapter).
 
 ## Design
 
@@ -354,20 +354,20 @@ def build_parser() -> argparse.ArgumentParser:
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
-        help="Manage the stored Dhan credentials (set once, auto-load every session)",
+        help="Manage the stored token credentials (set once, auto-load every session)",
     )
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
     auth_sub.add_parser(
         "set",
-        help="Interactively prompt (no echo) for the Dhan access token + client id and save them",
+        help="Interactively prompt (no echo) for the access token + client id and save them",
     )
     auth_sub.add_parser(
         "status",
-        help="Print whether Dhan credentials are stored (booleans only; never values)",
+        help="Print whether token credentials are stored (booleans only; never values)",
     )
     auth_sub.add_parser(
         "clear",
-        help="Delete the stored Dhan credentials file",
+        help="Delete the stored token credentials file",
     )
 
     # ── dashboard ─────────────────────────────────────────────────
@@ -427,7 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help=(
             "Candle interval: 1minute / 1day (aliases 1m / 1d), or 'all' for both "
-            "(default). Dhan fetches 1m + 1d only — the 19 intraday timeframes are "
+            "(default). Groww fetches 1m + 1d only — the 19 intraday timeframes are "
             "resampled from the 1-minute base (DEC-DHAN-1M-ONLY-001)"
         ),
     )
@@ -435,12 +435,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-days",
         type=int,
         default=None,
-        help="Legacy chunk-window override — ignored on Dhan (tiled internally)",
+        help="Legacy chunk-window override — ignored on Groww (tiled internally)",
     )
     fetch.add_argument(
         "--dry-run",
         action="store_true",
-        help="Use synthetic candles (no Dhan creds) — proves the pipe + writes sample lake data",
+        help="Use synthetic candles (no Groww creds) — proves the pipe + writes sample lake data",
     )
     fetch.add_argument(
         "--inspect",
@@ -468,7 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--instruments",
         action="store_true",
         help=(
-            "ONLY load the keyless public instrument master (no Dhan keys), "
+            "ONLY load the keyless public instrument master (no vendor API keys), "
             "print the index/stock counts, and exit — populates the /universe "
             "list without auth (DEC-INSTRUMENT-LOAD-001)"
         ),
@@ -729,7 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── sweep-daemon (DEC-SWEEP-SCHEDULER-001) — scheduled/daemon sweep runner ──
     # The AUTOMATIC twin of `sweep-all` (CLAUDE.md §11 manual⇄automatic duality):
     # runs the EXACT same grid pipeline on a cadence (intended: nightly, after the
-    # incremental Dhan pull), crash-safe auto-resume via the SAME checkpoint, BLAKE3
+    # incremental Groww pull), crash-safe auto-resume via the SAME checkpoint, BLAKE3
     # audit-logged per cycle. `--once` runs exactly one cycle on demand (manual).
     sweep_daemon = sub.add_parser(
         "sweep-daemon",
@@ -1107,7 +1107,7 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
 
 
 def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
-    """Interactively prompt (no echo) for the Dhan creds and save them.
+    """Interactively prompt (no echo) for the token creds and save them.
 
     Reads the access token and client id via :func:`getpass.getpass` so neither
     is echoed to the terminal or recorded in shell history. The values are
@@ -1118,15 +1118,15 @@ def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
 
     from brutex.config.credentials import (
         CredentialsError,
-        DhanFileCredentials,
-        save_dhan_credentials,
+        TokenFileCredentials,
+        save_token_credentials,
     )
 
-    access_token = getpass.getpass("Dhan access token (input hidden): ")
-    client_id = getpass.getpass("Dhan client id (input hidden): ")
+    access_token = getpass.getpass("Access token (input hidden): ")
+    client_id = getpass.getpass("Client id (input hidden): ")
     try:
-        path = save_dhan_credentials(
-            DhanFileCredentials(access_token=access_token, client_id=client_id)
+        path = save_token_credentials(
+            TokenFileCredentials(access_token=access_token, client_id=client_id)
         )
     except CredentialsError as exc:
         print(f"[brutex] could not save credentials: {exc}", file=sys.stderr)
@@ -1136,7 +1136,7 @@ def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
 
 
 def cmd_auth_status() -> int:  # pragma: no cover — thin print wrapper
-    """Print whether Dhan credentials are stored (booleans only, no values)."""
+    """Print whether token credentials are stored (booleans only, no values)."""
     from brutex.config.credentials import credentials_path, credentials_present
 
     present = credentials_present()
@@ -1146,10 +1146,10 @@ def cmd_auth_status() -> int:  # pragma: no cover — thin print wrapper
 
 
 def cmd_auth_clear() -> int:  # pragma: no cover — thin print wrapper
-    """Delete the stored Dhan credentials file (if any)."""
-    from brutex.config.credentials import clear_dhan_credentials, credentials_path
+    """Delete the stored token credentials file (if any)."""
+    from brutex.config.credentials import clear_token_credentials, credentials_path
 
-    removed = clear_dhan_credentials()
+    removed = clear_token_credentials()
     path = credentials_path()
     if removed:
         print(f"[brutex] credentials removed: {path}")
@@ -1441,7 +1441,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # PHASED-001, operator decree 2026-05-30: "remove the auto pull"). The
         # universe pull is now driven by the two MANUAL /universe buttons —
         # "Fetch all expiries" (Phase 1) then "Fetch all contracts" (Phase 2) —
-        # so nothing hits Dhan until the operator clicks. The keyless
+        # so nothing hits Groww until the operator clicks. The keyless
         # instrument master still auto-loads above (it needs no auth) so the
         # /universe list is populated and the buttons have something to pull.
         _log.info(
@@ -1516,18 +1516,18 @@ def _resolve_lake_root(lake_root: Path | None) -> Path:
     return resolve_lake_root()
 
 
-def _resolve_dhan_fetch_intervals(interval: str) -> list[str]:
-    """Map the ``--interval`` flag to the Dhan FETCHED intervals.
+def _resolve_fetch_intervals(interval: str) -> list[str]:
+    """Map the ``--interval`` flag to the FETCHED intervals.
 
-    Dhan fetches only ``1minute`` + ``1day`` (the 19 intraday timeframes are
+    Groww fetches only ``1minute`` + ``1day`` (the 19 intraday timeframes are
     resampled from the 1-minute base — DEC-DHAN-1M-ONLY-001). ``all`` →
     both; ``1m``/``1minute`` and ``1d``/``1day`` → that one; anything else
     raises :class:`ValueError` (a non-fetched timeframe).
     """
-    from brutex.dashboard.pull_controller import DHAN_FETCH_INTERVALS
+    from brutex.dashboard.pull_controller import GROWW_FETCH_INTERVALS
 
     if interval == "all":
-        return list(DHAN_FETCH_INTERVALS)
+        return list(GROWW_FETCH_INTERVALS)
     canonical = {
         "1m": "1minute",
         "1minute": "1minute",
@@ -1536,7 +1536,7 @@ def _resolve_dhan_fetch_intervals(interval: str) -> list[str]:
     }.get(interval)
     if canonical is None:
         raise ValueError(
-            f"--interval {interval!r} is not fetched on Dhan — fetch 1minute/1day only "
+            f"--interval {interval!r} is not fetched on Groww — fetch 1minute/1day only "
             "(the 19 intraday timeframes are resampled from the 1-minute base). "
             "Use --interval 1minute, 1day, or all."
         )
@@ -1580,7 +1580,7 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
 ) -> list[Any]:
     """Resolve the 3 brute-force index ``Instrument``s from the populated store.
 
-    The live pull needs the real Dhan ``SECURITY_ID`` for each index, which
+    The live pull needs the real vendor ``SECURITY_ID`` for each index, which
     lands in the store via ``fetch --instruments`` / ``--universe``. Filters
     the store's index/equity rows to the brute-force indices (NIFTY /
     BANKNIFTY / SENSEX); raises if the store is empty (operator must load the
@@ -1619,7 +1619,7 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     resolves every fetched symbol through it), and writes through a
     ``ParquetBarSink`` over *lake_root*.
 
-    Unlike the retired Dhan builder there is no ``transport`` to inject — Groww
+    Unlike the retired builder there is no ``transport`` to inject — Groww
     talks through its SDK client, not a urllib transport — and no preset
     instrument list: the adapter carries the whole master index and resolves
     each fetched symbol in O(1).
@@ -1650,7 +1650,7 @@ class _DryRunGrowwSpotAdapter:
     → sink pipeline works — this minimal deterministic stand-in returns valid
     in-session :class:`~brutex.data.models.CandleBar` rows from the vendor-neutral
     pure :func:`~brutex.adapters.ingest_common.synthetic_spot_bars` generator
-    (a pure bar builder, not the Dhan *adapter*). It satisfies the
+    (a pure bar builder, not the Groww *adapter*). It satisfies the
     :class:`~brutex.adapters.protocol.MarketAdapter` shape the Groww spot spine
     drives, with NO client, NO credentials and NO network — so it is fully
     deterministic and unit-testable.
@@ -1695,13 +1695,13 @@ class _DryRunGrowwSpotAdapter:
 def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + live network
     lake_root: Path,
 ) -> dict[str, Any]:
-    """Keylessly load the public Dhan instrument master into the lake.
+    """Keylessly load the public Groww instrument master into the lake.
 
     Opens the real :class:`~brutex.data.instrument_store.InstrumentStore` and
     delegates to the testable
     :func:`brutex.dashboard.instrument_loader.load_instrument_master` with NO
     injected ``http_get`` — i.e. the real SSRF-guarded public-CSV fetch, which
-    needs NO Dhan API keys (DEC-INSTRUMENT-LOAD-001). Marked ``no cover``: the
+    needs NO vendor API keys (DEC-INSTRUMENT-LOAD-001). Marked ``no cover``: the
     DuckDB store transitively imports the ``fno_math`` Rust kernel and the
     fetch hits the live network, so this runs only on a fully-built, online
     environment; the pure loader core is unit-tested with a fake ``http_get``.
@@ -1797,7 +1797,7 @@ def cmd_fetch(
     ``--universe`` first ingests the instrument master into the lake (the LAKE
     surface authorised by DEC-P0-063) BEFORE the index candle pull — the turnkey
     "pull everything" command. ``--instruments`` loads ONLY the keyless public
-    instrument master (no Dhan keys), prints the index/stock counts, and exits —
+    instrument master (no vendor API keys), prints the index/stock counts, and exits —
     it populates the ``/universe`` list without auth (DEC-INSTRUMENT-LOAD-001).
 
     Leftover failed windows are AUTO-RETRIED after the pull by default
@@ -1808,7 +1808,7 @@ def cmd_fetch(
     ``--retry-failed`` is the MANUAL trigger that re-pulls ONLY the currently
     failed windows on demand (the coverage ledger skips everything already in the
     lake). Both ways call the SAME
-    :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` engine
+    :func:`~brutex.adapters.ingest_common.retry_failed_windows` engine
     (CLAUDE.md §11 COMMON).
 
     ``--until-clean`` (DEC-TOKEN-PREFLIGHT-001) keeps running bounded auto-retry
@@ -1843,7 +1843,7 @@ def cmd_fetch(
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
     from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
-    from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
+    from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
@@ -1857,27 +1857,27 @@ def cmd_fetch(
 
     resolved = _resolve_lake_root(lake_root)
     try:
-        intervals = _resolve_dhan_fetch_intervals(interval)
+        intervals = _resolve_fetch_intervals(interval)
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
     # Default the start to the Track-1 2021-01-01 pull floor (DEC-DHAN-PULL-SCOPE-001)
     # so a bare `brutex fetch` pulls the full locked "2021-01-01 → today" history.
     floor_dt = datetime(
-        DHAN_HISTORY_FLOOR.year, DHAN_HISTORY_FLOOR.month, DHAN_HISTORY_FLOOR.day, tzinfo=UTC
+        GROWW_HISTORY_FLOOR.year, GROWW_HISTORY_FLOOR.month, GROWW_HISTORY_FLOOR.day, tzinfo=UTC
     )
     start_dt = _parse_dt(start) if start else floor_dt
     end_dt = _parse_dt(end) if end else datetime.now(UTC)
     if window_days is not None:
         print(
-            "[brutex] --window-days is ignored on Dhan (1-minute is tiled internally)",
+            "[brutex] --window-days is ignored on Groww (1-minute is tiled internally)",
             file=sys.stderr,
         )
 
     if universe:
         # The legacy instruments→expiries→contracts universe ingest was
         # removed with the pre-pivot Groww adapter (DEC-DHAN-FINALIZE-001).
-        # The Dhan path loads the instrument master keylessly via
+        # The Groww path loads the instrument master keylessly via
         # `fetch --instruments`, and options/contracts are pulled on demand
         # through the dashboard rolling-option fan-out — there is no
         # three-phase ingest.
@@ -1891,7 +1891,7 @@ def cmd_fetch(
 
     if inspect:
         print(
-            "[brutex] --inspect is not yet ported to the Dhan adapter — "
+            "[brutex] --inspect is not yet ported to the Groww adapter — "
             "running to a NullBarSink (no persistence)",
             file=sys.stderr,
         )
@@ -1915,7 +1915,7 @@ def cmd_fetch(
     # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
     # → RUN_COMPLETE). --inspect / --dry-run write no real data, so they get a
     # null context (no audit). # pragma: no cover — live path (the audit-write
-    # core is 100%-tested in test_dhan_run_ingest.py).
+    # core is 100%-tested in test_groww_run_ingest.py).
     audit_ctx: Any = contextlib.nullcontext(None)
     if not (dry_run or inspect):  # pragma: no cover — live
         from brutex.orchestrator.audit import AuditWriter
@@ -1940,7 +1940,7 @@ def cmd_fetch(
             )
             print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
         else:
-            # Groww auth is TOTP (no Dhan-style 24h JWT + RenewToken pre-flight): a
+            # Groww auth is TOTP (no legacy 24h JWT + token pre-flight): a
             # missing-creds resolve is the only up-front gate (DEC-DHAN-GROWW-REMIGRATE-001,
             # PR-J2). Refuse loudly BEFORE burning a paced pull when creds are absent;
             # there is no Groww token-liveness probe to invent (Golden Rule #1).
@@ -2000,7 +2000,7 @@ def cmd_fetch(
             # the identical bug on the dashboard path): pass GROWW_COVERAGE_MARKET +
             # Groww's 30-day `window_days_for` so the PLANNED keys this seeds == the
             # keys the Groww ingest later settles. Without them `plan_windows` defaults
-            # to the Dhan namespace ("dhan" + 90-day width), so the planned rows would
+            # to the default coverage namespace ("spot" + 90-day width), so the planned rows would
             # never match the fetched ones → orphan PLANNED rows / re-pull loops
             # (CLAUDE.md §11 COMMON). `plan_windows` + `reconcile_ledger_with_lake`
             # are themselves 100%-covered in test_window_ledger_store.py; this wiring is
@@ -2232,7 +2232,7 @@ def cmd_sweep(
     self-describing leaderboard (``brutex.engine.sweep_report``). Signal-only —
     nothing is persisted (DEC-SWEEP-CLI-001). ``--exchange`` / ``--segment`` /
     ``--interval`` are the LAKE partition labels and must match what was ingested
-    (segment ``INDEX`` for the spot indexes — the lake partition label, NOT the Dhan
+    (segment ``INDEX`` for the spot indexes — the lake partition label, NOT the Groww
     API's ``IDX_I`` request segment).
     """
     from brutex.data.catalog import Catalog
@@ -3612,7 +3612,7 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
 # and the rolling-option lake (the OptionBarSource). They are real-lake +
 # fno_math I/O paths — unrunnable on the Py3.11/no-wheel/no-data sandbox — so
 # they are coverage-omitted (cli.py) + pragma'd and verified by the operator
-# against a real Dhan lake; the executor core they call is the tested piece.
+# against a real Groww lake; the executor core they call is the tested piece.
 
 
 class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-verified

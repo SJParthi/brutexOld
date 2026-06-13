@@ -1,18 +1,18 @@
-"""Precise constituent → Dhan ``SECURITY_ID`` mapping (PURE, no I/O).
+"""Precise constituent → vendor ``SECURITY_ID`` mapping (PURE, no I/O).
 
 DEC-NIFTY-TOTAL-MARKET-MAP-001 — Stage 2a of DEC-NIFTY-TOTAL-MARKET-001
 (MIGRATION.md). Given an index's parsed constituents (from
 :func:`brutex.dashboard.nse_constituents.parse_constituents`, e.g. the ~750
-NIFTY Total Market names) and the Dhan instrument master, resolve **each
-constituent to its NSE cash-equity ``SECURITY_ID``** — the numeric key the Dhan
+NIFTY Total Market names) and the vendor instrument master, resolve **each
+constituent to its NSE cash-equity ``SECURITY_ID``** — the numeric key the vendor
 charts API actually needs.
 
 ## Why ISIN is the load-bearing join key (Golden Rule #1, no hallucination)
 
 The constituent CSV gives a **ticker** (``Symbol``) + a globally-unique
-**``ISIN Code``**. The Dhan master gives ``security_id``, ``isin``, and
+**``ISIN Code``**. The vendor master gives ``security_id``, ``isin``, and
 ``symbol_name``. Matching on the ticker alone is unreliable: for a **non-F&O**
-Dhan equity (the majority of the ~750 Total-Market names) the engine
+vendor equity (the majority of the ~750 Total-Market names) the engine
 ``symbol_name`` is the **long company name**, not the ticker — only F&O-eligible
 EQ rows carry the ticker in ``symbol_name`` (DEC-DHAN-FNO-JOIN-KEY-001). So:
 
@@ -20,7 +20,7 @@ EQ rows carry the ticker in ``symbol_name`` (DEC-DHAN-FNO-JOIN-KEY-001). So:
   listings. ``constituent.isin`` → ``instrument.isin``.
 * **Fallback — ticker.** ``constituent.symbol`` → ``instrument.symbol_name``;
   only resolves the F&O-eligible names (where ``symbol_name`` IS the ticker),
-  used solely when a constituent has no ISIN or its ISIN is absent from Dhan.
+  used solely when a constituent has no ISIN or its ISIN is absent from the vendor.
 
 Both keys are matched **only against NSE cash-equity rows** (``instrument == EQ``
 ∧ ``exch_id == NSE`` ∧ ``segment == CASH``) so derivative legs and BSE dual
@@ -28,7 +28,7 @@ listings never mis-match.
 
 ## Performance (O(1) per lookup — CLAUDE.md §2 Rule 5)
 
-The Dhan side is indexed **once** into two hash maps (``isin →`` instrument,
+The vendor side is indexed **once** into two hash maps (``isin →`` instrument,
 ``ticker →`` instrument); each of the N constituents is then a constant-time
 lookup. Total ``O(N_master + N_constituents)``, each per-name resolve O(1).
 
@@ -40,7 +40,7 @@ order, so the same inputs always produce the same mapping (Golden Rule #7).
 
 ## Honesty (Golden Rule #10)
 
-Nothing is fabricated: a constituent whose ISIN is absent from Dhan and whose
+Nothing is fabricated: a constituent whose ISIN is absent from the vendor and whose
 ticker doesn't match a cash-equity ``symbol_name`` is returned in ``unmatched``
 — never assigned a guessed ``SECURITY_ID``. :meth:`MatchReport.summary` makes
 the coverage visible (``matched X/Y — A by ISIN, B by ticker; unmatched Z``).
@@ -57,7 +57,7 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 @dataclass(frozen=True)
 class ConstituentMatch:
-    """A resolved constituent → its NSE cash-equity Dhan ``SECURITY_ID``."""
+    """A resolved constituent → its NSE cash-equity vendor ``SECURITY_ID``."""
 
     symbol: str
     isin: str | None
@@ -68,7 +68,7 @@ class ConstituentMatch:
 
 @dataclass(frozen=True)
 class MatchReport:
-    """The outcome of resolving a list of constituents against the Dhan master."""
+    """The outcome of resolving a list of constituents against the vendor master."""
 
     matched: tuple[ConstituentMatch, ...]
     unmatched: tuple[ConstituentRow, ...]
@@ -152,7 +152,7 @@ def resolve_constituents(
     constituents
         The index members (e.g. from :func:`parse_constituents`).
     instruments
-        The Dhan instrument master (any iterable of :class:`Instrument`); only
+        The vendor instrument master (any iterable of :class:`Instrument`); only
         the NSE cash-equity rows participate.
 
     Returns
@@ -217,7 +217,7 @@ def resolve_reference_security_ids(
     constituents
         The index members (e.g. from :func:`parse_constituents`).
     instruments
-        The Dhan instrument master (only NSE cash equities participate).
+        The vendor instrument master (only NSE cash equities participate).
     require_full_coverage
         When ``True`` (default), raise :class:`ConstituentCoverageError` if ANY
         constituent is unmatched — the hostile review's fail-loud rule, so a

@@ -27,21 +27,26 @@ blake3 formula block and the stale line pointed mid-section). Earlier:
 #612 — §2 Rule 13(a) `mergeable_state` invariant aligned with the
 charter §4.5 pre-G2 envelope per DEC-WORKSPACE-VERIFY-002 follow-up
 F-4). Earlier: 2026-06-10 (DEC-WORKSPACE-VERIFY-002, MIGRATION.md #609 —
-§6 `dhan/constants.py` line citations refreshed after the 5-agent
-workspace verification found 4 rows drifted by 7 lines; §1/§3 active
-branch refreshed). Earlier: 2026-06-03 (DEC-SHARED-CORE-001 Phase 2b,
+§6 prior-vendor `constants.py` line citations refreshed after the
+5-agent workspace verification found 4 rows drifted by 7 lines; §1/§3
+active branch refreshed). Earlier: 2026-06-03 (DEC-SHARED-CORE-001 Phase 2b,
 MIGRATION.md
 #441 — BruteX's 52-condition vocab now delegates to the shared
 `rust/trading-core/` crate; §1/§5 reconciled). Earlier: 2026-06-01
-(DEC-DASHBOARD-OMIT-AUDIT-001 — vendor docs reconciled Groww → Dhan
-after the 5-agent workspace verification found §1/§6 stale). DEC-P0-026
+(DEC-DASHBOARD-OMIT-AUDIT-001 — vendor docs reconciled Groww → the prior
+vendor after the 5-agent workspace verification found §1/§6 stale).
+DEC-P0-026
 (PR #48) retired the tickvault co-development layer; DEC-SHARED-CORE-001
 then re-established a single shared `trading-core` crate (indicators +
 52-vocab) consumed by BruteX + TickVault. Vendor history: broker → Groww
-migration (2026-05-15), Groww →
-Dhan pivot proposed then reverted — **DEC-GROWW-DHAN-REVERT-001
-(2026-05-31, ADR-0002) is authoritative: the live vendor is Dhan.**
-Track 1 spec locked after 4-agent hostile-review pass._
+migration (2026-05-15), Groww → prior-vendor pivot proposed then
+reverted (ADR-0002, 2026-05-31 — the prior-vendor revert, now
+superseded), then a full
+re-migration back to Groww — **DEC-DHAN-GROWW-REMIGRATE-001 (2026-06-12,
+ADR-0009) supersedes the revert and is authoritative: the live vendor is
+Groww (the prior-vendor adapter package + reference docs were removed in
+the ADR-0009 §5 cutover PR series).** Track 1 spec locked after 4-agent
+hostile-review pass._
 
 ---
 
@@ -53,17 +58,20 @@ Track 1 spec locked after 4-agent hostile-review pass._
   VIX** (volatility index). Track 1 is signal-only research; the
   Options Track translates winning signals to options for execution
   realism.
-- **Data source (Track 1):** **Dhan Data API v2** (REST, no vendor SDK —
-  plain HTTP client; base `https://api.dhan.co/v2/`) per
-  DEC-GROWW-DHAN-REVERT-001 / ADR-0002. Track 1 spot uses two surfaces:
-  1. `POST /v2/charts/intraday` (1-minute OHLC ONLY per
-     DEC-DHAN-1M-ONLY-001; other timeframes resampled deterministically
-     from 1m)
-  2. `POST /v2/charts/historical` (daily OHLC, used for PDH/PDL anchors)
+- **Data source (Track 1):** **Groww Trade API** via the `growwapi`
+  Python SDK (injected `GrowwAPI` client; TOTP auth) per
+  DEC-DHAN-GROWW-REMIGRATE-001 / ADR-0009 (which supersedes the
+  ADR-0002 prior-vendor revert). One unified surface for
+  spot AND options:
+  1. `groww.get_historical_candles(...)` — fetch 1-minute OHLC ONLY for
+     spot (per DEC-DHAN-1M-ONLY-001; the 19 derived intraday timeframes
+     are resampled deterministically from 1m), plus `1day` candles for
+     PDH/PDL daily anchors.
 
-  Expired options (Options Track / lake) use `POST /v2/charts/rollingoption`
-  exclusively (never the spot endpoints). See §6 for the full verified
-  fact table.
+  Expired options (Options Track / lake) use the same
+  `get_historical_candles` after resolving contracts via
+  `groww.get_expiries(...)` → `groww.get_contracts(...)`. See §6 for the
+  full verified fact table.
 - **Out of scope (Track 1 engine):** Live feed, WebSocket, order
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
@@ -74,7 +82,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
 
 ## 2. Golden Rules (never violate)
 
-1. **No hallucination.** Every factual claim about Dhan, NSE, BSE, NIFTY
+1. **No hallucination.** Every factual claim about Groww, NSE, BSE, NIFTY
    composition, brokerage, taxes, or any external system must be
    traceable to a verified source. If unsure, say "unverified" and stop.
 2. **Single source of truth.** All Track 1 specs live under
@@ -82,7 +90,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
    a section + decision ID from `docs/MIGRATION.md`. The legacy
    `docs/REQUIREMENTS.md` is a retired stub (banner only) — do not
    read or derive new requirements from it.
-3. **Scope lock.** Track 1 = Dhan + spot indexes + India VIX (NIFTY 50,
+3. **Scope lock.** Track 1 = Groww + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every trade, but is NEVER part of brute-force pattern combinations
@@ -93,7 +101,8 @@ Track 1 spec locked after 4-agent hostile-review pass._
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
    cover **200 NSE F&O eligible single stocks (spot + options across the
-   Dhan rolling-option `expiryCodes`)** for the LAKE. The **BRUTE-FORCE ENGINE is
+   vendor's expiry/contract addressing — Groww `get_expiries` →
+   `get_contracts`)** for the LAKE. The **BRUTE-FORCE ENGINE is
    UNCHANGED** — it still operates only on the 3 brute-force indexes
    (NIFTY/BANKNIFTY/SENSEX); the 200 stocks join India VIX in
    `REFERENCE_ONLY` (mirrors decision #83). Stock options sit in the
@@ -129,13 +138,21 @@ Track 1 spec locked after 4-agent hostile-review pass._
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
    append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
    for each hot path. Any regression fails CI.
-6. **Rate-limit safety.** Dhan Data APIs: **5 req/s** per-second cap +
-   **100,000/day** quota (`docs/dhan-ref/01-introduction-and-rate-limits.md`;
-   mirrored in `brutex/adapters/dhan/constants.py` `DATA_RATE_LIMIT_RPS=5`,
-   `DATA_DAILY_QUOTA=100_000`). Adapter uses an adaptive token bucket
-   capped at **[3..5] r/s** (`brutex/adapters/dhan/rate_control.py`).
-   Never raise without explicit user approval. Track 1's typical
-   first-run + daily incremental is < 0.1% of the daily quota.
+6. **Rate-limit safety.** Groww publishes type-level limits (the
+   **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
+   300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
+   The **backtesting `get_historical_candles` per-second cap + daily
+   quota are UNDOCUMENTED** and are an OPEN Phase-0 probe gate
+   (`brutex/adapters/groww/constants.py:112-118`
+   `GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`,
+   `GROWW_DAILY_QUOTA_UNVERIFIED=None`; ADR-0009 §3.1 risk #4 / §4) — the
+   `_UNVERIFIED` suffix carries the honesty requirement in the
+   identifier. The adapter paces with the vendor-neutral adaptive
+   token-bucket controller (`brutex/adapters/rate_common.py:136`
+   `RateController`, injected `ceiling_rps`; the 429/timeout ladders step
+   down to a deep floor of **1 r/s** under sustained pressure and recover
+   up to the ceiling once it clears). Never raise the ceiling without
+   explicit user approval.
 7. **Idempotence.** Every ingest chunk and every backtest combo must be
    rerun-safe. Same inputs → same outputs, bit-for-bit. The audit-log
    replay test is the oracle.
@@ -241,7 +258,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
-  - `feat(adapter/dhan): implement intraday OHLC chunking`
+  - `feat(adapter/groww): implement intraday OHLC chunking`
   - `fix(engine): O(1) regression in bar lookup`
   - `test(property): add DSR effective-N invariant`
   - `chore(claude): update CLAUDE.md rules`
@@ -325,7 +342,7 @@ bruteX/
 │   ├── adr/                        ← architecture decisions
 │   └── runbooks/
 ├── brutex/                         ← Python package
-│   ├── adapters/dhan/              ← Dhan Data API v2 adapter (REST)
+│   ├── adapters/groww/             ← Groww Trade API adapter (growwapi SDK)
 │   ├── calendars/                  ← NSE/BSE trading calendar
 │   ├── config/
 │   ├── costs/                      ← brokerage/tax cost models
@@ -367,56 +384,50 @@ bruteX/
 
 ---
 
-## 6. Verified Dhan Facts (cite these, don't re-derive)
+## 6. Verified Groww Facts (cite these, don't re-derive)
 
-> **DEC-GROWW-DHAN-REVERT-001 (2026-05-31, ADR-0002):** REVERSAL of
-> ADR-0001's Dhan→Groww pivot. The live vendor is **Dhan Data API v2**.
-> The facts below are repo-sourced: HARD-VERIFIED from
-> `brutex/adapters/dhan/constants.py` (and sibling modules) + the
-> operator-supplied Dhan v2 reference at `docs/dhan-ref/`. See
-> `docs/adr/0002-groww-to-dhan-revert.md` for the revert rationale.
-> The legacy Groww table is preserved in git history (pre-revert);
-> `docs/adr/0001-groww-vendor-pivot.md` is SUPERSEDED. (Compiled by the
-> 2026-06-01 5-agent workspace verification; every row traces to file:line.)
+> **DEC-DHAN-GROWW-REMIGRATE-001 (2026-06-12, ADR-0009):** full
+> re-migration of the Track-1 backtesting data source back to the
+> **Groww Trade API** (`growwapi` Python SDK). This SUPERSEDES the
+> ADR-0002 prior-vendor revert; the prior-vendor adapter package + its
+> reference docs were removed in the ADR-0009 §5 cutover PR series. The
+> facts below are repo-sourced: HARD-VERIFIED from
+> `brutex/adapters/groww/constants.py` (and sibling modules) + the Groww
+> SDK reference at `docs/groww/api-reference/`. See `docs/adr/` ADR-0009
+> for the migration rationale + the accepted-risk register. Rows whose value is an OPEN Phase-0 probe
+> gate are stamped **UNVERIFIED** (ADR-0009 §3.2 / §4) — never encoded as
+> fact in code until a probe transcript lands. Every row traces to
+> file:line.
 
 | Fact | Value | Source |
 |------|-------|--------|
-| Vendor / transport | **Dhan Data API v2 — REST, NO vendor SDK** (plain HTTP via `requests`/`httpx`) | `adr/0002-groww-to-dhan-revert.md:45-46` |
-| Base URL | `https://api.dhan.co/v2/` | `dhan/constants.py:24`; `dhan-ref/01...:13` |
-| Historical OHLC — spot | `POST /v2/charts/intraday` (1m) + `POST /v2/charts/historical` (1d) | `dhan/constants.py:31-34`; `dhan-ref/05...:22-25` |
-| Expired-options method | `POST /v2/charts/rollingoption` — **ONLY** option source (spot endpoints never used for options) | `dhan/constants.py:37`; `dhan-ref/06...:11-13` |
-| Backtesting segments | `IDX_I` (indices — NIFTY/BANKNIFTY/SENSEX/India VIX), `NSE_EQ`, `NSE_FNO`, `BSE_EQ`, `BSE_FNO` | `dhan/constants.py:76`; `dhan-ref/09...:76-78` (DEC-DHAN-IDX-SEGMENT-001) |
-| Instrument types | `INDEX, EQUITY, OPTIDX, OPTSTK, FUTIDX, FUTSTK` | `dhan/constants.py:74-76` |
-| Historical depth — intraday | **5 years** | `dhan/constants.py:99`; `dhan-ref/05...:82` |
-| Historical depth — daily | **back to instrument inception** | `dhan-ref/05...:84` |
-| Candle intervals (Dhan supports) | `"1","5","15","25","60"` (minutes) | `dhan/constants.py:60`; `dhan-ref/05...:43` |
-| Candle interval — Track 1 spot+options | **`"1"` (1-minute) ONLY** (DEC-DHAN-1M-ONLY-001; other TFs resampled) | `dhan/constants.py:63,66`; `dhan-ref/05...:89-91` |
-| Chunk window — intraday | **90 days per call** (single cap, no tiering) | `dhan/constants.py:100`; `dhan-ref/05...:83` |
-| Chunk window — options | **30 days per call** | `dhan/constants.py:103`; `dhan-ref/06...:18` |
-| Candle response shape — spot | **Columnar parallel arrays** `{open[],high[],low[],close[],volume[],timestamp[],open_interest[]}` (NOT row-arrays) | `dhan/parser.py:5-15`; `dhan-ref/05...:54-63` |
-| Candle response shape — options | **Per-side columnar** `{ce:{iv[],oi[],strike[],spot[],open[],...}, pe:null}` (null side allowed) | `dhan-ref/06...:54-62` |
-| **Price unit** | **RUPEES (float)** from Dhan — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `dhan-ref/05...:72-73` |
-| Timestamp unit | **UNIX epoch (UTC seconds)** — store UTC, convert to IST at display only | `dhan/parser.py:36-57`; `dhan-ref/05...:74-76` |
-| Symbol/key format | **`SECURITY_ID` (numeric, from CSV) — NEVER hardcode**; lookup Symbol/ISIN → CSV row → SECURITY_ID | `dhan/instruments.py:64-73`; `dhan-ref/09...:64-72` |
-| Options strike addressing | **Relative-to-spot ATM±N** (ATM±10 index near-expiry, ATM±3 other), NOT absolute strikes | `dhan-ref/06...:43-44` |
-| Options instrument type | **`CALL` / `PUT`** (NOT `CE`/`PE`) | `dhan/constants.py:79`; `dhan-ref/06...:45` |
-| Exchanges | NSE, BSE, MCX | `dhan-ref/09...:34` |
-| Rate limit — Data APIs | **5 r/s, 100,000/day** (single Data bucket) | `dhan/constants.py:93,96`; `dhan-ref/01...:22-26` |
-| Adapter effective cap | **Adaptive [3..5] r/s** (token bucket, step-down on 429) | `dhan/rate_control.py:1-153` + this file §2 rule 6 |
-| Data-API bucket isolation | **UNVERIFIED** — no explicit sharing rule in docs; treat 5 r/s as binding | `dhan-ref/01...:49-57` |
-| Auth — default approach | **Manual web-generated token + `RenewToken`** (operator 2026-05-31); header `access-token` (JWT, 24h) + `dhanClientId`. `RenewToken` is an **HTTP GET — headers-only, NO body** (DEC-DHAN-RENEWTOKEN-GET-001; source: official SDK `dhan-oss/DhanHQ-py` `src/dhanhq/auth.py` `requests.get(url, headers=headers)`) — a POST+body is rejected `HTTP 400 DH-905` | `dhan/auth.py`; `dhan/constants.py:53,56`; `dhan-ref/02...:19-35,67-72` |
-| Auth — TOTP alternative | `POST https://auth.dhan.co/app/generateAccessToken?dhanClientId=&pin=&totp=` (unattended runs, meets §11) | `dhan/constants.py:27`; `dhan-ref/02...:44-82` |
-| Instrument master URL — compact | `https://images.dhan.co/api-data/api-scrip-master.csv` | `dhan/constants.py:44`; `dhan-ref/09...:10` |
-| Instrument master URL — detailed | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` (**required for F&O**) | `dhan/constants.py:47-48`; `dhan-ref/09...:11` |
-| Instrument master schema | 31 cols; keys `EXCH_ID, SEGMENT, SECURITY_ID (PK), ISIN, INSTRUMENT, UNDERLYING_SYMBOL, SYMBOL_NAME, LOT_SIZE, TICK_SIZE, SM_FREEZE_QTY, OPTION_TYPE, EXPIRY_FLAG` | `dhan/instruments.py:51-72`; `dhan-ref/09...:20-30` |
-| Exception hierarchy | `DhanError, DhanAuthError, DhanRateLimitError, DhanBadRequest, DhanNotFound, DhanServerError` + `is_retryable()` | `dhan/errors.py:1-103` |
-| F&O-eligible stock detection | EQUITY rows whose `UNDERLYING_SYMBOL` appears in FUTSTK/OPTSTK set (DEC-DHAN-FNO-JOIN-KEY-001) | `dhan/instruments.py:15-34,361-421` |
-| Index allow-list | **31 NSE + {SENSEX} BSE = 32** (`_ADMITTED_NSE/BSE_INDEX_SYMBOLS`); India VIX in NSE list | `dhan/instruments.py:113-148` |
-| Track 1 brute-force universe | NIFTY (`IDX_I`,INDEX), BANKNIFTY (`IDX_I`,INDEX), SENSEX (`IDX_I`,INDEX) — **indices use the cross-exchange `IDX_I` segment, NOT `*_EQ`** (DEC-DHAN-IDX-SEGMENT-001); resolved to SECURITY_ID via CSV | `dhan/instruments.py:113-148`; `dhan/adapter.py:128` |
-| INDIA VIX presence on historical endpoint | **UNVERIFIED** — Phase 0 HARD-GATE empirical probe | `dhan/instruments.py:119`; `dhan-ref/01...:49-57` |
-| Index SECURITY_ID values (NIFTY/BANKNIFTY/SENSEX) | **UNVERIFIED** — not in docs; resolve from detailed CSV at Phase 0 | `dhan-ref/09...:80-90` |
-| Expiry-code numbering | **DISCREPANCY** — rolling-option uses 1/2/3 (Near/Next/Far); Annexure uses 0/1/2 (DEC-DHAN-EXPIRY-CODES-001 open) | `dhan-ref/06...:43` |
-| Time format | IST market times (convert to/from UTC at ingest/display) | `dhan/parser.py:36-57` |
+| Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
+| Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:88-129` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot) | `groww/api-reference/03-backtesting.md:41-134` |
+| Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
+| Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
+| Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
+| 1-minute granularity at the 2020 boundary | **UNVERIFIED** — Phase-0 probe gate (rows may not truly start Jan-2020 at 1m) | `groww/constants.py:107`; `adr/0009-...-migration.md:113-114` |
+| Candle intervals (SDK supports) | `1/2/3/5/10/15/30 minute`, `1hour`, `4hour`, `1day`, `1week`, `1month` | `groww/constants.py:57-70`; `groww/api-reference/04-annexures.md:85-98` |
+| Candle interval — Track 1 spot | **`1minute` ONLY** (+ `1day` for PDH/PDL); 19 intraday TFs resampled from 1m (mirrors DEC-DHAN-1M-ONLY-001) | `groww/constants.py:71-74` |
+| Chunk window — by interval tier | **1/2/3/5m → 30d · 10/15/30m → 90d · 1h+/1d/1w/1mo → 180d** per call (richer than a single split) | `groww/constants.py:76-89`; `groww/chunks.py:34-60`; `groww/api-reference/03-backtesting.md:238-246` |
+| Candle response shape | **ROW-arrays** — `{"candles": [[ts, open, high, low, close, volume, open_interest], ...]}`; OI `null` for non-FNO | `groww/parser.py:1-18,104-124`; `groww/api-reference/03-backtesting.md:202-236` |
+| **Price unit** | **RUPEES (float)** from Groww — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `groww/api-reference/03-backtesting.md:202` |
+| Timestamp unit | **Native-IST string** `"yyyy-MM-ddTHH:mm:ss"` (or epoch seconds defensively) — localized to IST (fixed +05:30, no DST), stored UTC, displayed IST | `groww/parser.py:33-67`; `groww/constants.py:109-110`; `groww/api-reference/03-backtesting.md:198-207` |
+| Symbol/key format | **`groww_symbol` string** `EXCH-SYMBOL[-…]` (e.g. `NSE-NIFTY`, `BSE-SENSEX`) — O(1) `by_groww_symbol` lookup, NOT a numeric ID | `groww/instruments.py:190-201`; `groww/adapter.py:108-111`; `groww/api-reference/02-instruments.md:119`, `03-backtesting.md:10-37` |
+| Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
+| Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
+| Rate limit — backtesting | **UNVERIFIED** — `get_historical_candles` per-second cap + daily quota UNDOCUMENTED; Phase-0 probe gate. The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps`, steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear | `adapters/rate_common.py:136-198` + this file §2 rule 6 |
+| Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds via `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET`. The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED) | `groww/auth.py:28-31,94-114`; `groww/api-reference/01-introduction.md:34-96` |
+| Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
+| Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
+| Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name) | `groww/errors.py:36-108`; `groww/api-reference/05-exceptions.md:9-70` |
+| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set; **212** single stocks verified in the operator instrument master (lake scope) | `groww/constants.py:103-104`; `groww/instruments.py:174` |
+| Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved via `by_groww_symbol` | `groww/constants.py:97-100`; `groww/instruments.py:124-136`; `groww/adapter.py:45-58` |
+| INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
+| INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
+| Token lifetime + backtest-vs-live drift | **UNVERIFIED** — Phase-0 probe gates (unattended TOTP token lifetime; prior-vendor↔Groww 1m bar drift) | `adr/0009-...-migration.md:88-92,113-124` |
 
 ## 7. Verified Indian Market Microstructure Facts
 

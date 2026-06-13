@@ -1,4 +1,4 @@
-"""Tests for :mod:`brutex.config.credentials` — secure Dhan credential store.
+"""Tests for :mod:`brutex.config.credentials` — secure token credential store.
 
 Exhaustive line + branch coverage of the save / load / resolve / present /
 clear surface (DEC-CREDENTIALS-STORE-001, DEC-DHAN-CREDS-WIRING-001). Every
@@ -20,15 +20,15 @@ from brutex.config.credentials import (
     ENV_CLIENT_ID,
     ENV_CREDENTIALS_FILE,
     CredentialsError,
-    DhanFileCredentials,
-    clear_dhan_credentials,
+    TokenFileCredentials,
+    clear_token_credentials,
     credentials_path,
     credentials_present,
     credentials_preview,
-    load_dhan_credentials,
+    load_token_credentials,
     normalise_token,
-    resolve_dhan_file_credentials,
-    save_dhan_credentials,
+    resolve_token_file_credentials,
+    save_token_credentials,
     token_shape_problem,
 )
 
@@ -42,8 +42,8 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _creds(token: str = FAKE_TOKEN, client_id: str = FAKE_CLIENT_ID) -> DhanFileCredentials:
-    return DhanFileCredentials(access_token=token, client_id=client_id)
+def _creds(token: str = FAKE_TOKEN, client_id: str = FAKE_CLIENT_ID) -> TokenFileCredentials:
+    return TokenFileCredentials(access_token=token, client_id=client_id)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -72,14 +72,14 @@ class TestCredentialsPath:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# save_dhan_credentials
+# save_token_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestSave:
     def test_writes_0600_and_parent_0700_and_shape(self, tmp_path: Path) -> None:
         path = tmp_path / "nest" / "credentials.json"
-        written = save_dhan_credentials(_creds(), path=path)
+        written = save_token_credentials(_creds(), path=path)
 
         assert written == path
         assert _mode(path) == 0o600
@@ -87,23 +87,23 @@ class TestSave:
         assert _mode(path) & 0o077 == 0
 
         payload = json.loads(path.read_text(encoding="utf-8"))
-        assert payload == {"dhan": {"access_token": FAKE_TOKEN, "client_id": FAKE_CLIENT_ID}}
+        assert payload == {"token": {"access_token": FAKE_TOKEN, "client_id": FAKE_CLIENT_ID}}
 
     def test_leaves_no_temp_file_behind(self, tmp_path: Path) -> None:
-        save_dhan_credentials(_creds(), path=tmp_path / "credentials.json")
+        save_token_credentials(_creds(), path=tmp_path / "credentials.json")
         leftovers = [p.name for p in tmp_path.iterdir() if p.name != "credentials.json"]
         assert leftovers == []
 
     def test_blank_access_token_raises_without_value(self, tmp_path: Path) -> None:
         with pytest.raises(CredentialsError) as exc:
-            save_dhan_credentials(_creds(token="   "), path=tmp_path / "c.json")
+            save_token_credentials(_creds(token="   "), path=tmp_path / "c.json")
         assert "access_token" in str(exc.value)
         assert FAKE_CLIENT_ID not in str(exc.value)
         assert not (tmp_path / "c.json").exists()
 
     def test_blank_client_id_raises_without_value(self, tmp_path: Path) -> None:
         with pytest.raises(CredentialsError) as exc:
-            save_dhan_credentials(_creds(client_id=""), path=tmp_path / "c.json")
+            save_token_credentials(_creds(client_id=""), path=tmp_path / "c.json")
         assert "client_id" in str(exc.value)
         assert FAKE_TOKEN not in str(exc.value)
 
@@ -112,7 +112,7 @@ class TestSave:
     ) -> None:
         target = tmp_path / "home" / "credentials.json"
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
-        written = save_dhan_credentials(_creds())
+        written = save_token_credentials(_creds())
         assert written == target
         assert target.exists()
 
@@ -128,39 +128,39 @@ class TestSave:
 
         monkeypatch.setattr(mod.os, "replace", _boom)
         with pytest.raises(OSError, match="disk full"):
-            save_dhan_credentials(_creds(), path=tmp_path / "credentials.json")
+            save_token_credentials(_creds(), path=tmp_path / "credentials.json")
         assert list(tmp_path.iterdir()) == []
 
 
 # ────────────────────────────────────────────────────────────────────────
-# load_dhan_credentials
+# load_token_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestLoad:
     def test_round_trip(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
-        assert load_dhan_credentials(path=path) == _creds()
+        save_token_credentials(_creds(), path=path)
+        assert load_token_credentials(path=path) == _creds()
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
-        assert load_dhan_credentials(path=tmp_path / "nope.json") is None
+        assert load_token_credentials(path=tmp_path / "nope.json") is None
 
     def test_default_path_when_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         target = tmp_path / "credentials.json"
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
-        assert load_dhan_credentials() is None
-        save_dhan_credentials(_creds())
-        loaded = load_dhan_credentials()
+        assert load_token_credentials() is None
+        save_token_credentials(_creds())
+        loaded = load_token_credentials()
         assert loaded is not None
         assert loaded.access_token == FAKE_TOKEN
 
     def test_insecure_perms_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
+        save_token_credentials(_creds(), path=path)
         path.chmod(0o644)
         with pytest.raises(CredentialsError) as exc:
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
         assert "chmod 600" in str(exc.value)
         assert "insecure permissions" in str(exc.value)
 
@@ -168,11 +168,11 @@ class TestLoad:
         # A symlinked credentials path is refused (O_NOFOLLOW) rather than
         # followed — closes the perms-check/read TOCTOU via a swapped symlink.
         real = tmp_path / "real.json"
-        save_dhan_credentials(_creds(), path=real)
+        save_token_credentials(_creds(), path=real)
         link = tmp_path / "credentials.json"
         link.symlink_to(real)
         with pytest.raises(CredentialsError) as exc:
-            load_dhan_credentials(path=link)
+            load_token_credentials(path=link)
         assert "symlink" in str(exc.value)
         assert FAKE_TOKEN not in str(exc.value)
         assert FAKE_CLIENT_ID not in str(exc.value)
@@ -182,120 +182,120 @@ class TestLoad:
         path.write_text("{not valid json", encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="corrupt or unreadable"):
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
 
     def test_non_dict_top_level_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="invalid shape"):
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
 
-    def test_missing_dhan_section_refused(self, tmp_path: Path) -> None:
+    def test_missing_token_section_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(json.dumps({"other": {}}), encoding="utf-8")
         path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="missing the 'dhan' section"):
-            load_dhan_credentials(path=path)
+        with pytest.raises(CredentialsError, match="missing the 'token' section"):
+            load_token_credentials(path=path)
 
-    def test_dhan_section_not_dict_refused(self, tmp_path: Path) -> None:
+    def test_token_section_not_dict_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        path.write_text(json.dumps({"dhan": "scalar"}), encoding="utf-8")
+        path.write_text(json.dumps({"token": "scalar"}), encoding="utf-8")
         path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="missing the 'dhan' section"):
-            load_dhan_credentials(path=path)
+        with pytest.raises(CredentialsError, match="missing the 'token' section"):
+            load_token_credentials(path=path)
 
     def test_missing_access_token_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        path.write_text(json.dumps({"dhan": {"client_id": FAKE_CLIENT_ID}}), encoding="utf-8")
+        path.write_text(json.dumps({"token": {"client_id": FAKE_CLIENT_ID}}), encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError) as exc:
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
         assert "access_token" in str(exc.value)
         assert FAKE_CLIENT_ID not in str(exc.value)
 
     def test_blank_access_token_value_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(
-            json.dumps({"dhan": {"access_token": "  ", "client_id": FAKE_CLIENT_ID}}),
+            json.dumps({"token": {"access_token": "  ", "client_id": FAKE_CLIENT_ID}}),
             encoding="utf-8",
         )
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="access_token"):
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
 
     def test_non_string_access_token_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(
-            json.dumps({"dhan": {"access_token": 123, "client_id": FAKE_CLIENT_ID}}),
+            json.dumps({"token": {"access_token": 123, "client_id": FAKE_CLIENT_ID}}),
             encoding="utf-8",
         )
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="access_token"):
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
 
     def test_missing_client_id_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        path.write_text(json.dumps({"dhan": {"access_token": FAKE_TOKEN}}), encoding="utf-8")
+        path.write_text(json.dumps({"token": {"access_token": FAKE_TOKEN}}), encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError) as exc:
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
         assert "client_id" in str(exc.value)
         assert FAKE_TOKEN not in str(exc.value)
 
     def test_blank_client_id_value_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(
-            json.dumps({"dhan": {"access_token": FAKE_TOKEN, "client_id": ""}}),
+            json.dumps({"token": {"access_token": FAKE_TOKEN, "client_id": ""}}),
             encoding="utf-8",
         )
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="client_id"):
-            load_dhan_credentials(path=path)
+            load_token_credentials(path=path)
 
 
 # ────────────────────────────────────────────────────────────────────────
-# resolve_dhan_file_credentials
+# resolve_token_file_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestResolve:
     def test_env_only(self, tmp_path: Path) -> None:
         env = {ENV_ACCESS_TOKEN: FAKE_TOKEN, ENV_CLIENT_ID: FAKE_CLIENT_ID}
-        assert resolve_dhan_file_credentials(env, path=tmp_path / "absent.json") == _creds()
+        assert resolve_token_file_credentials(env, path=tmp_path / "absent.json") == _creds()
 
     def test_file_only(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
-        creds = resolve_dhan_file_credentials({}, path=path)
+        save_token_credentials(_creds(), path=path)
+        creds = resolve_token_file_credentials({}, path=path)
         assert creds.access_token == FAKE_TOKEN
         assert creds.client_id == FAKE_CLIENT_ID
 
     def test_per_field_mix_env_token_file_client(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(token="file-token"), path=path)
-        creds = resolve_dhan_file_credentials({ENV_ACCESS_TOKEN: "env-token"}, path=path)
+        save_token_credentials(_creds(token="file-token"), path=path)
+        creds = resolve_token_file_credentials({ENV_ACCESS_TOKEN: "env-token"}, path=path)
         assert creds.access_token == "env-token"  # env wins for this field
         assert creds.client_id == FAKE_CLIENT_ID  # file fills the other
 
     def test_env_overrides_file_for_both(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(token="file-token", client_id="file-client"), path=path)
+        save_token_credentials(_creds(token="file-token", client_id="file-client"), path=path)
         env = {ENV_ACCESS_TOKEN: "env-token", ENV_CLIENT_ID: "env-client"}
-        creds = resolve_dhan_file_credentials(env, path=path)
-        assert creds == DhanFileCredentials(access_token="env-token", client_id="env-client")
+        creds = resolve_token_file_credentials(env, path=path)
+        assert creds == TokenFileCredentials(access_token="env-token", client_id="env-client")
 
     def test_blank_env_field_falls_back_to_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
+        save_token_credentials(_creds(), path=path)
         env = {ENV_ACCESS_TOKEN: "   ", ENV_CLIENT_ID: ""}
-        creds = resolve_dhan_file_credentials(env, path=path)
+        creds = resolve_token_file_credentials(env, path=path)
         assert creds.access_token == FAKE_TOKEN
         assert creds.client_id == FAKE_CLIENT_ID
 
     def test_neither_raises_naming_both(self, tmp_path: Path) -> None:
         with pytest.raises(CredentialsError) as exc:
-            resolve_dhan_file_credentials({}, path=tmp_path / "absent.json")
+            resolve_token_file_credentials({}, path=tmp_path / "absent.json")
         msg = str(exc.value)
         assert ENV_ACCESS_TOKEN in msg
         assert ENV_CLIENT_ID in msg
@@ -304,7 +304,7 @@ class TestResolve:
     def test_only_access_token_missing(self, tmp_path: Path) -> None:
         env = {ENV_CLIENT_ID: FAKE_CLIENT_ID}
         with pytest.raises(CredentialsError) as exc:
-            resolve_dhan_file_credentials(env, path=tmp_path / "absent.json")
+            resolve_token_file_credentials(env, path=tmp_path / "absent.json")
         missing_part = str(exc.value).split(";", maxsplit=1)[0]
         assert ENV_ACCESS_TOKEN in missing_part
         assert ENV_CLIENT_ID not in missing_part
@@ -312,7 +312,7 @@ class TestResolve:
     def test_only_client_id_missing(self, tmp_path: Path) -> None:
         env = {ENV_ACCESS_TOKEN: FAKE_TOKEN}
         with pytest.raises(CredentialsError) as exc:
-            resolve_dhan_file_credentials(env, path=tmp_path / "absent.json")
+            resolve_token_file_credentials(env, path=tmp_path / "absent.json")
         missing_part = str(exc.value).split(";", maxsplit=1)[0]
         assert ENV_CLIENT_ID in missing_part
         assert ENV_ACCESS_TOKEN not in missing_part
@@ -322,14 +322,14 @@ class TestResolve:
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "absent.json"))
         monkeypatch.setenv(ENV_ACCESS_TOKEN, FAKE_TOKEN)
         monkeypatch.setenv(ENV_CLIENT_ID, FAKE_CLIENT_ID)
-        assert resolve_dhan_file_credentials().access_token == FAKE_TOKEN
+        assert resolve_token_file_credentials().access_token == FAKE_TOKEN
 
     def test_insecure_file_propagates(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
+        save_token_credentials(_creds(), path=path)
         path.chmod(0o644)
         with pytest.raises(CredentialsError, match="chmod 600"):
-            resolve_dhan_file_credentials({}, path=path)
+            resolve_token_file_credentials({}, path=path)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -344,7 +344,7 @@ class TestPresent:
 
     def test_true_from_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
+        save_token_credentials(_creds(), path=path)
         assert credentials_present({}, path=path) is True
 
     def test_false_when_absent(self, tmp_path: Path) -> None:
@@ -352,7 +352,7 @@ class TestPresent:
 
     def test_false_on_insecure_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
+        save_token_credentials(_creds(), path=path)
         path.chmod(0o644)
         assert credentials_present({}, path=path) is False
 
@@ -364,26 +364,26 @@ class TestPresent:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# clear_dhan_credentials
+# clear_token_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestClear:
     def test_removes_existing(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(), path=path)
-        assert clear_dhan_credentials(path=path) is True
+        save_token_credentials(_creds(), path=path)
+        assert clear_token_credentials(path=path) is True
         assert not path.exists()
 
     def test_returns_false_when_absent(self, tmp_path: Path) -> None:
-        assert clear_dhan_credentials(path=tmp_path / "absent.json") is False
+        assert clear_token_credentials(path=tmp_path / "absent.json") is False
 
     def test_default_path_when_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         target = tmp_path / "credentials.json"
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
-        assert clear_dhan_credentials() is False
-        save_dhan_credentials(_creds())
-        assert clear_dhan_credentials() is True
+        assert clear_token_credentials() is False
+        save_token_credentials(_creds())
+        assert clear_token_credentials() is True
         assert not target.exists()
 
 
@@ -394,7 +394,7 @@ class TestClear:
 
 class TestNormalise:
     def test_strips_surrounding_whitespace(self) -> None:
-        # A paste with a trailing newline → "access-token: <tok>\n" → Dhan 401.
+        # A paste with a trailing newline → "access-token: <tok>\n" → a vendor 401.
         assert normalise_token("  eyJraWQ.payload.sig \n") == "eyJraWQ.payload.sig"
 
     def test_keeps_internal_chars(self) -> None:
@@ -404,8 +404,8 @@ class TestNormalise:
     def test_save_persists_normalised_values(self, tmp_path: Path) -> None:
         """A whitespace-laden paste is stored CANONICAL (the 401 root-cause fix)."""
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(_creds(token="  tok.en \n", client_id=" 110099 "), path=path)
-        stored = json.loads(path.read_text())["dhan"]
+        save_token_credentials(_creds(token="  tok.en \n", client_id=" 110099 "), path=path)
+        stored = json.loads(path.read_text())["token"]
         assert stored["access_token"] == "tok.en"
         assert stored["client_id"] == "110099"
 
@@ -413,7 +413,7 @@ class TestNormalise:
         """Even env-sourced creds (an exported paste) are canonicalised."""
         monkeypatch.setenv(ENV_ACCESS_TOKEN, "  envtok \n")
         monkeypatch.setenv(ENV_CLIENT_ID, " 110099 ")
-        creds = resolve_dhan_file_credentials(path=Path("/nonexistent/creds.json"))
+        creds = resolve_token_file_credentials(path=Path("/nonexistent/creds.json"))
         assert creds.access_token == "envtok"
         assert creds.client_id == "110099"
 
@@ -482,7 +482,7 @@ class TestPreview:
     def test_present_returns_masked_previews_and_lengths(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         token = "eyJraWQabcdefghij1234WXYZ"  # 25 chars
-        save_dhan_credentials(_creds(token=token, client_id="1100123456"), path=path)
+        save_token_credentials(_creds(token=token, client_id="1100123456"), path=path)
         preview = credentials_preview(env={}, path=path)
         assert preview["present"] is True
         # Masked head…tail — never the full secret.
@@ -496,7 +496,7 @@ class TestPreview:
         """A value too short to split head…tail is bulleted, never revealed."""
         path = tmp_path / "credentials.json"
         # client_id 'ABCD' (4 chars) ≤ head(2)+tail(2) → fully masked.
-        save_dhan_credentials(_creds(token="tok12345", client_id="ABCD"), path=path)
+        save_token_credentials(_creds(token="tok12345", client_id="ABCD"), path=path)
         preview = credentials_preview(env={}, path=path)
         assert preview["client_id_preview"] == "••••"
         assert preview["client_id_len"] == 4

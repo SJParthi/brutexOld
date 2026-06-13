@@ -32,7 +32,7 @@ the API-call level on the next click (the incremental skip below).
 Re-clicking a button must do only NEW work. The key insight is **immutability
 by time**, not "pulled once = never again":
 
-* **Phase 1 expiries** — a *past* year's expiry calendar is FINAL (Dhan never
+* **Phase 1 expiries** — a *past* year's expiry calendar is FINAL (the vendor never
   adds a 2021 expiry in 2026). :func:`cells_to_pull` skips
   ``(exchange, underlying, year)`` when ``year < current_year`` AND it is
   already settled (a complete/pending coverage row). The **current** year is
@@ -163,7 +163,7 @@ def phase1_cells(
     underlyings
         ``(exchange, underlying_symbol)`` pairs in the brute-force/lake universe.
     years
-        Calendar years to cover (Dhan historical data from 2021).
+        Calendar years to cover (vendor historical data from 2021).
 
     Returns
     -------

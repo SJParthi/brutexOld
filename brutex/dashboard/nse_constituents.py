@@ -7,7 +7,7 @@ our F&O-eligible universe, ready for the unified "⤓ Pull spot".
 
 ## Honesty (CLAUDE.md §1 no-hallucination, §10 honest limits)
 
-This is **NOT Dhan data** — the Dhan instrument master does not carry
+This is **NOT vendor data** — the Groww instrument master does not carry
 index membership. NSE publishes per-index constituent CSVs (e.g.
 ``ind_nifty50list.csv``) under
 ``https://nsearchives.nseindia.com/content/indices/``. Those CSVs are
@@ -105,7 +105,7 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY TOTAL MARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
     "NIFTYTOTALMARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
     "NIFTY_TOTAL_MARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
-    # ABBREVIATED ("MKT") aliases — DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001: the Dhan
+    # ABBREVIATED ("MKT") aliases — DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001: the Groww
     # detailed-master spells this index "NIFTY TOTAL MKT" (the value
     # ``ntm.NTM_SYMBOL`` holds + the display symbol the /universe page sends to
     # ``/api/v1/universe/index-constituents``), NOT the niftyindices "MARKET"
@@ -164,8 +164,8 @@ class ConstituentRow:
     """One NSE-index constituent: its ticker ``symbol`` + (optional) ``isin``.
 
     DEC-NIFTY-TOTAL-MARKET-MAP-001. The ISIN is the globally-unique join key
-    used to map a constituent to its Dhan ``SECURITY_ID`` (the ticker alone is
-    ambiguous — for non-F&O Dhan equities the engine ``symbol_name`` is the long
+    used to map a constituent to its vendor ``SECURITY_ID`` (the ticker alone is
+    ambiguous — for non-F&O vendor equities the engine ``symbol_name`` is the long
     company name, NOT the ticker, per DEC-DHAN-FNO-JOIN-KEY-001). ``isin`` is
     ``None`` only when the source CSV omits/blanks the ISIN column.
     """
@@ -364,7 +364,7 @@ def fetch_constituent_csv(
 
     The text sibling of :func:`fetch_constituent_symbols`: returns the full CSV
     body so callers that need the **ISIN** column (e.g. NTM constituent →
-    ``SECURITY_ID`` resolution against the Dhan master, DEC-NIFTY-TOTAL-MARKET-MAP-001)
+    ``SECURITY_ID`` resolution against the vendor master, DEC-NIFTY-TOTAL-MARKET-MAP-001)
     can parse it themselves, not just the symbol list. Returns ``None`` for an
     unknown index (no URL mapping). Fetch errors from *opener* PROPAGATE (the
     caller decides whether to degrade). Tests inject a fake *opener* offline.

@@ -71,7 +71,7 @@ def test_wipe_targets_registry_covers_all_overrides() -> None:
     assert OVERRIDE_ENV_VARS == (
         "BRUTEX_LAKE_ROOT",
         "BRUTEX_CREDENTIALS_FILE",
-        "BRUTEX_DHAN_TOKEN_PATH",
+        "BRUTEX_TOKEN_PATH",
         "BRUTEX_LOG_DIR",
         "BRUTEX_LOG_FILE",
         "BRUTEX_RUNTIME_FILE",

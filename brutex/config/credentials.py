@@ -1,15 +1,15 @@
-"""Secure local credentials store for the Dhan adapter (DEC-CREDENTIALS-STORE-001).
+"""Secure local credentials store for the vendor adapter (DEC-CREDENTIALS-STORE-001).
 
-The operator sets their Dhan **access token** + **client id** ONCE — via
+The operator sets their token-style **access token** + **client id** ONCE — via
 ``brutex auth set``, the dashboard Credentials page, or the
-``BRUTEX_DHAN_*`` env vars — and they auto-load every session, satisfying
-``CLAUDE.md §11`` AUTOMATED (no ``export`` per shell, zero clicks per day).
+``BRUTEX_ACCESS_TOKEN`` / ``BRUTEX_CLIENT_ID`` env vars — and they auto-load
+every session, satisfying ``CLAUDE.md §11`` AUTOMATED (no ``export`` per shell,
+zero clicks per day).
 
-This is the file-backed half of the Dhan credential resolution
-(DEC-DHAN-CREDS-WIRING-001): the adapter's env-first resolver
-(:func:`brutex.adapters.dhan.auth.resolve_dhan_credentials`) falls back to the
-file this module writes, so creds saved on the dashboard **actually enable a
-live pull** — closing the prior Groww-store-vs-Dhan-env disconnect that forced
+This is the file-backed half of the token-style credential resolution
+(DEC-DHAN-CREDS-WIRING-001): the vendor adapter's env-first resolver falls back
+to the file this module writes, so creds saved on the dashboard **actually
+enable a live pull** — closing the prior store-vs-env disconnect that forced
 every dashboard pull to dry-run.
 
 ## Security model (the only thing this module is for)
@@ -32,7 +32,7 @@ every dashboard pull to dry-run.
 
 ## Resolution order
 
-:func:`resolve_dhan_file_credentials` is **per-field env-first, file-fallback**:
+:func:`resolve_token_file_credentials` is **per-field env-first, file-fallback**:
 each of ``access_token`` / ``client_id`` is taken from its env var when
 non-empty, else from the saved file. This lets an operator override a single
 field from the environment without rewriting the file.
@@ -56,21 +56,22 @@ from brutex.adapters.groww.auth import ENV_TOTP_SECRET as ENV_GROWW_TOTP_SECRET
 #: Env var that overrides the credentials file location (path, not a secret).
 ENV_CREDENTIALS_FILE: Final[str] = "BRUTEX_CREDENTIALS_FILE"
 
-#: Env var holding the Dhan access token (the env var NAME, not the value).
-ENV_ACCESS_TOKEN: Final[str] = "BRUTEX_DHAN_ACCESS_TOKEN"  # noqa: S105  # env var name, not a secret
+#: Env var holding the access token (the env var NAME, not the value).
+ENV_ACCESS_TOKEN: Final[str] = "BRUTEX_ACCESS_TOKEN"  # noqa: S105  # env var name, not a secret
 
-#: Env var holding the Dhan client id (env var NAME, not the value).
-ENV_CLIENT_ID: Final[str] = "BRUTEX_DHAN_CLIENT_ID"
+#: Env var holding the client id (env var NAME, not the value).
+ENV_CLIENT_ID: Final[str] = "BRUTEX_CLIENT_ID"
 
 #: Permission bits that, if set, mean the file is group / world accessible.
 _INSECURE_MODE_BITS: Final[int] = 0o077
 
-#: JSON top-level section the Dhan credentials live under.
-_SECTION: Final[str] = "dhan"
+#: JSON top-level section the token-style credentials live under.
+_SECTION: Final[str] = "token"
 
-#: JSON top-level section the Groww credentials live under. Groww + Dhan
-#: sections coexist in ONE file (read-merge-write), so saving one vendor's
-#: credentials never drops the other's (DEC-DHAN-GROWW-REMIGRATE-001).
+#: JSON top-level section the Groww credentials live under. The Groww section
+#: and the legacy token-style section coexist in ONE file (read-merge-write), so
+#: saving one vendor's credentials never drops the other's
+#: (DEC-DHAN-GROWW-REMIGRATE-001).
 _GROWW_SECTION: Final[str] = "groww"
 
 #: How to set Groww credentials, appended to "missing field" errors. Names the
@@ -84,7 +85,7 @@ _GROWW_HOW_TO_SET: Final[str] = (
 #: three supported mechanisms; contains NO secret values.
 _HOW_TO_SET: Final[str] = (
     "run `brutex auth set`, use the dashboard Credentials page, or export "
-    "BRUTEX_DHAN_ACCESS_TOKEN / BRUTEX_DHAN_CLIENT_ID"
+    "BRUTEX_ACCESS_TOKEN / BRUTEX_CLIENT_ID"
 )
 
 
@@ -100,10 +101,10 @@ class CredentialsError(Exception):
 def normalise_token(value: str) -> str:
     """Return *value* with surrounding whitespace stripped.
 
-    A copy-pasted Dhan access token / client id very often carries a trailing
+    A copy-pasted access token / client id very often carries a trailing
     newline or stray spaces (clipboard / password-manager artefacts). The
     client puts the access token straight into an ``access-token`` header, so a
-    trailing ``\\n`` produces a malformed header and Dhan rejects the request
+    trailing ``\\n`` produces a malformed header and the vendor rejects the request
     with **HTTP 401** (DEC-CREDS-NORMALISE-001). Stripping the outer whitespace
     removes that whole class of opaque auth failures. Internal characters are
     left untouched (the token is an opaque JWT).
@@ -111,7 +112,7 @@ def normalise_token(value: str) -> str:
     return value.strip()
 
 
-#: A Dhan access token is a JWT (``CLAUDE.md`` §6: "header ``access-token``
+#: A token-style access token is a JWT (``CLAUDE.md`` §6: "header ``access-token``
 #: (JWT, 24h)") — exactly three base64url segments joined by ``.``
 #: (``header.payload.signature``). A clipboard paste that drops characters
 #: almost always loses or empties the trailing signature segment, collapsing
@@ -128,9 +129,9 @@ _B64URL_SEGMENT: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
 def token_shape_problem(token: str) -> str | None:
     """Return a reason *token* is not a well-formed JWT, or ``None`` when it is.
 
-    A Dhan access token is a JWT (``CLAUDE.md`` §6) — exactly three non-empty
-    base64url segments joined by ``.`` (``header.payload.signature``). A
-    clipboard paste that drops characters almost always loses or empties the
+    A token-style access token is a JWT (``CLAUDE.md`` §6) — exactly three
+    non-empty base64url segments joined by ``.`` (``header.payload.signature``).
+    A clipboard paste that drops characters almost always loses or empties the
     trailing signature segment, collapsing the segment count, so this
     structural check catches the dominant truncation failure mode **offline,
     before a doomed token is ever saved** (DEC-CREDS-JWT-SHAPE-001). It is the
@@ -193,15 +194,15 @@ class GrowwFileCredentials:
 
 
 @dataclass(frozen=True, slots=True)
-class DhanFileCredentials:
-    """An immutable pair of Dhan credentials as stored on disk.
+class TokenFileCredentials:
+    """An immutable pair of token-style credentials as stored on disk.
 
     Attributes
     ----------
     access_token
-        The Dhan access token (``BRUTEX_DHAN_ACCESS_TOKEN``).
+        The access token (``BRUTEX_ACCESS_TOKEN``).
     client_id
-        The Dhan client id (``BRUTEX_DHAN_CLIENT_ID``).
+        The client id (``BRUTEX_CLIENT_ID``).
     """
 
     access_token: str
@@ -233,11 +234,11 @@ def credentials_path(env: Mapping[str, str] | None = None) -> Path:
 def _read_raw_sections(target: Path) -> dict[str, object]:
     """Return the parsed top-level object of *target*, or ``{}`` when absent.
 
-    The READ half of the read-merge-write that lets the Dhan + Groww sections
-    coexist: saving one vendor's credentials reads the existing file first so the
-    OTHER vendor's section is preserved (it was previously clobbered by a
-    whole-file ``json.dumps`` — DEC-DHAN-GROWW-REMIGRATE-001). Mirrors the
-    security posture of :func:`load_dhan_credentials`: ``O_NOFOLLOW`` open +
+    The READ half of the read-merge-write that lets the token-style + Groww
+    sections coexist: saving one vendor's credentials reads the existing file
+    first so the OTHER vendor's section is preserved (it was previously clobbered
+    by a whole-file ``json.dumps`` — DEC-DHAN-GROWW-REMIGRATE-001). Mirrors the
+    security posture of :func:`load_token_credentials`: ``O_NOFOLLOW`` open +
     insecure-permission refusal on the same fd (TOCTOU-safe). A corrupt /
     wrong-shape existing file is refused rather than silently overwritten, so a
     save can never destroy an unreadable-but-present file's contents.
@@ -278,8 +279,8 @@ def _read_raw_sections(target: Path) -> dict[str, object]:
 def _atomic_write(target: Path, payload: str) -> None:
     """Atomically write *payload* to *target* at mode 0600 (parent dir 0700).
 
-    The WRITE half of the read-merge-write, shared by the Dhan + Groww saves. A
-    :func:`tempfile.NamedTemporaryFile` in the destination directory is
+    The WRITE half of the read-merge-write, shared by the token-style + Groww
+    saves. A :func:`tempfile.NamedTemporaryFile` in the destination directory is
     ``chmod``-ed 0600, then ``os.replace``-d over *target* — so the file never
     exists world-readable, even briefly. On any failure the temp file is removed.
     """
@@ -305,15 +306,15 @@ def _save_section(target: Path, section: str, values: dict[str, str]) -> None:
     """Read-merge-write *values* into *section* of *target*, preserving others.
 
     Reads the existing file (:func:`_read_raw_sections`), replaces only
-    *section*, and writes the whole object back atomically — so a Dhan save never
-    drops a stored Groww section and vice versa (DEC-DHAN-GROWW-REMIGRATE-001).
+    *section*, and writes the whole object back atomically — so a token-style save
+    never drops a stored Groww section and vice versa (DEC-DHAN-GROWW-REMIGRATE-001).
     """
     raw = _read_raw_sections(target)
     raw[section] = values
     _atomic_write(target, json.dumps(raw))
 
 
-def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = None) -> Path:
+def save_token_credentials(creds: TokenFileCredentials, *, path: Path | None = None) -> Path:
     """Atomically write *creds* to *path* at mode 0600 (parent dir 0700).
 
     Parameters
@@ -338,7 +339,7 @@ def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = Non
     -----
     The write is a **read-merge-write** (:func:`_save_section`): the existing
     file is read first so a stored Groww section is preserved, then only the
-    ``dhan`` section is replaced and the whole object written atomically — a
+    ``token`` section is replaced and the whole object written atomically — a
     :func:`tempfile.NamedTemporaryFile` ``chmod``-ed 0600 then ``os.replace``-d
     over *path*, so the file never exists world-readable. On any failure the
     temp file is removed.
@@ -349,7 +350,7 @@ def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = Non
         raise CredentialsError("client_id must not be blank")
 
     # Persist the CANONICAL (stripped) form (DEC-CREDS-NORMALISE-001) so a paste
-    # with a trailing newline never reaches the Dhan ``access-token`` header
+    # with a trailing newline never reaches the ``access-token`` header
     # malformed (the opaque 401 the operator would otherwise hit).
     access_token = normalise_token(creds.access_token)
     client_id = normalise_token(creds.client_id)
@@ -359,7 +360,7 @@ def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = Non
     return target
 
 
-def load_dhan_credentials(*, path: Path | None = None) -> DhanFileCredentials | None:
+def load_token_credentials(*, path: Path | None = None) -> TokenFileCredentials | None:
     """Load saved credentials, or ``None`` when the file is absent.
 
     Parameters
@@ -369,7 +370,7 @@ def load_dhan_credentials(*, path: Path | None = None) -> DhanFileCredentials | 
 
     Returns
     -------
-    DhanFileCredentials | None
+    TokenFileCredentials | None
         The stored credentials, or ``None`` when *path* does not exist.
 
     Raises
@@ -418,12 +419,12 @@ def load_dhan_credentials(*, path: Path | None = None) -> DhanFileCredentials | 
         raise CredentialsError(f"credentials file {target} has a missing or blank access_token")
     if not isinstance(client_id, str) or not client_id.strip():
         raise CredentialsError(f"credentials file {target} has a missing or blank client_id")
-    return DhanFileCredentials(access_token=access_token, client_id=client_id)
+    return TokenFileCredentials(access_token=access_token, client_id=client_id)
 
 
-def resolve_dhan_file_credentials(
+def resolve_token_file_credentials(
     env: Mapping[str, str] | None = None, *, path: Path | None = None
-) -> DhanFileCredentials:
+) -> TokenFileCredentials:
     """Resolve credentials per-field: env-first, saved-file fallback.
 
     Each field is taken from its env var when non-blank, otherwise from the
@@ -439,7 +440,7 @@ def resolve_dhan_file_credentials(
 
     Returns
     -------
-    DhanFileCredentials
+    TokenFileCredentials
         The resolved credentials.
 
     Raises
@@ -447,11 +448,11 @@ def resolve_dhan_file_credentials(
     CredentialsError
         If either field cannot be resolved from env or file. The message
         names WHICH field(s) are missing and how to set them — never a
-        value. Also propagated from :func:`load_dhan_credentials` for an
+        value. Also propagated from :func:`load_token_credentials` for an
         insecure / corrupt file.
     """
     source = os.environ if env is None else env
-    stored = load_dhan_credentials(path=path)
+    stored = load_token_credentials(path=path)
 
     env_token = source.get(ENV_ACCESS_TOKEN)
     env_client = source.get(ENV_CLIENT_ID)
@@ -474,19 +475,20 @@ def resolve_dhan_file_credentials(
     if client_id is None:
         missing.append(ENV_CLIENT_ID)
     if access_token is None or client_id is None:
-        raise CredentialsError(f"missing Dhan credentials: {', '.join(missing)}; {_HOW_TO_SET}")
+        raise CredentialsError(f"missing credentials: {', '.join(missing)}; {_HOW_TO_SET}")
     # Canonicalise at the resolution boundary (DEC-CREDS-NORMALISE-001) so the
     # auth layer always gets a clean ``access-token`` header value — whether the
-    # value came from the saved file OR a ``BRUTEX_DHAN_*`` env var (an exported
-    # value can carry the same paste whitespace). Idempotent on clean values.
-    return DhanFileCredentials(
+    # value came from the saved file OR a ``BRUTEX_ACCESS_TOKEN`` / ``BRUTEX_CLIENT_ID``
+    # env var (an exported value can carry the same paste whitespace). Idempotent
+    # on clean values.
+    return TokenFileCredentials(
         access_token=normalise_token(access_token),
         client_id=normalise_token(client_id),
     )
 
 
 def credentials_present(env: Mapping[str, str] | None = None, *, path: Path | None = None) -> bool:
-    """Return ``True`` iff :func:`resolve_dhan_file_credentials` would succeed.
+    """Return ``True`` iff :func:`resolve_token_file_credentials` would succeed.
 
     Parameters
     ----------
@@ -504,7 +506,7 @@ def credentials_present(env: Mapping[str, str] | None = None, *, path: Path | No
         raising (so a status surface degrades gracefully).
     """
     try:
-        resolve_dhan_file_credentials(env, path=path)
+        resolve_token_file_credentials(env, path=path)
     except CredentialsError:
         return False
     return True
@@ -526,7 +528,7 @@ def _mask_secret(value: str, *, head: int, tail: int) -> str:
 def credentials_preview(
     env: Mapping[str, str] | None = None, *, path: Path | None = None
 ) -> dict[str, object]:
-    """Return a NON-SECRET preview of the stored Dhan credentials for the operator.
+    """Return a NON-SECRET preview of the stored token-style credentials for the operator.
 
     Surfaces, on the dashboard Credentials page, a masked ``head…tail`` preview +
     character length of each resolved field so the paste can be VERIFIED at a
@@ -548,7 +550,7 @@ def credentials_preview(
         of the normalised values, never the raw secrets.
     """
     try:
-        creds = resolve_dhan_file_credentials(env, path=path)
+        creds = resolve_token_file_credentials(env, path=path)
     except CredentialsError:
         return {"present": False}
     return {
@@ -560,7 +562,7 @@ def credentials_preview(
     }
 
 
-def clear_dhan_credentials(*, path: Path | None = None) -> bool:
+def clear_token_credentials(*, path: Path | None = None) -> bool:
     """Delete the credentials file if present.
 
     Parameters
@@ -587,9 +589,9 @@ def save_groww_credentials(creds: GrowwFileCredentials, *, path: Path | None = N
     """Atomically write Groww *creds* into the ``groww`` section (mode 0600).
 
     A **read-merge-write** (:func:`_save_section`): the existing file is read
-    first so a stored ``dhan`` section is preserved, then only the ``groww``
+    first so a stored ``token`` section is preserved, then only the ``groww``
     section is replaced and the whole object written atomically — saving Groww
-    credentials never drops the Dhan section (DEC-DHAN-GROWW-REMIGRATE-001).
+    credentials never drops the legacy section (DEC-DHAN-GROWW-REMIGRATE-001).
 
     Parameters
     ----------
@@ -634,7 +636,7 @@ def load_groww_credentials(*, path: Path | None = None) -> GrowwFileCredentials 
     -------
     GrowwFileCredentials | None
         The stored credentials, ``None`` when *path* does not exist OR exists
-        but has no ``groww`` section (a Dhan-only file). A present-but-broken
+        but has no ``groww`` section (a legacy-only file). A present-but-broken
         ``groww`` section (blank field) is surfaced, NOT silently ``None``.
 
     Raises
@@ -772,9 +774,9 @@ def groww_credentials_preview(
 def clear_groww_credentials(*, path: Path | None = None) -> bool:
     """Remove only the ``groww`` section from the credentials file.
 
-    Unlike :func:`clear_dhan_credentials` (which deletes the whole single-vendor
+    Unlike :func:`clear_token_credentials` (which deletes the whole single-vendor
     file), this is a read-merge-write that drops only the ``groww`` section so a
-    coexisting ``dhan`` section is preserved.
+    coexisting ``token`` section is preserved.
 
     Parameters
     ----------
@@ -803,21 +805,21 @@ __all__ = [
     "ENV_GROWW_API_KEY",
     "ENV_GROWW_TOTP_SECRET",
     "CredentialsError",
-    "DhanFileCredentials",
     "GrowwFileCredentials",
-    "clear_dhan_credentials",
+    "TokenFileCredentials",
     "clear_groww_credentials",
+    "clear_token_credentials",
     "credentials_path",
     "credentials_present",
     "credentials_preview",
     "groww_credentials_present",
     "groww_credentials_preview",
-    "load_dhan_credentials",
     "load_groww_credentials",
+    "load_token_credentials",
     "normalise_token",
-    "resolve_dhan_file_credentials",
     "resolve_groww_file_credentials",
-    "save_dhan_credentials",
+    "resolve_token_file_credentials",
     "save_groww_credentials",
+    "save_token_credentials",
     "token_shape_problem",
 ]

@@ -1,7 +1,7 @@
 """Concrete expired-option sink — O(1)-dedup → write → hash-chained audit.
 
 The write-side component the rolling-option ingest streams into
-(:class:`brutex.adapters.dhan.option_ingest.OptionBarSink` protocol): it
+(the :class:`OptionBarSink` protocol): it
 applies the **O(1) dedup guard** (:class:`~brutex.data.option_dedup.OptionDedupIndex`),
 delegates the surviving bars to an injected partition writer, and appends one
 **hash-chained audit row** per material write (Golden Rule #8). The dedup
@@ -94,7 +94,7 @@ class OptionBarSink:
     fail ``verify_chain``. The lock spans only fast local work (the O(1) dedup
     probe + a Parquet/disk write + one audit line); the per-series **network
     fetch** happens in ``ingest_rolling_option_series`` BEFORE this call, so the
-    cross-worker parallelism (the rate-limited Dhan I/O) is fully preserved — the
+    cross-worker parallelism (the rate-limited vendor I/O) is fully preserved — the
     lock only serialises the lake/audit write tail, which a single-writer audit
     chain requires anyway.
     """
@@ -156,7 +156,7 @@ class OptionBarSink:
         # SINGLE-WRITER critical section (DEC-DHAN-PARALLEL-INGEST-001): the
         # dedup probe + the partition write + the hash-chained audit append must
         # be atomic so the non-thread-safe ``AuditWriter`` advances as exactly
-        # one writer (Golden Rule #8). No network I/O happens here — the Dhan
+        # one writer (Golden Rule #8). No network I/O happens here — the vendor
         # fetch ran before this call — so cross-worker parallelism is preserved.
         with self._lock:
             survivors = unique_option_bars(

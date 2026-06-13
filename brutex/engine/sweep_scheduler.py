@@ -1,8 +1,8 @@
 """Pure, clock-injected sweep-scheduler core (DEC-SWEEP-SCHEDULER-001).
 
 The §11 AUTOMATED "ZERO clicks per day" decree wants the full brute-force sweep
-to run **unattended on a cadence** (intended: nightly, after the incremental Dhan
-pull) while keeping the existing ``brutex sweep-all`` as the **manual** trigger.
+to run **unattended on a cadence** (intended: nightly, after the incremental
+vendor pull) while keeping the existing ``brutex sweep-all`` as the **manual** trigger.
 This module is the deterministic *brain* of that daemon — and **nothing else**.
 
 What this module IS (the testable core)
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from brutex.engine.sweep_checkpoint import SweepCheckpoint
 
 #: India Standard Time offset (UTC+5:30) in seconds — the natural anchor for a
-#: "nightly, after the incremental Dhan pull" daily schedule on an IST market.
+#: "nightly, after the incremental vendor pull" daily schedule on an IST market.
 #: The CLI passes this so ``daily@02:30`` means 02:30 **IST**, not 02:30 UTC.
 IST_OFFSET_SECONDS: Final[int] = 5 * 3600 + 30 * 60  # 19_800
 

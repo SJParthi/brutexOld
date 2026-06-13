@@ -29,10 +29,10 @@ def _banner_json(**kwargs: object) -> str:
 
 _GOLDEN = {
     "auth_expired": (
-        '{"action": "Regenerate the 24-hour token at web.dhan.co, then re-pull. '
-        'A retry can NEVER succeed on a dead token \\u2014 only a fresh token can.", '
+        '{"action": "Re-check the Groww API key + TOTP secret, then re-pull. '
+        'A retry can NEVER succeed on bad credentials \\u2014 only valid credentials can.", '
         '"colour": "red", "css_class": "verdict--red", '
-        '"headline": "\\ud83d\\udd11 Dhan token expired mid-pull \\u2014 the pull aborted.", '
+        '"headline": "\\ud83d\\udd11 Groww auth failed mid-pull \\u2014 the pull aborted.", '
         '"kind": "auth_expired", "pending_windows": 10, "show_retry_button": true}'
     ),
     "transient_residual": (
@@ -43,10 +43,10 @@ _GOLDEN = {
         '"kind": "transient_residual", "pending_windows": 4, "show_retry_button": true}'
     ),
     "known_gap_only": (
-        '{"action": "No action needed \\u2014 these are reference-only symbols Dhan does not serve '
+        '{"action": "No action needed \\u2014 these are reference-only symbols Groww does not serve '
         'intraday (e.g. broad-market indices); they are not brute-force inputs.", '
         '"colour": "grey", "css_class": "verdict--grey", '
-        '"headline": "\\u2139\\ufe0f No new bars \\u2014 these symbols have no intraday on Dhan.", '
+        '"headline": "\\u2139\\ufe0f No new bars \\u2014 these symbols have no intraday on Groww.", '
         '"kind": "known_gap_only", "pending_windows": 0, "show_retry_button": false}'
     ),
     "clean": (

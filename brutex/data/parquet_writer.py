@@ -120,7 +120,7 @@ def _partition_lock(dest: Path) -> threading.Lock:
 def _tick_round(bar: CandleBar) -> CandleBar:
     """Snap a bar's OHLC to the 2-decimal rupee tick grid (DEC-SPOT-PRICE-2DP-001).
 
-    Dhan returns float-noise prices (``14020.7999``) but the real index / equity
+    The vendor returns float-noise prices (``14020.7999``) but the real index / equity
     tick is 2dp (``14020.80``). The spot lake rounds at the write boundary with
     the SAME ``round_money`` (``ROUND_HALF_UP``, never truncation) the option
     writer already uses — so the spot and option lakes match and ``/db`` shows
@@ -144,7 +144,7 @@ def _tick_round(bar: CandleBar) -> CandleBar:
 class BarConflict:
     """A single vendor re-statement detected during merge-on-write.
 
-    When Dhan returns a DIFFERENT OHLCV/OI for a timestamp ALREADY stored
+    When the vendor returns a DIFFERENT OHLCV/OI for a timestamp ALREADY stored
     in the lake the writer records the discrepancy here rather than raising
     (DEC-LAKE-CONFLICT-KEEPFIRST-001). The STORED bar always wins
     (keep-first — never overwritten, preserving reproducibility per

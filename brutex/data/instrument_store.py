@@ -3,7 +3,7 @@
 THE single source of truth for every tradable symbol BruteX knows
 about. Every downstream phase (expiries / contracts / candles /
 strategies / sweep / execution / dashboard) reads from this store
-instead of re-parsing the Dhan instrument master CSV or holding its own copy.
+instead of re-parsing the vendor instrument master CSV or holding its own copy.
 
 ## Why this exists
 
@@ -30,7 +30,7 @@ process and every downstream layer re-parses the CSV from disk.
 
 **Uniqueness** \u2014 primary key
 ``(security_id, exch_id, segment, snapshot_date)``. ``segment`` is
-PART of the key because Dhan's instrument identity is the pair
+PART of the key because the vendor's instrument identity is the pair
 ``(securityId, exchangeSegment)`` (DEC-INSTRUMENT-PK-SEGMENT-001): a
 ``security_id`` is unique only WITHIN an ``(exch_id, segment)`` \u2014 the
 same numeric id can recur across NSE vs BSE AND across CASH vs FNO, so
@@ -104,9 +104,9 @@ from brutex.models import (
 #: row per ``(exch_id, underlying_symbol, year)`` recording how many
 #: expiries/contracts were pulled + the cell's completeness status.
 #:
-#: v3 (ADR-0003 — Dhan-native instrument-master schema rename): the
+#: v3 (ADR-0003 — native instrument-master schema rename): the
 #: ``instruments`` / ``expiries`` / ``contracts`` / ``coverage_ledger``
-#: tables were renamed to Dhan-doc lower_snake column names (KEEPING
+#: tables were renamed to vendor-doc lower_snake column names (KEEPING
 #: BruteX's engine-ready VALUES); identity moved to ``(security_id,
 #: exch_id)``; the old ``vendor_symbol`` / ``internal_trading_symbol`` /
 #: ``buy_allowed`` / ``sell_allowed`` columns were dropped and
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS instruments (
     -- DEFAULT FALSE so the column is back-fill-safe on the drop+recreate.
     reference_only         BOOLEAN NOT NULL DEFAULT FALSE,
 
-    -- Dhan identity is (securityId, exchangeSegment) — a security_id is
+    -- Vendor identity is (securityId, exchangeSegment) — a security_id is
     -- unique only WITHIN an (exch_id, segment); the same id recurs across
     -- NSE/BSE and CASH/FNO, so segment is PART of the PK
     -- (DEC-INSTRUMENT-PK-SEGMENT-001 / ADR-0003).
@@ -306,7 +306,7 @@ class InstrumentRun:
     Written to ``instrument_runs`` table by
     :meth:`InstrumentStore.record_run` after the upsert completes.
     Lets the dashboard and audit layer reconstruct the full history
-    of ingest attempts without replaying the Dhan instrument master CSV.
+    of ingest attempts without replaying the vendor instrument master CSV.
     """
 
     run_id: str
@@ -830,7 +830,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         ``CREATE ... IF NOT EXISTS`` so repeated opens converge to the same
         shape.
 
-        **Schema-version drop+recreate (ADR-0003).** The v3 Dhan-native
+        **Schema-version drop+recreate (ADR-0003).** The v3 native
         rename is a NON-additive column-shape change, so a store stamped at
         an OLDER ``schema_version`` cannot be migrated in place by additive
         DDL. The instrument master is fully rebuildable from one CSV pull,
@@ -937,7 +937,7 @@ class InstrumentStore(metaclass=_StoreMeta):
             Normalised :class:`Instrument` objects, typically the
             full filtered output of Phase A.
         snapshot_date
-            Calendar date the Dhan instrument master CSV was pulled for. Part of
+            Calendar date the vendor instrument master CSV was pulled for. Part of
             the primary key.
         run_id
             Ingest run UUID. Recorded on every row for audit.
@@ -970,7 +970,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         # Defensive identity-dedup (DEC-DHAN-UNIVERSE-PK-DEDUP-001). Within one
         # snapshot the table identity is (security_id, exch_id, segment) — the
         # PRIMARY KEY minus snapshot_date. A caller that hands us two rows sharing
-        # that identity (e.g. the Dhan master listing one security_id under two
+        # that identity (e.g. the vendor master listing one security_id under two
         # SYMBOL_NAMEs — the live "13, NSE, CASH" crash) would otherwise blow up
         # the single bulk INSERT on a PK violation. Collapse to one row per
         # identity here, O(1) per row via a dict (last-seen wins), so the store is
@@ -1738,7 +1738,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         * **CSV source drift** \u2014 returns a per-date map of
           distinct ``csv_source_sha256`` counts. Anything other
           than ``1`` means two pulls on the same day saw
-          different CSV content \u2014 Dhan master CSV drift in-flight.
+          different CSV content \u2014 vendor master CSV drift in-flight.
         """
         self._ensure_open()
         total_row = self._conn.execute("SELECT COUNT(*) FROM instruments").fetchone()

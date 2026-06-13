@@ -11,7 +11,7 @@ SOURCES (fetched live, never hardcoded):
      GET https://www.nseindia.com/api/underlying-information
   2. NSE lot-size CSV (cross-check + lot sizes):
      GET https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv
-  3. Dhan scrip master (UNDERLYING_SECURITY_ID + segment flags) — reuses
+  3. Groww instrument master (underlying_security_id + segment flags) — reuses
      BruteX's own URL + parser (CLAUDE.md §11 COMMON).
 
 NSE FETCH: bare requests 401/403, so we first GET https://www.nseindia.com/ to
@@ -19,14 +19,16 @@ obtain session cookies, persist the jar, THEN request the api/ + archives URLs
 with those cookies + a browser User-Agent + Referer.
 
 RESOLUTION RULES (match locked BruteX architecture):
-  * stock -> spot via the integer UNDERLYING_SECURITY_ID (one canonical spot,
-    O(1)) — done inside ``select_universe_report``; no symbol string-matching.
-  * exclude ``*NSETEST`` test scrips; stock F&O is NSE-only; indices keep all
-    NSE indices + BSE SENSEX (the curated allow-list).
+  * the F&O underlyings are derived from the Groww master's derivative rows
+    (FUT / CE / PE): each carries its ``underlying_symbol`` +
+    ``underlying_security_id``, so the distinct underlyings are the canonical
+    F&O-eligible spots (O(1) per row; no symbol string-matching).
+  * a derivative whose underlying resolves to an index instrument is an index
+    underlying (``OPTIDX``); otherwise a single-stock underlying (``OPTSTK``).
 
 This script is the **network glue** (coverage-excluded — ``source = ["brutex"]``);
 the deterministic transforms it calls live in ``brutex.data.fno_universe`` +
-``brutex.adapters.dhan.instruments`` and are 100%-tested.
+``brutex.adapters.groww.instruments`` and are 100%-tested.
 
 Run on a machine with NSE access (e.g. the operator's Mac):
     python scripts/build_fno_universe.py
@@ -34,8 +36,6 @@ Run on a machine with NSE access (e.g. the operator's Mac):
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 import sys
 import tempfile
@@ -45,8 +45,8 @@ from pathlib import Path
 from typing import Any
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
-from brutex.adapters.dhan.constants import INSTRUMENT_MASTER_DETAILED_URL
-from brutex.adapters.dhan.instruments import select_universe_report
+from brutex.adapters.groww.constants import GROWW_INSTRUMENT_CSV_URL
+from brutex.adapters.groww.instruments import parse_instrument_csv
 from brutex.data.fno_universe import (
     FnoUnderlying,
     common_symbols,
@@ -81,14 +81,14 @@ def _get(opener: Any, url: str, *, referer: str | None = None) -> bytes:
     headers = {"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"}
     if referer:
         headers["Referer"] = referer
-    with opener.open(Request(url, headers=headers), timeout=_TIMEOUT) as resp:  # noqa: S310 — hardcoded https NSE/Dhan URLs only
+    with opener.open(Request(url, headers=headers), timeout=_TIMEOUT) as resp:  # noqa: S310 — hardcoded https NSE/Groww URLs only
         if resp.status != 200:
             raise BuildError(f"{url} -> HTTP {resp.status}")
         return resp.read()
 
 
 def fetch_sources() -> tuple[dict[str, Any], str, str]:
-    """Cookie-prime NSE then fetch (underlying-info JSON, fo_mktlots CSV, Dhan CSV)."""
+    """Cookie-prime NSE then fetch (underlying-info JSON, fo_mktlots CSV, Groww CSV)."""
     opener = _opener()
     _get(opener, _NSE_HOME)  # prime session cookies
     api = json.loads(_get(opener, _NSE_UNDERLYING_API, referer=_NSE_HOME))
@@ -96,8 +96,8 @@ def fetch_sources() -> tuple[dict[str, Any], str, str]:
         mktlots = _get(opener, _FO_MKTLOTS, referer=_NSE_HOME).decode("utf-8")
     except OSError:
         mktlots = _get(opener, _FO_MKTLOTS_FALLBACK, referer=_NSE_HOME).decode("utf-8")
-    dhan = _get(_opener(), INSTRUMENT_MASTER_DETAILED_URL).decode("utf-8")
-    return api, mktlots, dhan
+    groww = _get(_opener(), GROWW_INSTRUMENT_CSV_URL).decode("utf-8")
+    return api, mktlots, groww
 
 
 def nse_api_symbols(payload: dict[str, Any]) -> set[str]:
@@ -111,28 +111,44 @@ def nse_api_symbols(payload: dict[str, Any]) -> set[str]:
     return out
 
 
-def resolve_dhan(dhan_csv: str) -> list[FnoUnderlying]:
-    """Resolve the Dhan master to the canonical F&O-underlying spots (BruteX rules)."""
-    rows = list(csv.DictReader(io.StringIO(dhan_csv)))
-    report = select_universe_report(rows)
-    out: list[FnoUnderlying] = []
-    for inst in report.universe:
-        is_index = inst.instrument_type is InstrumentType.IDX
-        out.append(
-            FnoUnderlying(
-                symbol=inst.trading_symbol,
-                underlying_security_id=inst.exchange_token,
-                instrument_type="OPTIDX" if is_index else "OPTSTK",
-                exchange=inst.exchange.value,
-                lot_size=0,  # filled from fo_mktlots below
-            )
+_DERIVATIVE_TYPES = frozenset({InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE})
+
+
+def resolve_groww(groww_csv: str) -> list[FnoUnderlying]:
+    """Resolve the Groww master to the canonical F&O-underlying spots (BruteX rules).
+
+    The F&O underlyings are the distinct ``underlying_symbol`` referenced by the
+    master's derivative rows (FUT / CE / PE), each carrying its
+    ``underlying_security_id``. An underlying that itself resolves to an index
+    spot (``IDX``) is an index underlying (``OPTIDX``); otherwise a single-stock
+    underlying (``OPTSTK``). Reuses the 100%-tested Groww CSV parser.
+    """
+    pairs = parse_instrument_csv(groww_csv)
+    index_symbols = {
+        inst.symbol_name for _gsym, inst in pairs if inst.instrument is InstrumentType.IDX
+    }
+    # Distinct underlyings keyed on symbol; first derivative row wins for ids/exchange.
+    by_symbol: dict[str, FnoUnderlying] = {}
+    for _gsym, inst in pairs:
+        if inst.instrument not in _DERIVATIVE_TYPES:
+            continue
+        underlying = inst.underlying_symbol
+        if not underlying or inst.underlying_security_id is None or underlying in by_symbol:
+            continue
+        is_index = underlying in index_symbols
+        by_symbol[underlying] = FnoUnderlying(
+            symbol=underlying,
+            underlying_security_id=inst.underlying_security_id,
+            instrument_type="OPTIDX" if is_index else "OPTSTK",
+            exchange=inst.exch_id.value,
+            lot_size=0,  # filled from fo_mktlots below
         )
-    return out
+    return list(by_symbol.values())
 
 
 def main() -> int:
     """Fetch → cross-check → write the timestamped universe CSV. Returns exit code."""
-    api, mktlots_text, dhan_csv = fetch_sources()
+    api, mktlots_text, groww_csv = fetch_sources()
 
     mktlots = parse_fo_mktlots(mktlots_text)
     if len(mktlots.stock_lots) < _MIN_STOCK_UNDERLYINGS:
@@ -142,9 +158,9 @@ def main() -> int:
     if len(nse_syms) < _MIN_STOCK_UNDERLYINGS:
         raise BuildError(f"NSE underlying-information returned only {len(nse_syms)} symbols")
 
-    underlyings = resolve_dhan(dhan_csv)
+    underlyings = resolve_groww(groww_csv)
     if len([u for u in underlyings if u.instrument_type == "OPTSTK"]) < _MIN_STOCK_UNDERLYINGS:
-        raise BuildError("Dhan master resolved too few stock underlyings")
+        raise BuildError("Groww master resolved too few stock underlyings")
 
     # Stamp lot sizes from fo_mktlots; cross-check the three sources' symbol sets.
     lots = {**mktlots.index_lots, **mktlots.stock_lots}
@@ -157,7 +173,7 @@ def main() -> int:
     sources = {
         "nse_api": nse_syms,
         "fo_mktlots": set(mktlots.index_lots) | set(mktlots.stock_lots),
-        "dhan": {u.symbol for u in underlyings},
+        "groww": {u.symbol for u in underlyings},
     }
     only_in = cross_check(sources)
     common = common_symbols(sources)
@@ -166,7 +182,7 @@ def main() -> int:
     out_dir = Path("data")
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / f"fno_underlyings_{datetime.now(UTC):%Y%m%d}.csv"
-    text = to_csv(stamped, source="nse+dhan", fetched_at_utc=fetched_at)
+    text = to_csv(stamped, source="nse+groww", fetched_at_utc=fetched_at)
     # Atomic write — no partial file on failure.
     with tempfile.NamedTemporaryFile("w", dir=out_dir, delete=False, suffix=".tmp") as tmp:
         tmp.write(text)

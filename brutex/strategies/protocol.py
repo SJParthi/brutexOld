@@ -37,7 +37,7 @@ class StrategyMeta:
         versions are allowed to differ without the reproducibility
         gate firing.
     symbols
-        Ordered tuple of canonical (Dhan) trading symbols the strategy
+        Ordered tuple of canonical (vendor) trading symbols the strategy
         consumes. The runner uses this to build the :class:`ReplayFeed`'s
         ``symbols`` argument.
     interval

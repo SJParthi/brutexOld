@@ -81,7 +81,7 @@ class FeedEvent:
     Attributes
     ----------
     symbol
-        Dhan/canonical symbol the bar belongs to, e.g.
+        Canonical (vendor) symbol the bar belongs to, e.g.
         ``"NSE-NIFTY-02Jan25-28500-PE"``.
     bar
         The underlying :class:`~brutex.data.models.CandleBar`.

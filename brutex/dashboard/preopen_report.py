@@ -3,7 +3,7 @@
 A **standalone, lake-derived** report (DEC-PREOPEN-REPORT-001, fully 1-day-sourced
 per DEC-PREOPEN-REPORT-1DAY-001): for each requested spot symbol and each trading
 day in a ``[from, to]`` range it reconstructs the NSE pre-open columns straight
-from the Dhan **1-day** lake — and the numbers match NSE to the paisa (verified
+from the **1-day** lake — and the numbers match NSE to the paisa (verified
 against the operator's pre-open CSV: COALINDIA 2026-05-27 IEP 429.00, PREV. CLOSE
 458.15, %CHNG −6.36):
 

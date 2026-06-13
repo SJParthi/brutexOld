@@ -1,25 +1,25 @@
 # Runbook — Data Fetch Run-Day (instruments · expiries · contracts · index candles)
 
-> **Target audience:** the operator (sjparthi) on the day Dhan access is
+> **Target audience:** the operator (sjparthi) on the day Groww access is
 > first enabled, and any Claude session driving the first real ingest.
 > **Time required:** ~10 min operator setup + ~1-2 h first full index pull
 > (90-day intraday chunks per CLAUDE.md §6); minutes for incremental re-runs.
-> **Prerequisites:** an active Dhan Data API v2 subscription, a web-generated
-> access token + client id, and an environment whose **network policy allows
-> the Dhan hosts** (`api.dhan.co`, `images.dhan.co`).
+> **Prerequisites:** active Groww trade-api access, a Groww API key + TOTP
+> shared secret, and an environment whose **network policy allows the Groww
+> hosts**.
 
 This runbook is the single-paste recipe for the operator directive
 (2026-05-29): *"pulling entire instruments, totp, all expiries, all
 contracts, and current-year NIFTY 50 / BANKNIFTY / SENSEX all timeframes."*
 
-It honors CLAUDE.md §2 rule 6 (rate-limit safety), §6 (verified Dhan
+It honors CLAUDE.md §2 rule 6 (rate-limit safety), §6 (verified vendor
 facts), and Golden Rule #1 (no hallucination — every value below is
 traceable to the cited file).
 
 > **⚠️ Reconciliation banner (DEC-DHAN-DOC-RECONCILE-001, 2026-06-02):** the
-> live vendor is **Dhan Data API v2** (DEC-GROWW-DHAN-REVERT-001, ADR-0002).
-> The §0–§2 + §6 auth / host / setup steps below are Dhan-correct. The exact
-> `brutex fetch` CLI flags in §3–§4 are **Groww-era and pending a live-CLI
+> live vendor is **Groww** (DEC-GROWW-DHAN-REVERT-001, ADR-0002).
+> The §0–§2 + §6 auth / host / setup steps below are Groww-correct. The exact
+> `brutex fetch` CLI flags in §3–§4 are **pending a live-CLI
 > re-verification** (tracked follow-up): the authoritative live-pull path today
 > is the dashboard **`/universe` "Pull the Universe"** panel + the
 > **`/credentials`** page (live pulls enable from the UI; MIGRATION #261-#267).
@@ -33,34 +33,33 @@ by three checks, two of which only the operator can clear:
 
 | Wall | Proof | Who clears it |
 |------|-------|---------------|
-| Network policy denies Dhan hosts | `curl -I https://images.dhan.co/api-data/api-scrip-master-detailed.csv` returns `HTTP 403 host_not_allowed` when blocked | **operator** (environment network policy) |
-| No Dhan credentials | `BRUTEX_DHAN_ACCESS_TOKEN` + `BRUTEX_DHAN_CLIENT_ID` both unset | **operator** (env vars, or the dashboard `/credentials` page) |
+| Network policy denies Groww hosts | a `curl -I` against the Groww instrument-master / API host returns `HTTP 403 host_not_allowed` when blocked | **operator** (environment network policy) |
+| No Groww credentials | `BRUTEX_GROWW_API_KEY` + `BRUTEX_GROWW_TOTP_SECRET` both unset | **operator** (env vars, or the dashboard `/credentials` page) |
 | Runtime deps not installed | no `.venv`; `brutex` import fails | Claude / `make setup` (PyPI is reachable) |
 
 PyPI itself **is** reachable (`curl -I https://pypi.org/simple/` → `HTTP 200`),
-so only the Dhan road and the keys are operator-side.
+so only the Groww road and the keys are operator-side.
 
 ---
 
 ## 1. Operator unblock checklist (do these once)
 
-1. **Subscribe** to the Dhan Data API v2 and generate a **web access token**
-   + note your **client id** from web.dhan.co (CLAUDE.md §6 — the default auth
-   is a manual web-generated token; a TOTP `generateAccessToken` flow exists
-   for unattended renewal that meets §11 AUTOMATED).
+1. **Enable** Groww trade-api access and generate a **Groww API key**
+   + note your **TOTP shared secret** from the Groww trade-api console
+   (CLAUDE.md §6 — auth is TOTP: the API key plus the shared secret mint a
+   6-digit per-session code, which meets §11 AUTOMATED for unattended runs).
 
-2. **Allow the Dhan hosts in the environment network policy.** The web
-   environment is "deny by default"; add at least:
-   - `images.dhan.co` (public instrument master CSV — no auth)
-   - `api.dhan.co` (the Data API v2 host)
+2. **Allow the Groww hosts in the environment network policy.** The web
+   environment is "deny by default"; add the Groww instrument-master and
+   API hosts the adapter calls.
    See https://code.claude.com/docs/en/claude-code-on-the-web for how
    network policies are chosen at environment-creation time.
 
 3. **Set the two credentials** as environment variables (never commit them;
    the dashboard `/credentials` page can also store them):
    ```
-   BRUTEX_DHAN_ACCESS_TOKEN=<access token from web.dhan.co>
-   BRUTEX_DHAN_CLIENT_ID=<your Dhan client id>
+   BRUTEX_GROWW_API_KEY=<Groww API key from the trade-api console>
+   BRUTEX_GROWW_TOTP_SECRET=<your Groww TOTP shared secret>
    ```
    Full var reference: `docs/runbooks/ENV_VARS.md` §5.
 
@@ -173,11 +172,11 @@ every new Claude session, so you see live state with zero clicks.
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `HTTP 403 host_not_allowed` | network policy still denies Dhan | re-check §1 step 2 |
-| auth failure / `HTTP 401` | `BRUTEX_DHAN_ACCESS_TOKEN` / `BRUTEX_DHAN_CLIENT_ID` unset or token expired (24h) | §1 step 3; re-generate the web token |
+| `HTTP 403 host_not_allowed` | network policy still denies Groww | re-check §1 step 2 |
+| auth failure / `HTTP 401` | `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET` unset or wrong (the per-session TOTP code could not be minted/exchanged) | §1 step 3; re-check the API key + TOTP secret |
 | `ModuleNotFoundError` on import | `[data,ui]` extras not installed | `uv pip install --python .venv -e ".[data,ui]"` |
 | `ModuleNotFoundError: fno_math` (only on engine paths) | Rust kernel not built | `make setup`, or `cd rust/fno-math && maturin develop --release` |
-| Rate-limit exception (`HTTP 429`) | burst over the 5 r/s Dhan cap | `rate_control` auto-backs-off 5→4→3; retry |
+| Rate-limit exception (`HTTP 429`) | burst over the 5 r/s Groww cap | `rate_control` auto-backs-off 5→4→3; retry |
 | INDIA VIX missing from CSV | Phase 0 HARD-GATE probe failure | escalate — CLAUDE.md §6 (INDIA VIX presence UNVERIFIED) |
 
 ---
@@ -187,5 +186,5 @@ every new Claude session, so you see live state with zero clicks.
 - **Network/creds blocker + unblock path:** this runbook + DEC-SESSION-HOOK-LIVESTATE-001 (MIGRATION #298).
 - **Index symbols + scope:** Golden Rule #3; `ingest.py:37`.
 - **Rate-limit + chunk windows:** CLAUDE.md §6.
-- **Auth (Dhan access token + client id):** CLAUDE.md §6; `brutex/adapters/dhan/auth.py`.
+- **Auth (Groww API key + TOTP shared secret):** CLAUDE.md §6; `brutex/adapters/groww/auth.py`.
 - **Universe expansion to F&O lake:** DEC-P0-063 (MIGRATION #200).

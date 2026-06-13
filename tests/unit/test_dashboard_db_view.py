@@ -302,7 +302,7 @@ _WINDOW_NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 
 def _window_key(security_id: str = "NIFTY", interval: str = "1minute") -> WindowKey:
     return WindowKey(
-        market="dhan",
+        market="spot",
         security_id=security_id,
         interval=interval,
         start=date(2021, 1, 1),
@@ -414,7 +414,7 @@ def _option_window_key(
 ) -> WindowKey:
     """An option-series ledger key exactly as option_ingest._coverage_key folds it."""
     return WindowKey(
-        market="dhan-option",
+        market="spot-option",
         security_id=security_id,
         interval=interval,
         start=date(2021, 1, 1),
@@ -441,7 +441,7 @@ class TestOptionWindowDecode:
         (window,) = payload["windows"]
         assert window["symbol"] == "BANKNIFTY · NSE_FNO"
         assert window["interval"] == "WEEK#1 ATM+3 CALL · 1m"
-        assert window["market"] == "dhan-option"  # the filter key stays raw
+        assert window["market"] == "spot-option"  # the filter key stays raw
 
     def test_unknown_id_keeps_numeric_id_not_a_crash(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
@@ -501,7 +501,7 @@ class TestOptionWindowDecode:
         spot = build_window_payload(tmp_path, market="spot")
         assert [w["symbol"] for w in spot["windows"]] == ["NIFTY"]
         options = build_window_payload(tmp_path, market="options")
-        assert [w["market"] for w in options["windows"]] == ["dhan-option"]
+        assert [w["market"] for w in options["windows"]] == ["spot-option"]
         assert options["counts"]["spot"] == {"SUCCESS": 1}
         assert options["counts"]["options"] == {"SUCCESS": 1}
 
@@ -588,7 +588,7 @@ class TestSpotWindowRollup:
         )
         ledger.settle_known_gap(
             WindowKey(
-                market="dhan",
+                market="spot",
                 security_id="NIFTY",
                 interval="1minute",
                 start=date(2021, 4, 1),
@@ -598,7 +598,7 @@ class TestSpotWindowRollup:
         )
         ledger.plan(
             WindowKey(
-                market="dhan",
+                market="spot",
                 security_id="NIFTY",
                 interval="1minute",
                 start=date(2021, 7, 1),
@@ -608,7 +608,7 @@ class TestSpotWindowRollup:
         )
         ledger.record(
             WindowKey(
-                market="dhan",
+                market="spot",
                 security_id="NIFTY",
                 interval="1minute",
                 start=date(2021, 10, 1),
@@ -621,7 +621,7 @@ class TestSpotWindowRollup:
         )
         ledger.record(
             WindowKey(
-                market="dhan",
+                market="spot",
                 security_id="NIFTY",
                 interval="1day",
                 start=date(2021, 1, 1),

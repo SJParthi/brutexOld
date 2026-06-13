@@ -33,7 +33,7 @@ from brutex.dashboard.summary_cache import CoverageCounters
 
 #: The positional progress hook the ingest drivers emit
 #: (``label, bars, failed, gap``) — identical to
-#: ``brutex.adapters.dhan.run_ingest.ProgressHook`` but redeclared here so this
+#: ``brutex.adapters.groww.run_ingest.ProgressHook`` but redeclared here so this
 #: layer carries no import from the adapter package. ``gap`` flags a benign
 #: DH-905 no-data boundary (NOT a failure — DEC-DHAN-NO-DATA-GAP-COUNT-001).
 ProgressHook = Callable[[str, int, bool, bool], None]

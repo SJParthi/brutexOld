@@ -48,8 +48,8 @@ class TestBannerForEachKind:
         assert b.css_class == "verdict--red"
         assert b.show_retry_button is True  # needs_operator
         assert b.pending_windows == 10  # 7 + 3 verbatim from the verdict
-        assert "token" in b.headline.lower()
-        assert "web.dhan.co" in b.action
+        assert "auth" in b.headline.lower()
+        assert "TOTP secret" in b.action
 
     def test_transient_residual_is_amber_with_retry(self) -> None:
         b = banner_for(_verdict_dict(still_failed_windows=4, completed=100))

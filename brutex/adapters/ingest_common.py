@@ -1,30 +1,31 @@
-"""Vendor-neutral ingest utilities shared by the Dhan + Groww spot/option spines.
+"""Vendor-neutral ingest utilities shared by the Groww spot/option spines.
 
-PR-J1 of the Dhan→Groww cutover (CLAUDE.md §11 COMMON — one source of truth, no
+PR-J1 of the Groww cutover (CLAUDE.md §11 COMMON — one source of truth, no
 copy-paste between modules). This module is the single home for the ingest
 machinery that has zero vendor coupling, so the Groww package no longer imports
-from the Dhan package (and vice-versa) for any of it:
+any of it from a vendor-specific package:
 
 * **Window tiling** — :class:`DateWindow` + :func:`plan_windows` (the generic,
-  symbol-free ``[start, end)`` tiler). The Dhan ``chunks`` module pins it to the
-  Dhan 90/30-day caps; the Groww ``chunks`` module pins it to the Groww tier
-  table; both import the type + tiler from here.
+  symbol-free ``[start, end)`` tiler). The 90/30-day intraday/option caps pin it
+  to those widths; the Groww ``chunks`` module pins it to the Groww tier table;
+  both import the type + tiler from here.
 * **Per-interval fetch-window builder + clamp** — :func:`tile_windows`,
   :func:`clamp_window_end`, :func:`now_ist`, and the IST/market-close constants.
-  Both vendors tile/clamp against the SAME NSE/BSE 15:30 IST reality; the only
+  Both spines tile/clamp against the SAME NSE/BSE 15:30 IST reality; the only
   divergence (the per-interval window width) is INJECTED via *window_days_for*.
-  The coverage-ledger market namespace (``"dhan"`` / ``"groww"``) is an explicit
-  ARGUMENT, never a module constant, so the ledger key is unambiguous per vendor.
+  The coverage-ledger market namespace is an explicit ARGUMENT, never a module
+  constant, so the ledger key is unambiguous per vendor.
 * **Conflict summary** — :func:`summarize_conflicts` (pure, takes a sequence of
   :class:`~brutex.data.parquet_writer.BarConflict`).
 * **Post-run leftover-window auto-retry** — :func:`retry_failed_windows` +
   :class:`RetryOutcome` / :class:`RetryRound`. The known-gap classification (a
-  Dhan ``DH-905`` concept) is an INJECTED predicate (*is_known_gap*), so the
-  engine itself stays vendor-neutral: Dhan passes its ``is_no_data_message``-based
-  predicate, Groww passes nothing (no known-gap concept → nothing is a known gap).
+  no-data-window concept) is an INJECTED predicate (*is_known_gap*), so the
+  engine itself stays vendor-neutral: a vendor with a no-data signal passes an
+  ``is_no_data_message``-based predicate, Groww passes nothing (no known-gap
+  concept → nothing is a known gap).
 
-PR-J4a additionally relocated here (a behaviour-preserving MOVE out of the Dhan
-package so a later slice can delete it — CLAUDE.md §11 COMMON):
+PR-J4a additionally relocated here (a behaviour-preserving MOVE out of the
+original vendor package so a later slice can delete it — CLAUDE.md §11 COMMON):
 
 * **Synthetic spot source** — :func:`synthetic_spot_bars` (pure offline bar
   generator) + :class:`SyntheticSpotAdapter` (a :class:`MarketAdapter` over it),
@@ -34,13 +35,14 @@ package so a later slice can delete it — CLAUDE.md §11 COMMON):
 * **Re-pull-until-clean** — :func:`run_until_clean` + :class:`UntilCleanRound` /
   :class:`UntilCleanOutcome` / :func:`decide_until_clean` and the round budgets.
 * **Coverage-key namespace + per-interval window width** — :data:`_MARKET` (the
-  lake coverage-key namespace, value UNCHANGED from the Dhan home) +
-  :func:`window_days_for_interval` (the Dhan per-call tiling width policy), both
+  lake coverage-key namespace, value UNCHANGED from its original home) +
+  :func:`window_days_for_interval` (the per-call tiling width policy), both
   consumed by :mod:`brutex.data.window_ledger_store`.
 
-Everything here is **behaviour-preserving** — moved verbatim from the Dhan
-modules, with the only change being the two injection seams (*is_known_gap*,
-*window_days_for* / *market*) that let the one implementation serve both vendors.
+Everything here is **behaviour-preserving** — moved verbatim from the original
+vendor modules, with the only change being the two injection seams
+(*is_known_gap*, *window_days_for* / *market*) that let the one implementation
+serve both vendors.
 """
 
 from __future__ import annotations
@@ -163,7 +165,7 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
 
 #: Resolve a canonical interval to its per-call max-window width (days), or
 #: ``None`` to emit ONE un-tiled window for the whole range (the daily case in
-#: the Dhan spine). The vendor injects this so the per-interval tier policy stays
+#: the ingest spine). The vendor injects this so the per-interval tier policy stays
 #: vendor-owned while the tiling mechanism is shared.
 WindowDaysFor = Callable[[str], "int | None"]
 
@@ -178,7 +180,7 @@ def tile_windows(
     :func:`plan_windows`, decoding the ISO :class:`DateWindow` bounds back to
     :class:`datetime.date` (the meaningful granularity for the ledger). A
     *window_days_for* result of ``None`` means "one un-tiled window over the whole
-    range" (the Dhan daily case, where the daily endpoint takes the full range in
+    range" (the daily case, where the daily endpoint takes the full range in
     one call).
 
     Parameters
@@ -201,45 +203,42 @@ def tile_windows(
 
 
 # --------------------------------------------------------------------------- #
-# Coverage-key namespace + per-interval tiling width (relocated from
-# ``dhan.ingest`` in PR-J4a so ``window_ledger_store`` no longer imports the Dhan
-# package). Behaviour-preserving — the namespace VALUE and the width policy are
-# byte-identical to their Dhan home (changing _MARKET's value is a data-migration
-# event — the lake coverage keys are stamped with it).
+# Coverage-key namespace + per-interval tiling width (relocated into this
+# vendor-neutral home in PR-J4a so ``window_ledger_store`` no longer imports a
+# vendor-specific package). Behaviour-preserving — the namespace VALUE and the
+# width policy are byte-identical to their original home (changing _MARKET's value
+# is a data-migration event — the lake coverage keys are stamped with it).
 # --------------------------------------------------------------------------- #
-#: The data-source namespace stamped on every coverage :class:`WindowKey`. Its
-#: VALUE (``"dhan"``) is the lake coverage-key namespace and is INTENTIONALLY
-#: UNCHANGED across the relocation — the persisted ledger keys carry it, so
-#: changing it would orphan every existing coverage row (a data-migration event,
-#: out of scope for this behaviour-preserving move). PUBLIC (no leading underscore)
-#: so cross-module consumers (the Dhan spine, the window ledger store) import it
-#: WITHOUT a private-access warning (the value was a private ``_MARKET`` constant in
-#: its prior Dhan home).
-COVERAGE_MARKET: str = "dhan"
+#: The default spot data-source namespace stamped on a coverage :class:`WindowKey`
+#: when no explicit ``market`` is supplied. The live Groww spot spine passes
+#: :data:`GROWW_COVERAGE_MARKET` explicitly; this constant is the vendor-neutral
+#: fallback for the generic ledger machinery. PUBLIC (no leading underscore) so
+#: cross-module consumers (the ingest spine, the window ledger store) import it
+#: WITHOUT a private-access warning.
+COVERAGE_MARKET: str = "spot"
 
 #: The Groww-spine coverage namespace stamped on every Groww :class:`WindowKey`
-#: (``"groww"``), kept distinct from :data:`COVERAGE_MARKET` so Dhan and Groww
-#: windows never collide on the shared lake ledger. PUBLIC so the Groww ingest
+#: (``"groww"``), kept distinct from :data:`COVERAGE_MARKET` so the two namespaces
+#: never collide on the shared lake ledger. PUBLIC so the Groww ingest
 #: spine AND the ledger-seeding helpers (``plan_windows`` /
 #: ``reconcile_ledger_with_lake``) share ONE literal (CLAUDE.md §11 COMMON) — the
 #: dashboard + CLI Groww spot pulls pass it so the PLANNED rows they seed match
 #: the SUCCESS rows the Groww spine records (PR-J4b).
 GROWW_COVERAGE_MARKET: str = "groww"
 
-#: Dhan intraday per-call cap (days). Relocated from
-#: ``dhan.constants.INTRADAY_WINDOW_DAYS`` (same value 90) so the width policy has
-#: NO dhan import here; ``dhan.constants`` remains the verified source of truth.
+#: Intraday per-call cap (days). The 90-day width policy is owned LOCALLY here so
+#: it needs no vendor import; the value mirrors the verified 90-day intraday cap.
 _INTRADAY_WINDOW_DAYS: int = 90
 
 
 def window_days_for_interval(interval: str) -> int | None:
     """Resolve an interval to its tiling width — ``None`` (single window) for daily.
 
-    The Dhan per-call cap is a flat 90 days for intraday; the daily endpoint takes
+    The intraday per-call cap is a flat 90 days; the daily endpoint takes
     the whole range in ONE call (``None`` ⇒ :func:`tile_windows` emits a single
     un-tiled window). Injected into the shared tiler so the tiling MECHANISM is
     vendor-neutral while this width policy stays owned here (relocated verbatim
-    from ``dhan.ingest._dhan_window_days_for`` in PR-J4a).
+    from the original per-vendor window helper in PR-J4a).
     """
     return None if interval == _DAILY else _INTRADAY_WINDOW_DAYS
 
@@ -298,8 +297,8 @@ def summarize_conflicts(conflicts: Sequence[BarConflict]) -> dict[str, object]:
 class _RetryReport(Protocol):
     """The minimal read surface :func:`retry_failed_windows` needs off a pass report.
 
-    Both :class:`~brutex.adapters.dhan.run_ingest.DhanIngestReport` and
-    :class:`~brutex.adapters.groww.run_ingest.GrowwIngestReport` satisfy it
+    Each vendor's ingest report (e.g.
+    :class:`~brutex.adapters.groww.run_ingest.GrowwIngestReport`) satisfies it
     structurally (the engine is duck-typed over these three members).
     """
 
@@ -360,7 +359,7 @@ class RetryRound:
     #: Transient windows still failing after this round (the next round's worklist,
     #: 0 when clean) — the retryable residual that drives the loop.
     still_failed_windows: int
-    #: Known-gap quarantines this round (e.g. a Dhan ``DH-905`` no-data) — NOT
+    #: Known-gap quarantines this round (e.g. a vendor no-data window) — NOT
     #: retried (left as-is). Always 0 when no *is_known_gap* predicate is supplied.
     known_gaps: int
     #: Whether the token died mid-round (an auth failure) — halts the loop.
@@ -407,10 +406,10 @@ def _count_known_gaps(report: _RetryReport, is_known_gap: Callable[[object], boo
     A known gap is an EXPECTED data boundary (the vendor genuinely has no data for
     the range), not a transient fault, so it must never drive another retry round
     (the honest-envelope rule, DEC-INGEST-AUTO-RETRY-001). The classification is
-    INJECTED via *is_known_gap*: the Dhan caller passes a predicate over its
-    quarantined failures' serialised error (delegating to
-    :func:`~brutex.adapters.dhan.errors.is_no_data_message`), while a vendor with
-    NO known-gap concept (Groww) passes ``None`` ⇒ nothing is a known gap.
+    INJECTED via *is_known_gap*: a vendor with a no-data signal passes a predicate
+    over its quarantined failures' serialised error (an ``is_no_data_message``-style
+    check), while a vendor with NO known-gap concept (Groww) passes ``None`` ⇒
+    nothing is a known gap.
     """
     if is_known_gap is None:
         return 0
@@ -533,8 +532,8 @@ def retry_failed_windows(
 
 
 # --------------------------------------------------------------------------- #
-# Synthetic spot source (relocated from ``dhan.synthetic`` +
-# ``dhan.synthetic_adapter`` in PR-J4a — the dry-run, offline data source).
+# Synthetic spot source (relocated from the original vendor ``synthetic`` +
+# ``synthetic_adapter`` modules in PR-J4a — the dry-run, offline data source).
 # --------------------------------------------------------------------------- #
 #: India Standard Time — the synthetic bars use the NSE/BSE wall clock.
 _IST: ZoneInfo = ZoneInfo("Asia/Kolkata")
@@ -604,8 +603,8 @@ def synthetic_spot_bars(
 #: the live adapter (spot only, 1m + 1d fetched, others resampled), so the
 #: orchestrator plans the dry-run pull exactly as it would the live one.
 _SYNTHETIC_CAPABILITIES: MarketCapabilities = MarketCapabilities(
-    market_id="dhan",
-    display_name="Dhan (synthetic dry-run)",
+    market_id="spot",
+    display_name="Groww (synthetic dry-run)",
     exchanges=frozenset({Exchange.NSE, Exchange.BSE}),
     has_derivatives=False,
     has_expiries=False,
@@ -678,8 +677,8 @@ class SyntheticSpotAdapter:
 
 
 # --------------------------------------------------------------------------- #
-# Pull verdict (relocated from ``dhan.pull_verdict`` in PR-J4a — the actionable,
-# prioritised finished-pull verdict).
+# Pull verdict (relocated from the original vendor ``pull_verdict`` module in
+# PR-J4a — the actionable, prioritised finished-pull verdict).
 # --------------------------------------------------------------------------- #
 #: The mutually-exclusive, priority-ordered outcomes of a finished pull.
 PullVerdictKind = Literal[
@@ -694,19 +693,19 @@ PullVerdictKind = Literal[
 #: Kept as data (not f-strings) so the message is deterministic + test-pinnable;
 #: dynamic counts are carried as structured fields on :class:`PullVerdict`.
 _HEADLINE: Final[dict[str, str]] = {
-    "auth_expired": "🔑 Dhan token expired mid-pull — the pull aborted.",
-    "quota_exhausted": "📊 Daily Dhan quota reached — auto-resume paused for today.",
+    "auth_expired": "🔑 Groww auth failed mid-pull — the pull aborted.",
+    "quota_exhausted": "📊 Daily Groww quota reached — auto-resume paused for today.",
     "transient_residual": "⏳ Some windows are still pending after retries.",
-    "known_gap_only": "ℹ️ No new bars — these symbols have no intraday on Dhan.",
+    "known_gap_only": "ℹ️ No new bars — these symbols have no intraday on Groww.",
     "clean": "✅ Pull complete.",
 }
 _ACTION: Final[dict[str, str]] = {
     "auth_expired": (
-        "Regenerate the 24-hour token at web.dhan.co, then re-pull. "
-        "A retry can NEVER succeed on a dead token — only a fresh token can."
+        "Re-check the Groww API key + TOTP secret, then re-pull. "
+        "A retry can NEVER succeed on bad credentials — only valid credentials can."
     ),
     "quota_exhausted": (
-        "The 100,000/day Dhan quota is spent — the auto-resume paused itself "
+        "The 100,000/day Groww quota is spent — the auto-resume paused itself "
         "(it will NOT keep burning a dead quota). Re-pull after the IST-midnight "
         "reset; already-pulled windows are skipped, so only the gaps re-fetch."
     ),
@@ -715,7 +714,7 @@ _ACTION: Final[dict[str, str]] = {
         "still-pending windows are re-fetched (auto-retry mops up transient 429s)."
     ),
     "known_gap_only": (
-        "No action needed — these are reference-only symbols Dhan does not serve "
+        "No action needed — these are reference-only symbols Groww does not serve "
         "intraday (e.g. broad-market indices); they are not brute-force inputs."
     ),
     "clean": "No action needed.",
@@ -784,7 +783,7 @@ def classify_pull(
     1. **auth_expired** — the token died mid-pull (``auth_aborted``). Most urgent:
        no retry can recover until the token is regenerated. ``pending_windows``
        counts the still-failed windows + quarantined pairs left behind.
-    2. **quota_exhausted** — the day's 100,000-call Dhan quota is spent
+    2. **quota_exhausted** — the day's 100,000-call quota is spent
        (``quota_exhausted``) with windows still pending: the auto-resume paused
        itself rather than burn a dead quota; the operator re-pulls after the
        IST-midnight reset (DEC-AUTO-RESUME-QUOTA-001). Ranked just under a dead
@@ -842,8 +841,8 @@ def _make_verdict(
 
 
 # --------------------------------------------------------------------------- #
-# Re-pull-until-clean (relocated from ``dhan.until_clean`` in PR-J4a — drive
-# bounded pull rounds until the coverage ledger is CLEAN).
+# Re-pull-until-clean (relocated from the original vendor ``until_clean`` module
+# in PR-J4a — drive bounded pull rounds until the coverage ledger is CLEAN).
 # --------------------------------------------------------------------------- #
 #: The pure controller's verdicts: keep going, or one of five terminal stops.
 LoopVerdict = Literal[
@@ -948,7 +947,7 @@ class UntilCleanOutcome:
     def stopped_on_quota(self) -> bool:
         """True iff the auto-resume paused on the daily quota (``stop_quota``).
 
-        DEC-AUTO-RESUME-QUOTA-001 — the day's 100,000-call Dhan quota is spent;
+        DEC-AUTO-RESUME-QUOTA-001 — the day's 100,000-call quota is spent;
         re-pull after the IST-midnight reset (the auto-resume will not burn a dead
         quota).
         """
@@ -1028,7 +1027,7 @@ def decide_until_clean(
        (``RenewToken`` cannot revive a dead token) — halt for re-auth.
     2. **stop_clean** — ``still_failed_windows == 0``: the coverage ledger is clean
        (success outranks every "can't continue" reason — if we're done, we're done).
-    3. **stop_quota** — ``quota_exhausted``: the day's 100,000-call Dhan quota is
+    3. **stop_quota** — ``quota_exhausted``: the day's 100,000-call quota is
        spent (DEC-AUTO-RESUME-QUOTA-001). Like a dead token, NO amount of immediate
        retrying can land a bar today — the auto-resume pauses itself rather than
        burn a dead quota; the operator re-pulls after the IST-midnight reset. Ranked
@@ -1110,7 +1109,7 @@ def run_until_clean(
         tests.
     quota_exhausted
         Optional ``() -> bool`` hook checked AFTER each round (DEC-AUTO-RESUME-
-        QUOTA-001): ``True`` means the day's 100,000-call Dhan quota is spent, so the
+        QUOTA-001): ``True`` means the day's 100,000-call quota is spent, so the
         loop stops with ``stop_quota`` rather than re-firing batches that would only
         raise :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded`. ``None``
         (the default) → quota is never the limit (the pre-feature behaviour, for the

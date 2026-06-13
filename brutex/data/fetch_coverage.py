@@ -24,7 +24,7 @@ class WindowKey:
     """One fetch window's identity — the unit of a single vendor API call.
 
     Immutable + hashable, so it is an O(1) set/dict member. ``market`` namespaces
-    the data source (e.g. ``"dhan"``); ``security_id`` + ``interval`` +
+    the data source (e.g. ``"groww"``); ``security_id`` + ``interval`` +
     ``(start, end)`` pin the exact window the adapter would fetch.
     """
 

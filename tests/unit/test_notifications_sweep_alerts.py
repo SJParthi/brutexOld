@@ -207,7 +207,7 @@ class TestAlerts:
         ev = fake.published[0]
         assert ev.kind == TelegramEventKind.RATE_LIMIT_DOWNSHIFT
         assert ev.severity == TelegramSeverity.WARN
-        assert ev.dedupe_key == "dhan-rate"
+        assert ev.dedupe_key == "rate-breach"
         assert "429" in ev.message
 
     def test_auth_renew_failed(self) -> None:
@@ -216,7 +216,7 @@ class TestAlerts:
         ev = fake.published[0]
         assert ev.kind == TelegramEventKind.AUTH_RENEW_FAILED
         assert ev.severity == TelegramSeverity.ERROR
-        assert ev.dedupe_key == "dhan-auth"
+        assert ev.dedupe_key == "auth-renew"
         assert "token expired" in ev.message
 
     def test_sweep_complete(self) -> None:

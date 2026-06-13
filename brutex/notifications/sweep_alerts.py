@@ -10,7 +10,7 @@ emitted:
 * **watchdog-hung** — a sweep tuple wedged past the
   :class:`~brutex.engine.sweep_watchdog.SweepWatchdog` timeout
   (``WORKER_HUNG``, CRITICAL).
-* **rate.breach** — a Dhan ``429`` throttled the live pull
+* **rate.breach** — a vendor ``429`` throttled the live pull
   (``RATE_LIMIT_DOWNSHIFT``, WARN; coalesced by the notifier's 60 s dedupe).
 * **auth.renew_failed** — ``RenewToken`` refused so the pull is running on a
   token that will expire (``AUTH_RENEW_FAILED``, ERROR).
@@ -120,9 +120,9 @@ def _resolve_singleton_notifier() -> NotifierLike | None:  # pragma: no cover �
 
 
 class RateControllerLike(Protocol):
-    """Structural type for the Dhan rate controller bits :class:`SweepAlerter` reads.
+    """Structural type for the rate controller bits :class:`SweepAlerter` reads.
 
-    Matched by :class:`brutex.adapters.dhan.rate_control.DhanRateController`. The
+    Matched by :class:`brutex.adapters.rate_common.RateController`. The
     method bodies are never executed (Protocols are structural-only).
     """
 
@@ -318,29 +318,29 @@ class SweepAlerter:
         )
 
     def rate_breach(self, *, current_rps: float, recent_hits: int) -> bool:
-        """Alert that Dhan 429-throttled the pull (WARN; deduped by the 60 s window)."""
+        """Alert that the vendor 429-throttled the pull (WARN; deduped by the 60 s window)."""
         message = escape_markdown_v2(
-            f"⚠️ Dhan rate breach: {recent_hits} recent 429(s); "
+            f"⚠️ Vendor rate breach: {recent_hits} recent 429(s); "
             f"throttled to {current_rps:.0f} r/s. The pull continues, slower."
         )
         return self._publish(
             kind=TelegramEventKind.RATE_LIMIT_DOWNSHIFT,
             severity=TelegramSeverity.WARN,
             message=message,
-            dedupe_key="dhan-rate",
+            dedupe_key="rate-breach",
         )
 
     def auth_renew_failed(self, *, reason: str) -> bool:
         """Alert that ``RenewToken`` refused so the token will expire (ERROR)."""
         message = escape_markdown_v2(
-            f"🔑 Dhan RenewToken refused: {reason}. The pull continues on the "
+            f"🔑 Vendor token refresh refused: {reason}. The pull continues on the "
             "existing token — generate a fresh token before it expires."
         )
         return self._publish(
             kind=TelegramEventKind.AUTH_RENEW_FAILED,
             severity=TelegramSeverity.ERROR,
             message=message,
-            dedupe_key="dhan-auth",
+            dedupe_key="auth-renew",
         )
 
     def symbol_window_failure(

@@ -7,7 +7,7 @@ Groww caps the date range per backtesting call by **interval tier**
 * 10/15/30-minute → **90 days** per call
 * 1h / 4h / 1d / 1w / 1mo → **180 days** per call
 
-This is richer than Dhan's single 90/30 split, so the only Groww-specific logic
+This is richer than a single 90/30 split, so the only Groww-specific logic
 here is :func:`window_days_for_interval` (interval → window width). The actual
 tiling reuses the **vendor-neutral, symbol-free**
 :func:`brutex.adapters.ingest_common.plan_windows` (CLAUDE.md §11 COMMON — no

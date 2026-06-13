@@ -5,7 +5,7 @@ Groww's ``get_historical_candles`` returns OHLCV as a **list of 7-element rows**
 
     {"candles": [[timestamp, open, high, low, close, volume, open_interest], ...]}
 
-This is the inverse of Dhan's columnar arrays, so this module iterates rows and
+The payload is row-oriented (not columnar), so this module iterates rows and
 hands each to the shared
 :func:`~brutex.data.candle_fields.assemble_candle` (CLAUDE.md §11 COMMON — the
 field-level rules live once). The only Groww-specific glue is the **IST timestamp**
@@ -42,8 +42,8 @@ def parse_timestamp_ist(raw: object) -> datetime:
     Accepts a native-IST string (``"yyyy-MM-ddTHH:mm:ss"`` or with a space
     separator) — localized to IST then converted to UTC — or epoch seconds
     (int/float, already UTC). Rejects bools, non-finite, and out-of-range values
-    (raises :class:`CandleParseError`), mirroring Dhan's
-    :func:`~brutex.adapters.dhan.parser.parse_timestamp_epoch` guards.
+    (raises :class:`CandleParseError`), applying the same timestamp-validation
+    guards as the shared candle-field rules.
     """
     if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
         raise CandleParseError(f"candle timestamp must not be bool: {raw!r}")

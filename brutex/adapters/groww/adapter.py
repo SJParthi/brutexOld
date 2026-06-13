@@ -2,8 +2,8 @@
 
 DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009 §5). Composes the Groww leaf layer into
 the market-neutral contract the orchestrator talks to: ``capabilities``,
-``list_instruments``, ``list_derivatives``, ``fetch_ohlcv``. Still additive — the
-CLI/dashboard keep using Dhan until the cutover PR wires this in.
+``list_instruments``, ``list_derivatives``, ``fetch_ohlcv``. Groww is the live
+vendor (ADR-0009) that the CLI/dashboard drive through this adapter.
 
 Scope (CLAUDE.md §3): this is the Track-1 **spot** adapter — the brute-force
 engine universe is the 3 indices + India VIX (reference-only), all spot, so

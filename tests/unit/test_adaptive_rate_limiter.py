@@ -104,13 +104,13 @@ class TestConfigValidation:
 class TestFromEnv:
     def test_defaults_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for var in (
-            "BRUTEX_DHAN_MIN_RPS",
-            "BRUTEX_DHAN_MAX_RPS",
-            "BRUTEX_DHAN_INITIAL_RPS",
-            "BRUTEX_DHAN_STEP_DOWN_HITS",
-            "BRUTEX_DHAN_STEP_DOWN_WINDOW",
-            "BRUTEX_DHAN_STEP_UP_CLEAN_WINDOW",
-            "BRUTEX_DHAN_RECHECK_INTERVAL",
+            "BRUTEX_RATE_MIN_RPS",
+            "BRUTEX_RATE_MAX_RPS",
+            "BRUTEX_RATE_INITIAL_RPS",
+            "BRUTEX_RATE_STEP_DOWN_HITS",
+            "BRUTEX_RATE_STEP_DOWN_WINDOW",
+            "BRUTEX_RATE_STEP_UP_CLEAN_WINDOW",
+            "BRUTEX_RATE_RECHECK_INTERVAL",
         ):
             monkeypatch.delenv(var, raising=False)
         cfg = AdaptiveRateLimiterConfig.from_env()
@@ -123,13 +123,13 @@ class TestFromEnv:
         assert cfg.recheck_interval == 60.0
 
     def test_overrides_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("BRUTEX_DHAN_MIN_RPS", "2.0")
-        monkeypatch.setenv("BRUTEX_DHAN_MAX_RPS", "6.0")
-        monkeypatch.setenv("BRUTEX_DHAN_INITIAL_RPS", "5.0")
-        monkeypatch.setenv("BRUTEX_DHAN_STEP_DOWN_HITS", "5")
-        monkeypatch.setenv("BRUTEX_DHAN_STEP_DOWN_WINDOW", "30")
-        monkeypatch.setenv("BRUTEX_DHAN_STEP_UP_CLEAN_WINDOW", "120")
-        monkeypatch.setenv("BRUTEX_DHAN_RECHECK_INTERVAL", "15")
+        monkeypatch.setenv("BRUTEX_RATE_MIN_RPS", "2.0")
+        monkeypatch.setenv("BRUTEX_RATE_MAX_RPS", "6.0")
+        monkeypatch.setenv("BRUTEX_RATE_INITIAL_RPS", "5.0")
+        monkeypatch.setenv("BRUTEX_RATE_STEP_DOWN_HITS", "5")
+        monkeypatch.setenv("BRUTEX_RATE_STEP_DOWN_WINDOW", "30")
+        monkeypatch.setenv("BRUTEX_RATE_STEP_UP_CLEAN_WINDOW", "120")
+        monkeypatch.setenv("BRUTEX_RATE_RECHECK_INTERVAL", "15")
         cfg = AdaptiveRateLimiterConfig.from_env()
         assert cfg.min_rps == 2.0
         assert cfg.max_rps == 6.0
@@ -140,12 +140,12 @@ class TestFromEnv:
         assert cfg.recheck_interval == 15.0
 
     def test_unparseable_float_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("BRUTEX_DHAN_MIN_RPS", "not-a-float")
+        monkeypatch.setenv("BRUTEX_RATE_MIN_RPS", "not-a-float")
         cfg = AdaptiveRateLimiterConfig.from_env()
         assert cfg.min_rps == 3.0
 
     def test_unparseable_int_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("BRUTEX_DHAN_STEP_DOWN_HITS", "not-an-int")
+        monkeypatch.setenv("BRUTEX_RATE_STEP_DOWN_HITS", "not-an-int")
         cfg = AdaptiveRateLimiterConfig.from_env()
         assert cfg.step_down_hits == 3
 

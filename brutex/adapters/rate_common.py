@@ -1,10 +1,10 @@
 """Adaptive rate controller — start at the ceiling, step down under heavy 429s.
 
-Vendor-neutral home (PR-J4a of the Dhan→Groww cutover — CLAUDE.md §11 COMMON,
-one source of truth, no copy-paste between modules). The controller (formerly
-``DhanRateController``, DEC-DHAN-ADAPTIVE-RPS-001) runs a pull at the **ceiling
-rate** (injected per vendor; the verified Dhan Data-API ceiling is **5 req/s**,
-``docs/dhan-ref/01`` — :data:`CEILING_RPS`) when the vendor is healthy and only
+Vendor-neutral home (PR-J4a of the Groww cutover — CLAUDE.md §11 COMMON,
+one source of truth, no copy-paste between modules). The controller
+(:class:`RateController`, DEC-DHAN-ADAPTIVE-RPS-001) runs a pull at the **ceiling
+rate** (injected per vendor; the verified data-API ceiling is **5 req/s**
+— :data:`CEILING_RPS`) when the vendor is healthy and only
 **steps down 1 r/s** under *sustained* rate-limiting, recovering 1 r/s at a time
 once the pressure clears. It never exceeds the ceiling. The 429 ladder reaches the SOFT
 :data:`FLOOR_RPS` (**3**) quickly on a brief burst (a quota nudge is no reason to
@@ -31,7 +31,7 @@ cascade (DEC-DHAN-RATE-SINGLE-BUCKET-001 — closes the dual-bucket
 reset.
 
 Wiring (next installment): ``pace`` → the ingest ``pace=`` hook;
-``on_rate_limit`` ← a 429 (``DhanRateLimitError``) in the fetch loop;
+``on_rate_limit`` ← a 429 (``GrowwRateLimitError``) in the fetch loop;
 ``on_success`` ← a clean window. The hooks are O(1) (a bounded deque + a few
 comparisons).
 """
@@ -54,11 +54,10 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
 _LOG = structlog.get_logger("brutex.adapters.rate_common")
 
-#: The verified Dhan Data-API ceiling (5 r/s, ``docs/dhan-ref/01``), kept here as
-#: the DEFAULT ceiling so this vendor-neutral controller needs NO dhan import
-#: (relocated from ``dhan.constants.DATA_RATE_LIMIT_RPS`` in PR-J4a — same value,
-#: which ``dhan.constants`` remains the verified source of truth for). A different
-#: vendor injects its own ``ceiling_rps`` (e.g. the Groww cutover, PR-J2).
+#: The verified data-API ceiling (5 r/s), kept here as the DEFAULT ceiling so this
+#: vendor-neutral controller needs NO vendor import — the width policy is owned
+#: locally and mirrors the verified 5 r/s cap. A different vendor injects its own
+#: ``ceiling_rps`` (e.g. the Groww cutover, PR-J2).
 CEILING_RPS: float = 5.0
 
 #: The SOFT floor the 429 ladder reaches quickly on a brief burst (a quota nudge is
@@ -108,13 +107,13 @@ RATE_LIMIT_STORM_FLOOR_RPS: float = TIMEOUT_FLOOR_RPS
 STORM_HITS: int = 30
 
 #: "Heavy" TIMEOUTS = this many server-stress stalls (timeout / transport / 5xx —
-#: a SLOW, struggling Dhan, NOT a quota breach) inside :data:`STEP_DOWN_WINDOW`
+#: a SLOW, struggling vendor, NOT a quota breach) inside :data:`STEP_DOWN_WINDOW`
 #: seconds → step DOWN 1 r/s (DEC-DHAN-TIMEOUT-BACKOFF-001, gentle adaptive
 #: step-down chosen by the operator 2026-06-05). Deliberately MORE tolerant than
 #: the 429 :data:`STEP_DOWN_HITS` (3): a timeout is softer evidence than an
 #: explicit 429, and a one-off stall already self-heals via the client's bounded
 #: fast-retry — so a single timeout must NOT cost throughput. Only a *sustained*
-#: storm (the `latency_ms_max → 10s` + `DhanTimeoutError` cascade the operator's
+#: storm (the `latency_ms_max → 10s` + `GrowwTimeoutError` cascade the operator's
 #: long-pull logs caught) eases the rate; it then recovers 3→4→5 via
 #: :meth:`on_success` once the storm clears, exactly like the 429 ladder.
 STEP_DOWN_TIMEOUT_HITS: int = 5
@@ -125,7 +124,7 @@ STEP_UP_WINDOW: float = 300.0
 #: Token-bucket burst allowance. EASE-IN (DEC-DHAN-EASE-IN-001): **1**, not 5, so
 #: a pull does NOT fire a multi-request spike at t=0. With burst 5 the bucket
 #: started FULL, so the parallel window fan-out dumped 5 requests instantly →
-#: an instantaneous rate far above Dhan's strict 5 r/s → the opening 429 storm
+#: an instantaneous rate far above the strict 5 r/s cap → the opening 429 storm
 #: the operator saw on every pull (3× ``rate.429`` → ``rate.stepdown`` within the
 #: first second). With burst 1 each worker paces from the first call at the
 #: current r/s. Steady-state throughput is UNCHANGED (still ``current_rps`` — one
@@ -185,7 +184,7 @@ class RateController:
             + sleep). Threaded into the reused token bucket.
         ceiling_rps
             The start rate AND the upshift cap (default :data:`CEILING_RPS`, the
-            Dhan verified 5 r/s). Injected so the SAME adaptive mechanism can pace
+            verified 5 r/s). Injected so the SAME adaptive mechanism can pace
             a different vendor at a different ceiling WITHOUT hardcoding a verified
             rate here (the Groww vendor cutover, DEC-DHAN-GROWW-REMIGRATE-001 PR-J2,
             feeds the UNVERIFIED Groww backtesting rate). The 429/timeout ladders
@@ -314,7 +313,7 @@ class RateController:
 
         The gentle adaptive timeout ladder (DEC-DHAN-TIMEOUT-BACKOFF-001 +
         DEC-DHAN-OPTION-TIMEOUT-STORM-001): a long pull that starts TIMING OUT (a
-        slow, struggling Dhan — not a quota breach) eases 5→4→3→2→1 r/s once
+        slow, struggling vendor — not a quota breach) eases 5→4→3→2→1 r/s once
         :data:`STEP_DOWN_TIMEOUT_HITS` stalls land inside :data:`STEP_DOWN_WINDOW`
         seconds, then recovers via :meth:`on_success` once the storm clears. A
         one-off timeout is ignored (it self-heals via the client's bounded
@@ -422,7 +421,7 @@ class RateController:
         When a :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker` is wired
         (the live path — DEC-AUTO-RESUME-QUOTA-001), the snapshot ALSO carries the
         day's quota gauge (``quota_used`` / ``quota_remaining`` / ``quota_limit``) so
-        the dashboard SHOWS how much of the mandatory 100,000/day Dhan quota is
+        the dashboard SHOWS how much of the mandatory 100,000/day quota is
         spent, not just the live r/s. The quota tracker is read OUTSIDE the
         controller lock (``self._quota`` is set once at construction, never mutated)
         to avoid nesting the controller lock over the tracker's own lock + LMDB read.

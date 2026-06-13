@@ -1,14 +1,12 @@
 """Groww spot ingest — pull a symbol's OHLCV window-by-window into the lake.
 
-ADDITIVE mirror of :mod:`brutex.adapters.dhan.ingest` for the Groww→Dhan vendor
-re-migration (PR-H). It is the thin orchestration the cutover (PR-I) will wire
-the cli/dashboard to: plan the fetch windows for a ``(instrument, interval)``
-series, fetch each via
+The Groww vendor ingest spine (PR-H). It is the thin orchestration the cutover
+(PR-I) wires the cli/dashboard to: plan the fetch windows for a
+``(instrument, interval)`` series, fetch each via
 :meth:`~brutex.adapters.protocol.MarketAdapter.fetch_ohlcv`, and append the
-parsed bars to a :class:`~brutex.data.sink.BarSink`. **No caller is wired yet**
-— Dhan stays live until the cutover; this spine is exercised only by its tests.
+parsed bars to a :class:`~brutex.data.sink.BarSink`.
 
-Structure is identical to the Dhan spine (CLAUDE.md §11 COMMON — same shape, no
+Structure follows the canonical ingest spine (CLAUDE.md §11 COMMON — same shape, no
 re-architecting): per-window parallel fan-out via an injected
 :class:`~brutex.orchestrator.universe_phases.RunParallel` (production: a bounded
 :class:`~brutex.orchestrator.parallel.PoolRunParallel`), in-run bounded
@@ -18,11 +16,11 @@ record authority, the intraday session filter, aggregated keep-first conflict
 logging, deterministic order-independent aggregation, and the ``pull_id``
 correlation re-bind inside each worker thread.
 
-**Divergences from the Dhan spine (deliberate, documented per Golden Rule #1):**
+**Divergences from a flat single-tier spine (deliberate, per Golden Rule #1):**
 
 * **Window tiling.** Groww's per-call date cap is interval-tiered (30/90/180
   days — :func:`~brutex.adapters.groww.chunks.window_days_for_interval`), richer
-  than Dhan's flat 90/30 split. We tile HERE via
+  than a flat split. We tile HERE via
   :func:`~brutex.adapters.groww.chunks.plan_candle_windows` at the SAME
   granularity the ledger records its windows at, then call ``fetch_ohlcv`` once
   per tile with that tile's ``[start, end)``. The
@@ -33,22 +31,22 @@ correlation re-bind inside each worker thread.
   window. This keeps the skip authority precise (DEC-WINDOW-LEDGER-001 carries
   over verbatim).
 * **Market namespace.** Every coverage :class:`~brutex.data.fetch_coverage.WindowKey`
-  is stamped ``market="groww"`` (vs Dhan's ``"dhan"``), so Dhan and Groww windows
+  is stamped ``market="groww"``, so windows from different vendors
   for the same symbol never collide on the shared lake ledger.
-* **Auth.** Dhan carries a mid-pull ``AuthGuard`` token-death latch (DH-906). The
+* **Auth.** Some vendors carry a mid-pull ``AuthGuard`` token-death latch. The
   Groww adapter package provides no such latch, so we DO NOT invent one: a Groww
   auth failure (:class:`~brutex.adapters.groww.errors.GrowwAuthError`) is a
   TERMINAL non-retryable error that propagates to the outer
   :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` quarantine —
   the same as any other terminal Groww error. (An honest, simpler envelope; a
   shared latch can be added if/when the Groww adapter grows one.)
-* **status_log.** OMITTED. The Dhan spine still carries a write-retired
-  ``status_log`` branch (DEC-STATUS-SIDECAR-WRITE-RETIRE-001); the Groww mirror
+* **status_log.** OMITTED. A legacy spine still carried a write-retired
+  ``status_log`` branch (DEC-STATUS-SIDECAR-WRITE-RETIRE-001); the Groww spine
   drops it entirely — the unified ledger is the sole record surface.
 * **Conflict summary.** :func:`~brutex.adapters.ingest_common.summarize_conflicts`
   is vendor-neutral; it is IMPORTED from the shared
   :mod:`brutex.adapters.ingest_common` home rather than copied (CLAUDE.md §11
-  COMMON — no duplication), so the Groww package no longer depends on the Dhan one.
+  COMMON — no duplication), so the Groww package depends on no other adapter.
 
 **Honest envelope (Golden Rule #10):** the fan-out lets one symbol's windows be
 in flight at once so the pull saturates UP TO the rate ceiling when Groww is
@@ -89,7 +87,7 @@ from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
 from brutex.orchestrator.universe_phases import RunParallel
 
-#: Structured logger — mirrors the Dhan spine under the ``ingest.*`` namespace,
+#: Structured logger — uses the canonical ``ingest.*`` namespace,
 #: every event carrying the pull's ``pull_id``. Per-window detail is DEBUG so a
 #: long pull never floods INFO; the per-series summary stays DEBUG too (the
 #: per-instrument rollup at INFO lives one layer up in ``run_ingest``).
@@ -102,12 +100,12 @@ Pacer = Callable[[], None]
 _DAILY: str = "1day"
 
 #: The data-source namespace stamped on every coverage :class:`WindowKey`. ``"groww"``
-#: keeps Groww windows from colliding with Dhan's on the shared lake ledger. Sourced
+#: keeps Groww windows from colliding with other vendors' on the shared lake ledger. Sourced
 #: from the shared :data:`~brutex.adapters.ingest_common.GROWW_COVERAGE_MARKET` so the
 #: spine AND the ledger-seeding helpers carry ONE literal (CLAUDE.md §11 COMMON).
 _MARKET: str = GROWW_COVERAGE_MARKET
 
-#: In-run transient-window auto-retry budget (mirrors the Dhan spine). After the
+#: In-run transient-window auto-retry budget. After the
 #: first fan-out pass, windows that returned a RETRYABLE Groww error (rate-limit /
 #: timeout) are re-run as their own pass, up to this many extra passes. Windows
 #: still failing after the budget stay UNMARKED (deferred to the next pull — the
@@ -133,7 +131,7 @@ def _default_retry_backoff(pass_index: int) -> None:
 
 @dataclass(frozen=True, slots=True)
 class IngestReport:
-    """Outcome of an :func:`ingest_spot` run (Groww twin of the Dhan report)."""
+    """Outcome of an :func:`ingest_spot` run."""
 
     windows: int
     bars_appended: int

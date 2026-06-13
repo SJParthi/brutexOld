@@ -196,7 +196,7 @@ class RateLimitPanel:
     "is 5 r/s actually working?" at a glance (DEC-DASHBOARD-RATE-PANEL-001).
 
     ``rps_1s`` / ``rps_1s_max`` are the **instantaneous** per-second issue gauge
-    straight from :meth:`brutex.adapters.dhan.client.CallMeter.snapshot` — the
+    straight from the vendor client's call-meter snapshot — the
     trailing-1s physical-POST count and its run peak. Unlike the cumulative
     ``effective_rps`` average (which can read high in the opening seconds without
     any true breach), ``rps_1s_max`` is the real-time PROOF the 5 r/s cap held:
@@ -212,7 +212,7 @@ class RateLimitPanel:
     latency_ms_p95: float = 0.0
     rps_1s: int = 0
     rps_1s_max: int = 0
-    #: The mandatory daily Dhan quota gauge (DEC-AUTO-RESUME-QUOTA-001): calls spent
+    #: The mandatory daily vendor quota gauge (DEC-AUTO-RESUME-QUOTA-001): calls spent
     #: today, calls remaining, and the 100,000/day ceiling — straight from the
     #: shared persisted ``DailyQuotaTracker`` via the controller snapshot. ``-1``
     #: ``quota_limit`` means "no tracker wired" (dry-run / no live pull) so the panel
@@ -434,7 +434,7 @@ class DashboardState:
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
-        ``quota_used`` / ``quota_remaining`` / ``quota_limit`` are the daily Dhan
+        ``quota_used`` / ``quota_remaining`` / ``quota_limit`` are the daily vendor
         quota gauge (DEC-AUTO-RESUME-QUOTA-001), defaulting to the "no tracker
         wired" sentinel (``quota_limit=-1``) so a caller that has no quota snapshot
         leaves the gauge hidden rather than showing a false 0.
@@ -460,7 +460,7 @@ class DashboardState:
         ``effective_rps`` is the transport's inter-arrival rate (calls ÷ wall-span)
         and ``latency_ms_p95`` its 95th-percentile round-trip; ``rps_1s`` /
         ``rps_1s_max`` are the instantaneous trailing-1s issue gauge + its run peak —
-        all straight from :meth:`brutex.adapters.dhan.client.CallMeter.snapshot`
+        all straight from the vendor client's call-meter snapshot
         (DEC-DASHBOARD-RATE-PANEL-001 + DEC-DASHBOARD-RPS1S-PANEL-001). ``rps_1s_max``
         is the real-time proof the 5 r/s cap held (``<= 5`` ⇒ no breach, ever).
         """
@@ -611,9 +611,9 @@ def make_rate_observer(
     """Build a callback that pushes a controller + meter snapshot to *state*'s rate panel.
 
     Threaded (live-only) into the pull controllers' rate feedback so a live pull's
-    adaptive rate (:meth:`~brutex.adapters.dhan.rate_control.DhanRateController.snapshot`
+    adaptive rate (:meth:`~brutex.adapters.rate_common.RateController.snapshot`
     → ``current_rps`` + ``recent_hits``) and measured throughput
-    (:meth:`~brutex.adapters.dhan.client.CallMeter.snapshot` → ``effective_rps`` +
+    (the vendor client's call-meter snapshot → ``effective_rps`` +
     ``latency_ms_p95`` + the instantaneous ``rps_1s`` / ``rps_1s_max`` gauge) flow to
     the dashboard rate panel (DEC-DASHBOARD-RATE-PANEL-001 +
     DEC-DASHBOARD-RPS1S-PANEL-001). Pure + testable: drive it with two snapshot
@@ -664,7 +664,7 @@ def build_app(
         Optional :class:`~brutex.data.instrument_store.InstrumentStore`
         handle. When supplied, the app exposes read-only instruments /
         expiries / contracts / stats endpoints + an HTML browser
-        section so a user can literally see what Dhan ingest
+        section so a user can literally see what the vendor ingest
         pulled. When ``None`` (the default), those endpoints return
         503 and the HTML section stays hidden \u2014 the pipeline
         progress cards still work.
@@ -711,10 +711,10 @@ def build_app(
 
     from brutex.observability.metrics import get_registry, render_prometheus
 
-    # The Dhan 24h-JWT token keepalive was retired here (PR-J4c): the dashboard
-    # now authenticates via Groww TOTP, so the vestigial Dhan keepalive lifespan
-    # wiring was removed. ``brutex.adapters.dhan.token_keepalive`` stays importable
-    # (a later PR deletes the package); the dashboard simply no longer drives it.
+    # The retired-vendor 24h-JWT token keepalive was retired here (PR-J4c): the
+    # dashboard now authenticates via Groww TOTP, so the vestigial keepalive
+    # lifespan wiring was removed. The retired-vendor adapter package has since been
+    # deleted; the dashboard simply no longer drives any keepalive.
     app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
     @app.middleware("http")
@@ -766,7 +766,7 @@ def build_app(
     _summary_cache = summary_cache if summary_cache is not None else SummaryCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
-    # pull restarting at the 5 r/s ceiling and re-storming Dhan.
+    # pull restarting at the 5 r/s ceiling and re-storming the vendor.
     _session_rate = SessionRateController()
 
     @app.get("/api/v1/state")
@@ -815,7 +815,7 @@ def build_app(
 
     @app.get("/api/v1/quota")
     async def api_quota() -> JSONResponse:
-        """GET /api/v1/quota — today's PERSISTED Dhan daily-quota usage (read-only).
+        """GET /api/v1/quota — today's PERSISTED vendor daily-quota usage (read-only).
 
         Reads the IST-midnight :class:`DailyQuotaTracker` directly (one O(1) LMDB
         read) so the ``/universe`` gauge can show ``used / limit / remaining`` on
@@ -1086,7 +1086,7 @@ def build_app(
         forces a fresh fetch (use after a semi-annual rebalance), falling
         back to the stale cache if the refresh fails.
 
-        Honesty (CLAUDE.md §1 / §10): this is **NOT Dhan data**. Index
+        Honesty (CLAUDE.md §1 / §10): this is **NOT vendor data**. Index
         membership comes from NSE's per-index constituent CSVs. NSE
         bot-blocks those endpoints and this build environment
         network-blocks ``nseindia.com``, so the live fetch is UNVERIFIABLE
@@ -1166,10 +1166,10 @@ def build_app(
 
         Thin wrapper over
         :func:`brutex.dashboard.instrument_loader.load_instrument_master`.
-        The instrument master is a PUBLIC CSV needing NO Dhan token, so this
+        The instrument master is a PUBLIC CSV needing NO vendor token, so this
         endpoint can fill the empty ``/universe`` list without authentication
         (options / candles still need the token, separately). On any
-        network / parse failure (the live fetch can't reach the Dhan asset
+        network / parse failure (the live fetch can't reach the vendor asset
         host, or the CSV header drifted) it maps to **HTTP 502** with a short
         message the UI surfaces.
         """
@@ -1182,7 +1182,7 @@ def build_app(
         except (InstrumentFormatError, OSError) as exc:
             raise HTTPException(
                 status_code=502,
-                detail=f"couldn't reach Dhan asset host / parse instrument master: {exc}",
+                detail=f"couldn't reach vendor asset host / parse instrument master: {exc}",
             ) from exc
         return JSONResponse(counts)
 
@@ -1243,7 +1243,7 @@ def build_app(
             # Offloading to the threadpool (mirroring every other route here) frees
             # the loop so the rest of the dashboard stays responsive DURING a pull
             # (DEC-DASHBOARD-PULL-ASYNC-001). The vendor-bound pull duration itself
-            # is unchanged (Dhan rate-limit), but it no longer blocks the UI.
+            # is unchanged (vendor rate-limit), but it no longer blocks the UI.
             report = await run_in_threadpool(
                 pull_candles,
                 instrument,
@@ -1402,10 +1402,10 @@ def build_app(
             Runs the AUTO-RESUME-UNTIL-CLEAN loop (DEC-AUTO-RESUME-DEFAULT-001):
             ``auto_retry=True`` + ``until_clean=True`` so AFTER the saturating first
             pass the leftover failed windows are re-pulled in bounded rounds (over
-            the SHARED coverage ledger — only the still-failed windows hit Dhan
+            the SHARED coverage ledger — only the still-failed windows hit the vendor
             again, rate-safe) until ONE terminal state is reached: ``stop_clean``
             (every window fetched — the normal exit), ``stop_quota`` (the day's
-            100,000-call Dhan quota is spent — resume after the IST-midnight reset),
+            100,000-call vendor quota is spent — resume after the IST-midnight reset),
             ``stop_dead`` (the token died — re-auth), or ``stop_no_progress`` /
             budget backstop. So the one-click pull DRIVES ITSELF to a clean lake with
             zero manual "Re-pull to finish" clicks (CLAUDE.md §11 AUTOMATED), bounded
@@ -1464,7 +1464,7 @@ def build_app(
         :func:`brutex.dashboard.pull_controller.pull_all_spot` with
         ``auto_retry=True`` so AFTER the (coverage-skipped) pass, bounded extra
         rounds re-fetch ONLY the still-failed windows — the SAME
-        :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` engine the
+        :func:`~brutex.adapters.ingest_common.retry_failed_windows` engine the
         CLI ``brutex fetch --retry-failed`` calls (CLAUDE.md §11 COMMON), rate-safe
         (``≤ 5 r/s``) + idempotent (a now-succeeded window is a no-op). With no
         ``?symbols=`` / ``?symbol=`` / ``?kind=`` the full admitted spot universe
@@ -1598,7 +1598,7 @@ def build_app(
         Query parameters
         ----------------
         symbol
-            The engine ``symbol_name`` / Dhan ``SECURITY_ID`` the universe grid
+            The engine ``symbol_name`` / vendor ``SECURITY_ID`` the universe grid
             sends; resolved to an instrument (and its lake exchange/segment/
             symbol partition coordinates) via the store. An unknown symbol is a
             400 (DEC-PULL-ERROR-VISIBILITY-001).
@@ -1696,7 +1696,7 @@ def build_app(
         :func:`brutex.dashboard.coverage_view.build_coverage_payload`. The
         expected universe×years grid is derived from the lake's IDX + EQ
         candidates (:func:`brutex.universe.derive_lake_underlyings`) × the
-        Dhan history window (2021 → current year); the actual rows come
+        vendor history window (2021 → current year); the actual rows come
         from ``store.list_coverage()`` (indexed read). All projection logic
         lives in the (coverage-tested) ``coverage_view`` module.
         """
@@ -1813,7 +1813,7 @@ def build_app(
             """Build the payload with the id→symbol map for PRECISE option rows.
 
             DEC-WINDOW-OPTION-DECODE-001: option window keys carry the numeric
-            Dhan SECURITY_ID (``25|NSE_FNO``), so the map lets the projection
+            vendor SECURITY_ID (``25|NSE_FNO``), so the map lets the projection
             display the operator's symbol (``BANKNIFTY``) instead. Built here on
             the SAME threadpool worker as the read so the store's RLock stays on
             one thread (DEC-DASHBOARD-FASTREAD-001); display-only.
@@ -2157,7 +2157,7 @@ def build_app(
 
         Accepts the api key + TOTP secret in the request BODY (never query
         params, which leak into access logs). The body is NOT logged. The save is
-        a read-merge-write (:func:`save_groww_credentials`) so a stored Dhan
+        a read-merge-write (:func:`save_groww_credentials`) so a stored token-style
         section is preserved. A blank field raises :class:`CredentialsError`,
         mapped to HTTP 400 naming the field but NEVER its value. Returns only the
         masked preview — never echoes a value back.
@@ -2639,7 +2639,7 @@ def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:
         "Cannot resolve a lake root for a LIVE pull: no InstrumentStore "
         "path is wired. Start the dashboard with "
         "`brutex dashboard --lake-root <path>` so live pulls have a "
-        "Parquet sink, or run without Dhan creds for the offline "
+        "Parquet sink, or run without vendor creds for the offline "
         "synthetic preview."
     )
 
@@ -3084,7 +3084,7 @@ def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, dat
 
 
 def _coverage_years() -> list[int]:
-    """Return the expected coverage years — Dhan Track-1 history floor 2021 → now.
+    """Return the expected coverage years — Track-1 vendor history floor 2021 → now.
 
     The operational floor is **2021-01-01** (DEC-DHAN-PULL-SCOPE-001); the
     2020 floor was a stale Groww-era carryover (DEC-DHAN-COVERAGE-RESCOPE-001).

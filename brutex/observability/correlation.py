@@ -1,14 +1,14 @@
 """pull_id correlation — one id per ingest pull, threaded via structlog contextvars.
 
-The COMMON (CLAUDE.md §11) correlation primitive for the Dhan ingest path
+The COMMON (CLAUDE.md §11) correlation primitive for the vendor ingest path
 (DEC-DHAN-INGEST-LOGGING-001). Every operator-facing pull
 (:func:`~brutex.dashboard.pull_controller.pull_candles` /
 :func:`~brutex.dashboard.pull_controller.pull_all_spot`) opens a
 :func:`pull_id_scope`, which BINDS a single ``pull_id`` into the structlog
 context-vars for the whole pull. Two things then carry that id for free:
 
-1. **The already-lit layers** — the transport (``dhan.call`` /
-   ``dhan.throughput``; DEC-DHAN-CALL-LATENCY-LOGGING-001 #419) and the rate
+1. **The already-lit layers** — the transport (the per-call /
+   throughput events; DEC-DHAN-CALL-LATENCY-LOGGING-001 #419) and the rate
    controller (``rate.429`` / ``rate.stepdown`` / ``rate.stepup``;
    DEC-DHAN-RATE-LOGGING-001 #420) — inherit ``pull_id`` because
    ``structlog.contextvars.merge_contextvars`` sits first in the configured

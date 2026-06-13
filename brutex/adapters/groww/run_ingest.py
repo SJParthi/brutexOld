@@ -1,32 +1,31 @@
-"""Groww multi-instrument spot-ingest orchestrator (ADDITIVE mirror of Dhan's).
+"""Groww multi-instrument spot-ingest orchestrator.
 
-The Groww twin of :mod:`brutex.adapters.dhan.run_ingest` for the vendor
-re-migration (PR-H). Drives :func:`~brutex.adapters.groww.ingest.ingest_spot`
+The Groww vendor run-ingest layer (PR-H). Drives
+:func:`~brutex.adapters.groww.ingest.ingest_spot`
 across every ``(instrument, interval)`` pair resiliently: a **terminal** Groww
 error on one pair is quarantined (recorded as failed) and the run continues to
 the next pair — one bad symbol never kills the whole pull. Per-window transient
 errors are already retried/skipped inside ``ingest_spot``; this layer adds the
 multi-instrument fan-out + per-pair quarantine + an aggregate report.
 
-**No caller is wired yet** — the CLI/dashboard keep calling the Dhan spine until
-the cutover (PR-I). The adapter, sink and pacing hook are all injected, so this
+The adapter, sink and pacing hook are all injected, so this
 is 100% unit-testable without a network or a real lake.
 
-Parallel fan-out mirrors the Dhan spine: the OUTER loop — one job per
+Parallel fan-out: the OUTER loop — one job per
 ``(instrument, interval)`` pair — runs through an injected
 :class:`~brutex.orchestrator.universe_phases.RunParallel` (production: a bounded
 :class:`~brutex.orchestrator.parallel.PoolRunParallel`). Each pair writes a
 DISTINCT lake partition, so the per-pair writes are path-isolated; the shared
 rate bucket (the injected ``pace``) is the governor.
 
-**Divergences from the Dhan spine (deliberate, Golden Rule #1):**
+**Divergences from a latched, gap-aware spine (deliberate, Golden Rule #1):**
 
-* **No auth fail-fast latch.** Dhan carries a shared ``AuthGuard`` + an
-  ``auth_aborted`` / ``auth_cause`` report field for a mid-pull token death
-  (DH-906). The Groww adapter provides no such latch, so a Groww auth failure is
+* **No auth fail-fast latch.** Some vendors carry a shared ``AuthGuard`` + an
+  ``auth_aborted`` / ``auth_cause`` report field for a mid-pull token death.
+  The Groww adapter provides no such latch, so a Groww auth failure is
   a plain TERMINAL per-pair quarantine — recorded + re-tried next pull, like any
   other terminal error. The report carries no auth-abort fields.
-* **No known-gap branch.** Dhan special-cases a ``DH-905`` "no data" 400 as a
+* **No known-gap branch.** Some vendors special-case a "no data" 400 as a
   benign KNOWN_GAP. Groww has no such marker (Golden Rule #1 — no invented vendor
   code), so every terminal Groww error is a uniform quarantine.
 * **No ``status_log``.** Dropped (the unified ledger is the sole record surface).
@@ -112,7 +111,7 @@ class PairFailure:
     """Whether the terminal error was a Groww auth failure (a dead/invalid token).
 
     Captured from the live exception at quarantine time (Groww has no error-string
-    no-data marker to re-derive it from, unlike Dhan), so the auto-retry wrapper
+    no-data marker to re-derive it from), so the auto-retry wrapper
     can halt on a token death — retrying is futile until re-auth.
     """
 
@@ -166,7 +165,7 @@ class GrowwIngestReport:
         Groww has no fail-fast latch (the documented divergence), so this is a
         DERIVED read over the quarantined failures' captured ``auth_failure`` flag
         rather than a latch state. It lets the auto-retry wrapper halt the loop on
-        a token death exactly as the Dhan path does — retrying is futile until re-auth.
+        a token death — retrying is futile until re-auth.
         """
         return any(f.auth_failure for f in self.failures)
 

@@ -16,8 +16,8 @@ This module is **pure** — no imports of polars / duckdb / pyarrow —
 so it participates in the unit-test suite without the P2 data-lake
 dependency extras installed.
 
-Note: the live Dhan path uses the columnar parser in
-``brutex/adapters/dhan/parser.py``; this row parser is the
+Note: the live vendor path uses the parser in
+``brutex/adapters/groww/parser.py``; this row parser is the
 canonical/legacy 7-field shape.
 """
 

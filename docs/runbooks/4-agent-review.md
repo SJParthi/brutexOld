@@ -147,7 +147,7 @@ Specific things to grep for:
    docs/STANDARDS_100PCT_HONEST_AUDIT.md)?
 4. Stale references — anything pointing to retired stubs
    (REQUIREMENTS.md, ROADMAP.md, REQUIREMENTS_SIMPLE.md,
-   adapters.md), retired adapters (Dhan), removed concepts.
+   adapters.md), retired adapters (the prior pre-Groww vendor), removed concepts.
 5. Untested code paths the subject claims are tested.
 
 Output format:

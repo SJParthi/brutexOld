@@ -6,11 +6,10 @@ inspect them without installing P2 data-lake dependencies.
 
 ## Types
 
-* :class:`CandleBar` — one OHLCV bar (spot underlying), columnar
-  layout per ``docs/dhan-ref/05-historical-data.md``.
+* :class:`CandleBar` — one OHLCV bar (spot underlying), in the
+  normalised lake layout produced by the vendor parser.
 * :class:`OptionBar` — one expired-option OHLC bar (one ``ce`` / ``pe``
-  side) from ``/charts/rollingoption``, per
-  ``docs/dhan-ref/06-expired-options-data.md``; carries the resolved
+  side) from the vendor's rolling-option endpoint; carries the resolved
   ``strike`` / ``spot`` / ``iv`` the rolling endpoint stamps per bar.
 * :class:`CatalogEntry` — one row in the DuckDB catalog, defined per
   ``FR-CAT-002``.
@@ -131,7 +130,7 @@ class OptionBar:
     """One expired-option OHLC bar from ``/charts/rollingoption`` (one side).
 
     Track 1 / lake (DEC-P0-063) options live ONLY on the rolling endpoint
-    (``docs/dhan-ref/06-expired-options-data.md``) — every backtest contract
+    (the vendor's expired-options data source) — every backtest contract
     is already expired. The endpoint returns per-side (``ce`` / ``pe``)
     columnar arrays and stamps, per bar, the **resolved** ``strike`` (the
     relative ``ATM±N`` selector resolved to an absolute strike), the
@@ -216,7 +215,7 @@ class CatalogEntry:
     segment
         CASH or FNO.
     symbol
-        Full Dhan/canonical contract symbol, e.g. ``NSE-NIFTY-02Jan25-28500-PE``.
+        Full canonical contract symbol, e.g. ``NSE-NIFTY-02Jan25-28500-PE``.
     interval
         the canonical interval name, e.g. ``1minute``, ``1day``.
     year, month

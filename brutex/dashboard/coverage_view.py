@@ -207,10 +207,10 @@ def spot_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-#: The two Dhan FETCH intervals the window ledger plans/records — every other
+#: The two FETCH intervals the window ledger plans/records — every other
 #: lake interval is RESAMPLED from 1minute (DEC-DHAN-1M-ONLY-001) and so has NO
 #: ledger rows BY DESIGN. MUST MATCH
-#: ``brutex.dashboard.pull_controller.DHAN_FETCH_INTERVALS`` — mirrored here
+#: ``brutex.dashboard.pull_controller.GROWW_FETCH_INTERVALS`` — mirrored here
 #: (the ``db_view._OPTION_WINDOW_MARKET`` precedent) so this pure projection
 #: module never imports the pull/adapter stack
 #: (DEC-SPOT-COVERAGE-COMPLETENESS-001).

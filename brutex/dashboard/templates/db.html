@@ -352,7 +352,7 @@ async function loadTables() {
     /* The unified window ledger lives in a Parquet sidecar (`window_ledger/`),
        NOT a DuckDB table — surface it as its OWN clickable read-only row
        (DEC-WINDOW-LEDGER-001) so EVERY fetch window is browsable right here on /db.
-       (The Dhan token-events viewer was retired in PR-J4c with the token
+       (The Groww token-events viewer was retired in PR-J4c with the token
        lifecycle.) */
     const ledgerRow = '<div class="tbl" data-ledger="window_ledger">'
       + '<span class="nm">🪟 window ledger</span>'

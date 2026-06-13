@@ -66,9 +66,9 @@ class OptionSeriesCoordinate:
     exch_id
         Exchange id (e.g. ``"NSE"``).
     exchange_segment
-        Dhan ``exchangeSegment`` (e.g. ``"NSE_FNO"``).
+        Vendor ``exchangeSegment`` (e.g. ``"NSE_FNO"``).
     security_id
-        The **underlying** Dhan ``SECURITY_ID`` (numeric).
+        The **underlying** vendor ``SECURITY_ID`` (numeric).
     underlying_symbol
         The underlying's engine symbol (e.g. ``"NIFTY"``).
     expiry_flag

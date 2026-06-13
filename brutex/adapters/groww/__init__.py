@@ -1,11 +1,10 @@
 """Groww Trade API adapter (Track-1 backtesting data source).
 
-DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) — the Dhan → Groww re-migration.
-This package is built additive-first: PR-C ships the pure leaf layer
-(``constants`` · ``errors`` · ``parser`` · ``chunks``); the client, auth,
+DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) — the Groww re-migration. Groww is
+the live vendor (ADR-0009). This package layers the pure leaf surface
+(``constants`` · ``errors`` · ``parser`` · ``chunks``) under the client, auth,
 instruments, ingest, and the :class:`~brutex.adapters.protocol.MarketAdapter`
-implementation land in later PRs (ADR-0009 §5). Dhan stays the live vendor
-until the cutover (PR-G/H); nothing here is wired into the orchestrator yet.
+implementation (ADR-0009 §5).
 
 Every Groww fact is traceable to ``docs/groww/api-reference/*.md`` or the
 operator-verified ``docs/groww/probe/INSTRUMENT_MASTER_FINDINGS.md``
