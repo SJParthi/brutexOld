@@ -675,3 +675,135 @@ def test_ingest_underlying_options_resolution_error_propagates() -> None:
             end=date(2024, 1, 26),
             now_ist=_now,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# contract_windows — smart 1-minute bounds (DEC-DERIV-MINUTE-BOUNDS-001)
+# ─────────────────────────────────────────────────────────────────────────
+_BOUND = (date(2024, 12, 2), date(2024, 12, 20))
+_GLOBAL = (date(2021, 1, 1), date(2025, 2, 1))
+
+
+def test_resolve_window_none_map_is_global() -> None:
+    assert (
+        _oi._resolve_window(None, symbol="X", interval="1minute", start=_GLOBAL[0], end=_GLOBAL[1])
+        == _GLOBAL
+    )
+
+
+def test_resolve_window_daily_interval_never_bounded() -> None:
+    # Even with the symbol in the map, the DAILY interval keeps the global range — it
+    # is the coverage SOURCE, so bounding it would freeze a live contract's coverage.
+    assert (
+        _oi._resolve_window(
+            {"X": _BOUND}, symbol="X", interval="1day", start=_GLOBAL[0], end=_GLOBAL[1]
+        )
+        == _GLOBAL
+    )
+
+
+def test_resolve_window_subdaily_symbol_present_is_bounded() -> None:
+    assert (
+        _oi._resolve_window(
+            {"X": _BOUND}, symbol="X", interval="1minute", start=_GLOBAL[0], end=_GLOBAL[1]
+        )
+        == _BOUND
+    )
+
+
+def test_resolve_window_symbol_absent_is_global() -> None:
+    assert (
+        _oi._resolve_window(
+            {"OTHER": _BOUND}, symbol="X", interval="1minute", start=_GLOBAL[0], end=_GLOBAL[1]
+        )
+        == _GLOBAL
+    )
+
+
+def _record_window(ledger: WindowLedger, *, interval: str) -> tuple[str, str]:
+    rec = next(r for r in ledger.records() if r.interval == interval)
+    return (rec.window_start, rec.window_end)
+
+
+def test_run_contract_windows_bounds_subdaily_not_daily() -> None:
+    # The minute pull is bounded to the contract's window; the daily pull keeps the
+    # full range (the daily-guard) — proven via the persisted WindowLedger keys.
+    contract = _ce()
+    ledger = WindowLedger()
+    run_groww_option_ingest(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contracts=[contract],
+        intervals=["1minute", "1day"],
+        start=_GLOBAL[0],
+        end=_GLOBAL[1],
+        ledger=ledger,
+        now_ist=_now,
+        contract_windows={contract.symbol: _BOUND},
+    )
+    assert _record_window(ledger, interval="1minute") == ("2024-12-02", "2024-12-20")
+    assert _record_window(ledger, interval="1day") == ("2021-01-01", "2025-02-01")
+
+
+def test_run_contract_windows_none_is_backward_compatible() -> None:
+    contract = _ce()
+    ledger = WindowLedger()
+    run_groww_option_ingest(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contracts=[contract],
+        intervals=["1minute"],
+        start=_GLOBAL[0],
+        end=_GLOBAL[1],
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert _record_window(ledger, interval="1minute") == ("2021-01-01", "2025-02-01")
+
+
+def test_ingest_underlying_options_forwards_contract_windows() -> None:
+    sym = "NSE-NIFTY-25Jan24-100-CE"
+    ledger = WindowLedger()
+    sdk = _FakeSDK(
+        payload=_candles(),
+        expiries=lambda **kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
+        contracts=lambda **_kw: {"contracts": [sym]},
+    )
+    ingest_underlying_options(
+        _client(sdk),
+        _Sink(),
+        exchange="NSE",
+        underlying_symbol="NIFTY",
+        years=[2024],
+        intervals=["1minute"],
+        start=_GLOBAL[0],
+        end=_GLOBAL[1],
+        ledger=ledger,
+        now_ist=_now,
+        contract_windows={sym: _BOUND},
+    )
+    assert _record_window(ledger, interval="1minute") == ("2024-12-02", "2024-12-20")
+
+
+def test_ingest_underlying_futures_forwards_contract_windows() -> None:
+    sym = "NSE-NIFTY-25Jan24-FUT"
+    ledger = WindowLedger()
+    sdk = _FakeSDK(
+        payload=_candles(),
+        expiries=lambda **kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
+        contracts=lambda **_kw: {"contracts": [sym]},
+    )
+    ingest_underlying_futures(
+        _client(sdk),
+        _Sink(),
+        exchange="NSE",
+        underlying_symbol="NIFTY",
+        years=[2024],
+        intervals=["1minute"],
+        start=_GLOBAL[0],
+        end=_GLOBAL[1],
+        ledger=ledger,
+        now_ist=_now,
+        contract_windows={sym: _BOUND},
+    )
+    assert _record_window(ledger, interval="1minute") == ("2024-12-02", "2024-12-20")
