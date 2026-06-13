@@ -1582,6 +1582,43 @@ def build_app(
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **banner_for(raw).to_dict()})
 
+    @app.post("/api/v1/universe/verify-nse")
+    async def api_universe_verify_nse(
+        symbol: str = Query(...),
+        date_str: str = Query(..., alias="date"),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/verify-nse — cross-check ONE index's spot 1-day OHLC vs NSE.
+
+        The MANUAL/AUTOMATED *first-verification* surface (DEC-NSE-VERIFY-ROUTE-001):
+        before a bulk derivative pull is trusted, prove Groww's spot holds the SAME
+        data as the official exchange — for the underlying spot, one day, alone. A
+        thin wrapper over the degrade-safe
+        :func:`brutex.data.validation.nse_oneday.validate_index_oneday` (it pulls the
+        index's ``1day`` Groww candle live + the official NSE ``ind_close_all``
+        snapshot, compares the four OHLC fields, and returns a ``matched`` /
+        ``mismatched`` / ``unavailable`` verdict — it NEVER raises for a missing
+        ``[groww]`` extra / missing creds / network block; those each surface as an
+        honest ``unavailable`` note, so this route is always a 200 with a verdict).
+        Run OFF the event loop (live network) via the threadpool like every other
+        pull route here. ``date`` is an inclusive ISO ``YYYY-MM-DD`` IST trade day; a
+        malformed value is the lone 400, with the real reason
+        (DEC-PULL-ERROR-VISIBILITY-001). Only the 3 brute-force indices
+        (``NIFTY`` / ``BANKNIFTY`` / ``SENSEX``) have an official source today; any
+        other symbol returns an honest ``unavailable`` (no source mapping).
+        """
+        from brutex.data.validation.nse_oneday import validate_index_oneday
+
+        try:
+            trade_date = date.fromisoformat(date_str)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid date {date_str!r} — expected ISO YYYY-MM-DD ({exc})",
+            ) from exc
+        _LOG.info("universe.verify_nse.requested", symbol=symbol, date=date_str)
+        verdict = await run_in_threadpool(validate_index_oneday, symbol, trade_date)
+        return JSONResponse(verdict.to_dict())
+
     @app.post("/api/v1/universe/derive-timeframes")
     async def api_universe_derive_timeframes(
         symbol: str = Query(...),
