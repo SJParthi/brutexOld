@@ -80,6 +80,49 @@ def test_verify_returns_serialised_verdict(
     assert captured["trade_date"] == date(2025, 9, 24)
 
 
+def test_verify_stock_routes_to_equity_harness(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-index symbol auto-routes to the equity OHLCV+Volume harness (DEC-NSE-EQUITY-VERIFY-001)."""
+    from brutex.data.validation.nse_equity_oneday import (
+        EquityVerdict,
+        VolumeComparison,
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_equity(symbol: str, trade_date: date) -> EquityVerdict:
+        captured["symbol"] = symbol
+        return EquityVerdict(
+            symbol=symbol,
+            trade_date=trade_date,
+            status=VerdictStatus.MATCHED,
+            price_tolerance=DEFAULT_TOLERANCE_RUPEES_UNVERIFIED,
+            volume_tolerance=0,
+            fields=(),
+            volume=VolumeComparison(groww=1000, official=1000, delta=0, matched=True),
+            groww_source="groww",
+            official_source="nse",
+            note=None,
+        )
+
+    def fake_index(
+        symbol: str, trade_date: date
+    ) -> OneDayVerdict:  # pragma: no cover - not reached
+        raise AssertionError("a stock must not hit the index harness")
+
+    _patch_validate(monkeypatch, fake_index)
+    mod = importlib.import_module("brutex.data.validation.nse_equity_oneday")
+    monkeypatch.setattr(mod, "validate_equity_oneday", fake_equity)
+
+    resp = client.post("/api/v1/universe/verify-nse?symbol=RELIANCE&date=2025-09-24")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "matched"
+    assert body["volume"] == {"groww": 1000, "official": 1000, "delta": 0, "matched": True}
+    assert captured["symbol"] == "RELIANCE"
+
+
 def test_verify_bad_date_is_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     def fake(symbol: str, trade_date: date) -> OneDayVerdict:  # pragma: no cover - never reached
         raise AssertionError("validate must not run on a malformed date")

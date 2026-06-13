@@ -1548,10 +1548,18 @@ def _resolve_fetch_intervals(interval: str) -> list[str]:
     both; ``1m``/``1minute`` and ``1d``/``1day`` → that one; anything else
     raises :class:`ValueError` (a non-fetched timeframe).
     """
-    from brutex.dashboard.pull_controller import GROWW_FETCH_INTERVALS
+    from brutex.dashboard.pull_controller import (
+        SPOT_INTERVAL_BOTH,
+        SPOT_INTERVAL_CHOICES,
+    )
 
     if interval == "all":
-        return list(GROWW_FETCH_INTERVALS)
+        # ``all`` means BOTH fetched intervals (1minute + 1day) per this function's
+        # contract below. Merge-reconcile (DEC-NSE-EQUITY-VERIFY-001): DEC-PULL-1DAY-FIRST-001
+        # narrowed GROWW_FETCH_INTERVALS to the verify-first 1-day-only DEFAULT, which had
+        # silently shrunk this ``all`` alias to 1-day; restore it to the explicit both-tuple
+        # so ``--interval all`` fetches 1m + 1d as documented + tested.
+        return list(SPOT_INTERVAL_CHOICES[SPOT_INTERVAL_BOTH])
     canonical = {
         "1m": "1minute",
         "1minute": "1minute",
