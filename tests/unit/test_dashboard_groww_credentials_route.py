@@ -191,6 +191,33 @@ def test_test_route_other_groww_error_502(
     assert issubclass(GrowwRateLimitError, GrowwError)
 
 
+def test_test_route_missing_groww_extra_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing optional ``.[groww]`` extra (lazy growwapi/pyotp import) → a clean 400.
+
+    DEC-GROWW-CREDS-TEST-IMPORT-400-001: the raw ``ModuleNotFoundError`` used to
+    escape as a 500 the frontend mis-rendered as "not valid JSON"; now it is an
+    actionable 400 naming the extra to install.
+    """
+    _save(client)
+
+    def no_deps(creds: object) -> object:
+        raise ModuleNotFoundError("No module named 'growwapi'")
+
+    _patch_probe(monkeypatch, build=no_deps)
+    resp = client.post("/api/v1/groww/credentials/test")
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert ".[groww]" in detail  # actionable install hint
+    assert "growwapi" in detail  # the missing module, surfaced (no secret)
+    # ModuleNotFoundError is an ImportError → caught by the new branch.
+    assert issubclass(ModuleNotFoundError, ImportError)
+    # No secret value leaks into the response.
+    assert _TOTP_SECRET not in resp.text
+    assert _API_KEY not in resp.text
+
+
 # ── template loader (whitebox: both cache branches + key UX strings) ─────────
 
 
