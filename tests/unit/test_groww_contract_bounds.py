@@ -9,7 +9,7 @@ disjoint / quarantine fallbacks, and the catalog-unavailable degrade).
 
 The lake tests build a real ``ParquetBarSink`` (``catalog=None`` — the
 dashboard/derivative-pull reality) + a real ``Catalog`` under ``tmp_path``, exactly
-mirroring the blessed reconcile→read pattern (``movers_reader`` /
+mirroring the blessed reconcile→read pattern (``cascade_wire`` /
 ``test_data_lake_real``). No network, no Groww SDK.
 """
 
