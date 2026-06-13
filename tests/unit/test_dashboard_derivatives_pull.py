@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=none
 """Tests for ``brutex.dashboard.derivatives_pull`` (DEC-PULL-DERIVATIVES-001).
 
 The bulk DERIVATIVES pull controller: interval/contract-type/range resolution, the

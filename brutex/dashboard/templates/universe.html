@@ -342,6 +342,36 @@
         <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
         <span class="bmeta">all F&amp;O stock 1m + 1d</span>
       </button>
+      <button class="bulkbtn idx" id="bulkIdxDeriv" data-surface="derivatives" data-kind="index">
+        <span class="shine"></span><span class="bnum">③</span>
+        <span class="bicon">🔗</span><span class="blabel">Indices · Derivatives</span>
+        <span class="bmeta">all index expiries + strikes</span>
+      </button>
+      <button class="bulkbtn stk" id="bulkStkDeriv" data-surface="derivatives" data-kind="stock">
+        <span class="shine"></span><span class="bnum">④</span>
+        <span class="bicon">🔗</span><span class="blabel">Stocks · Derivatives</span>
+        <span class="bmeta">all F&amp;O stock expiries + strikes</span>
+      </button>
+    </div>
+    <!-- Derivatives knobs (DEC-PULL-DERIVATIVES-001): drive BOTH the ③④ bulk
+         buttons AND the per-selection "⤓ Pull expiries + contracts" button.
+         ALL expiries × ALL strikes · Jan-2020 → today · 1day FIRST. -->
+    <div class="derivctl" style="margin:12px 0 0; display:flex; gap:16px; align-items:center; flex-wrap:wrap; color:var(--muted); font-size:12px;">
+      <label>Interval&nbsp;
+        <select id="derivInterval" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;">
+          <option value="1day">1 day · cheap, NSE-verifiable</option>
+          <option value="1minute">1 minute · heavy fill</option>
+          <option value="both">both · 1day → 1minute</option>
+        </select>
+      </label>
+      <label>Contract type&nbsp;
+        <select id="derivType" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;">
+          <option value="both">options + futures</option>
+          <option value="option">options · CE+PE</option>
+          <option value="future">futures · FUT</option>
+        </select>
+      </label>
+      <span>⛓ ALL expiries × ALL strikes · Jan-2020 → today · 1day first (verify, then 1-minute)</span>
     </div>
   </div>
 
@@ -372,6 +402,7 @@
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
     <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
     <button class="loadbtn" id="verifybtn" title="Cross-check the selected index's pulled spot 1-day OHLC against the official NSE close for the 'to' date — the trust anchor before any bulk pull. NIFTY / BANKNIFTY today (SENSEX needs an operator-verified BSE source)." disabled>🛡 Verify vs NSE</button>
+    <button class="loadbtn" id="pullDerivBtn" title="Pull the ENTIRE F&amp;O chain (all expiries × all listed strikes, Jan-2020 → today) for the selected instrument(s) — interval + contract-type set by the dropdowns above. Re-click is safe (already-pulled windows are skipped)." disabled>⛓ Pull expiries + contracts</button>
     <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
@@ -955,6 +986,20 @@ document.getElementById("verifybtn").onclick = async () => {
   }
 };
 
+/* ── "⛓ Pull expiries + contracts" (DEC-PULL-DERIVATIVES-001): the per-selection
+   bulk F&O CHAIN pull — every expiry × every listed strike for the ticked /
+   highlighted underlying(s), at the dropdowns' interval + contract-type (1day
+   first). No date picker → the full Jan-2020 → today FNO range; re-click is
+   idempotent (the WindowLedger skips already-pulled windows). ── */
+document.getElementById("pullDerivBtn").onclick = () => {
+  const items = spotSelection();
+  if (!items.length) return;
+  const ids = items.map(it => it.pull_symbol).join(",");
+  startAndPoll(
+    "/api/v1/universe/pull-derivatives?symbols=" + encodeURIComponent(ids) + derivKnobs(),
+    `${items.length} derivatives`);
+};
+
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
    selected" pulls each instrument's spot in turn (sequential, so the one shared
    rate budget is respected and each shows in the live panel). The per-row
@@ -980,6 +1025,13 @@ function updateMultiBtn() {
   // highlighted (the trust anchor verifies that one underlying's spot 1-day).
   const v = document.getElementById("verifybtn");
   if (v) v.disabled = !selInst;
+  // "⛓ Pull expiries + contracts" is selection-driven (one OR many) — same enable
+  // rule as the spot pull (any ticked row OR a single highlight).
+  const d = document.getElementById("pullDerivBtn");
+  if (d) {
+    d.textContent = n > 0 ? `⛓ Pull expiries + contracts · ${n} selected` : "⛓ Pull expiries + contracts";
+    d.disabled = n === 0 && !selPullSymbol;
+  }
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed
@@ -1130,20 +1182,35 @@ document.getElementById("matbtn").onclick = async () => {
 /* ── Bulk spot pull (buttons ① ②) — one click fans the whole kind ──
    surface=spot → /pull-all?kind=…
    Disables every bulk button while one runs so two universe pulls can't race. */
-const BULK_BTNS = ['bulkIdxSpot','bulkStkSpot']
+const BULK_BTNS = ['bulkIdxSpot','bulkStkSpot','bulkIdxDeriv','bulkStkDeriv']
   .map(id => document.getElementById(id));
 
 function setBulkDisabled(on) {
   BULK_BTNS.forEach(b => { if (b) b.disabled = on; });
 }
 
+/* The interval + contract-type dropdowns drive every derivatives pull (bulk +
+   per-selection): &interval=1day|1minute|both &contract_type=option|future|both. */
+function derivKnobs() {
+  const ivSel = document.getElementById('derivInterval');
+  const ctSel = document.getElementById('derivType');
+  const iv = ivSel ? ivSel.value : '1day';
+  const ct = ctSel ? ctSel.value : 'both';
+  return '&interval=' + encodeURIComponent(iv) + '&contract_type=' + encodeURIComponent(ct);
+}
+
 BULK_BTNS.forEach(btn => {
   if (!btn) return;
   btn.addEventListener('click', () => {
     const kind = btn.dataset.kind;             // "index" | "stock"
-    const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
     const noun = kind === 'index' ? 'indices' : 'stocks';
-    startAndPoll(path, `ALL ${noun} spot`);
+    if (btn.dataset.surface === 'derivatives') {
+      const path = '/api/v1/universe/pull-derivatives?kind=' + encodeURIComponent(kind) + derivKnobs();
+      startAndPoll(path, `ALL ${noun} derivatives`);
+    } else {
+      const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
+      startAndPoll(path, `ALL ${noun} spot`);
+    }
   });
 });
 

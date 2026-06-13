@@ -195,3 +195,16 @@ def test_no_selection_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
     assert resp.json()["detail"] == (
         "pull-derivatives requires ?symbols=..., ?symbol=... or ?kind=..."
     )
+
+
+def test_universe_page_carries_derivatives_ui(client: TestClient) -> None:
+    """The /universe page wires the derivatives button, bulk buttons, dropdowns + route."""
+    resp = client.get("/universe")
+    assert resp.status_code == 200
+    assert "/api/v1/universe/pull-derivatives" in resp.text
+    assert 'id="pullDerivBtn"' in resp.text
+    assert 'id="bulkIdxDeriv"' in resp.text
+    assert 'id="bulkStkDeriv"' in resp.text
+    assert 'id="derivInterval"' in resp.text
+    assert 'id="derivType"' in resp.text
+    assert "Pull expiries + contracts" in resp.text
