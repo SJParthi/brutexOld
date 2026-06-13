@@ -220,6 +220,33 @@ class TestListUnderlyings:
         assert {r["symbol"] for r in rows} == {"NIFTY", "NIFTYIT"}
         assert all(r["kind"] == KIND_INDEX for r in rows)
 
+    def test_rows_carry_contract_economics(self) -> None:
+        """Rows surface lot_size / tick_size (str) / freeze_quantity (DEC-DASHBOARD-ECON-COLUMNS-001).
+
+        ``tick_size`` is a Decimal serialised to ``str`` (JSON-safe, exact);
+        ``freeze_quantity`` is ``None`` on an index / non-F&O spot row. The values
+        are whatever the (already leg-folded at ingest) instrument carries.
+        """
+        from dataclasses import replace
+
+        # An F&O stock as it is STORED after the leg-economics fold: lot 500,
+        # spot tick 0.10 (kept), freeze 15001. The option leg makes it eligible.
+        rel = replace(
+            _equity("RELIANCE"), lot_size=500, tick_size=Decimal("0.10"), sm_freeze_qty=15001
+        )
+        rows = list_underlyings([rel, _option("RELIANCE")], kind=KIND_STOCK)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["symbol"] == "RELIANCE"
+        assert row["lot_size"] == 500
+        assert row["tick_size"] == "0.10"  # Decimal -> exact str, never a float
+        assert row["freeze_quantity"] == 15001
+
+        # An index surfaces its own (placeholder) economics; freeze is None.
+        idx = list_underlyings([_index("NIFTY")], kind=KIND_INDEX)[0]
+        assert idx["tick_size"] == "0.05"
+        assert idx["freeze_quantity"] is None
+
     def test_filter_stock(self) -> None:
         rows = list_underlyings(self._snapshot(), kind=KIND_STOCK)
         assert {r["symbol"] for r in rows} == {"RELIANCE", "TCS"}
@@ -238,6 +265,11 @@ class TestListUnderlyings:
             "name": "NIFTY 50",
             "kind": KIND_INDEX,
             "exchange": "NSE",
+            # Contract economics (DEC-DASHBOARD-ECON-COLUMNS-001): the fixture's own
+            # values; tick is a Decimal serialised to str, freeze is None on an index.
+            "lot_size": 1,
+            "tick_size": "0.05",
+            "freeze_quantity": None,
             # NIFTY is not reference-only → option chain applies (DEC-OPTIONS-PULL-GUARD-001).
             "option_pullable": True,
         }
