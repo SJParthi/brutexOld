@@ -15,11 +15,12 @@ core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
 
 PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the SPOT
 pull + instrument-master load now run on Groww — the J2-equivalent the
-dashboard never got (J3 only swapped the credentials gate). The OPTIONS pull +
-TOKEN-LIFECYCLE features (``start_token_keepalive`` / ``refresh_live_token`` /
-the holder + keepalive seams + the re-exported ``dhan_creds_present``) keep
-importing from ``brutex.adapters.dhan`` transitionally — they are rewired
-separately in J4c; ``brutex.adapters.dhan`` stays importable until J4d.
+dashboard never got (J3 only swapped the credentials gate). PR-J4c then darkened
+the vestigial Dhan TOKEN-LIFECYCLE seams (``start_token_keepalive`` /
+``refresh_live_token`` / the holder + keepalive setters / the re-exported
+``dhan_creds_present``): the dashboard authenticates via Groww TOTP, so those
+Dhan-only helpers were removed here. ``brutex.adapters.dhan`` stays importable
+(a later PR deletes the package); this module simply no longer imports it.
 
 ## Offline-first
 
@@ -52,11 +53,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.adapters.dhan.auth import dhan_creds_present
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
 from brutex.adapters.groww.run_ingest import (
     GrowwIngestReport,
@@ -96,8 +96,6 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    from brutex.adapters.dhan.token_holder import TokenHolder
-    from brutex.adapters.dhan.token_keepalive import TokenKeepalive
     from brutex.adapters.dhan.token_preflight import TokenPreflight
     from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
     from brutex.adapters.rate_common import RateController as DhanRateController
@@ -318,11 +316,11 @@ def resolve_pull_symbols(
 ) -> list[Instrument]:
     """Resolve a comma ``?symbols=`` list to instruments via *lookup* (a store ``get``).
 
-    The backend half of the unified multi-select OPTIONS pull
+    The backend half of the unified multi-select SPOT pull
     (DEC-UNIVERSE-OPTIONS-MULTIPULL-001): the page sends the ticked underlyings
     as ``?symbols=a,b,c``; this resolves each to its
     :class:`~brutex.models.Instrument` so ONE
-    :func:`~brutex.dashboard.option_pull_controller.pull_options` pass fans them
+    :func:`~brutex.dashboard.pull_controller.pull_all_spot` pass fans them
     all (the core already accepts a list). Blanks are dropped + duplicates
     removed (:func:`parse_symbol_list`), order preserved.
 
@@ -535,118 +533,6 @@ def _build_live_pull_adapter(  # pragma: no cover — thin single-instrument wra
 BulkAdapterFactory = Callable[[Path, Sequence[Instrument]], tuple[MarketAdapter, BarSink]]
 
 
-#: Process-wide live-token holder seam (DEC-DHAN-TOKEN-KEEPALIVE-001). The
-#: dashboard installs ONE :class:`~brutex.adapters.dhan.token_holder.TokenHolder`
-#: at startup (the same instance the background :class:`TokenKeepalive` writes to)
-#: so the LIVE builders below wire ``token_provider=holder.get`` into every
-#: ``DhanClient`` they construct — a mid-life renew then propagates to BOTH the
-#: next pull AND every in-flight window worker. ``None`` (e.g. unit tests, no live
-#: creds) → the builders fall back to the static token, byte-unchanged. Holds only
-#: a reference; the holder itself owns the thread-safety (one ``threading.Lock``).
-_LIVE_TOKEN_HOLDER: TokenHolder | None = None
-
-
-def set_live_token_holder(holder: TokenHolder | None) -> None:
-    """Install (or clear) the process-wide live-token holder for the live builders.
-
-    Called by the dashboard at startup with the holder the background keepalive
-    renews into, and with ``None`` at shutdown. Keeping it here (next to the live
-    builders that consume it) — rather than passing it through every factory
-    signature — mirrors how the live ``urllib`` transport is referenced directly:
-    the holder is a single live-path singleton, threaded explicitly from the app.
-
-    Parameters
-    ----------
-    holder
-        The shared :class:`~brutex.adapters.dhan.token_holder.TokenHolder`, or
-        ``None`` to clear it (live builders then use the static resolved token).
-    """
-    global _LIVE_TOKEN_HOLDER  # noqa: PLW0603 — single live-path singleton, set once at app start
-    _LIVE_TOKEN_HOLDER = holder
-
-
-class _LiveKeepalive(Protocol):
-    """The one method :func:`refresh_live_token` needs from the live keepalive.
-
-    Kept minimal so a test can inject a lightweight fake without the live network
-    dependencies of the real
-    :class:`~brutex.adapters.dhan.token_keepalive.TokenKeepalive`.
-    """
-
-    def forget_expiry(self) -> None:
-        """Drop the learned expiry so the next tick re-learns the live token's exp."""
-
-
-#: Process-wide live keepalive seam (DEC-DHAN-TOKEN-SINGLE-SOURCE-001), installed at
-#: startup alongside the holder so a mid-session credential save can tell the
-#: keepalive to RE-LEARN the new token's expiry. ``None`` when no keepalive runs.
-_LIVE_KEEPALIVE: _LiveKeepalive | None = None
-
-
-def set_live_keepalive(keepalive: _LiveKeepalive | None) -> None:
-    """Install (or clear) the process-wide live keepalive reference (startup/shutdown)."""
-    global _LIVE_KEEPALIVE  # noqa: PLW0603 — single live-path singleton, set once at app start
-    _LIVE_KEEPALIVE = keepalive
-
-
-def refresh_live_token(
-    access_token: str,
-    *,
-    lake_root: Path | None = None,
-    client_id: str | None = None,
-) -> bool:
-    """Propagate a freshly-saved access token to the LIVE session — no restart.
-
-    DEC-DHAN-TOKEN-SINGLE-SOURCE-001. When the operator saves a new token via the
-    Credentials page mid-session, the file is updated but the in-memory holder every
-    live ``DhanClient`` reads through ``token_provider`` was NOT — so every pull kept
-    using the STALE startup token and 401/``DH-906``'d (``auth_expired``) even with a
-    valid fresh token. This updates the installed holder IN PLACE (write-through, so
-    the durable store stays in sync) and tells the keepalive to re-learn the new
-    token's expiry on its next tick. Returns ``True`` when a live holder was installed
-    (the change took effect), ``False`` otherwise (no live session — a no-op).
-
-    Token-events log (DEC-TOKEN-EVENTS-001): when *lake_root* is given, a ``saved``
-    event is recorded into the durable token-events table — with the token's
-    JWT-derived expiry + a MASKED *client_id*, NEVER the token secret. Best-effort
-    (``record_token_event`` never raises), so it can never block a token save.
-
-    Parameters
-    ----------
-    access_token
-        The freshly-saved access token to make live immediately.
-    lake_root
-        The lake root to record the ``saved`` token event under (``None`` → no event).
-    client_id
-        The dhanClientId to MASK into the event (the raw id is never stored).
-    """
-    if lake_root is not None:
-        from brutex.adapters.dhan.token_events import ACTION_SAVED, record_token_event
-        from brutex.adapters.dhan.token_keepalive import decode_jwt_expiry
-
-        exp_epoch = decode_jwt_expiry(access_token)
-        expiry_at = datetime.fromtimestamp(exp_epoch, tz=UTC) if exp_epoch is not None else None
-        record_token_event(
-            lake_root,
-            action=ACTION_SAVED,
-            status="ok",
-            expiry_at=expiry_at,
-            client_id=client_id,
-        )
-    holder = _LIVE_TOKEN_HOLDER
-    if holder is None:
-        return False
-    holder.set(access_token)
-    keepalive = _LIVE_KEEPALIVE
-    if keepalive is not None:
-        keepalive.forget_expiry()
-    _LOG.info(
-        "auth.live_token_refreshed",
-        note="new token propagated to the live holder; keepalive will re-learn its expiry",
-    )
-    return True
-
-
 @dataclass(frozen=True, slots=True)
 class SymbolPullResult:
     """Per-symbol completed / failed / no-data interval counts for a bulk pull."""
@@ -848,86 +734,6 @@ class SessionRateController:
             if self._controller is None:
                 self._controller = self._factory()
             return self._controller
-
-
-def start_token_keepalive(  # pragma: no cover — live creds + RenewToken network, absent in CI
-    session_rate: SessionRateController | None = None,
-) -> TokenKeepalive | None:
-    """Start the continuous 12h token keepalive for the app's lifetime (best-effort).
-
-    DEC-DHAN-TOKEN-KEEPALIVE-001. When live creds resolve, this:
-
-    1. resolves the access token + client id;
-    2. builds ONE :class:`~brutex.adapters.dhan.token_holder.TokenHolder` seeded
-       with that token and INSTALLS it via :func:`set_live_token_holder`, so every
-       live pull's ``DhanClient`` reads the LIVE token through ``token_provider``;
-    3. builds a renew :class:`~brutex.adapters.dhan.client.DhanClient`
-       (``token_provider=holder.get``) over the real ``urllib`` transport, paced
-       through the session rate bucket (≤ 5 r/s, CLAUDE.md §2 Rule 6);
-    4. starts ONE :class:`~brutex.adapters.dhan.token_keepalive.TokenKeepalive`.
-
-    Best-effort + NEVER raises: if creds are absent (dry-run dashboard) it returns
-    ``None`` and the dashboard runs unchanged. ``# pragma: no cover`` — needs real
-    creds + the ``RenewToken`` network, absent in CI (the keepalive's own logic is
-    100%-covered via its injected-clock unit tests).
-
-    Honest envelope (Golden Rule #10): the keepalive keeps the token alive
-    INDEFINITELY only while the process runs AND the first token is an ACTIVE
-    web-generated token (RenewToken cannot revive a dead one, and refuses a
-    TOTP-minted one). This is NOT the §11 "zero clicks across restarts" guarantee.
-
-    Returns
-    -------
-    TokenKeepalive | None
-        The started :class:`TokenKeepalive` (call ``.stop()`` at shutdown), or
-        ``None`` when no live creds are present.
-    """
-    from brutex.adapters.dhan.auth import dhan_creds_present, resolve_dhan_credentials
-    from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
-    from brutex.adapters.dhan.token_holder import TokenHolder
-    from brutex.adapters.dhan.token_keepalive import TokenKeepalive
-    from brutex.config.credentials import DhanFileCredentials, save_dhan_credentials
-
-    if not dhan_creds_present():
-        return None
-    creds = resolve_dhan_credentials()
-
-    def _persist_token(token: str) -> None:
-        """Write-through the live token to the SINGLE durable store (the 0600 creds
-        file), best-effort — NEVER raises (a persist failure must not crash a renewal
-        mid-pull; the in-memory token is already updated). DEC-DHAN-TOKEN-SINGLE-
-        SOURCE-001: a keepalive renewal ROTATES the token (the new one invalidates
-        the old), so persisting it keeps the file holding the LIVE token — a restart
-        then re-loads the live token, not the just-invalidated pre-rotation one.
-
-        The client id is RE-READ from the store at persist time (not captured at
-        keepalive start): on the SAVE path the operator may have just changed it, and
-        a captured startup value would clobber the new one back to the old (a stale
-        full-overwrite). Re-resolving uses whatever the store currently holds, so the
-        persist only ever updates the token, never reverts the client id.
-        """
-        try:
-            client_id = resolve_dhan_credentials().client_id
-            save_dhan_credentials(DhanFileCredentials(access_token=token, client_id=client_id))
-        except Exception as exc:  # best-effort persist; must never crash a renewal mid-pull
-            _LOG.warning("auth.token_persist_failed", reason=str(exc))
-
-    holder = TokenHolder(creds.access_token, on_set=_persist_token)
-    set_live_token_holder(holder)
-    pace: Callable[[], None] | None = None
-    if session_rate is not None:
-        pace = session_rate.get().pace
-    client = DhanClient(
-        access_token=creds.access_token,
-        client_id=creds.client_id,
-        transport=default_dhan_transport(),
-        token_provider=holder.get,
-    )
-    keepalive = TokenKeepalive(client, holder, pace=pace, log=_LOG)
-    keepalive.start()
-    set_live_keepalive(keepalive)
-    _LOG.info("auth.keepalive.started", renew_before_hours=12)
-    return keepalive
 
 
 #: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
@@ -1785,14 +1591,9 @@ __all__ = [
     "SessionRateController",
     "SymbolPullResult",
     "TimeframeResult",
-    "dhan_creds_present",
     "parse_symbol_list",
     "pull_all_spot",
     "pull_candles",
-    "refresh_live_token",
     "resolve_candle_range",
     "resolve_pull_symbols",
-    "set_live_keepalive",
-    "set_live_token_holder",
-    "start_token_keepalive",
 ]

@@ -18,7 +18,12 @@ from datetime import date
 from typing import Any
 
 import pytest
-from brutex.adapters.dhan.errors import DhanBadRequestError
+from brutex.adapters.dhan.errors import (
+    DhanAuthError,
+    DhanBadRequestError,
+    DhanRateLimitError,
+)
+from brutex.adapters.dhan.option_ingest import OptionIngestReport
 from brutex.adapters.dhan.option_universe_ingest import (
     DEFAULT_EXPIRY_CODES,
     INDEX_STRIKE_OFFSETS,
@@ -848,3 +853,192 @@ class TestPlanFetchKeyParity:
         assert "2021-02-09" not in ends  # yesterday's trailing orphan pruned
         assert "2021-02-10" in ends  # today's trailing key planned
         assert ledger.is_skippable(full_tile) is True  # settled full tile kept
+
+
+# ── until-clean drain accounting: auth short-circuit, aborted series ─────────
+# These cover the residual drain arms that the deleted ``pull_options``
+# wrapper used to reach (test_option_until_clean.py): the worker AUTH-SKIP
+# `return None` (the latch tripped mid-fan-out), its `skipped_auth` drain arm,
+# the one-shot auth-alert latch under a SECOND quarantined auth failure, the
+# aborted (incomplete) series rollup, and the two report aggregate properties
+# (`still_failed_windows` + `aborted_series`). Driven against the module's OWN
+# public entrypoint — no deleted controller imported.
+
+
+class _SerialDispatchRun:
+    """A synchronous RunParallel fake that ACTUALLY dispatches each ``fn(item)``.
+
+    Distinct from the fabricating ``_fake_runner`` above (which never calls
+    ``fn``): this one runs the real per-series worker in input order, so the
+    shared dead-token latch a doomed first series trips is visible to every
+    later series' worker — exercising the worker's AUTH-SKIP ``return None``.
+    """
+
+    def __call__(
+        self,
+        fn: Callable[[Any], Any],
+        items: Sequence[Any],
+    ) -> list[ItemResult[Any, Any]]:
+        out: list[ItemResult[Any, Any]] = []
+        for item in items:
+            try:
+                out.append(ItemResult(item=item, ok=True, result=fn(item), exc=None))
+            except Exception as exc:  # captured into the outcome, exactly like the pool runner
+                out.append(ItemResult(item=item, ok=False, result=None, exc=exc))
+        return out
+
+
+def test_auth_death_short_circuits_fanout_and_drains_as_skips() -> None:
+    """First auth failure trips the latch: later workers AUTH-SKIP, drain counts them.
+
+    Covers the worker's ``if auth_guard.tripped(): return None`` short-circuit
+    and the drain's ``report is None`` → ``skipped_auth`` arm — the
+    no-call AUTH-SKIP accounting (DEC-OPTIONS-UNTIL-CLEAN-001, hostile
+    finding 6), formerly exercised only via the deleted ``pull_options``.
+    """
+
+    class _AuthDeadClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+            del endpoint, body
+            self.calls += 1
+            raise DhanAuthError("HTTP 401 unauthorized: token expired")
+
+    client = _AuthDeadClient()
+    # 3 codes × ATM-only × CALL = 3 series; serial dispatch ⇒ deterministic.
+    report = run_dhan_options_ingest(
+        client,
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1, 2, 3),
+        option_types=("CALL",),
+        run_parallel=_SerialDispatchRun(),
+    )
+    assert client.calls == 1  # series 1 fires once; series 2..3 AUTH-SKIP (never call)
+    assert report.auth_aborted is True
+    assert report.series_skipped_auth == 2  # the two short-circuited series
+    assert report.real_failed_series == 1  # only the first (quarantined) auth failure
+    assert report.series_count == 0  # no series committed
+
+
+def test_second_quarantined_auth_failure_does_not_re_alert() -> None:
+    """A SECOND drained auth quarantine is recorded silently (one-shot alert latch).
+
+    Covers the ``if not auth_alerted:`` FALSE arm (753->800): the loud
+    ``ingest.auth_aborted`` alert fires EXACTLY ONCE, later auth quarantines
+    skip the alert and ``continue``. Driven by a fabricating runner that yields
+    two auth-failure outcomes for two series of one underlying.
+    """
+
+    def _two_auth_failures(
+        fn: Callable[[Any], Any],
+        items: Sequence[Any],
+    ) -> list[ItemResult[Any, Any]]:
+        del fn  # fabricate the drain-side arrivals directly
+        return [
+            ItemResult(
+                item=item,
+                ok=False,
+                result=None,
+                exc=DhanAuthError("HTTP 401 unauthorized: token expired"),
+            )
+            for item in items
+        ]
+
+    with capture_logs() as logs:
+        report = run_dhan_options_ingest(
+            _OkClient(),
+            _Sink(),
+            underlyings=[_index("13", offsets=1)],  # 3 strikes → ≥2 series
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            run_parallel=_two_auth_failures,
+        )
+    alerts = [e for e in logs if e["event"] == "ingest.auth_aborted"]
+    assert len(alerts) == 1  # the flood-stopper: one alert, later failures silent
+    assert report.auth_aborted is True
+    assert report.real_failed_series == 3  # all three quarantined as real auth failures
+
+
+def test_aborted_series_counts_residual_and_is_never_a_completion() -> None:
+    """An incomplete (aborted) series report drives the ``aborted`` rollup + residual.
+
+    Covers ``result.aborted += 1`` (842) and the two report aggregate
+    properties ``still_failed_windows`` (306) + ``aborted_series`` (326): an
+    all-or-nothing abort committed NOTHING, so it is residual work, never a
+    completion (DEC-OPTIONS-UNTIL-CLEAN-001, hostile finding 6).
+    """
+
+    def _aborted_outcome(
+        fn: Callable[[Any], Any],
+        items: Sequence[Any],
+    ) -> list[ItemResult[Any, Any]]:
+        del fn
+        # A complete=False report: still_failed_windows > 0 ⇒ committed nothing.
+        aborted = OptionIngestReport(
+            windows=1,
+            bars_appended=0,
+            transient_failures=1,
+            still_failed_windows=1,
+        )
+        return [ItemResult(item=items[0], ok=True, result=aborted, exc=None)]
+
+    report = run_dhan_options_ingest(
+        _OkClient(),
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1,),
+        option_types=("CALL",),
+        run_parallel=_aborted_outcome,
+    )
+    assert report.series_count == 1  # the series IS reported …
+    assert report.aborted_series == 1  # … but as ABORTED, never completed
+    assert report.still_failed_windows == 1  # its window is the round residual
+    assert report.bars_appended == 0  # it committed nothing
+    assert report.failed_series == 0  # an abort is NOT a quarantine
+
+
+def test_rate_limit_storm_aborts_one_series_keeps_the_healthy_one() -> None:
+    """A 429-stormed series ABORTS (residual) while a healthy sibling commits whole.
+
+    The end-to-end aborted-series path through the real worker (no fabricated
+    report): one series 429s past its in-run retry budget and commits nothing;
+    the other returns the one-bar payload. Mirrors the deleted
+    ``test_aborted_series_is_never_a_completion`` (option_until_clean), driven
+    directly against ``run_dhan_options_ingest``.
+    """
+
+    class _OneSeries429Client:
+        def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+            del endpoint
+            if body["expiryCode"] == 2:
+                raise DhanRateLimitError("HTTP 429 too many requests")
+            return _payload()
+
+    report = run_dhan_options_ingest(
+        _OneSeries429Client(),
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1, 2),
+        option_types=("CALL",),
+        run_parallel=_SerialDispatchRun(),
+    )
+    assert report.series_count == 2  # both reported …
+    assert report.aborted_series == 1  # … but the 429-stormed one is ABORTED
+    assert report.still_failed_windows == 1  # its window is the round residual
+    assert report.bars_appended == 1  # only the healthy series committed
+    assert report.failed_series == 0  # an abort is NOT a quarantine

@@ -1,14 +1,13 @@
 """F&O Universe Explorer — bulk-pull target selection (pure, offline).
 
-The pure core behind the **bulk** pull buttons (① ② bulk-indices, ③ ④
-bulk-stocks; DEC-UNIVERSE-DASHBOARD-001): given the instrument snapshot it
-returns the concrete :class:`~brutex.models.Instrument` objects to fan a
-spot / options pull over for one explorer *kind* (``"index"`` / ``"stock"``).
+The pure core behind the **bulk** pull buttons (① bulk-indices, ② bulk-stocks;
+DEC-UNIVERSE-DASHBOARD-001): given the instrument snapshot it returns the
+concrete :class:`~brutex.models.Instrument` objects to fan a spot pull over for
+one explorer *kind* (``"index"`` / ``"stock"``).
 
 Where :func:`brutex.dashboard.universe_query.list_underlyings` returns the
 JSON **rows** the grid renders, this returns the **instruments themselves** —
-exactly what :func:`brutex.dashboard.pull_controller.pull_all_spot` and
-:func:`brutex.dashboard.option_pull_controller.pull_options` consume. It
+exactly what :func:`brutex.dashboard.pull_controller.pull_all_spot` consumes. It
 reuses the single classification rule
 (:func:`brutex.dashboard.universe_query.classify_instrument`, CLAUDE.md §11
 COMMON — no re-derivation of the index-vs-stock / F&O-eligibility split), so
@@ -40,8 +39,7 @@ def select_pull_instruments(
     *kind* (``"index"`` → every admitted ``IDX``; ``"stock"`` → every
     F&O-eligible ``EQ``), returning the instruments themselves (sorted by
     ``trading_symbol`` for a stable, deterministic pull order) — the bulk-pull
-    target list for :func:`~brutex.dashboard.pull_controller.pull_all_spot` /
-    :func:`~brutex.dashboard.option_pull_controller.pull_options`.
+    target list for :func:`~brutex.dashboard.pull_controller.pull_all_spot`.
 
     Parameters
     ----------
