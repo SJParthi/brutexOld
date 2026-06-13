@@ -8,7 +8,7 @@ already in the lake and order it.
 Modules
 -------
 * :mod:`brutex.screeners.gainers_losers` — top gainers / losers by window %
-  change (``DEC-MOVERS-GAINERS-001``, ``docs/MIGRATION.md`` entry #697).
+  change (``DEC-MOVERS-GAINERS-001``, ``docs/MIGRATION.md`` entry #699).
 """
 
 from __future__ import annotations
