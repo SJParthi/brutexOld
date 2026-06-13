@@ -922,6 +922,30 @@ def build_parser() -> argparse.ArgumentParser:
     verify_la.add_argument("--start", required=True, help="Slice start date/ISO (UTC)")
     verify_la.add_argument("--end", required=True, help="Slice end date/ISO (UTC)")
 
+    # ── validate-nse-1day (DEC-NSE-1DAY-VALIDATION-001) — Groww vs official OHLC ──
+    validate_nse = sub.add_parser(
+        "validate-nse-1day",
+        help=(
+            "Cross-verify Groww 1-day OHLC vs NSE/BSE official OHLC for the 3 "
+            "brute-force indices on ONE date (best-effort; degrades to "
+            "'unavailable' on any block/timeout). BSE-SENSEX needs an "
+            "operator-verified source URL via BRUTEX_NSE_ONEDAY_SOURCES"
+        ),
+    )
+    validate_nse.add_argument(
+        "--date", required=True, help="IST trading day to verify (YYYY-MM-DD)"
+    )
+    validate_nse.add_argument(
+        "--symbol",
+        default=None,
+        help="One index (NIFTY/BANKNIFTY/SENSEX); omit to verify all 3",
+    )
+    validate_nse.add_argument(
+        "--tolerance",
+        default=None,
+        help="Per-field rupee tolerance (default 0.01 = one 2-dp tick; UNVERIFIED)",
+    )
+
     # ── sweep-verify (DEC-SWEEP-VERIFY-001) — the results-tree doctor ──
     sweep_verify = sub.add_parser(
         "sweep-verify",
@@ -3086,6 +3110,39 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     return EXIT_OK
 
 
+def cmd_validate_nse_1day(
+    date_str: str, symbol: str | None, tolerance: str | None
+) -> int:  # pragma: no cover — live network (Groww + NSE/BSE), cli-omitted
+    """Cross-verify Groww 1-day OHLC vs NSE/BSE official OHLC and print the verdict.
+
+    A thin print wrapper over the 100%-tested
+    :mod:`brutex.data.validation.nse_oneday` harness, driven through its DEFAULT
+    live openers (real Groww client + real NSE/BSE urllib) — hence the live-only
+    pragma. With ``--symbol`` it checks one index, else all three brute-force
+    indices. Every degradation (block / timeout / no source) renders as an honest
+    ``unavailable`` row, never a traceback.
+    """
+    from datetime import date as _date
+    from decimal import Decimal
+
+    from brutex.data.validation.nse_oneday import (
+        BatchReport,
+        render_report,
+        validate_brute_force_indices,
+        validate_index_oneday,
+    )
+
+    trade_date = _date.fromisoformat(date_str)
+    tol = Decimal(tolerance) if tolerance is not None else None
+    if symbol is not None:
+        verdict = validate_index_oneday(symbol, trade_date, tolerance=tol)
+        report = BatchReport(trade_date=trade_date, verdicts=(verdict,))
+    else:
+        report = validate_brute_force_indices(trade_date, tolerance=tol)
+    print(render_report(report))
+    return EXIT_OK
+
+
 def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-tested sweep_verify core
     *,
     lake_root: Path | None,
@@ -4169,6 +4226,13 @@ def main(argv: list[str] | None = None) -> int:
             start=args.start,
             end=args.end,
             run_id=args.run_id,
+        )
+    # Groww-vs-official 1-day OHLC cross-check (DEC-NSE-1DAY-VALIDATION-001).
+    if args.command == "validate-nse-1day":
+        return cmd_validate_nse_1day(
+            date_str=args.date,
+            symbol=args.symbol,
+            tolerance=args.tolerance,
         )
     # Results-tree doctor (DEC-SWEEP-VERIFY-001) — report-only verification.
     if args.command == "sweep-verify":
