@@ -127,6 +127,18 @@ hostile-review pass._
    surface" is narrowed: the lake = the universe underlyings; the legs are
    derived/recoverable, not stored.
 
+   **Leg-economics fold (DEC-GROWW-LEG-ECONOMICS-001, 2026-06-13, MIGRATION.md
+   entry #696):** before the legs are discarded, each persisted underlying is
+   **stamped with its tradable F&O lot + freeze** harvested from its derivative
+   legs (`universe.build_underlying_economics` →
+   `dashboard/instrument_loader._fold_leg_economics`) — RELIANCE → 500, NIFTY →
+   75 — SUPERSEDING the IDX/EQ row's cash placeholder (`lot_size` 1 / 0); the
+   spot `tick_size` is preserved (a spot tick differs from its future's). This is
+   the Groww twin of the retired-vendor fold; without it every F&O equity kept
+   the placeholder `lot_size = 1`, which left `has_placeholder_stock_economics`
+   permanently True and made the dashboard auto-heal re-load the master on every
+   startup (a silent loop this closes).
+
    **Re-amended by DEC-NTM-GROWW-REPOINT-001 (2026-06-13, MIGRATION.md entry
    #694):** the lean universe ALSO persists the matched **NIFTY Total Market
    constituents** as REFERENCE_ONLY rows — the ~540 non-F&O names on top of the

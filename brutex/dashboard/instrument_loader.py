@@ -19,11 +19,12 @@ This module is the thin, fully-testable seam that:
 1. downloads + parses the Groww instrument master into an in-memory
    :class:`~brutex.adapters.groww.instruments.InstrumentIndex` (the SSRF-guarded,
    **no-auth** public-CSV path), then
-2. derives the F&O-eligible equity set from the parsed derivative legs and
-   **full-snapshot upserts the LEAN universe** (every admitted IDX + every
-   F&O-eligible EQ + every admitted REFERENCE_ONLY NTM constituent; the
-   ~tens-of-thousands of FUT / CE / PE legs are parsed for eligibility then
-   DISCARDED per DEC-INSTRUMENT-UNIVERSE-FAST-001) into the vendor-neutral
+2. derives the F&O-eligible equity set + the per-underlying tradable lot/freeze
+   from the parsed derivative legs and **full-snapshot upserts the LEAN universe**
+   (every admitted IDX + every F&O-eligible EQ + every admitted REFERENCE_ONLY NTM
+   constituent, each stamped with its F&O lot + freeze from its legs per
+   DEC-GROWW-LEG-ECONOMICS-001; the ~tens-of-thousands of FUT / CE / PE legs are
+   then DISCARDED per DEC-INSTRUMENT-UNIVERSE-FAST-001) into the vendor-neutral
    :class:`~brutex.data.instrument_store.InstrumentStore`, then
 3. reads the snapshot back and summarises it with the COMMON
    :func:`brutex.dashboard.universe_query.universe_summary` classifier
@@ -73,6 +74,7 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -90,7 +92,9 @@ from brutex.dashboard.ntm_cache import (
 from brutex.dashboard.universe_query import universe_summary
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.universe import (
+    UnderlyingEconomics,
     build_fno_eligible_underlyings,
+    build_underlying_economics,
     is_reference_only,
     is_universe_underlying,
 )
@@ -258,6 +262,7 @@ def _reference_only_of(
     """
 
     def _is_reference_only(instr: Instrument) -> bool:
+        """True for India VIX or an admitted NTM constituent (matched by security_id)."""
         return is_reference_only(instr) or instr.security_id in reference_security_ids
 
     return _is_reference_only
@@ -276,6 +281,48 @@ def _summarise_stored(store: Any) -> dict[str, int]:
     eligible = store.fno_eligible_underlyings()
     candidates = store.list_index_equity_instruments()
     return universe_summary(candidates, fno_eligible=eligible)
+
+
+def _fold_leg_economics(
+    instruments: list[Instrument],
+    economics: dict[tuple[Exchange, str], UnderlyingEconomics],
+) -> list[Instrument]:
+    """Stamp each underlying with its TRADABLE F&O lot + freeze from its legs.
+
+    DEC-GROWW-LEG-ECONOMICS-001 — the Groww twin of the retired-vendor
+    ``DEC-UNDERLYING-LEG-ECONOMICS-001`` fold. In the Groww master an IDX / EQ
+    row carries only its CASH economics (placeholder ``lot_size = 1`` for an
+    equity, ``0`` for an index); the real *tradable* F&O lot + freeze live on the
+    derivative legs. *economics* maps each ``(exchange, underlying_symbol)`` to
+    ``(lot_size, tick_size, freeze_quantity)`` harvested once from those legs by
+    :func:`brutex.universe.build_underlying_economics`. For every underlying with
+    a leg carrying a real lot (``> 0``) we SUPERSEDE its lot + freeze with the
+    leg's, but KEEP the row's own ``tick_size`` (a spot tick differs from its
+    future's). A non-F&O underlying (no legs — a reference-only NTM constituent
+    or a non-F&O index) is returned unchanged. A leg whose own freeze is blank
+    leaves the underlying row's freeze intact. The leg's ``lot_size`` is always
+    ``> 0`` (``Instrument.__post_init__`` enforces it for every FUT / CE / PE), so
+    a folded equity can never violate the ``lot_size > 0`` invariant.
+
+    Without this fold every F&O equity keeps the placeholder ``lot_size = 1``,
+    which leaves
+    :meth:`~brutex.data.instrument_store.InstrumentStore.has_placeholder_stock_economics`
+    permanently ``True`` and makes the dashboard auto-heal
+    (:func:`brutex.dashboard.auto_pull.should_reload_instrument_master`) re-load
+    the master on every startup — a silent reload loop this fold closes.
+    """
+    folded: list[Instrument] = []
+    for inst in instruments:
+        leg = economics.get((inst.exch_id, inst.symbol_name))
+        if leg is None:
+            folded.append(inst)  # non-F&O underlying (no legs) → keep own economics
+            continue
+        # Supersede lot + freeze (keep the row's own spot tick). A leg without its
+        # own freeze leaves the underlying row's freeze untouched.
+        lot_size, freeze_qty = leg[0], leg[2]
+        new_freeze = freeze_qty if freeze_qty is not None else inst.sm_freeze_qty
+        folded.append(replace(inst, lot_size=lot_size, sm_freeze_qty=new_freeze))
+    return folded
 
 
 def _lean_universe(
@@ -319,9 +366,11 @@ def load_instrument_master(
     Downloads the public Groww instrument-master CSV (NO Groww token), parses it
     into the O(1) :class:`~brutex.adapters.groww.instruments.InstrumentIndex`,
     resolves the NIFTY-Total-Market constituents to REFERENCE_ONLY admissions
-    (best-effort — DEC-NTM-GROWW-REPOINT-001), full-snapshot upserts the LEAN
-    universe (IDX + F&O-eligible EQ + the matched REFERENCE_ONLY constituents) into
-    *store*, prunes to the newest snapshot, then reads the snapshot back and returns
+    (best-effort — DEC-NTM-GROWW-REPOINT-001), stamps each underlying with its
+    tradable F&O lot + freeze harvested from its derivative legs
+    (DEC-GROWW-LEG-ECONOMICS-001), full-snapshot upserts the LEAN universe
+    (IDX + F&O-eligible EQ + the matched REFERENCE_ONLY constituents) into *store*,
+    prunes to the newest snapshot, then reads the snapshot back and returns
     headline counts for the ``/universe`` page.
 
     Parameters
@@ -415,6 +464,11 @@ def load_instrument_master(
         lean, legs_dropped = _lean_universe(
             index, fno_eligible=fno_eligible, reference_security_ids=reference_security_ids
         )
+        # Stamp each underlying with its TRADABLE F&O lot + freeze from its legs
+        # (DEC-GROWW-LEG-ECONOMICS-001) — the legs carry the real economics; the
+        # IDX / EQ row carries only its cash placeholder. This also keeps
+        # ``has_placeholder_stock_economics`` False so the auto-heal does not loop.
+        lean = _fold_leg_economics(lean, build_underlying_economics(index.universe))
         store.upsert_many(
             lean,
             snapshot_date=date.today(),
