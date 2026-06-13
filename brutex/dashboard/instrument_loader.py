@@ -61,6 +61,13 @@ not the retired vendor calls:
   stays ``reference_only=FALSE`` so it keeps its real option chain
   (DEC-OPTIONS-PULL-GUARD-001).
 
+The same ``reference_only`` column also tags every **spot-only index** — an ``IDX``
+with no listed options of its own that is not a brute-force index (NIFTY IT / 100 /
+TOTAL MARKET, INDIA VIX) — so the ``/universe`` dashboard does NOT badge it
+option-pullable (DEC-NON-OPTION-INDEX-REFTAG-001). The options-bearing indices
+(NIFTY / BANKNIFTY / FINNIFTY …) keep their chain; the brute-force trio (NIFTY /
+BANKNIFTY / SENSEX) is always tradable, never tagged reference_only.
+
 HARD SCOPE GUARD (CLAUDE.md §3): NTM constituents are lake / REFERENCE_ONLY only
 — NEVER in the 52-condition vocabulary or the brute-force engine, which stays
 exactly NIFTY / BANKNIFTY / SENSEX (locked by
@@ -94,8 +101,10 @@ from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.universe import (
     UnderlyingEconomics,
     build_fno_eligible_underlyings,
+    build_options_eligible_underlyings,
     build_underlying_economics,
     is_reference_only,
+    is_spot_only_index,
     is_universe_underlying,
 )
 from brutex.universe_constituents import resolve_constituents
@@ -249,21 +258,44 @@ def _ntm_admission(
 
 def _reference_only_of(
     reference_security_ids: frozenset[int],
+    options_eligible: frozenset[tuple[Exchange, str]],
 ) -> Callable[[Instrument], bool]:
     """Build the ``reference_only`` upsert predicate.
 
-    Returns a callable that is ``True`` for India VIX (the index-level
-    :func:`brutex.universe.is_reference_only` flag) OR any admitted NTM constituent
-    (``security_id`` in *reference_security_ids*) — the single, unified
-    REFERENCE_ONLY encoding (DEC-NIFTY-TOTAL-MARKET-REFTAG-001 /
-    DEC-NTM-GROWW-REPOINT-001) the lean upsert tags onto the ``reference_only``
-    column. Replacing the store's default ``is_reference_only`` MUST keep India VIX
-    tagged, so the VIX clause stays first.
+    Returns a callable that is ``True`` for any of the three REFERENCE_ONLY arms —
+    the single, unified encoding the lean upsert tags onto the ``reference_only``
+    column:
+
+    1. **India VIX** — the index-level :func:`brutex.universe.is_reference_only`
+       flag (DEC-NIFTY-TOTAL-MARKET-REFTAG-001). Kept first so replacing the
+       store's default predicate can never drop the VIX tag.
+    2. **An admitted NTM constituent** — ``security_id`` in
+       *reference_security_ids* (DEC-NTM-GROWW-REPOINT-001).
+    3. **A spot-only index** — an ``IDX`` with no listed options that is not a
+       brute-force index (:func:`brutex.universe.is_spot_only_index` against
+       *options_eligible*), i.e. a sectoral / broad-market index like NIFTY IT /
+       100 / TOTAL MARKET (DEC-NON-OPTION-INDEX-REFTAG-001). This closes the bug
+       where every non-F&O index wrongly showed "OPT" + survived the dashboard's
+       "F&O only" filter, while the options-bearing indices (NIFTY / BANKNIFTY /
+       FINNIFTY …) keep their pullable chain.
+
+    Parameters
+    ----------
+    reference_security_ids
+        ``SECURITY_ID``s of the admitted non-F&O NTM constituents.
+    options_eligible
+        The options-bearing ``(exchange, underlying_symbol)`` set from
+        :func:`brutex.universe.build_options_eligible_underlyings` (harvested at
+        ingest from the full master before the legs are discarded).
     """
 
     def _is_reference_only(instr: Instrument) -> bool:
-        """True for India VIX or an admitted NTM constituent (matched by security_id)."""
-        return is_reference_only(instr) or instr.security_id in reference_security_ids
+        """True for India VIX, an admitted NTM constituent, or a spot-only index."""
+        return (
+            is_reference_only(instr)
+            or instr.security_id in reference_security_ids
+            or is_spot_only_index(instr, options_eligible)
+        )
 
     return _is_reference_only
 
@@ -439,6 +471,11 @@ def load_instrument_master(
         index = load_index(lambda _url: master_text)
         parsed = len(index.universe)
         fno_eligible = build_fno_eligible_underlyings(index.universe)
+        # The options-bearing underlyings (CE/PE legs) — harvested NOW, while the
+        # full master still carries the legs (the lean ingest discards them). Used
+        # to tag spot-only indices reference_only so the dashboard never badges a
+        # non-option index "OPT" (DEC-NON-OPTION-INDEX-REFTAG-001).
+        options_eligible = build_options_eligible_underlyings(index.universe)
 
         # NTM enrichment is fail-soft — it never blocks the keyless core load
         # (DEC-NTM-GROWW-REPOINT-001). The returned ids ADMIT the non-F&O
@@ -475,7 +512,7 @@ def load_instrument_master(
             run_id=run_id,
             csv_source_sha256=csv_sha256,
             replace_snapshot=True,
-            reference_only_of=_reference_only_of(reference_security_ids),
+            reference_only_of=_reference_only_of(reference_security_ids, options_eligible),
         )
         pruned = store.prune_to_latest_snapshot()
         summary = _summarise_stored(store)
