@@ -410,7 +410,7 @@ def test_load_instruments_maps_oserror_to_502(
     resp = client.post("/api/v1/universe/load-instruments")
     assert resp.status_code == 502
     assert resp.json()["detail"] == (
-        "couldn't reach Dhan asset host / parse instrument master: asset host unreachable"
+        "couldn't reach vendor asset host / parse instrument master: asset host unreachable"
     )
 
 

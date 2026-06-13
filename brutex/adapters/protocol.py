@@ -1,7 +1,7 @@
 """Market-neutral adapter contract.
 
 This module defines the abstract contract every BruteX market adapter
-must satisfy, so adding a new market (Polygon, Binance, Dhan, Zerodha,
+must satisfy, so adding a new market (Polygon, Binance, Groww, Zerodha,
 IBKR, Coinbase, …) is a **one-file job** — not a rewrite.
 
 ## Why a market-neutral protocol?
@@ -88,11 +88,11 @@ hard plumbing (rate limit, dedup, audit) keeps working unchanged.
 
 ::
 
-    brutex/adapters/dhan/           # Dhan Data API v2 historical-data (Track 1 spot indices)
+    brutex/adapters/groww/          # Groww historical-data adapter (Track 1 spot indices)
 
 ## Future markets (out-of-scope for Track 1 — illustrative only)
 
-Per CLAUDE.md §3 scope-lock, Track 1 is locked to the Dhan adapter for
+Per CLAUDE.md §3 scope-lock, Track 1 is locked to the Groww adapter for
 4 Indian spot indices (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX). The
 adapter Protocol is broker-neutral so future tracks could add::
 
@@ -281,7 +281,7 @@ class DerivativeContract:
 class MarketAdapter(Protocol):
     """Market-neutral adapter interface.
 
-    Every BruteX adapter (Dhan, Polygon, Binance, …) implements
+    Every BruteX adapter (Groww, Polygon, Binance, …) implements
     this protocol. The orchestrator talks ONLY through these methods —
     no market-specific code leaks upstream.
 
@@ -353,7 +353,7 @@ class MarketAdapter(Protocol):
 
         * Converting the market's native timezone to UTC
         * Chunking the date range if the upstream API has per-call
-          limits (Dhan: 90-day intraday-spot window, 30-day option window)
+          limits (e.g. a per-call intraday-spot window and option window)
         * Retrying transient errors (429, timeout, 5xx) via the
           adapter's own rate limiter + retry policy
         * Raising :class:`~brutex.models.OutOfScopeError` if the symbol

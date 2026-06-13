@@ -151,7 +151,7 @@ class TestClassifyExceptionName:
         assert classify_exception_name(name) == expected
 
     def test_unknown_name_raises(self) -> None:
-        with pytest.raises(UnknownExceptionError, match="Unknown Dhan API exception"):
+        with pytest.raises(UnknownExceptionError, match="Unknown vendor API exception"):
             classify_exception_name("VendorAPITotallyNewException")
 
     def test_unknown_error_mentions_remediation(self) -> None:
@@ -169,7 +169,7 @@ class TestClassifyExceptionName:
         with pytest.raises(UnknownExceptionError) as excinfo:
             classify_exception_name("VendorAPITotallyNewException")
         assert str(excinfo.value) == (
-            "Unknown Dhan API exception class: 'VendorAPITotallyNewException'. "
+            "Unknown vendor API exception class: 'VendorAPITotallyNewException'. "
             "Add it to BROKER_EXCEPTION_CLASSIFICATION in brutex/orchestrator/retry.py "
             "and re-run tests/unit/test_orchestrator_retry.py."
         )
@@ -251,7 +251,7 @@ class TestClassifyException:
             "['ValueError', 'Exception', 'BaseException', 'object']) does not match "
             "any entry in BROKER_EXCEPTION_CLASSIFICATION. "
             "This exception should not have reached the retry classifier — "
-            "verify the adapter only catches Dhan API exceptions."
+            "verify the adapter only catches vendor API exceptions."
         )
 
 

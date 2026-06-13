@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-#: The base intervals the pull fetches directly from Dhan; anything else is a
+#: The base intervals the pull fetches directly from the vendor; anything else is a
 #: derived timeframe whose remedy is materialization, not a re-pull.
 _FETCHED_INTERVALS: frozenset[str] = frozenset({"1minute", "1day"})
 

@@ -1,12 +1,12 @@
 """Vendor-neutral candle-field parsing — shared by every adapter parser.
 
-Extracted from the Groww parser (DEC-GROWW-DHAN-REVERT-001) so the Groww
-and Dhan parsers share ONE implementation of the field-level rules
-(CLAUDE.md §11 COMMON — no copy-paste between modules; the jscpd gate
-enforces this). Each adapter keeps only its **vendor-specific** glue:
+Extracted from the Groww parser (ADR-0002) so every adapter
+parser shares ONE implementation of the field-level rules (CLAUDE.md §11
+COMMON — no copy-paste between modules; the jscpd gate enforces this). Each
+adapter keeps only its **vendor-specific** glue:
 
 * Groww — 7-element row shape + IST-string timestamps.
-* Dhan — columnar parallel arrays + UNIX-epoch timestamps.
+* Any future vendor — its own candle response shape + timestamp encoding.
 
 The two correctness rules the operator cares most about ("no data
 mismatch") live here, once:
@@ -135,13 +135,13 @@ def assemble_candle(
     # Vendor count-field normalization (DEC-VENDOR-VOLUME-NORMALIZE-001, sibling
     # of the OHLC clamp below): an IMPOSSIBLE negative volume / open-interest
     # must NEVER crash a multi-year pull on the strict ``CandleBar`` invariant.
-    # Dhan emits a stray negative (e.g. ``-2``) on the ``volume`` array of an
-    # INDEX (indices have no traded volume at all — the array is junk), and the
+    # A vendor can emit a stray negative (e.g. ``-2``) on the ``volume`` field of
+    # an INDEX (indices have no traded volume at all — the value is junk), and the
     # observed live failure was exactly ``volume must be non-negative, got -2``.
     # A count's only valid floor is 0, so clamp to 0 — never raise, never lose
     # the bar's authoritative OHLC price. (Indices additionally have ``volume``
     # IGNORED outright upstream — the spot parser's ``drop_volume`` — so an index
-    # bar is always 0 regardless of the junk Dhan sends.)
+    # bar is always 0 regardless of the junk volume the vendor sends.)
     oi = None if is_absent(open_interest) else max(0, to_int(open_interest, "open_interest"))
     open_price = to_price(open_, "open")
     high_price = to_price(high, "high")
@@ -149,7 +149,7 @@ def assemble_candle(
     close_price = to_price(close, "close")
     # Vendor OHLC normalization (DEC-OHLC-VENDOR-NORMALIZE-001): ``open`` and
     # ``close`` are authoritative traded prices, so the bar's true high/low
-    # MUST bound them. Dhan occasionally under-reports ``high`` (or over-
+    # MUST bound them. A vendor occasionally under-reports ``high`` (or over-
     # reports ``low``) by a tick — a single such quirk bar would otherwise
     # crash an entire multi-year pull on the strict ``CandleBar`` invariant
     # (``low <= open, close <= high``). Clamp to enclose all four prices

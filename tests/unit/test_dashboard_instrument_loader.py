@@ -131,9 +131,9 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     assert result["index_count"] == 2
     assert result["stock_count"] == 1
     assert result["total"] == 3
-    # NTM auto-admission is Dhan-only → a deliberate Groww no-op note.
+    # NTM auto-admission has no Groww twin → a deliberate Groww no-op note.
     assert result["ntm"]["admitted"] is False
-    assert "Dhan-only" in result["ntm"]["reason"]
+    assert "no Groww equivalent" in result["ntm"]["reason"]
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     result = load_instrument_master(store, http_get=lambda _url: _csv([]))
     ntm = result.pop("ntm")
     assert ntm["admitted"] is False
-    assert "Dhan-only" in ntm["reason"]
+    assert "no Groww equivalent" in ntm["reason"]
     assert result == {
         "parsed": 0,
         "persisted": 0,

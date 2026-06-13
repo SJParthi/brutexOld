@@ -240,7 +240,7 @@ class TestSpotCoverageApi:
         ledger = WindowLedger()
         ledger.record(
             WindowKey(
-                market="dhan",
+                market="spot",
                 security_id="NSE-NIFTY",
                 interval="1minute",
                 start=date(2024, 3, 1),

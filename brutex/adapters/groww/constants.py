@@ -7,7 +7,7 @@ Every value here is traceable to a verified source (Golden Rule #1/#2):
   instrument master (India VIX present, 21-column schema, the in-scope
   universe, real lot/tick).
 
-No I/O, no mutable state — mirrors ``brutex.adapters.dhan.constants``. The two
+No I/O, no mutable state — mirrors the canonical adapter constants layout. The two
 ``*_UNVERIFIED`` names carry the honesty requirement (ADR-0009 §3.2) in the
 identifier itself: the backtesting rate-limit ceiling is an OPEN Phase-0 probe
 gate and MUST NOT be mistaken for a verified fact.

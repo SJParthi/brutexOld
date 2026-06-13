@@ -6,13 +6,11 @@ L5 engine, L6 orchestrator, L7 UI) consumes normalised BruteX models
 from :mod:`brutex.models` and is broker-agnostic.
 
 The contract is defined in :mod:`brutex.adapters.protocol`. BruteX is
-**Dhan-only** (DEC-DHAN-FINALIZE-001, 2026-06-01): the live adapter is
-:mod:`brutex.adapters.dhan` — ``auth`` (manual access-token + client-id),
-``client`` (plain REST over the injected urllib transport), ``body`` /
-``parser`` (request/response shapes), ``run_ingest`` / ``option_ingest`` /
-``option_universe_ingest`` (the spot + rolling-option pulls). The earlier
-Groww adapter (DEC-VENDOR-PIVOT-001) was removed in full; pre-removal state
-at git tags `v-pre-groww-pivot` (the original wipe) and the #267 merge.
+**Groww** (ADR-0009): the live adapter is
+:mod:`brutex.adapters.groww` — ``auth`` (Groww TOTP: api key + TOTP secret),
+``client`` (thin SDK wrapper over the injected ``growwapi`` transport),
+``chunks`` / ``parser`` (request/response shapes), and the spot + option
+ingest paths.
 """
 
 from __future__ import annotations

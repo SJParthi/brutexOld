@@ -50,7 +50,7 @@ class ProgressSnapshot:
         Units finished cleanly / quarantined so far (``completed`` counts both
         clean and failed units — it is the units *processed*).
     gaps
-        Units that returned NO data for a benign, expected reason — a Dhan
+        Units that returned NO data for a benign, expected reason — a vendor
         ``DH-905`` "no data" boundary (e.g. NIFTY NEXT 50's daily history that
         starts after 2021-01-01). A gap is NOT a failure (it is re-tried next
         pull, never masked) — counting it separately keeps the ``failed`` tally

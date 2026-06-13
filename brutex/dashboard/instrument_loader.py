@@ -8,11 +8,11 @@ is a **public CSV** (the Groww instrument master,
 are a separate, later concern (DEC-VENDOR-PIVOT-001).
 
 PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): this module
-was repointed from the Dhan 31-column detailed scrip master to the Groww
-21-column instrument master — the J2-equivalent the dashboard never got. The
-Groww CSV schema differs, so the parse goes through the Groww parser
+was repointed from the retired-vendor 31-column detailed scrip master to the
+Groww 21-column instrument master — the J2-equivalent the dashboard never got.
+The Groww CSV schema differs, so the parse goes through the Groww parser
 (:func:`~brutex.adapters.groww.instrument_loader.load_index` →
-:class:`~brutex.adapters.groww.instruments.InstrumentIndex`), NOT the Dhan one.
+:class:`~brutex.adapters.groww.instruments.InstrumentIndex`), NOT the retired one.
 
 This module is the thin, fully-testable seam that:
 
@@ -41,12 +41,12 @@ CSV against a REAL temp
 
 ## NTM (NIFTY Total Market) enrichment — gated OFF on Groww
 
-The Dhan loader auto-admitted NIFTY Total Market + its ~750 constituents
-(DEC-NIFTY-TOTAL-MARKET-LOAD-001) via the Dhan-specific
-``brutex.adapters.dhan.ntm`` discovery. That discovery has **no Groww twin**
-yet, so — per Golden Rule #1 (no invented vendor behaviour) — NTM enrichment is
-a clean **no-op** here: the returned ``ntm`` note is always
-``{"admitted": False, "reason": "<NTM discovery is Dhan-only; …>"}``. NTM can
+The retired-vendor loader auto-admitted NIFTY Total Market + its ~750
+constituents (DEC-NIFTY-TOTAL-MARKET-LOAD-001) via a vendor-specific NTM
+discovery. That discovery has **no Groww twin** yet, so — per Golden Rule #1
+(no invented vendor behaviour) — NTM enrichment is a clean **no-op** here: the
+returned ``ntm`` note is always
+``{"admitted": False, "reason": "<NTM discovery has no Groww equivalent; …>"}``. NTM can
 return in a later PR once a Groww discovery path exists.
 """
 
@@ -68,16 +68,16 @@ from brutex.universe import build_fno_eligible_underlyings, is_universe_underlyi
 
 _LOG = structlog.get_logger(__name__)
 
-#: NTM (NIFTY Total Market) is NOT auto-admitted on Groww — the Dhan discovery
-#: (``brutex.adapters.dhan.ntm``) has no Groww twin yet, and we do not invent
-#: vendor behaviour (Golden Rule #1). The keyless load returns this fixed note so
-#: the operator SEES that NTM was deliberately skipped (not silently dropped).
+#: NTM (NIFTY Total Market) is NOT auto-admitted on Groww — the retired-vendor
+#: NTM discovery has no Groww twin yet, and we do not invent vendor behaviour
+#: (Golden Rule #1). The keyless load returns this fixed note so the operator
+#: SEES that NTM was deliberately skipped (not silently dropped).
 _NTM_SKIPPED_NOTE: dict[str, Any] = {
     "admitted": False,
     "reason": (
-        "NIFTY Total Market auto-admission is Dhan-only — its discovery has no "
-        "Groww equivalent yet (Golden Rule #1, no invented vendor behaviour); it "
-        "can return in a later PR"
+        "NIFTY Total Market auto-admission has no Groww equivalent yet — its "
+        "discovery was a retired-vendor feature (Golden Rule #1, no invented "
+        "vendor behaviour); it can return in a later PR"
     ),
 }
 
@@ -102,8 +102,8 @@ def _lean_universe(index: InstrumentIndex) -> tuple[list[Instrument], int]:
     F&O-eligible EQ — and discards the legs (they are parsed only to discover
     which equities are F&O-eligible). Returns ``(lean_rows, legs_dropped)`` where
     ``legs_dropped`` is the count of in-scope rows NOT persisted (the legs +
-    any non-F&O equity), so the caller can report the accounting like the Dhan
-    refresh did. The F&O-eligibility rule is delegated to the COMMON
+    any non-F&O equity), so the caller can report the accounting like the
+    retired-vendor refresh did. The F&O-eligibility rule is delegated to the COMMON
     :func:`brutex.universe.build_fno_eligible_underlyings` /
     :func:`brutex.universe.is_universe_underlying` (CLAUDE.md §11 COMMON).
     """
@@ -152,7 +152,7 @@ def load_instrument_master(
         ``parsed`` already counts only in-scope rows) and ``quarantined`` is
         always ``0`` (the Groww parser **fails closed** on a malformed in-scope
         row — Golden Rule #1 — rather than quarantining). ``ntm`` is the fixed
-        :data:`_NTM_SKIPPED_NOTE` (NTM auto-admission is Dhan-only).
+        :data:`_NTM_SKIPPED_NOTE` (NTM auto-admission has no Groww equivalent).
 
     Raises
     ------
@@ -221,7 +221,7 @@ def load_instrument_master(
         "index_count": summary["index_count"],
         "stock_count": summary["stock_count"],
         "total": summary["total"],
-        # NTM auto-admission is Dhan-only (Golden Rule #1) — a fixed skipped note.
+        # NTM auto-admission has no Groww equivalent (Golden Rule #1) — a fixed skipped note.
         "ntm": dict(_NTM_SKIPPED_NOTE),
     }
 

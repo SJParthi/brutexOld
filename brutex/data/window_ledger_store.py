@@ -334,8 +334,8 @@ def plan_windows(
     """Upsert every planned window for the pull as ``PLANNED`` — returns the count.
 
     For each ``(instrument, interval)`` over ``[start, end)`` the canonical tiler
-    (:func:`~brutex.adapters.dhan.ingest._windows`, ONE source of truth — the same
-    tiling the ingest fetches) yields the windows; each is
+    (:func:`~brutex.adapters.ingest_common.tile_windows`, ONE source of truth — the
+    same tiling the ingest fetches) yields the windows; each is
     :meth:`WindowLedger.plan`-ned (idempotent — a settled row is untouched). This
     is what guarantees EVERY window of the CURRENT pull's tiling has a row BEFORE
     any fetch, so a window that is never reached still shows ``PLANNED`` (never
@@ -349,7 +349,7 @@ def plan_windows(
 
     CLAMP PARITY (DEC-PLAN-CLAMP-PARITY-001): the planner tiles the SAME
     settled-data bound the fetch spine does —
-    :func:`~brutex.adapters.dhan.ingest.clamp_window_end` per interval
+    :func:`~brutex.adapters.ingest_common.clamp_window_end` per interval
     (DEC-DAILY-CANDLE-CLAMP-001: daily → ``today``; intraday → ``today + 1``
     only from the 15:30 IST close). Planning the RAW ``end`` while the fetch
     clamps minted a key the fetch could never record (one permanently-PLANNED
@@ -362,7 +362,7 @@ def plan_windows(
     """
     # Vendor-neutral tiling/clamp helpers + the (relocated-to-neutral) interval→width
     # policy + coverage market namespace all live in ingest_common (CLAUDE.md §11
-    # COMMON; relocated out of the Dhan package in PR-J4a — _MARKET's value unchanged).
+    # COMMON; relocated out of the vendor package in PR-J4a — _MARKET's value unchanged).
     # Imported locally to avoid an import cycle (this module is in brutex.data, which
     # the ingest spines depend on).
     from brutex.adapters.ingest_common import (
@@ -374,16 +374,16 @@ def plan_windows(
         now_ist as _now_ist,
     )
     from brutex.adapters.ingest_common import (
-        window_days_for_interval as _dhan_window_days_for,
+        window_days_for_interval as _window_days_for,
     )
 
-    # Default to the Dhan coverage namespace + tiling-width policy (back-compat); a
+    # Default to the legacy coverage namespace + tiling-width policy (back-compat); a
     # Groww spot pull passes ``market=GROWW_COVERAGE_MARKET`` AND Groww's
     # ``window_days_for`` so the PLANNED rows it seeds carry the SAME namespace AND
     # the SAME tile boundaries as the windows the Groww ingest fetches+records — the
     # "planned keys == fetched keys" invariant holds per vendor (PR-J4b, CLAUDE.md §11).
     coverage_market = market if market is not None else COVERAGE_MARKET
-    width_for = window_days_for if window_days_for is not None else _dhan_window_days_for
+    width_for = window_days_for if window_days_for is not None else _window_days_for
     stamp = now if now is not None else datetime.now(UTC)
     ist = now_ist if now_ist is not None else _now_ist()
     # ONE tiling per interval (the tiler is pure in (interval, start, end)) with
@@ -456,22 +456,22 @@ def reconcile_ledger_windows(
     """
     # Shared vendor-neutral tiler + the (relocated-to-neutral) width policy +
     # coverage market namespace, all in ingest_common (CLAUDE.md §11 COMMON; moved
-    # out of the Dhan package in PR-J4a — _MARKET's value unchanged). Local import
+    # out of the vendor package in PR-J4a — _MARKET's value unchanged). Local import
     # avoids the brutex.data ↔ ingest spine import cycle.
     from brutex.adapters.ingest_common import (
         COVERAGE_MARKET,
         tile_windows,
     )
     from brutex.adapters.ingest_common import (
-        window_days_for_interval as _dhan_window_days_for,
+        window_days_for_interval as _window_days_for,
     )
 
-    # Default to the Dhan namespace + tiling width (back-compat); the Groww spot
+    # Default to the legacy namespace + tiling width (back-compat); the Groww spot
     # pull passes ``market=GROWW_COVERAGE_MARKET`` AND Groww's ``window_days_for`` so
     # cold-start SUCCESS seeds match the namespace + tile boundaries the Groww ingest
     # records (PR-J4b, CLAUDE.md §11 COMMON).
     coverage_market = market if market is not None else COVERAGE_MARKET
-    width_for = window_days_for if window_days_for is not None else _dhan_window_days_for
+    width_for = window_days_for if window_days_for is not None else _window_days_for
     stamp = now if now is not None else datetime.now(UTC)
     span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {
         (str(s["exchange"]), str(s["segment"]), str(s["symbol"]), str(s["interval"])): s

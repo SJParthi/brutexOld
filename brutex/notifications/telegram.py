@@ -140,7 +140,7 @@ class TelegramEventKind(StrEnum):
     SYMBOL_WINDOW_FAILURE = (
         "symbol.window_failure"  # 100% window-failure for a symbol (DEC-RATE-STORM-WATCHDOG-001)
     )
-    AUTH_RENEW_FAILED = "auth.renew_failed"  # Dhan RenewToken refused (DEC-TELEGRAM-WIRE-001)
+    AUTH_RENEW_FAILED = "auth.renew_failed"  # vendor token-renew refused (DEC-TELEGRAM-WIRE-001)
     RUN_HEARTBEAT = "run.heartbeat"
     RUN_COMPLETE = "run.complete"
     TEST = "test"  # for `brutex notify test`

@@ -11,7 +11,7 @@ reconciliation that diffs the *expected* universe×years grid against the
 ## Why this is a separate, pure module (CLAUDE.md §11 COMMON + DYNAMIC)
 
 The DuckDB ``coverage_ledger`` table (persistence) lives in
-:mod:`brutex.data.instrument_store`; the live Dhan pull glue lives in
+:mod:`brutex.data.instrument_store`; the live vendor pull glue lives in
 :mod:`brutex.cli` (``# pragma: no cover`` — needs creds + SDK + network);
 the dashboard routes live in :mod:`brutex.dashboard.app` (FastAPI /
 coverage-omit). All three delegate the *decisions* here so the
@@ -86,7 +86,7 @@ class CoverageRecord:
     calendar year, the cell's :data:`COVERAGE_STATUSES` status, the run id
     + timestamp of the last attempt, and the error message of the last
     failure (``None`` when the cell never failed). Column / field names are
-    Dhan-faithful (ADR-0003); values are unchanged.
+    vendor-faithful (ADR-0003); values are unchanged.
 
     Attributes
     ----------
@@ -95,7 +95,7 @@ class CoverageRecord:
     underlying_symbol
         The underlying the expiries/contracts were pulled for.
     year
-        Calendar year of the pull (Dhan historical depth from 2021).
+        Calendar year of the pull (vendor historical depth from 2021).
     expiries_pulled
         Count of expiry dates discovered for ``(underlying, year)``.
     contracts_pulled

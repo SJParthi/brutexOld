@@ -122,19 +122,19 @@ def test_arm_guard_builds_hook_audits_terminal_failure(tmp_path: Path) -> None:
 # ── cmd_fetch interval / mode validation ────────────────────────────────
 
 
-def test_resolve_dhan_fetch_intervals_aliases() -> None:
+def test_resolve_fetch_intervals_aliases() -> None:
     """``all``/``1m``/``1minute``/``1d``/``1day`` map to the fetched intervals."""
-    assert cli._resolve_dhan_fetch_intervals("all") == ["1minute", "1day"]
-    assert cli._resolve_dhan_fetch_intervals("1m") == ["1minute"]
-    assert cli._resolve_dhan_fetch_intervals("1minute") == ["1minute"]
-    assert cli._resolve_dhan_fetch_intervals("1d") == ["1day"]
-    assert cli._resolve_dhan_fetch_intervals("1day") == ["1day"]
+    assert cli._resolve_fetch_intervals("all") == ["1minute", "1day"]
+    assert cli._resolve_fetch_intervals("1m") == ["1minute"]
+    assert cli._resolve_fetch_intervals("1minute") == ["1minute"]
+    assert cli._resolve_fetch_intervals("1d") == ["1day"]
+    assert cli._resolve_fetch_intervals("1day") == ["1day"]
 
 
-def test_resolve_dhan_fetch_intervals_rejects_unfetched() -> None:
+def test_resolve_fetch_intervals_rejects_unfetched() -> None:
     """A non-fetched timeframe raises the pinned DEC-DHAN-1M-ONLY-001 error."""
-    with pytest.raises(ValueError, match="not fetched on Dhan"):
-        cli._resolve_dhan_fetch_intervals("25minute")
+    with pytest.raises(ValueError, match="not fetched on Groww"):
+        cli._resolve_fetch_intervals("25minute")
 
 
 def test_cmd_fetch_unfetched_interval_is_user_error(
@@ -153,7 +153,7 @@ def test_cmd_fetch_unfetched_interval_is_user_error(
     )
     assert rc == cli.EXIT_USER_ERROR
     assert capsys.readouterr().err == (
-        "[brutex] --interval '5minute' is not fetched on Dhan — fetch 1minute/1day only "
+        "[brutex] --interval '5minute' is not fetched on Groww — fetch 1minute/1day only "
         "(the 19 intraday timeframes are resampled from the 1-minute base). "
         "Use --interval 1minute, 1day, or all.\n"
     )
@@ -272,7 +272,7 @@ def test_cmd_fetch_dry_run_synthetic_end_to_end(
     )
     assert rc == cli.EXIT_OK
     captured = capsys.readouterr()
-    assert "[brutex] --window-days is ignored on Dhan (1-minute is tiled internally)" in (
+    assert "[brutex] --window-days is ignored on Groww (1-minute is tiled internally)" in (
         captured.err
     )
     assert "[brutex] fetch --dry-run → synthetic candles" in captured.err
@@ -304,7 +304,7 @@ def test_cmd_fetch_dry_run_inspect_persists_nothing(
     )
     assert rc == cli.EXIT_OK
     captured = capsys.readouterr()
-    assert "[brutex] --inspect is not yet ported to the Dhan adapter" in captured.err
+    assert "[brutex] --inspect is not yet ported to the Groww adapter" in captured.err
     assert "[brutex] fetch done — windows=3 bars_appended=6 failed_pairs=0 transient=0" in (
         captured.out
     )
@@ -628,7 +628,7 @@ def test_cmd_fetch_until_clean_reaches_clean(
     assert rc == cli.EXIT_OK
     captured = capsys.readouterr()
     assert "[brutex] until-clean — verdict=stop_clean rounds=1 still_failed=0" in captured.out
-    assert "Regenerate the 24-hour token" not in captured.err
+    assert "Re-check the Groww API key" not in captured.err
 
 
 def test_cmd_fetch_until_clean_dead_token_needs_operator(
@@ -672,5 +672,5 @@ def test_cmd_fetch_until_clean_dead_token_needs_operator(
     assert budgets == [2]  # --until-clean-rounds overrides DEFAULT_MAX_ROUNDS
     captured = capsys.readouterr()
     assert "[brutex] until-clean — verdict=stop_dead rounds=1 still_failed=4" in captured.out
-    assert "Dhan token expired mid-pull" in captured.err
-    assert "Regenerate the 24-hour token" in captured.err
+    assert "Groww auth failed mid-pull" in captured.err
+    assert "Re-check the Groww API key" in captured.err

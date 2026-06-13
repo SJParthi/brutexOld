@@ -3,7 +3,7 @@
 Closes the G-10 gap (``TRACK1_REQUIREMENTS_FINAL.md §3``): an empty
 historical-candle window (pre-listing / trading-halt / holiday / sparse
 F&O minute) would otherwise be re-requested forever on every resume,
-silently burning the 100K/day Dhan quota.
+silently burning the 100K/day vendor quota.
 
 A **chunk** is one historical-candle fetch window:
 ``(vendor_symbol, interval, start, end)``. After every fetch attempt the

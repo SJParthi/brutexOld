@@ -3,7 +3,7 @@
 This is the top-level package. See ``docs/TRACK1_BACKTEST_SPEC.md`` for the
 authoritative Track 1 specification. Scope-locked to 4 Indian spot indexes:
 NIFTY 50, BANKNIFTY, SENSEX, and INDIA VIX (reference only), fetched via
-the Dhan Data API v2 (DEC-GROWW-DHAN-REVERT-001 / ADR-0002, 2026-05-31). See CLAUDE.md §1/§6.
+the Groww Trade API (ADR-0009). See CLAUDE.md §1/§6.
 """
 
 from __future__ import annotations

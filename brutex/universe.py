@@ -1,7 +1,7 @@
 """BruteX Track 1 universe — Indian spot indexes + India VIX.
 
 **STATUS (2026-05-26):** universe definitions are vendor-agnostic. Post
-DEC-VENDOR-PIVOT-001 the Dhan adapter consumes these definitions
+DEC-VENDOR-PIVOT-001 the Groww adapter consumes these definitions
 (prior broker adapter wiped). The prior universe (8 F&O indices + dynamic
 stock-derivative discovery) is out of scope for Track 1. India VIX
 added after 4-agent verification on 2026-05-15 (late-day scope
@@ -324,13 +324,13 @@ def build_options_eligible_underlyings(
     DEC-OPTIONS-ELIGIBLE-GUARD-001. The OPTIONS-ONLY sibling of
     :func:`build_fno_eligible_underlyings` (operator decree: "we will NEVER pull
     futures — only options"): an underlying is options-eligible iff at least one
-    Dhan **option** leg (``CE`` / ``PE`` — i.e. an ``OPTIDX`` index option or an
+    vendor **option** leg (``CE`` / ``PE`` — i.e. an ``OPTIDX`` index option or an
     ``OPTSTK`` stock option) names it as the underlying. A ``FUT`` leg does NOT
-    qualify it. This is the AUTHORITATIVE, data-driven set — derived from Dhan's
-    own instrument master in the SAME single pass the F&O-eligibility scan uses, so
-    it auto-tracks NSE adding/removing an F&O name, never a hardcoded guess
+    qualify it. This is the AUTHORITATIVE, data-driven set — derived from the
+    vendor's own instrument master in the SAME single pass the F&O-eligibility scan
+    uses, so it auto-tracks NSE adding/removing an F&O name, never a hardcoded guess
     (Golden Rule #1). The dashboard guards the options-chain pull on this set: a
-    ``Pull options chain`` on an underlying NOT in it is rejected BEFORE any Dhan
+    ``Pull options chain`` on an underlying NOT in it is rejected BEFORE any vendor
     call, so a mis-click can never waste the 100,000/day quota on options that do
     not exist (e.g. NIFTY 100 / INDIA VIX / a non-F&O equity).
 
@@ -356,7 +356,7 @@ def build_underlying_economics(
 ) -> dict[tuple[Exchange, str], UnderlyingEconomics]:
     """Map ``(exchange, underlying_symbol)`` to leg-derived contract economics.
 
-    In the Dhan instrument master, IDX and EQ rows carry BLANK / placeholder
+    In the vendor instrument master, IDX and EQ rows carry BLANK / placeholder
     economics — ``lot_size`` defaults to ``1`` (or ``0`` for indices),
     ``freeze_quantity`` is absent. The REAL ``lot_size`` / ``tick_size`` /
     ``freeze_quantity`` for an underlying live only on its derivative legs
@@ -414,10 +414,8 @@ def derive_lake_underlyings(
     DEC-P0-063) — not just the ~25 indices. The caller passes the IDX + EQ
     candidate rows (from
     :meth:`~brutex.data.instrument_store.InstrumentStore.list_index_equity_instruments`),
-    and this projects each to the ``(symbol, exchange)`` pair the Dhan options
-    rolling fan-out
-    (:func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`)
-    expects.
+    and this projects each to the ``(symbol, exchange)`` pair the options
+    rolling fan-out expects.
 
     The brute-force ENGINE is UNAFFECTED — it still sweeps only the 3
     indices; this only widens the LAKE pull.

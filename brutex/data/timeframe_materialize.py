@@ -1,7 +1,7 @@
 """Manual derived-timeframe **materialiser** — the testable core (DEC-TF-MATERIALIZE-001).
 
 The brute-force sweep evaluates strategies at all 21 timeframes (CLAUDE.md §1).
-Only the **1-minute** base is fetched from Dhan; the 19 derived intraday
+Only the **1-minute** base is fetched from the vendor; the 19 derived intraday
 timeframes are *resampled* from it (DEC-DHAN-1M-ONLY-001) by
 :func:`~brutex.data.spot_resample.derive_intraday_tfs`. Re-resampling 1m on
 every read would re-pay that cost ~33 billion times across a production sweep.

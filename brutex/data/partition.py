@@ -78,7 +78,7 @@ VALID_INTERVALS: Final[frozenset[str]] = frozenset(LAKE_INTERVAL_LABELS.values()
 VALID_EXCHANGES: Final[frozenset[str]] = frozenset({"NSE", "BSE"})
 
 
-#: Segments BruteX stores bars for. ``INDEX`` (Dhan ``IDX_I``) was added by
+#: Segments BruteX stores bars for. ``INDEX`` (vendor ``IDX_I``) was added by
 #: DEC-INDEX-SEGMENT-PK-FIX-001 (#406) — index instruments now carry
 #: ``segment='INDEX'``, so a spot-candle pull for NIFTY/BANKNIFTY/SENSEX routes
 #: an ``INDEX`` segment into the partition path; without it the lake-write

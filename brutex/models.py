@@ -2,11 +2,11 @@
 
 Every broker adapter normalises its raw data into these models. Layers L2+
 (data lake, feed, engine, etc.) see ONLY these types, never the raw vendor
-payloads from the Dhan Data API v2 or any other broker.
+payloads from the Groww Data API or any other broker.
 
 See ``docs/TRACK1_BACKTEST_SPEC.md`` for the full data-model specification.
-The canonical instrument fields map to the Dhan instrument-master schema
-(``brutex/adapters/dhan/instruments.py``; CLAUDE.md §6).
+The canonical instrument fields map to the broker instrument-master schema
+(``brutex/adapters/groww/instruments.py``; CLAUDE.md §6).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class Exchange(StrEnum):
     NSE = "NSE"
     BSE = "BSE"
     # MCX exists in broker SDK but is out of scope for BruteX v1
-    # (Dhan-backed backtesting does not support COMMODITY segment).
+    # (broker-backed backtesting does not support COMMODITY segment).
 
 
 class Segment(StrEnum):
@@ -38,7 +38,7 @@ class Segment(StrEnum):
 
         **Track 1 scope (CLAUDE.md §3):** the signal-only spot-index
         brute-force backtest uses ``INDEX`` (the 3 brute-force indices +
-        India VIX live in Dhan's cross-exchange ``IDX_I`` segment, per
+        India VIX live in the vendor's cross-exchange ``IDX_I`` segment, per
         DEC-DHAN-IDX-SEGMENT-001). ``CASH`` is the spot-equity segment
         (F&O-eligible single-stock SPOT rows in the lean lake). ``FNO`` is
         **Track 2 reference** — kept in the enum so Track 2 modules and
@@ -47,13 +47,13 @@ class Segment(StrEnum):
 
         ``INDEX`` was added by DEC-INDEX-SEGMENT-PK-FIX-001 (2026-06-02):
         before it, indices were mis-assigned ``CASH``, so an index and a
-        cash equity that share a numeric ``SECURITY_ID`` across Dhan's
+        cash equity that share a numeric ``SECURITY_ID`` across the vendor's
         distinct ``IDX_I`` vs ``NSE_EQ`` segments (e.g. ``13``) collided on
         the ``(security_id, exch_id, segment, snapshot_date)`` PK and
         crashed the instrument-master load.
     """
 
-    INDEX = "INDEX"  # Dhan IDX_I — Track 1 brute-force indices + India VIX
+    INDEX = "INDEX"  # vendor IDX_I — Track 1 brute-force indices + India VIX
     CASH = "CASH"
     FNO = "FNO"  # Track 2 reference — out of scope for Track 1 signal-only mode
     # COMMODITY exists in broker SDK but is out of scope for BruteX v1.
@@ -62,8 +62,8 @@ class Segment(StrEnum):
 class InstrumentType(StrEnum):
     """Instrument type — matches broker SDK values verbatim.
 
-    See the Dhan instrument-master schema (CLAUDE.md §6;
-    ``brutex/adapters/dhan/instruments.py``) for the canonical list.
+    See the vendor instrument-master schema (CLAUDE.md §6;
+    ``brutex/adapters/groww/instruments.py``) for the canonical list.
 
     .. note::
 
@@ -102,13 +102,13 @@ class OptionSide(StrEnum):
 class Instrument:
     """Canonical representation of one tradable contract.
 
-    Every Dhan instrument-master CSV row is normalised into one
-    ``Instrument`` by :mod:`brutex.adapters.dhan.instruments`. Downstream
+    Every vendor instrument-master CSV row is normalised into one
+    ``Instrument`` by :mod:`brutex.adapters.groww.instruments`. Downstream
     layers see only this class and never the raw vendor dict.
 
-    Field names + ordering mirror the Dhan instrument-master schema
-    (CLAUDE.md §6 / ``docs/adr/0003-dhan-native-instrument-schema.md``):
-    Dhan's lower_snake column names, BruteX's engine-ready VALUES (e.g.
+    Field names + ordering mirror the vendor instrument-master schema
+    (CLAUDE.md §6 / ADR-0003, the native instrument-master schema rename):
+    the vendor's lower_snake column names, BruteX's engine-ready VALUES (e.g.
     ``instrument`` keeps ``IDX``/``EQ``/``FUT``/``CE``/``PE``; ``segment``
     keeps ``CASH``/``FNO``). Identity is ``(security_id, exch_id)`` — the
     exchange-prefixed ``vendor_symbol`` of the old schema was dropped
@@ -118,9 +118,9 @@ class Instrument:
 
     # Identity
     exch_id: Exchange  # was exchange
-    security_id: int  # was exchange_token (the numeric Dhan SECURITY_ID)
+    security_id: int  # was exchange_token (the numeric vendor SECURITY_ID)
     symbol_name: str  # was trading_symbol — the engine's primary symbol
-    display_name: str | None  # was name (Dhan DISPLAY_NAME)
+    display_name: str | None  # was name (vendor DISPLAY_NAME)
 
     # Classification
     instrument: InstrumentType  # was instrument_type (values IDX/EQ/FUT/CE/PE)
@@ -140,11 +140,11 @@ class Instrument:
     # Derivatives-only fields
     sm_expiry_date: date | None  # was expiry_date
     strike_price: Decimal | None
-    option_type: str | None = None  # NEW — the raw CE/PE Dhan OPTION_TYPE
-    expiry_flag: str | None = None  # NEW — the raw M/W Dhan EXPIRY_FLAG
+    option_type: str | None = None  # NEW — the raw CE/PE vendor OPTION_TYPE
+    expiry_flag: str | None = None  # NEW — the raw M/W vendor EXPIRY_FLAG
 
     # Reservation / surveillance flag (KEEP the working bool value; name is
-    # the Dhan-faithful change — was is_reserved).
+    # the vendor-faithful change — was is_reserved).
     asm_gsm_flag: bool = False
 
     # ─────────────────────────────────────────────────────────────────
@@ -234,7 +234,7 @@ class OutOfScopeError(BruteXError):
     """Row belongs to a scope that is explicitly excluded from v1.
 
     Examples: stock options, cash equity rows, commodity segment rows.
-    The adapter raises this when a Dhan row would be ingested that
+    The adapter raises this when a vendor row would be ingested that
     does not match the locked v1 universe (``FD-09a`` / ``FD-09b``).
     """
 
@@ -250,7 +250,7 @@ class InstrumentFormatError(BruteXError):
 class TickSizeFormatError(InstrumentFormatError):
     """Raised when ``tick_size`` cannot be normalised to Decimal rupees.
 
-    See the Dhan instrument-master schema (CLAUDE.md §6) for the format
+    See the vendor instrument-master schema (CLAUDE.md §6) for the format
     drift (float rupees in CSV vs integer paise in dict output).
     """
 
@@ -277,7 +277,7 @@ VALID_TICK_SIZES_RUPEES: Final[frozenset[Decimal]] = frozenset(
 def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
     """Convert a vendor tick_size value to canonical Decimal rupees.
 
-    Handles the format drift documented in the Dhan instrument-master
+    Handles the format drift documented in the vendor instrument-master
     schema (CLAUDE.md §6):
 
     * CSV row: float rupees (``0.05``)

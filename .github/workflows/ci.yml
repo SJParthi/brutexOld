@@ -2106,6 +2106,24 @@ jobs:
         run: python3 scripts/ci/validate_ledger_numbering.py
 
   # ─────────────────────────────────────────────────────────────────
+  # NO-DHAN GUARD — zero-dhan enforcement on the live surface.
+  # The live vendor is Groww; the Dhan adapter was fully removed in the
+  # J4 PR series. This guard fails the build if the retired "dhan" vendor
+  # word reappears in brutex/, scripts/, CLAUDE.md, README.md, or
+  # docs/runbooks/. The immutable DEC-DHAN-* decision IDs + the historical
+  # docs (MIGRATION.md / adr/ / TRACK1_*.md) are exempt (see the script
+  # header for the full LEDGER rationale).
+  # ─────────────────────────────────────────────────────────────────
+  no-dhan-guard:
+    name: No-dhan guard (zero-dhan enforcement)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run no-dhan guard
+        run: bash scripts/ci/no-dhan-guard.sh
+
+  # ─────────────────────────────────────────────────────────────────
   # CONVENTIONAL COMMITS — commit format check (only on PRs)
   # ─────────────────────────────────────────────────────────────────
   conv-commits:

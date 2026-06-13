@@ -2,8 +2,8 @@
 
 The lake holds **21 timeframes** per spot instrument (CLAUDE.md §1:
 "1m base + 19 derived intraday + 1d"). Only **1-minute** spot data is fetched
-from Dhan ``/charts/intraday``; the **1-day** anchor comes from
-``/charts/historical``. Every **other** timeframe is *derived* from the 1m
+from the vendor's intraday endpoint; the **1-day** anchor comes from
+the vendor's historical endpoint. Every **other** timeframe is *derived* from the 1m
 base — never fetched (DEC-DHAN-1M-ONLY-001) — and this is spot-only (the
 brute-force engine + reference indexes; options are a separate surface).
 

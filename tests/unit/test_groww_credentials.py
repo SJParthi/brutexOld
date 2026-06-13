@@ -20,24 +20,24 @@ from brutex.config.credentials import (
     ENV_GROWW_API_KEY,
     ENV_GROWW_TOTP_SECRET,
     CredentialsError,
-    DhanFileCredentials,
     GrowwFileCredentials,
+    TokenFileCredentials,
     clear_groww_credentials,
     credentials_path,
     groww_credentials_present,
     groww_credentials_preview,
-    load_dhan_credentials,
     load_groww_credentials,
+    load_token_credentials,
     resolve_groww_file_credentials,
-    save_dhan_credentials,
     save_groww_credentials,
+    save_token_credentials,
 )
 
 # FAKE values only — never a real secret.
 FAKE_API_KEY = "gw_api_key_abcdef123456"
 FAKE_TOTP_SECRET = "JBSWY3DPEHPK3PXP"
-FAKE_DHAN_TOKEN = "eyJhbGc.eyJzdWImC6.sIg-na_ture"
-FAKE_DHAN_CLIENT = "1100123456"
+FAKE_TOKEN = "eyJhbGc.eyJzdWImC6.sIg-na_ture"
+FAKE_CLIENT = "1100123456"
 
 
 def _mode(path: Path) -> int:
@@ -91,31 +91,31 @@ class TestSaveGroww:
 
 
 class TestCoexistence:
-    def test_save_dhan_then_groww_keeps_both(self, tmp_path: Path) -> None:
+    def test_save_token_then_groww_keeps_both(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(
-            DhanFileCredentials(access_token=FAKE_DHAN_TOKEN, client_id=FAKE_DHAN_CLIENT),
+        save_token_credentials(
+            TokenFileCredentials(access_token=FAKE_TOKEN, client_id=FAKE_CLIENT),
             path=path,
         )
         save_groww_credentials(_groww(), path=path)
-        dhan = load_dhan_credentials(path=path)
+        token_creds = load_token_credentials(path=path)
         groww = load_groww_credentials(path=path)
-        assert dhan is not None
-        assert dhan.access_token == FAKE_DHAN_TOKEN
+        assert token_creds is not None
+        assert token_creds.access_token == FAKE_TOKEN
         assert groww == _groww()
 
-    def test_save_groww_then_dhan_keeps_both(self, tmp_path: Path) -> None:
+    def test_save_groww_then_token_keeps_both(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         save_groww_credentials(_groww(), path=path)
-        save_dhan_credentials(
-            DhanFileCredentials(access_token=FAKE_DHAN_TOKEN, client_id=FAKE_DHAN_CLIENT),
+        save_token_credentials(
+            TokenFileCredentials(access_token=FAKE_TOKEN, client_id=FAKE_CLIENT),
             path=path,
         )
         groww = load_groww_credentials(path=path)
-        dhan = load_dhan_credentials(path=path)
+        token_creds = load_token_credentials(path=path)
         assert groww == _groww()
-        assert dhan is not None
-        assert dhan.client_id == FAKE_DHAN_CLIENT
+        assert token_creds is not None
+        assert token_creds.client_id == FAKE_CLIENT
 
 
 # ── load ──────────────────────────────────────────────────────────────────
@@ -130,10 +130,10 @@ class TestLoadGroww:
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         assert load_groww_credentials(path=tmp_path / "nope.json") is None
 
-    def test_dhan_only_file_returns_none(self, tmp_path: Path) -> None:
+    def test_token_only_file_returns_none(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(
-            DhanFileCredentials(access_token=FAKE_DHAN_TOKEN, client_id=FAKE_DHAN_CLIENT),
+        save_token_credentials(
+            TokenFileCredentials(access_token=FAKE_TOKEN, client_id=FAKE_CLIENT),
             path=path,
         )
         assert load_groww_credentials(path=path) is None
@@ -307,23 +307,23 @@ class TestPreviewGroww:
 class TestClearGroww:
     def test_removes_only_groww_section(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(
-            DhanFileCredentials(access_token=FAKE_DHAN_TOKEN, client_id=FAKE_DHAN_CLIENT),
+        save_token_credentials(
+            TokenFileCredentials(access_token=FAKE_TOKEN, client_id=FAKE_CLIENT),
             path=path,
         )
         save_groww_credentials(_groww(), path=path)
         assert clear_groww_credentials(path=path) is True
-        # Groww gone, Dhan preserved.
+        # Groww gone, token section preserved.
         assert load_groww_credentials(path=path) is None
-        assert load_dhan_credentials(path=path) is not None
+        assert load_token_credentials(path=path) is not None
 
     def test_absent_file_returns_false(self, tmp_path: Path) -> None:
         assert clear_groww_credentials(path=tmp_path / "nope.json") is False
 
     def test_no_groww_section_returns_false(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_dhan_credentials(
-            DhanFileCredentials(access_token=FAKE_DHAN_TOKEN, client_id=FAKE_DHAN_CLIENT),
+        save_token_credentials(
+            TokenFileCredentials(access_token=FAKE_TOKEN, client_id=FAKE_CLIENT),
             path=path,
         )
         assert clear_groww_credentials(path=path) is False

@@ -7,16 +7,16 @@
 
 ## When you need this
 
-Per **DEC-OPTION-DH905-CONTINUE-001**, a Dhan `DH-905` "no data" answer on an
+Per **DEC-OPTION-DH905-CONTINUE-001**, a vendor `DH-905` "no data" answer on an
 option fetch window settles that window `SKIPPED` in the unified window ledger
 (`<lake_root>/window_ledger/windows.parquet`) and the series continues — so a
 fully-dead series drains in ONE paced pass and is never re-fetched.
 
-That settle trusts Dhan's answer. But Dhan's DH-905 message **conflates two
+That settle trusts the vendor's answer. But the DH-905 message **conflates two
 causes** ("incorrect parameters **or** no data present" —
-`brutex/adapters/dhan/errors.py:83-88`), so a *systematic request bug* (wrong
+`brutex/adapters/groww/errors.py:83-88`), so a *systematic request bug* (wrong
 SECURITY_ID mapping, malformed body, a vendor contract change — the
-DEC-OPTION-SECURITY-ID-FIX-001 class) can mass-settle windows that Dhan
+DEC-OPTION-SECURITY-ID-FIX-001 class) can mass-settle windows that the vendor
 actually HAS data for. The hostile review of DEC-OPTION-DH905-CONTINUE-001
 (finding 2) quantified the blast radius: one such bug can poison every fetched
 window of every affected series in a single pull, and every later pull then
@@ -48,7 +48,7 @@ gaps = [
     r
     for r in ledger.records()
     if r.status == "SKIPPED"
-    and r.market == "dhan-option"
+    and r.market == "groww-option"
     and r.last_error is not None
     and "DH-905" in r.last_error
 ]
@@ -88,7 +88,7 @@ def is_poisoned(row: tuple) -> bool:
         row[0], row[1], row[2], row[5], row[8],
     )
     return (
-        market == "dhan-option"
+        market == "groww-option"
         and status == "SKIPPED"
         and last_error is not None
         and "DH-905" in str(last_error)

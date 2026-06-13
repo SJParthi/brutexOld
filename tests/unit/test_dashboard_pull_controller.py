@@ -29,8 +29,8 @@ from brutex.adapters.groww.errors import GrowwBadRequestError
 from brutex.adapters.ingest_common import SyntheticSpotAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.pull_controller import (
-    DHAN_FETCH_INTERVALS,
-    DHAN_HISTORY_FLOOR,
+    GROWW_FETCH_INTERVALS,
+    GROWW_HISTORY_FLOOR,
     BulkAdapterFactory,
     BulkSpotReport,
     PullCandlesReport,
@@ -182,8 +182,8 @@ class TestPullCandlesDryRun:
         # day), so the report's start year is the 2021 floor, NOT the current
         # year (FIX 4 — blank pickers default to the full history floor).
         report = pull_candles(_index(), lake_root=tmp_path, dry_run=True)
-        assert report.year == DHAN_HISTORY_FLOOR.year
-        assert report.start_date == DHAN_HISTORY_FLOOR.isoformat()
+        assert report.year == GROWW_HISTORY_FLOOR.year
+        assert report.start_date == GROWW_HISTORY_FLOOR.isoformat()
         assert report.dry_run is True
         assert report.symbol == "13"
 
@@ -192,7 +192,7 @@ class TestPullCandlesDryRun:
         # Dhan fetches 1m + 1d only (the 19 derived TFs are resampled, not
         # fetched — DEC-DHAN-1M-ONLY-001); the grid shows two cells.
         assert [tf.interval for tf in report.timeframes] == ["1m", "1d"]
-        assert len(DHAN_FETCH_INTERVALS) == 2
+        assert len(GROWW_FETCH_INTERVALS) == 2
         # Synthetic adapter always returns bars → some completed, zero failed.
         assert report.total_failed == 0
         assert report.total_completed > 0
@@ -357,7 +357,7 @@ class TestResolveCandleRange:
     def test_to_only_starts_at_history_floor(self) -> None:
         # to_date must be on/after the 2021 floor or there's nothing to pull.
         start, end = resolve_candle_range(from_date=None, to_date="2021-03-10", year=None, now=_NOW)
-        assert start == datetime(DHAN_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2021-01-01
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2021-01-01
         assert end == datetime(2021, 3, 11, tzinfo=UTC)
 
     def test_from_before_floor_is_clamped_up(self) -> None:
@@ -422,7 +422,7 @@ class TestResolveCandleRange:
         start, end = resolve_candle_range(
             from_date="   ", to_date="2024-02-15", year=None, now=_NOW
         )
-        assert start == datetime(DHAN_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
         assert end == datetime(2024, 2, 16, tzinfo=UTC)
 
 

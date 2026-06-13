@@ -4,7 +4,7 @@ The dashboard's READ paths were observability-dark: a ``GET /api/v1/...`` only
 produced uvicorn's raw ``"GET ... 200"`` access line — no latency, no request
 id, no correlation with a concurrent pull — and the 1 s ``/pull-progress`` +
 4 s coverage polls flooded that access stream so the ~52 structured BUSINESS
-events (``rate.*`` / ``ingest.*`` / ``dhan.*``) were drowned.
+events (``rate.*`` / ``ingest.*`` / ``vendor.*``) were drowned.
 
 This module supplies the small, pure, 100%-unit-testable pieces the dashboard
 middleware uses to fix both:

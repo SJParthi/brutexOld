@@ -395,7 +395,7 @@ class RetryStormWatchdog:
         The hook splits ``label`` (``"{symbol} {window}"``) on the LAST
         *label_sep*, routes ``failed=True`` to
         :meth:`record_terminal_failure` and ``failed=False`` to
-        :meth:`record_success`. A ``gap=True`` tick (a benign Dhan ``DH-905``
+        :meth:`record_success`. A ``gap=True`` tick (a benign vendor ``DH-905``
         no-data boundary — DEC-DHAN-NO-DATA-GAP-COUNT-001) is IGNORED: it is
         neither a failure nor a clean success, so a recurring known gap (e.g.
         NIFTY NEXT 50's pre-2021 daily range, empty on every pull) can never

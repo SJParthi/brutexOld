@@ -87,7 +87,7 @@ class IngestPhase(StrEnum):
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Outcomes — what the worker reports after calling the Dhan API
+# Outcomes — what the worker reports after calling the Groww API
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -95,8 +95,8 @@ class Outcome(StrEnum):
     """Outcomes the worker can report to the FSM.
 
     The FSM translates each outcome + current state into a new state.
-    These map onto a Dhan API exception hierarchy (see
-    the Dhan error hierarchy in ``brutex/adapters/dhan/errors.py``) plus
+    These map onto a Groww API exception hierarchy (see
+    the Groww error hierarchy in ``brutex/adapters/groww/errors.py``) plus
     two non-error outcomes for empty/valid responses.
     """
 
@@ -168,7 +168,7 @@ class WorkItem:
         key in the LMDB dedup cache — re-issuing a call with identical
         params yields the same hash and is deduplicated.
     params
-        Immutable mapping of the arguments passed to the Dhan API method.
+        Immutable mapping of the arguments passed to the Groww API method.
         Example for Phase B: ``{"exchange": "NSE", "underlying_symbol":
         "NIFTY", "year": 2024}``.
     state
@@ -276,7 +276,7 @@ def transition(
         The work item (must be in a non-terminal state; ``TransitionError``
         is raised otherwise).
     outcome
-        What the worker reported after calling the Dhan API.
+        What the worker reported after calling the Groww API.
     max_soft_retries
         Override the default retry-escalation threshold (default
         :data:`MAX_SOFT_RETRIES` = 10). Lower values are useful in tests.
@@ -324,8 +324,8 @@ def transition(
             last_transition_at=now,
         )
 
-    # ── NOT_FOUND is a terminal NO_DATA (Dhan says "no such thing":
-    # HTTP 404 → DhanNotFoundError) ─
+    # ── NOT_FOUND is a terminal NO_DATA (Groww says "no such thing":
+    # HTTP 404 → GrowwNotFoundError) ─
     if outcome == Outcome.NOT_FOUND:
         return replace(
             item,
@@ -333,7 +333,7 @@ def transition(
             last_transition_at=now,
         )
 
-    # ── NO_DATA is a terminal NO_DATA (Dhan empty-candle response — no
+    # ── NO_DATA is a terminal NO_DATA (Groww empty-candle response — no
     # bars for this specific query window; advance watermark, do not retry).
     if outcome == Outcome.NO_DATA:
         return replace(
@@ -342,8 +342,8 @@ def transition(
             last_transition_at=now,
         )
 
-    # ── FATAL: hard-fail terminal quarantine (Dhan terminal client errors,
-    # e.g. DhanBadRequestError / DhanAuthError).
+    # ── FATAL: hard-fail terminal quarantine (Groww terminal client errors,
+    # e.g. GrowwBadRequestError / GrowwAuthError).
     # Pipeline-level halt logic outside transition() reads this state and
     # marks the entire phase HALTED on its next scan.
     if outcome == Outcome.FATAL:

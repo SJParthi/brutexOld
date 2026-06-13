@@ -271,7 +271,7 @@ class WindowLedger:
     def settle_known_gap(self, key: WindowKey, *, now: datetime, reason: str | None = None) -> str:
         """Settle *key* as ``SKIPPED`` — a ``DH-905`` known-gap that must NOT re-pull — **O(1)**.
 
-        Folds DEC-DHAN-NODATA-SETTLED-001 (#597): a Dhan ``DH-905`` "no data
+        Folds DEC-DHAN-NODATA-SETTLED-001 (#597): a vendor ``DH-905`` "no data
         present" is the vendor's DEFINITIVE answer that the range has no bars, so it
         can never return a 200 — settling it ``SKIPPED`` stops it pinning the pull
         forever. A genuine retryable error is NEVER routed here (it goes through

@@ -9,7 +9,7 @@ Both side-effecting calls — ``pyotp.TOTP(secret).now()`` and
 ``GrowwAPI.get_access_token(...)`` — are **injected callables**, so every branch
 is unit-testable without ``pyotp`` / ``growwapi`` installed (the optional-extra
 resilience, DEC-GROWW-DEPS-REINSTATE-001). The real SDK/pyotp default shims are
-the only ``# pragma: no cover`` lines, mirroring ``brutex.adapters.dhan.auth``.
+the only ``# pragma: no cover`` lines, mirroring the canonical adapter auth layout.
 
 Secret hygiene: :class:`GrowwAuthError` is raised with a ``safe_message`` so
 ``str(exc)`` (which the audit log / dashboard persist) NEVER leaks the api_key or

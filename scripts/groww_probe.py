@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Phase-0 empirical probe for the Dhan -> Groww re-migration (ADR-0009).
+"""Phase-0 empirical probe for the migration to Groww (ADR-0009).
 
 `DEC-DHAN-GROWW-REMIGRATE-001` (MIGRATION.md #667). ADR-0009 reverses ADR-0002
-(Dhan) back to Groww on operator directive, OVERRIDING a 4-agent hostile-review
+back to Groww on operator directive, OVERRIDING a 4-agent hostile-review
 NO-GO. The override is conditional on this probe: several Groww facts are
 UNVERIFIED and MUST NOT be encoded as fact in adapter code until a committed
 transcript resolves them. This script is that gate.
@@ -21,7 +21,7 @@ The six checks map 1:1 to ADR-0009 §4 (each prints OK / ABSENT / ERROR / SKIP):
   1. India VIX existence            (HARD-GATE; ADR-0009 risk #3)
   2. 1m granularity at 2020 boundary (risk #6 — COVID window)
   3. backtest-vs-live parity         (measures risk #1 — the withdrawn folklore)
-  4. cross-vendor 1m drift           (risk #5 — needs a Dhan series alongside)
+  4. cross-vendor 1m drift           (risk #5 — needs a prior-vendor series alongside)
   5. rate limit / daily quota / token lifetime (risks #2, #4)
   6. options round-trip              (Track-2 / lake readiness)
 
@@ -170,10 +170,10 @@ def _check_parity(_client: object) -> None:
 
 
 def _check_drift(_client: object) -> None:
-    """ADR-0009 §4.4 — Dhan vs Groww 1m bar-by-bar drift (risk #5)."""
-    _section("CHECK 4 — cross-vendor 1m drift Dhan vs Groww (risk #5)")
+    """ADR-0009 §4.4 — prior-vendor vs Groww 1m bar-by-bar drift (risk #5)."""
+    _section("CHECK 4 — cross-vendor 1m drift prior-vendor vs Groww (risk #5)")
     _emit("MANUAL: pull NIFTY 1m for one full session from BOTH vendors and diff")
-    _emit("        OHLC bar-by-bar. Needs a Dhan series alongside (scripts/dhan_*).")
+    _emit("        OHLC bar-by-bar. Needs a prior-vendor series alongside.")
     _emit("VERDICT: quantify mismatch %; >5% triggers the ADR-0009 §7 reversal path.")
 
 

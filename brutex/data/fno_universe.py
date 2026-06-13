@@ -2,7 +2,7 @@
 
 The universe-builder *script* (``scripts/build_fno_universe.py``) fetches three
 live sources on the operator's machine (NSE underlying-information API, NSE
-``fo_mktlots.csv``, and the Dhan scrip master), then uses the deterministic,
+``fo_mktlots.csv``, and the vendor scrip master), then uses the deterministic,
 fully-tested functions here to parse + cross-check + serialise the result
 (DEC-FNO-UNIVERSE-BUILDER-001). Keeping the transforms in the ``brutex`` package
 (not the script) makes them COMMON + 100%-covered; the network I/O stays in the
@@ -108,7 +108,7 @@ def cross_check(sources: Mapping[str, set[str]]) -> dict[str, set[str]]:
 
     A symbol unique to one source (missing from the union of all others) is an
     addition/exclusion to watch — the builder logs these so a divergence between
-    the NSE API, ``fo_mktlots``, and the Dhan master is never silent. O(total
+    the NSE API, ``fo_mktlots``, and the vendor master is never silent. O(total
     symbols) via set algebra.
     """
     result: dict[str, set[str]] = {}

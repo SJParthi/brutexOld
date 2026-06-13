@@ -77,37 +77,36 @@ The runtime file records the currently-running pipeline's `pid`,
 
 ---
 
-## 5. Dhan adapter — live data-pull credentials (DEC-GROWW-DHAN-REVERT-001, ADR-0002)
+## 5. Groww adapter — live data-pull credentials (DEC-GROWW-DHAN-REVERT-001, ADR-0002)
 
-The live vendor is **Dhan Data API v2** (plain REST, no vendor SDK — CLAUDE.md §6).
-The pull authenticates with a manual web-generated access token + client id,
+The live vendor is **Groww** (CLAUDE.md §6). The pull authenticates with TOTP —
+a Groww API key plus a TOTP shared secret that mints the 6-digit per-session code,
 read from the environment (file fallback: the saved-credentials store in
 `brutex.config.credentials`):
 
 | Env var | Default | Allowed | Module |
 |---|---|---|---|
-| `BRUTEX_DHAN_ACCESS_TOKEN` | — (required for a live pull) | JWT access token from web.dhan.co (24h) | `brutex.adapters.dhan.auth` |
-| `BRUTEX_DHAN_CLIENT_ID` | — (required for a live pull) | numeric Dhan client id (`dhanClientId`) | `brutex.adapters.dhan.auth` |
+| `BRUTEX_GROWW_API_KEY` | — (required for a live pull) | Groww API key from the Groww trade-api console | `brutex.adapters.groww.auth` |
+| `BRUTEX_GROWW_TOTP_SECRET` | — (required for a live pull) | Groww TOTP shared secret (used to mint the 6-digit code) | `brutex.adapters.groww.auth` |
 
-**Auth model:** manual web-generated access token + client id (operator default,
-2026-05-31). Sent as the `access-token` (JWT, 24h) + `dhanClientId` headers. A
-TOTP alternative (`POST https://auth.dhan.co/app/generateAccessToken`) exists for
-unattended renewal. See CLAUDE.md §6 (verified Dhan facts) + `docs/TRACK1_DHAN_ADAPTER.md`.
+**Auth model:** TOTP. The API key plus the TOTP shared secret mint a fresh 6-digit
+code that is exchanged for a per-session access token; there is no long-lived JWT,
+client id, or renew-token step. See CLAUDE.md §6 (verified Groww facts).
 
-**Adaptive rate limiter (live Dhan pull):** throttled by the **[3..5] r/s**
-adaptive token bucket in `brutex.adapters.dhan.rate_control` (starts at 5, steps
-5→4→3 on HTTP 429; cap = Dhan's 5 r/s Data-API limit, `constants.py:86`
+**Adaptive rate limiter (live Groww pull):** throttled by the **[3..5] r/s**
+adaptive token bucket in `brutex.adapters.groww.rate_control` (starts at 5, steps
+5→4→3 on HTTP 429; cap = the 5 r/s Data-API limit, `constants.py:86`
 `DATA_RATE_LIMIT_RPS=5`, 100,000/day). These bounds are **code constants, not env vars.**
 
-**Honest envelope (Golden Rule #10):** the pre-revert
-`brutex.orchestrator.adaptive_rate_limiter` ([4..8] r/s) still reads the legacy
-`BRUTEX_GROWW_MIN_RPS` / `_MAX_RPS` / `_INITIAL_RPS` / `_STEP_DOWN_HITS` /
-`_STEP_DOWN_WINDOW` / `_STEP_UP_CLEAN_WINDOW` / `_RECHECK_INTERVAL` vars
-(`adaptive_rate_limiter.py:50-56`), and `brutex.wipe` reads
-`BRUTEX_GROWW_TOKEN_PATH` (`wipe.py:42`) — these are pre-Dhan residue **NOT on the
-live Dhan pull path** (which uses `rate_control` above). Retiring/renaming that
+**Honest envelope (Golden Rule #10):** the legacy
+`brutex.orchestrator.adaptive_rate_limiter` ([4..8] r/s) still reads the
+vendor-neutral `BRUTEX_RATE_MIN_RPS` / `_MAX_RPS` / `_INITIAL_RPS` /
+`_STEP_DOWN_HITS` / `_STEP_DOWN_WINDOW` / `_STEP_UP_CLEAN_WINDOW` /
+`_RECHECK_INTERVAL` vars (`adaptive_rate_limiter.py:50-56`), and `brutex.wipe`
+reads `BRUTEX_TOKEN_PATH` (`wipe.py:42`) — these are residue **NOT on the
+live Groww pull path** (which uses `rate_control` above). Retiring/renaming that
 module is a tracked follow-up (DEC-DHAN-DOC-RECONCILE-001). A live pull needs ONLY
-the two `BRUTEX_DHAN_*` vars above.
+the two `BRUTEX_GROWW_*` vars above.
 
 ---
 
@@ -162,5 +161,5 @@ typos).
 * DEC-M4PRO-ABSOLUTE-001 (#236) — strict-bool decoder pattern
 * DEC-TELEGRAM-WIRING-001 (#238) — Telegram env-var layout
 * DEC-PORTS-001 — port config layout
-* DEC-GROWW-DHAN-REVERT-001 (ADR-0002) — live vendor reverted to Dhan; §5 Dhan auth contract
-* DEC-VENDOR-PIVOT-001 — prior broker wipe (historical; superseded by the Dhan revert)
+* DEC-GROWW-DHAN-REVERT-001 (ADR-0002) — live vendor contract; §5 Groww auth contract
+* DEC-VENDOR-PIVOT-001 — prior broker wipe (historical; superseded by the current vendor)

@@ -1,7 +1,7 @@
 """Pure presentation helper for the /universe pull-verdict banner (DEC-VERDICT-BANNER-001).
 
 DEC-PULL-VERDICT-001 (PR #485) made a finished spot pull carry ONE prioritised,
-actionable :class:`~brutex.adapters.dhan.pull_verdict.PullVerdict` — emitted as
+actionable :class:`~brutex.adapters.ingest_common.PullVerdict` — emitted as
 the ``"verdict"`` object in the ``/api/v1/universe/pull-all`` JSON
 (:meth:`PullVerdict.to_dict`: ``kind``, ``headline``, ``action``,
 ``needs_operator``, ``pending_windows``, …). That verdict is in the JSON but the
@@ -33,7 +33,7 @@ from typing import Any, Final
 
 #: Verdict kind → (CSS modifier class, human colour name). The keys are the
 #: exact, mutually-exclusive
-#: :data:`~brutex.adapters.dhan.pull_verdict.PullVerdictKind` values; the colours
+#: :data:`~brutex.adapters.ingest_common.PullVerdictKind` values; the colours
 #: are the operator-facing severity decree (red/amber/grey/green). ``quota_exhausted``
 #: shares the amber "paused — resume later" lane (the auto-resume paused itself on
 #: the daily quota; not broken, just waiting for the IST-midnight reset —
@@ -53,7 +53,7 @@ class VerdictBanner:
 
     Immutable + JSON-serialisable. Every field is either a pure presentation
     decision (``css_class`` / ``colour`` / ``show_retry_button``) or a verbatim
-    pass-through of a :class:`~brutex.adapters.dhan.pull_verdict.PullVerdict`
+    pass-through of a :class:`~brutex.adapters.ingest_common.PullVerdict`
     field (``kind`` / ``headline`` / ``action`` / ``pending_windows``) — never a
     re-derivation (CLAUDE.md §11 COMMON).
     """
@@ -82,7 +82,7 @@ class VerdictBanner:
 def banner_for(verdict: Mapping[str, Any]) -> VerdictBanner:
     """Map a finished-pull *verdict* dict onto its display-ready :class:`VerdictBanner`.
 
-    *verdict* is a :meth:`~brutex.adapters.dhan.pull_verdict.PullVerdict.to_dict`
+    *verdict* is a :meth:`~brutex.adapters.ingest_common.PullVerdict.to_dict`
     mapping. The ``kind`` selects the colour + CSS class; the retry button is
     shown exactly when the verdict's own ``needs_operator`` flag is set (the
     button targets the existing ``/api/v1/universe/retry-failed`` engine —
@@ -104,7 +104,7 @@ def banner_for(verdict: Mapping[str, Any]) -> VerdictBanner:
     ------
     ValueError
         If ``kind`` is not one of the known
-        :data:`~brutex.adapters.dhan.pull_verdict.PullVerdictKind` values — a
+        :data:`~brutex.adapters.ingest_common.PullVerdictKind` values — a
         fail-closed guard so an unknown kind is never rendered uncoloured.
     """
     kind = verdict["kind"]

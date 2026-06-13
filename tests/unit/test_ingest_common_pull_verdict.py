@@ -20,13 +20,13 @@ class TestClassifyPull:
             failed_pairs=3,
             no_data=2,
             completed=0,
-            auth_cause="HTTP 400 DH-906 Invalid Token",
+            auth_cause="HTTP 401 invalid TOTP",
         )
         assert v.kind == "auth_expired"
         assert v.needs_operator is True
         assert v.pending_windows == 10  # still_failed (7) + failed_pairs (3)
-        assert v.auth_cause == "HTTP 400 DH-906 Invalid Token"
-        assert "web.dhan.co" in v.action
+        assert v.auth_cause == "HTTP 401 invalid TOTP"
+        assert "Groww API key + TOTP secret" in v.action
 
     def test_quota_exhausted_ranks_just_under_auth(self) -> None:
         # The daily-quota brake (DEC-AUTO-RESUME-QUOTA-001): with residual but a

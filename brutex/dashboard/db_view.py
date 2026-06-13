@@ -45,6 +45,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 import structlog
 
+from brutex.adapters.ingest_common import COVERAGE_MARKET
 from brutex.data.partition import (
     VALID_EXCHANGES,
     VALID_INTERVALS,
@@ -144,7 +145,7 @@ OPTIONS_DIR_NAME: Final = "options"
 
 #: A filesystem-safe option series segment is the writer's ``_safe_segment``
 #: output: a ``|``-joined series key with ``|`` rewritten to ``__``. The real
-#: parts are alnum + ``.`` + ``-`` + ``+`` (Dhan coordinates) joined by
+#: parts are alnum + ``.`` + ``-`` + ``+`` (vendor coordinates) joined by
 #: ``__``; we allow exactly that grammar so a discovered directory name can
 #: never carry a traversal/separator character into the read glob (``..``
 #: rejected separately, matching the writer's own guard).
@@ -166,7 +167,7 @@ _OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]*$")
 #: A candle symbol must match this allowlist before it is ever joined into
 #: a lake path / ``read_parquet`` glob — defence-in-depth against path
 #: traversal even though discovered symbols come from our own directory
-#: scan. Dhan symbols are alnum + ``-`` + ``_`` + ``.`` + ``&`` (e.g.
+#: scan. Vendor symbols are alnum + ``-`` + ``_`` + ``.`` + ``&`` (e.g.
 #: ``NSE-NIFTY-30Jan25-28500-CE``, ``M&M``); ``..`` is rejected separately.
 #:
 #: ``&`` is admitted because real NSE/BSE underlyings legitimately contain it —
@@ -1611,9 +1612,21 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
+#: The SPOT fetch-window market namespace. MUST MATCH the spot ingest's
+#: ``_MARKET`` — sourced from the canonical
+#: :data:`~brutex.adapters.ingest_common.COVERAGE_MARKET` (the vendor-neutral
+#: relocation home, NOT the vendor adapter) so the VALUE stays byte-identical to
+#: every persisted ledger row. The EXACT-match filter matters:
+#: ``_window_market_bucket`` maps EVERY non-option market to the "spot" display
+#: bucket, which is a rendering choice, not a join identity
+#: (DEC-SPOT-COVERAGE-COMPLETENESS-001).
+_SPOT_WINDOW_MARKET: Final[str] = COVERAGE_MARKET
+
 #: The unified ledger's option-window namespace — must match the coverage-key
-#: builder in :mod:`brutex.adapters.dhan.option_ingest` (``_COVERAGE_MARKET``).
-_OPTION_WINDOW_MARKET = "dhan-option"
+#: builder used by the option ingest (``_COVERAGE_MARKET``). Composed from the
+#: canonical spot namespace (:data:`_SPOT_WINDOW_MARKET`) so the VALUE stays
+#: byte-identical to the persisted ledger rows.
+_OPTION_WINDOW_MARKET = f"{_SPOT_WINDOW_MARKET}-option"
 
 #: The option coverage key's folded-interval arity:
 #: ``OPT|<flag>|<code>|<strike>|<type>`` (option_ingest._coverage_key).
@@ -1623,7 +1636,7 @@ _OPTION_INTERVAL_ARITY = 5
 def _decode_option_window(
     record: Any, symbol_for_id: Mapping[str, str] | None
 ) -> tuple[str, str] | None:
-    """Decode one dhan-option ledger row into PRECISE display coordinates.
+    """Decode one option-window ledger row into PRECISE display coordinates.
 
     The option window key folds the whole series into the reusable
     ``WindowKey`` (DEC-WINDOW-LEDGER-001): ``security_id = "<id>|<segment>"``
@@ -1656,7 +1669,7 @@ def _window_row(
     Shared by both sources (the unified ledger + the legacy status log) so the two
     can never drift — CLAUDE.md §11 COMMON. Both record types expose the same
     field names; only the ledger carries ``first_seen_at`` (``None`` for the
-    legacy log). Option windows (``dhan-option``) are decoded to the operator's
+    legacy log). Option windows (``_OPTION_WINDOW_MARKET``) are decoded to the operator's
     PRECISE coordinates — underlying symbol + ``FLAG#code strike type`` — via
     :func:`_decode_option_window` (DEC-WINDOW-OPTION-DECODE-001); spot rows are
     byte-unchanged.
@@ -1739,14 +1752,6 @@ def _window_market_bucket(market: str) -> str:
     return "options" if market == _OPTION_WINDOW_MARKET else "spot"
 
 
-#: The SPOT fetch-window market namespace. MUST MATCH
-#: ``brutex.adapters.dhan.ingest._MARKET`` ("dhan") — mirrored here (the
-#: ``_OPTION_WINDOW_MARKET`` precedent) so the read-only viewer never imports
-#: the adapter stack. The EXACT-match filter matters: ``_window_market_bucket``
-#: maps EVERY non-option market to the "spot" display bucket, which is a
-#: rendering choice, not a join identity (DEC-SPOT-COVERAGE-COMPLETENESS-001).
-_SPOT_WINDOW_MARKET: Final[str] = "dhan"
-
 #: mtime-keyed single-entry cache for the spot completeness GROUPING — the
 #: /coverage spot endpoint is polled every 4 s by two pages, and grouping a
 #: universe-scale (~1M-row) ledger per poll would be an O(rows) Python loop per
@@ -1764,7 +1769,7 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     (:data:`~brutex.data.window_ledger.SETTLED_STATUSES` = SUCCESS+SKIPPED),
     failed is ``FAILED``, and everything else (PLANNED + below-threshold EMPTY)
     is pending work the next pull re-fetches. Option rows
-    (``market == "dhan-option"``) are excluded by the EXACT spot-market filter.
+    (``market == _OPTION_WINDOW_MARKET``) are excluded by the EXACT spot-market filter.
 
     A lake with NO ledger Parquet returns ``{}`` (every fetch-interval chip
     renders "no ledger record") — deliberately NO ``window_status.json``

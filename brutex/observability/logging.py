@@ -33,7 +33,7 @@ Why structlog (not stdlib logging directly):
 * Processors are composable and testable. Tests can capture the event
   dict directly without parsing strings.
 
-Reference: Agent 2 of DEC-P0-031 PR #50d review flagged that the Dhan
+Reference: Agent 2 of DEC-P0-031 PR #50d review flagged that the vendor
 adapter layer cannot log token / response-body / URL safely without
 a known event-dict shape. Configuring structlog with a fixed processor
 chain pins that shape so the adapter's audit calls are reviewable.

@@ -16,7 +16,7 @@ The Groww SDK raises a typed exception hierarchy (``growwapi.groww.exceptions``,
         └── GrowwFeedNotSubscribedException
 
 This module maps those into a small neutral hierarchy the rest of BruteX reasons
-about — the analogue of ``brutex.adapters.dhan.errors`` (which maps HTTP status).
+about — the analogue of an HTTP-status-mapping error layer.
 Because the Groww SDK is an OPTIONAL extra (``DEC-GROWW-DEPS-REINSTATE-001``),
 :func:`from_groww_exception` matches on the exception's **class name** (a string)
 rather than importing the SDK classes, so this module imports + tests cleanly

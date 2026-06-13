@@ -4,7 +4,7 @@ DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009 §5, PR-F). Wraps an **injected**
 ``growwapi.GrowwAPI`` instance behind the three neutral calls the ingest layer
 needs (candles / expiries / contracts), translating every SDK exception through
 :func:`brutex.adapters.groww.errors.from_groww_exception` and owning a bounded
-in-call fast-retry for transient stalls (mirrors Dhan's client).
+in-call fast-retry for transient stalls (mirrors the canonical client pattern).
 
 The SDK is injected (the :class:`GrowwSDK` Protocol), so every branch — happy
 path, transient-retry, exhaustion, terminal — is unit-tested with a fake; no

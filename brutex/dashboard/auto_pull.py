@@ -4,15 +4,15 @@ Pure, dependency-light gate powering the credentials-gated, non-blocking
 background universe pull wired into ``cmd_dashboard`` (DEC-AUTO-UNIVERSE-001).
 Per CLAUDE.md §11 (COMMON) the *decision* of whether to launch the live
 expiries/contracts pull lives here in exactly ONE place so it is 100%
-unit-testable offline, while the actual live Dhan REST client + background-thread
+unit-testable offline, while the actual live vendor REST client + background-thread
 glue in :mod:`brutex.cli` (coverage-excluded) stays a thin wrapper.
 
 ## The gate (locked design)
 
-The keyless public instrument master loads on startup with NO Dhan
+The keyless public instrument master loads on startup with NO vendor
 credentials (DEC-INDEX-PARSE-FIX-001, CLAUDE.md §6 — the instrument
 master URL needs no auth). Expiries and contracts, by contrast, are
-fetched through the authenticated Dhan REST client (CLAUDE.md §6 — the
+fetched through the authenticated vendor REST client (CLAUDE.md §6 — the
 ``get_expiries`` / ``get_contracts`` methods require a session), so the
 auto-pull must be **gated on credentials being present**. It must also
 have something to pull *for*: the per-underlying expiry/contract fan-out

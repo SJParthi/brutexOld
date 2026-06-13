@@ -1,7 +1,7 @@
 """Last-good disk cache for the NIFTY TOTAL MARKET constituent CSV.
 
 DEC-NTM-CONSTITUENT-CACHE-001. The ``/universe`` page's full ~750-stock universe
-is NOT in the Dhan instrument master — it is the **NIFTY TOTAL MARKET broad-market
+is NOT in the vendor instrument master — it is the **NIFTY TOTAL MARKET broad-market
 constituents**, fetched best-effort from ``niftyindices.com`` at every keyless
 instrument load (``instrument_loader._ntm_admission``). NSE bot-blocks + frequently
 times out that host, and on a miss the universe SILENTLY cratered from ~750 stocks
@@ -41,7 +41,7 @@ def default_cache_dir() -> Path:
     """Return the per-user cache dir (``~/.brutex/cache/``) — the production default.
 
     Mirrors the other per-user state locations (``~/.brutex/quota/``,
-    ``~/.brutex/dhan/``). The caller resolves this and passes it explicitly so the
+    ``~/.brutex/``). The caller resolves this and passes it explicitly so the
     I/O functions stay pure + tmp-dir-testable.
     """
     return Path.home() / ".brutex" / "cache"

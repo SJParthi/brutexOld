@@ -7,7 +7,7 @@ index/stock or (lake-side) a contract — keyed by ``symbol_name`` (the engine
 symbol; ADR-0003). When the operator clicks a universe row and hits pull,
 :func:`pull_candles` ingests that instrument's candles across the
 **fetched** base timeframes
-(:data:`DHAN_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
+(:data:`GROWW_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
 timeframes are resampled from the 1-minute base, never fetched, per
 DEC-DHAN-1M-ONLY-001), reusing the proven
 :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` orchestration
@@ -16,18 +16,18 @@ core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
 PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the SPOT
 pull + instrument-master load now run on Groww — the J2-equivalent the
 dashboard never got (J3 only swapped the credentials gate). PR-J4c then darkened
-the vestigial Dhan TOKEN-LIFECYCLE seams (``start_token_keepalive`` /
+the vestigial previous-vendor TOKEN-LIFECYCLE seams (``start_token_keepalive`` /
 ``refresh_live_token`` / the holder + keepalive setters / the re-exported
-``dhan_creds_present``): the dashboard authenticates via Groww TOTP, so those
-Dhan-only helpers were removed here. ``brutex.adapters.dhan`` stays importable
-(a later PR deletes the package); this module simply no longer imports it.
+Groww credentials gate): the dashboard authenticates via Groww TOTP, so those
+previous-vendor-only helpers were removed here. The retired vendor's adapter
+package has since been deleted; this module imports only Groww.
 
 ## Offline-first
 
 The default and the CI-tested path is **dry-run**: a
 ``SyntheticSpotAdapter`` (the vendor-neutral
 :class:`~brutex.adapters.ingest_common.SyntheticSpotAdapter`, aliased
-``SyntheticDhanAdapter`` for back-compat) emits valid in-session candle rows
+``SyntheticSpotAdapter`` for back-compat) emits valid in-session candle rows
 into a :class:`~brutex.data.sink.NullBarSink` so the whole fetch →
 session-filter → sink pipeline runs with NO credentials and NO network. The
 LIVE Groww wiring lives in :func:`_build_live_spot_adapter`, which is
@@ -68,12 +68,10 @@ from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
     PullVerdict,
+    SyntheticSpotAdapter,
     UntilCleanRound,
     classify_pull,
     run_until_clean,
-)
-from brutex.adapters.ingest_common import (
-    SyntheticSpotAdapter as SyntheticDhanAdapter,
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink, NullBarSink
@@ -97,26 +95,26 @@ from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
     from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
-    from brutex.adapters.rate_common import RateController as DhanRateController
+    from brutex.adapters.rate_common import RateController
 
 _LOG = structlog.get_logger(__name__)
 
 #: The Track-1 **operational** pull floor — the start of the locked
-#: "Rolling 2021-01-01 → today" range (CLAUDE.md §3). Dhan's vendor capability
-#: reaches back to 2020-01-01 (``DhanMarketAdapter.earliest_history``; CLAUDE.md
+#: "Rolling 2021-01-01 → today" range (CLAUDE.md §3). The vendor capability
+#: reaches back to 2020-01-01 (``GrowwMarketAdapter.earliest_history``; CLAUDE.md
 #: §6 "Historical depth — From 2020"), but the operator deliberately starts the
 #: pull at 2021-01-01 for the safer case — the 2020 edge's data quality is
 #: unverified (DEC-DHAN-PULL-SCOPE-001). Any ``from_date`` below this floor is
 #: clamped up to it so a too-early pick can never waste quota.
-DHAN_HISTORY_FLOOR: Final[date] = date(2021, 1, 1)
+GROWW_HISTORY_FLOOR: Final[date] = date(2021, 1, 1)
 
-#: The base timeframes Track 1 actually FETCHES from Dhan: 1-minute (every
+#: The base timeframes Track 1 actually FETCHES from Groww: 1-minute (every
 #: intraday timeframe is resampled from it) + 1-day (PDH/PDL anchors). The 19
 #: derived intraday timeframes are produced from the stored 1-minute base by
 #: the resampler, never fetched (DEC-DHAN-1M-ONLY-001). Order = display order.
-DHAN_FETCH_INTERVALS: Final[tuple[str, ...]] = ("1minute", "1day")
+GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = ("1minute", "1day")
 
-#: Dhan canonical interval → lake ``TF_LABELS`` display label, so the
+#: Groww canonical interval → lake ``TF_LABELS`` display label, so the
 #: ``/universe`` grid shows ``1m`` / ``1d`` (consistent with the rest of the
 #: dashboard) rather than the vendor's ``1minute`` / ``1day``.
 _FETCH_INTERVAL_LABELS: Final[tuple[tuple[str, str], ...]] = (
@@ -140,20 +138,20 @@ def resolve_candle_range(
        Each is an ISO ``YYYY-MM-DD`` calendar date; both ends are
        **day-inclusive** (``to_date``'s whole day is fetched, so *end* is
        the midnight that starts the next day). A missing *from_date*
-       defaults to :data:`DHAN_HISTORY_FLOOR`; a missing *to_date*
+       defaults to :data:`GROWW_HISTORY_FLOOR`; a missing *to_date*
        defaults to the **previous day** (``today - 1``), so a pull never
        grabs the still-forming current session by default. An EXPLICIT
        *to_date* IS honoured (clamped to ``today``), so the operator can
        deliberately include today by picking it. The pair is then clamped
-       to ``[DHAN_HISTORY_FLOOR, today]`` so a too-early or future pick can
+       to ``[GROWW_HISTORY_FLOOR, today]`` so a too-early or future pick can
        never waste quota — and the future is never requested.
     2. **Year** — when neither date is given but *year* is: that full
-       calendar year, **clamped to ``[DHAN_HISTORY_FLOOR, yesterday]``**.
+       calendar year, **clamped to ``[GROWW_HISTORY_FLOOR, yesterday]``**.
        A past year resolves to the whole year; the current year stops at
        the previous day (never today / the future); a wholly-future or
        pre-2021 year raises "nothing to pull".
     3. **Default** — neither date nor year: the FULL Track-1 history,
-       ``[DHAN_HISTORY_FLOOR (2021-01-01), previous day]``. (Previously
+       ``[GROWW_HISTORY_FLOOR (2021-01-01), previous day]``. (Previously
        this defaulted to the current calendar year — corrected so a blank
        picker pulls the whole locked range, not just this year.)
 
@@ -194,7 +192,7 @@ def resolve_candle_range(
     today = now.astimezone(UTC).date()
     # Default upper bound = the PREVIOUS day, so a routine pull never grabs the
     # still-forming current session. An EXPLICIT to_date overrides this and may
-    # reach today (clamped below). yesterday < DHAN_HISTORY_FLOOR is impossible
+    # reach today (clamped below). yesterday < GROWW_HISTORY_FLOOR is impossible
     # in practice (today is well past 2021) but the start>end guard covers it.
     yesterday = today - timedelta(days=1)
 
@@ -214,10 +212,10 @@ def resolve_candle_range(
             start_date = date(year, 1, 1)
             end_date = date(year, 12, 31)
         else:
-            start_date = DHAN_HISTORY_FLOOR
+            start_date = GROWW_HISTORY_FLOOR
             end_date = yesterday
     else:
-        start_date = _parse_iso_date(from_date, "from_date") if from_date else DHAN_HISTORY_FLOOR
+        start_date = _parse_iso_date(from_date, "from_date") if from_date else GROWW_HISTORY_FLOOR
         # An explicit to_date is honoured (clamped to today via ``ceiling`` —
         # explicit today IS allowed); a missing to_date defaults to the
         # previous day.
@@ -227,7 +225,7 @@ def resolve_candle_range(
     # EVERY mode (the year/default branch was previously the one unclamped path
     # — the live-crash root cause). Only an explicit to_date may reach today;
     # otherwise the ceiling is the previous day.
-    start_date = max(start_date, DHAN_HISTORY_FLOOR)
+    start_date = max(start_date, GROWW_HISTORY_FLOOR)
     end_date = min(end_date, ceiling)
     if start_date > end_date:
         raise ValueError(
@@ -362,7 +360,7 @@ def resolve_pull_symbols(
     return resolved
 
 
-#: A factory that builds the ``(adapter, sink)`` pair the Dhan ingest spine
+#: A factory that builds the ``(adapter, sink)`` pair the Groww ingest spine
 #: needs, given the lake root + the instrument being pulled. The default
 #: builds the offline synthetic pair; the live path injects
 #: :func:`_build_live_pull_adapter`.
@@ -403,7 +401,7 @@ class PullCandlesReport:
         this case.
     timeframes
         One :class:`TimeframeResult` per **fetched** interval, in
-        :data:`DHAN_FETCH_INTERVALS` order (``1m`` then ``1d``). The 19
+        :data:`GROWW_FETCH_INTERVALS` order (``1m`` then ``1d``). The 19
         derived intraday timeframes are resampled from the 1-minute base
         downstream, not fetched here (DEC-DHAN-1M-ONLY-001).
     """
@@ -464,13 +462,13 @@ def _build_dry_run_adapter(
     _lake_root: Path,
     _instrument: Instrument,
 ) -> tuple[MarketAdapter, BarSink]:
-    """Build the offline ``(SyntheticDhanAdapter, NullBarSink)`` pair.
+    """Build the offline ``(SyntheticSpotAdapter, NullBarSink)`` pair.
 
     The synthetic adapter emits valid in-session bars and the null sink
     counts-but-discards them, so the pull runs with zero dependencies — the
     dry-run proof the spine works (DEC-VENDOR-PIVOT-001).
     """
-    return SyntheticDhanAdapter(), NullBarSink()
+    return SyntheticSpotAdapter(), NullBarSink()
 
 
 def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SDK + network
@@ -492,7 +490,7 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     resolves every fetched symbol through it), and write through a
     :class:`~brutex.data.sink.ParquetBarSink` over *lake_root*.
 
-    Unlike the retired Dhan builder there is NO ``transport`` to inject — Groww
+    Unlike the retired builder there is NO ``transport`` to inject — Groww
     talks through its SDK client, not a urllib transport — and the *instruments*
     are NOT threaded into the adapter: it carries the whole master index and
     resolves each fetched symbol in O(1). *instruments* is kept in the signature
@@ -556,14 +554,14 @@ class BulkSpotReport:
     end_date: str
     symbols: list[SymbolPullResult] = field(default_factory=list)
     auth_aborted: bool = False
-    """True if the Dhan token died mid-pull (DEC-DHAN-AUTH-FAILFAST-RENEW-001) —
+    """True if the Groww token died mid-pull (DEC-DHAN-AUTH-FAILFAST-RENEW-001) —
     drives the loud ``auth_expired`` verdict (DEC-PULL-VERDICT-001)."""
     auth_cause: str | None = None
     """The first dead-token cause string, carried onto the ``auth_expired`` verdict."""
     still_failed_windows: int = 0
     """Windows still failing after the in-run retry budget — deferred to the next pull."""
     quota_exhausted: bool = False
-    """True if the pull paused on the daily Dhan quota — the auto-resume's
+    """True if the pull paused on the daily Groww quota — the auto-resume's
     between-round brake (DEC-AUTO-RESUME-QUOTA-001) OR a mid-round
     ``DailyQuotaExceeded`` (DEC-SPOT-QUOTA-MIDROUND-001) — drives the loud
     ``quota_exhausted`` verdict (resume after the IST-midnight reset)."""
@@ -634,8 +632,8 @@ def _build_dry_run_bulk_adapter(
     _lake_root: Path,
     _instruments: Sequence[Instrument],
 ) -> tuple[MarketAdapter, BarSink]:
-    """Build the offline ``(SyntheticDhanAdapter, NullBarSink)`` pair for a bulk pull."""
-    return SyntheticDhanAdapter(), NullBarSink()
+    """Build the offline ``(SyntheticSpotAdapter, NullBarSink)`` pair for a bulk pull."""
+    return SyntheticSpotAdapter(), NullBarSink()
 
 
 def _build_live_bulk_adapter(  # pragma: no cover — thin bulk wrapper
@@ -659,17 +657,17 @@ _RateHooks = tuple[
 ]
 
 
-def _spot_run_parallel(controller: DhanRateController | None) -> RunParallel | None:
+def _spot_run_parallel(controller: RateController | None) -> RunParallel | None:
     """Size the spot fan-out pool to the controller's rate budget (Little's law).
 
     DEC-DHAN-PARALLEL-INGEST-001. A live pull threads its shared
-    :class:`~brutex.adapters.dhan.rate_control.DhanRateController` through here:
+    :class:`~brutex.adapters.rate_common.RateController` through here:
     the pool is widened to ``workers_to_saturate(controller.current_rps or 5.0,
     DEFAULT_LATENCY_BUDGET_S)`` so enough windows are in flight to keep the rate
     BUCKET (not network latency) the bottleneck — targeting/saturating UP TO
     ~5 r/s (Rule #6 still caps the aggregate; honest envelope: never a guaranteed
     constant 5 r/s). ``None`` controller (dry-run / injected-factory pull) →
-    ``None`` here, so ``run_dhan_spot_ingest`` uses its default pool. This is the
+    ``None`` here, so ``run_groww_spot_ingest`` uses its default pool. This is the
     pure, covered sizing seam; the live controller construction is the
     ``# pragma: no cover`` part.
     """
@@ -679,7 +677,7 @@ def _spot_run_parallel(controller: DhanRateController | None) -> RunParallel | N
     return PoolRunParallel(max_workers=workers)
 
 
-def _build_live_controller() -> DhanRateController:  # pragma: no cover — live Dhan controller
+def _build_live_controller() -> RateController:  # pragma: no cover — live Groww controller
     """Construct the shared adaptive [3..5] r/s controller (the session factory).
 
     The controller is threaded into BOTH the per-window pacing hooks (``pace`` /
@@ -694,7 +692,7 @@ def _build_live_controller() -> DhanRateController:  # pragma: no cover — live
     :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`
     (DEC-AUTO-RESUME-QUOTA-001): previously the dashboard built a controller with
     ``quota_tracker=None``, so dashboard pulls were NOT counted against the
-    mandatory 100,000/day Dhan quota at all. Wiring the SAME persisted tracker the
+    mandatory 100,000/day Groww quota at all. Wiring the SAME persisted tracker the
     CLI/orchestrator use (``~/.brutex/quota/quota.lmdb``, global to the API key)
     makes every paced dashboard call increment + check the quota, surfaces the
     gauge on the rate panel, and gives the auto-resume loop its hard brake.
@@ -706,11 +704,11 @@ def _build_live_controller() -> DhanRateController:  # pragma: no cover — live
 
 
 class SessionRateController:
-    """Persist ONE :class:`DhanRateController` across pulls in a dashboard session.
+    """Persist ONE :class:`RateController` across pulls in a dashboard session.
 
     DEC-DHAN-PERSIST-RATE-001. Each ``POST /universe/pull`` used to build a FRESH
     controller at the 5 r/s ceiling (:func:`_build_live_controller`), so every
-    symbol-pull re-opened at 5 r/s and re-hit Dhan's wall — the 429 storm the
+    symbol-pull re-opened at 5 r/s and re-hit Groww's wall — the 429 storm the
     operator saw at the start of *every* pull, re-learnt per symbol. This holder
     builds the controller ONCE (lazily, thread-safe) and hands the SAME instance
     to every pull, so the rate the system LEARNED (e.g. stepped down to 3 r/s)
@@ -721,13 +719,13 @@ class SessionRateController:
     each running its own 5 r/s.
     """
 
-    def __init__(self, factory: Callable[[], DhanRateController] | None = None) -> None:
+    def __init__(self, factory: Callable[[], RateController] | None = None) -> None:
         """Build a holder. *factory* (a test seam) defaults to :func:`_build_live_controller`."""
         self._factory = factory if factory is not None else _build_live_controller
-        self._controller: DhanRateController | None = None
+        self._controller: RateController | None = None
         self._lock = threading.Lock()
 
-    def get(self) -> DhanRateController:
+    def get(self) -> RateController:
         """Return the session's controller, building it ONCE on first use (thread-safe)."""
         with self._lock:
             if self._controller is None:
@@ -736,7 +734,7 @@ class SessionRateController:
 
 
 #: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
-#: ``DhanRateController.snapshot()`` (current_rps + recent_hits) and a
+#: ``RateController.snapshot()`` (current_rps + recent_hits) and a
 #: ``CallMeter.snapshot()`` (effective_rps + latency + the instantaneous
 #: ``rps_1s`` / ``rps_1s_max`` gauge — DEC-DASHBOARD-RPS1S-PANEL-001), push both
 #: to the panel.
@@ -745,7 +743,7 @@ RateObserver = Callable[[Mapping[str, Any], Mapping[str, Any]], None]
 
 def _observe_rate(
     rate_observer: RateObserver | None,
-    controller: DhanRateController | None,
+    controller: RateController | None,
     adapter: MarketAdapter,
 ) -> None:
     """Push a live pull's adaptive rate + measured throughput to the dashboard panel.
@@ -771,7 +769,7 @@ def _observe_rate(
 def _live_rate_runtime(
     use_live_rate: bool,
     session_rate: SessionRateController | None = None,
-) -> tuple[_RateHooks, RunParallel | None, DhanRateController | None]:
+) -> tuple[_RateHooks, RunParallel | None, RateController | None]:
     """Return ``((pace, on_rate_limit, on_timeout, on_success), run_parallel, controller)``.
 
     A **default live** pull (no injected factory + not dry-run) resolves ONE shared
@@ -821,9 +819,9 @@ def pull_all_spot(
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
-    :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` pass over
+    :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the whole *instruments* list and the fetched base intervals
-    (:data:`DHAN_FETCH_INTERVALS` — ``1m`` + ``1d``), so the live adapter is
+    (:data:`GROWW_FETCH_INTERVALS` — ``1m`` + ``1d``), so the live adapter is
     built ONCE with the full universe (O(1) index) and the fan-out quarantines
     a bad symbol without sinking the rest. An empty list is a clean no-op.
 
@@ -865,7 +863,7 @@ def pull_all_spot(
         When ``True`` (``brutex fetch --until-clean`` / the dashboard "until clean"
         option), keep running bounded auto-retry rounds — each one a full
         pull-pass-with-auto-retry over the SHARED window ledger, reusing
-        :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` (NO
+        :func:`~brutex.adapters.ingest_common.retry_failed_windows` (NO
         duplicated round loop) — until the ledger is CLEAN, OR the token dies (stop
         + ``auth_expired`` verdict), OR ``until_clean_rounds`` is spent
         (DEC-TOKEN-PREFLIGHT-001). ``False`` (default — the one-click Pull-ALL)
@@ -874,7 +872,7 @@ def pull_all_spot(
         ``still_failed_windows`` / ``auth_aborted`` reflect the FINAL state.
     until_clean_rounds
         Bounded OUTER round budget for *until_clean* (default
-        :data:`~brutex.adapters.dhan.until_clean.AUTO_RESUME_MAX_ROUNDS` — the
+        :data:`~brutex.adapters.ingest_common.AUTO_RESUME_MAX_ROUNDS` — the
         auto-resume budget, DEC-AUTO-RESUME-QUOTA-001). Never infinite (Golden
         Rule #10): the loop self-terminates on clean / token-dead / quota-spent /
         no-progress well before this cap, which is only the final backstop.
@@ -893,7 +891,7 @@ def pull_all_spot(
     # picker), honour it verbatim via :func:`resolve_candle_range` so routing the
     # multi-select through this saturating flatten never silently widens the range.
     if from_date is None and to_date is None and year is None:
-        from_date = DHAN_HISTORY_FLOOR.isoformat()
+        from_date = GROWW_HISTORY_FLOOR.isoformat()
     start, end = resolve_candle_range(
         from_date=from_date,
         to_date=to_date,
@@ -907,7 +905,7 @@ def pull_all_spot(
     # Open the pull's correlation scope: ``pid`` is bound into the structlog
     # contextvars for the whole pass, so every event — this start/done summary,
     # the ingest spine's ``ingest.*`` events, AND the already-lit transport
-    # (``dhan.call``) + rate (``rate.*``) events — shares one ``pull_id``
+    # (``groww.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
     with pull_id_scope(pull_id) as pid:
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
@@ -929,7 +927,7 @@ def pull_all_spot(
             plan_windows(
                 ledger,
                 instruments=instruments,
-                intervals=DHAN_FETCH_INTERVALS,
+                intervals=GROWW_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -948,7 +946,7 @@ def pull_all_spot(
                 ledger,
                 lake_root,
                 instruments=instruments,
-                intervals=DHAN_FETCH_INTERVALS,
+                intervals=GROWW_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1009,7 +1007,7 @@ def pull_all_spot(
                 adapter,
                 sink,
                 instruments=instruments,
-                intervals=DHAN_FETCH_INTERVALS,
+                intervals=GROWW_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
                 pace=pace,
@@ -1126,9 +1124,9 @@ def pull_all_spot(
         # IndexError an ``until_clean_rounds=0`` no-op drive used to hit.
         report = passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
         _observe_rate(rate_observer, _rate_controller, adapter)
-        # Groww has NO no-data marker — unlike Dhan's DH-905 "no data present" 400,
-        # which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we do not
-        # invent a Groww twin, so every terminal Groww error is a uniform terminal
+        # Groww has NO no-data marker — unlike the previous vendor's no-data 400
+        # marker, which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we
+        # do not invent a Groww twin, so every terminal Groww error is a uniform terminal
         # quarantine → `failed` (`transient_residual`). A settled EMPTY window is
         # still surfaced as `no_data` below when a pair ran cleanly but returned zero
         # bars; there is no known-gap split (no_data from a terminal failure has no
@@ -1281,12 +1279,12 @@ def pull_candles(
     rate_observer: RateObserver | None = None,
     session_rate: SessionRateController | None = None,
 ) -> PullCandlesReport:
-    """Ingest *instrument*'s spot candles over a date range (Dhan model).
+    """Ingest *instrument*'s spot candles over a date range (Groww model).
 
     Plans + drives one
-    :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` pass over
-    the single *instrument* and the Dhan **fetched** base intervals
-    (:data:`DHAN_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 derived
+    :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
+    the single *instrument* and the Groww **fetched** base intervals
+    (:data:`GROWW_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 derived
     intraday timeframes are resampled from the 1-minute base downstream,
     never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
@@ -1313,17 +1311,17 @@ def pull_candles(
         *to_date* is supplied.
     from_date, to_date
         Inclusive ISO ``YYYY-MM-DD`` bounds for an explicit range. Either
-        may be ``None`` (*from_date* defaults to the Dhan history floor;
+        may be ``None`` (*from_date* defaults to the Groww history floor;
         *to_date* defaults to the previous day — an explicit *to_date* may
         reach today). When both are ``None`` the *year* / full-history mode
         applies.
     dry_run
         When ``True``, use the offline synthetic adapter (no creds /
-        network). When ``False``, build the live Dhan adapter via
+        network). When ``False``, build the live Groww adapter via
         *adapter_factory*.
     adapter_factory
         Override the ``(adapter, sink)`` builder. Defaults to the offline
-        synthetic builder when *dry_run* is ``True`` and to the live Dhan
+        synthetic builder when *dry_run* is ``True`` and to the live Groww
         builder otherwise. Tests inject a fake factory to exercise the
         non-dry-run branch and the per-interval outcomes without network.
 
@@ -1362,7 +1360,7 @@ def pull_candles(
     # Open the pull's correlation scope (DEC-DHAN-INGEST-LOGGING-001): ``pid`` is
     # bound into the structlog contextvars for the whole pass, so this start/done
     # summary, the ingest spine's ``ingest.*`` events, and the already-lit
-    # transport (``dhan.call``) + rate (``rate.*``) events all share one
+    # transport (``groww.call``) + rate (``rate.*``) events all share one
     # ``pull_id``. Always unbinds on exit (no leak).
     with pull_id_scope(pull_id) as pid:
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
@@ -1378,7 +1376,7 @@ def pull_candles(
             plan_windows(
                 ledger,
                 instruments=[instrument],
-                intervals=DHAN_FETCH_INTERVALS,
+                intervals=GROWW_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1394,7 +1392,7 @@ def pull_candles(
                 ledger,
                 lake_root,
                 instruments=[instrument],
-                intervals=DHAN_FETCH_INTERVALS,
+                intervals=GROWW_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1409,7 +1407,7 @@ def pull_candles(
             start_date=start.date().isoformat(),
             end_date=end_label,
             dry_run=dry_run,
-            intervals=len(DHAN_FETCH_INTERVALS),
+            intervals=len(GROWW_FETCH_INTERVALS),
         )
 
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
@@ -1436,7 +1434,7 @@ def pull_candles(
             adapter,
             sink,
             instruments=[instrument],
-            intervals=DHAN_FETCH_INTERVALS,
+            intervals=GROWW_FETCH_INTERVALS,
             start=start.date(),
             end=end.date(),
             pace=pace,
@@ -1455,7 +1453,7 @@ def pull_candles(
         for fetch_interval, label in _FETCH_INTERVAL_LABELS:
             key = (symbol, fetch_interval)
             if key in failure_keys:
-                # Terminal Dhan error — quarantined, never in report.pairs.
+                # Terminal Groww error — quarantined, never in report.pairs.
                 timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
             elif report.pairs[key].bars_appended > 0:
                 timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
@@ -1486,8 +1484,8 @@ def pull_candles(
 
 
 __all__ = [
-    "DHAN_FETCH_INTERVALS",
-    "DHAN_HISTORY_FLOOR",
+    "GROWW_FETCH_INTERVALS",
+    "GROWW_HISTORY_FLOOR",
     "AdapterFactory",
     "BulkAdapterFactory",
     "BulkSpotReport",
