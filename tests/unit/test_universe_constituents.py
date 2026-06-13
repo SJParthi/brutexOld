@@ -15,6 +15,7 @@ from brutex.dashboard.nse_constituents import ConstituentRow, parse_constituents
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe_constituents import (
     ConstituentCoverageError,
+    held_members,
     resolve_constituents,
     resolve_reference_security_ids,
 )
@@ -220,3 +221,67 @@ class TestResolveReferenceSecurityIds:
 
     def test_empty_constituents_is_empty_set(self) -> None:
         assert resolve_reference_security_ids([], [_inst(1, "X LTD", "INE0X")]) == frozenset()
+
+
+# ── held_members (DEC-INDEX-CONSTITUENTS-NSE-001) ─────────────────────────────
+
+
+class TestHeldMembers:
+    """The rename-proof ``/universe`` tick matcher — held symbols, ISIN→ticker."""
+
+    def test_matches_held_by_ticker(self) -> None:
+        # A constituent whose ticker IS a held stock → included by ticker.
+        instruments = [_inst(1, "RELIANCE", "INE002A01018"), _inst(2, "TCS", "INE467B01029")]
+        members = held_members(
+            [ConstituentRow("RELIANCE", None)], instruments, held_symbols=["RELIANCE", "TCS"]
+        )
+        assert members == ["RELIANCE"]
+
+    def test_matches_held_by_isin_when_ticker_renamed(self) -> None:
+        # The rename-proof case: the constituent's ticker ("OLDNAME") matches no
+        # held symbol, but its ISIN matches the held instrument (now "NEWNAME"),
+        # so it is STILL ticked — by ISIN.
+        instruments = [_inst(1, "NEWNAME", "INE002A01018")]
+        members = held_members(
+            [ConstituentRow("OLDNAME", "INE002A01018")], instruments, held_symbols=["NEWNAME"]
+        )
+        assert members == ["NEWNAME"]
+
+    def test_matched_but_not_held_is_skipped(self) -> None:
+        # A constituent that resolves to a real NSE equity we do NOT hold is dropped
+        # (the False branch of the held filter) — never ticked.
+        instruments = [_inst(1, "RELIANCE", "INE002A01018"), _inst(2, "ZEEL", "INE256A01028")]
+        members = held_members(
+            [ConstituentRow("ZEEL", "INE256A01028")], instruments, held_symbols=["RELIANCE"]
+        )
+        assert members == []
+
+    def test_deduplicates_two_constituents_hitting_one_instrument(self) -> None:
+        # Two constituent rows (one by ISIN, one by ticker) resolve to the SAME held
+        # instrument → it appears at most once (the `name not in seen` branch).
+        instruments = [_inst(1, "RELIANCE", "INE002A01018")]
+        members = held_members(
+            [ConstituentRow("RELIANCE", None), ConstituentRow("ALIAS", "INE002A01018")],
+            instruments,
+            held_symbols=["RELIANCE"],
+        )
+        assert members == ["RELIANCE"]
+
+    def test_preserves_constituent_order(self) -> None:
+        instruments = [
+            _inst(1, "RELIANCE", "INE002A01018"),
+            _inst(2, "TCS", "INE467B01029"),
+            _inst(3, "INFY", "INE009A01021"),
+        ]
+        members = held_members(
+            [ConstituentRow("INFY", None), ConstituentRow("RELIANCE", None)],
+            instruments,
+            held_symbols=["RELIANCE", "TCS", "INFY"],
+        )
+        assert members == ["INFY", "RELIANCE"]
+
+    def test_empty_constituents_yields_empty(self) -> None:
+        assert (
+            held_members([], [_inst(1, "RELIANCE", "INE002A01018")], held_symbols=["RELIANCE"])
+            == []
+        )

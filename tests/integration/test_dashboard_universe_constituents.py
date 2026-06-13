@@ -248,3 +248,48 @@ def test_broad_market_basket_nifty500_resolves(
     body = r.json()
     assert body["source"] == "nse"
     assert body["members"] == ["RELIANCE", "HDFCBANK", "M&M"]
+
+
+def test_rename_proof_match_by_isin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A constituent whose NSE ticker was RENAMED still ticks by its globally-unique
+    ISIN (DEC-INDEX-CONSTITUENTS-NSE-001) — the rename-proof end-to-end path."""
+    # Held EQ row whose symbol_name is the NEW ticker, carrying the ISIN.
+    renamed = Instrument(
+        exch_id=Exchange.NSE,
+        security_id=2885,
+        symbol_name="NEWRELIANCE",
+        display_name="NEWRELIANCE",
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin="INE002A01018",
+        underlying_symbol="NEWRELIANCE",
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=100000,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    store.upsert_many(
+        [_idx("NIFTY", 26000), renamed],
+        snapshot_date=date(2024, 1, 2),
+        run_id="test-run",
+        csv_source_sha256="b" * 64,
+    )
+    client = TestClient(build_app(DashboardState(), instrument_store=store))
+    # The NSE index CSV still lists the OLD ticker, but the SAME ISIN.
+    csv = (
+        "Company Name,Industry,Symbol,Series,ISIN Code\n"
+        "Reliance Industries Ltd.,Refineries,OLDRELIANCE,EQ,INE002A01018\n"
+    )
+    monkeypatch.setattr(nc, "_default_opener", lambda _url: csv)
+    r = client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY"})
+    assert r.status_code == 200
+    body = r.json()
+    # Ticker "OLDRELIANCE" matches no held symbol, but its ISIN matches NEWRELIANCE.
+    assert body["members"] == ["NEWRELIANCE"]
+    assert "rename-proof" in body["note"]
+    store.close()

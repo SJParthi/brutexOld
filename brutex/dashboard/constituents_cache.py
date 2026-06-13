@@ -37,9 +37,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from brutex.dashboard.nse_constituents import (
+    ConstituentRow,
     constituent_url,
     convention_constituent_url,
-    fetch_symbols_at_url,
+    fetch_rows_at_url,
 )
 
 __all__ = [
@@ -67,6 +68,12 @@ class ConstituentResult:
     symbols
         The index member symbols (raw, upper-cased).  Empty tuple when the
         index is unknown or the data is unavailable.
+    rows
+        The index members as ``(symbol, isin)`` pairs — the ISIN-carrying form
+        used for rename-proof matching (DEC-INDEX-CONSTITUENTS-NSE-001). Parallel
+        to :attr:`symbols`; ``isin`` is ``None`` for a member with no ISIN in the
+        source CSV (or when read from a legacy symbols-only cache file). Empty
+        tuple when the index is unknown / unavailable.
     source
         Provenance tag — one of:
 
@@ -87,6 +94,7 @@ class ConstituentResult:
     """
 
     symbols: tuple[str, ...]
+    rows: tuple[ConstituentRow, ...]
     source: str
     as_of: str | None
 
@@ -163,12 +171,12 @@ def read_cache(cache_root: Path, index: str) -> dict[str, object] | None:
 def write_cache(
     cache_root: Path,
     index: str,
-    symbols: Iterable[str],
+    rows: Iterable[ConstituentRow],
     *,
     fetched_at: str,
     source_url: str,
 ) -> None:
-    """Write a constituent list to the on-disk cache.
+    """Write a constituent list (symbol + ISIN) to the on-disk cache.
 
     Parameters
     ----------
@@ -176,12 +184,15 @@ def write_cache(
         Root directory for all constituent caches.
     index
         Engine index symbol.
-    symbols
-        The constituent symbols to persist.
+    rows
+        The constituent ``(symbol, isin)`` rows to persist. Persisted as a
+        ``symbols`` list (backward-compatible with the legacy symbols-only reader)
+        PLUS a parallel ``isins`` list (``null`` for a member with no ISIN) so the
+        ISIN-primary match (DEC-INDEX-CONSTITUENTS-NSE-001) survives a cache hit.
     fetched_at
         ISO-8601 timestamp string representing when the data was fetched.
     source_url
-        The NSE CSV URL the symbols were fetched from (for audit / freshness
+        The NSE CSV URL the rows were fetched from (for audit / freshness
         traceability).
 
     Notes
@@ -189,13 +200,16 @@ def write_cache(
     Parent directories are created with ``parents=True, exist_ok=True`` so
     a fresh ``cache_root`` works without a prior ``mkdir``.  The JSON is
     written with ``sort_keys=True, indent=2`` for human-readability and
-    stable diffs.
+    stable diffs. The ``isins`` key is additive — a pre-existing reader that
+    only knows ``symbols`` still works.
     """
     path = cache_path(cache_root, index)
     path.parent.mkdir(parents=True, exist_ok=True)
+    rows = list(rows)
     payload = {
         "index": index,
-        "symbols": list(symbols),
+        "symbols": [row.symbol for row in rows],
+        "isins": [row.isin for row in rows],
         "fetched_at": fetched_at,
         "source_url": source_url,
     }
@@ -271,34 +285,55 @@ def resolve_constituents(
         # all-punctuation) → genuinely unknown. A stale cache was already served above.
         if cached is not None:
             return _result_from_cache(cached)
-        return ConstituentResult(symbols=(), source="unknown-index", as_of=None)
+        return ConstituentResult(symbols=(), rows=(), source="unknown-index", as_of=None)
 
     # Attempt live fetch of the resolved URL (verified mapping OR convention
-    # candidate). ``fetch_symbols_at_url`` fetches the EXACT url — not re-derived
-    # via ``constituent_url`` (which would drop the convention candidate).
+    # candidate). ``fetch_rows_at_url`` fetches the EXACT url — not re-derived
+    # via ``constituent_url`` (which would drop the convention candidate) — and
+    # carries each member's ISIN for rename-proof matching.
     try:
-        symbols = fetch_symbols_at_url(url, opener=opener)
+        rows = fetch_rows_at_url(url, opener=opener)
     except OSError:
         # Network / block / timeout: serve stale cache if present, else unavailable.
         if cached is not None:
             return _result_from_cache(cached)
-        return ConstituentResult(symbols=(), source="unavailable", as_of=None)
+        return ConstituentResult(symbols=(), rows=(), source="unavailable", as_of=None)
 
-    if not symbols:
+    if not rows:
         # Empty live response: fall back to stale cache if present.
         if cached is not None:
             return _result_from_cache(cached)
-        return ConstituentResult(symbols=(), source="unavailable", as_of=None)
+        return ConstituentResult(symbols=(), rows=(), source="unavailable", as_of=None)
 
-    # Fresh success: write cache and return.
+    # Fresh success: write cache (symbols + isins) and return.
     ts = (now if now is not None else datetime.now(tz=UTC)).isoformat()
-    write_cache(cache_root, index, symbols, fetched_at=ts, source_url=url)
-    return ConstituentResult(symbols=tuple(symbols), source="nse", as_of=ts)
+    write_cache(cache_root, index, rows, fetched_at=ts, source_url=url)
+    return ConstituentResult(
+        symbols=tuple(row.symbol for row in rows), rows=tuple(rows), source="nse", as_of=ts
+    )
 
 
 def _result_from_cache(cached: dict[str, object]) -> ConstituentResult:
-    """Build a ``source="cache"`` result from a validated cache document."""
+    """Build a ``source="cache"`` result from a validated cache document.
+
+    Reconstructs the ``(symbol, isin)`` rows from the parallel ``symbols`` +
+    ``isins`` arrays. A legacy cache file (written before
+    DEC-INDEX-CONSTITUENTS-NSE-001) has no ``isins`` key, or one whose length
+    does not line up with ``symbols`` — in either case the ISINs degrade to
+    ``None`` (the match then falls back to ticker-only for that file until the
+    next refresh re-writes it with ISINs).
+    """
     as_of = str(cached["fetched_at"]).split("T")[0]
     raw_symbols = cached["symbols"]
     syms = tuple(str(s) for s in raw_symbols) if isinstance(raw_symbols, list) else ()
-    return ConstituentResult(symbols=syms, source="cache", as_of=as_of)
+    raw_isins = cached.get("isins")
+    if isinstance(raw_isins, list) and len(raw_isins) == len(syms):
+        isins: tuple[str | None, ...] = tuple(
+            str(value) if value is not None else None for value in raw_isins
+        )
+    else:
+        isins = tuple(None for _ in syms)
+    rows = tuple(
+        ConstituentRow(symbol=sym, isin=isin) for sym, isin in zip(syms, isins, strict=True)
+    )
+    return ConstituentResult(symbols=syms, rows=rows, source="cache", as_of=as_of)

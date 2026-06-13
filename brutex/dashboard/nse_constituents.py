@@ -426,6 +426,23 @@ def fetch_symbols_at_url(url: str, *, opener: Callable[[str], str] | None = None
     return parse_symbols(fetch(url))
 
 
+def fetch_rows_at_url(
+    url: str, *, opener: Callable[[str], str] | None = None
+) -> list[ConstituentRow]:
+    """Fetch + parse the constituent ROWS (symbol + ISIN) at an EXACT *url*.
+
+    The ISIN-carrying sibling of :func:`fetch_symbols_at_url`: returns each
+    member's ``(symbol, isin)`` so the caller can fall back to the globally-unique
+    ISIN when a ticker has been renamed (rename-proof matching,
+    DEC-INDEX-CONSTITUENTS-NSE-001). Used by the cache layer's row resolution.
+    *opener* defaults to the live urllib opener (:func:`_default_opener`,
+    ``# pragma: no cover`` live surface); tests inject a fake. Fetch errors
+    PROPAGATE (the caller maps them to the honest degrade).
+    """
+    fetch = opener if opener is not None else _default_opener
+    return parse_constituents(fetch(url))
+
+
 def intersect_with_universe(
     constituents: Iterable[str],
     fno_symbols: Iterable[str],
@@ -515,6 +532,7 @@ __all__ = [
     "convention_constituent_url",
     "fetch_constituent_csv",
     "fetch_constituent_symbols",
+    "fetch_rows_at_url",
     "fetch_symbols_at_url",
     "intersect_with_universe",
     "members_in_universe",
