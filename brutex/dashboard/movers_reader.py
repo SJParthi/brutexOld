@@ -1,6 +1,6 @@
 """Production lake reader + JSON builder for the ``/movers`` dashboard page.
 
-``DEC-MOVERS-DASHBOARD-PAGE-001`` (``docs/MIGRATION.md`` entry #706). This is
+``DEC-MOVERS-DASHBOARD-PAGE-001`` (``docs/MIGRATION.md`` entry #708). This is
 the deferred production wiring the two already-merged screener cores pointed at:
 
 * :func:`brutex.screeners.screen_gainers_losers` (``DEC-MOVERS-GAINERS-001``,
