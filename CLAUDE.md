@@ -18,7 +18,12 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-12 (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001,
+_Last updated: 2026-06-13 (DEC-PULL-FLOOR-2020-001, MIGRATION.md #717 —
+§3 locked scope range moved `2021-01-01 → today` → `2020-01-01 → today`:
+the DATA pull floor (`GROWW_HISTORY_FLOOR`) lowered to the full
+probe-verified Groww 1-minute depth, superseding the conservative
+2021-01-01 floor of DEC-DHAN-PULL-SCOPE-001). Earlier: 2026-06-12
+(DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001,
 MIGRATION.md #669 — renumbered from #667 by PR #629's duplicate-repair;
 §2 Rule 4's run-identity citation refreshed
 `TRACK1_BACKTEST_SPEC.md:654` → `:743`; spec growth had moved the
@@ -95,7 +100,11 @@ hostile-review pass._
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every trade, but is NEVER part of brute-force pattern combinations
    or the 52-condition vocabulary. 21 timeframes (1m base + 19 derived
-   intraday + 1d). Rolling `2021-01-01 → today` range. No futures, no
+   intraday + 1d). Rolling `2020-01-01 → today` range (the data pull floor
+   — `GROWW_HISTORY_FLOOR`; DEC-PULL-FLOOR-2020-001, 2026-06-13, MIGRATION.md
+   entry #717 — supersedes the prior conservative `2021-01-01` floor of
+   DEC-DHAN-PULL-SCOPE-001 now that the Phase-0 granularity probe confirmed
+   Groww serves 1-minute data from `2020-01-01T09:15:00`). No futures, no
    options, no F&O contracts. Do not silently expand scope.
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry

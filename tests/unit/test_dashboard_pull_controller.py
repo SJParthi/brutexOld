@@ -178,8 +178,8 @@ class TestPullCandlesReport:
 
 class TestPullCandlesDryRun:
     def test_default_no_dates_no_year_pulls_full_history(self, tmp_path: Path) -> None:
-        # No dates, no year → the FULL Track-1 history (2021-01-01 → previous
-        # day), so the report's start year is the 2021 floor, NOT the current
+        # No dates, no year → the FULL Track-1 history (2020-01-01 → previous
+        # day), so the report's start year is the 2020 floor, NOT the current
         # year (FIX 4 — blank pickers default to the full history floor).
         report = pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert report.year == GROWW_HISTORY_FLOOR.year
@@ -297,18 +297,18 @@ class TestResolveCandleRange:
 
     def test_no_dates_no_year_pulls_full_history_to_yesterday(self) -> None:
         # Default mode 3 — neither date nor year → the FULL Track-1 history
-        # (2021-01-01 → previous day), NOT the current year (FIX 4). The end is
+        # (2020-01-01 → previous day), NOT the current year (FIX 4). The end is
         # the previous day (05-29), exclusive-end midnight 05-30, so the current
         # session (today, 05-30) is excluded by default (FIX 5).
         start, end = resolve_candle_range(from_date=None, to_date=None, year=None, now=_NOW)
-        assert start == datetime(2021, 1, 1, tzinfo=UTC)  # the 2021 floor, not 2026
+        assert start == datetime(2020, 1, 1, tzinfo=UTC)  # the 2020 floor, not 2026
         assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_default_date_range_is_the_picker_prefill(self) -> None:
-        """DEC-DEFAULT-DATE-RANGE-001: the canonical picker default = [2021-01-01,
+        """DEC-PULL-FLOOR-2020-001: the canonical picker default = [2020-01-01,
         previous day] — the SAME window resolve_candle_range applies when blank, so
         the pre-filled UI dates can never drift from what a blank pull fetches."""
-        assert default_date_range(now=_NOW) == ("2021-01-01", "2026-05-29")
+        assert default_date_range(now=_NOW) == ("2020-01-01", "2026-05-29")
 
     def test_no_dates_explicit_past_year_is_full_year(self) -> None:
         # Mode 2 — a PAST year, no dates → that full calendar year (the tail
@@ -333,11 +333,11 @@ class TestResolveCandleRange:
             resolve_candle_range(from_date=None, to_date=None, year=2027, now=_NOW)
 
     def test_no_dates_pre_floor_year_raises(self) -> None:
-        # Mode 2 — a year wholly before the 2021 Track-1 floor (DEC-DHAN-PULL-SCOPE-001):
+        # Mode 2 — a year wholly before the 2020 Groww floor (DEC-PULL-FLOOR-2020-001):
         # start clamps up to the floor, end stays in the pre-floor year → start > end →
-        # refused. 2020 is now BEFORE the floor (the operator starts at 2021 for safety).
+        # refused. 2019 is now BEFORE the floor (the operator pulls the full 2020 depth).
         with pytest.raises(ValueError, match="nothing to pull"):
-            resolve_candle_range(from_date=None, to_date=None, year=2020, now=_NOW)
+            resolve_candle_range(from_date=None, to_date=None, year=2019, now=_NOW)
 
     def test_explicit_from_and_to_are_day_inclusive(self) -> None:
         # Mode 1 — both ends inclusive; end is the midnight after to_date.
@@ -355,16 +355,16 @@ class TestResolveCandleRange:
         assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_to_only_starts_at_history_floor(self) -> None:
-        # to_date must be on/after the 2021 floor or there's nothing to pull.
+        # to_date must be on/after the 2020 floor or there's nothing to pull.
         start, end = resolve_candle_range(from_date=None, to_date="2021-03-10", year=None, now=_NOW)
-        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2021-01-01
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2020-01-01
         assert end == datetime(2021, 3, 11, tzinfo=UTC)
 
     def test_from_before_floor_is_clamped_up(self) -> None:
         start, _ = resolve_candle_range(
             from_date="2018-06-01", to_date="2021-06-01", year=None, now=_NOW
         )
-        assert start == datetime(2021, 1, 1, tzinfo=UTC)  # clamped up to the 2021 floor
+        assert start == datetime(2020, 1, 1, tzinfo=UTC)  # clamped up to the 2020 floor
 
     def test_to_after_today_is_clamped_down(self) -> None:
         # An EXPLICIT to_date may reach today, so the clamp ceiling is today
@@ -480,9 +480,9 @@ class TestPullAllSpot:
         assert isinstance(report, BulkSpotReport)
         assert report.dry_run is True
         assert report.total_symbols == 2
-        # full 2021 → previous day window (DEC-DHAN-PULL-SCOPE-001); the bulk
+        # full 2020 → previous day window (DEC-PULL-FLOOR-2020-001); the bulk
         # pull passes no explicit to_date so the current session is excluded.
-        assert report.start_date == "2021-01-01"
+        assert report.start_date == "2020-01-01"
         assert report.end_date == "2026-05-29"  # previous day (now=05-30)
         # both fetched intervals (1m + 1d) completed for each symbol → 4 pairs.
         assert report.total_completed == 4
@@ -549,7 +549,7 @@ class TestPullAllSpot:
             to_date=None,
             year=None,
         )
-        assert report.start_date == "2021-01-01"
+        assert report.start_date == "2020-01-01"
         assert report.end_date == "2026-05-29"  # previous day (now=05-30)
 
     def test_no_data_and_failure_branches(self, tmp_path: Path) -> None:

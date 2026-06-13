@@ -38,7 +38,7 @@ from typing import Any, Final
 
 from brutex.observability.watchdog import Watchdog, WorkerEvent, WorkerState
 
-#: Default hung-combo timeout. A single spot combo over the full 2021→today 1m
+#: Default hung-combo timeout. A single spot combo over the full 2020→today 1m
 #: history is sub-second; 300 s is a generous ceiling that only trips on a true
 #: wedge, not a slow-but-progressing combo. Tune per hardware envelope.
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 300.0

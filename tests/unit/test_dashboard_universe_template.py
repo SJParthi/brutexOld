@@ -50,16 +50,16 @@ def test_js_flags_running_at_start_and_clears_it_on_finish() -> None:
 
 def test_date_pickers_prefilled_with_canonical_default() -> None:
     """DEC-DEFAULT-DATE-RANGE-001: the from/to pickers are PRE-FILLED with the
-    canonical [2021-01-01, previous day] default, and no token leaks through."""
+    canonical [2020-01-01, previous day] default, and no token leaks through."""
     from brutex.dashboard.app import _render_universe_html
     from brutex.dashboard.pull_controller import default_date_range
 
     html = _render_universe_html()
     from_iso, to_iso = default_date_range()
     max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
-    assert from_iso == "2021-01-01"
-    assert f'id="fromDate" min="2021-01-01" max="{max_iso}" value="{from_iso}"' in html
-    assert f'id="toDate" min="2021-01-01" max="{max_iso}" value="{to_iso}"' in html
+    assert from_iso == "2020-01-01"
+    assert f'id="fromDate" min="2020-01-01" max="{max_iso}" value="{from_iso}"' in html
+    assert f'id="toDate" min="2020-01-01" max="{max_iso}" value="{to_iso}"' in html
     assert "__BRUTEX_DATE_" not in html  # the placeholder tokens were all substituted
 
 

@@ -353,13 +353,14 @@ class TestWindowStatusApi:
 
 
 class TestCoverageHelpers:
-    def test_coverage_years_starts_2021(self) -> None:
-        # Floor is 2021-01-01 (DEC-DHAN-PULL-SCOPE-001); the old 2020 floor was a
-        # stale Groww-era carryover (DEC-DHAN-COVERAGE-RESCOPE-001).
+    def test_coverage_years_starts_2020(self) -> None:
+        # Floor is 2020-01-01 (DEC-PULL-FLOOR-2020-001) now that the Phase-0
+        # granularity probe confirmed 1-minute data exists from 2020-01-01; the
+        # coverage grid aligns to the SAME floor the pull pickers default to.
         years = _coverage_years()
-        assert years[0] == 2021
+        assert years[0] == 2020
         assert years[-1] == datetime.now(UTC).year
-        assert years == list(range(2021, datetime.now(UTC).year + 1))
+        assert years == list(range(2020, datetime.now(UTC).year + 1))
 
     def test_render_coverage_hub_links_subpages(self) -> None:
         # The hub (DEC-DASHBOARD-COVERAGE-SPLIT-001) links to each focused page.

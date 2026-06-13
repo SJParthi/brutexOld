@@ -99,14 +99,16 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The Track-1 **operational** pull floor — the start of the locked
-#: "Rolling 2021-01-01 → today" range (CLAUDE.md §3). The vendor capability
-#: reaches back to 2020-01-01 (``GrowwMarketAdapter.earliest_history``; CLAUDE.md
-#: §6 "Historical depth — From 2020"), but the operator deliberately starts the
-#: pull at 2021-01-01 for the safer case — the 2020 edge's data quality is
-#: unverified (DEC-DHAN-PULL-SCOPE-001). Any ``from_date`` below this floor is
+#: The Track-1 **operational** pull floor — the start of the rolling
+#: "2020-01-01 → today" range. The vendor capability reaches back to 2020-01-01
+#: (``GrowwMarketAdapter.earliest_history``; CLAUDE.md §6 "Historical depth — From
+#: 2020"), and the operator-run Phase-0 granularity probe CONFIRMED 1-minute NIFTY
+#: data exists from 2020-01-01T09:15:00 (8297 rows in 2020-Jan), so the floor is set
+#: to the full vendor depth (DEC-PULL-FLOOR-2020-001, operator decision 2026-06-13 —
+#: supersedes the prior 2021-01-01 conservative floor of DEC-DHAN-PULL-SCOPE-001 now
+#: that the 2020 edge is probe-verified). Any ``from_date`` below this floor is
 #: clamped up to it so a too-early pick can never waste quota.
-GROWW_HISTORY_FLOOR: Final[date] = date(2021, 1, 1)
+GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
 
 #: The base timeframes Track 1 actually FETCHES from Groww: 1-minute (every
 #: intraday timeframe is resampled from it) + 1-day (PDH/PDL anchors). The 19
@@ -149,9 +151,9 @@ def resolve_candle_range(
        calendar year, **clamped to ``[GROWW_HISTORY_FLOOR, yesterday]``**.
        A past year resolves to the whole year; the current year stops at
        the previous day (never today / the future); a wholly-future or
-       pre-2021 year raises "nothing to pull".
+       pre-2020 year raises "nothing to pull".
     3. **Default** — neither date nor year: the FULL Track-1 history,
-       ``[GROWW_HISTORY_FLOOR (2021-01-01), previous day]``. (Previously
+       ``[GROWW_HISTORY_FLOOR (2020-01-01), previous day]``. (Previously
        this defaulted to the current calendar year — corrected so a blank
        picker pulls the whole locked range, not just this year.)
 
@@ -193,7 +195,7 @@ def resolve_candle_range(
     # Default upper bound = the PREVIOUS day, so a routine pull never grabs the
     # still-forming current session. An EXPLICIT to_date overrides this and may
     # reach today (clamped below). yesterday < GROWW_HISTORY_FLOOR is impossible
-    # in practice (today is well past 2021) but the start>end guard covers it.
+    # in practice (today is well past 2020) but the start>end guard covers it.
     yesterday = today - timedelta(days=1)
 
     # An EXPLICIT to_date may reach today; every other mode (year / default /
@@ -204,10 +206,10 @@ def resolve_candle_range(
 
     if from_date is None and to_date is None:
         # Mode 2/3 — an explicit *year* picks that full calendar year; absent a
-        # year the default is the FULL Track-1 history (2021-01-01 → previous
+        # year the default is the FULL Track-1 history (2020-01-01 → previous
         # day), NOT the current year. Both fall through the SAME clamp below so
         # the window never reaches today/the future and a wholly-future /
-        # pre-2021 year raises "nothing to pull" (DEC-PULL-FUTURE-WINDOW-001).
+        # pre-2020 year raises "nothing to pull" (DEC-PULL-FUTURE-WINDOW-001).
         if year is not None:
             start_date = date(year, 1, 1)
             end_date = date(year, 12, 31)
@@ -253,7 +255,7 @@ def default_date_range(now: datetime | None = None) -> tuple[str, str]:
     DEC-DEFAULT-DATE-RANGE-001. Reuses :func:`resolve_candle_range` with ALL bounds
     blank, so the pre-filled UI dates are GUARANTEED byte-identical to what a blank
     spot / options pull (or report) actually fetches — ONE source of truth for "the
-    default range is ``[2021-01-01, previous trading day]``" across the whole
+    default range is ``[2020-01-01, previous trading day]``" across the whole
     dashboard. ``to`` is the INCLUSIVE previous day (``resolve_candle_range``'s
     ``end`` is the exclusive half-open boundary, so subtract a day to display it).
 
@@ -267,7 +269,7 @@ def default_date_range(now: datetime | None = None) -> tuple[str, str]:
     Returns
     -------
     tuple[str, str]
-        ``(from_iso, to_iso)`` ISO ``YYYY-MM-DD`` — e.g. ``("2021-01-01",
+        ``(from_iso, to_iso)`` ISO ``YYYY-MM-DD`` — e.g. ``("2020-01-01",
         "2026-06-07")`` when "today" is 2026-06-08.
     """
     start, end = resolve_candle_range(
@@ -545,8 +547,8 @@ class BulkSpotReport:
     """Result of a :func:`pull_all_spot` call (the one-click bulk-spot button).
 
     Aggregates the per-symbol outcome across the two fetched intervals
-    (``1m`` + ``1d``) over the full ``[2021-01-01, previous day]`` range
-    (DEC-DHAN-PULL-SCOPE-001) — the current session is excluded by default.
+    (``1m`` + ``1d``) over the full ``[2020-01-01, previous day]`` range
+    (DEC-PULL-FLOOR-2020-001) — the current session is excluded by default.
     """
 
     dry_run: bool
@@ -828,7 +830,7 @@ def pull_all_spot(
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
 ) -> BulkSpotReport:
-    """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
+    """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
 
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
@@ -848,16 +850,16 @@ def pull_all_spot(
     now
         Injected "current" instant (defaults to :func:`datetime.now`) — its
         UTC date drives the upper bound (the previous day) of the full
-        ``[2021-01-01, previous day]`` window; the current session is excluded.
+        ``[2020-01-01, previous day]`` window; the current session is excluded.
     from_date, to_date, year
         Optional range selectors (DEC-DHAN-SPOT-MULTI-SATURATE-001) threaded to
         :func:`resolve_candle_range` so the multi-select "Pull spot" bulk route
         can pull the operator's date-picker window through this saturating
         cross-symbol flatten. When **all three are ``None``** (the one-click
         ``?kind=`` "Pull ALL" callers) the full Track-1 history
-        ``[2021-01-01, previous day]`` applies — byte-for-byte the prior
+        ``[2020-01-01, previous day]`` applies — byte-for-byte the prior
         behaviour. An explicit ``from_date`` / ``to_date`` (inclusive ISO
-        ``YYYY-MM-DD``, clamped to ``[2021-01-01, today]``) takes precedence over
+        ``YYYY-MM-DD``, clamped to ``[2020-01-01, today]``) takes precedence over
         ``year`` (a full calendar year); a malformed date or ``from`` after
         ``to`` raises :class:`ValueError` (the route maps it to a 400).
     adapter_factory
@@ -897,7 +899,7 @@ def pull_all_spot(
     instruments = list(instruments)
     # Range resolution (DEC-DHAN-SPOT-MULTI-SATURATE-001): when NO range is given
     # (the one-click "Pull ALL" caller) default to the full Track-1 history
-    # ``[2021-01-01, previous day]`` — the prior behaviour, unchanged. When the
+    # ``[2020-01-01, previous day]`` — the prior behaviour, unchanged. When the
     # caller DOES pass an explicit ``from_date`` / ``to_date`` / ``year`` (the
     # multi-select "Pull spot" bulk route, which carries the operator's date
     # picker), honour it verbatim via :func:`resolve_candle_range` so routing the
@@ -1300,9 +1302,9 @@ def pull_candles(
     intraday timeframes are resampled from the 1-minute base downstream,
     never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
-    (day-inclusive, clamped to ``[2021-01-01, today]``) when either is given,
+    (day-inclusive, clamped to ``[2020-01-01, today]``) when either is given,
     else the full calendar *year*, else (no dates, no year) the full Track-1
-    history ``[2021-01-01, previous day]``. The default end is the previous
+    history ``[2020-01-01, previous day]``. The default end is the previous
     day — today is pulled only via an explicit *to_date* reaching it.
     Idempotent + rerun-safe — the sink append is a no-op on already-stored
     bars (CLAUDE.md §2 Rule 7).
@@ -1318,7 +1320,7 @@ def pull_candles(
         dry-run null sink.
     year
         Calendar year to pull when no explicit range is given. ``None``
-        (default) pulls the full Track-1 history (2021-01-01 → previous
+        (default) pulls the full Track-1 history (2020-01-01 → previous
         day), NOT just the current year. Ignored when *from_date* or
         *to_date* is supplied.
     from_date, to_date
