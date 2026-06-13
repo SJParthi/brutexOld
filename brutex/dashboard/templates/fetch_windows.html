@@ -122,6 +122,7 @@
       <a href="#" data-mkt="" class="active">All</a>
       <a href="#" data-mkt="spot">📈 Spot</a>
       <a href="#" data-mkt="options">⛓️ Options</a>
+      <a href="#" data-mkt="futures">🔮 Futures</a>
     </div>
     <div class="subnav" style="border:none;padding:0;" id="stfilter">
       <a href="#" data-st="" class="active">Active</a>
@@ -196,6 +197,8 @@ function renderWindows(rows) {
   if (!rows.length) {
     panel.innerHTML = marketFilter === "options"
       ? '<div class="empty">no OPTION windows match — option windows are PLANNED up-front (see the Planned chip) and commit ALL at once when a whole series fetches cleanly (all-or-nothing, DEC-OPTION-429-RECOVERY-001), so completed rows appear in batches as each series finishes</div>'
+      : marketFilter === "futures"
+      ? '<div class="empty">no FUTURE windows match — pull a contract chain on /universe with "⛓ Pull expiries + contracts" (Type: futures or both); each FUT contract\'s fetch windows then log here under the groww-future namespace (DEC-COVERAGE-GROWW-NAMESPACE-001)</div>'
       : '<div class="empty">no fetch windows match — pull a symbol on /universe; each fetch window then logs PLANNED / SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
     return;
   }

@@ -378,6 +378,16 @@ class TestCoverageHelpers:
         assert "Segment" in _render_spot_coverage_html()
         assert "Last error" in _render_fetch_windows_html()
 
+    def test_fetch_windows_page_has_futures_filter(self) -> None:
+        # DEC-COVERAGE-FUTURES-TAB-001: #673 surfaced the `futures` bucket in the
+        # /coverage/windows payload (counts + ?market=futures); the page exposes a
+        # Futures filter chip so the operator can scope the window list + KPIs to
+        # the groww-future namespace (the JS already handles any data-mkt value).
+        html = _render_fetch_windows_html()
+        assert 'data-mkt="futures"' in html
+        assert "🔮 Futures" in html
+        assert "no FUTURE windows match" in html  # the futures-specific empty message
+
     def test_coverage_pages_have_accessibility_polish(self) -> None:
         # Keyboard focus rings + reduce-motion honoured, same safe a11y polish as
         # /universe (DEC-DASHBOARD-A11Y-POLISH-001) — additive, no layout change.
