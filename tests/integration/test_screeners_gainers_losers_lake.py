@@ -7,12 +7,11 @@ tiny two-instrument lake with the same ``ParquetWriter`` / ``ParquetBarSink``
 ingest uses, then ranks it and inspects the result.
 
 The in-test :class:`_CatalogLakeReader` is the deferred dashboard wiring's
-stand-in: it reuses :func:`brutex.feed.replay._arrow_table_to_bars` (CLAUDE.md
-§11 COMMON — no copy-paste of the Arrow→CandleBar conversion) so the only new
-code is the partition-coordinate glue.
+stand-in: it reuses :func:`brutex.feed.replay.arrow_table_to_bars` (CLAUDE.md
+§11 COMMON — no copy-paste of the Arrow→CandleBar conversion; promoted from the
+former private ``_arrow_table_to_bars`` in ``DEC-MOVERS-DASHBOARD-PAGE-001``) so
+the only new code is the partition-coordinate glue.
 """
-
-# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
-from brutex.feed.replay import _arrow_table_to_bars
+from brutex.feed.replay import arrow_table_to_bars
 from brutex.screeners.gainers_losers import InstrumentRef, screen_gainers_losers
 
 pytest.importorskip("polars")
@@ -83,7 +82,7 @@ class _CatalogLakeReader:
             start=start,
             end=end,
         )
-        return _arrow_table_to_bars(table)
+        return arrow_table_to_bars(table)
 
 
 def _persist(tmp_path: Path) -> tuple[Path, Catalog]:
