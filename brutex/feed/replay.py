@@ -250,7 +250,7 @@ class ReplayFeed:
             start=self._start,
             end=self._end,
         )
-        return _arrow_table_to_bars(table)
+        return arrow_table_to_bars(table)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ class ReplayFeed:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
+def arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
     """Materialise a ``pyarrow.Table`` of canonical bars into ``list[CandleBar]``.
 
     The table must have the canonical 7-column schema emitted by
@@ -266,6 +266,12 @@ def _arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
     :meth:`~brutex.data.catalog.Catalog.get_bars`. Float prices are
     re-wrapped as :class:`~decimal.Decimal` via ``str()`` so the
     in-memory bars round-trip bit-for-bit against the Parquet source.
+
+    Public (promoted from the former private ``_arrow_table_to_bars`` per
+    CLAUDE.md §11 COMMON, ``DEC-MOVERS-DASHBOARD-PAGE-001``): this is the single
+    source of truth for the Arrow → :class:`CandleBar` conversion, now also
+    consumed by the dashboard ``/movers`` lake reader
+    (:mod:`brutex.dashboard.movers_reader`) — no copy-paste of the conversion.
     """
     if table.num_rows == 0:
         return []
@@ -298,4 +304,5 @@ __all__ = [
     "FeedEvent",
     "Pacer",
     "ReplayFeed",
+    "arrow_table_to_bars",
 ]
