@@ -1885,8 +1885,9 @@ def cmd_fetch(
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
-    # Default the start to the Track-1 2021-01-01 pull floor (DEC-DHAN-PULL-SCOPE-001)
-    # so a bare `brutex fetch` pulls the full locked "2021-01-01 → today" history.
+    # Default the start to the Track-1 2020-01-01 pull floor (DEC-PULL-FLOOR-2020-001,
+    # which supersedes the prior conservative 2021-01-01 floor of DEC-DHAN-PULL-SCOPE-001)
+    # so a bare `brutex fetch` pulls the full "2020-01-01 → today" vendor-depth history.
     floor_dt = datetime(
         GROWW_HISTORY_FLOOR.year, GROWW_HISTORY_FLOOR.month, GROWW_HISTORY_FLOOR.day, tzinfo=UTC
     )

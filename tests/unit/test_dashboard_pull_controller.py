@@ -41,6 +41,7 @@ from brutex.dashboard.pull_controller import (
     pull_all_spot,
     pull_candles,
     resolve_candle_range,
+    resolve_fetch_intervals,
     resolve_pull_symbols,
 )
 from brutex.data.models import CandleBar
@@ -70,6 +71,44 @@ def _index(symbol: str = "13") -> Instrument:
         strike_price=None,
         asm_gsm_flag=False,
     )
+
+
+#: Both fetch intervals — passed EXPLICITLY by the machinery tests that exercise
+#: per-(symbol, interval) mechanics (per-pair progress, mixed 1m-lands/1d-gap
+#: outcomes, both-interval failure/quarantine). The PRODUCTION default
+#: (``GROWW_FETCH_INTERVALS``) is **1-day only** — the verify-first default of the
+#: ``/universe`` granularity dropdown (DEC-PULL-1DAY-FIRST-001: 1day / 1minute /
+#: both). These tests opt INTO the two-interval ("both") shape so the multi-interval
+#: machinery stays covered while the default-behaviour tests assert the 1-day default.
+_BOTH_INTERVALS: tuple[str, ...] = ("1minute", "1day")
+
+
+class TestResolveFetchIntervals:
+    """The spot-interval dropdown resolver (DEC-PULL-1DAY-FIRST-001)."""
+
+    def test_default_is_one_day_only(self) -> None:
+        # The verify-first default: a blank/None choice NEVER widens to 1-minute.
+        assert resolve_fetch_intervals(None) == ("1day",)
+        assert GROWW_FETCH_INTERVALS == ("1day",)
+
+    def test_day_choice(self) -> None:
+        assert resolve_fetch_intervals("1day") == ("1day",)
+
+    def test_minute_choice(self) -> None:
+        assert resolve_fetch_intervals("1minute") == ("1minute",)
+
+    def test_both_choice_keeps_display_order(self) -> None:
+        # ``both`` fetches 1m then 1d (the canonical display order).
+        assert resolve_fetch_intervals("both") == ("1minute", "1day")
+
+    def test_whitespace_is_stripped(self) -> None:
+        assert resolve_fetch_intervals("  both  ") == ("1minute", "1day")
+
+    def test_unknown_choice_falls_back_to_one_day(self) -> None:
+        # An unrecognised value safely defaults to 1-day (never crashes, never
+        # silently widens to 1-minute — Golden Rule #1).
+        assert resolve_fetch_intervals("5minute") == ("1day",)
+        assert resolve_fetch_intervals("") == ("1day",)
 
 
 class _EmptyAdapter(SyntheticSpotAdapter):
@@ -178,8 +217,8 @@ class TestPullCandlesReport:
 
 class TestPullCandlesDryRun:
     def test_default_no_dates_no_year_pulls_full_history(self, tmp_path: Path) -> None:
-        # No dates, no year → the FULL Track-1 history (2021-01-01 → previous
-        # day), so the report's start year is the 2021 floor, NOT the current
+        # No dates, no year → the FULL Track-1 history (2020-01-01 → previous
+        # day), so the report's start year is the 2020 floor, NOT the current
         # year (FIX 4 — blank pickers default to the full history floor).
         report = pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert report.year == GROWW_HISTORY_FLOOR.year
@@ -189,10 +228,12 @@ class TestPullCandlesDryRun:
 
     def test_covers_fetched_intervals(self, tmp_path: Path) -> None:
         report = pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
-        # Dhan fetches 1m + 1d only (the 19 derived TFs are resampled, not
-        # fetched — DEC-DHAN-1M-ONLY-001); the grid shows two cells.
-        assert [tf.interval for tf in report.timeframes] == ["1m", "1d"]
-        assert len(GROWW_FETCH_INTERVALS) == 2
+        # Verify-first phase: the PRODUCTION default fetches 1-day ONLY
+        # (DEC-PULL-1DAY-FIRST-001) — 1-minute + the 19 resampled intraday TFs
+        # return once the OHLCV-vs-bhavcopy check passes — so the grid shows the
+        # single 1d cell (not two).
+        assert [tf.interval for tf in report.timeframes] == ["1d"]
+        assert GROWW_FETCH_INTERVALS == ("1day",)
         # Synthetic adapter always returns bars → some completed, zero failed.
         assert report.total_failed == 0
         assert report.total_completed > 0
@@ -213,6 +254,7 @@ class TestPullCandlesDryRun:
             lake_root=tmp_path,
             year=2024,
             dry_run=True,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _inst: (_EmptyAdapter(), NullBarSink()),
         )
         assert report.total_completed == 0
@@ -235,6 +277,7 @@ class TestPullCandlesDryRun:
             _index(),
             lake_root=tmp_path,
             dry_run=True,
+            intervals=_BOTH_INTERVALS,
             from_date="2021-01-04",
             to_date="2021-01-08",
             on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
@@ -279,6 +322,7 @@ class TestPullCandlesInjectedFactory:
             lake_root=tmp_path,
             year=2024,
             dry_run=True,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _inst: (_FailingAdapter(), NullBarSink()),
         )
         assert report.total_completed == 0
@@ -297,18 +341,18 @@ class TestResolveCandleRange:
 
     def test_no_dates_no_year_pulls_full_history_to_yesterday(self) -> None:
         # Default mode 3 — neither date nor year → the FULL Track-1 history
-        # (2021-01-01 → previous day), NOT the current year (FIX 4). The end is
+        # (2020-01-01 → previous day), NOT the current year (FIX 4). The end is
         # the previous day (05-29), exclusive-end midnight 05-30, so the current
         # session (today, 05-30) is excluded by default (FIX 5).
         start, end = resolve_candle_range(from_date=None, to_date=None, year=None, now=_NOW)
-        assert start == datetime(2021, 1, 1, tzinfo=UTC)  # the 2021 floor, not 2026
+        assert start == datetime(2020, 1, 1, tzinfo=UTC)  # the 2020 floor, not 2026
         assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_default_date_range_is_the_picker_prefill(self) -> None:
-        """DEC-DEFAULT-DATE-RANGE-001: the canonical picker default = [2021-01-01,
+        """DEC-PULL-FLOOR-2020-001: the canonical picker default = [2020-01-01,
         previous day] — the SAME window resolve_candle_range applies when blank, so
         the pre-filled UI dates can never drift from what a blank pull fetches."""
-        assert default_date_range(now=_NOW) == ("2021-01-01", "2026-05-29")
+        assert default_date_range(now=_NOW) == ("2020-01-01", "2026-05-29")
 
     def test_no_dates_explicit_past_year_is_full_year(self) -> None:
         # Mode 2 — a PAST year, no dates → that full calendar year (the tail
@@ -333,11 +377,11 @@ class TestResolveCandleRange:
             resolve_candle_range(from_date=None, to_date=None, year=2027, now=_NOW)
 
     def test_no_dates_pre_floor_year_raises(self) -> None:
-        # Mode 2 — a year wholly before the 2021 Track-1 floor (DEC-DHAN-PULL-SCOPE-001):
+        # Mode 2 — a year wholly before the 2020 Groww floor (DEC-PULL-FLOOR-2020-001):
         # start clamps up to the floor, end stays in the pre-floor year → start > end →
-        # refused. 2020 is now BEFORE the floor (the operator starts at 2021 for safety).
+        # refused. 2019 is now BEFORE the floor (the operator pulls the full 2020 depth).
         with pytest.raises(ValueError, match="nothing to pull"):
-            resolve_candle_range(from_date=None, to_date=None, year=2020, now=_NOW)
+            resolve_candle_range(from_date=None, to_date=None, year=2019, now=_NOW)
 
     def test_explicit_from_and_to_are_day_inclusive(self) -> None:
         # Mode 1 — both ends inclusive; end is the midnight after to_date.
@@ -355,16 +399,16 @@ class TestResolveCandleRange:
         assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_to_only_starts_at_history_floor(self) -> None:
-        # to_date must be on/after the 2021 floor or there's nothing to pull.
+        # to_date must be on/after the 2020 floor or there's nothing to pull.
         start, end = resolve_candle_range(from_date=None, to_date="2021-03-10", year=None, now=_NOW)
-        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2021-01-01
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2020-01-01
         assert end == datetime(2021, 3, 11, tzinfo=UTC)
 
     def test_from_before_floor_is_clamped_up(self) -> None:
         start, _ = resolve_candle_range(
             from_date="2018-06-01", to_date="2021-06-01", year=None, now=_NOW
         )
-        assert start == datetime(2021, 1, 1, tzinfo=UTC)  # clamped up to the 2021 floor
+        assert start == datetime(2020, 1, 1, tzinfo=UTC)  # clamped up to the 2020 floor
 
     def test_to_after_today_is_clamped_down(self) -> None:
         # An EXPLICIT to_date may reach today, so the clamp ceiling is today
@@ -480,12 +524,13 @@ class TestPullAllSpot:
         assert isinstance(report, BulkSpotReport)
         assert report.dry_run is True
         assert report.total_symbols == 2
-        # full 2021 → previous day window (DEC-DHAN-PULL-SCOPE-001); the bulk
+        # full 2020 → previous day window (DEC-PULL-FLOOR-2020-001); the bulk
         # pull passes no explicit to_date so the current session is excluded.
-        assert report.start_date == "2021-01-01"
+        assert report.start_date == "2020-01-01"
         assert report.end_date == "2026-05-29"  # previous day (now=05-30)
-        # both fetched intervals (1m + 1d) completed for each symbol → 4 pairs.
-        assert report.total_completed == 4
+        # Verify-first default fetches 1-day ONLY (DEC-PULL-1DAY-FIRST-001) →
+        # one interval × 2 symbols = 2 completed pairs (was 4 when 1m+1d).
+        assert report.total_completed == 2
         assert report.total_failed == 0
         assert report.total_no_data == 0
 
@@ -506,6 +551,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             auto_retry=True,
         )
         assert report.total_symbols == 2
@@ -549,7 +595,7 @@ class TestPullAllSpot:
             to_date=None,
             year=None,
         )
-        assert report.start_date == "2021-01-01"
+        assert report.start_date == "2020-01-01"
         assert report.end_date == "2026-05-29"  # previous day (now=05-30)
 
     def test_no_data_and_failure_branches(self, tmp_path: Path) -> None:
@@ -559,6 +605,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert report.total_no_data == 2
@@ -574,6 +621,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_FailingAdapter(), NullBarSink()),
         )
         assert failed.total_failed == 2
@@ -596,6 +644,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert all_gap.total_failed == 0  # NOT counted as a failure
@@ -616,6 +665,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
         )
         assert report.total_completed == 1  # the 1minute series landed bars
@@ -679,6 +729,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
         )
         # 2 symbols × 2 fetched intervals (1m + 1d) = 4 progress events, all clean.
@@ -958,6 +1009,7 @@ class TestQuotaDeathMidRound:
                 now=_BULK_NOW,
                 from_date="2021-01-04",
                 to_date="2021-01-08",
+                intervals=_BOTH_INTERVALS,
                 adapter_factory=factory,
                 on_progress=_on_progress,
                 until_clean=until_clean,
@@ -1058,6 +1110,7 @@ class TestQuotaDeathMidRound:
                 now=_BULK_NOW,
                 from_date="2021-01-04",
                 to_date="2021-01-08",
+                intervals=_BOTH_INTERVALS,
                 adapter_factory=lambda _root, _insts: (_DiesInRoundTwo(), NullBarSink()),
                 until_clean=True,
             )
@@ -1115,6 +1168,7 @@ class TestStatusSidecarWriteRetired:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
         )
         assert report.verdict.kind == "clean"

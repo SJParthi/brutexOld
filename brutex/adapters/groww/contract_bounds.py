@@ -2,7 +2,7 @@
 
 DEC-DERIV-MINUTE-BOUNDS-001 (MIGRATION.md entry #711). An F&O contract only
 *lives* from its listing day to its expiry, so pulling 1-minute candles over the
-full ``2021-01-01 → today`` range (CLAUDE.md §3) for every strike wastes the bulk
+full ``2020-01-01 → today`` range (CLAUDE.md §3) for every strike wastes the bulk
 of the per-contract API calls on dead periods the contract did not yet / no longer
 trades. After the **cheap 1-day pull** lands (one ``get_historical_candles`` window
 per contract — DEC-GROWW-OPTION-INGEST-001, #702), each contract's REAL data window

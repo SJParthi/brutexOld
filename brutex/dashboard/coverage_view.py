@@ -207,13 +207,15 @@ def spot_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-#: The two FETCH intervals the window ledger plans/records — every other
-#: lake interval is RESAMPLED from 1minute (DEC-DHAN-1M-ONLY-001) and so has NO
-#: ledger rows BY DESIGN. MUST MATCH
-#: ``brutex.dashboard.pull_controller.GROWW_FETCH_INTERVALS`` — mirrored here
-#: (the ``db_view._OPTION_WINDOW_MARKET`` precedent) so this pure projection
-#: module never imports the pull/adapter stack
-#: (DEC-SPOT-COVERAGE-COMPLETENESS-001).
+#: The POSSIBLE fetch intervals — every other lake interval is RESAMPLED from
+#: 1minute (DEC-DHAN-1M-ONLY-001) and so is classified ``derived`` here. Both
+#: ``1minute`` and ``1day`` are valid fetch intervals: the operator picks per pull
+#: via the ``/universe`` spot-interval dropdown — 1-day only (verify-first
+#: default), 1-minute only, or both (DEC-PULL-1DAY-FIRST-001) — so a cell of either
+#: is a real fetch row (settled/pending/failed by its ledger counts), never
+#: ``derived``. Mirrors the set of ``pull_controller.SPOT_INTERVAL_CHOICES`` values
+#: (the ``db_view._OPTION_WINDOW_MARKET`` precedent) so this pure projection module
+#: never imports the pull/adapter stack (DEC-SPOT-COVERAGE-COMPLETENESS-001).
 FETCH_INTERVALS: Final[frozenset[str]] = frozenset({"1minute", "1day"})
 
 #: Completeness chip states for the spot coverage rows

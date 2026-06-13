@@ -34,9 +34,12 @@ MARKET_ID: Final[str] = "synthetic"
 DISPLAY_NAME: Final[str] = "SYNTHETIC (offline, deterministic — NOT real market data)"
 #: The wall clock the synthetic session grid uses (NSE/BSE), fixed +05:30.
 NATIVE_TIMEZONE: Final[str] = "Asia/Kolkata"
-#: Earliest date the generator will serve. Bounded to the verified NSE/BSE
-#: trading-calendar coverage (2021-2026) so every emitted bar sits on a real
-#: session; mirrors CLAUDE.md §3's rolling ``2021-01-01`` range start.
+#: Earliest date the OFFLINE generator will serve. Bounded to the verified
+#: NSE/BSE trading-calendar coverage (2021-2026) so every emitted dry-run bar
+#: sits on a real session — this is the synthetic adapter's own constraint and is
+#: deliberately INDEPENDENT of the live pull floor (``GROWW_HISTORY_FLOOR`` is
+#: 2020-01-01 per DEC-PULL-FLOOR-2020-001; the live vendor depth reaches 2020, the
+#: offline calendar's verified holiday set still starts 2021).
 EARLIEST_HISTORY: Final[date] = date(2021, 1, 1)
 #: Nominal rate ceiling. Offline generation has no real per-second limit, but
 #: :class:`~brutex.adapters.protocol.MarketCapabilities` requires ``> 0``; a

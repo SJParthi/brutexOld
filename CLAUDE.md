@@ -18,7 +18,17 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-12 (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001,
+_Last updated: 2026-06-13 (DEC-PULL-1DAY-FIRST-001, MIGRATION.md #723 —
+§1/§6 spot-interval facts: the spot pull granularity is now operator-chosen
+per pull via the `/universe` dropdown with a VERIFY-FIRST **1-day-only**
+default (`resolve_fetch_intervals`; 1-minute / both after the
+OHLCV-vs-bhavcopy cross-check), no longer force-fetching 1-minute alongside
+1-day). Earlier: 2026-06-13 (DEC-PULL-FLOOR-2020-001, MIGRATION.md #722 —
+§3 locked scope range moved `2021-01-01 → today` → `2020-01-01 → today`:
+the DATA pull floor (`GROWW_HISTORY_FLOOR`) lowered to the full
+probe-verified Groww 1-minute depth, superseding the conservative
+2021-01-01 floor of DEC-DHAN-PULL-SCOPE-001). Earlier: 2026-06-12
+(DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001,
 MIGRATION.md #669 — renumbered from #667 by PR #629's duplicate-repair;
 §2 Rule 4's run-identity citation refreshed
 `TRACK1_BACKTEST_SPEC.md:654` → `:743`; spec growth had moved the
@@ -63,10 +73,13 @@ hostile-review pass._
   DEC-DHAN-GROWW-REMIGRATE-001 / ADR-0009 (which supersedes the
   ADR-0002 prior-vendor revert). One unified surface for
   spot AND options:
-  1. `groww.get_historical_candles(...)` — fetch 1-minute OHLC ONLY for
+  1. `groww.get_historical_candles(...)` — fetch 1-minute + `1day` OHLC for
      spot (per DEC-DHAN-1M-ONLY-001; the 19 derived intraday timeframes
-     are resampled deterministically from 1m), plus `1day` candles for
-     PDH/PDL daily anchors.
+     are resampled deterministically from 1m; `1day` is the PDH/PDL daily
+     anchor). The spot pull granularity is **operator-chosen per pull** via
+     the `/universe` dropdown — **1-day only** (the VERIFY-FIRST default:
+     pull 1-day, cross-check vs the official NSE/BSE bhavcopy, THEN widen),
+     1-minute only, or both (DEC-PULL-1DAY-FIRST-001, MIGRATION.md #723).
 
   Expired options (Options Track / lake) use the same
   `get_historical_candles` after resolving contracts via
@@ -95,7 +108,11 @@ hostile-review pass._
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every trade, but is NEVER part of brute-force pattern combinations
    or the 52-condition vocabulary. 21 timeframes (1m base + 19 derived
-   intraday + 1d). Rolling `2021-01-01 → today` range. No futures, no
+   intraday + 1d). Rolling `2020-01-01 → today` range (the data pull floor
+   — `GROWW_HISTORY_FLOOR`; DEC-PULL-FLOOR-2020-001, 2026-06-13, MIGRATION.md
+   entry #722 — supersedes the prior conservative `2021-01-01` floor of
+   DEC-DHAN-PULL-SCOPE-001 now that the Phase-0 granularity probe confirmed
+   Groww serves 1-minute data from `2020-01-01T09:15:00`). No futures, no
    options, no F&O contracts. Do not silently expand scope.
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
@@ -441,7 +458,7 @@ bruteX/
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
 | 1-minute granularity at the 2020 boundary | **UNVERIFIED** — Phase-0 probe gate (rows may not truly start Jan-2020 at 1m) | `groww/constants.py:107`; `adr/0009-...-migration.md:113-114` |
 | Candle intervals (SDK supports) | `1/2/3/5/10/15/30 minute`, `1hour`, `4hour`, `1day`, `1week`, `1month` | `groww/constants.py:57-70`; `groww/api-reference/04-annexures.md:85-98` |
-| Candle interval — Track 1 spot | **`1minute` ONLY** (+ `1day` for PDH/PDL); 19 intraday TFs resampled from 1m (mirrors DEC-DHAN-1M-ONLY-001) | `groww/constants.py:71-74` |
+| Candle interval — Track 1 spot | **`1minute` + `1day`** (19 intraday TFs resampled from 1m, mirrors DEC-DHAN-1M-ONLY-001); the spot pull granularity is **operator-chosen per pull** via the `/universe` dropdown — **1-day only** is the VERIFY-FIRST default (`resolve_fetch_intervals`; DEC-PULL-1DAY-FIRST-001 #723), then 1-minute / both after the OHLCV-vs-bhavcopy cross-check | `groww/constants.py:71-74`; `dashboard/pull_controller.py` `SPOT_INTERVAL_CHOICES` |
 | Chunk window — by interval tier | **1/2/3/5m → 30d · 10/15/30m → 90d · 1h+/1d/1w/1mo → 180d** per call (richer than a single split) | `groww/constants.py:76-89`; `groww/chunks.py:34-60`; `groww/api-reference/03-backtesting.md:238-246` |
 | Candle response shape | **ROW-arrays** — `{"candles": [[ts, open, high, low, close, volume, open_interest], ...]}`; OI `null` for non-FNO | `groww/parser.py:1-18,104-124`; `groww/api-reference/03-backtesting.md:202-236` |
 | **Price unit** | **RUPEES (float)** from Groww — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `groww/api-reference/03-backtesting.md:202` |

@@ -7,9 +7,9 @@ index/stock or (lake-side) a contract — keyed by ``symbol_name`` (the engine
 symbol; ADR-0003). When the operator clicks a universe row and hits pull,
 :func:`pull_candles` ingests that instrument's candles across the
 **fetched** base timeframes
-(:data:`GROWW_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
-timeframes are resampled from the 1-minute base, never fetched, per
-DEC-DHAN-1M-ONLY-001), reusing the proven
+(:data:`GROWW_FETCH_INTERVALS` — **``1day`` only during the verify-first phase**,
+DEC-PULL-1DAY-FIRST-001; ``1minute`` + the 19 intraday timeframes resampled from
+it return once the OHLCV-vs-bhavcopy check passes), reusing the proven
 :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` orchestration
 core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
 
@@ -99,20 +99,63 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The Track-1 **operational** pull floor — the start of the locked
-#: "Rolling 2021-01-01 → today" range (CLAUDE.md §3). The vendor capability
-#: reaches back to 2020-01-01 (``GrowwMarketAdapter.earliest_history``; CLAUDE.md
-#: §6 "Historical depth — From 2020"), but the operator deliberately starts the
-#: pull at 2021-01-01 for the safer case — the 2020 edge's data quality is
-#: unverified (DEC-DHAN-PULL-SCOPE-001). Any ``from_date`` below this floor is
+#: The Track-1 **operational** pull floor — the start of the rolling
+#: "2020-01-01 → today" range. The vendor capability reaches back to 2020-01-01
+#: (``GrowwMarketAdapter.earliest_history``; CLAUDE.md §6 "Historical depth — From
+#: 2020"), and the operator-run Phase-0 granularity probe CONFIRMED 1-minute NIFTY
+#: data exists from 2020-01-01T09:15:00 (8297 rows in 2020-Jan), so the floor is set
+#: to the full vendor depth (DEC-PULL-FLOOR-2020-001, operator decision 2026-06-13 —
+#: supersedes the prior 2021-01-01 conservative floor of DEC-DHAN-PULL-SCOPE-001 now
+#: that the 2020 edge is probe-verified). Any ``from_date`` below this floor is
 #: clamped up to it so a too-early pick can never waste quota.
-GROWW_HISTORY_FLOOR: Final[date] = date(2021, 1, 1)
+GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
 
-#: The base timeframes Track 1 actually FETCHES from Groww: 1-minute (every
-#: intraday timeframe is resampled from it) + 1-day (PDH/PDL anchors). The 19
-#: derived intraday timeframes are produced from the stored 1-minute base by
-#: the resampler, never fetched (DEC-DHAN-1M-ONLY-001). Order = display order.
-GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = ("1minute", "1day")
+#: Spot-pull interval selection (DEC-PULL-1DAY-FIRST-001, operator decision
+#: 2026-06-13). The operator picks the fetch granularity per pull via a
+#: ``/universe`` dropdown — **1-day only** (the verify-first default), **1-minute
+#: only**, or **both** — so they can pull 1-day first, cross-check it against the
+#: official NSE/BSE bhavcopy (CLAUDE.md §6), THEN choose 1-minute / both, with no
+#: code change. The three canonical choice tokens:
+SPOT_INTERVAL_DAY: Final[str] = "1day"
+SPOT_INTERVAL_MINUTE: Final[str] = "1minute"
+SPOT_INTERVAL_BOTH: Final[str] = "both"
+
+#: Dropdown choice → the fetched-interval tuple. ``both`` keeps the canonical
+#: display order (1m before 1d; the 19 intraday TFs are resampled from the stored
+#: 1-minute base, never fetched — DEC-DHAN-1M-ONLY-001).
+SPOT_INTERVAL_CHOICES: Final[dict[str, tuple[str, ...]]] = {
+    SPOT_INTERVAL_DAY: ("1day",),
+    SPOT_INTERVAL_MINUTE: ("1minute",),
+    SPOT_INTERVAL_BOTH: ("1minute", "1day"),
+}
+
+#: The verify-first DEFAULT the pull functions use when no explicit ``intervals``
+#: is passed: **1-day only**. One source of truth shared by callers + tests.
+GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = SPOT_INTERVAL_CHOICES[SPOT_INTERVAL_DAY]
+
+
+def resolve_fetch_intervals(choice: str | None) -> tuple[str, ...]:
+    """Map a spot-interval dropdown *choice* to the fetch-interval tuple.
+
+    ``"1day"`` → ``("1day",)``, ``"1minute"`` → ``("1minute",)``, ``"both"`` →
+    ``("1minute", "1day")``. A blank / ``None`` / unrecognised choice falls back to
+    the verify-first **1-day only** default (:data:`GROWW_FETCH_INTERVALS`) — it
+    NEVER silently widens to 1-minute (DEC-PULL-1DAY-FIRST-001 / Golden Rule #1).
+
+    Parameters
+    ----------
+    choice
+        The dropdown / query-param value, or ``None`` when unspecified.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The intervals to fetch, in display order.
+    """
+    if choice is None:
+        return GROWW_FETCH_INTERVALS
+    return SPOT_INTERVAL_CHOICES.get(choice.strip(), GROWW_FETCH_INTERVALS)
+
 
 #: Groww canonical interval → lake ``TF_LABELS`` display label, so the
 #: ``/universe`` grid shows ``1m`` / ``1d`` (consistent with the rest of the
@@ -149,9 +192,9 @@ def resolve_candle_range(
        calendar year, **clamped to ``[GROWW_HISTORY_FLOOR, yesterday]``**.
        A past year resolves to the whole year; the current year stops at
        the previous day (never today / the future); a wholly-future or
-       pre-2021 year raises "nothing to pull".
+       pre-2020 year raises "nothing to pull".
     3. **Default** — neither date nor year: the FULL Track-1 history,
-       ``[GROWW_HISTORY_FLOOR (2021-01-01), previous day]``. (Previously
+       ``[GROWW_HISTORY_FLOOR (2020-01-01), previous day]``. (Previously
        this defaulted to the current calendar year — corrected so a blank
        picker pulls the whole locked range, not just this year.)
 
@@ -193,7 +236,7 @@ def resolve_candle_range(
     # Default upper bound = the PREVIOUS day, so a routine pull never grabs the
     # still-forming current session. An EXPLICIT to_date overrides this and may
     # reach today (clamped below). yesterday < GROWW_HISTORY_FLOOR is impossible
-    # in practice (today is well past 2021) but the start>end guard covers it.
+    # in practice (today is well past 2020) but the start>end guard covers it.
     yesterday = today - timedelta(days=1)
 
     # An EXPLICIT to_date may reach today; every other mode (year / default /
@@ -204,10 +247,10 @@ def resolve_candle_range(
 
     if from_date is None and to_date is None:
         # Mode 2/3 — an explicit *year* picks that full calendar year; absent a
-        # year the default is the FULL Track-1 history (2021-01-01 → previous
+        # year the default is the FULL Track-1 history (2020-01-01 → previous
         # day), NOT the current year. Both fall through the SAME clamp below so
         # the window never reaches today/the future and a wholly-future /
-        # pre-2021 year raises "nothing to pull" (DEC-PULL-FUTURE-WINDOW-001).
+        # pre-2020 year raises "nothing to pull" (DEC-PULL-FUTURE-WINDOW-001).
         if year is not None:
             start_date = date(year, 1, 1)
             end_date = date(year, 12, 31)
@@ -253,7 +296,7 @@ def default_date_range(now: datetime | None = None) -> tuple[str, str]:
     DEC-DEFAULT-DATE-RANGE-001. Reuses :func:`resolve_candle_range` with ALL bounds
     blank, so the pre-filled UI dates are GUARANTEED byte-identical to what a blank
     spot / options pull (or report) actually fetches — ONE source of truth for "the
-    default range is ``[2021-01-01, previous trading day]``" across the whole
+    default range is ``[2020-01-01, previous trading day]``" across the whole
     dashboard. ``to`` is the INCLUSIVE previous day (``resolve_candle_range``'s
     ``end`` is the exclusive half-open boundary, so subtract a day to display it).
 
@@ -267,7 +310,7 @@ def default_date_range(now: datetime | None = None) -> tuple[str, str]:
     Returns
     -------
     tuple[str, str]
-        ``(from_iso, to_iso)`` ISO ``YYYY-MM-DD`` — e.g. ``("2021-01-01",
+        ``(from_iso, to_iso)`` ISO ``YYYY-MM-DD`` — e.g. ``("2020-01-01",
         "2026-06-07")`` when "today" is 2026-06-08.
     """
     start, end = resolve_candle_range(
@@ -401,9 +444,11 @@ class PullCandlesReport:
         this case.
     timeframes
         One :class:`TimeframeResult` per **fetched** interval, in
-        :data:`GROWW_FETCH_INTERVALS` order (``1m`` then ``1d``). The 19
-        derived intraday timeframes are resampled from the 1-minute base
-        downstream, not fetched here (DEC-DHAN-1M-ONLY-001).
+        :data:`GROWW_FETCH_INTERVALS` order (``1d`` only during the
+        verify-first phase, DEC-PULL-1DAY-FIRST-001; ``1m`` then ``1d``
+        once 1-minute is re-enabled). The 19 derived intraday timeframes
+        are resampled from the 1-minute base downstream, not fetched here
+        (DEC-DHAN-1M-ONLY-001).
     """
 
     symbol: str
@@ -545,8 +590,8 @@ class BulkSpotReport:
     """Result of a :func:`pull_all_spot` call (the one-click bulk-spot button).
 
     Aggregates the per-symbol outcome across the two fetched intervals
-    (``1m`` + ``1d``) over the full ``[2021-01-01, previous day]`` range
-    (DEC-DHAN-PULL-SCOPE-001) — the current session is excluded by default.
+    (``1m`` + ``1d``) over the full ``[2020-01-01, previous day]`` range
+    (DEC-PULL-FLOOR-2020-001) — the current session is excluded by default.
     """
 
     dry_run: bool
@@ -819,6 +864,7 @@ def pull_all_spot(
     from_date: str | None = None,
     to_date: str | None = None,
     year: int | None = None,
+    intervals: tuple[str, ...] = GROWW_FETCH_INTERVALS,
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     pull_id: str | None = None,
@@ -828,13 +874,14 @@ def pull_all_spot(
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
 ) -> BulkSpotReport:
-    """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
+    """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
 
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the whole *instruments* list and the fetched base intervals
-    (:data:`GROWW_FETCH_INTERVALS` — ``1m`` + ``1d``), so the live adapter is
-    built ONCE with the full universe (O(1) index) and the fan-out quarantines
+    (the injected *intervals*, defaulting to :data:`GROWW_FETCH_INTERVALS` —
+    ``1d`` only during the verify-first phase, DEC-PULL-1DAY-FIRST-001), so the
+    live adapter is built ONCE with the full universe (O(1) index) and the fan-out quarantines
     a bad symbol without sinking the rest. An empty list is a clean no-op.
 
     Parameters
@@ -848,16 +895,16 @@ def pull_all_spot(
     now
         Injected "current" instant (defaults to :func:`datetime.now`) — its
         UTC date drives the upper bound (the previous day) of the full
-        ``[2021-01-01, previous day]`` window; the current session is excluded.
+        ``[2020-01-01, previous day]`` window; the current session is excluded.
     from_date, to_date, year
         Optional range selectors (DEC-DHAN-SPOT-MULTI-SATURATE-001) threaded to
         :func:`resolve_candle_range` so the multi-select "Pull spot" bulk route
         can pull the operator's date-picker window through this saturating
         cross-symbol flatten. When **all three are ``None``** (the one-click
         ``?kind=`` "Pull ALL" callers) the full Track-1 history
-        ``[2021-01-01, previous day]`` applies — byte-for-byte the prior
+        ``[2020-01-01, previous day]`` applies — byte-for-byte the prior
         behaviour. An explicit ``from_date`` / ``to_date`` (inclusive ISO
-        ``YYYY-MM-DD``, clamped to ``[2021-01-01, today]``) takes precedence over
+        ``YYYY-MM-DD``, clamped to ``[2020-01-01, today]``) takes precedence over
         ``year`` (a full calendar year); a malformed date or ``from`` after
         ``to`` raises :class:`ValueError` (the route maps it to a 400).
     adapter_factory
@@ -897,7 +944,7 @@ def pull_all_spot(
     instruments = list(instruments)
     # Range resolution (DEC-DHAN-SPOT-MULTI-SATURATE-001): when NO range is given
     # (the one-click "Pull ALL" caller) default to the full Track-1 history
-    # ``[2021-01-01, previous day]`` — the prior behaviour, unchanged. When the
+    # ``[2020-01-01, previous day]`` — the prior behaviour, unchanged. When the
     # caller DOES pass an explicit ``from_date`` / ``to_date`` / ``year`` (the
     # multi-select "Pull spot" bulk route, which carries the operator's date
     # picker), honour it verbatim via :func:`resolve_candle_range` so routing the
@@ -939,7 +986,7 @@ def pull_all_spot(
             plan_windows(
                 ledger,
                 instruments=instruments,
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -958,7 +1005,7 @@ def pull_all_spot(
                 ledger,
                 lake_root,
                 instruments=instruments,
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1019,7 +1066,7 @@ def pull_all_spot(
                 adapter,
                 sink,
                 instruments=instruments,
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 pace=pace,
@@ -1148,7 +1195,7 @@ def pull_all_spot(
         for instrument in instruments:
             symbol = instrument.symbol_name
             completed = failed = no_data = 0
-            for fetch_interval, _label in _FETCH_INTERVAL_LABELS:
+            for fetch_interval in intervals:
                 key = (symbol, fetch_interval)
                 if key in failure_keys:
                     failed += 1
@@ -1285,6 +1332,7 @@ def pull_candles(
     from_date: str | None = None,
     to_date: str | None = None,
     dry_run: bool,
+    intervals: tuple[str, ...] = GROWW_FETCH_INTERVALS,
     adapter_factory: AdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     pull_id: str | None = None,
@@ -1296,13 +1344,14 @@ def pull_candles(
     Plans + drives one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the single *instrument* and the Groww **fetched** base intervals
-    (:data:`GROWW_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 derived
-    intraday timeframes are resampled from the 1-minute base downstream,
-    never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
+    (the injected *intervals*, defaulting to :data:`GROWW_FETCH_INTERVALS` —
+    ``1day`` only during the verify-first phase, DEC-PULL-1DAY-FIRST-001;
+    ``1minute`` + the 19 resampled intraday timeframes return once 1-minute is
+    re-enabled, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
-    (day-inclusive, clamped to ``[2021-01-01, today]``) when either is given,
+    (day-inclusive, clamped to ``[2020-01-01, today]``) when either is given,
     else the full calendar *year*, else (no dates, no year) the full Track-1
-    history ``[2021-01-01, previous day]``. The default end is the previous
+    history ``[2020-01-01, previous day]``. The default end is the previous
     day — today is pulled only via an explicit *to_date* reaching it.
     Idempotent + rerun-safe — the sink append is a no-op on already-stored
     bars (CLAUDE.md §2 Rule 7).
@@ -1318,7 +1367,7 @@ def pull_candles(
         dry-run null sink.
     year
         Calendar year to pull when no explicit range is given. ``None``
-        (default) pulls the full Track-1 history (2021-01-01 → previous
+        (default) pulls the full Track-1 history (2020-01-01 → previous
         day), NOT just the current year. Ignored when *from_date* or
         *to_date* is supplied.
     from_date, to_date
@@ -1388,7 +1437,7 @@ def pull_candles(
             plan_windows(
                 ledger,
                 instruments=[instrument],
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1404,7 +1453,7 @@ def pull_candles(
                 ledger,
                 lake_root,
                 instruments=[instrument],
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1419,7 +1468,7 @@ def pull_candles(
             start_date=start.date().isoformat(),
             end_date=end_label,
             dry_run=dry_run,
-            intervals=len(GROWW_FETCH_INTERVALS),
+            intervals=len(intervals),
         )
 
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
@@ -1446,7 +1495,7 @@ def pull_candles(
             adapter,
             sink,
             instruments=[instrument],
-            intervals=GROWW_FETCH_INTERVALS,
+            intervals=intervals,
             start=start.date(),
             end=end.date(),
             pace=pace,
@@ -1461,8 +1510,16 @@ def pull_candles(
         _observe_rate(rate_observer, _rate_controller, adapter)
 
         failure_keys = {(f.symbol, f.interval) for f in report.failures}
+        # Build one result per ACTUALLY-fetched interval (the injected *intervals*,
+        # 1day-only during the verify-first phase, DEC-PULL-1DAY-FIRST-001) — NOT a
+        # hardcoded 1m+1d pair, which KeyError'd on report.pairs when 1-minute was
+        # gated off. The label map gives the dashboard's ``1m``/``1d`` display label.
+        # Explicit ``dict[str, str]`` so the keys are plain ``str`` (not the literal
+        # union pyright would infer from the tuple), matching the ``str`` *intervals*.
+        label_for: dict[str, str] = dict(_FETCH_INTERVAL_LABELS)
         timeframes: list[TimeframeResult] = []
-        for fetch_interval, label in _FETCH_INTERVAL_LABELS:
+        for fetch_interval in intervals:
+            label = label_for.get(fetch_interval, fetch_interval)
             key = (symbol, fetch_interval)
             if key in failure_keys:
                 # Terminal Groww error — quarantined, never in report.pairs.
@@ -1498,6 +1555,10 @@ def pull_candles(
 __all__ = [
     "GROWW_FETCH_INTERVALS",
     "GROWW_HISTORY_FLOOR",
+    "SPOT_INTERVAL_BOTH",
+    "SPOT_INTERVAL_CHOICES",
+    "SPOT_INTERVAL_DAY",
+    "SPOT_INTERVAL_MINUTE",
     "AdapterFactory",
     "BulkAdapterFactory",
     "BulkSpotReport",
@@ -1509,5 +1570,6 @@ __all__ = [
     "pull_all_spot",
     "pull_candles",
     "resolve_candle_range",
+    "resolve_fetch_intervals",
     "resolve_pull_symbols",
 ]
