@@ -203,11 +203,18 @@ def _build_dry_run_derivative_client(_lake_root: Path) -> tuple[GrowwClient, Bar
 
 def _build_live_derivative_client(  # pragma: no cover - live Groww TOTP token + SDK + network
     lake_root: Path,
+    *,
+    pace: Callable[[], None] | None = None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
 ) -> tuple[GrowwClient, BarSink]:
     """Build the LIVE ``(GrowwClient, ParquetBarSink)`` from stored TOTP credentials.
 
     LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. Mirrors
     ``pull_controller._build_live_spot_adapter`` — same creds chain, same lake sink.
+    The rate-controller hooks are passed into the client so EVERY chain call
+    (expiries / contracts / candles) is paced + retried + decrement/recover at the
+    one choke point (DEC-GROWW-RATELIMIT-RETRY-001).
     """
     from brutex.adapters.groww.auth import GrowwCredentials
     from brutex.adapters.groww.live import build_live_client
@@ -217,9 +224,37 @@ def _build_live_derivative_client(  # pragma: no cover - live Groww TOTP token +
 
     file_creds = resolve_groww_file_credentials()
     creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
-    client = build_live_client(creds)
+    client = build_live_client(
+        creds, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
+    )
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     return client, sink
+
+
+def _resolve_client_factory(
+    *,
+    dry_run: bool,
+    pace: Callable[[], None] | None,
+    on_rate_limit: Callable[[], None] | None,
+    on_success: Callable[[], None] | None,
+) -> DerivativeClientFactory:
+    """Pick the default ``(lake_root) -> (client, sink)`` factory, wiring the live limiter.
+
+    Dry-run → the honest empty-chain pair. Live → a factory that injects the shared
+    rate controller's pace / decrement-on-429 / recover-on-success hooks into the
+    :class:`GrowwClient`, so the chain pull can NEVER bypass the limiter
+    (DEC-GROWW-RATELIMIT-RETRY-001). The returned factory keeps the
+    ``Callable[[Path], ...]`` contract so an injected test factory is unaffected.
+    """
+    if dry_run:
+        return _build_dry_run_derivative_client
+
+    def _live(lake_root: Path) -> tuple[GrowwClient, BarSink]:  # pragma: no cover - live network
+        return _build_live_derivative_client(
+            lake_root, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
+        )
+
+    return _live
 
 
 def _rate_hooks(
@@ -318,12 +353,12 @@ def pull_all_derivatives(
     now = now or datetime.now(UTC)
     start, end = resolve_derivative_range(from_date=from_date, to_date=to_date, now=now)
     years = _years_for(start, end)
+    pace, on_rate_limit, on_timeout, on_success = _rate_hooks(session_rate, dry_run=dry_run)
     if client_factory is None:
-        client_factory = (
-            _build_dry_run_derivative_client if dry_run else _build_live_derivative_client
+        client_factory = _resolve_client_factory(
+            dry_run=dry_run, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
         )
     client, sink = client_factory(lake_root)
-    pace, on_rate_limit, on_timeout, on_success = _rate_hooks(session_rate, dry_run=dry_run)
     ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
     progress = _make_progress(on_progress, flush)

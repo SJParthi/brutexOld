@@ -427,3 +427,27 @@ def test_pull_default_now_branch(tmp_path: Path) -> None:
         intervals=("1day",),
     )
     assert report.dry_run is True
+
+
+def test_resolve_client_factory_dry_run_returns_empty_chain_pair(tmp_path: Path) -> None:
+    """Dry-run → the honest empty-chain client + null sink (no hooks needed)."""
+    factory = dp._resolve_client_factory(
+        dry_run=True, pace=None, on_rate_limit=None, on_success=None
+    )
+    client, _sink = factory(tmp_path)
+    assert isinstance(client, GrowwClient)
+
+
+def test_resolve_client_factory_live_returns_callable() -> None:
+    """Live (DEC-GROWW-RATELIMIT-RETRY-001) → a factory closure carrying the limiter hooks.
+
+    The closure's body is the live (network/TOTP) ``# pragma: no cover`` path; this
+    pins that the live branch returns a usable ``(Path) -> (client, sink)`` factory.
+    """
+    factory = dp._resolve_client_factory(
+        dry_run=False,
+        pace=lambda: None,
+        on_rate_limit=lambda: None,
+        on_success=lambda: None,
+    )
+    assert callable(factory)
