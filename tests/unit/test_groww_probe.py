@@ -8,6 +8,7 @@ Drives :mod:`brutex.adapters.groww.probe` with a FAKE ``GrowwClient`` (no
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import date
 
 from brutex.adapters.groww.errors import GrowwError, GrowwNotFoundError
 from brutex.adapters.groww.probe import (
@@ -145,6 +146,24 @@ def test_granularity_error() -> None:
     result = probe_granularity(client)  # type: ignore[arg-type]
     assert result.verdict == VERDICT_ERROR
     assert "granularity probe failed" in result.detail
+
+
+def test_granularity_requests_window_within_30day_cap() -> None:
+    # DEC-GROWW-PROBE-1M-WINDOW-001: Groww caps the 1minute interval at 30 days per
+    # request, so the probe MUST ask for a single ≤30-day window — the old 90-day
+    # (Q1) request was rejected vendor-side as a FALSE ❌ on a valid token.
+    captured: dict[str, object] = {}
+
+    def _capture(kwargs: dict[str, object]) -> Mapping[str, object]:
+        captured.update(kwargs)
+        return {"candles": [["2020-01-01 09:15:00", 1, 2]]}
+
+    result = probe_granularity(_FakeClient(candles=_capture))  # type: ignore[arg-type]
+    assert result.verdict == VERDICT_OK
+    assert captured["interval"] == "1minute"
+    start = date.fromisoformat(str(captured["start"])[:10])
+    end = date.fromisoformat(str(captured["end"])[:10])
+    assert (end - start).days <= 30
 
 
 # ── probe_options ───────────────────────────────────────────────────────────
