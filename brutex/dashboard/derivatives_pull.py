@@ -224,9 +224,7 @@ def _build_live_derivative_client(  # pragma: no cover - live Groww TOTP token +
 
     file_creds = resolve_groww_file_credentials()
     creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
-    client = build_live_client(
-        creds, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
-    )
+    client = build_live_client(creds, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success)
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     return client, sink
 
