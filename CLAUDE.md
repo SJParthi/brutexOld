@@ -128,7 +128,7 @@ hostile-review pass._
    derived/recoverable, not stored.
 
    **Leg-economics fold (DEC-GROWW-LEG-ECONOMICS-001, 2026-06-13, MIGRATION.md
-   entry #695):** before the legs are discarded, each persisted underlying is
+   entry #696):** before the legs are discarded, each persisted underlying is
    **stamped with its tradable F&O lot + freeze** harvested from its derivative
    legs (`universe.build_underlying_economics` →
    `dashboard/instrument_loader._fold_leg_economics`) — RELIANCE → 500, NIFTY →
