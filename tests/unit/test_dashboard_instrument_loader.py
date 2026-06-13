@@ -310,9 +310,11 @@ def test_ntm_admits_non_fno_constituents_as_reference(tmp_path: Path) -> None:
     # The lake tags exactly SMALLCO reference_only; WIPRO keeps its option chain.
     refs = store.reference_only_security_ids()
     assert refs == frozenset({_SMALLCO_ID})
+    assert _WIPRO_ID not in refs  # the F&O constituent is excluded from the reference set
     wipro = store.get("WIPRO")
     smallco = store.get("SMALLCO")
     assert wipro is not None and smallco is not None
+    assert wipro.security_id == _WIPRO_ID  # parsed from the exchange_token column
     assert is_option_pullable(wipro, reference_only_ids=refs) is True
     assert is_option_pullable(smallco, reference_only_ids=refs) is False
 
