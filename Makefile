@@ -7,7 +7,7 @@ help:
 	@echo "BruteX development targets:"
 	@echo "  setup      — turnkey full env: venv + all libs + Rust kernel (scripts/setup/bootstrap.sh)"
 	@echo "  install    — install package + dev dependencies via pip (into the active env)"
-	@echo "  run        — turnkey one-click: venv + [data,ui] libs + fno_math + trading_core kernels + launch (opens browser, http://127.0.0.1:9080)"
+	@echo "  run        — turnkey one-click: venv + [data,ui,groww] libs (incl. the live Groww SDK) + fno_math + trading_core kernels + launch (opens browser, http://127.0.0.1:9080)"
 	@echo "  fmt        — run ruff format"
 	@echo "  lint       — run ruff check"
 	@echo "  type       — run mypy --strict + pyright"
@@ -49,9 +49,10 @@ setup:
 	bash scripts/setup/bootstrap.sh
 
 # One-command clone-and-run (DEC-CLONE-RUN-002 + DEC-ONECLICK-RUN-001). Creates
-# the venv, installs the dashboard runtime libs ([data,ui] — Dhan needs no
-# vendor SDK; auth is a manual access-token + client-id over plain REST,
-# DEC-DHAN-FINALIZE-001), builds the fno_math
+# the venv, installs the dashboard runtime + Groww live libs ([data,ui,groww] —
+# Groww authenticates via the growwapi SDK + pyotp TOTP, so the live probe/pull
+# need the [groww] extra; DEC-DHAN-GROWW-REMIGRATE-001 / DEC-MAKE-RUN-GROWW-EXTRA-001),
+# builds the fno_math
 # Rust kernel when it is not importable (brutex.strategies.combo imports it at
 # module top, combo.py:64) AND the trading_core kernel (the shared 52-vocab
 # core — brutex.indicators.fib_levels imports it at module top, fib_levels.py:68,
@@ -67,7 +68,7 @@ preflight:
 run: preflight
 	@test -d $(VENV) || $(PY) -m venv $(VENV)
 	$(VPIP) install --upgrade pip
-	$(VPIP) install -e ".[data,ui]"
+	$(VPIP) install -e ".[data,ui,groww]"
 	@$(VPY) -c "import fno_math" 2>/dev/null || { \
 		echo "==> fno_math kernel not importable — building it (one-time; needs cargo)"; \
 		$(VPIP) install maturin; \
