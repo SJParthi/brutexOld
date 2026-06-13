@@ -119,14 +119,28 @@ class GrowwClient:
         )
 
     def expiries(
-        self, *, exchange: str, underlying_symbol: str, year: int, month: int
+        self,
+        *,
+        exchange: str,
+        underlying_symbol: str,
+        year: int | None = None,
+        month: int | None = None,
     ) -> Mapping[str, object]:
-        """List FNO expiries for an underlying in a given year/month."""
-        return self._call(
-            lambda: self.sdk.get_expiries(
-                exchange=exchange, underlying_symbol=underlying_symbol, year=year, month=month
-            )
-        )
+        """List FNO expiries for an underlying, optionally scoped to a year/month.
+
+        ``year`` and ``month`` are OPTIONAL per the SDK
+        (``docs/groww/api-reference/03-backtesting.md:60-79``): a ``None`` ``year``
+        defaults to the current year, a ``None`` ``month`` to the WHOLE year. Each
+        is OMITTED from the SDK call when ``None`` (never forwarded as ``None``), so
+        the option enumerator can issue ONE call per historical year (month omitted)
+        to cover the full FNO depth (DEC-GROWW-OPTION-INGEST-001).
+        """
+        kwargs: dict[str, object] = {"exchange": exchange, "underlying_symbol": underlying_symbol}
+        if year is not None:
+            kwargs["year"] = year
+        if month is not None:
+            kwargs["month"] = month
+        return self._call(lambda: self.sdk.get_expiries(**kwargs))
 
     def contracts(
         self, *, exchange: str, underlying_symbol: str, expiry_date: str
