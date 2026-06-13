@@ -1,6 +1,6 @@
 """Smart 1-minute fetch bounds derived from a contract's 1-day lake coverage.
 
-DEC-DERIV-MINUTE-BOUNDS-001 (MIGRATION.md entry #710). An F&O contract only
+DEC-DERIV-MINUTE-BOUNDS-001 (MIGRATION.md entry #711). An F&O contract only
 *lives* from its listing day to its expiry, so pulling 1-minute candles over the
 full ``2021-01-01 → today`` range (CLAUDE.md §3) for every strike wastes the bulk
 of the per-contract API calls on dead periods the contract did not yet / no longer
