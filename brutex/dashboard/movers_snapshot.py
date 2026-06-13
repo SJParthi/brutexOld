@@ -1,4 +1,4 @@
-"""Point-in-time "movers" snapshot core — the Dhan-style `/movers` view (pure).
+"""Point-in-time "movers" snapshot core — the markets-screen-style `/movers` view (pure).
 
 ``DEC-MOVERS-SNAPSHOT-VIEW-001``. The redesigned ``/movers`` page asks ONE
 question — *"who are the movers as of a single date, on one timeframe, at one
@@ -13,7 +13,7 @@ The trading session is **09:15 → 15:30 IST** (CLAUDE.md §7); every intraday
 metric anchors at the 09:15 open.
 
 * **% change is vs the PREVIOUS day's close** (the standard market convention,
-  matches the Dhan screens the operator referenced):
+  matches the broker markets screens the operator referenced):
   ``change = ltp − prev_day_close`` and
   ``pct_change = change / prev_day_close × 100`` — where ``ltp`` is the close of
   the **selected** bar (date · timeframe · time) and ``prev_day_close`` is the
@@ -37,9 +37,12 @@ pulled**, NOT a live feed (Track-1 has no live feed — CLAUDE.md §1). Prices a
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from datetime import date as date_cls
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Final
 
 from brutex.data.models import CandleBar
@@ -48,13 +51,26 @@ from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.money import format_inr, round_money, rupees_to_paisa
 
 __all__ = [
+    "DEFAULT_INTERVAL",
+    "DEFAULT_TOP_N",
     "MoverSnapshot",
     "ScreenInstrument",
     "build_snapshot_payload",
     "compute_snapshot",
     "interval_minutes",
+    "parse_snapshot_date",
+    "pending_asset_payload",
+    "run_movers_snapshot",
     "session_bar_times",
 ]
+
+#: The page opens on the coarse 1-day timeframe (cheapest, always populated if
+#: ANY spot was pulled) and a generous depth (the broker markets screens list many rows).
+DEFAULT_INTERVAL: Final[str] = "1day"
+DEFAULT_TOP_N: Final[int] = 50
+
+#: IST is a fixed +05:30 (no DST) — the lake stores bar time as tz-aware UTC.
+_IST: Final[str] = "Asia/Kolkata"
 
 #: Lake interval label → its bar length in minutes (the inverse of the single
 #: source of truth :data:`brutex.data.timeframes.LAKE_INTERVAL_LABELS`, so the
@@ -233,8 +249,24 @@ def _by_volume(snaps: Sequence[MoverSnapshot], top_n: int) -> list[MoverSnapshot
     return pool[:top_n]
 
 
+def _by_value(snaps: Sequence[MoverSnapshot], top_n: int) -> list[MoverSnapshot]:
+    """Top-``n`` snapshots by cumulative fresh-session traded value, descending."""
+    pool = [s for s in snaps if s.value_paisa > 0]
+    pool.sort(key=lambda s: (-s.value_paisa, _sort_key(s)))
+    return pool[:top_n]
+
+
+#: Spot category key → ranking function (the redesigned page's pill set).
+_SPOT_CATEGORIES: Final[dict[str, Any]] = {
+    "price_gainers": _gainers,
+    "price_losers": _losers,
+    "volume": _by_volume,
+    "value": _by_value,
+}
+
+
 def _row(snap: MoverSnapshot) -> dict[str, Any]:
-    """Project one snapshot to a Dhan-style JSON row (money 2dp, metrics full-precision)."""
+    """Project one snapshot to a markets-screen-style JSON row (money 2dp, metrics full-precision)."""
     return {
         "symbol": snap.instrument.symbol,
         "name": snap.instrument.display_name,
@@ -258,24 +290,27 @@ def build_snapshot_payload(
     top_n: int,
     skipped: int,
 ) -> dict[str, Any]:
-    """Assemble the Dhan-style ``/api/v1/movers`` JSON from computed snapshots.
+    """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
-    Builds the three ranked tables (gainers / losers / volume) the redesigned
-    page renders, plus the echo of the chosen ``date`` / ``interval`` / ``time``
-    and an honest ``note``. Every value is JSON-native (money is a ``₹`` string,
-    statistical metrics are full-precision strings, value is a ₹-crore string) so
-    Starlette's ``JSONResponse`` never chokes on a ``Decimal``.
+    Builds one ranked list **per spot category** (``price_gainers`` /
+    ``price_losers`` / ``volume`` / ``value`` — the redesigned page's pills), keyed
+    by the category name so the page's ``j[category]`` lookup picks the active one.
+    Adds the echo of the chosen ``date`` / ``interval`` / ``time`` and an honest
+    ``note``. Every value is JSON-native (money is a ``₹`` string, statistical
+    metrics are full-precision strings, value is a ₹-crore string) so Starlette's
+    ``JSONResponse`` never chokes on a ``Decimal``.
     """
-    gainers = [_row(s) for s in _gainers(snapshots, top_n)]
-    losers = [_row(s) for s in _losers(snapshots, top_n)]
-    volume = [_row(s) for s in _by_volume(snapshots, top_n)]
+    ranked: dict[str, list[dict[str, Any]]] = {
+        category: [_row(s) for s in rank_fn(snapshots, top_n)]
+        for category, rank_fn in _SPOT_CATEGORIES.items()
+    }
     instrument_count = len(snapshots) + skipped
     if instrument_count == 0:
         note = (
             "No spot data in the lake yet — pull spot first on the Coverage page, "
             "then refresh. (Reference-only lake view, CLAUDE.md §3.)"
         )
-    elif not gainers and not losers and not volume:
+    elif not any(ranked.values()):
         note = (
             f"{instrument_count} instrument(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
@@ -292,8 +327,231 @@ def build_snapshot_payload(
         "top_n": top_n,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
-        "gainers": gainers,
-        "losers": losers,
-        "volume_movers": volume,
         "note": note,
+        **ranked,
     }
+
+
+def pending_asset_payload(
+    asset: str, *, interval: str, date: str, time: str | None, top_n: int
+) -> dict[str, Any]:
+    """An honest "not wired yet" payload for the Futures / Options tabs.
+
+    This milestone ships the **Spot** tab; Futures + Options follow. Returns the
+    same echo shape as :func:`build_snapshot_payload` (so the page's as-of line +
+    note still render) with no rows and a note that names the asset — never a
+    500, never a fabricated row (Golden Rule #1 / #10). The page reads
+    ``j[category]`` and falls back to ``[]`` for the absent category keys.
+    """
+    return {
+        "interval": interval,
+        "date": date,
+        "time": time,
+        "top_n": top_n,
+        "instrument_count": 0,
+        "skipped_count": 0,
+        "note": (
+            f"{asset.title()} movers ship after Spot — this milestone wires the Spot tab; "
+            "Futures + Options follow. Reference-only lake view (CLAUDE.md §3)."
+        ),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Live orchestration — reads the lake, resamples, snapshots (spot)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def parse_snapshot_date(date_str: str | None) -> date_cls:
+    """Parse an ISO ``YYYY-MM-DD`` *date_str* (blank ⇒ today UTC), or raise ``ValueError``.
+
+    The single date the snapshot is taken on (the redesigned page's one date
+    picker, not a range). A malformed value raises :class:`ValueError` naming the
+    bad input (the route maps it to a 400).
+    """
+    if not date_str:
+        return datetime.now(UTC).date()
+    try:
+        return date_cls.fromisoformat(date_str)
+    except ValueError as exc:
+        raise ValueError(f"malformed date {date_str!r} — expected ISO YYYY-MM-DD") from exc
+
+
+def _cutoff_minute(time_str: str | None) -> int | None:
+    """Parse an ``HH:MM`` IST time to a minute-of-day cutoff, or ``None`` for whole-day.
+
+    Raises :class:`ValueError` on a malformed time (the route maps it to a 400).
+    """
+    if not time_str:
+        return None
+    try:
+        hh, mm = time_str.split(":")  # wrong arity → ValueError (unpack), as does a bad int.
+        return int(hh) * 60 + int(mm)
+    except ValueError as exc:
+        raise ValueError(f"malformed time {time_str!r} — expected HH:MM") from exc
+
+
+def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
+    """Convert one resampled polars row (``ts_utc``/OHLCV) to a :class:`CandleBar`."""
+    ts = row["ts_utc"]
+    if ts.tzinfo is None:  # the resampler may drop tz — the lake instant is UTC.
+        ts = ts.replace(tzinfo=UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(row["open"])),
+        high=Decimal(str(row["high"])),
+        low=Decimal(str(row["low"])),
+        close=Decimal(str(row["close"])),
+        volume=int(row["volume"]),
+        open_interest=None,
+    )
+
+
+def _read_session_bars(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    day: date_cls,
+    minutes: int,
+    cutoff_min: int | None,
+) -> list[CandleBar]:
+    """Read *day*'s 1-minute bars, resample to *minutes*, slice to ``≤ cutoff_min``.
+
+    Reuses the COMMON :func:`~brutex.data.timeframe_materialize.make_lake_read_1m`
+    reader (CLAUDE.md §11) so the resampler is fed identically to the rest of the
+    lake; then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the
+    chosen timeframe (1minute → no-op, 1day → the single session bar). For an
+    intraday timeframe the bars are kept up to (and including) the bar whose IST
+    open-minute ``≤ cutoff_min``. Empty when the symbol has no 1-minute bars on
+    *day* (the caller reports it skipped, never fabricated — Golden Rule #1).
+    """
+    import polars as pl
+
+    from brutex.data.tf_resampler import resample_1m_to_tf
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    try:
+        df = make_lake_read_1m(
+            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+        )()
+    except ValueError:
+        return []
+    ist_date = pl.col("ts_utc").dt.convert_time_zone(_IST).dt.date()
+    day_df = df.filter(ist_date == day).sort("ts_utc")
+    if day_df.is_empty():
+        return []
+    res = resample_1m_to_tf(day_df, minutes).sort("ts_utc")
+    if cutoff_min is not None:
+        ist = pl.col("ts_utc").dt.convert_time_zone(_IST)
+        # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
+        # UInt8, so `hour * 60` would overflow (9*60=540 wraps past 255).
+        minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+        res = res.filter(minute_of_day <= cutoff_min)
+    if res.is_empty():
+        return []
+    return [_row_to_bar(row) for row in res.iter_rows(named=True)]
+
+
+def _prev_day_close(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> Decimal | None:
+    """Return the previous trading day's 1-day close before *day*, or ``None``.
+
+    Reads the symbol's stored ``1day`` partitions and returns the close of the
+    last bar whose IST trading date is strictly before *day*. ``None`` when there
+    is no 1-day data or no prior day (the first day in the lake) — the snapshot
+    then reports an honest ``None`` % change, never a fabricated base.
+    """
+    import polars as pl
+
+    base = lake_root / "bars" / exchange / segment / symbol / "1day"
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return None
+    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+    prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+        "timestamp"
+    )
+    if prior.is_empty():
+        return None
+    return Decimal(str(prior.tail(1).get_column("close")[0]))
+
+
+def run_movers_snapshot(
+    *,
+    lake_root: Path,
+    interval: str,
+    date: str | None,
+    time: str | None,
+    top_n: int,
+    names: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compute the spot movers snapshot over the lake → the ``/api/v1/movers`` payload.
+
+    Discovers every spot instrument with 1-minute data
+    (:func:`~brutex.dashboard.db_view.list_candle_datasets`), reads each one's
+    selected-day session bars at *interval* up to *time*, takes the previous
+    day's 1-day close, computes the per-instrument :class:`MoverSnapshot`, and
+    ranks them into the per-category payload. An empty lake (or an unknown
+    interval) yields an honest "pull spot first" payload — never a 500, never a
+    fabricated mover (Golden Rule #1).
+
+    Raises
+    ------
+    ValueError
+        On a malformed *date* / *time* (the route maps it to a 400).
+    """
+    from brutex.dashboard.db_view import list_candle_datasets
+
+    minutes = interval_minutes(interval)
+    day = parse_snapshot_date(date)
+    date_str = day.isoformat()
+    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    resolved_names = names or {}
+    one_minute = [d for d in list_candle_datasets(lake_root) if d["interval"] == "1minute"]
+    if minutes is None or not one_minute:
+        return build_snapshot_payload(
+            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
+        )
+
+    snapshots: list[MoverSnapshot] = []
+    skipped = 0
+    for dataset in one_minute:
+        bars = _read_session_bars(
+            lake_root,
+            exchange=dataset["exchange"],
+            segment=dataset["segment"],
+            symbol=dataset["symbol"],
+            day=day,
+            minutes=minutes,
+            cutoff_min=cutoff_min,
+        )
+        # Skip the prior-day 1-day read entirely when the symbol had no bars on
+        # the selected day (no point computing a baseline for nothing).
+        prev_close = (
+            _prev_day_close(
+                lake_root,
+                exchange=dataset["exchange"],
+                segment=dataset["segment"],
+                symbol=dataset["symbol"],
+                day=day,
+            )
+            if bars
+            else None
+        )
+        instrument = ScreenInstrument(
+            symbol=dataset["symbol"],
+            exchange=dataset["exchange"],
+            segment=dataset["segment"],
+            display_name=resolved_names.get(dataset["symbol"], dataset["symbol"]),
+        )
+        snap = compute_snapshot(instrument, bars, prev_close=prev_close)
+        if snap is None:  # no bars on the selected day → reported skipped, never faked.
+            skipped += 1
+            continue
+        snapshots.append(snap)
+
+    return build_snapshot_payload(
+        snapshots, interval=interval, date=date_str, time=time, top_n=top_n, skipped=skipped
+    )

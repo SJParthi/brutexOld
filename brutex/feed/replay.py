@@ -269,9 +269,8 @@ def arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
 
     Public (promoted from the former private ``_arrow_table_to_bars`` per
     CLAUDE.md §11 COMMON, ``DEC-MOVERS-DASHBOARD-PAGE-001``): this is the single
-    source of truth for the Arrow → :class:`CandleBar` conversion, now also
-    consumed by the dashboard ``/movers`` lake reader
-    (:mod:`brutex.dashboard.movers_reader`) — no copy-paste of the conversion.
+    source of truth for the Arrow → :class:`CandleBar` conversion, reused by the
+    lake-reading screener paths — no copy-paste of the conversion.
     """
     if table.num_rows == 0:
         return []

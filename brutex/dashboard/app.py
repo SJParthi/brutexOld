@@ -69,13 +69,13 @@ from brutex.dashboard.db_view import (
     summarize_spot_datasets,
     table_summary,
 )
-from brutex.dashboard.movers_reader import (
+from brutex.dashboard.movers_snapshot import (
     DEFAULT_INTERVAL,
-    DEFAULT_RECENT_BARS,
     DEFAULT_TOP_N,
-    empty_movers_payload,
-    parse_window,
-    run_movers_screen,
+    build_snapshot_payload,
+    parse_snapshot_date,
+    pending_asset_payload,
+    run_movers_snapshot,
 )
 from brutex.dashboard.preopen_report import (
     ReportBasis,
@@ -1915,68 +1915,83 @@ def build_app(
 
     @app.get("/api/v1/movers")
     async def api_movers(
+        asset: str = Query(default="spot"),
         interval: str = Query(default=DEFAULT_INTERVAL),
-        start: str | None = Query(default=None),
-        end: str | None = Query(default=None),
-        top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=100),
-        recent_bars: int = Query(default=DEFAULT_RECENT_BARS, ge=1, le=500),
+        date: str | None = Query(default=None),
+        time: str | None = Query(default=None),
+        top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=200),
     ) -> JSONResponse:
-        """GET /api/v1/movers — top gainers/losers + volume/volatility movers (DEC-MOVERS-DASHBOARD-PAGE-001).
+        """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
-        Surfaces the two already-merged reference-only screener cores
-        (``DEC-MOVERS-GAINERS-001`` #701 + ``DEC-MOVERS-VOLUME-001`` #702) over
-        the ingested lake. READ-ONLY (CLAUDE.md §3): ranks OHLCV the operator
-        already pulled; NEVER touches the brute-force engine or the 52-vocab.
+        Answers ONE question — *"who are the movers as of a single date, on one
+        timeframe, at one time?"* — over the ingested lake. READ-ONLY
+        (CLAUDE.md §3): ranks OHLCV the operator already pulled; NEVER touches the
+        brute-force engine or the 52-vocab; NOT a live feed (Track-1 has none —
+        CLAUDE.md §1). The page renders one ranked list per spot category
+        (``price_gainers`` / ``price_losers`` / ``volume`` / ``value``) and sorts
+        any column client-side.
 
         Query parameters
         ----------------
+        asset
+            ``spot`` (this milestone). ``futures`` / ``options`` return an honest
+            "ships after Spot" payload until their readers land.
         interval
-            The lake timeframe to screen (default ``1day`` — coarse on purpose;
-            see :mod:`brutex.dashboard.movers_reader` honest envelope).
-        start, end
-            Inclusive ISO ``YYYY-MM-DD`` window bounds; blank ⇒ the rolling
-            ``[2021-01-01, today]`` default (CLAUDE.md §3). A malformed date or a
-            ``from`` after ``to`` is a 400.
+            The lake timeframe to snapshot (default ``1day``); the 21-timeframe
+            vocab (1minute … 1day). An unknown label degrades to "pull spot first".
+        date
+            The single ISO ``YYYY-MM-DD`` snapshot day; blank ⇒ today (UTC). A
+            malformed value is a 400.
+        time
+            The intraday ``HH:MM`` IST bar to snapshot as-of (blank / daily ⇒ the
+            whole-day bar). A malformed value is a 400.
         top_n
-            Ranking depth for each of the four tables (1..100).
-        recent_bars
-            Volume-surge recent-window size (1..500).
+            Ranking depth for each category (1..200).
 
-        **Honest envelope (Golden Rule #10):** the screen is only as good as the
+        **Honest envelope (Golden Rule #10):** the snapshot is only as good as the
         ingested lake — an empty lake (or a store with no lake root) returns an
         honest ``instrument_count: 0`` payload with a "pull spot first" note,
-        never a 500 and never a fabricated mover. The lake read + reconcile is
-        an O(P) one-time pass (NOT O(1)-total — see the module docstring).
+        never a 500 and never a fabricated mover. % change is vs the PREVIOUS
+        day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
         try:
-            window_start, window_end = parse_window(start, end)
+            if asset != "spot":
+                # Milestone 1 wires the Spot tab; Futures + Options follow.
+                return JSONResponse(
+                    pending_asset_payload(
+                        asset,
+                        interval=interval,
+                        date=parse_snapshot_date(date).isoformat(),
+                        time=time,
+                        top_n=top_n,
+                    )
+                )
+            store_path = getattr(store, "path", None)
+            if not isinstance(store_path, Path):
+                # No lake root wired → honest empty payload (never a 500), mirroring
+                # the /api/v1/coverage/spot no-lake-root degrade.
+                return JSONResponse(
+                    build_snapshot_payload(
+                        [],
+                        interval=interval,
+                        date=parse_snapshot_date(date).isoformat(),
+                        time=time,
+                        top_n=top_n,
+                        skipped=0,
+                    )
+                )
+            payload = await run_in_threadpool(
+                run_movers_snapshot,
+                lake_root=store_path.parent,
+                interval=interval,
+                date=date,
+                time=time,
+                top_n=top_n,
+            )
+            return JSONResponse(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        store_path = getattr(store, "path", None)
-        if not isinstance(store_path, Path):
-            # No lake root wired → honest empty payload (never a 500), mirroring
-            # the /api/v1/coverage/spot no-lake-root degrade.
-            return JSONResponse(
-                empty_movers_payload(
-                    interval=interval,
-                    start=window_start,
-                    end=window_end,
-                    top_n=top_n,
-                    recent_bars=recent_bars,
-                )
-            )
-        lake_root = store_path.parent
-        payload = await run_in_threadpool(
-            run_movers_screen,
-            lake_root=lake_root,
-            interval=interval,
-            start=window_start,
-            end=window_end,
-            top_n=top_n,
-            recent_bars=recent_bars,
-        )
-        return JSONResponse(payload)
 
     @app.get("/coverage", response_class=HTMLResponse)
     async def coverage_page() -> str:
@@ -2216,11 +2231,12 @@ def build_app(
 
     @app.get("/movers", response_class=HTMLResponse)
     async def movers_page() -> str:
-        """GET /movers — the reference-only movers page (DEC-MOVERS-DASHBOARD-PAGE-001).
+        """GET /movers — the reference-only markets-screen-style movers page (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
-        Surfaces the gainers/losers + volume/volatility screener cores over the
-        lake; the page loads on open + a manual Refresh (no auto-poll timer —
-        each load reconciles the catalog from the lake, an O(P) one-time pass).
+        A point-in-time snapshot view (Spot / Futures / Options tabs; single date
+        + timeframe + auto-filled time; click-to-sort on every column) over the
+        ingested lake. The page loads on open + on every control change / manual
+        Refresh (no auto-poll timer); each load is an O(P) one-time lake pass.
         """
         return _render_movers_html()
 
@@ -3198,12 +3214,12 @@ _MOVERS_TEMPLATE_CACHE: str | None = None
 
 
 def _load_movers_template() -> str:
-    """Load + cache the movers page template (DEC-MOVERS-DASHBOARD-PAGE-001).
+    """Load + cache the movers page template (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
-    Ships as ``brutex/dashboard/templates/movers.html``. The page fetches
-    ``/api/v1/movers`` on open + a manual Refresh (no auto-poll timer) and
-    renders the top gainers / losers / volume movers / volatility movers tables.
-    Loaded once, then served verbatim.
+    Ships as ``brutex/dashboard/templates/movers.html``. The markets-screen-style page
+    fetches ``/api/v1/movers`` on open + on every control change / manual Refresh
+    (no auto-poll timer) and renders the active asset/category as a click-to-sort
+    table. Loaded once, then served verbatim.
     """
     global _MOVERS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
     if _MOVERS_TEMPLATE_CACHE is None:
@@ -3212,7 +3228,7 @@ def _load_movers_template() -> str:
 
 
 def _render_movers_html() -> str:
-    """Return the reference-only movers page HTML (DEC-MOVERS-DASHBOARD-PAGE-001)."""
+    """Return the reference-only movers page HTML (DEC-MOVERS-SNAPSHOT-VIEW-001)."""
     return _load_movers_template()
 
 
