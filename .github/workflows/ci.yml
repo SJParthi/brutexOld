@@ -559,7 +559,7 @@ jobs:
           else
             echo "(brutex.adapters.protocol test file not present yet — gate inactive)"
           fi
-          # DEC-SYNTHETIC-ADAPTER-001 (entry #694): the synthetic offline adapter
+          # DEC-SYNTHETIC-ADAPTER-001 (entry #695): the synthetic offline adapter
           #       package — seeded deterministic generator + O(1)-per-bar candle
           #       maths + instrument index + MarketAdapter composition.
           if compgen -G "tests/unit/test_synthetic_adapter.py" > /dev/null; then
