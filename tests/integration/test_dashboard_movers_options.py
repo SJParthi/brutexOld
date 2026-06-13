@@ -435,6 +435,44 @@ class TestOptionsApi:
         assert Decimal(ce_row["oi_chg_pct"]) == Decimal("10")
         assert ce_row["oi_chg"] == 100
 
+    def test_expiry_tier_filters_near_vs_next(self, store: InstrumentStore, tmp_path: Path) -> None:
+        # June (near) CE/PE + a July (next) CE for the SAME underlying.
+        _seed_options_lake(tmp_path)
+        jul_ce = "NSE-NIFTY-25Jul24-24000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=jul_ce,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="200", volume=300, oi=2000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=jul_ce,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 6, 12), close="180", oi=1800)],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        # expiry=near (the front expiry as-of the date) → only the June 27 CE/PE.
+        near = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13", "expiry": "near"},
+        ).json()
+        assert near["instrument_count"] == 2
+        assert "Near expiry" in near["note"]
+        assert all("25Jul24" not in row["name"] for row in near["highest_oi"])
+
+        # expiry=Next (mixed case → lower-cased) → only the July 25 CE.
+        nxt = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13", "expiry": "Next"},
+        ).json()
+        assert nxt["instrument_count"] == 1
+        assert nxt["highest_oi"][0]["name"] == "NIFTY 25Jul24 24000 CE"
+        assert "Next expiry" in nxt["note"]
+
     def test_empty_options_lake_degrades(self, store: InstrumentStore) -> None:
         # Store wired but no options parquet → honest empty payload (never 500).
         client = TestClient(build_app(DashboardState(), instrument_store=store))
