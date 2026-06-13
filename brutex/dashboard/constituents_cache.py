@@ -36,7 +36,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from brutex.dashboard.nse_constituents import constituent_url, fetch_constituent_symbols
+from brutex.dashboard.nse_constituents import (
+    constituent_url,
+    convention_constituent_url,
+    fetch_symbols_at_url,
+)
 
 __all__ = [
     "ConstituentResult",
@@ -250,18 +254,30 @@ def resolve_constituents(
     ConstituentResult
         Immutable result with ``symbols``, ``source``, and ``as_of``.
     """
-    url = constituent_url(index)
-    if url is None:
-        return ConstituentResult(symbols=(), source="unknown-index", as_of=None)
+    # Resolve the CSV URL: the verified/override mapping first, then NSE's public
+    # filename convention as a self-validating fallback (DEC-INDEX-CONSTITUENTS-
+    # COVERAGE-001) so EVERY index — not just the ~10 explicitly mapped ones —
+    # gets a fetch attempt. A wrong convention guess 404s → honest "unavailable",
+    # never WRONG data (the symbols always come from NSE's response).
+    url = constituent_url(index) or convention_constituent_url(index)
 
     cached = read_cache(cache_root, index)
 
     if not force_refresh and cached is not None:
         return _result_from_cache(cached)
 
-    # Attempt live fetch.
+    if url is None:
+        # No verified mapping AND no convention candidate (a symbolless index, e.g.
+        # all-punctuation) → genuinely unknown. A stale cache was already served above.
+        if cached is not None:
+            return _result_from_cache(cached)
+        return ConstituentResult(symbols=(), source="unknown-index", as_of=None)
+
+    # Attempt live fetch of the resolved URL (verified mapping OR convention
+    # candidate). ``fetch_symbols_at_url`` fetches the EXACT url — not re-derived
+    # via ``constituent_url`` (which would drop the convention candidate).
     try:
-        symbols = fetch_constituent_symbols(index, opener=opener)
+        symbols = fetch_symbols_at_url(url, opener=opener)
     except OSError:
         # Network / block / timeout: serve stale cache if present, else unavailable.
         if cached is not None:
