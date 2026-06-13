@@ -2078,6 +2078,7 @@ def build_app(
         date: str | None = Query(default=None),
         time: str | None = Query(default=None),
         top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=200),
+        expiry: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -2094,8 +2095,10 @@ def build_app(
         asset
             ``spot`` / ``futures`` / ``options`` — all three wired to the lake.
             Any other (unknown) asset returns an honest "ships after Spot"
-            pending payload. (The Options ``expiry`` Near/Next/Far filter is
-            deferred — all expiries are ranked; the payload note says so.)
+            pending payload.
+        expiry
+            Options only — the ``near`` / ``next`` / ``far`` expiry tier (blank /
+            unknown ⇒ ``near``); ranks only that serial expiry as-of *date*.
         interval
             The lake timeframe to snapshot (default ``1day``); the 21-timeframe
             vocab (1minute … 1day). An unknown label degrades to "pull spot first".
@@ -2166,19 +2169,27 @@ def build_app(
                         skipped=0,
                     )
                 )
-            runner = (
-                run_options_snapshot
-                if asset == "options"
-                else (run_futures_snapshot if asset == "futures" else run_movers_snapshot)
-            )
-            payload = await run_in_threadpool(
-                runner,
-                lake_root=store_path.parent,
-                interval=interval,
-                date=date,
-                time=time,
-                top_n=top_n,
-            )
+            if asset == "options":
+                # Options carries the extra Near/Next/Far expiry tier (blank ⇒ near).
+                payload = await run_in_threadpool(
+                    run_options_snapshot,
+                    lake_root=store_path.parent,
+                    interval=interval,
+                    date=date,
+                    time=time,
+                    top_n=top_n,
+                    expiry_tier=(expiry or "near").lower(),
+                )
+            else:
+                runner = run_futures_snapshot if asset == "futures" else run_movers_snapshot
+                payload = await run_in_threadpool(
+                    runner,
+                    lake_root=store_path.parent,
+                    interval=interval,
+                    date=date,
+                    time=time,
+                    top_n=top_n,
+                )
             return JSONResponse(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

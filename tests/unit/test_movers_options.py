@@ -23,6 +23,7 @@ from decimal import Decimal
 
 from brutex.dashboard.movers_options import (
     OptionMover,
+    _tier_expiry_by_underlying,
     build_options_payload,
     compute_option_mover,
     parse_option_symbol,
@@ -34,6 +35,59 @@ from brutex.dashboard.movers_options import (
     rank_value,
     rank_volume,
 )
+
+# ── _tier_expiry_by_underlying (Near/Next/Far resolution) ──────────────────
+
+
+def _c(
+    underlying: str, expiry: date, *, strike: str = "24000", typ: str = "CE"
+) -> tuple[str, str, str, date, Decimal, str]:
+    """A `_discover_options`-shaped tuple (symbol/exchange irrelevant to the tier)."""
+    return (f"NSE-{underlying}-x-{strike}-{typ}", "NSE", underlying, expiry, Decimal(strike), typ)
+
+
+class TestTierExpiry:
+    _ON = date(2025, 6, 13)
+
+    def test_near_next_far_pick_1st_2nd_3rd_distinct_live_expiry(self) -> None:
+        contracts = [
+            _c("NIFTY", date(2025, 6, 26)),
+            _c("NIFTY", date(2025, 7, 31), typ="PE"),
+            _c("NIFTY", date(2025, 8, 28)),
+            _c("NIFTY", date(2025, 6, 26), strike="24500"),  # duplicate expiry, distinct contract
+        ]
+        assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="near") == {
+            "NIFTY": date(2025, 6, 26)
+        }
+        assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="next") == {
+            "NIFTY": date(2025, 7, 31)
+        }
+        assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="far") == {
+            "NIFTY": date(2025, 8, 28)
+        }
+
+    def test_unknown_tier_falls_back_to_near(self) -> None:
+        contracts = [_c("NIFTY", date(2025, 6, 26)), _c("NIFTY", date(2025, 7, 31))]
+        assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="bogus") == {
+            "NIFTY": date(2025, 6, 26)
+        }
+
+    def test_expired_contracts_are_excluded(self) -> None:
+        # An expiry BEFORE the snapshot date is dropped (covers the `< on_date` arm);
+        # NIFTY's only live expiry is the July one → that becomes Near.
+        contracts = [
+            _c("NIFTY", date(2025, 5, 29)),  # expired (< 2025-06-13)
+            _c("NIFTY", date(2025, 7, 31)),
+        ]
+        assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="near") == {
+            "NIFTY": date(2025, 7, 31)
+        }
+
+    def test_tier_beyond_available_omits_the_underlying(self) -> None:
+        # Only ONE live expiry → Far (3rd) has nothing → the underlying drops out.
+        contracts = [_c("NIFTY", date(2025, 6, 26))]
+        assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="far") == {}
+
 
 # ── parse_option_symbol ───────────────────────────────────────────────────
 
@@ -366,12 +420,18 @@ class TestBuildOptionsPayload:
         assert payload["instrument_count"] == 3
         assert "none had a bar" in payload["note"]
 
-    def test_ranked_note_mentions_deferred_expiry(self) -> None:
+    def test_ranked_note_names_the_expiry_tier(self) -> None:
         payload = build_options_payload(
-            [_mover()], interval="1day", date="2025-06-13", time=None, top_n=10, skipped=0
+            [_mover()],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            expiry_tier="next",
         )
-        assert "deferred" in payload["note"]
-        assert "ALL expiries ranked" in payload["note"]
+        assert "Next expiry" in payload["note"]
+        assert "Near/Next/Far" in payload["note"]
 
     def test_daily_note_shows_daily_label(self) -> None:
         payload = build_options_payload(
