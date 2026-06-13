@@ -54,8 +54,16 @@ import structlog
 
 from brutex.adapters.groww.candles import fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClient
-from brutex.adapters.groww.constants import GROWW_OPTION_COVERAGE_MARKET, OPTION_SEGMENT
-from brutex.adapters.groww.contracts import enumerate_contracts, option_contracts
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+    OPTION_SEGMENT,
+)
+from brutex.adapters.groww.contracts import (
+    enumerate_contracts,
+    future_contracts,
+    option_contracts,
+)
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure, is_rate_limit, is_retryable
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.ingest_common import (
@@ -168,6 +176,7 @@ def ingest_option_contract(
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    market: str = GROWW_OPTION_COVERAGE_MARKET,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -200,7 +209,7 @@ def ingest_option_contract(
     pull_id = current_pull_id()
     fields = {"symbol": contract.symbol, "interval": interval}
     key = WindowKey(
-        market=GROWW_OPTION_COVERAGE_MARKET,
+        market=market,
         security_id=contract.symbol,
         interval=interval,
         start=start,
@@ -382,8 +391,13 @@ def run_groww_option_ingest(
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    market: str = GROWW_OPTION_COVERAGE_MARKET,
 ) -> GrowwOptionIngestReport:
-    """Ingest every ``(contract, interval)`` option pair over ``[start, end)``.
+    """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
+
+    Contract-type-agnostic: the SAME driver ingests OPTION (CE/PE) or FUTURE (FUT)
+    contracts — only *market* differs (the lake-ledger namespace:
+    ``"groww-option"`` vs ``"groww-future"``, DEC-GROWW-FUTURE-INGEST-001).
 
     A SEQUENTIAL, paced outer loop (the shared rate bucket the *pace* hook drives
     is the governor — not the worker count). **Never raises** on a Groww error: a
@@ -428,6 +442,7 @@ def run_groww_option_ingest(
                     max_attempts=max_attempts,
                     backoff=backoff,
                     now_ist=now_ist,
+                    market=market,
                 )
             except GrowwError as exc:
                 auth_failed = is_auth_failure(exc)
@@ -515,6 +530,69 @@ def ingest_underlying_options(
     )
 
 
+def ingest_underlying_futures(
+    client: GrowwClient,
+    sink: BarSink,
+    *,
+    exchange: str,
+    underlying_symbol: str,
+    years: Iterable[int],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    pace: Pacer | None = None,
+    ledger: WindowLedger | None = None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_timeout: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
+    on_progress: ProgressHook | None = None,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    backoff: Callable[[int], None] | None = None,
+    now_ist: Callable[[], datetime] | None = None,
+) -> GrowwOptionIngestReport:
+    """Full path for ONE underlying: expiries → FUTURE contracts → candles → lake.
+
+    The FUTURES mirror of :func:`ingest_underlying_options` (DEC-GROWW-FUTURE-INGEST-001):
+    resolves the underlying's chain across *years*
+    (:func:`~brutex.adapters.groww.contracts.enumerate_contracts` filtered by
+    :func:`~brutex.adapters.groww.contracts.future_contracts` — ``FUT`` only, one
+    expiry-dated future per expiry, no strike fan), then ingests each via the SHARED
+    :func:`run_groww_option_ingest` under the DISTINCT
+    :data:`~brutex.adapters.groww.constants.GROWW_FUTURE_COVERAGE_MARKET`
+    (``"groww-future"``) ledger namespace, so future windows never collide with the
+    option/spot windows. Pacing, ledger skip/record, per-pair quarantine, and the
+    standard FNO ``BarSink`` are all reused (CLAUDE.md §11 COMMON). Like
+    :func:`ingest_underlying_options`, a TERMINAL Groww error during RESOLUTION
+    propagates (the caller quarantines the whole underlying); per-contract candle
+    failures are quarantined inside :func:`run_groww_option_ingest`.
+
+    **Scope (CLAUDE.md §3):** REFERENCE_ONLY lake — never the brute-force engine.
+    """
+    contracts = future_contracts(
+        enumerate_contracts(
+            client, exchange=exchange, underlying_symbol=underlying_symbol, years=years
+        )
+    )
+    return run_groww_option_ingest(
+        client,
+        sink,
+        contracts=contracts,
+        intervals=intervals,
+        start=start,
+        end=end,
+        pace=pace,
+        ledger=ledger,
+        on_rate_limit=on_rate_limit,
+        on_timeout=on_timeout,
+        on_success=on_success,
+        on_progress=on_progress,
+        max_attempts=max_attempts,
+        backoff=backoff,
+        now_ist=now_ist,
+        market=GROWW_FUTURE_COVERAGE_MARKET,
+    )
+
+
 __all__ = [
     "GrowwOptionIngestReport",
     "OptionPairFailure",
@@ -523,6 +601,7 @@ __all__ = [
     "contract_exchange",
     "fetch_option_candles",
     "ingest_option_contract",
+    "ingest_underlying_futures",
     "ingest_underlying_options",
     "run_groww_option_ingest",
 ]
