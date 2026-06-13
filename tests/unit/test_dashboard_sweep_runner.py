@@ -1,0 +1,262 @@
+"""Pure-core tests for the dashboard sweep launcher (DEC-SWEEP-RUN-BUTTON-001).
+
+100% line + branch coverage of :mod:`brutex.dashboard.sweep_runner` — every
+validation arm of :func:`resolve_sweep_request` (defaults, blank-token fallbacks,
+and the ValueError raises), the trivial path helpers, and the 1:1
+``cmd_sweep_all`` kwargs mapping. ZERO I/O, no FastAPI, no lake — these are the
+hermetic unit tests the route layer leans on (the ``# pragma: no cover``
+``run_sweep_from_request`` shim is exercised by the CLI integration suite).
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+from brutex.dashboard.sweep_runner import (
+    DEFAULT_DIRECTIONS,
+    DEFAULT_EXCHANGE,
+    DEFAULT_INTERVALS,
+    DEFAULT_K,
+    DEFAULT_MODE,
+    DEFAULT_SEGMENT,
+    DEFAULT_SYMBOLS,
+    DEFAULT_TOP,
+    SweepRunRequest,
+    build_sweep_kwargs,
+    default_results_root,
+    resolve_sweep_request,
+    sweep_progress_file,
+)
+
+_TODAY = date(2026, 6, 13)
+
+
+# ── happy paths: defaults + custom ────────────────────────────────────────────
+
+
+def test_all_defaults_mirror_the_cli_contract() -> None:
+    req = resolve_sweep_request(today=_TODAY)
+    assert req.symbols == DEFAULT_SYMBOLS
+    assert req.intervals == DEFAULT_INTERVALS
+    assert req.directions == DEFAULT_DIRECTIONS
+    assert req.k == DEFAULT_K
+    assert req.sl == "none"
+    assert req.tp == "none"
+    assert req.exchange == DEFAULT_EXCHANGE
+    assert req.segment == DEFAULT_SEGMENT
+    assert req.mode == DEFAULT_MODE
+    assert req.top == DEFAULT_TOP
+    assert req.start == "2021-01-01"
+    assert req.end == "2026-06-13"  # injected today
+
+
+def test_blank_and_whitespace_inputs_fall_back_to_defaults() -> None:
+    req = resolve_sweep_request(
+        symbols="  ,  ",
+        intervals="",
+        directions="   ",
+        k=" , ",
+        sl="   ",
+        tp="",
+        mode="   ",
+        exchange="  ",
+        segment="",
+        start="",
+        end="   ",
+        today=_TODAY,
+    )
+    assert req.symbols == DEFAULT_SYMBOLS
+    assert req.intervals == DEFAULT_INTERVALS
+    assert req.directions == DEFAULT_DIRECTIONS
+    assert req.k == DEFAULT_K
+    assert req.sl == "none"
+    assert req.tp == "none"
+    assert req.mode == DEFAULT_MODE
+    assert req.exchange == DEFAULT_EXCHANGE
+    assert req.segment == DEFAULT_SEGMENT
+    assert req.start == "2021-01-01"
+    assert req.end == "2026-06-13"
+
+
+def test_custom_values_are_normalised() -> None:
+    req = resolve_sweep_request(
+        symbols=" SENSEX , ",
+        intervals="1minute, 5minute",
+        directions="buy , sell",
+        k="1, 3 ,5",
+        sl="1500,3000",
+        tp="2500",
+        top=50,
+        mode="B",
+        exchange="bse",
+        segment="index",
+        start="2022-03-01",
+        end="2023-09-30",
+        today=_TODAY,
+    )
+    assert req.symbols == "SENSEX"
+    assert req.intervals == "1minute,5minute"
+    assert req.directions == "BUY,SELL"  # upper-cased
+    assert req.k == "1,3,5"
+    assert req.sl == "1500,3000"
+    assert req.tp == "2500"
+    assert req.top == 50
+    assert req.mode == "B"
+    assert req.exchange == "bse"  # non-blank passthrough (case preserved)
+    assert req.segment == "index"
+    assert req.start == "2022-03-01"
+    assert req.end == "2023-09-30"
+
+
+def test_to_dict_round_trips_every_field() -> None:
+    req = resolve_sweep_request(today=_TODAY)
+    assert req.to_dict() == {
+        "symbols": DEFAULT_SYMBOLS,
+        "intervals": DEFAULT_INTERVALS,
+        "directions": DEFAULT_DIRECTIONS,
+        "k": DEFAULT_K,
+        "sl": "none",
+        "tp": "none",
+        "exchange": DEFAULT_EXCHANGE,
+        "segment": DEFAULT_SEGMENT,
+        "start": "2021-01-01",
+        "end": "2026-06-13",
+        "mode": DEFAULT_MODE,
+        "top": DEFAULT_TOP,
+    }
+
+
+# ── validation: 400-able ValueError arms ──────────────────────────────────────
+
+
+def test_unknown_interval_raises() -> None:
+    with pytest.raises(ValueError, match="interval must be one of"):
+        resolve_sweep_request(intervals="1minute,7tick", today=_TODAY)
+
+
+def test_unknown_direction_raises() -> None:
+    with pytest.raises(ValueError, match="direction must be one of"):
+        resolve_sweep_request(directions="BUY,HOLD", today=_TODAY)
+
+
+def test_non_integer_k_raises() -> None:
+    with pytest.raises(ValueError, match="k must be a whole number"):
+        resolve_sweep_request(k="1,abc", today=_TODAY)
+
+
+@pytest.mark.parametrize("bad", ["0", "53", "-1"])
+def test_out_of_range_k_raises(bad: str) -> None:
+    with pytest.raises(ValueError, match="k must be a whole number"):
+        resolve_sweep_request(k=bad, today=_TODAY)
+
+
+def test_non_integer_sl_leg_raises() -> None:
+    with pytest.raises(ValueError, match="sl must be 'none' or positive paisa"):
+        resolve_sweep_request(sl="1500,oops", today=_TODAY)
+
+
+def test_non_positive_tp_leg_raises() -> None:
+    with pytest.raises(ValueError, match="tp must be 'none' or positive paisa"):
+        resolve_sweep_request(tp="0", today=_TODAY)
+
+
+def test_top_below_one_raises() -> None:
+    with pytest.raises(ValueError, match="top must be a whole number >= 1"):
+        resolve_sweep_request(top=0, today=_TODAY)
+
+
+def test_unparseable_start_date_raises() -> None:
+    with pytest.raises(ValueError, match="start must be a YYYY-MM-DD date"):
+        resolve_sweep_request(start="01/01/2021", today=_TODAY)
+
+
+def test_unparseable_end_date_raises() -> None:
+    with pytest.raises(ValueError, match="end must be a YYYY-MM-DD date"):
+        resolve_sweep_request(end="not-a-date", today=_TODAY)
+
+
+def test_end_before_start_raises() -> None:
+    with pytest.raises(ValueError, match="must not precede start"):
+        resolve_sweep_request(start="2024-01-01", end="2023-12-31", today=_TODAY)
+
+
+def test_explicit_none_leg_passes_through() -> None:
+    req = resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
+    assert req.sl == "none"
+    assert req.tp == "none"
+
+
+# ── path helpers ──────────────────────────────────────────────────────────────
+
+
+def test_default_results_root() -> None:
+    assert default_results_root(Path("/lake")) == Path("/lake/sweeps")
+
+
+def test_sweep_progress_file() -> None:
+    root = Path("/lake/sweeps")
+    assert sweep_progress_file(root) == Path("/lake/sweeps/progress/sweep-progress.json")
+
+
+# ── kwargs mapping ────────────────────────────────────────────────────────────
+
+
+def test_build_sweep_kwargs_maps_request_and_pins_safe_defaults() -> None:
+    req = resolve_sweep_request(
+        symbols="NIFTY", intervals="5minute", directions="BUY", k="2", today=_TODAY
+    )
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"), results_root=Path("/lake/sweeps"))
+    assert kwargs["lake_root"] == Path("/lake")
+    assert kwargs["results_root"] == Path("/lake/sweeps")
+    assert kwargs["catalog_path"] is None
+    assert kwargs["symbols"] == "NIFTY"
+    assert kwargs["intervals"] == "5minute"
+    assert kwargs["directions"] == "BUY"
+    assert kwargs["k"] == "2"
+    assert kwargs["exchange"] == DEFAULT_EXCHANGE
+    assert kwargs["segment"] == DEFAULT_SEGMENT
+    assert kwargs["start"] == "2021-01-01"
+    assert kwargs["end"] == "2026-06-13"
+    # Pinned safe dashboard defaults (signal-only, forgiving, no overfit/stage3).
+    assert kwargs["conditions"] is None
+    assert kwargs["options_sim"] is False
+    assert kwargs["overfit_gate"] is False
+    assert kwargs["stage3_enable"] is False
+    assert kwargs["allow_missing_slices"] is True
+    assert kwargs["max_tuples"] is None
+    assert kwargs["max_combos"] is None
+    assert kwargs["data_snapshot_hash"] is None
+
+
+def test_build_sweep_kwargs_defaults_results_and_catalog_to_none() -> None:
+    req = resolve_sweep_request(today=_TODAY)
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    assert kwargs["results_root"] is None
+    assert kwargs["catalog_path"] is None
+
+
+def test_build_sweep_kwargs_threads_explicit_catalog() -> None:
+    req = resolve_sweep_request(today=_TODAY)
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"), catalog_path=Path("/cat.duckdb"))
+    assert kwargs["catalog_path"] == Path("/cat.duckdb")
+
+
+def test_request_is_frozen() -> None:
+    req = SweepRunRequest(
+        symbols="NIFTY",
+        intervals="5minute",
+        directions="BUY",
+        k="2",
+        sl="none",
+        tp="none",
+        exchange="NSE",
+        segment="INDEX",
+        start="2021-01-01",
+        end="2026-06-13",
+        mode="A",
+        top=20,
+    )
+    with pytest.raises((AttributeError, TypeError)):
+        req.symbols = "BANKNIFTY"  # type: ignore[misc]
