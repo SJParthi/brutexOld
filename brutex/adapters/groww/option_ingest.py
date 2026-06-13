@@ -45,7 +45,7 @@ injected fakes reach 100% offline — full contract validation needs real expiri
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from time import sleep as _time_sleep
@@ -58,6 +58,7 @@ from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
     OPTION_SEGMENT,
+    TRACK1_DAILY_INTERVAL,
 )
 from brutex.adapters.groww.contracts import (
     enumerate_contracts,
@@ -89,6 +90,15 @@ _LOG = structlog.get_logger("brutex.adapters.groww.option_ingest")
 #: Pacing hook fired once before every physical fetch (token-bucket acquire) —
 #: the SAME ``Callable[[], None]`` contract the spot spine uses.
 Pacer = Callable[[], None]
+
+#: Optional per-contract minute-pull bounds, keyed by the contract ``groww_symbol``:
+#: ``{symbol: (start, end)}`` half-open fetch windows derived from the 1-day lake
+#: coverage (DEC-DERIV-MINUTE-BOUNDS-001 — see
+#: :mod:`brutex.adapters.groww.contract_bounds`). A symbol ABSENT from the map (or a
+#: ``None`` map) falls back to the spine's global ``(start, end)`` — backward-compatible
+#: and never-skip. The values are the SAME half-open semantics as the spine's own
+#: ``start``/``end``.
+ContractWindows = Mapping[str, tuple[date, date]]
 
 #: Canonical daily interval — the only interval not session-filtered.
 _DAILY: str = "1day"
@@ -374,6 +384,36 @@ class GrowwOptionIngestReport:
 ProgressHook = Callable[[str, int, bool], None]
 
 
+def _resolve_window(
+    contract_windows: ContractWindows | None,
+    *,
+    symbol: str,
+    interval: str,
+    start: date,
+    end: date,
+) -> tuple[date, date]:
+    """Resolve one ``(contract, interval)`` pair's ``(start, end)`` — the smart-bounds hook.
+
+    DEC-DERIV-MINUTE-BOUNDS-001. Returns the per-contract bounded window from
+    *contract_windows* ONLY for sub-daily intervals and only when *symbol* is in the
+    map; every other case falls back to the global ``(start, end)``:
+
+    * ``contract_windows is None`` → ``(start, end)`` — byte-identical to the
+      pre-feature behaviour (the param is opt-in).
+    * ``interval == TRACK1_DAILY_INTERVAL`` → ``(start, end)`` — the DAILY interval is
+      the coverage that PRODUCES the bounds, so it must NEVER be bounded by them, or a
+      still-live contract's daily coverage would freeze at its first-observed extent
+      and stop advancing (the blocker the design review caught).
+    * *symbol* absent from the map → ``(start, end)`` — a contract with no derived
+      window (no 1-day coverage yet) is pulled in FULL, never skipped.
+
+    Pure + **O(1)** (one dict lookup).
+    """
+    if contract_windows is None or interval == TRACK1_DAILY_INTERVAL:
+        return (start, end)
+    return contract_windows.get(symbol, (start, end))
+
+
 def run_groww_option_ingest(
     client: GrowwClient,
     sink: BarSink,
@@ -392,6 +432,7 @@ def run_groww_option_ingest(
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
+    contract_windows: ContractWindows | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -414,6 +455,19 @@ def run_groww_option_ingest(
     (typically CE/PE — see :func:`~brutex.adapters.groww.contracts.option_contracts`)
     chain, *intervals* the canonical intervals to pull per contract.
 
+    *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is an OPTIONAL per-contract
+    ``{symbol: (start, end)}`` map (typically built by
+    :func:`~brutex.adapters.groww.contract_bounds.derive_contract_minute_windows`
+    from the 1-day lake coverage). When supplied, the heavy SUB-DAILY pull of a
+    contract present in the map is bounded to its real listing→expiry window instead
+    of the full *start*/*end* range — avoiding the first-pass requests over the dead
+    periods a contract did not trade. ``None`` (the default) is byte-identical to the
+    pre-feature behaviour; the DAILY interval is never bounded (see
+    :func:`_resolve_window`); a contract absent from the map is pulled in full
+    (never skipped). This is an OPTIMISATION, not a correctness change — the
+    keep-first sink + WindowLedger make the resulting lake byte-identical to a
+    full-range pull (Golden Rule #7).
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -426,14 +480,21 @@ def run_groww_option_ingest(
     for contract in contracts:
         for interval in intervals:
             label = f"{contract.symbol} {interval}"
+            window_start, window_end = _resolve_window(
+                contract_windows,
+                symbol=contract.symbol,
+                interval=interval,
+                start=start,
+                end=end,
+            )
             try:
                 report = ingest_option_contract(
                     client,
                     sink,
                     contract=contract,
                     interval=interval,
-                    start=start,
-                    end=end,
+                    start=window_start,
+                    end=window_end,
                     pace=pace,
                     ledger=ledger,
                     on_rate_limit=on_rate_limit,
@@ -489,6 +550,7 @@ def ingest_underlying_options(
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    contract_windows: ContractWindows | None = None,
 ) -> GrowwOptionIngestReport:
     """Full path for ONE underlying: expiries → contracts → CE/PE candles → lake.
 
@@ -503,6 +565,11 @@ def ingest_underlying_options(
     swallowed here — it propagates so the caller (the K2 phased universe driver)
     can quarantine the whole underlying. Per-contract candle failures are
     quarantined inside :func:`run_groww_option_ingest`.
+
+    *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is forwarded verbatim to
+    :func:`run_groww_option_ingest` — an OPTIONAL ``{symbol: (start, end)}`` map
+    bounding each contract's heavy sub-daily pull to its real listing→expiry window
+    (``None`` = the full-range, pre-feature behaviour).
 
     **Scope (CLAUDE.md §3):** REFERENCE_ONLY lake — never the brute-force engine.
     """
@@ -527,6 +594,7 @@ def ingest_underlying_options(
         max_attempts=max_attempts,
         backoff=backoff,
         now_ist=now_ist,
+        contract_windows=contract_windows,
     )
 
 
@@ -549,6 +617,7 @@ def ingest_underlying_futures(
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    contract_windows: ContractWindows | None = None,
 ) -> GrowwOptionIngestReport:
     """Full path for ONE underlying: expiries → FUTURE contracts → candles → lake.
 
@@ -565,6 +634,10 @@ def ingest_underlying_futures(
     :func:`ingest_underlying_options`, a TERMINAL Groww error during RESOLUTION
     propagates (the caller quarantines the whole underlying); per-contract candle
     failures are quarantined inside :func:`run_groww_option_ingest`.
+
+    *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is forwarded verbatim to
+    :func:`run_groww_option_ingest` — the same OPTIONAL per-contract minute-bounds
+    map :func:`ingest_underlying_options` accepts (``None`` = full-range behaviour).
 
     **Scope (CLAUDE.md §3):** REFERENCE_ONLY lake — never the brute-force engine.
     """
@@ -590,10 +663,12 @@ def ingest_underlying_futures(
         backoff=backoff,
         now_ist=now_ist,
         market=GROWW_FUTURE_COVERAGE_MARKET,
+        contract_windows=contract_windows,
     )
 
 
 __all__ = [
+    "ContractWindows",
     "GrowwOptionIngestReport",
     "OptionPairFailure",
     "Pacer",
