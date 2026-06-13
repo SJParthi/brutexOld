@@ -462,7 +462,7 @@ def test_pull_all_symbols_form_starts_background_job(
         "kind": None,
         "symbol": None,
         "symbols": "NIFTY",
-        "total": 1,
+        "total": 1,  # verify-first default = 1-day only (1 interval × 1 instrument)
         "dry_run": True,
     }
     assert _wait_for_job(client)["state"] == "done"
@@ -491,7 +491,7 @@ def test_pull_all_symbol_form_starts_background_job(
         "kind": None,
         "symbol": "NIFTY",
         "symbols": None,
-        "total": 1,
+        "total": 1,  # verify-first default = 1-day only (1 interval × 1 instrument)
         "dry_run": True,
     }
     assert _wait_for_job(client)["state"] == "done"
@@ -518,7 +518,7 @@ def test_pull_all_kind_form_starts_background_job(
         "kind": "index",
         "symbol": None,
         "symbols": None,
-        "total": 1,
+        "total": 1,  # verify-first default = 1-day only (1 interval × 1 instrument)
         "dry_run": True,
     }
     assert _wait_for_job(client)["state"] == "done"

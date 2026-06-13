@@ -23,12 +23,19 @@ from brutex.dashboard.constituents_cache import (
     resolve_constituents,
     write_cache,
 )
+from brutex.dashboard.nse_constituents import ConstituentRow
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 _FIXED_NOW = datetime(2026, 6, 4, 9, 15, 0, tzinfo=UTC)
 _FIXED_TS = _FIXED_NOW.isoformat()  # "2026-06-04T09:15:00+00:00"
 _FIXED_DATE = "2026-06-04"
+
+
+def _rows(*symbols: str) -> list[ConstituentRow]:
+    """Build symbol-only ConstituentRows (isin=None) for write_cache test calls."""
+    return [ConstituentRow(symbol=s, isin=None) for s in symbols]
+
 
 _FIXTURE_CSV = (
     "Company Name,Industry,Symbol,Series,ISIN Code\n"
@@ -133,7 +140,7 @@ class TestReadCache:
         write_cache(
             tmp_path,
             "NIFTY50",
-            ["RELIANCE", "HDFCBANK"],
+            _rows("RELIANCE", "HDFCBANK"),
             fetched_at=_FIXED_TS,
             source_url="https://example.com/ind_nifty50list.csv",
         )
@@ -152,7 +159,7 @@ class TestWriteCache:
         write_cache(
             root,
             "NIFTY 100",
-            ["RELIANCE"],
+            _rows("RELIANCE"),
             fetched_at=_FIXED_TS,
             source_url="https://x.com/ind_nifty100list.csv",
         )
@@ -164,9 +171,13 @@ class TestWriteCache:
 
     def test_overwrites_existing_file(self, tmp_path: Path) -> None:
         write_cache(
-            tmp_path, "NIFTY50", ["OLD"], fetched_at="2025-01-01T00:00:00+00:00", source_url="u"
+            tmp_path,
+            "NIFTY50",
+            _rows("OLD"),
+            fetched_at="2025-01-01T00:00:00+00:00",
+            source_url="u",
         )
-        write_cache(tmp_path, "NIFTY50", ["NEW"], fetched_at=_FIXED_TS, source_url="u2")
+        write_cache(tmp_path, "NIFTY50", _rows("NEW"), fetched_at=_FIXED_TS, source_url="u2")
         doc = read_cache(tmp_path, "NIFTY50")
         assert doc is not None
         assert doc["symbols"] == ["NEW"]
@@ -189,7 +200,7 @@ class TestResolveConstituents:
             opener=opener,
             now=_FIXED_NOW,
         )
-        assert result == ConstituentResult((), "unknown-index", None)
+        assert result == ConstituentResult((), (), "unknown-index", None)
         assert opener.calls == []
 
     def test_unmapped_index_resolves_via_nse_convention(self, tmp_path: Path) -> None:
@@ -214,7 +225,7 @@ class TestResolveConstituents:
     ) -> None:
         # force_refresh skips the early cache return; for a symbolless index the
         # URL is None, but a prior cache is STILL served (never lost).
-        write_cache(tmp_path, "@@@", ["RELIANCE"], fetched_at=_FIXED_TS, source_url="seed")
+        write_cache(tmp_path, "@@@", _rows("RELIANCE"), fetched_at=_FIXED_TS, source_url="seed")
         opener = _CountingOpener()
         result = resolve_constituents(
             "@@@",
@@ -252,7 +263,7 @@ class TestResolveConstituents:
         write_cache(
             tmp_path,
             "NIFTY",
-            ["RELIANCE", "HDFCBANK"],
+            _rows("RELIANCE", "HDFCBANK"),
             fetched_at=_FIXED_TS,
             source_url="https://x.com/ind_nifty50list.csv",
         )
@@ -275,7 +286,7 @@ class TestResolveConstituents:
         write_cache(
             tmp_path,
             "NIFTY",
-            ["OLD_SYMBOL"],
+            _rows("OLD_SYMBOL"),
             fetched_at=old_ts,
             source_url="https://x.com/ind_nifty50list.csv",
         )
@@ -306,7 +317,7 @@ class TestResolveConstituents:
             opener=opener,
             now=_FIXED_NOW,
         )
-        assert result == ConstituentResult((), "unavailable", None)
+        assert result == ConstituentResult((), (), "unavailable", None)
         assert len(opener.calls) == 1
 
     # ── branch 6: force_refresh + fetch raises OSError, stale cache present ───
@@ -319,7 +330,7 @@ class TestResolveConstituents:
         write_cache(
             tmp_path,
             "NIFTY",
-            ["RELIANCE"],
+            _rows("RELIANCE"),
             fetched_at=stale_ts,
             source_url="https://x.com/ind_nifty50list.csv",
         )
@@ -346,7 +357,7 @@ class TestResolveConstituents:
             opener=opener,
             now=_FIXED_NOW,
         )
-        assert result == ConstituentResult((), "unavailable", None)
+        assert result == ConstituentResult((), (), "unavailable", None)
         assert len(opener.calls) == 1
 
     # ── branch 8: force_refresh + empty list, stale cache present ────────────
@@ -357,7 +368,7 @@ class TestResolveConstituents:
         write_cache(
             tmp_path,
             "NIFTY",
-            ["HDFCBANK"],
+            _rows("HDFCBANK"),
             fetched_at=stale_ts,
             source_url="https://x.com/ind_nifty50list.csv",
         )
@@ -382,3 +393,87 @@ class TestResolveConstituents:
         # Should succeed and store a timestamp (not raise).
         assert result.source == "nse"
         assert result.as_of is not None
+
+
+# ── ISIN-carrying rows (DEC-INDEX-CONSTITUENTS-NSE-001) ───────────────────────
+
+
+class TestIsinRows:
+    def test_fresh_fetch_carries_isins_in_rows(self, tmp_path: Path) -> None:
+        # A live fetch parses the ISIN column → result.rows carry (symbol, isin).
+        opener = _CountingOpener(_FIXTURE_CSV)
+        result = resolve_constituents("NIFTY", cache_root=tmp_path, opener=opener, now=_FIXED_NOW)
+        assert result.source == "nse"
+        assert result.rows == (
+            ConstituentRow(symbol="RELIANCE", isin="INE002A01018"),
+            ConstituentRow(symbol="HDFCBANK", isin="INE040A01034"),
+        )
+
+    def test_isins_persisted_and_reloaded_from_cache(self, tmp_path: Path) -> None:
+        # write_cache stores the parallel isins array; a cache hit reloads rows WITH isin.
+        write_cache(
+            tmp_path,
+            "NIFTY",
+            [
+                ConstituentRow(symbol="RELIANCE", isin="INE002A01018"),
+                ConstituentRow(symbol="TCS", isin=None),
+            ],
+            fetched_at=_FIXED_TS,
+            source_url="u",
+        )
+        doc = read_cache(tmp_path, "NIFTY")
+        assert doc is not None
+        assert doc["symbols"] == ["RELIANCE", "TCS"]
+        assert doc["isins"] == ["INE002A01018", None]
+        result = resolve_constituents("NIFTY", cache_root=tmp_path, opener=_CountingOpener())
+        assert result.source == "cache"
+        assert result.rows == (
+            ConstituentRow(symbol="RELIANCE", isin="INE002A01018"),
+            ConstituentRow(symbol="TCS", isin=None),
+        )
+
+    def test_legacy_cache_without_isins_degrades_to_none(self, tmp_path: Path) -> None:
+        # A pre-DEC-INDEX-CONSTITUENTS-NSE-001 cache file has NO "isins" key → rows
+        # carry isin=None (ticker-only fallback) until the next refresh re-writes it.
+        p = cache_path(tmp_path, "NIFTY")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {
+                    "index": "NIFTY",
+                    "symbols": ["RELIANCE", "HDFCBANK"],
+                    "fetched_at": _FIXED_TS,
+                    "source_url": "u",
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = resolve_constituents("NIFTY", cache_root=tmp_path, opener=_CountingOpener())
+        assert result.source == "cache"
+        assert result.rows == (
+            ConstituentRow(symbol="RELIANCE", isin=None),
+            ConstituentRow(symbol="HDFCBANK", isin=None),
+        )
+
+    def test_isins_length_mismatch_degrades_to_none(self, tmp_path: Path) -> None:
+        # A corrupt cache whose isins array length != symbols → all ISINs degrade to None
+        # (never mis-pairs a symbol with the wrong ISIN — Golden Rule #1).
+        p = cache_path(tmp_path, "NIFTY")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {
+                    "index": "NIFTY",
+                    "symbols": ["RELIANCE", "HDFCBANK"],
+                    "isins": ["INE002A01018"],
+                    "fetched_at": _FIXED_TS,
+                    "source_url": "u",
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = resolve_constituents("NIFTY", cache_root=tmp_path, opener=_CountingOpener())
+        assert result.rows == (
+            ConstituentRow(symbol="RELIANCE", isin=None),
+            ConstituentRow(symbol="HDFCBANK", isin=None),
+        )

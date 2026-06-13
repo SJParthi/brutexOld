@@ -1547,15 +1547,18 @@ def _resolve_fetch_intervals(interval: str) -> list[str]:
     resampled from the 1-minute base — DEC-DHAN-1M-ONLY-001). ``all`` →
     both; ``1m``/``1minute`` and ``1d``/``1day`` → that one; anything else
     raises :class:`ValueError` (a non-fetched timeframe).
-
-    ``all`` returns BOTH fetched intervals — NOT the module-level
-    :data:`~brutex.dashboard.pull_controller.GROWW_FETCH_INTERVALS`, which became
-    the verify-first **1-day-only** dashboard default (DEC-PULL-1DAY-FIRST-001);
-    the CLI's ``all`` means the full fetched set via the ``both`` choice.
     """
-    from brutex.dashboard.pull_controller import SPOT_INTERVAL_BOTH, SPOT_INTERVAL_CHOICES
+    from brutex.dashboard.pull_controller import (
+        SPOT_INTERVAL_BOTH,
+        SPOT_INTERVAL_CHOICES,
+    )
 
     if interval == "all":
+        # ``all`` means BOTH fetched intervals (1minute + 1day) per this function's
+        # contract below. Merge-reconcile (DEC-NSE-EQUITY-VERIFY-001): DEC-PULL-1DAY-FIRST-001
+        # narrowed GROWW_FETCH_INTERVALS to the verify-first 1-day-only DEFAULT, which had
+        # silently shrunk this ``all`` alias to 1-day; restore it to the explicit both-tuple
+        # so ``--interval all`` fetches 1m + 1d as documented + tested.
         return list(SPOT_INTERVAL_CHOICES[SPOT_INTERVAL_BOTH])
     canonical = {
         "1m": "1minute",

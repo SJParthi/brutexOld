@@ -241,10 +241,58 @@ def resolve_reference_security_ids(
     return frozenset(report.security_ids)
 
 
+def held_members(
+    constituents: Iterable[ConstituentRow],
+    instruments: Iterable[Instrument],
+    held_symbols: Iterable[str],
+) -> list[str]:
+    """The HELD stock ``symbol_name``s that are index members — ISIN-primary, ticker-fallback.
+
+    DEC-INDEX-CONSTITUENTS-NSE-001 — the rename-proof replacement for the
+    ticker-only :func:`~brutex.dashboard.nse_constituents.intersect_with_universe`
+    on the ``/universe`` "⊕ tick its constituents" path. Reuses
+    :func:`resolve_constituents` (the COMMON ISIN-primary + ticker-fallback matcher,
+    CLAUDE.md §11), so a constituent whose NSE ticker was renamed still matches by
+    its globally-unique ISIN. The result is restricted to the symbols we actually
+    hold (*held_symbols*), in constituent order, deduplicated.
+
+    Parameters
+    ----------
+    constituents
+        The index members (symbol + ISIN), e.g. from
+        :func:`~brutex.dashboard.nse_constituents.parse_constituents`.
+    instruments
+        The vendor instrument master; only the NSE cash equities participate in the
+        match (non-equity rows are ignored by :func:`resolve_constituents`).
+    held_symbols
+        The engine ``symbol_name``s we hold (the universe stock set to restrict to),
+        matched case-insensitively.
+
+    Returns
+    -------
+    list[str]
+        The held ``symbol_name``s that are members of the index, in constituent
+        order (each at most once).
+    """
+    instruments = list(instruments)
+    report = resolve_constituents(constituents, instruments)
+    name_by_id = {inst.security_id: inst.symbol_name for inst in instruments}
+    held_upper = {symbol.upper() for symbol in held_symbols}
+    members: list[str] = []
+    seen: set[str] = set()
+    for match in report.matched:
+        name = name_by_id[match.security_id]
+        if name.upper() in held_upper and name not in seen:
+            members.append(name)
+            seen.add(name)
+    return members
+
+
 __all__ = [
     "ConstituentCoverageError",
     "ConstituentMatch",
     "MatchReport",
+    "held_members",
     "resolve_constituents",
     "resolve_reference_security_ids",
 ]
