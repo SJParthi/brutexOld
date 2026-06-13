@@ -984,6 +984,12 @@ jobs:
           else
             echo "(brutex.ranking test file not present yet — gate inactive)"
           fi
+          # 19i2a · brutex.screeners — top gainers/losers screener (DEC-MOVERS-GAINERS-001)
+          if compgen -G "tests/unit/test_screeners_gainers_losers.py" > /dev/null; then
+            pytest --cov=brutex.screeners --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_screeners_gainers_losers.py
+          else
+            echo "(brutex.screeners test file not present yet — gate inactive)"
+          fi
           # 19j · brutex.strategies.types (31 stmts, 4 branches, 10 tests)
           if compgen -G "tests/unit/test_strategies_types.py" > /dev/null; then
             pytest --cov=brutex.strategies.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_types.py
