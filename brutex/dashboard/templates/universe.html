@@ -401,7 +401,7 @@
     <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
     <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
-    <button class="loadbtn" id="verifybtn" title="Cross-check the selected index's pulled spot 1-day OHLC against the official NSE close for the 'to' date — the trust anchor before any bulk pull. NIFTY / BANKNIFTY today (SENSEX needs an operator-verified BSE source)." disabled>🛡 Verify vs NSE</button>
+    <button class="loadbtn" id="verifybtn" title="Cross-check the highlighted symbol's pulled spot 1-day data against the official NSE for the 'to' date — the trust anchor before any bulk pull. An INDEX checks 4 OHLC fields (NIFTY / BANKNIFTY; SENSEX needs an operator-verified BSE source); a STOCK checks full OHLCV including VOLUME vs the NSE security bhavcopy." disabled>🛡 Verify vs NSE</button>
     <button class="loadbtn" id="pullDerivBtn" title="Pull the ENTIRE F&amp;O chain (all expiries × all listed strikes, Jan-2020 → today) for the selected instrument(s) — interval + contract-type set by the dropdowns above. Re-click is safe (already-pulled windows are skipped)." disabled>⛓ Pull expiries + contracts</button>
     <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
@@ -959,6 +959,11 @@ function renderVerdict(v) {
     html += " · " + v.fields.map(f =>
       `${f.field}: groww=${f.groww} nse=${f.official} Δ=${f.delta_paisa}p${f.matched ? "" : " ⚠"}`
     ).join(" · ");
+  }
+  // Stocks add a VOLUME comparison (DEC-NSE-EQUITY-VERIFY-001); indices have none.
+  if (v.volume) {
+    html += ` · volume: groww=${v.volume.groww} nse=${v.volume.official}`
+      + ` Δ=${v.volume.delta}${v.volume.matched ? "" : " ⚠"}`;
   }
   if (v.note) html += `<div style="color:var(--muted);font-size:12px;margin-top:4px">${v.note}</div>`;
   return html;
