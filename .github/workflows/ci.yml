@@ -493,7 +493,7 @@ jobs:
           # upsert ROLLBACK, list_partitions None-bound partials, get_bars +
           # open() missing-dependency ImportError, open_catalog, naive-tz).
           if compgen -G "tests/integration/test_catalog.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py tests/unit/test_dhan_parallel_locks.py
+            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py
           else
             echo "(brutex.data.catalog edge test file not present yet — gate inactive)"
           fi
@@ -1298,28 +1298,18 @@ jobs:
           else
             echo "(brutex.data.spot_resample test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
-          else
-            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
-          fi
           # Vendor-neutral rate controller gate (PR-J4a relocation): rate_control
           # moved + renamed to brutex.adapters.rate_common.RateController. (The
           # synthetic / synthetic_adapter / pull_verdict / until_clean modules also
           # relocated in PR-J4a — folded into the brutex.adapters.ingest_common gate
           # below, which now carries their moved test files.)
           if compgen -G "tests/unit/test_rate_common.py" > /dev/null; then
-            pytest --cov=brutex.adapters.rate_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_rate_common.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_spot_parallel.py tests/unit/test_dashboard_pull_pool_sizing.py
+            pytest --cov=brutex.adapters.rate_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_rate_common.py tests/unit/test_dashboard_pull_pool_sizing.py
           else
             echo "(brutex.adapters.rate_common test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_option_synthetic.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.option_synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_synthetic.py
-          else
-            echo "(brutex.adapters.dhan.option_synthetic test file not present yet — gate inactive)"
-          fi
           if compgen -G "tests/unit/test_fetch_coverage.py" > /dev/null; then
-            pytest --cov=brutex.data.fetch_coverage --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fetch_coverage.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_spot_parallel.py
+            pytest --cov=brutex.data.fetch_coverage --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fetch_coverage.py
           else
             echo "(brutex.data.fetch_coverage test file not present yet — gate inactive)"
           fi
@@ -1359,31 +1349,6 @@ jobs:
           else
             echo "(brutex.observability.throttle test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
-          else
-            echo "(brutex.adapters.dhan.parser test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_option_parser.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.option_parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_parser.py
-          else
-            echo "(brutex.adapters.dhan.option_parser test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_option_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.option_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_ingest.py
-          else
-            echo "(brutex.adapters.dhan.option_ingest test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_option_universe_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.option_universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_universe_ingest.py tests/unit/test_dhan_options_parallel_wiring.py tests/integration/test_dhan_options_audit_chain.py
-          else
-            echo "(brutex.adapters.dhan.option_universe_ingest test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_run_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.run_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_run_ingest.py tests/unit/test_dhan_spot_parallel_wiring.py tests/integration/test_dhan_spot_parallel.py
-          else
-            echo "(brutex.adapters.dhan.run_ingest test file not present yet — gate inactive)"
-          fi
           # Ratchet `brutex.adapters.ingest_common` (the VENDOR-NEUTRAL ingest
           # utilities extracted out of the dhan package — DEC-INGEST-COMMON-001:
           # retry_failed_windows + summarize_conflicts + DateWindow/plan_windows +
@@ -1397,34 +1362,20 @@ jobs:
           else
             echo "(brutex.adapters.ingest_common test file not present yet — gate inactive)"
           fi
-          # Ratchet `brutex.adapters.dhan.token_preflight` (the PURE token-state
-          # classifier valid/expiring-soon/dead + the DEAD→auth_expired verdict —
-          # DEC-TOKEN-PREFLIGHT-001) into the strict per-module 100% gate. Wheel-free
-          # pure core; the live RenewToken probe is `# pragma: no cover`.
-          if compgen -G "tests/unit/test_dhan_token_preflight.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.token_preflight --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_preflight.py tests/property/test_until_clean_properties.py tests/golden/test_token_preflight_golden.py
-          else
-            echo "(brutex.adapters.dhan.token_preflight test file not present yet — gate inactive)"
-          fi
           # The PURE re-pull-until-clean loop-controller (continue/stop_clean/
           # stop_dead/stop_budget + the bounded driver — DEC-TOKEN-PREFLIGHT-001)
           # relocated into brutex.adapters.ingest_common in PR-J4a. Its 100% line+branch
           # is asserted by the brutex.adapters.ingest_common strict gate above (which
           # carries test_ingest_common_until_clean.py). Here we additionally RUN its
-          # property + golden suites (no second 100% gate — they exercise invariants,
+          # property suite (no second 100% gate — it exercises invariants,
           # not the per-module coverage contract).
           if compgen -G "tests/property/test_until_clean_properties.py" > /dev/null; then
-            pytest tests/property/test_until_clean_properties.py tests/golden/test_token_preflight_golden.py
+            pytest tests/property/test_until_clean_properties.py
           else
             echo "(re-pull-until-clean property test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_universe_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_universe_ingest.py
-          else
-            echo "(brutex.adapters.dhan.universe_ingest test file not present yet — gate inactive)"
-          fi
           if compgen -G "tests/unit/test_option_dedup.py" > /dev/null; then
-            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_options_audit_chain.py
+            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py
           else
             echo "(brutex.data.option_dedup test file not present yet — gate inactive)"
           fi
@@ -1434,7 +1385,7 @@ jobs:
             echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_option_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.option_sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_sink.py tests/integration/test_dhan_options_audit_chain.py
+            pytest --cov=brutex.data.option_sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_sink.py
           else
             echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
@@ -1473,21 +1424,6 @@ jobs:
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
-          else
-            echo "(brutex.adapters.dhan.chunks test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_body.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.body --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_body.py
-          else
-            echo "(brutex.adapters.dhan.body test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_errors.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_errors.py
-          else
-            echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
-          fi
           # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
           # 100% line+branch from the start (read-side fix that makes an
           # already-pulled lake sweep-able with no re-pull).
@@ -1495,60 +1431,6 @@ jobs:
             pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py tests/unit/test_dhan_parallel_locks.py
-          else
-            echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_auth.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.auth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auth.py
-          else
-            echo "(brutex.adapters.dhan.auth test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_auth_guard.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.auth_guard --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auth_guard.py
-          else
-            echo "(brutex.adapters.dhan.auth_guard test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_token_holder.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.token_holder --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_holder.py
-          else
-            echo "(brutex.adapters.dhan.token_holder test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_token_keepalive.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.token_keepalive --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_keepalive.py
-          else
-            echo "(brutex.adapters.dhan.token_keepalive test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_instruments.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.instruments --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instruments.py
-          else
-            echo "(brutex.adapters.dhan.instruments test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_instrument_loader.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.instrument_loader --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instrument_loader.py
-          else
-            echo "(brutex.adapters.dhan.instrument_loader test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_instrument_refresh.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.instrument_refresh --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instrument_refresh.py
-          else
-            echo "(brutex.adapters.dhan.instrument_refresh test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_adapter.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
-          else
-            echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
-            # DEC-DHAN-PARALLEL-WINDOWS-001: the per-window fan-out lives in
-            # ingest_spot, so the parallel-window integration suite is part of
-            # this module's 100% gate (same wiring fix DEC-DHAN-PARALLEL-INGEST-001
-            # made for run_ingest's parallel suite).
-            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py tests/integration/test_dhan_spot_window_parallel.py
-          else
-            echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
           # completeness-ledger modules. Both are import-light (brutex.data /

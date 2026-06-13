@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
+from brutex.adapters.groww.run_ingest import run_groww_spot_ingest
 from brutex.adapters.ingest_common import SyntheticSpotAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.session import in_session
@@ -96,7 +96,7 @@ def test_default_bars_per_window() -> None:
 def test_drives_the_ingest_spine_offline() -> None:
     """The synthetic adapter is a drop-in: it runs the real spine with no I/O."""
     adapter = SyntheticSpotAdapter(bars_per_window=4)
-    report = run_dhan_spot_ingest(
+    report = run_groww_spot_ingest(
         adapter,
         NullBarSink(),
         instruments=[_instrument("13")],

@@ -625,49 +625,6 @@ class TestPullAllSpot:
         assert report.verdict.needs_operator is False
         assert report.verdict.pending_windows == 0
 
-    def test_preflight_dead_refuses_pull(self, tmp_path: Path) -> None:
-        """A DEAD pre-flight REFUSES the bulk pull — no ingest, loud auth_expired verdict."""
-        from brutex.adapters.dhan.token_preflight import classify_token_lifetime
-
-        built: list[int] = []
-
-        def factory(_root: Path, _insts: object) -> tuple[SyntheticSpotAdapter, BarSink]:
-            built.append(1)  # must NEVER run for a dead token
-            return SyntheticSpotAdapter(), NullBarSink()
-
-        with capture_logs() as logs:
-            report = pull_all_spot(
-                [_index("13"), _index("25")],
-                lake_root=tmp_path,
-                dry_run=False,
-                now=_BULK_NOW,
-                adapter_factory=factory,
-                preflight=classify_token_lifetime(-60.0),  # dead
-            )
-
-        assert built == []  # the adapter was never built — no doomed pull burned
-        assert report.auth_aborted is True
-        assert report.symbols == []
-        assert report.verdict.kind == "auth_expired"
-        assert report.verdict.needs_operator is True
-        assert "DEAD" in (report.auth_cause or "")
-        assert _events(logs, "universe.pull_all.preflight_refused")
-
-    def test_preflight_alive_proceeds(self, tmp_path: Path) -> None:
-        """A healthy pre-flight does NOT block the pull — it completes normally."""
-        from brutex.adapters.dhan.token_preflight import classify_token_lifetime
-
-        report = pull_all_spot(
-            [_index("13")],
-            lake_root=tmp_path,
-            dry_run=True,
-            now=_BULK_NOW,
-            preflight=classify_token_lifetime(20 * 3600.0),  # valid
-        )
-        assert report.auth_aborted is False
-        assert report.total_completed > 0
-        assert report.verdict.kind == "clean"
-
     def test_until_clean_dry_run_reaches_clean(self, tmp_path: Path) -> None:
         """``until_clean=True`` drives the bounded loop; a clean synthetic pull ends clean.
 
