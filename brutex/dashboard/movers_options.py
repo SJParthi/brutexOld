@@ -53,12 +53,15 @@ For each option contract (strike × CE/PE × expiry) found in the lake:
 * **Spot** is the UNDERLYING's spot LTP (its INDEX or CASH 1-minute bars,
   resolved the SAME way the Futures reader resolves it). ``None`` when absent.
 
-## Deferred — the ``expiry`` (Near/Next/Far) filter (honest scope, Golden Rule #10)
+## The ``expiry`` (Near/Next/Far) filter (DEC-MOVERS-OPTIONS-EXPIRY-001)
 
-The ``/movers`` Options tab also exposes a ``?expiry=`` Near/Next/Far selector.
-This milestone **IGNORES it** — it ranks ALL option contracts in the lake (every
-strike × CE/PE × expiry) and the payload ``note`` says so honestly. Filtering by
-expiry tier is a follow-up (a separate decision; not authorized here).
+The Options tab's ``?expiry=`` selector keeps ONLY the contracts on the chosen
+expiry, resolved PER underlying as-of the snapshot date: ``near`` = the front
+(closest) live expiry ``>= date``, ``next`` = the one after, ``far`` = the third
+(:func:`_tier_expiry_by_underlying`). So picking a date shows that underlying's
+nearest-relevant expiry, and a near-dated vs a far-dated ``24000 CE`` never mix in
+one ranking. An underlying without that serial expiry simply drops out (honest —
+that month is not listed yet); a blank / unknown selector falls back to ``near``.
 
 ## Honesty (Golden Rule #1 / #10)
 
@@ -141,6 +144,12 @@ _MIN_OPTION_PARTS: Final[int] = 5
 #: spec (CLAUDE.md §11 COMMON — re-derived locally rather than importing a
 #: private from the Futures reader).
 _EXPIRY_FORMAT: Final[str] = "%d%b%y"
+
+#: The ``?expiry=`` selector → the 0-based rank of the chosen expiry among an
+#: underlying's DISTINCT live (``>= snapshot date``) expiries, sorted ascending:
+#: ``near`` = the front (closest) expiry, ``next`` = the one after, ``far`` = the
+#: third. An unknown / blank selector falls back to ``near``.
+_EXPIRY_TIERS: Final[dict[str, int]] = {"near": 0, "next": 1, "far": 2}
 
 
 def parse_option_symbol(symbol: str) -> tuple[str, date_cls, Decimal, str] | None:
@@ -460,6 +469,7 @@ def build_options_payload(
     time: str | None,
     top_n: int,
     skipped: int,
+    expiry_tier: str = "near",
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -467,11 +477,10 @@ def build_options_payload(
     ``oi_gainers`` / ``oi_losers`` / ``volume`` / ``value`` / ``price_gainers`` /
     ``price_losers`` — the Options tab's pills), keyed by the category name so the
     page's ``j[category]`` lookup picks the active one. Adds the echo of the
-    chosen ``date`` / ``interval`` / ``time`` and an honest ``note`` (which states
-    that the ``expiry`` Near/Next/Far filter is deferred — ALL contracts are
-    ranked). Every value is JSON-native (money is a ``₹`` string, statistical
-    metrics are full-precision strings, OI / volume are ints) so Starlette's
-    ``JSONResponse`` never chokes on a ``Decimal``.
+    chosen ``date`` / ``interval`` / ``time`` and an honest ``note`` naming the
+    selected ``expiry_tier`` (Near/Next/Far). Every value is JSON-native (money is
+    a ``₹`` string, statistical metrics are full-precision strings, OI / volume are
+    ints) so Starlette's ``JSONResponse`` never chokes on a ``Decimal``.
 
     Parameters
     ----------
@@ -482,6 +491,8 @@ def build_options_payload(
     skipped
         Count of contracts dropped (no session bar on the selected day/time) —
         reported honestly, never hidden (Golden Rule #1).
+    expiry_tier
+        The selected ``near`` / ``next`` / ``far`` expiry tier, echoed in the note.
 
     Returns
     -------
@@ -493,22 +504,25 @@ def build_options_payload(
         category: [_option_row(m) for m in rank_fn(movers, top_n)]
         for category, rank_fn in _OPTIONS_CATEGORIES.items()
     }
+    tier_label = expiry_tier.capitalize()
     instrument_count = len(movers) + skipped
     if instrument_count == 0:
         note = (
-            "No options in the lake yet — pull the F&O options first on the Coverage "
-            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+            f"No {tier_label}-expiry option contracts in the lake for {date} — pull the F&O "
+            "options first on the Coverage page, or pick another expiry/date. "
+            "(Reference-only lake view, CLAUDE.md §3.)"
         )
     elif not any(ranked.values()):
         note = (
-            f"{instrument_count} option contract(s) in the lake, but none had a bar at "
-            f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
+            f"{instrument_count} {tier_label}-expiry option contract(s) in the lake, but none "
+            f"had a bar at {date} {time or '(daily)'} on {interval} — pick another time/day."
         )
     else:
         note = (
-            f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
-            "(CLAUDE.md §3); ALL expiries ranked (the Near/Next/Far filter is deferred); "
-            "% is vs the contract's previous close, OI change is vs its prior day."
+            f"As-of {date} {time or '(daily)'} · {interval} · {tier_label} expiry — "
+            "reference-only lake view "
+            "(CLAUDE.md §3); the contract's expiry nearest the selected date "
+            "(Near/Next/Far); % is vs the contract's previous close, OI change is vs its prior day."
         )
     return {
         "interval": interval,
@@ -626,6 +640,50 @@ def _discover_options(lake_root: Path) -> list[tuple[str, str, str, date_cls, De
     return contracts
 
 
+def _tier_expiry_by_underlying(
+    contracts: Sequence[tuple[str, str, str, date_cls, Decimal, str]],
+    *,
+    on_date: date_cls,
+    tier: str,
+) -> dict[str, date_cls]:
+    """Map each underlying → its Near/Next/Far expiry on/after *on_date*.
+
+    For each underlying the DISTINCT expiries that are ``>= on_date`` are sorted
+    ascending; the *tier* (``near`` / ``next`` / ``far`` via :data:`_EXPIRY_TIERS`,
+    an unknown / blank tier falling back to ``near``) picks the 1st / 2nd / 3rd. An
+    underlying that has fewer live expiries than the tier needs is OMITTED — that
+    serial month is simply not listed yet, so it contributes nothing for that tier
+    (honest, never faked — Golden Rule #1). Already-expired contracts
+    (``expiry < on_date``) are excluded.
+
+    Parameters
+    ----------
+    contracts
+        The lake's option contracts as ``(symbol, exchange, underlying, expiry,
+        strike, type)`` (the :func:`_discover_options` shape).
+    on_date
+        The snapshot date the expiry tier is resolved as-of.
+    tier
+        The ``?expiry=`` selector, lower-cased (``near`` / ``next`` / ``far``).
+
+    Returns
+    -------
+    dict[str, datetime.date]
+        ``underlying → the tier's expiry`` for every underlying that has one.
+    """
+    idx = _EXPIRY_TIERS.get(tier, 0)
+    live: dict[str, set[date_cls]] = {}
+    for _symbol, _exchange, underlying, expiry, _strike, _opt in contracts:
+        if expiry >= on_date:
+            live.setdefault(underlying, set()).add(expiry)
+    target: dict[str, date_cls] = {}
+    for underlying, expiries in live.items():
+        ordered = sorted(expiries)
+        if idx < len(ordered):
+            target[underlying] = ordered[idx]
+    return target
+
+
 def run_options_snapshot(
     *,
     lake_root: Path,
@@ -633,6 +691,7 @@ def run_options_snapshot(
     date: str | None,
     time: str | None,
     top_n: int,
+    expiry_tier: str = "near",
     names: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compute the options movers snapshot over the lake → the ``/api/v1/movers`` payload.
@@ -646,8 +705,10 @@ def run_options_snapshot(
     unknown interval) yields an honest "pull the F&O options first" payload —
     never a 500, never a fabricated mover (Golden Rule #1).
 
-    The ``expiry`` (Near/Next/Far) filter is DEFERRED (see the module docstring) —
-    ALL expiries are ranked and the payload note says so.
+    The ``expiry_tier`` (``near`` / ``next`` / ``far``) keeps ONLY the contracts on
+    the selected expiry — resolved PER underlying as the 1st / 2nd / 3rd distinct
+    live expiry on/after the snapshot date (:func:`_tier_expiry_by_underlying`) — so
+    a near-dated and a far-dated ``24000 CE`` never mix in one ranking.
 
     Parameters
     ----------
@@ -655,6 +716,9 @@ def run_options_snapshot(
         Top-level lake directory (the parent of ``bars/``).
     interval, date, time, top_n
         The snapshot coordinates (mirrors :func:`run_movers_snapshot`).
+    expiry_tier
+        The ``?expiry=`` selector (``near`` / ``next`` / ``far``; blank / unknown ⇒
+        ``near``) — which serial expiry, as-of *date*, to rank.
     names
         Optional ``underlying → display name`` map; defaults to the underlying
         symbol itself when absent (the contract name keeps the strike + type).
@@ -674,10 +738,22 @@ def run_options_snapshot(
     date_str = day.isoformat()
     cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
     resolved_names = names or {}
+    tier = expiry_tier.lower()
     contracts = _discover_options(lake_root)
+    # Keep ONLY the contracts on the selected Near/Next/Far expiry (resolved per
+    # underlying as-of the snapshot day); an underlying without that serial expiry
+    # drops out honestly.
+    target_expiry = _tier_expiry_by_underlying(contracts, on_date=day, tier=tier)
+    contracts = [c for c in contracts if target_expiry.get(c[2]) == c[3]]
     if minutes is None or not contracts:
         return build_options_payload(
-            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
+            [],
+            interval=interval,
+            date=date_str,
+            time=time,
+            top_n=top_n,
+            skipped=0,
+            expiry_tier=tier,
         )
 
     movers: list[OptionMover] = []
@@ -729,5 +805,11 @@ def run_options_snapshot(
         )
 
     return build_options_payload(
-        movers, interval=interval, date=date_str, time=time, top_n=top_n, skipped=skipped
+        movers,
+        interval=interval,
+        date=date_str,
+        time=time,
+        top_n=top_n,
+        skipped=skipped,
+        expiry_tier=tier,
     )
