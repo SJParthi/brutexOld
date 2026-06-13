@@ -61,3 +61,17 @@ def test_date_pickers_prefilled_with_canonical_default() -> None:
     assert f'id="fromDate" min="2021-01-01" max="{max_iso}" value="{from_iso}"' in html
     assert f'id="toDate" min="2021-01-01" max="{max_iso}" value="{to_iso}"' in html
     assert "__BRUTEX_DATE_" not in html  # the placeholder tokens were all substituted
+
+
+def test_instrument_rows_render_contract_economics() -> None:
+    """The instruments column ships the lot/tick/freeze econ line (DEC-DASHBOARD-ECON-COLUMNS-001)."""
+    from brutex.dashboard.app import _render_universe_html
+
+    html = _render_universe_html()
+    assert "function econLine(" in html  # the compact lot·tick·freeze helper exists
+    assert ".inst .econ" in html  # its CSS rule ships
+    assert 'class="econ"' in html  # rendered per instrument row
+    # the helper reads the three economics fields the row now carries
+    assert "i.lot_size" in html
+    assert "i.tick_size" in html
+    assert "i.freeze_quantity" in html

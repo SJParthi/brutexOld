@@ -109,6 +109,23 @@ EARLIEST_HISTORY: Final[date] = date(2020, 1, 1)
 #: Groww candle timestamps are native IST (fixed +05:30, no DST).
 NATIVE_TIMEZONE: Final[str] = "Asia/Kolkata"
 
+# ── Option lake (DEC-P0-063 — REFERENCE_ONLY, never the brute-force engine) ──
+#: The neutral SEGMENT every option/future contract bar is partitioned under in
+#: the lake (``bars/<exch>/FNO/<contract_groww_symbol>/<interval>/...`` — see
+#: ``brutex/data/partition.py``, whose ``VALID_SEGMENTS`` includes ``FNO`` and
+#: whose docstring explicitly supports hyphenated contract symbols like
+#: ``NSE-NIFTY-02Jan25-28500-PE``). Groww options are ABSOLUTE-strike OHLCV+OI
+#: rows (all listed strikes, 03-backtesting.md:202-236), so they ride the SAME
+#: ``BarSink`` / :class:`~brutex.data.models.CandleBar` path as spot — not a
+#: relative/rolling option schema (Golden Rule #1 — no invented vendor shape).
+OPTION_SEGMENT: Final[str] = "FNO"
+#: The coverage-ledger market namespace stamped on every OPTION fetch window
+#: (DEC-GROWW-OPTION-INGEST-001), kept DISTINCT from the spot ``"groww"``
+#: namespace (:data:`~brutex.adapters.ingest_common.GROWW_COVERAGE_MARKET`) so
+#: option windows never collide with spot windows on the shared lake ledger and
+#: the dashboard can surface the two coverage surfaces apart.
+GROWW_OPTION_COVERAGE_MARKET: Final[str] = "groww-option"
+
 # ── UNVERIFIED — OPEN Phase-0 probe gates (ADR-0009 §3.1/§4) ─────────────────
 #: Backtesting rate-limit ceiling is UNDOCUMENTED. The "Live Data" 10 r/s figure
 #: (01-introduction.md) is NOT confirmed to cover get_historical_candles. The
@@ -141,6 +158,7 @@ __all__ = [
     "GROWW_EXCHANGES",
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
+    "GROWW_OPTION_COVERAGE_MARKET",
     "GROWW_RATE_LIMIT_PER_MIN",
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
@@ -148,6 +166,7 @@ __all__ = [
     "INSTRUMENT_CSV_COLUMNS",
     "INTERVAL_TO_GROWW",
     "NATIVE_TIMEZONE",
+    "OPTION_SEGMENT",
     "TRACK1_DAILY_INTERVAL",
     "TRACK1_SPOT_INTERVAL",
     "WINDOW_DAYS_30",

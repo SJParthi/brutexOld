@@ -104,3 +104,42 @@ def test_rate_limit_is_not_fast_retried() -> None:
         )
     assert sdk.calls == 1  # raised immediately — the bucket owns 429 backoff
     assert slept == []
+
+
+class _RecordingSDK:
+    """Captures the exact kwargs forwarded to ``get_expiries`` (DEC-GROWW-OPTION-INGEST-001)."""
+
+    def __init__(self) -> None:
+        self.expiry_kwargs: dict[str, object] = {}
+
+    def get_historical_candles(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        return {"candles": []}
+
+    def get_expiries(self, **kw: object) -> Mapping[str, object]:
+        self.expiry_kwargs = dict(kw)
+        return {"expiries": []}
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        return {"contracts": []}
+
+
+def test_expiries_omits_year_and_month_when_none() -> None:
+    sdk = _RecordingSDK()
+    GrowwClient(sdk=sdk, sleep=lambda _s: None).expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert sdk.expiry_kwargs == {"exchange": "NSE", "underlying_symbol": "NIFTY"}
+
+
+def test_expiries_forwards_year_but_omits_month() -> None:
+    sdk = _RecordingSDK()
+    GrowwClient(sdk=sdk, sleep=lambda _s: None).expiries(
+        exchange="NSE", underlying_symbol="NIFTY", year=2024
+    )
+    assert sdk.expiry_kwargs == {"exchange": "NSE", "underlying_symbol": "NIFTY", "year": 2024}
+
+
+def test_expiries_forwards_both_year_and_month() -> None:
+    sdk = _RecordingSDK()
+    GrowwClient(sdk=sdk, sleep=lambda _s: None).expiries(
+        exchange="NSE", underlying_symbol="NIFTY", year=2024, month=3
+    )
+    assert sdk.expiry_kwargs["year"] == 2024 and sdk.expiry_kwargs["month"] == 3

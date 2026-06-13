@@ -121,6 +121,8 @@
     background-size:200% 100%; animation: shimmer 1.4s linear infinite; }
   .inst .sym { font-weight:700; }
   .inst .nm { font-size:11px; color:var(--muted); }
+  /* Contract economics line — lot · tick · freeze (DEC-DASHBOARD-ECON-COLUMNS-001). */
+  .inst .econ { font-size:10px; color:var(--muted); opacity:.8; letter-spacing:.2px; margin-top:1px; }
   .inst .cc { margin-left:auto; font-size:11px; color:var(--muted); }
 
   .pill { display:inline-flex; align-items:center; gap:8px; margin:4px; padding:9px 13px;
@@ -421,7 +423,7 @@
    selected instrument's spot, while clicking the future row or a CE/PE
    option-chain cell pulls THAT contract via the same /pull endpoint. */
 let filter = "index";          // active tab kind
-let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange}]
+let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange,lot_size,tick_size,freeze_quantity,option_pullable}]
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
 let selPullSymbol = null;      // selected instrument's vendor symbol (Groww SECURITY_ID)
 let selExp = null;             // selected expiry ISO date
@@ -620,6 +622,19 @@ function isVisible(i) {
 }
 function visibleInstruments() { return UNIV.filter(isVisible); }
 
+/* Compact contract-economics line (DEC-DASHBOARD-ECON-COLUMNS-001): the F&O lot
+   + freeze folded from the legs at ingest (DEC-GROWW-LEG-ECONOMICS-001) + the spot
+   tick. Parts that are absent are omitted — an index has no lot/freeze; a
+   reference-only (non-F&O) spot row keeps its cash lot 1 (shown only as the tick),
+   so the line stays honest about what is actually tradable. */
+function econLine(i) {
+  const bits = [];
+  if (Number(i.lot_size) > 1) bits.push("lot " + i.lot_size);
+  if (Number(i.tick_size) > 0) bits.push("tick " + i.tick_size);
+  if (i.freeze_quantity != null) bits.push("freeze " + i.freeze_quantity);
+  return bits.join(" · ");
+}
+
 function renderInstruments() {
   const list = visibleInstruments();
   const el = document.getElementById("instruments");
@@ -657,7 +672,9 @@ function renderInstruments() {
       + (refOnly
           ? '<span class="chip ref" title="Reference-only — fetched + stored for context, but NOT brute-forced and no option chain (NIFTY Total Market + its non-F&amp;O constituents, India VIX)">REF</span>'
           : '<span class="chip opt" title="Option-pullable — this underlying has a listed option chain, so &quot;Pull options chain&quot; is allowed (DEC-OPTIONS-ELIGIBLE-GUARD-001)">OPT</span>')
-      + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div></div>`
+      + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div>`
+      + ((econ) => econ ? `<div class="econ">${esc(econ)}</div>` : "")(econLine(i))
+      + `</div>`
       + `<span class="cc">${esc(i.exchange)}</span>`;
     const cb = d.querySelector(".msel");
     cb.onclick = (ev) => { ev.stopPropagation(); toggleMulti(i, cb.checked); };

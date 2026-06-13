@@ -183,9 +183,13 @@ def list_underlyings(
     instruments column renders: ``symbol`` (the bare ``symbol_name`` for
     display), ``pull_symbol`` (also ``symbol_name`` — the key the spot pull
     button POSTs to resolve the instrument via the store; ADR-0003 dropped
-    the old exchange-prefixed ``vendor_symbol``), display name, kind, and
-    exchange. The real per-underlying contract count is fetched lazily
-    via ``/api/v1/contracts`` when the row is clicked.
+    the old exchange-prefixed ``vendor_symbol``), display name, kind,
+    exchange, the contract economics ``lot_size`` (int) / ``tick_size`` (str —
+    a Decimal serialised exactly) / ``freeze_quantity`` (int | None) — the
+    F&O lot + freeze folded from the legs at ingest (DEC-GROWW-LEG-ECONOMICS-001)
+    + the spot tick, surfaced as columns per DEC-DASHBOARD-ECON-COLUMNS-001 —
+    and ``option_pullable``. The real per-underlying contract count is fetched
+    lazily via ``/api/v1/contracts`` when the row is clicked.
 
     Parameters
     ----------
@@ -234,6 +238,14 @@ def list_underlyings(
                 "name": instrument.display_name or instrument.symbol_name,
                 "kind": classified,
                 "exchange": str(instrument.exch_id),
+                # Contract economics (DEC-DASHBOARD-ECON-COLUMNS-001): the tradable
+                # F&O lot + freeze folded from the derivative legs at ingest
+                # (DEC-GROWW-LEG-ECONOMICS-001) + the spot tick. ``tick_size`` is a
+                # Decimal → serialised to ``str`` for JSON (exact, no float noise);
+                # ``freeze_quantity`` is ``None`` for an index / non-F&O spot row.
+                "lot_size": instrument.lot_size,
+                "tick_size": str(instrument.tick_size),
+                "freeze_quantity": instrument.sm_freeze_qty,
                 # Whether the "⛓ Pull options chain" action applies to this row
                 # (DEC-OPTIONS-PULL-GUARD-001) — False for NTM + its reference-only
                 # non-F&O constituents + India VIX, so the UI greys the button.
