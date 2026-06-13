@@ -689,4 +689,5 @@ class TestPerMinuteGovernor:
         ctl, _clock, _slept = _governed(3, ceiling_rps=GROWW_CEILING)
         for _ in range(12):
             ctl.pace()
-            assert ctl.snapshot()["recent_minute"] <= 3
+            recent = ctl.snapshot()["recent_minute"]
+            assert isinstance(recent, int) and recent <= 3
