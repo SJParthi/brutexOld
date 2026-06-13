@@ -282,8 +282,12 @@ def is_option_pullable(instrument: Instrument, *, reference_only_ids: frozenset[
     DEC-OPTIONS-PULL-GUARD-001), so such a stock keeps its options. Every persisted
     non-reference equity is therefore F&O-eligible (the lean store only admits EQ
     rows that are F&O-eligible OR reference), so ``not reference_only`` is exactly
-    "has an option chain" for stocks; a non-reference index keeps its pre-existing
-    pullable behaviour.
+    "has an option chain" for stocks. For an INDEX the same holds because the load
+    now also tags every **spot-only index** (one with no listed options of its own
+    that is not a brute-force index — :func:`is_spot_only_index`) reference_only
+    (DEC-NON-OPTION-INDEX-REFTAG-001), so a sectoral / broad-market index (NIFTY IT
+    / 100 / TOTAL MARKET) + India VIX are correctly NOT option-pullable, while the
+    options-bearing indices (NIFTY / BANKNIFTY / FINNIFTY …) keep their chain.
 
     Parameters
     ----------
@@ -291,8 +295,8 @@ def is_option_pullable(instrument: Instrument, *, reference_only_ids: frozenset[
         The candidate underlying.
     reference_only_ids
         The ``SECURITY_ID`` set tagged ``reference_only=TRUE`` in the lake
-        (``store.reference_only_security_ids``) — NTM + its non-F&O constituents
-        + India VIX.
+        (``store.reference_only_security_ids``) — NTM + its non-F&O constituents,
+        India VIX, and every spot-only (non-option, non-brute-force) index.
     """
     return instrument.security_id not in reference_only_ids
 
@@ -344,6 +348,45 @@ def build_options_eligible_underlyings(
         if inst.is_option and inst.exch_id == Exchange.NSE and underlying is not None:
             eligible.add((inst.exch_id, underlying))
     return frozenset(eligible)
+
+
+def is_spot_only_index(
+    instrument: Instrument,
+    options_eligible_underlyings: frozenset[tuple[Exchange, str]],
+) -> bool:
+    """Return True iff *instrument* is an index with NO tradable option chain.
+
+    DEC-NON-OPTION-INDEX-REFTAG-001. An ``IDX`` row is **spot-only** — fetched +
+    stored for context but with no listed options of its own — iff it is NEITHER
+
+    * one of the 3 brute-force indices (NIFTY / BANKNIFTY / SENSEX — always
+      individually tradable, never reference; :func:`is_in_brute_force_scope`), NOR
+    * an options-eligible index (one named by at least one ``CE`` / ``PE`` leg in
+      *options_eligible_underlyings* — e.g. FINNIFTY / MIDCPNIFTY / NIFTY NEXT 50).
+
+    The broad-market (NIFTY 100 / 500 / TOTAL MARKET), sectoral (NIFTY IT / AUTO /
+    PHARMA) indices and INDIA VIX are therefore spot-only. The keyless instrument
+    load tags them ``reference_only`` so the ``/universe`` dashboard does NOT badge
+    them option-pullable (the bug this closes: every non-F&O index wrongly showing
+    "OPT" + passing the "F&O only" filter). A non-``IDX`` row (equity / derivative
+    leg) returns ``False`` here — an equity's pullability is decided by
+    F&O-eligibility, not this index rule.
+
+    Parameters
+    ----------
+    instrument
+        The candidate instrument-master row.
+    options_eligible_underlyings
+        The authoritative options-bearing ``(exchange, underlying_symbol)`` set
+        from :func:`build_options_eligible_underlyings`, computed once at ingest
+        from the FULL master (the lean store discards the option legs, so this is
+        not recoverable at query time — Golden Rule #1, never a hardcoded guess).
+    """
+    if instrument.instrument != InstrumentType.IDX:
+        return False
+    if is_in_brute_force_scope(instrument):
+        return False
+    return (instrument.exch_id, instrument.symbol_name) not in options_eligible_underlyings
 
 
 #: One underlying's contract economics derived from its derivative legs:
@@ -574,5 +617,6 @@ __all__ = [
     "is_index_underlying",
     "is_option_pullable",
     "is_reference_only",
+    "is_spot_only_index",
     "is_universe_underlying",
 ]
