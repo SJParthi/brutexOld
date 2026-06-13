@@ -2210,6 +2210,7 @@ def build_app(
         )
 
         def _run() -> tuple[int, dict[str, object]]:
+            """Resolve the stored Groww creds + run the live probe → ``(status, payload)``."""
             try:
                 file_creds = resolve_groww_file_credentials()
             except CredentialsError as exc:

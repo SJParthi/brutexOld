@@ -31,6 +31,7 @@ from brutex.adapters.ingest_common import (
     plan_windows,
     summarize_conflicts,
     tile_windows,
+    window_days_for_interval,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict
@@ -186,3 +187,16 @@ class TestSummarizeConflicts:
         )
         assert summary["differing_fields"] == "close"
         assert summary["max_close_delta"] == "2.00"
+
+
+class TestWindowDaysForInterval:
+    """The vendor-neutral interval→tiling-width policy (the back-compat default)."""
+
+    def test_daily_is_a_single_untiled_window(self) -> None:
+        """A ``1day`` pull takes the whole range in ONE call → ``None`` width."""
+        assert window_days_for_interval("1day") is None
+
+    def test_intraday_uses_the_flat_90_day_cap(self) -> None:
+        """Every intraday interval tiles at the flat 90-day per-call cap."""
+        assert window_days_for_interval("1minute") == 90
+        assert window_days_for_interval("5minute") == 90

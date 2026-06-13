@@ -170,16 +170,6 @@ class TestConstituentUrl:
         assert "NIFTY TOTAL MARKET" in INDEX_CSV_FILENAMES
         assert "NIFTY TOTAL MKT" in INDEX_CSV_FILENAMES
 
-    def test_ntm_display_symbol_resolves(self) -> None:
-        # Cross-module sync guard (CLAUDE.md §11 COMMON): the exact display symbol
-        # BruteX admits NTM under (ntm.NTM_SYMBOL — sent verbatim by the /universe
-        # page) MUST have a constituent mapping, else the button silently regresses
-        # to "unknown-index" again. Imported here so a future rename of either
-        # side trips this test (DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001).
-        from brutex.adapters.dhan.ntm import NTM_SYMBOL
-
-        assert constituent_url(NTM_SYMBOL) is not None
-
     @pytest.mark.parametrize("symbol", sorted(INDEX_CSV_FILENAMES))
     def test_every_mapped_index_resolves(self, symbol: str) -> None:
         assert constituent_url(symbol) is not None

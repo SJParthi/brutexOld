@@ -41,7 +41,7 @@ python = ["dep:pyo3"]
 [dependencies]
 # Optional — only compiled when the `python` feature is enabled (Phase 2 binding).
 # abi3-py312 pins the stable-ABI floor to BruteX's Python 3.12 baseline.
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"], optional = true }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
 
 [dev-dependencies]
 # The golden integration test reads the JSON oracle. Test-only — not in the
