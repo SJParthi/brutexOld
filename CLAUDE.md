@@ -151,7 +151,14 @@ hostile-review pass._
    token-bucket controller (`brutex/adapters/rate_common.py:136`
    `RateController`, injected `ceiling_rps`; the 429/timeout ladders step
    down to a deep floor of **1 r/s** under sustained pressure and recover
-   up to the ceiling once it clears). Never raise the ceiling without
+   up to the ceiling once it clears). On TOP of the per-second bucket the
+   controller now runs an **operator-confirmed 500 req/min HARD governor**
+   (a rolling-60s issue-count cap, injected `ceiling_per_min` =
+   `GROWW_RATE_LIMIT_PER_MIN=500`; **no daily quota** for backtesting —
+   both operator-confirmed 2026-06-13, NOT vendor-documented;
+   DEC-GROWW-RATE-PERMIN-001). The governor only ever LOWERS the issue
+   rate (it caps; it never raises a ceiling), so it is a safe addition;
+   never raise the per-second ceiling OR the per-minute cap without
    explicit user approval.
 7. **Idempotence.** Every ingest chunk and every backtest combo must be
    rerun-safe. Same inputs → same outputs, bit-for-bit. The audit-log
@@ -417,8 +424,8 @@ bruteX/
 | Symbol/key format | **`groww_symbol` string** `EXCH-SYMBOL[-…]` (e.g. `NSE-NIFTY`, `BSE-SENSEX`) — O(1) `by_groww_symbol` lookup, NOT a numeric ID | `groww/instruments.py:190-201`; `groww/adapter.py:108-111`; `groww/api-reference/02-instruments.md:119`, `03-backtesting.md:10-37` |
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
-| Rate limit — backtesting | **UNVERIFIED** — `get_historical_candles` per-second cap + daily quota UNDOCUMENTED; Phase-0 probe gate. The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps`, steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear | `adapters/rate_common.py:136-198` + this file §2 rule 6 |
+| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting; 500/min (≈8.3 r/s sustained) is the binding limit | `groww/constants.py:112-118` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps`, steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds via `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET`. The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED) | `groww/auth.py:28-31,94-114`; `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

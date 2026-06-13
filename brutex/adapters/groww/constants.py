@@ -117,6 +117,17 @@ GROWW_RATE_LIMIT_RPS_UNVERIFIED: Final[float] = 10.0
 #: Daily quota for backtesting is unknown until probed.
 GROWW_DAILY_QUOTA_UNVERIFIED: Final[int | None] = None
 
+#: Per-minute request cap for backtesting `get_historical_candles`, applied as a
+#: HARD governor on top of the per-second token bucket (DEC-GROWW-RATE-PERMIN-001).
+#: PROVENANCE: operator-confirmed (2026-06-13) — NOT in the SDK reference. The
+#: published "Live Data" group is 300/min (01-introduction.md:130-134), but that
+#: row is NOT confirmed to cover backtesting; the operator confirms the backtesting
+#: endpoint allows 500/min with NO daily quota. The per-second ceiling stays
+#: UNVERIFIED (`GROWW_RATE_LIMIT_RPS_UNVERIFIED`) — 500/min (≈8.3 r/s sustained) is
+#: the binding limit. Injected into `RateController(ceiling_per_min=...)` so a high
+#: per-second ceiling (10 r/s ⇒ 600/min) can never overshoot it.
+GROWW_RATE_LIMIT_PER_MIN: Final[int] = 500
+
 __all__ = [
     "BRUTE_FORCE_INDEX_SYMBOLS",
     "CHUNK_WINDOW_30D_INTERVALS",
@@ -130,6 +141,7 @@ __all__ = [
     "GROWW_EXCHANGES",
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
+    "GROWW_RATE_LIMIT_PER_MIN",
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
     "INDIA_VIX_SYMBOL",
