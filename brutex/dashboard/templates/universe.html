@@ -406,7 +406,7 @@
     <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
-    <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
+    <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's constituent stocks — ALL of them, or only F&amp;O-eligible when 'F&amp;O only' is on (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
   </div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
   <!-- Spot-vs-NSE verify result (DEC-NSE-VERIFY-ROUTE-001): the one-day trust
@@ -1096,19 +1096,29 @@ document.getElementById("tickconstbtn").onclick = async () => {
   filter = "stock";
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === "stock"));
   await loadInstruments();
-  let ticked = 0;
+  /* Honor the "F&O only" toggle (DEC-INDEX-CONSTITUENTS-FULL-001): the endpoint
+     returns the index's FULL held membership (F&O + reference-only NTM stocks).
+     With "F&O only" OFF tick the ENTIRE set; with it ON tick only the
+     option-pullable (F&O) members — "if it is fno then only fno, else those
+     particular stocks". A reference-only row carries option_pullable === false. */
+  let ticked = 0, skipped = 0;
   members.forEach(sym => {
     const inst = UNIV.find(i => i.symbol === sym);
-    if (inst) { selMulti.set(inst.symbol, inst); ticked++; }
+    if (!inst) return;
+    if (fnoOnly && inst.option_pullable === false) { skipped++; return; }
+    selMulti.set(inst.symbol, inst); ticked++;
   });
   updateMultiBtn();
   renderInstruments();
   if (msg) {
     msg.classList.remove("err");
-    /* Prefer the backend note (it already says "fresh from NSE" vs "from
-       cache (fetched …)" correctly per source); fall back to a local line. */
-    msg.textContent = note
-      || `Ticked ${ticked} F&O-eligible constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ⤓ Pull spot.`;
+    /* With F&O-only ON, report the narrowed local count (the backend note carries
+       the FULL count); OFF, prefer the backend note (it says "fresh from NSE" vs
+       "from cache (fetched …)" correctly per source). */
+    msg.textContent = fnoOnly
+      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ⤓ Pull spot.`
+      : (note
+        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ⤓ Pull spot.`);
   }
   btn.disabled = false;
 };
