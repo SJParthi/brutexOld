@@ -446,7 +446,8 @@ def _read_session_bars(
     if cutoff_min is not None:
         ist = pl.col("ts_utc").dt.convert_time_zone(_IST)
         # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-        # UInt8, so `hour * 60` would overflow (9*60=540 wraps past 255).
+        # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
+        # wraps to a negative Int8); the cast gives the true minute-of-day.
         minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
         res = res.filter(minute_of_day <= cutoff_min)
     if res.is_empty():
