@@ -125,9 +125,16 @@ def probe_vix(client: GrowwClient) -> ProbeResult:
 def probe_granularity(client: GrowwClient) -> ProbeResult:
     """ADR-0009 §4.2 — do NIFTY 1m rows truly start Jan 2020 (COVID window)?
 
-    Fetches NIFTY 1m over 2020-01-01..2020-03-31 and reports the row count +
-    first timestamp. ABSENT when the window came back empty; ERROR on a
-    :class:`GrowwError`.
+    Fetches NIFTY 1m over a SINGLE ≤30-day window at the Jan-2020 boundary
+    (``2020-01-01..2020-01-30``) and reports the row count + first timestamp.
+    The window is deliberately ONE month, NOT a quarter: Groww caps the 1-minute
+    interval at **30 days per request** (``CHUNK_WINDOW_30D_INTERVALS`` /
+    ``WINDOW_DAYS_30``; ``groww/api-reference/03-backtesting.md``), so the old
+    90-day (Q1) request was rejected vendor-side — "Interval 1minute can only be
+    queried for a maximum of 30 days" — a FALSE ❌ on a perfectly valid token
+    (DEC-GROWW-PROBE-1M-WINDOW-001). One ≤30-day call answers the boundary question
+    (does 1m exist at Jan-2020?) without tiling. ABSENT when the window came back
+    empty; ERROR on a :class:`GrowwError`.
     """
     try:
         resp = client.historical_candles(
@@ -136,7 +143,7 @@ def probe_granularity(client: GrowwClient) -> ProbeResult:
             groww_symbol="NSE-NIFTY",
             interval="1minute",
             start="2020-01-01 09:15:00",
-            end="2020-03-31 15:30:00",
+            end="2020-01-30 15:30:00",
         )
     except GrowwError as exc:
         return ProbeResult(
@@ -149,7 +156,7 @@ def probe_granularity(client: GrowwClient) -> ProbeResult:
         return ProbeResult(
             name="granularity",
             verdict=VERDICT_ABSENT,
-            detail="NIFTY 1m 2020-Q1 returned no candles",
+            detail="NIFTY 1m 2020-Jan returned no candles",
             rows=0,
         )
     first = candles[0]
@@ -157,7 +164,7 @@ def probe_granularity(client: GrowwClient) -> ProbeResult:
     return ProbeResult(
         name="granularity",
         verdict=VERDICT_OK,
-        detail=f"NIFTY 1m 2020-Q1: {len(candles)} rows, first_ts={first_ts}",
+        detail=f"NIFTY 1m 2020-Jan: {len(candles)} rows, first_ts={first_ts}",
         rows=len(candles),
     )
 
