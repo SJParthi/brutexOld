@@ -22,14 +22,10 @@
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
       var(--bg);
   }
-  @keyframes fadeInDown { from{opacity:0;transform:translateY(-20px);} to{opacity:1;transform:translateY(0);} }
-  @keyframes fadeInUp { from{opacity:0;transform:translateY(16px);} to{opacity:1;transform:translateY(0);} }
   header {
     display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation:fadeInDown .5s ease both;
-    position:sticky; top:0; z-index:6;
-    background:rgba(10,13,17,.82);
-    -webkit-backdrop-filter:blur(11px); backdrop-filter:blur(11px);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:6;
+    background:rgba(10,13,17,.82); -webkit-backdrop-filter:blur(11px); backdrop-filter:blur(11px);
   }
   .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
     background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
@@ -38,67 +34,63 @@
   nav { margin-left:18px; display:flex; gap:14px; font-size:13px; }
   nav a { color:var(--blue); text-decoration:none; }
   nav a:hover { color:var(--green); }
-  .wrap { flex:1; padding:24px; animation:fadeInUp .5s ease both; max-width:1200px; }
-  .card {
-    background:var(--surface); border:1px solid var(--border); border-radius:14px;
-    padding:20px 22px; margin-bottom:18px;
-  }
-  h1 { font-size:17px; margin:0 0 4px; color:var(--text-bright); }
-  h2 { font-size:15px; margin:0 0 12px; color:var(--text-bright); }
-  .lede { color:var(--muted); font-size:13px; margin:0 0 18px; line-height:1.5; }
-  .row { display:flex; gap:18px; align-items:flex-end; flex-wrap:wrap; }
-  label { display:flex; flex-direction:column; gap:6px; font-size:11px; color:var(--muted);
-    text-transform:uppercase; letter-spacing:.5px; }
-  input[type=date], input[type=number], select {
+  .wrap { flex:1; padding:20px 24px; max-width:1320px; width:100%; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
+
+  /* Asset tabs (Spot · Futures · Options) — Dhan's Stocks/Options/Futures row */
+  .tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:12px; }
+  .tab { padding:8px 16px; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer;
+    color:var(--muted); background:transparent; border:1px solid transparent; user-select:none; }
+  .tab.on { color:var(--green-bright); background:rgba(38,217,176,.10); border-color:var(--green); }
+
+  /* category pills + right-side controls */
+  .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .pill { padding:6px 12px; border-radius:999px; font-size:12.5px; cursor:pointer; user-select:none;
+    color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
+  .pill.on { color:var(--yellow); border-color:var(--yellow); background:rgba(255,183,77,.10); }
+  .spacer { margin-left:auto; }
+  .toggle { display:inline-flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); }
+  .toggle b { color:var(--text-bright); }
+  .seg { display:inline-flex; border:1px solid var(--border-strong); border-radius:999px; overflow:hidden; }
+  .seg span { padding:5px 12px; font-size:12.5px; cursor:pointer; user-select:none; color:var(--muted); }
+  .seg span.on.gain { color:#06231c; background:var(--green); font-weight:700; }
+  .seg span.on.lose { color:#2a0c0c; background:var(--red); font-weight:700; }
+  select, input[type=date], input[type=number] {
     background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:9px; padding:9px 12px; font-size:13px; min-width:150px;
-  }
-  input[type=number] { min-width:110px; }
-  button {
-    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:10px; padding:11px 18px; font-size:13px; cursor:pointer; transition:.16s;
-  }
-  button:hover { border-color:var(--blue); }
-  button.go { border-color:var(--green); color:var(--green-bright); font-weight:700;
-    background:linear-gradient(180deg, rgba(38,217,176,.10), transparent); }
-  button:disabled { opacity:.45; cursor:not-allowed; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
-  table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th, td { text-align:right; padding:7px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+    border-radius:9px; padding:7px 10px; font-size:12.5px; }
+  input[type=number]{ width:64px; }
+  label.ctl { display:inline-flex; flex-direction:column; gap:3px; font-size:10px; color:var(--muted);
+    text-transform:uppercase; letter-spacing:.4px; }
+  button.go { background:linear-gradient(180deg, rgba(38,217,176,.12), transparent);
+    border:1px solid var(--green); color:var(--green-bright); border-radius:9px; padding:8px 14px;
+    font-size:13px; font-weight:700; cursor:pointer; align-self:flex-end; }
+
+  /* the Dhan-style movers table */
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:right; padding:10px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
-  th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; font-weight:600; }
-  td.sym { color:var(--text-bright); font-weight:600; }
+  thead th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
+    position:sticky; top:64px; background:var(--surface); }
+  td.name { color:var(--text-bright); font-weight:600; }
+  td.name small { display:block; color:var(--muted); font-weight:400; font-size:11px; }
   td.pos { color:var(--green); } td.neg { color:var(--red); }
-  .tag { font-size:10px; color:var(--muted); background:var(--surface-3);
-    border:1px solid var(--border); border-radius:6px; padding:2px 7px; font-family:ui-monospace,monospace; }
-  .empty { color:var(--muted); font-size:13px; padding:14px 0; text-align:center; }
-  .empty .art { display:block; font-size:38px; line-height:1; margin-bottom:8px; }
-  #msg { font-size:13px; color:var(--yellow); margin-top:6px; min-height:18px; }
-  #window { font-size:12px; color:var(--muted); margin-left:auto; }
-  .note { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
+  tbody tr:hover { background:var(--surface-2); }
+  .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
+  #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
+  .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; }
   .note b { color:var(--text); }
+  .preview-badge { font-size:10px; font-weight:700; color:var(--yellow); border:1px solid var(--yellow);
+    border-radius:999px; padding:2px 8px; background:rgba(255,183,77,.10); }
+  .empty { color:var(--muted); text-align:center; padding:24px 0; }
   a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
-    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
-      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
-      transition-duration: .001ms !important; scroll-behavior: auto !important;
-    }
-  }
-  @media (max-width: 860px) {
-    .grid { grid-template-columns:1fr; }
-    header { flex-wrap:wrap; gap:8px; padding:12px 14px; }
-    nav { margin-left:0; }
-    .wrap { padding:14px; }
-    .row > label, .row input, .row select { width:100%; min-width:0; }
-  }
+    outline:2px solid var(--blue); outline-offset:2px; border-radius:8px; }
+  @media (prefers-reduced-motion: reduce){ *{ animation:none!important; transition:none!important; } }
 </style>
 </head>
 <body>
   <header>
     <div class="logo">BruteX</div>
-    <div class="sub">Movers — top gainers / losers · volume surge · realised-range volatility (reference-only lake view)</div>
+    <div class="sub">Movers — point-in-time gainers / losers · volume · value · OI (reference-only lake view)</div>
     <nav>
       <a href="/groww-credentials">Credentials</a>
       <a href="/db">Database</a>
@@ -110,148 +102,144 @@
 
   <div class="wrap">
     <div class="card">
-      <h1>📊 Movers over the ingested lake</h1>
-      <p class="lede">
-        Reference-only ranking over the spot data already pulled into the lake (CLAUDE.md §3) —
-        it never touches the brute-force engine or the 52-condition vocabulary. <b>% change</b> is
-        first-bar-open → last-bar-close across the window; <b>surge×</b> is recent vs baseline mean
-        volume; <b>range vol</b> is mean per-bar (high−low)/close. Prices are lake-derived and
-        2-decimal money; the numbers are only as good as what you pulled.
-      </p>
-      <div class="row">
-        <label>Interval
+      <!-- Asset tabs: Spot · Futures · Options -->
+      <div class="tabs" id="tabs">
+        <div class="tab on" data-asset="spot">📈 Spot</div>
+        <div class="tab" data-asset="futures">🔮 Futures</div>
+        <div class="tab" data-asset="options">🎯 Options</div>
+      </div>
+
+      <!-- category pills (left) + gainers/losers + exchange + expiry (right) -->
+      <div class="bar">
+        <span id="pills"></span>
+        <span class="spacer"></span>
+        <span class="toggle" id="sideWrap">
+          <span class="seg">
+            <span class="on gain" data-side="gainers" id="sideGain">Gainers</span>
+            <span data-side="losers" id="sideLose">Losers</span>
+          </span>
+        </span>
+        <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
+        <select id="expiry" title="Expiry" style="display:none;"></select>
+      </div>
+
+      <!-- controls: single date + timeframe + time + top N -->
+      <div class="controls-row">
+        <label class="ctl">Date<input type="date" id="date" /></label>
+        <label class="ctl">Timeframe
           <select id="interval">
             <option value="1day" selected>1 day</option>
             <option value="1hour">1 hour</option>
+            <option value="30minute">30 min</option>
             <option value="15minute">15 min</option>
             <option value="5minute">5 min</option>
             <option value="1minute">1 min</option>
           </select>
         </label>
-        <label>From<input type="date" id="from" /></label>
-        <label>To<input type="date" id="to" /></label>
-        <label>Top N<input type="number" id="topn" min="1" max="100" step="1" value="10" /></label>
-        <label>Recent bars<input type="number" id="recent" min="1" max="500" step="1" value="5" /></label>
+        <label class="ctl">Time<select id="time"><option value="">(daily)</option></select></label>
+        <label class="ctl">Top N<input type="number" id="topn" min="1" max="100" value="20" /></label>
         <button class="go" id="refresh">↻ Refresh</button>
-        <span id="window"></span>
+        <span id="asof"></span>
       </div>
-      <div id="msg"></div>
-      <p class="note" id="note"></p>
-    </div>
 
-    <div class="grid">
-      <div class="card">
-        <h2>📈 Top gainers</h2>
-        <table>
-          <thead><tr><th>Symbol</th><th>Mkt</th><th>Base</th><th>Last</th><th>% chg</th><th>Bars</th></tr></thead>
-          <tbody id="gainers"></tbody>
-        </table>
-      </div>
-      <div class="card">
-        <h2>📉 Top losers</h2>
-        <table>
-          <thead><tr><th>Symbol</th><th>Mkt</th><th>Base</th><th>Last</th><th>% chg</th><th>Bars</th></tr></thead>
-          <tbody id="losers"></tbody>
-        </table>
-      </div>
-      <div class="card">
-        <h2>🔊 Volume movers <span class="tag">surge×</span></h2>
-        <table>
-          <thead><tr><th>Symbol</th><th>Mkt</th><th>Surge×</th><th>Last close</th><th>Bars</th></tr></thead>
-          <tbody id="volume"></tbody>
-        </table>
-      </div>
-      <div class="card">
-        <h2>🌪 Volatility movers <span class="tag">range vol</span></h2>
-        <table>
-          <thead><tr><th>Symbol</th><th>Mkt</th><th>Range vol</th><th>Last close</th><th>Bars</th></tr></thead>
-          <tbody id="volatility"></tbody>
-        </table>
-      </div>
+      <table>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="note" id="note"></p>
     </div>
   </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
+const state = { asset:"spot", category:"price", side:"gainers", interval:"1day", time:"", expiry:"" };
 
-/* Display-only number formatting. The server keeps statistical metrics
-   (% change, surge ratio, range volatility) at FULL precision as strings —
-   we round here ONLY for display, never mutating the ranked value. */
-function fmtPct(s) {
-  const n = Number(s);
-  if (!isFinite(n)) return s;
-  return (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
-}
-function fmtNum(s, dp) {
-  const n = Number(s);
-  return isFinite(n) ? n.toFixed(dp) : (s == null ? "—" : s);
-}
-function emptyRow(cols, text) {
-  return '<tr><td colspan="' + cols + '" class="empty"><span class="art">📭</span>'
-    + text + '</td></tr>';
-}
+/* Per-asset category pills (mirrors the Dhan Stocks/Futures/Options tabs). */
+const CATEGORIES = {
+  spot:    [["price","Price Movers"],["volume","Top Volume"],["value","Top Value"]],
+  futures: [["price","Price Movers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
+  options: [["oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price","Price Movers"]],
+};
+/* Per-asset table columns (Dhan's column sets). */
+const COLUMNS = {
+  spot:    ["Name","LTP","Change","Change %","Value (Cr)","Volume"],
+  futures: ["Name","LTP","Spot","Premium","Change %","OI","OI Chg %","Volume"],
+  options: ["Name","Spot","LTP","Change %","OI","OI Chg","OI Chg %","Volume"],
+};
+/* timeframe → bar length (minutes) → auto-fill the time dropdown (09:15 → 15:30). */
+const TF_MIN = {"1minute":1,"5minute":5,"15minute":15,"30minute":30,"1hour":60,"1day":375};
 
-function renderMovers(rows, tbodyId, sign) {
-  const tb = $(tbodyId);
-  if (!rows || rows.length === 0) { tb.innerHTML = emptyRow(6, "none in this window"); return; }
-  tb.innerHTML = rows.map((r) => {
-    const cls = sign === "pos" ? "pos" : "neg";
-    return '<tr><td class="sym">' + r.symbol + '</td>'
-      + '<td><span class="tag">' + r.exchange + '·' + r.segment + '</span></td>'
-      + '<td>' + r.base_price + '</td>'
-      + '<td>' + r.last_price + '</td>'
-      + '<td class="' + cls + '">' + fmtPct(r.pct_change) + '</td>'
-      + '<td>' + r.bar_count + '</td></tr>';
-  }).join("");
+function fillTimes() {
+  const m = TF_MIN[$("interval").value] || 375;
+  const sel = $("time");
+  if (m >= 375) { sel.innerHTML = '<option value="">(daily)</option>'; sel.disabled = true; state.time=""; return; }
+  sel.disabled = false;
+  let opts = "", t = 9*60+15;
+  while (t < 15*60+30) { const hh=String(Math.floor(t/60)).padStart(2,"0"), mm=String(t%60).padStart(2,"0"); opts += `<option>${hh}:${mm}</option>`; t += m; }
+  sel.innerHTML = opts;
+  state.time = sel.value;
 }
 
-function renderMetric(rows, tbodyId, dp) {
-  const tb = $(tbodyId);
-  if (!rows || rows.length === 0) { tb.innerHTML = emptyRow(5, "none in this window"); return; }
-  tb.innerHTML = rows.map((r) =>
-    '<tr><td class="sym">' + r.symbol + '</td>'
-    + '<td><span class="tag">' + r.exchange + '·' + r.segment + '</span></td>'
-    + '<td>' + fmtNum(r.value, dp) + '</td>'
-    + '<td>' + r.last_close + '</td>'
-    + '<td>' + r.bar_count + '</td></tr>'
-  ).join("");
+function renderPills() {
+  $("pills").innerHTML = CATEGORIES[state.asset].map(([k,label]) =>
+    `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${label}</span>`).join("");
+  $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); load(); });
+  // expiry dropdown only for F&O.
+  $("expiry").style.display = (state.asset==="spot") ? "none" : "";
+  if (state.asset!=="spot" && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
 }
+function renderHead() { $("head").innerHTML = COLUMNS[state.asset].map(c=>`<th>${c}</th>`).join(""); }
+
+/* SAMPLE rows so this file shows the layout when opened standalone (no backend).
+   Clearly a PREVIEW — not real market data (Golden Rule #1). */
+const SAMPLE = {
+  spot: [["NIFTY 50","₹23,622.90","+461.30","+1.99%","12,304.50","1,23,45,678"],
+         ["RELIANCE","₹1,293.00","+30.00","+2.38%","996.41","81,01,241"],
+         ["HDFC Bank","₹772.45","+27.85","+3.74%","440.82","99,46,830"]],
+};
+function sampleRow(cells, side){ const cls = side==="losers"?"neg":"pos";
+  return "<tr>"+cells.map((c,i)=>`<td class="${i===0?'name':(i===2||i===3?cls:'')}">${c}</td>`).join("")+"</tr>"; }
 
 async function load() {
-  const btn = $("refresh");
-  btn.disabled = true;
-  $("msg").textContent = "Loading — reconciling the catalog from the lake…";
-  const params = new URLSearchParams({
-    interval: $("interval").value,
-    top_n: $("topn").value || "10",
-    recent_bars: $("recent").value || "5",
-  });
-  if ($("from").value) params.set("start", $("from").value);
-  if ($("to").value) params.set("end", $("to").value);
+  $("note").innerHTML = "Loading…";
+  const p = new URLSearchParams({ asset:state.asset, category:state.category, side:state.side,
+    interval:$("interval").value, top_n:$("topn").value||"20" });
+  if ($("date").value) p.set("date", $("date").value);
+  if (state.time) p.set("time", state.time);
+  if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
   try {
-    const r = await fetch("/api/v1/movers?" + params.toString());
+    const r = await fetch("/api/v1/movers?"+p.toString());
+    if (!r.ok) throw new Error("HTTP "+r.status);
     const j = await r.json();
-    if (!r.ok) { $("msg").textContent = "Error: " + (j.detail || ("HTTP " + r.status)); btn.disabled = false; return; }
-    renderMovers(j.gainers, "gainers", "pos");
-    renderMovers(j.losers, "losers", "neg");
-    renderMetric(j.volume_movers, "volume", 3);
-    renderMetric(j.volatility_movers, "volatility", 5);
-    $("window").textContent = (j.start || "").slice(0, 10) + " → " + (j.end || "").slice(0, 10)
-      + " · " + j.interval + " · " + j.instrument_count + " instrument(s)"
-      + (j.skipped_count ? " · " + j.skipped_count + " skipped" : "");
-    $("note").innerHTML = "<b>Note:</b> " + (j.note || "");
-    $("msg").textContent = "";
+    const list = state.side==="losers" ? (j.losers||[]) : (j.gainers||j.volume_movers||[]);
+    renderHead();
+    if (!list.length) { $("rows").innerHTML = `<tr><td colspan="${COLUMNS[state.asset].length}" class="empty">📭 ${j.note||"no movers in this snapshot"}</td></tr>`; }
+    else { $("rows").innerHTML = list.map(row => sampleRow(
+      [row.name||row.symbol, row.ltp, row.change??"—", (row.pct_change!=null?Number(row.pct_change).toFixed(2)+"%":"—"), row.value_cr??"—", row.volume??"—"], state.side)).join(""); }
+    $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
+    $("note").innerHTML = "<b>Note:</b> "+(j.note||"");
   } catch (e) {
-    $("msg").textContent = "Request failed: " + e;
-  } finally {
-    btn.disabled = false;
+    // Standalone preview (no backend): show the SAMPLE layout, clearly badged.
+    renderHead();
+    $("rows").innerHTML = (SAMPLE[state.asset]||SAMPLE.spot).map(c=>sampleRow(c.concat(Array(Math.max(0,COLUMNS[state.asset].length-c.length)).fill("—")), state.side)).join("");
+    $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
+    $("note").innerHTML = "<b>Note:</b> preview of the layout with sample rows — run the dashboard for live lake data (reference-only, % vs prev-day close, fresh-session volume).";
   }
 }
 
+$("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  $("tabs").querySelectorAll(".tab").forEach(x=>x.classList.remove("on")); t.classList.add("on");
+  state.asset = t.dataset.asset; state.category = CATEGORIES[state.asset][0][0];
+  renderPills(); renderHead(); load();
+});
+$("sideGain").onclick = () => { state.side="gainers"; $("sideGain").className="on gain"; $("sideLose").className=""; load(); };
+$("sideLose").onclick = () => { state.side="losers"; $("sideLose").className="on lose"; $("sideGain").className="gain"; load(); };
+$("interval").onchange = () => { fillTimes(); load(); };
+$("time").onchange = () => { state.time = $("time").value; load(); };
+["exchange","expiry","topn","date"].forEach(id => $(id).onchange = load);
 $("refresh").onclick = load;
-/* Load once on open. No auto-poll timer: each load reconciles the catalog from
-   the lake (an O(P) one-time pass), so polling would re-storm that work. */
-load();
+
+fillTimes(); renderPills(); renderHead(); load();
 </script>
 </body>
 </html>
