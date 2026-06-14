@@ -8,24 +8,42 @@ in-call fast-retry for transient stalls (mirrors the canonical client pattern).
 
 The SDK is injected (the :class:`GrowwSDK` Protocol), so every branch — happy
 path, transient-retry, exhaustion, terminal — is unit-tested with a fake; no
-``growwapi`` install and no network. Rate limiting + the work-item re-queue stay
-the orchestrator's job (CLAUDE.md §11 COMMON); a rate-limit error is therefore
-NEVER fast-retried here (the token bucket owns 429 backoff) — only a
-:class:`GrowwTimeoutError` gets the bounded retry. O(1): the retry budget is a
-fixed constant; the client holds no per-symbol state.
+``growwapi`` install and no network.
+
+**Adaptive rate limiting lives HERE, at the one choke point EVERY Groww call
+funnels through (DEC-GROWW-RATELIMIT-RETRY-001)** — so spot / expiries / contracts
+/ futures / options / historical are uniformly protected, never one bypassed: each
+:meth:`_call` (a) ``pace()``-acquires a token (≤ the injected ceiling), (b) on a
+RETRYABLE error (rate-limit OR timeout, classified by
+:func:`~brutex.adapters.groww.errors.from_groww_exception` — which now recognises a
+generic ``GrowwAPIException("Rate limit …")``, the live 429 shape) backs off +
+retries within a bounded budget, (c) fires ``on_rate_limit`` to **decrement** the
+shared token bucket on every 429 and ``on_success`` to **recover** it on a clean
+call (the operator's decremental/incremental contract). The orchestrator's
+work-item re-queue (layer 3) still re-pulls any window that exhausts this in-call
+budget — belt-and-suspenders. O(1): the retry budget is a fixed constant; the
+client holds no per-symbol state.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from brutex.adapters.groww.errors import GrowwTimeoutError, from_groww_exception
+from brutex.adapters.groww.errors import (
+    GrowwRateLimitError,
+    from_groww_exception,
+    is_retryable,
+)
 
 
 def _noop_pace() -> None:
     """Default rate-bucket hook — no-op until a controller is injected."""
+
+
+def _noop_hook() -> None:
+    """Default decrement/recover feedback hook — no-op until a controller is injected."""
 
 
 def _noop_sleep(_seconds: float) -> None:  # pragma: no cover — replaced in tests + by real backoff
@@ -78,23 +96,48 @@ class GrowwClient:
     sdk: GrowwSDK
     pace: Callable[[], None] = _noop_pace
     sleep: Callable[[float], None] = _noop_sleep
-    max_attempts: int = 3
+    on_rate_limit: Callable[[], None] = field(default=_noop_hook)
+    on_success: Callable[[], None] = field(default=_noop_hook)
+    max_attempts: int = 6
     backoff_seconds: float = 0.5
+    rate_limit_backoff_seconds: float = 2.0
 
     def _call(self, fn: Callable[[], Mapping[str, object]]) -> Mapping[str, object]:
-        """Run *fn*, mapping SDK errors and fast-retrying only a transient timeout."""
+        """Run *fn* through the adaptive limiter: pace → retry retryable → decrement/recover.
+
+        Every physical call acquires a token (:attr:`pace`), then on a RETRYABLE
+        failure (rate-limit OR timeout — :func:`is_retryable`) backs off + retries
+        within :attr:`max_attempts`; a rate-limit additionally fires
+        :attr:`on_rate_limit` (decrement the shared bucket) on EVERY occurrence and
+        uses the longer :attr:`rate_limit_backoff_seconds`. A clean call fires
+        :attr:`on_success` (recover the rate up). A terminal error (auth / bad-
+        request / not-found / unknown), or a retryable one that exhausts the budget,
+        re-raises the neutral :class:`GrowwError` for the caller to handle (the
+        orchestrator's layer-3 re-queue). Linear backoff (``base × attempt``) keeps
+        it O(1)-state + bounded.
+        """
         attempt = 0
         while True:
             attempt += 1
             self.pace()
             try:
-                return fn()
+                result = fn()
             except Exception as exc:  # broad: any SDK error → neutral GrowwError
                 err = from_groww_exception(exc)
-                if isinstance(err, GrowwTimeoutError) and attempt < self.max_attempts:
-                    self.sleep(self.backoff_seconds * attempt)
+                if isinstance(err, GrowwRateLimitError):
+                    self.on_rate_limit()  # decrement the shared bucket on EVERY 429
+                if is_retryable(err) and attempt < self.max_attempts:
+                    base = (
+                        self.rate_limit_backoff_seconds
+                        if isinstance(err, GrowwRateLimitError)
+                        else self.backoff_seconds
+                    )
+                    self.sleep(base * attempt)
                     continue
                 raise err from exc
+            else:
+                self.on_success()  # recover the rate up on a clean call
+                return result
 
     def historical_candles(
         self,
