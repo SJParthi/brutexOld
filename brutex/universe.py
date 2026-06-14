@@ -423,6 +423,7 @@ def normalize_underlying_symbol(symbol: str) -> str:
 
 def diagnose_unmatched_option_underlyings(
     instruments: Iterable[Instrument],
+    index_alias_symbols: frozenset[tuple[Exchange, str]] | None = None,
 ) -> list[OptionUnderlyingGap]:
     """Report NSE option underlyings that look like an INDEX but match no IDX spot row.
 
@@ -433,6 +434,17 @@ def diagnose_unmatched_option_underlyings(
     from the ``underlying_symbol`` the vendor stamps on its ``CE`` / ``PE``
     legs, because the OPT-vs-REF badge keys on an EXACT
     ``(exchange, symbol_name)`` match (DEC-NON-OPTION-INDEX-REFTAG-001).
+
+    *index_alias_symbols* (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001) is the set of
+    ``(exchange, vendor_F&O_symbol)`` the loader harvests from each ``IDX``
+    row's ``groww_symbol`` key (``"NSE-MIDCPNIFTY"`` → ``(NSE, "MIDCPNIFTY")``
+    via :func:`~brutex.adapters.groww.instruments.index_symbol_of`). An
+    underlying that the groww-symbol bridge ALREADY resolved to a spot row is
+    NOT a real gap, so it is skipped here — the diagnostic stays HONEST and
+    stops crying about indices the bridge fixed (it would otherwise log a
+    permanent false ``count`` for MIDCPNIFTY / NIFTYNXT50 even after they were
+    correctly badged OPT). ``None`` (the default) preserves the original
+    symbol_name-only behaviour for any non-loader caller.
 
     For every distinct NSE option ``underlying_symbol`` in *instruments*:
 
@@ -488,9 +500,15 @@ def diagnose_unmatched_option_underlyings(
     for name in sorted(index_symbol_names):
         normalized_index.setdefault(normalize_underlying_symbol(name), name)
 
+    aliases = index_alias_symbols if index_alias_symbols is not None else frozenset()
     gaps: list[OptionUnderlyingGap] = []
     for underlying in option_underlyings:
         if underlying in index_symbol_names or underlying in equity_symbol_names:
+            continue
+        # The groww-symbol bridge already resolved this underlying to a spot
+        # IDX row (its verbose symbol_name differed, but its vendor F&O symbol
+        # matched) → NOT a gap (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001).
+        if (Exchange.NSE, underlying) in aliases:
             continue
         nearest = normalized_index.get(normalize_underlying_symbol(underlying))
         gaps.append(

@@ -269,3 +269,25 @@ def test_opt_date_branches() -> None:
 def test_segment_for_unmappable_raises() -> None:
     with pytest.raises(InstrumentFormatError, match="unmappable segment"):
         gi._segment_for(InstrumentType.FUT, "WEIRD", gsym="g")
+
+
+# ── index_symbol_of (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001) ──────────────────
+@pytest.mark.parametrize(
+    ("groww_symbol", "expected"),
+    [
+        ("NSE-NIFTY", "NIFTY"),
+        ("NSE-MIDCPNIFTY", "MIDCPNIFTY"),
+        ("NSE-NIFTYNXT50", "NIFTYNXT50"),
+        ("BSE-SENSEX", "SENSEX"),
+        ("NSE-INDIAVIX", "INDIAVIX"),
+    ],
+)
+def test_index_symbol_of_extracts_the_fno_symbol(groww_symbol: str, expected: str) -> None:
+    # The SYMBOL component (after the exchange prefix) is the vendor's F&O
+    # symbol — the SAME string the option legs name as underlying_symbol.
+    assert gi.index_symbol_of(groww_symbol) == expected
+
+
+def test_index_symbol_of_without_dash_is_empty() -> None:
+    # A malformed key with no "-" yields "" (matches nothing — safe, never raises).
+    assert gi.index_symbol_of("NIFTY") == ""
