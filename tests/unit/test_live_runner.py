@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import signal
 import sys
+from collections.abc import Mapping
 
 from brutex.dashboard import live_runner as lr
 from brutex.dashboard.live_runner import LiveRunner, _now_epoch
@@ -109,11 +110,12 @@ def test_status_reaps_dead_pid_after_restart(tmp_path) -> None:
 
 def test_start_injects_dashboard_creds_into_child_env(tmp_path) -> None:
     """The saved Groww creds ride in the child ENV (never argv → ps stays clean)."""
-    captured: dict[str, object] = {}
+    captured_argv: list[str] = []
+    captured_env: dict[str, str] = {}
 
-    def popen(argv: list[str], env):
-        captured["argv"] = argv
-        captured["env"] = dict(env)
+    def popen(argv: list[str], env: Mapping[str, str]) -> _FakeProc:
+        captured_argv.extend(argv)
+        captured_env.update(env)
         return _FakeProc(5)
 
     r = LiveRunner(
@@ -124,10 +126,10 @@ def test_start_injects_dashboard_creds_into_child_env(tmp_path) -> None:
         cred_env=lambda: {"BRUTEX_GROWW_API_KEY": "K", "BRUTEX_GROWW_TOTP_SECRET": "S"},
     )
     r.start(out="o", log_file="l", seconds=1)
-    env = captured["env"]
-    assert env["BRUTEX_GROWW_API_KEY"] == "K" and env["BRUTEX_GROWW_TOTP_SECRET"] == "S"
+    assert captured_env["BRUTEX_GROWW_API_KEY"] == "K"
+    assert captured_env["BRUTEX_GROWW_TOTP_SECRET"] == "S"
     # creds are NOT on argv (ps hygiene).
-    assert "K" not in captured["argv"] and "S" not in captured["argv"]
+    assert "K" not in captured_argv and "S" not in captured_argv
 
 
 def test_load_cred_env_branches(monkeypatch) -> None:
