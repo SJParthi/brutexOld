@@ -731,6 +731,7 @@ def build_app(
             PlainTextResponse,
             Response,
         )
+        from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -745,6 +746,15 @@ def build_app(
     # lifespan wiring was removed. The retired-vendor adapter package has since been
     # deleted; the dashboard simply no longer drives any keepalive.
     app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
+
+    # Serve the shared dashboard static assets (the date-picker component, etc.)
+    # from ``/static`` — ONE source of truth loaded by every page via <link>/<script>
+    # (no inline copy, so the duplication gate stays clean).
+    app.mount(
+        "/static",
+        StaticFiles(directory=Path(__file__).resolve().parent / "static"),
+        name="static",
+    )
 
     @app.middleware("http")
     async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
