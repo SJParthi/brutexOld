@@ -1,6 +1,6 @@
 """Pins the ``/universe`` premium custom controls (DEC-UNIVERSE-PREMIUM-CONTROLS-001).
 
-The operator's expectation was a TradingView/Dhan-grade UI; the browser-native
+The operator's expectation was a premium, TradingView-grade UI; the browser-native
 ``<input type="date">`` calendar + ``<select>`` dropdowns read as legacy because
 they are unstylable OS widgets. This replaces them with custom, animated
 components (a dual-month date-range picker with presets + custom select
