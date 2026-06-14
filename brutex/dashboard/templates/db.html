@@ -235,6 +235,10 @@ const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], 
    dataset's `kind` still drives which API + column set is used
    (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer). */
 const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: null, desc: false, offset: 0 };
+/* F&O registry-viewer state (DEC-DERIV-REGISTRY-DB-VIEW-001). `kind` is the
+   active registry row ("expiries"|"contracts"); the registry is a SEPARATE
+   `registry.duckdb` cache surfaced read-only as a grid (columns/rows/total). */
+const rstate = { kind: null };
 
 /* Friendly labels for the allowlisted query operators (mirrors
    db_view.ALLOWED_OPERATORS — the backend is the source of truth + re-validates). */
@@ -358,9 +362,24 @@ async function loadTables() {
       + '<span class="nm">🪟 window ledger</span>'
       + '<span class="badge" style="color:var(--green);background:rgba(74,222,128,.13)">windows</span>'
       + '</div>';
+    /* The F&O expiries+contracts REGISTRY lives in a SEPARATE `registry.duckdb`
+       cache (DEC-DERIV-METADATA-HISTORICAL-SPLIT-001 PR-1), a sibling of the lean
+       instrument master — NOT a master DuckDB table — so it gets its OWN clickable
+       read-only rows (DEC-DERIV-REGISTRY-DB-VIEW-001): a pulled chain becomes
+       browsable here, structured by expiry / strike / CE-PE. EMPTY until a later
+       PR populates it — the badge starts blank and fills from the route's counts. */
+    const expiriesRow = '<div class="tbl" data-registry="expiries">'
+      + '<span class="nm">📅 expiries</span>'
+      + '<span class="badge" style="color:var(--blue);background:rgba(91,141,239,.13)">registry</span>'
+      + '</div>';
+    const contractsRow = '<div class="tbl" data-registry="contracts">'
+      + '<span class="nm">🔗 contracts</span>'
+      + '<span class="badge" style="color:var(--yellow);background:rgba(255,183,77,.13)">registry</span>'
+      + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
       + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + optionRow
-      + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow;
+      + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow
+      + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
     tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
       el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
@@ -371,7 +390,11 @@ async function loadTables() {
     tablesEl.querySelectorAll(".tbl[data-ledger]").forEach(el => {
       el.addEventListener("click", () => selectLedger(el.getAttribute("data-ledger")));
     });
+    tablesEl.querySelectorAll(".tbl[data-registry]").forEach(el => {
+      el.addEventListener("click", () => selectRegistry(el.getAttribute("data-registry")));
+    });
     if (mode === "candles") markCandles();
+    else if (mode === "registry") markRegistry(rstate.kind);
     else if (selected && counts[selected] !== undefined) markSelected(selected);
   } catch (e) {
     tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">offline</div>';
@@ -425,6 +448,66 @@ async function selectLedger(kind) {
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
   }
+}
+
+/* ── F&O registry (separate registry.duckdb cache) ── */
+function markRegistry(kind) {
+  tablesEl.querySelectorAll(".tbl").forEach(el => {
+    el.classList.toggle("sel", kind !== null && el.getAttribute("data-registry") === kind);
+  });
+}
+
+async function selectRegistry(kind) {
+  /* Render the expiries / contracts registry grid read-only. Both routes return
+     the grid shape (columns/rows/total) directly, PLUS a `note` (an honest
+     "no registry yet — pull expiries + contracts first" when the cache file is
+     absent) and `counts` for the nav badges. EMPTY until a later PR populates the
+     cache — handled exactly like the expired-options "empty" path. */
+  mode = "registry";
+  selected = null;
+  rstate.kind = kind;
+  markRegistry(kind);
+  const isExp = kind === "expiries";
+  const label = isExp ? "expiries" : "contracts";
+  dataEl.innerHTML = '<div class="empty">loading ' + esc(label) + '…</div>';
+  try {
+    const r = await fetch(isExp
+      ? "/api/v1/db/registry/expiries"
+      : "/api/v1/db/registry/contracts");
+    const body = await r.json();
+    if (!r.ok) { dataEl.innerHTML = '<div class="empty qerr">error ' + r.status + '</div>'; return; }
+    /* Backfill the registry nav badges from the route's counts (the cache is
+       empty until a later PR populates it, so loadTables can't know the totals). */
+    updateRegistryBadges(body.counts || {});
+    const cols = body.columns || [];
+    const rows = body.rows || [];
+    const total = Number(body.total || 0);
+    const sub = cols.length + " cols · " + total.toLocaleString() + " rows";
+    const head = '<div class="datahead"><span class="dt">📅 ' + esc(label)
+      + '</span><span class="sub">' + esc(sub) + '</span></div>';
+    /* An honest empty state: the note (when present) names WHY — no registry
+       pulled yet — never an invented row (Golden Rule #1). */
+    const emptyMsg = body.note
+      ? esc(body.note)
+      : "no " + esc(label) + " yet — pull expiries + contracts first";
+    const grid = total === 0
+      ? '<div class="empty">' + emptyMsg + '</div>'
+      : gridAndPager(cols, rows, total, 0, total);
+    dataEl.innerHTML = head + grid;
+  } catch (e) {
+    dataEl.innerHTML = '<div class="empty">offline</div>';
+  }
+}
+
+/* Fill the registry nav badges with the live expiry/contract counts (the cache
+   is empty/absent at loadTables time, so the totals arrive with the grid fetch). */
+function updateRegistryBadges(counts) {
+  const set = (kind, n) => {
+    const row = tablesEl.querySelector('.tbl[data-registry="' + kind + '"] .badge');
+    if (row) row.textContent = (Number(n) || 0).toLocaleString();
+  };
+  set("expiries", counts.expiries);
+  set("contracts", counts.contracts);
 }
 
 const CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"];
@@ -714,6 +797,7 @@ limitSel.addEventListener("change", () => {
 refreshBtn.addEventListener("click", () => {
   loadTables();
   if (mode === "candles") selectCandles(cstate.kind);
+  else if (mode === "registry") selectRegistry(rstate.kind);
   else if (selected) selectTable(selected);
 });
 
