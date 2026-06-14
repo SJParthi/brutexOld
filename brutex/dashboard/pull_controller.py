@@ -722,8 +722,15 @@ def _spot_run_parallel(controller: RateController | None) -> RunParallel | None:
     return PoolRunParallel(max_workers=workers)
 
 
-def _build_live_controller() -> RateController:  # pragma: no cover — live Groww controller
-    """Construct the shared adaptive [3..5] r/s controller (the session factory).
+def _build_live_controller() -> RateController:
+    """Construct the shared adaptive [3..8] r/s controller (the session factory).
+
+    The controller starts at the operator-DIRECTED 8 r/s ceiling
+    (:data:`~brutex.adapters.groww.constants.GROWW_RATE_LIMIT_RPS_CEILING`,
+    DEC-GROWW-RATE-CEILING-8-001) — the per-second backtesting cap stays officially
+    UNVERIFIED; 8×60 = 480/min sits just under the 500/min governor so the
+    per-second ceiling is the binding gate. The adaptive AIMD ladder is unchanged:
+    a 429 burst still steps 8→…→3 (soft floor) and recovers back to 8.
 
     The controller is threaded into BOTH the per-window pacing hooks (``pace`` /
     ``on_rate_limit`` / ``on_success``) AND the pool sizing
@@ -731,7 +738,7 @@ def _build_live_controller() -> RateController:  # pragma: no cover — live Gro
     current rate (DEC-DHAN-ADAPTIVE-RPS-001 + DEC-DHAN-PARALLEL-INGEST-001). Built
     ONCE per dashboard session and reused across pulls via
     :class:`SessionRateController` (DEC-DHAN-PERSIST-RATE-001) so the learned rate
-    carries over instead of every pull restarting at the 5 r/s ceiling.
+    carries over instead of every pull restarting at the 8 r/s ceiling.
 
     The controller is built with **NO** :class:`~brutex.orchestrator.quota_tracker.\
 DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
@@ -748,7 +755,10 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     ``/api/v1/quota`` endpoint keeps its own informational tracker (display only, no
     enforcement) and is unaffected.
     """
-    from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_PER_MIN
+    from brutex.adapters.groww.constants import (
+        GROWW_RATE_LIMIT_PER_MIN,
+        GROWW_RATE_LIMIT_RPS_CEILING,
+    )
     from brutex.adapters.rate_common import RateController
 
     # Operator-confirmed Groww backtesting limits (DEC-GROWW-NO-DAILY-QUOTA-001):
@@ -757,23 +767,31 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     # spot path (cli.py also builds the controller with quota_tracker=None). The
     # phantom 100,000/day cap would have wrongly HALTED a large multi-day backfill,
     # since Groww backtesting has no daily quota (operator-confirmed 2026-06-13).
-    return RateController(ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN)
+    # The per-second start AND upshift cap is the operator-DIRECTED 8 r/s ceiling
+    # (GROWW_RATE_LIMIT_RPS_CEILING, DEC-GROWW-RATE-CEILING-8-001) — 8×60 = 480/min
+    # stays under the 500/min governor, so the per-second ceiling is the binding gate
+    # without ever fighting the per-minute cap; the AIMD ladder still steps DOWN on
+    # 429s. Supersedes the prior implicit 5 r/s ceiling (rate_common.CEILING_RPS).
+    return RateController(
+        ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
+        ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+    )
 
 
 class SessionRateController:
     """Persist ONE :class:`RateController` across pulls in a dashboard session.
 
     DEC-DHAN-PERSIST-RATE-001. Each ``POST /universe/pull`` used to build a FRESH
-    controller at the 5 r/s ceiling (:func:`_build_live_controller`), so every
-    symbol-pull re-opened at 5 r/s and re-hit Groww's wall — the 429 storm the
-    operator saw at the start of *every* pull, re-learnt per symbol. This holder
-    builds the controller ONCE (lazily, thread-safe) and hands the SAME instance
-    to every pull, so the rate the system LEARNED (e.g. stepped down to 3 r/s)
-    CARRIES OVER: symbol 2, 3, 4… start at the learned rate, not 5. The controller
-    is itself thread-safe (DEC-DHAN-PARALLEL-INGEST-001), so sharing it across
-    sequential AND concurrent pulls correctly keeps the AGGREGATE issue rate
-    ≤ 5 r/s (Rule #6) — concurrent pulls now share one global budget instead of
-    each running its own 5 r/s.
+    controller at the 8 r/s ceiling (:func:`_build_live_controller`, the
+    operator-DIRECTED ceiling DEC-GROWW-RATE-CEILING-8-001), so every symbol-pull
+    re-opened at 8 r/s and re-hit Groww's wall — the 429 storm the operator saw at
+    the start of *every* pull, re-learnt per symbol. This holder builds the
+    controller ONCE (lazily, thread-safe) and hands the SAME instance to every pull,
+    so the rate the system LEARNED (e.g. stepped down to 3 r/s) CARRIES OVER: symbol
+    2, 3, 4… start at the learned rate, not 8. The controller is itself thread-safe
+    (DEC-DHAN-PARALLEL-INGEST-001), so sharing it across sequential AND concurrent
+    pulls correctly keeps the AGGREGATE issue rate ≤ 8 r/s (Rule #6) — concurrent
+    pulls now share one global budget instead of each running its own 8 r/s.
     """
 
     def __init__(self, factory: Callable[[], RateController] | None = None) -> None:
