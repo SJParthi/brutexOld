@@ -402,65 +402,66 @@
   }
 
   /* ── Premium custom controls (DEC-UNIVERSE-PREMIUM-CONTROLS-001) ──
-     A premium, TradingView-style date-range picker + custom select dropdowns that
-     REPLACE the browser-native widgets (which are unstylable + read legacy).
-     The native <input type=date>/<select> stay in the DOM (hidden, test-pinned)
-     as the value source of truth; these components drive them. All motion is
-     gated by the existing prefers-reduced-motion block. */
+     A premium, TradingView-style "Go to" date picker — Date + Custom-range tabs,
+     with day -> month -> year(decade) DRILL navigation for fast multi-year
+     access — plus custom select dropdowns, replacing the unstylable
+     browser-native widgets. The native inputs/selects stay hidden as the value
+     source. Motion gated by prefers-reduced-motion. */
   .dp-wrap,.cs-wrap{position:relative;display:inline-block}
-  .dp-trigger{display:inline-flex;align-items:center;gap:8px;min-height:var(--ctl-h);padding:0 14px;
-    background:linear-gradient(180deg,var(--surface-2),var(--surface));border:1px solid var(--border-strong);
-    border-radius:var(--r-md);color:var(--text);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap;
-    transition:.16s var(--ease)}
+  .dp-trigger{display:inline-flex;align-items:center;gap:8px;min-height:var(--ctl-h);padding:0 14px;background:linear-gradient(180deg,var(--surface-2),var(--surface));border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap;transition:.16s var(--ease)}
   .dp-trigger:hover{border-color:var(--blue);box-shadow:0 0 0 3px rgba(91,141,239,.16);transform:translateY(-1px)}
   .dp-trigger b{color:var(--text-bright)} .dp-trigger .dp-sep{color:var(--muted)}
   .dp-trigger .dp-car,.cs-car{opacity:.5;font-size:10px;transition:.2s}
   .dp-wrap.open .dp-car,.cs-wrap.open .cs-car{transform:rotate(180deg);opacity:.9}
-  .dp-pop{position:absolute;z-index:300;top:46px;left:0;display:flex;
-    background:linear-gradient(180deg,#161b27,#10141d);border:1px solid var(--border-strong);
-    border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.03);overflow:hidden;
-    opacity:0;transform:translateY(-10px) scale(.97);transform-origin:top left;pointer-events:none;
-    transition:opacity .2s ease,transform .22s var(--ease)}
+  .dp-pop{position:absolute;z-index:300;top:46px;left:0;width:308px;display:flex;flex-direction:column;background:linear-gradient(180deg,#161b27,#10141d);border:1px solid var(--border-strong);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.03);overflow:hidden;opacity:0;transform:translateY(-10px) scale(.97);transform-origin:top left;pointer-events:none;transition:opacity .2s ease,transform .22s var(--ease)}
   .dp-wrap.open .dp-pop{opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
-  .dp-presets{display:flex;flex-direction:column;gap:3px;padding:14px;min-width:158px;border-right:1px solid var(--border);background:rgba(255,255,255,.015)}
-  .dp-pl{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin:2px 0 6px}
-  .dp-preset{text-align:left;background:transparent;border:1px solid transparent;border-radius:8px;padding:8px 10px;
-    color:var(--text);font:inherit;font-size:12.5px;cursor:pointer;transition:.14s;display:flex;justify-content:space-between;gap:8px}
-  .dp-preset:hover{background:var(--surface-3)}
-  .dp-preset.on{background:rgba(91,141,239,.16);box-shadow:inset 0 0 0 1px var(--blue);color:var(--text-bright)}
-  .dp-preset small{color:var(--muted);font-size:10px;align-self:center}
-  .dp-right{display:flex;flex-direction:column}
-  .dp-cals{display:flex;gap:20px;padding:16px 18px 8px}
-  .dp-cal{width:236px}
-  .dp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-  .dp-mlabel{font-weight:800;font-size:13px;color:var(--text-bright);letter-spacing:.2px}
-  .dp-nav{background:transparent;border:1px solid var(--border-strong);border-radius:8px;color:var(--text);
-    width:28px;height:28px;cursor:pointer;display:grid;place-items:center;transition:.14s;font-size:13px}
-  .dp-nav:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-1px)}
+  .dp-tabs{display:flex;gap:20px;padding:14px 16px 0}
+  .dp-tab{background:none;border:none;color:var(--muted);font:inherit;font-size:13px;font-weight:700;cursor:pointer;padding:0 0 9px;position:relative;transition:.14s}
+  .dp-tab.on{color:var(--text-bright)}
+  .dp-tab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;border-radius:2px;background:var(--blue)}
+  .dp-tabline{height:1px;background:var(--border)}
+  .dp-fields{display:flex;align-items:center;gap:8px;padding:14px 16px 4px}
+  .dp-field{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:9px 10px;font-size:12px;color:var(--text);cursor:pointer;transition:.14s;display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden}
+  .dp-field.act{border-color:var(--blue);box-shadow:0 0 0 3px rgba(91,141,239,.16)}
+  .dp-field .dp-fi{opacity:.6;font-size:12px;flex:0 0 auto}
+  .dp-farrow{color:var(--muted);flex:0 0 auto}
+  .dp-quick{display:flex;flex-wrap:wrap;gap:6px;padding:6px 16px 8px}
+  .dp-chip{background:var(--surface-2);border:1px solid var(--border-strong);border-radius:var(--r-pill);padding:5px 11px;font-size:11.5px;color:var(--text);cursor:pointer;transition:.14s}
+  .dp-chip:hover{border-color:var(--blue);color:var(--text-bright)}
+  .dp-chip.on{background:rgba(91,141,239,.16);border-color:var(--blue);color:var(--text-bright)}
+  .dp-cal{padding:4px 16px 2px}
+  .dp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .dp-nav{background:transparent;border:1px solid var(--border-strong);border-radius:8px;color:var(--text);width:30px;height:30px;cursor:pointer;display:grid;place-items:center;transition:.14s;font-size:14px}
+  .dp-nav:hover{border-color:var(--blue);color:var(--blue)}
+  .dp-hbtn{background:transparent;border:1px solid transparent;border-radius:9px;color:var(--text-bright);font:inherit;font-size:13.5px;font-weight:800;cursor:pointer;padding:6px 16px;transition:.14s}
+  .dp-hbtn:hover{border-color:var(--border-strong);background:var(--surface-2)}
   .dp-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px}
   .dp-dow span{text-align:center;font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:600}
   .dp-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
-  .dp-day{height:30px;display:grid;place-items:center;font-size:12px;color:var(--text);border-radius:8px;cursor:pointer;
-    position:relative;transition:transform .1s,background .12s;border:1px solid transparent}
+  .dp-grid.mons,.dp-grid.yrs{grid-template-columns:repeat(4,1fr);gap:6px}
+  .dp-day{height:32px;display:grid;place-items:center;font-size:12.5px;color:var(--text);border-radius:8px;cursor:pointer;transition:transform .1s,background .12s;border:1px solid transparent}
   .dp-day:hover{background:var(--surface-3);transform:translateY(-1px)}
   .dp-day.out{color:var(--muted);opacity:.3}
   .dp-day.disabled{opacity:.18;cursor:not-allowed} .dp-day.disabled:hover{background:transparent;transform:none}
   .dp-day.today{box-shadow:inset 0 0 0 1px var(--blue)}
   .dp-day.inrange{background:rgba(91,141,239,.16);border-radius:0}
-  .dp-day.start,.dp-day.end{background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff;font-weight:800;box-shadow:0 4px 14px rgba(91,141,239,.45)}
-  .dp-day.start{border-radius:8px 0 0 8px} .dp-day.end{border-radius:0 8px 8px 0} .dp-day.start.end{border-radius:8px}
-  .dp-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;border-top:1px solid var(--border)}
-  .dp-readout{font-size:12px;color:var(--muted)} .dp-readout b{color:var(--green-bright);font-variant-numeric:tabular-nums}
+  .dp-day.start,.dp-day.end,.dp-day.sel{background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff;font-weight:800;box-shadow:0 4px 14px rgba(91,141,239,.45)}
+  .dp-day.start{border-radius:8px 0 0 8px} .dp-day.end{border-radius:0 8px 8px 0} .dp-day.start.end,.dp-day.sel{border-radius:8px}
+  .dp-cell{height:48px;display:grid;place-items:center;font-size:13px;color:var(--text);border-radius:9px;cursor:pointer;transition:.12s;border:1px solid transparent}
+  .dp-cell:hover{background:var(--surface-3)}
+  .dp-cell.disabled{opacity:.2;cursor:not-allowed} .dp-cell.disabled:hover{background:transparent}
+  .dp-cell.now{box-shadow:inset 0 0 0 1px var(--blue)}
+  .dp-cell.on{background:rgba(91,141,239,.18);box-shadow:inset 0 0 0 1px var(--blue);color:var(--text-bright);font-weight:700}
+  .dp-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px 14px;border-top:1px solid var(--border);margin-top:6px}
+  .dp-readout{font-size:11.5px;color:var(--muted)} .dp-readout b{color:var(--green-bright);font-variant-numeric:tabular-nums}
   .dp-actions{display:flex;gap:8px}
   .dp-btn{border-radius:9px;padding:8px 16px;font:inherit;font-size:12.5px;font-weight:800;cursor:pointer;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);transition:.14s}
   .dp-btn:hover{border-color:var(--blue)}
   .dp-btn.apply{border:none;color:#062018;background:linear-gradient(90deg,var(--green-bright),var(--green));box-shadow:0 0 18px rgba(38,217,176,.35)}
   .dp-btn.apply:hover{box-shadow:0 0 26px rgba(38,217,176,.6);transform:translateY(-1px)}
-  .cs-trigger{display:inline-flex;align-items:center;gap:8px;min-height:30px;padding:0 4px 0 4px;background:transparent;border:none;color:var(--text);font:inherit;font-size:12.5px;cursor:pointer}
+  .cs-trigger{display:inline-flex;align-items:center;gap:8px;min-height:30px;padding:0 4px;background:transparent;border:none;color:var(--text);font:inherit;font-size:12.5px;cursor:pointer}
   .cs-trigger b{color:var(--text-bright);font-weight:600}
-  .cs-menu{position:absolute;z-index:300;top:34px;left:-10px;min-width:190px;background:linear-gradient(180deg,#161b27,#10141d);
-    border:1px solid var(--border-strong);border-radius:12px;box-shadow:0 24px 50px rgba(0,0,0,.6);padding:6px;
-    opacity:0;transform:translateY(-8px) scale(.98);transform-origin:top;pointer-events:none;transition:opacity .16s,transform .18s var(--ease)}
+  .cs-menu{position:absolute;z-index:300;top:34px;left:-10px;min-width:190px;background:linear-gradient(180deg,#161b27,#10141d);border:1px solid var(--border-strong);border-radius:12px;box-shadow:0 24px 50px rgba(0,0,0,.6);padding:6px;opacity:0;transform:translateY(-8px) scale(.98);transform-origin:top;pointer-events:none;transition:opacity .16s,transform .18s var(--ease)}
   .cs-wrap.open .cs-menu{opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
   .cs-opt{padding:9px 12px;border-radius:8px;font-size:12.5px;color:var(--text);cursor:pointer;transition:.12s}
   .cs-opt:hover{background:var(--surface-3)}
@@ -473,8 +474,9 @@
     <div class="logo">BruteX</div>
     <div class="sub">F&amp;O Universe Explorer</div>
     <nav class="topnav" aria-label="Primary">
+      <a href="/universe" aria-current="page">Universe</a>
       <a href="/groww-credentials">Credentials</a>
-      <a href="/db" aria-current="page">Database</a>
+      <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
       <a href="/movers">Movers</a>
       <a href="/reports">Reports</a>
@@ -952,52 +954,70 @@ async function selectInstrument(i) {
   ex.innerHTML = '<div class="empty">loading…</div>';
   document.getElementById("contracts").innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⛓</span>Pick an expiry to see the chain</div>';
   try {
-    const r = await fetch('/api/v1/expiries?underlying=' + encodeURIComponent(i.symbol));
+    /* DEC-UNIVERSE-REGISTRY-PANELS-001: the EXPIRIES panel now reads the F&O
+       metadata REGISTRY (registry.duckdb) that the "⛓ Pull expiries + contracts"
+       button fills — NOT the expired-options OHLC lake. Rows follow
+       REGISTRY_EXPIRY_COLUMNS = [exch, underlying, expiry_date, year, fetched_at]. */
+    const r = await fetch('/api/v1/db/registry/expiries?underlying=' + encodeURIComponent(i.symbol));
     const body = await r.json();
-    const expiries = (body.expiries || []);
-    if (!expiries.length) { ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No expired-option series in the lake yet</div>'; return; }
+    const rows = (body.rows || []);
+    if (!rows.length) {
+      const msg = body.note || 'No expiries pulled yet — click "⛓ Pull expiries + contracts"';
+      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
+      return;
+    }
     ex.innerHTML = "";
-    /* DEC-EXPIRED-OPTIONS-TABLE-001: an "expiry" is now a distinct
-       (flag, code) series in the expired-options lake, not a calendar date. */
-    expiries.forEach((e, ix) => {
+    rows.forEach((row, ix) => {
+      const expiryDate = row[2];  // REGISTRY_EXPIRY_COLUMNS[2] = expiry_date (ISO yyyy-mm-dd)
       const p = document.createElement("span");
       p.className = "pill" + (ix === 0 ? " near" : "");
       p.style.animationDelay = (ix * 0.05) + "s";
-      p.textContent = e.expiry_flag + " " + e.expiry_code;
-      p.onclick = () => selectExpiry(i.symbol, e.expiry_code, p);
+      p.textContent = expiryDate;
+      p.onclick = () => selectExpiry(i.symbol, expiryDate, p);
       ex.appendChild(p);
     });
   } catch (e) { ex.innerHTML = '<div class="empty">error loading expiries</div>'; }
 }
 
-function selectExpiry(symbol, expiryCode, el) {
-  selExp = expiryCode;
+function selectExpiry(symbol, expiryDate, el) {
+  selExp = expiryDate;
   document.querySelectorAll('#expiries .pill').forEach(x => x.classList.remove('sel'));
   el.classList.add('sel');
-  renderContracts(symbol, expiryCode);
+  renderContracts(symbol, expiryDate);
 }
 
-async function renderContracts(symbol, expiryCode) {
+async function renderContracts(symbol, expiryDate) {
   const c = document.getElementById("contracts");
   c.innerHTML = '<div class="empty">loading…</div>';
   try {
-    const r = await fetch('/api/v1/contracts?underlying=' + encodeURIComponent(symbol)
-      + '&expiry_code=' + encodeURIComponent(expiryCode));
+    /* DEC-UNIVERSE-REGISTRY-PANELS-001: the CONTRACTS chain now reads the F&O
+       registry's contracts table for this (underlying, expiry_date). Rows follow
+       REGISTRY_CONTRACT_COLUMNS = [exch, underlying, expiry_date, contract_symbol,
+       strike, side, candle_status, fetched_at]. */
+    const r = await fetch('/api/v1/db/registry/contracts?underlying=' + encodeURIComponent(symbol)
+      + '&expiry_date=' + encodeURIComponent(expiryDate));
     const body = await r.json();
-    const contracts = body.contracts || [];
-    if (!contracts.length) { c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No option series in the lake for this expiry</div>'; return; }
+    const rows = body.rows || [];
+    if (!rows.length) {
+      const msg = body.note || 'No contracts pulled for this expiry yet';
+      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
+      return;
+    }
     c.innerHTML = "";
-    /* DEC-EXPIRED-OPTIONS-TABLE-001: the chain is the distinct
-       (strike, side) series present in the expired-options lake — grouped by
-       the RESOLVED strike, with the requested strike_offset as a hint. */
+    /* Group the registry contracts by RESOLVED strike → CE / PE presence. A FUT
+       leg carries a null strike + side "FUT" and is not part of the CE/PE strike
+       ladder (browse it in /db → F&O registry). */
     const byStrike = {};
-    contracts.forEach(ct => {
-      const s = (ct.strike != null) ? ct.strike : "—";
-      byStrike[s] = byStrike[s] || {offset: ct.strike_offset};
-      if (ct.side === "CE") byStrike[s].ce = true;
-      else if (ct.side === "PE") byStrike[s].pe = true;
+    rows.forEach(row => {
+      const strike = row[4], side = row[5];
+      if (strike == null) return;  // FUT leg — no strike, skip the option ladder
+      const s = strike;
+      byStrike[s] = byStrike[s] || {};
+      if (side === "CE") byStrike[s].ce = true;
+      else if (side === "PE") byStrike[s].pe = true;
     });
     const strikes = Object.keys(byStrike).sort((a, b) => parseFloat(a) - parseFloat(b));
+    if (!strikes.length) { c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No CE/PE strikes for this expiry yet</div>'; return; }
     const ladder = document.createElement("div");
     ladder.className = "ladder";
     ladder.innerHTML = '<div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
@@ -1005,7 +1025,7 @@ async function renderContracts(symbol, expiryCode) {
       const row = byStrike[s];
       ladder.appendChild(optionCell("ce", row.ce, ix));
       const st = document.createElement("div");
-      st.className = "strike"; st.textContent = s + (row.offset ? " (" + row.offset + ")" : "");
+      st.className = "strike"; st.textContent = s;
       ladder.appendChild(st);
       ladder.appendChild(optionCell("pe", row.pe, ix));
     });
@@ -1681,16 +1701,18 @@ async function bootstrap() {
 bootstrap();
 
 /* ── Premium custom controls (DEC-UNIVERSE-PREMIUM-CONTROLS-001) ──
-   Custom date-range picker + select dropdowns that drive the hidden, test-pinned
-   native <input type=date>/<select> elements. Pure progressive enhancement: if
-   this code throws, the native controls remain functional. */
+   "Go to" date picker (Date + Custom-range tabs; day->month->year drill) +
+   custom select dropdowns. Progressive enhancement over the hidden, test-pinned
+   native <input type=date>/<select> (the value source). If this throws, the
+   native controls still work. */
 (function(){
   function ymd(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
   function parse(s){if(!s)return null;var p=String(s).split("-");return new Date(+p[0],(+p[1])-1,+p[2]);}
-  function fmt(d){return d?d.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";}
-  function sameDay(a,b){return a&&b&&a.getFullYear()==b.getFullYear()&&a.getMonth()==b.getMonth()&&a.getDate()==b.getDate();}
-  function clampDay(d){return new Date(d.getFullYear(),d.getMonth(),d.getDate());}
+  function fmt(d){return d?d.toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short",year:"2-digit"}):"—";}
+  function same(a,b){return a&&b&&a.getFullYear()==b.getFullYear()&&a.getMonth()==b.getMonth()&&a.getDate()==b.getDate();}
+  function cl(d){return new Date(d.getFullYear(),d.getMonth(),d.getDate());}
   var MON=["January","February","March","April","May","June","July","August","September","October","November","December"];
+  var MON3=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   function enhanceCalendar(){
     var dr=document.querySelector(".daterange");
     var fromIn=document.getElementById("fromDate"), toIn=document.getElementById("toDate");
@@ -1699,58 +1721,68 @@ bootstrap();
     var start=parse(fromIn.value)||minD, end=parse(toIn.value)||maxD;
     Array.prototype.forEach.call(dr.children,function(c){c.style.display="none";});
     var wrap=document.createElement("div"); wrap.className="dp-wrap";
-    var trig=document.createElement("button"); trig.type="button"; trig.className="dp-trigger";
-    trig.setAttribute("aria-label","Choose date range");
+    var trig=document.createElement("button"); trig.type="button"; trig.className="dp-trigger"; trig.setAttribute("aria-label","Choose date range");
     var pop=document.createElement("div"); pop.className="dp-pop";
     wrap.appendChild(trig); wrap.appendChild(pop); dr.appendChild(wrap);
-    var view=new Date(end.getFullYear(),end.getMonth()-1,1);
-    var presets=[
-      ["Full history","2020 → today",function(){return [minD,maxD];}],
-      ["Year to date","",function(){return [new Date(maxD.getFullYear(),0,1),maxD];}],
-      ["Last 1 year","",function(){var s=new Date(maxD);s.setFullYear(s.getFullYear()-1);return [s,maxD];}],
-      ["Last 6 months","",function(){var s=new Date(maxD);s.setMonth(s.getMonth()-6);return [s,maxD];}],
-      ["Last 3 months","",function(){var s=new Date(maxD);s.setMonth(s.getMonth()-3);return [s,maxD];}],
-      ["Last 30 days","",function(){var s=new Date(maxD);s.setDate(s.getDate()-30);return [s,maxD];}]
-    ];
+    var mode="range", active="from", level="days", view=new Date(end.getFullYear(),end.getMonth(),1);
+    var presets=[["Full history",function(){return [minD,maxD];}],["YTD",function(){return [new Date(maxD.getFullYear(),0,1),maxD];}],["1Y",function(){var s=new Date(maxD);s.setFullYear(s.getFullYear()-1);return [s,maxD];}],["6M",function(){var s=new Date(maxD);s.setMonth(s.getMonth()-6);return [s,maxD];}],["3M",function(){var s=new Date(maxD);s.setMonth(s.getMonth()-3);return [s,maxD];}],["30D",function(){var s=new Date(maxD);s.setDate(s.getDate()-30);return [s,maxD];}]];
     function setTrig(){trig.innerHTML='<span aria-hidden="true">📅</span> <b>'+fmt(start)+'</b> <span class="dp-sep">→</span> <b>'+fmt(end)+'</b> <span class="dp-car">▾</span>';}
-    function monthGrid(base){
-      var y=base.getFullYear(),m=base.getMonth(),first=new Date(y,m,1),lead=first.getDay();
-      var html='<div class="dp-head"><button class="dp-nav" data-nav="-1" aria-label="Previous month">‹</button>'
-        +'<div class="dp-mlabel">'+MON[m]+' '+y+'</div>'
-        +'<button class="dp-nav" data-nav="1" aria-label="Next month">›</button></div>'
-        +'<div class="dp-dow"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div><div class="dp-grid">';
-      for(var i=0;i<42;i++){
-        var d=new Date(y,m,1-lead+i),inMonth=d.getMonth()==m,cls="dp-day"+(inMonth?"":" out"),dd=clampDay(d);
-        if(dd<clampDay(minD)||dd>clampDay(maxD))cls+=" disabled";
-        if(sameDay(d,new Date()))cls+=" today";
-        if(start&&end&&dd>clampDay(start)&&dd<clampDay(end))cls+=" inrange";
-        if(sameDay(d,start))cls+=" start"; if(sameDay(d,end))cls+=" end";
-        html+='<div class="'+cls+'" data-day="'+ymd(d)+'">'+d.getDate()+'</div>';
+    function decade(y){return y-(y%20);}
+    function headLabel(){if(level=="days")return MON[view.getMonth()]+" "+view.getFullYear(); if(level=="mons")return ""+view.getFullYear(); var d=decade(view.getFullYear()); return d+" - "+(d+19);}
+    function gridHtml(){
+      if(level=="days"){
+        var y=view.getFullYear(),m=view.getMonth(),lead=(new Date(y,m,1).getDay()+6)%7;
+        var h='<div class="dp-dow"><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span></div><div class="dp-grid days">';
+        for(var i=0;i<42;i++){var d=new Date(y,m,1-lead+i),inM=d.getMonth()==m,dd=cl(d),cls="dp-day"+(inM?"":" out");
+          if(dd<cl(minD)||dd>cl(maxD))cls+=" disabled";
+          if(same(d,new Date()))cls+=" today";
+          if(mode=="range"){if(start&&end&&dd>cl(start)&&dd<cl(end))cls+=" inrange"; if(same(d,start))cls+=" start"; if(same(d,end))cls+=" end";}
+          else{if(same(d,start))cls+=" sel";}
+          h+='<div class="'+cls+'" data-day="'+ymd(d)+'">'+d.getDate()+'</div>';}
+        return h+'</div>';
       }
-      return html+'</div>';
+      if(level=="mons"){
+        var yy=view.getFullYear(),h='<div class="dp-grid mons">',n=new Date();
+        for(var mm=0;mm<12;mm++){var first=cl(new Date(yy,mm,1)),last=cl(new Date(yy,mm+1,0)),cls="dp-cell";
+          if(last<cl(minD)||first>cl(maxD))cls+=" disabled";
+          if(n.getFullYear()==yy&&n.getMonth()==mm)cls+=" now";
+          if(start.getFullYear()==yy&&start.getMonth()==mm)cls+=" on";
+          h+='<div class="'+cls+'" data-mon="'+mm+'">'+MON3[mm]+'</div>';}
+        return h+'</div>';
+      }
+      var base=decade(view.getFullYear()),h2='<div class="dp-grid yrs">',ny=new Date().getFullYear();
+      for(var k=0;k<20;k++){var Y=base+k,c="dp-cell";
+        if(Y<minD.getFullYear()||Y>maxD.getFullYear())c+=" disabled";
+        if(ny==Y)c+=" now"; if(start.getFullYear()==Y)c+=" on";
+        h2+='<div class="'+c+'" data-yr="'+Y+'">'+Y+'</div>';}
+      return h2+'</div>';
     }
-    function render(){
-      var m2=new Date(view.getFullYear(),view.getMonth()+1,1);
-      var pres=presets.map(function(p,i){var r=p[2](),on=(start&&end&&sameDay(r[0],start)&&sameDay(r[1],end));
-        return '<button class="dp-preset'+(on?" on":"")+'" data-p="'+i+'">'+p[0]+(p[1]?' <small>'+p[1]+'</small>':'')+'</button>';}).join("");
-      var days=Math.round((clampDay(end)-clampDay(start))/86400000)+1;
-      pop.innerHTML='<div class="dp-presets"><div class="dp-pl">Quick ranges</div>'+pres+'</div>'
-        +'<div class="dp-right"><div class="dp-cals"><div class="dp-cal">'+monthGrid(view)+'</div><div class="dp-cal">'+monthGrid(m2)+'</div></div>'
-        +'<div class="dp-foot"><div class="dp-readout"><b>'+fmt(start)+'</b> → <b>'+fmt(end)+'</b> &nbsp;·&nbsp; <b>'+(days>0?days.toLocaleString("en-IN"):0)+'</b> days</div>'
-        +'<div class="dp-actions"><button class="dp-btn" data-x="cancel">Cancel</button><button class="dp-btn apply" data-x="apply">Apply range</button></div></div></div>';
+    function fieldsHtml(){
+      if(mode=="range")return '<div class="dp-fields"><div class="dp-field'+(active=="from"?" act":"")+'" data-f="from"><span class="dp-fi">📅</span>'+fmt(start)+'</div><span class="dp-farrow">→</span><div class="dp-field'+(active=="to"?" act":"")+'" data-f="to"><span class="dp-fi">📅</span>'+fmt(end)+'</div></div>';
+      return '<div class="dp-fields"><div class="dp-field act" data-f="from"><span class="dp-fi">📅</span>'+fmt(start)+'</div></div>';
     }
-    function pickDay(s){var d=parse(s);if(!d)return;var dd=clampDay(d);if(dd<clampDay(minD)||dd>clampDay(maxD))return;
-      if(!start||(start&&end)){start=d;end=null;}else if(d<start){end=start;start=d;}else{end=d;}render();}
+    function quickHtml(){if(mode!="range")return ""; return '<div class="dp-quick">'+presets.map(function(p,i){var r=p[1](),on=(start&&end&&same(r[0],start)&&same(r[1],end));return '<button class="dp-chip'+(on?" on":"")+'" data-p="'+i+'">'+p[0]+'</button>';}).join("")+'</div>';}
+    function footHtml(){var days=Math.round((cl(end)-cl(start))/86400000)+1,ro=mode=="range"?('<b>'+fmt(start)+'</b> → <b>'+fmt(end)+'</b> · <b>'+(days>0?days.toLocaleString("en-IN"):0)+'</b> days'):('<b>'+fmt(start)+'</b>');
+      return '<div class="dp-foot"><div class="dp-readout">'+ro+'</div><div class="dp-actions"><button class="dp-btn" data-x="cancel">Cancel</button><button class="dp-btn apply" data-x="apply">Go to</button></div></div>';}
+    function render(){pop.innerHTML='<div class="dp-tabs"><button class="dp-tab'+(mode=="range"?" on":"")+'" data-m="range">Custom range</button><button class="dp-tab'+(mode=="date"?" on":"")+'" data-m="date">Date</button></div><div class="dp-tabline"></div>'+fieldsHtml()+quickHtml()+'<div class="dp-cal"><div class="dp-head"><button class="dp-nav" data-nav="-1" aria-label="Previous">‹</button><button class="dp-hbtn" data-drill="1">'+headLabel()+'</button><button class="dp-nav" data-nav="1" aria-label="Next">›</button></div>'+gridHtml()+'</div>'+footHtml();}
+    function setDay(s){var d=parse(s);if(!d)return;var dd=cl(d);if(dd<cl(minD)||dd>cl(maxD))return;
+      if(mode=="date"){start=d;end=d;render();return;}
+      if(active=="from"){start=d;if(end&&end<start)end=start;active="to";}else{end=d;if(end<start){var t=start;start=end;end=t;}active="from";}render();}
     function close(){wrap.classList.remove("open");}
-    function open(){render();wrap.classList.add("open");}
+    function open(){var f=(mode=="date"?start:(active=="to"?end:start));level="days";view=new Date(f.getFullYear(),f.getMonth(),1);render();wrap.classList.add("open");}
     pop.addEventListener("click",function(e){
-      var t=e.target.closest("[data-day],[data-nav],[data-p],[data-x]");if(!t)return;
-      if(t.dataset.day!=null&&!t.classList.contains("disabled")){pickDay(t.dataset.day);return;}
-      if(t.dataset.nav){view=new Date(view.getFullYear(),view.getMonth()+(+t.dataset.nav),1);render();return;}
-      if(t.dataset.p!=null){var r=presets[+t.dataset.p][2]();start=r[0];end=r[1];view=new Date(end.getFullYear(),end.getMonth()-1,1);render();return;}
+      e.stopPropagation();  /* inside clicks must NOT reach the outside-close handler (the popover re-renders, detaching e.target) */
+      var t=e.target.closest("[data-m],[data-f],[data-p],[data-drill],[data-nav],[data-day],[data-mon],[data-yr],[data-x]");if(!t)return;
+      if(t.dataset.m){mode=t.dataset.m;active="from";level="days";render();return;}
+      if(t.dataset.f){active=t.dataset.f;level="days";var g=(active=="to"?end:start);view=new Date(g.getFullYear(),g.getMonth(),1);render();return;}
+      if(t.dataset.p!=null){var r=presets[+t.dataset.p][1]();start=r[0];end=r[1];active="from";render();return;}
+      if(t.dataset.drill){level=(level=="days"?"mons":(level=="mons"?"yrs":"yrs"));render();return;}
+      if(t.dataset.nav){var n=+t.dataset.nav;if(level=="days")view=new Date(view.getFullYear(),view.getMonth()+n,1);else if(level=="mons")view=new Date(view.getFullYear()+n,view.getMonth(),1);else view=new Date(view.getFullYear()+n*20,view.getMonth(),1);render();return;}
+      if(t.dataset.day!=null&&!t.classList.contains("disabled")){setDay(t.dataset.day);return;}
+      if(t.dataset.mon!=null&&!t.classList.contains("disabled")){view=new Date(view.getFullYear(),+t.dataset.mon,1);level="days";render();return;}
+      if(t.dataset.yr!=null&&!t.classList.contains("disabled")){view=new Date(+t.dataset.yr,view.getMonth(),1);level="mons";render();return;}
       if(t.dataset.x=="cancel"){close();return;}
-      if(t.dataset.x=="apply"){if(start&&!end)end=start;fromIn.value=ymd(start);toIn.value=ymd(end);setTrig();close();
-        try{fromIn.dispatchEvent(new Event("change"));toIn.dispatchEvent(new Event("change"));}catch(_){}return;}
+      if(t.dataset.x=="apply"){fromIn.value=ymd(start);toIn.value=ymd(end);setTrig();close();try{fromIn.dispatchEvent(new Event("change"));toIn.dispatchEvent(new Event("change"));}catch(_){}return;}
     });
     trig.addEventListener("click",function(e){e.stopPropagation();wrap.classList.contains("open")?close():open();});
     document.addEventListener("click",function(e){if(!wrap.contains(e.target))close();});
@@ -1764,20 +1796,14 @@ bootstrap();
     var menu=document.createElement("div"); menu.className="cs-menu";
     function label(){return sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:"";}
     function setTrig(){trig.innerHTML='<b>'+label()+'</b> <span class="cs-car">▾</span>';}
-    function build(){menu.innerHTML=Array.prototype.map.call(sel.options,function(o,i){
-      return '<div class="cs-opt'+(i==sel.selectedIndex?" on":"")+'" data-i="'+i+'">'+o.text+'</div>';}).join("");}
+    function build(){menu.innerHTML=Array.prototype.map.call(sel.options,function(o,i){return '<div class="cs-opt'+(i==sel.selectedIndex?" on":"")+'" data-i="'+i+'">'+o.text+'</div>';}).join("");}
     function close(){wrap.classList.remove("open");}
-    menu.addEventListener("click",function(e){var t=e.target.closest("[data-i]");if(!t)return;
-      sel.selectedIndex=+t.dataset.i;setTrig();build();close();try{sel.dispatchEvent(new Event("change"));}catch(_){}});
+    menu.addEventListener("click",function(e){var t=e.target.closest("[data-i]");if(!t)return;sel.selectedIndex=+t.dataset.i;setTrig();build();close();try{sel.dispatchEvent(new Event("change"));}catch(_){}});
     trig.addEventListener("click",function(e){e.stopPropagation();build();wrap.classList.toggle("open");});
     document.addEventListener("click",function(e){if(!wrap.contains(e.target))close();});
     wrap.appendChild(trig);wrap.appendChild(menu);sel.parentNode.insertBefore(wrap,sel.nextSibling);setTrig();
   }
-  function init(){
-    try{enhanceCalendar();}catch(e){}
-    ["spotInterval","derivInterval","derivType"].forEach(function(id){
-      try{var s=document.getElementById(id);if(s)enhanceSelect(s);}catch(e){}});
-  }
+  function init(){try{enhanceCalendar();}catch(e){}["spotInterval","derivInterval","derivType"].forEach(function(id){try{var s=document.getElementById(id);if(s)enhanceSelect(s);}catch(e){}});}
   if(document.readyState!="loading")init(); else document.addEventListener("DOMContentLoaded",init);
 })();
 
