@@ -1024,11 +1024,11 @@ async function renderContracts(symbol, expiryDate) {
     ladder.innerHTML = '<div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
     strikes.forEach((s, ix) => {
       const row = byStrike[s];
-      ladder.appendChild(optionCell("ce", row.ce, ix, symbol, expiryCode));
+      ladder.appendChild(optionCell("ce", row.ce, ix, symbol, expiryDate));
       const st = document.createElement("div");
       st.className = "strike"; st.textContent = s;
       ladder.appendChild(st);
-      ladder.appendChild(optionCell("pe", row.pe, ix, symbol, expiryCode));
+      ladder.appendChild(optionCell("pe", row.pe, ix, symbol, expiryDate));
     });
     c.appendChild(ladder);
   } catch (e) { c.innerHTML = '<div class="empty">error loading contracts</div>'; }
@@ -1040,14 +1040,14 @@ async function renderContracts(symbol, expiryDate) {
    ISO date, else the whole underlying) — the candles land in the verified candle lake.
    The chain cells carry no registry contract_symbol, so the cell click is the per-expiry
    grain available; the route + button cover single / multi / underlying / all. */
-function optionCell(side, present, ix, symbol, expiryCode) {
+function optionCell(side, present, ix, symbol, expiryDate) {
   const cell = document.createElement("div");
   cell.className = "cell " + side + (present ? " live" : "");
   cell.style.animationDelay = (ix * 0.02) + "s";
   cell.textContent = present ? side.toUpperCase() : "—";
   if (present) {
     cell.title = side.toUpperCase() + " series in the lake — click to pull this expiry's chain history";
-    cell.onclick = () => pullHistorical(symbol, expiryCode);
+    cell.onclick = () => pullHistorical(symbol, expiryDate);
   }
   return cell;
 }
