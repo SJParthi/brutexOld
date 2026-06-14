@@ -157,3 +157,24 @@ def test_registry_contracts_malformed_expiry_is_400(client: TestClient, tmp_path
     r = client.get("/api/v1/db/registry/contracts?expiry_date=2020/01/30")
     assert r.status_code == 400
     assert "expiry_date" in r.json()["detail"]
+
+
+def test_registry_routes_pathless_store_return_no_store_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wired-but-path-less store (no `.path`) → both routes degrade to "no store wired".
+
+    Mirrors the existing `/db` candle/option routes' path-less guard
+    (`getattr(store, "path", None)` → `not isinstance(..., Path)`); the
+    `SimpleNamespace(path=None)` store reproduces it without a real DuckDB file.
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+    pathless = SimpleNamespace(path=None)
+    with TestClient(build_app(DashboardState(), instrument_store=pathless)) as c:
+        for route in ("/api/v1/db/registry/expiries", "/api/v1/db/registry/contracts"):
+            body = c.get(route).json()
+            assert body["note"] == "no store wired"
+            assert body["rows"] == []
+            assert body["total"] == 0
