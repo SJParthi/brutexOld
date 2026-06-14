@@ -400,6 +400,71 @@
       transition-duration: .001ms !important; scroll-behavior: auto !important;
     }
   }
+
+  /* ── Premium custom controls (DEC-UNIVERSE-PREMIUM-CONTROLS-001) ──
+     A TradingView/Dhan-style date-range picker + custom select dropdowns that
+     REPLACE the browser-native widgets (which are unstylable + read legacy).
+     The native <input type=date>/<select> stay in the DOM (hidden, test-pinned)
+     as the value source of truth; these components drive them. All motion is
+     gated by the existing prefers-reduced-motion block. */
+  .dp-wrap,.cs-wrap{position:relative;display:inline-block}
+  .dp-trigger{display:inline-flex;align-items:center;gap:8px;min-height:var(--ctl-h);padding:0 14px;
+    background:linear-gradient(180deg,var(--surface-2),var(--surface));border:1px solid var(--border-strong);
+    border-radius:var(--r-md);color:var(--text);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap;
+    transition:.16s var(--ease)}
+  .dp-trigger:hover{border-color:var(--blue);box-shadow:0 0 0 3px rgba(91,141,239,.16);transform:translateY(-1px)}
+  .dp-trigger b{color:var(--text-bright)} .dp-trigger .dp-sep{color:var(--muted)}
+  .dp-trigger .dp-car,.cs-car{opacity:.5;font-size:10px;transition:.2s}
+  .dp-wrap.open .dp-car,.cs-wrap.open .cs-car{transform:rotate(180deg);opacity:.9}
+  .dp-pop{position:absolute;z-index:300;top:46px;left:0;display:flex;
+    background:linear-gradient(180deg,#161b27,#10141d);border:1px solid var(--border-strong);
+    border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.03);overflow:hidden;
+    opacity:0;transform:translateY(-10px) scale(.97);transform-origin:top left;pointer-events:none;
+    transition:opacity .2s ease,transform .22s var(--ease)}
+  .dp-wrap.open .dp-pop{opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
+  .dp-presets{display:flex;flex-direction:column;gap:3px;padding:14px;min-width:158px;border-right:1px solid var(--border);background:rgba(255,255,255,.015)}
+  .dp-pl{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin:2px 0 6px}
+  .dp-preset{text-align:left;background:transparent;border:1px solid transparent;border-radius:8px;padding:8px 10px;
+    color:var(--text);font:inherit;font-size:12.5px;cursor:pointer;transition:.14s;display:flex;justify-content:space-between;gap:8px}
+  .dp-preset:hover{background:var(--surface-3)}
+  .dp-preset.on{background:rgba(91,141,239,.16);box-shadow:inset 0 0 0 1px var(--blue);color:var(--text-bright)}
+  .dp-preset small{color:var(--muted);font-size:10px;align-self:center}
+  .dp-right{display:flex;flex-direction:column}
+  .dp-cals{display:flex;gap:20px;padding:16px 18px 8px}
+  .dp-cal{width:236px}
+  .dp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .dp-mlabel{font-weight:800;font-size:13px;color:var(--text-bright);letter-spacing:.2px}
+  .dp-nav{background:transparent;border:1px solid var(--border-strong);border-radius:8px;color:var(--text);
+    width:28px;height:28px;cursor:pointer;display:grid;place-items:center;transition:.14s;font-size:13px}
+  .dp-nav:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-1px)}
+  .dp-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px}
+  .dp-dow span{text-align:center;font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:600}
+  .dp-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+  .dp-day{height:30px;display:grid;place-items:center;font-size:12px;color:var(--text);border-radius:8px;cursor:pointer;
+    position:relative;transition:transform .1s,background .12s;border:1px solid transparent}
+  .dp-day:hover{background:var(--surface-3);transform:translateY(-1px)}
+  .dp-day.out{color:var(--muted);opacity:.3}
+  .dp-day.disabled{opacity:.18;cursor:not-allowed} .dp-day.disabled:hover{background:transparent;transform:none}
+  .dp-day.today{box-shadow:inset 0 0 0 1px var(--blue)}
+  .dp-day.inrange{background:rgba(91,141,239,.16);border-radius:0}
+  .dp-day.start,.dp-day.end{background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff;font-weight:800;box-shadow:0 4px 14px rgba(91,141,239,.45)}
+  .dp-day.start{border-radius:8px 0 0 8px} .dp-day.end{border-radius:0 8px 8px 0} .dp-day.start.end{border-radius:8px}
+  .dp-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;border-top:1px solid var(--border)}
+  .dp-readout{font-size:12px;color:var(--muted)} .dp-readout b{color:var(--green-bright);font-variant-numeric:tabular-nums}
+  .dp-actions{display:flex;gap:8px}
+  .dp-btn{border-radius:9px;padding:8px 16px;font:inherit;font-size:12.5px;font-weight:800;cursor:pointer;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);transition:.14s}
+  .dp-btn:hover{border-color:var(--blue)}
+  .dp-btn.apply{border:none;color:#062018;background:linear-gradient(90deg,var(--green-bright),var(--green));box-shadow:0 0 18px rgba(38,217,176,.35)}
+  .dp-btn.apply:hover{box-shadow:0 0 26px rgba(38,217,176,.6);transform:translateY(-1px)}
+  .cs-trigger{display:inline-flex;align-items:center;gap:8px;min-height:30px;padding:0 4px 0 4px;background:transparent;border:none;color:var(--text);font:inherit;font-size:12.5px;cursor:pointer}
+  .cs-trigger b{color:var(--text-bright);font-weight:600}
+  .cs-menu{position:absolute;z-index:300;top:34px;left:-10px;min-width:190px;background:linear-gradient(180deg,#161b27,#10141d);
+    border:1px solid var(--border-strong);border-radius:12px;box-shadow:0 24px 50px rgba(0,0,0,.6);padding:6px;
+    opacity:0;transform:translateY(-8px) scale(.98);transform-origin:top;pointer-events:none;transition:opacity .16s,transform .18s var(--ease)}
+  .cs-wrap.open .cs-menu{opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
+  .cs-opt{padding:9px 12px;border-radius:8px;font-size:12.5px;color:var(--text);cursor:pointer;transition:.12s}
+  .cs-opt:hover{background:var(--surface-3)}
+  .cs-opt.on{background:rgba(91,141,239,.16);box-shadow:inset 0 0 0 1px var(--blue);color:var(--text-bright)}
 </style>
 </head>
 <body>
@@ -1612,6 +1677,108 @@ async function bootstrap() {
   setInterval(pollQuota, 3000);
 }
 bootstrap();
+
+/* ── Premium custom controls (DEC-UNIVERSE-PREMIUM-CONTROLS-001) ──
+   Custom date-range picker + select dropdowns that drive the hidden, test-pinned
+   native <input type=date>/<select> elements. Pure progressive enhancement: if
+   this code throws, the native controls remain functional. */
+(function(){
+  function ymd(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
+  function parse(s){if(!s)return null;var p=String(s).split("-");return new Date(+p[0],(+p[1])-1,+p[2]);}
+  function fmt(d){return d?d.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";}
+  function sameDay(a,b){return a&&b&&a.getFullYear()==b.getFullYear()&&a.getMonth()==b.getMonth()&&a.getDate()==b.getDate();}
+  function clampDay(d){return new Date(d.getFullYear(),d.getMonth(),d.getDate());}
+  var MON=["January","February","March","April","May","June","July","August","September","October","November","December"];
+  function enhanceCalendar(){
+    var dr=document.querySelector(".daterange");
+    var fromIn=document.getElementById("fromDate"), toIn=document.getElementById("toDate");
+    if(!dr||!fromIn||!toIn||dr.dataset.dp)return; dr.dataset.dp="1";
+    var minD=parse(fromIn.min)||new Date(2020,0,1), maxD=parse(toIn.max)||new Date();
+    var start=parse(fromIn.value)||minD, end=parse(toIn.value)||maxD;
+    Array.prototype.forEach.call(dr.children,function(c){c.style.display="none";});
+    var wrap=document.createElement("div"); wrap.className="dp-wrap";
+    var trig=document.createElement("button"); trig.type="button"; trig.className="dp-trigger";
+    trig.setAttribute("aria-label","Choose date range");
+    var pop=document.createElement("div"); pop.className="dp-pop";
+    wrap.appendChild(trig); wrap.appendChild(pop); dr.appendChild(wrap);
+    var view=new Date(end.getFullYear(),end.getMonth()-1,1);
+    var presets=[
+      ["Full history","2020 → today",function(){return [minD,maxD];}],
+      ["Year to date","",function(){return [new Date(maxD.getFullYear(),0,1),maxD];}],
+      ["Last 1 year","",function(){var s=new Date(maxD);s.setFullYear(s.getFullYear()-1);return [s,maxD];}],
+      ["Last 6 months","",function(){var s=new Date(maxD);s.setMonth(s.getMonth()-6);return [s,maxD];}],
+      ["Last 3 months","",function(){var s=new Date(maxD);s.setMonth(s.getMonth()-3);return [s,maxD];}],
+      ["Last 30 days","",function(){var s=new Date(maxD);s.setDate(s.getDate()-30);return [s,maxD];}]
+    ];
+    function setTrig(){trig.innerHTML='<span aria-hidden="true">📅</span> <b>'+fmt(start)+'</b> <span class="dp-sep">→</span> <b>'+fmt(end)+'</b> <span class="dp-car">▾</span>';}
+    function monthGrid(base){
+      var y=base.getFullYear(),m=base.getMonth(),first=new Date(y,m,1),lead=first.getDay();
+      var html='<div class="dp-head"><button class="dp-nav" data-nav="-1" aria-label="Previous month">‹</button>'
+        +'<div class="dp-mlabel">'+MON[m]+' '+y+'</div>'
+        +'<button class="dp-nav" data-nav="1" aria-label="Next month">›</button></div>'
+        +'<div class="dp-dow"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div><div class="dp-grid">';
+      for(var i=0;i<42;i++){
+        var d=new Date(y,m,1-lead+i),inMonth=d.getMonth()==m,cls="dp-day"+(inMonth?"":" out"),dd=clampDay(d);
+        if(dd<clampDay(minD)||dd>clampDay(maxD))cls+=" disabled";
+        if(sameDay(d,new Date()))cls+=" today";
+        if(start&&end&&dd>clampDay(start)&&dd<clampDay(end))cls+=" inrange";
+        if(sameDay(d,start))cls+=" start"; if(sameDay(d,end))cls+=" end";
+        html+='<div class="'+cls+'" data-day="'+ymd(d)+'">'+d.getDate()+'</div>';
+      }
+      return html+'</div>';
+    }
+    function render(){
+      var m2=new Date(view.getFullYear(),view.getMonth()+1,1);
+      var pres=presets.map(function(p,i){var r=p[2](),on=(start&&end&&sameDay(r[0],start)&&sameDay(r[1],end));
+        return '<button class="dp-preset'+(on?" on":"")+'" data-p="'+i+'">'+p[0]+(p[1]?' <small>'+p[1]+'</small>':'')+'</button>';}).join("");
+      var days=Math.round((clampDay(end)-clampDay(start))/86400000)+1;
+      pop.innerHTML='<div class="dp-presets"><div class="dp-pl">Quick ranges</div>'+pres+'</div>'
+        +'<div class="dp-right"><div class="dp-cals"><div class="dp-cal">'+monthGrid(view)+'</div><div class="dp-cal">'+monthGrid(m2)+'</div></div>'
+        +'<div class="dp-foot"><div class="dp-readout"><b>'+fmt(start)+'</b> → <b>'+fmt(end)+'</b> &nbsp;·&nbsp; <b>'+(days>0?days.toLocaleString("en-IN"):0)+'</b> days</div>'
+        +'<div class="dp-actions"><button class="dp-btn" data-x="cancel">Cancel</button><button class="dp-btn apply" data-x="apply">Apply range</button></div></div></div>';
+    }
+    function pickDay(s){var d=parse(s);if(!d)return;var dd=clampDay(d);if(dd<clampDay(minD)||dd>clampDay(maxD))return;
+      if(!start||(start&&end)){start=d;end=null;}else if(d<start){end=start;start=d;}else{end=d;}render();}
+    function close(){wrap.classList.remove("open");}
+    function open(){render();wrap.classList.add("open");}
+    pop.addEventListener("click",function(e){
+      var t=e.target.closest("[data-day],[data-nav],[data-p],[data-x]");if(!t)return;
+      if(t.dataset.day!=null&&!t.classList.contains("disabled")){pickDay(t.dataset.day);return;}
+      if(t.dataset.nav){view=new Date(view.getFullYear(),view.getMonth()+(+t.dataset.nav),1);render();return;}
+      if(t.dataset.p!=null){var r=presets[+t.dataset.p][2]();start=r[0];end=r[1];view=new Date(end.getFullYear(),end.getMonth()-1,1);render();return;}
+      if(t.dataset.x=="cancel"){close();return;}
+      if(t.dataset.x=="apply"){if(start&&!end)end=start;fromIn.value=ymd(start);toIn.value=ymd(end);setTrig();close();
+        try{fromIn.dispatchEvent(new Event("change"));toIn.dispatchEvent(new Event("change"));}catch(_){}return;}
+    });
+    trig.addEventListener("click",function(e){e.stopPropagation();wrap.classList.contains("open")?close():open();});
+    document.addEventListener("click",function(e){if(!wrap.contains(e.target))close();});
+    document.addEventListener("keydown",function(e){if(e.key=="Escape")close();});
+    setTrig();
+  }
+  function enhanceSelect(sel){
+    if(!sel||sel.dataset.cs)return; sel.dataset.cs="1"; sel.style.display="none";
+    var wrap=document.createElement("span"); wrap.className="cs-wrap";
+    var trig=document.createElement("button"); trig.type="button"; trig.className="cs-trigger"; trig.setAttribute("aria-label","Choose option");
+    var menu=document.createElement("div"); menu.className="cs-menu";
+    function label(){return sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:"";}
+    function setTrig(){trig.innerHTML='<b>'+label()+'</b> <span class="cs-car">▾</span>';}
+    function build(){menu.innerHTML=Array.prototype.map.call(sel.options,function(o,i){
+      return '<div class="cs-opt'+(i==sel.selectedIndex?" on":"")+'" data-i="'+i+'">'+o.text+'</div>';}).join("");}
+    function close(){wrap.classList.remove("open");}
+    menu.addEventListener("click",function(e){var t=e.target.closest("[data-i]");if(!t)return;
+      sel.selectedIndex=+t.dataset.i;setTrig();build();close();try{sel.dispatchEvent(new Event("change"));}catch(_){}});
+    trig.addEventListener("click",function(e){e.stopPropagation();build();wrap.classList.toggle("open");});
+    document.addEventListener("click",function(e){if(!wrap.contains(e.target))close();});
+    wrap.appendChild(trig);wrap.appendChild(menu);sel.parentNode.insertBefore(wrap,sel.nextSibling);setTrig();
+  }
+  function init(){
+    try{enhanceCalendar();}catch(e){}
+    ["spotInterval","derivInterval","derivType"].forEach(function(id){
+      try{var s=document.getElementById(id);if(s)enhanceSelect(s);}catch(e){}});
+  }
+  if(document.readyState!="loading")init(); else document.addEventListener("DOMContentLoaded",init);
+})();
+
 </script>
 </body>
 </html>
