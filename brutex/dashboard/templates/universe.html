@@ -530,6 +530,7 @@
       <span class="pull-div" aria-hidden="true"></span>
       <button class="loadbtn" id="verifybtn" title="Cross-check the highlighted symbol's pulled spot 1-day data against the official NSE for the 'to' date — the trust anchor before any bulk pull. An INDEX checks 4 OHLC fields (NIFTY / BANKNIFTY; SENSEX needs an operator-verified BSE source); a STOCK checks full OHLCV including VOLUME vs the NSE security bhavcopy." disabled>🛡 Verify vs NSE</button>
       <button class="loadbtn" id="pullDerivBtn" title="Pull expiries + contracts METADATA ONLY (every expiry date + every listed contract symbol, Jan-2020 → today) for the selected instrument(s) — no history, fast. The historical candle fill is a separate button. Re-click is safe (the immutable past is skipped)." disabled>⛓ Pull expiries + contracts</button>
+      <button class="loadbtn" id="pullHistBtn" title="download OHLC for the SELECTED contracts (single / chain / all) — auto-retries until clean. Needs the contracts cached first (⛓ button); the candles land in the verified candle lake. Highlight an underlying (whole-underlying or pick an expiry for its chain), or click an option-chain cell for that one contract." disabled>⤓ Pull historical</button>
       <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
       <span class="pull-div" aria-hidden="true"></span>
       <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
@@ -960,24 +961,30 @@ async function renderContracts(symbol, expiryDate) {
     ladder.innerHTML = '<div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
     strikes.forEach((s, ix) => {
       const row = byStrike[s];
-      ladder.appendChild(optionCell("ce", row.ce, ix));
+      ladder.appendChild(optionCell("ce", row.ce, ix, symbol, expiryDate));
       const st = document.createElement("div");
       st.className = "strike"; st.textContent = s;
       ladder.appendChild(st);
-      ladder.appendChild(optionCell("pe", row.pe, ix));
+      ladder.appendChild(optionCell("pe", row.pe, ix, symbol, expiryDate));
     });
     c.appendChild(ladder);
   } catch (e) { c.innerHTML = '<div class="empty">error loading contracts</div>'; }
 }
 
-/* Build one CE/PE option-chain cell; lit when that side's series is in the lake. */
-function optionCell(side, present, ix) {
+/* Build one CE/PE option-chain cell; lit when that side's series is in the lake. A live
+   cell is click-to-pull-historical (DEC-DERIV-PULL-HISTORICAL-001): clicking it pulls
+   THIS expiry's cached chain's history (?underlying=…&expiry=… when the code is a real
+   ISO date, else the whole underlying) — the candles land in the verified candle lake.
+   The chain cells carry no registry contract_symbol, so the cell click is the per-expiry
+   grain available; the route + button cover single / multi / underlying / all. */
+function optionCell(side, present, ix, symbol, expiryDate) {
   const cell = document.createElement("div");
   cell.className = "cell " + side + (present ? " live" : "");
   cell.style.animationDelay = (ix * 0.02) + "s";
   cell.textContent = present ? side.toUpperCase() : "—";
   if (present) {
-    cell.title = side.toUpperCase() + " series stored in the expired-options lake";
+    cell.title = side.toUpperCase() + " series in the lake — click to pull this expiry's chain history";
+    cell.onclick = () => pullHistorical(symbol, expiryDate);
   }
   return cell;
 }
@@ -1181,6 +1188,36 @@ document.getElementById("pullDerivBtn").onclick = () => {
     `${items.length} metadata`);
 };
 
+/* ── "⤓ Pull historical" (DEC-DERIV-PULL-HISTORICAL-001): the SEPARATE heavy-pull
+   button — download OHLC candles for the operator-SELECTED cached contracts (single /
+   an expiry's chain / a whole underlying / all). The metadata (every expiry + contract
+   SYMBOL) must already be cached by the ⛓ button; this route resolves the SELECTION to
+   those registry rows and pulls THEIR candles into the verified candle lake (PATH A) —
+   no chain re-enumeration. Defaults until_clean=true (auto-retry every failed window).
+   The button pulls the WHOLE highlighted underlying's cached chain (?underlying=…); a
+   picked expiry that is a real ISO date narrows it to that expiry's CHAIN
+   (?underlying=…&expiry=…) — only when ISO, so a non-ISO display code never 400s. The
+   interval comes from the same granularity knob the spot pull uses. ── */
+const _ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function histInterval() {
+  return (document.getElementById("spotInterval") || {}).value || "1day";
+}
+function pullHistorical(underlying, expiryDate) {
+  if (!underlying) return;
+  let qs = "/api/v1/universe/pull-historical?underlying=" + encodeURIComponent(underlying)
+    + "&interval=" + encodeURIComponent(histInterval());
+  let label = `${underlying} historical`;
+  /* Only pass &expiry= when the picked expiry is a real ISO date (the registry keys on
+     dates). A display-only expiry code is NOT forwarded — the whole-underlying pull is
+     the honest fallback (never a fabricated date). */
+  if (expiryDate && _ISO_DATE_RE.test(expiryDate)) {
+    qs += "&expiry=" + encodeURIComponent(expiryDate);
+    label = `${underlying} ${expiryDate} chain historical`;
+  }
+  startAndPoll(qs, label);
+}
+document.getElementById("pullHistBtn").onclick = () => pullHistorical(selInst, selExp);
+
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
    selected" pulls each instrument's spot in turn (sequential, so the one shared
    rate budget is respected and each shows in the live panel). The per-row
@@ -1213,6 +1250,11 @@ function updateMultiBtn() {
     d.textContent = n > 0 ? `⛓ Pull expiries + contracts · ${n} selected` : "⛓ Pull expiries + contracts";
     d.disabled = n === 0 && !selPullSymbol;
   }
+  // "⤓ Pull historical" is single-underlying: enabled whenever ONE underlying row is
+  // highlighted (it pulls that underlying's cached chain history — a picked expiry
+  // narrows it to that chain). The metadata must already be cached (the ⛓ button).
+  const h = document.getElementById("pullHistBtn");
+  if (h) h.disabled = !selInst;
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed
