@@ -50,3 +50,18 @@ def test_native_controls_remain_as_value_source() -> None:
     assert '<option value="1day" selected>' in html
     # the enhancers do not remove the native nodes (they hide + sync them).
     assert 'sel.style.display = "none"' in html or 'sel.style.display="none"' in html
+
+
+def test_picker_has_drill_nav_and_tabs() -> None:
+    """The picker matches the TradingView/Go-to UX: Date + Custom-range tabs and
+    a day->month->year(decade) DRILL header so any year is two clicks away."""
+    html = _render_universe_html()
+    # tabs.
+    assert 'data-m="range"' in html, "the Custom-range tab is missing"
+    assert "Custom range" in html, "the Custom-range tab label is missing"
+    # drill levels: header drill button + month-grid + year(decade)-grid cells.
+    assert "data-drill" in html, "the header drill button is missing"
+    assert "data-mon" in html, "the month-grid drill cells are missing"
+    assert "data-yr" in html, "the year(decade)-grid drill cells are missing"
+    # the decade label helper (e.g. 2020 - 2039).
+    assert "function decade" in html, "the decade drill helper is missing"
