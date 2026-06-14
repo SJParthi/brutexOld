@@ -100,7 +100,7 @@ def test_groww_credentials_page_serves_html(client: TestClient) -> None:
 
 
 def test_groww_credentials_nav_is_canonical(client: TestClient) -> None:
-    """The page carries the canonical 6-link nav, identical to every other page.
+    """The page carries the canonical 7-link nav, identical to every other page.
 
     Regression for DEC-DASHBOARD-NAV-CREDS-RECONCILE-001: the credentials page
     used to render a divergent nav (``Groww (legacy)`` / ``Groww`` toggle tabs,
@@ -109,11 +109,14 @@ def test_groww_credentials_nav_is_canonical(client: TestClient) -> None:
     Database · Coverage · Movers · Reports.
     """
     html = client.get("/groww-credentials").text
-    # The six canonical links are present, with "Credentials" as the current page.
+    # The full canonical nav is present, with "Credentials" as the current page
+    # (the order matches every other dashboard page: Universe . Credentials .
+    # Database . Live . Coverage . Movers . Reports).
     for href in (
         '"/universe"',
         '"/groww-credentials"',
         '"/db"',
+        '"/live"',
         '"/coverage"',
         '"/movers"',
         '"/reports"',
