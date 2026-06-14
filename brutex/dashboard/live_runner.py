@@ -207,7 +207,7 @@ class LiveRunner:
         log_file: str,
         seconds: float,
         symbols: str = "all",
-        feed: str = "ltp",
+        feed: str = "both",
     ) -> LiveStatus:
         """Spawn the capture subprocess (idempotent — a no-op if already running).
 
