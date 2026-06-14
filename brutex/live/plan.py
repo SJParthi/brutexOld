@@ -24,8 +24,9 @@ instruments); it is O(1) *amortised per operation* on an O(N) index built once.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Final
 
 
@@ -112,11 +113,29 @@ def build_plan(
         if inst.key not in seen:  # O(1) dedup
             seen.add(inst.key)
             unique.append(inst)
-    shards = tuple(
-        tuple(unique[i : i + per_connection_cap]) for i in range(0, len(unique), per_connection_cap)
-    )
+    return _plan_from_unique(unique, per_connection_cap=per_connection_cap)
+
+
+def _plan_from_unique(
+    unique: list[Instrument], *, per_connection_cap: int, boundaries: tuple[int, ...] = ()
+) -> ConnectionPlan:
+    """Shard pre-deduped *unique* into ≤*cap* bundles + build the O(1) indexes.
+
+    *boundaries* are extra split points (instrument-list offsets) at which a shard
+    MUST break even if the cap is not yet reached — used by
+    :func:`build_grouped_plan` to keep the spot group and the leg group in
+    separate shards. ``()`` (the default) reproduces :func:`build_plan`'s contiguous
+    cap-only packing exactly. The work is O(N): one pass to cut shards, one pass to
+    fill ``by_key``, one pass to fill ``by_underlying``; the maps are O(N) space.
+    """
+    cuts = sorted({0, len(unique), *boundaries})
+    shards: list[tuple[Instrument, ...]] = []
+    for lo, hi in pairwise(cuts):
+        for start in range(lo, hi, per_connection_cap):
+            shards.append(tuple(unique[start : min(start + per_connection_cap, hi)]))
+    shard_tuple = tuple(shards)
     by_key: dict[str, int] = {}
-    for connection_index, shard in enumerate(shards):
+    for connection_index, shard in enumerate(shard_tuple):
         for inst in shard:
             by_key[inst.key] = connection_index
     grouped: dict[str, list[str]] = {}
@@ -126,10 +145,55 @@ def build_plan(
     by_underlying = {underlying: tuple(keys) for underlying, keys in grouped.items()}
     return ConnectionPlan(
         per_connection_cap=per_connection_cap,
-        shards=shards,
+        shards=shard_tuple,
         by_key=by_key,
         by_underlying=by_underlying,
     )
+
+
+def build_grouped_plan(
+    spot: Sequence[Instrument],
+    legs: Sequence[Instrument],
+    *,
+    per_connection_cap: int = DEFAULT_PER_CONNECTION_CAP,
+) -> ConnectionPlan:
+    """Shard *spot* into the FIRST connection(s), *legs* into the SUBSEQUENT ones.
+
+    The operator's "connection #1 = all spot, connections #2…N = legs" model: the
+    deduped spot instruments fill shards ``0 .. k`` (``k = ceil(len(spot_unique) /
+    cap) - 1``); the deduped legs fill the shards AFTER them — **a shard boundary
+    always falls between the spot group and the leg group, so spot and legs are
+    NEVER mixed in one shard**. Dedup is the same O(1) set-membership pass as
+    :func:`build_plan`, applied spot-first so an instrument present in BOTH groups
+    is kept ONCE on its spot connection (spot wins — it rides connection #1).
+
+    Honest envelope (Golden Rule #10): every LOOKUP / dedup / route / assign on the
+    returned plan (``connection_of`` / ``legs_of`` / ``shard``) is **O(1)** (dict /
+    set / tuple-index). BUILDING the plan is **O(N)** one pass and the maps are
+    **O(N)** space — you must touch each of the N distinct instruments once and
+    store its assignment. That is NOT an O(1)-total claim (impossible for N distinct
+    instruments); it is O(1) *amortised per operation* on an O(N) index built once.
+
+    Empty *spot* → legs start on connection #0; empty *legs* → spot-only (mirrors
+    :func:`build_plan`); both empty → zero connections.
+
+    Raises
+    ------
+    ValueError
+        If *per_connection_cap* < 1.
+    """
+    if per_connection_cap < 1:
+        raise ValueError(f"per_connection_cap must be >= 1, got {per_connection_cap}")
+    seen: set[str] = set()
+    unique: list[Instrument] = []
+    for inst in (*spot, *legs):  # spot first → spot wins on a cross-group duplicate
+        if inst.key not in seen:  # O(1) dedup
+            seen.add(inst.key)
+            unique.append(inst)
+    # The boundary offset is the count of DISTINCT spot keys (spot fills shards
+    # 0..k, legs the shards after) — one O(N) pass, no nested scans.
+    boundary = len({inst.key for inst in spot})
+    return _plan_from_unique(unique, per_connection_cap=per_connection_cap, boundaries=(boundary,))
 
 
 def connection_count(
@@ -145,6 +209,7 @@ __all__ = [
     "DEFAULT_PER_CONNECTION_CAP",
     "ConnectionPlan",
     "Instrument",
+    "build_grouped_plan",
     "build_plan",
     "connection_count",
 ]
