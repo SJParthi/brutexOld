@@ -76,6 +76,24 @@ def test_live_page_renders(tmp_path) -> None:
     assert "Live feed" in resp.text and 'href="/live" aria-current="page"' in resp.text
 
 
+def test_live_page_renders_query_builder_controls(tmp_path) -> None:
+    """The /live page ships the query-builder UI (DEC-LIVE-UI-CONTROLS-001).
+
+    Mirrors /db: a column picker, AND-combined filter rows, a sort dropdown, and
+    Prev/Next paging — all wired to the live columns + query routes the JS calls.
+    """
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    text = client.get("/live").text
+    # Column picker, filter rows, sort dropdown, + paging markup are present.
+    assert 'class="qcol"' in text and 'class="colbox"' in text  # column picker
+    assert 'class="fcol"' in text and 'class="fop"' in text and 'class="fval"' in text  # filters
+    assert 'id="addf"' in text and 'id="sortcol"' in text and 'id="sortdir"' in text
+    assert 'id="applyq"' in text  # apply-query button
+    assert 'id="liveprev"' in text and 'id="livenext"' in text  # paging
+    # The controls call the already-merged live columns + query routes.
+    assert "/api/v1/live/columns/" in text and "/api/v1/live/query/" in text
+
+
 def test_start_status_stop_cycle(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)  # runs/ + .brutex-logs/ resolve under tmp
     client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
