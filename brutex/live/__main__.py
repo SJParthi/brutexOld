@@ -75,7 +75,7 @@ def _real_feed_builder() -> Any:  # pragma: no cover — needs growwapi + creds 
     """Build a live ``GrowwFeed`` from env credentials (TOTP flow)."""
     import os
 
-    from growwapi import GrowwAPI, GrowwFeed  # type: ignore[import-not-found]
+    from growwapi import GrowwAPI, GrowwFeed  # type: ignore[import-not-found, unused-ignore]
 
     from brutex.adapters.groww.auth import get_access_token, resolve_groww_credentials
 
