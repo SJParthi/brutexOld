@@ -22,6 +22,7 @@ from brutex.dashboard.nse_constituents import (
     convention_constituent_url,
     fetch_constituent_csv,
     fetch_constituent_symbols,
+    fetch_rows_at_url,
     fetch_symbols_at_url,
     intersect_with_universe,
     members_in_universe,
@@ -383,4 +384,22 @@ class TestFetchSymbolsAtUrl:
 
         symbols = fetch_symbols_at_url("https://x/ind_niftypharmalist.csv", opener=_opener)
         assert symbols == ["RELIANCE", "M&M", "GVT&D", "HDFCBANK"]
+        assert calls == ["https://x/ind_niftypharmalist.csv"]
+
+    def test_fetch_rows_returns_symbol_isin_pairs(self) -> None:
+        """The ISIN-carrying sibling parses each member's (symbol, isin) row.
+
+        Covers ``fetch_rows_at_url`` (DEC-INDEX-CONSTITUENTS-NSE-001) which #685
+        added without a direct test — its 2-line body was left uncovered on main,
+        failing the per-module 100% gate (repaired here under DEC-GROWW-RATELIMIT-RETRY-001).
+        """
+        calls: list[str] = []
+
+        def _opener(url: str) -> str:
+            calls.append(url)
+            return _FIXTURE_CSV
+
+        rows = fetch_rows_at_url("https://x/ind_niftypharmalist.csv", opener=_opener)
+        assert rows[0] == ConstituentRow(symbol="RELIANCE", isin="INE002A01018")
+        assert rows[1] == ConstituentRow(symbol="M&M", isin="INE101A01026")
         assert calls == ["https://x/ind_niftypharmalist.csv"]
