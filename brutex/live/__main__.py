@@ -34,7 +34,12 @@ import structlog
 from brutex.live.candle_builder import build_minute_candles
 from brutex.live.capture import SnapshotFn, SubscribeFn, TickCapture, _utc_now
 from brutex.live.lake import minute_tick_counts, write_live_candles, write_live_ticks
-from brutex.live.multiconn import build_report, make_multiconn_capture, plan_connections
+from brutex.live.multiconn import (
+    build_report,
+    make_multiconn_capture,
+    plan_connections,
+    read_subscription_manifest,
+)
 from brutex.live.parity import compare_candles
 from brutex.live.probe import analyze_cadence, probe_connections
 from brutex.live.report import render_parity_markdown
@@ -457,8 +462,16 @@ def _cmd_capture_all(  # pragma: no cover — opens N real websockets (operator'
     plan is the spot connection(s).
     """
     deps.configure_logging(args.log_file)
-    spot = deps.instrument_resolver(args.symbols, "both")
-    legs: list[Mapping[str, Any]] = []  # leg resolution = named follow-up
+    spot: Sequence[Mapping[str, Any]]
+    legs: Sequence[Mapping[str, Any]]
+    if args.manifest:
+        # The dashboard wrote the EXACT 775 spot + the F&O legs from the persisted
+        # instruments + contracts tables (DEC-LIVE-MULTICONN-MANIFEST-001).
+        spot, legs = read_subscription_manifest(args.manifest)
+    else:
+        # No manifest → resolve the spot from the instrument master; legs empty
+        # (connection #0 = spot only).
+        spot, legs = deps.instrument_resolver(args.symbols, "both"), []
     bindings, skipped, plan = plan_connections(
         spot, legs, per_connection_cap=args.cap, ceiling=args.ceiling
     )
@@ -546,6 +559,13 @@ def _build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--report", required=True, help="per-connection subscription proof (Markdown)")
     cal.add_argument("--seconds", type=float, default=60.0, help="capture duration")
     cal.add_argument("--symbols", default=DEFAULT_SYMBOLS, help="spot selector (see capture)")
+    cal.add_argument(
+        "--manifest",
+        default=None,
+        help='JSON {"spot":[...],"legs":[...]} of the exact 775 + F&O legs '
+        "(the dashboard writes it from the instruments + contracts tables); "
+        "overrides --symbols when given",
+    )
     cal.add_argument(
         "--cap", type=int, default=1000, help="per-connection subscription cap (default 1000)"
     )
