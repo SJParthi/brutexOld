@@ -43,6 +43,7 @@ def test_start_then_status_uptime(tmp_path) -> None:
     r = _mk(tmp_path, alive=lambda p: True, clock=lambda: now["t"])
     s = r.start(out="o.jsonl", log_file="l.log", seconds=60)
     assert s.running and s.pid == 4242
+    assert s.argv is not None
     assert s.argv[:4] == [sys.executable, "-m", "brutex.live", "capture"]
     now["t"] = 1007.5
     s2 = r.status()

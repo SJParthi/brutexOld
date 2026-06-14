@@ -3330,8 +3330,14 @@ def build_app(
         lake = _live_lake_root()
         if lake is None:
             return JSONResponse(
-                {"table": name, "columns": [], "rows": [], "total": 0,
-                 "limit": limit, "offset": offset}
+                {
+                    "table": name,
+                    "columns": [],
+                    "rows": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                }
             )
         try:
             payload = await run_in_threadpool(
