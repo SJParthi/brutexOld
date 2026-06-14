@@ -44,8 +44,19 @@ from brutex.live.verify import render_subscription_markdown, verify_subscription
 
 _LOG = structlog.get_logger("brutex.live.cli")
 
-#: Default instruments to capture — the backtest universe (the parity target).
-DEFAULT_SYMBOLS = "NSE-NIFTY,NSE-BANKNIFTY,BSE-SENSEX,NSE-INDIAVIX"
+#: The 4 brute-force instruments — the index-value PARITY target (vs the backtest
+#: candles, which only carry the 3 indexes + India VIX). Use this with
+#: ``--feed index`` for parity; the capture default is the FULL universe.
+PARITY_SYMBOLS = "NSE-NIFTY,NSE-BANKNIFTY,BSE-SENSEX,NSE-INDIAVIX"
+#: Default capture/verify symbol selector — the FULL universe (every index +
+#: every F&O-eligible stock), resolved feed-aware by ``_real_instrument_resolver``.
+DEFAULT_SYMBOLS = "all"
+#: Where the live CLI tees its structured logs (sibling of the dashboard's log).
+DEFAULT_LOG_FILE = ".brutex-logs/brutex-live.log"
+
+
+def _noop_configure_logging(_log_file: Path | None) -> None:
+    """Default logging hook — a no-op (the real file/console sink is injected)."""
 
 
 @dataclass
@@ -57,6 +68,7 @@ class LiveDeps:
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
+    configure_logging: Callable[[Path | None], None] = _noop_configure_logging
 
 
 def _real_feed_builder() -> Any:  # pragma: no cover — needs growwapi + creds + network
@@ -75,14 +87,22 @@ def _real_feed_builder() -> Any:  # pragma: no cover — needs growwapi + creds 
 def _real_instrument_resolver(  # pragma: no cover — needs the instrument master
     symbols: str, feed_kind: str
 ) -> list[dict[str, Any]]:
-    """Resolve ``EXCH-SYMBOL`` strings (or ``"all"``) to feed instrument dicts.
+    """Resolve ``EXCH-SYMBOL`` strings (or a sentinel) to feed instrument dicts.
 
     Downloads the Groww instrument master and emits the ``{exchange, segment,
     exchange_token}`` dicts the feed's ``subscribe_*`` methods expect. The
-    sentinel ``"all"`` / ``"universe"`` resolves the FULL universe — every index
-    (``IDX``) PLUS every F&O-eligible single stock (an ``EQ`` row whose symbol is
-    named by at least one ``FUT``/``CE``/``PE`` leg) — so a ``verify`` run
-    subscribes to all indices AND their stocks.
+    selector is **feed-aware** so each feed only gets instruments it can carry:
+
+    * ``"all"`` / ``"universe"`` — the FULL brute-force-adjacent universe. With
+      ``--feed index`` this is every index (``IDX``) value; with ``--feed ltp``
+      it ALSO adds every F&O-eligible single stock (an ``EQ`` row whose symbol is
+      named by a ``FUT``/``CE``/``PE`` leg) — indices + stocks in one run.
+    * ``"everything"`` / ``"all-equity"`` — indices PLUS *every* NSE/BSE equity
+      (the ~750 the dashboard shows), for the widest ltp capture.
+    * a comma list of ``EXCH-SYMBOL`` — exactly those ``groww_symbol`` rows.
+
+    Stocks are never subscribed on the index-value feed (they would be silent);
+    ``verify`` reports any genuinely-silent instrument rather than hiding it.
     """
     import csv
     import urllib.request
@@ -91,14 +111,15 @@ def _real_instrument_resolver(  # pragma: no cover — needs the instrument mast
 
     text = urllib.request.urlopen(GROWW_INSTRUMENT_CSV_URL, timeout=30).read().decode("utf-8")  # noqa: S310  # nosec B310
     rows = list(csv.DictReader(text.splitlines()))
-    full = symbols.strip().lower() in ("all", "universe")
-    fno_underlyings: set[str] = set()
-    if full:
-        fno_underlyings = {
-            (r.get("underlying_symbol") or "").strip().upper()
-            for r in rows
-            if (r.get("instrument_type") or "").strip().upper() in ("FUT", "CE", "PE")
-        }
+    sentinel = symbols.strip().lower()
+    all_equity = sentinel in ("everything", "all-equity")
+    full = all_equity or sentinel in ("all", "universe")
+    on_ltp = feed_kind != "index"
+    fno_underlyings = {
+        (r.get("underlying_symbol") or "").strip().upper()
+        for r in rows
+        if (r.get("instrument_type") or "").strip().upper() in ("FUT", "CE", "PE")
+    }
     wanted = {s.strip().upper() for s in symbols.split(",") if s.strip()}
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -106,7 +127,8 @@ def _real_instrument_resolver(  # pragma: no cover — needs the instrument mast
         gsym = (row.get("groww_symbol") or "").strip().upper()
         tsym = (row.get("trading_symbol") or "").strip().upper()
         if full:
-            keep = itype == "IDX" or (itype == "EQ" and tsym in fno_underlyings)
+            stock_ok = on_ltp and (all_equity or tsym in fno_underlyings)
+            keep = itype == "IDX" or (itype == "EQ" and stock_ok)
         else:
             keep = gsym in wanted
         if keep:
@@ -120,11 +142,39 @@ def _real_instrument_resolver(  # pragma: no cover — needs the instrument mast
     return out
 
 
+def _real_configure_logging(log_file: Path | None) -> None:  # pragma: no cover — global I/O
+    """Tee the live CLI's structured logs to the console AND a JSONL file.
+
+    Mirrors the dashboard's structured-log contract (one JSON object per line) so
+    an unattended ``capture`` / ``verify`` / ``probe-connections`` run leaves a
+    durable, greppable trail — not just ephemeral console output.
+    """
+    import logging
+    import sys
+
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(format="%(message)s", level=logging.INFO, handlers=handlers, force=True)
+    structlog.configure(
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+
 def _real_deps() -> LiveDeps:  # pragma: no cover — wires the real network collaborators
     """The production dependency bundle (real feed + real instrument master)."""
     return LiveDeps(
         feed_builder=_real_feed_builder,
         instrument_resolver=_real_instrument_resolver,
+        configure_logging=_real_configure_logging,
     )
 
 
@@ -149,9 +199,12 @@ def _make_snapshot_reader(feed: Any, feed_kind: str) -> SnapshotFn:
 
 def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
     """Subscribe + capture every snapshot for ``--seconds`` to ``--out``."""
+    deps.configure_logging(args.log_file)
     feed = deps.feed_builder()
     instruments = deps.instrument_resolver(args.symbols, args.feed)
-    _LOG.info("capture_subscribe", instruments=len(instruments), feed=args.feed)
+    _LOG.info(
+        "capture_subscribe", instruments=len(instruments), feed=args.feed, symbols=args.symbols
+    )
     subscribe = _make_subscribe(feed, instruments, args.feed)
     read_snapshot = _make_snapshot_reader(feed, args.feed)
     with TickStore.open(args.out, resume=args.resume) as store:
@@ -161,7 +214,12 @@ def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
             read_snapshot=read_snapshot,
             clock=deps.clock,
         )
-        captured = capture.run_for(args.seconds, sleep=deps.sleep, monotonic=deps.monotonic)
+        captured = capture.run_for(
+            args.seconds,
+            sleep=deps.sleep,
+            monotonic=deps.monotonic,
+            heartbeat_interval=args.heartbeat,
+        )
     stats = analyze_cadence(TickStore.read(args.out))
     _LOG.info(
         "capture_complete",
@@ -232,9 +290,12 @@ def _cmd_parity(args: argparse.Namespace, _deps: LiveDeps) -> int:
 
 def _cmd_probe_connections(args: argparse.Namespace, deps: LiveDeps) -> int:
     """Ramp websocket connections 1..``--max`` to find the ceiling."""
+    deps.configure_logging(args.log_file)
 
-    def open_connection(_ordinal: int) -> Any:
-        return deps.feed_builder()
+    def open_connection(ordinal: int) -> Any:
+        conn = deps.feed_builder()
+        _LOG.info("connection_opened", ordinal=ordinal)
+        return conn
 
     result = probe_connections(open_connection=open_connection, max_conns=args.max)
     _LOG.info(
@@ -273,6 +334,7 @@ def _cmd_lake(args: argparse.Namespace, _deps: LiveDeps) -> int:
 
 def _cmd_verify(args: argparse.Namespace, deps: LiveDeps) -> int:
     """Subscribe to ALL requested instruments + PROVE per-instrument tick delivery."""
+    deps.configure_logging(args.log_file)
     feed = deps.feed_builder()
     instruments = deps.instrument_resolver(args.symbols, args.feed)
     _LOG.info(
@@ -324,8 +386,23 @@ def _build_parser() -> argparse.ArgumentParser:
     cap = sub.add_parser("capture", help="capture live ticks to a JSONL log")
     cap.add_argument("--out", required=True, help="destination JSONL path")
     cap.add_argument("--seconds", type=float, default=60.0, help="capture duration")
-    cap.add_argument("--symbols", default=DEFAULT_SYMBOLS, help="comma EXCH-SYMBOL list")
-    cap.add_argument("--feed", choices=("index", "ltp"), default="index")
+    cap.add_argument(
+        "--symbols",
+        default=DEFAULT_SYMBOLS,
+        help=f'"all"/"universe" (every index + F&O stock), "everything" (every '
+        f"equity too), or a comma EXCH-SYMBOL list (parity subset: {PARITY_SYMBOLS})",
+    )
+    cap.add_argument(
+        "--feed",
+        choices=("index", "ltp"),
+        default="ltp",
+        help="ltp = index + stock last-traded-price (whole universe); "
+        "index = index-value feed (parity-accurate for the 3 indexes)",
+    )
+    cap.add_argument(
+        "--heartbeat", type=float, default=30.0, help="progress-log interval (seconds)"
+    )
+    cap.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     cap.add_argument("--resume", action="store_true", help="append to an existing log")
 
     cad = sub.add_parser("cadence", help="report tick cadence (ms vs seconds)")
@@ -343,6 +420,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     prb = sub.add_parser("probe-connections", help="ramp connections 1..N")
     prb.add_argument("--max", type=int, default=100, help="max connections to try")
+    prb.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
 
     lk = sub.add_parser("lake", help="persist a captured log into the live lake tables")
     lk.add_argument("--in", dest="in_path", required=True, help="captured JSONL path")
@@ -358,6 +436,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ver.add_argument("--symbols", default="all", help='"all" (full universe) or comma EXCH-SYMBOL')
     ver.add_argument("--seconds", type=float, default=60.0, help="measurement window")
     ver.add_argument("--feed", choices=("index", "ltp"), default="ltp")
+    ver.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     ver.add_argument("--resume", action="store_true", help="append to an existing log")
 
     return parser

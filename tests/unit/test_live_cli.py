@@ -115,6 +115,25 @@ def test_tickcapture_records_and_counts(tmp_path) -> None:
     ]
 
 
+def test_tickcapture_emits_heartbeats(tmp_path) -> None:
+    """A long-enough window emits a progress heartbeat (tracking/monitoring)."""
+    feed = _FakeFeed([{"N": 1.0}, {"N": 2.0}])
+    store = TickStore.open(tmp_path / "t.jsonl")
+    capture = TickCapture(
+        store=store,
+        subscribe=lambda cb: feed.subscribe_index_value([], on_data_received=cb),
+        read_snapshot=feed.get_index_value,
+        clock=_clock_seq(),
+    )
+    # start=0.0; first loop now=0.5 ≥ next_beat 0.1 → one heartbeat; then break at 1.5.
+    monotonic = iter([0.0, 0.5, 1.5]).__next__
+    n = capture.run_for(
+        1.0, sleep=lambda _s: feed.fire(), monotonic=monotonic, heartbeat_interval=0.1
+    )
+    store.close()
+    assert n >= 1 and capture.heartbeats == 1
+
+
 def test_utc_now_is_tz_aware() -> None:
     assert _utc_now().tzinfo is not None
 
