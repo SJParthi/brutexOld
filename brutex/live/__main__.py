@@ -33,6 +33,7 @@ import structlog
 
 from brutex.live.candle_builder import build_minute_candles
 from brutex.live.capture import SnapshotFn, SubscribeFn, TickCapture, _utc_now
+from brutex.live.lake import minute_tick_counts, write_live_candles, write_live_ticks
 from brutex.live.parity import compare_candles
 from brutex.live.probe import analyze_cadence, probe_connections
 from brutex.live.report import render_parity_markdown
@@ -225,12 +226,37 @@ def _cmd_probe_connections(args: argparse.Namespace, deps: LiveDeps) -> int:
     return 0
 
 
+def _cmd_lake(args: argparse.Namespace, _deps: LiveDeps) -> int:
+    """Persist a captured JSONL log into the ``live_ticks`` + ``live_candles_1m`` lake."""
+    records = TickStore.read(args.in_path)
+    tick_paths = write_live_ticks(
+        records, lake_root=args.lake_root, capture_run_id=args.run_id, feed_kind=args.feed
+    )
+    candles = build_minute_candles(iter_ticks(records))
+    candle_paths = write_live_candles(
+        candles,
+        lake_root=args.lake_root,
+        built_run_id=args.run_id,
+        tick_counts=minute_tick_counts(records),
+    )
+    _LOG.info(
+        "lake_complete",
+        records=len(records),
+        tick_partitions=len(tick_paths),
+        candle_partitions=len(candle_paths),
+        instruments=len(candles),
+        lake_root=str(args.lake_root),
+    )
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
     "capture": _cmd_capture,
     "cadence": _cmd_cadence,
     "build": _cmd_build,
     "parity": _cmd_parity,
     "probe-connections": _cmd_probe_connections,
+    "lake": _cmd_lake,
 }
 
 
@@ -261,6 +287,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     prb = sub.add_parser("probe-connections", help="ramp connections 1..N")
     prb.add_argument("--max", type=int, default=100, help="max connections to try")
+
+    lk = sub.add_parser("lake", help="persist a captured log into the live lake tables")
+    lk.add_argument("--in", dest="in_path", required=True, help="captured JSONL path")
+    lk.add_argument("--lake-root", dest="lake_root", required=True, help="lake root directory")
+    lk.add_argument("--run-id", dest="run_id", required=True, help="capture/build run id")
+    lk.add_argument("--feed", choices=("index", "ltp"), default="index")
 
     return parser
 

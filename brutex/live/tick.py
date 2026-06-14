@@ -96,6 +96,90 @@ def _leaf_price(mapping: Mapping[str, Any]) -> Decimal | None:
     return None
 
 
+#: The vendor's OWN timestamp field in a live-feed leaf — **MILLISECONDS**, a
+#: double. VERIFIED from the ``growwapi`` proto (``stocksLiveIndices`` /
+#: ``stockLivePrice`` both carry ``tsInMillis``). Stored UNTAMPERED.
+VENDOR_TS_MS_KEY: Final[str] = "tsInMillis"
+
+
+def _coerce_int(raw: object) -> int | None:
+    """Return *raw* as an int (the feed sends volume / OI as doubles), or ``None``."""
+    coerced = _coerce_number(raw)
+    return None if coerced is None else int(coerced)
+
+
+def _coerce_ms(raw: object) -> float | None:
+    """Return the vendor millisecond timestamp UNTAMPERED as a float, or ``None``.
+
+    No rounding, no unit conversion — the operator's rule is that the vendor's
+    own timestamp is never edited (our nanosecond ``recv_ns`` is the separate,
+    OURS-only clock).
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class Quote:
+    """One instrument's FULL live observation from a feed leaf.
+
+    Attributes
+    ----------
+    value
+        Price (index ``value`` / stock ``ltp``) as exact :class:`~decimal.Decimal`.
+    vendor_ts_ms
+        The vendor's own ``tsInMillis`` (MILLISECONDS) — UNTAMPERED; ``None`` if
+        the leaf omits it (e.g. a flat numeric snapshot).
+    volume, open_interest
+        Cumulative volume / open interest (LTP feed only; ``None`` for an index).
+    """
+
+    value: Decimal
+    vendor_ts_ms: float | None
+    volume: int | None
+    open_interest: int | None
+
+
+def _leaf_quote(mapping: Mapping[str, Any]) -> Quote | None:
+    """Build a :class:`Quote` from a price-leaf dict, or ``None`` if not one."""
+    price = _leaf_price(mapping)
+    if price is None:
+        return None
+    return Quote(
+        value=price,
+        vendor_ts_ms=_coerce_ms(mapping.get(VENDOR_TS_MS_KEY)),
+        volume=_coerce_int(mapping.get("volume")),
+        open_interest=_coerce_int(mapping.get("openInterest")),
+    )
+
+
+def extract_quotes(snapshot: Mapping[str, Any], *, prefix: str = "") -> dict[str, Quote]:
+    """Flatten a snapshot to ``{instrument_key: Quote}`` — the FULL leaf.
+
+    Like :func:`flatten_index_snapshot` but each value carries the price AND the
+    vendor's untampered ``tsInMillis`` + volume/OI — the source for a
+    ``live_ticks`` lake row. A flat numeric leaf yields a Quote with only
+    ``value`` set; the three snapshot shapes are handled identically.
+    """
+    out: dict[str, Quote] = {}
+    for raw_key, raw_value in snapshot.items():
+        key = f"{prefix}:{raw_key}" if prefix else str(raw_key)
+        if isinstance(raw_value, Mapping):
+            quote = _leaf_quote(raw_value)
+            if quote is not None:
+                out[key] = quote
+            else:
+                out.update(extract_quotes(raw_value, prefix=key))
+        else:
+            number = _coerce_number(raw_value)
+            if number is not None:
+                out[key] = Quote(value=number, vendor_ts_ms=None, volume=None, open_interest=None)
+    return out
+
+
 def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> dict[str, Decimal]:
     """Flatten a (possibly nested) Groww feed snapshot to ``{key: Decimal}``.
 
@@ -165,7 +249,10 @@ def iter_ticks(records: Sequence[TickRecord]) -> Iterator[LiveTick]:
 
 __all__ = [
     "PRICE_LEAF_KEYS",
+    "VENDOR_TS_MS_KEY",
     "LiveTick",
+    "Quote",
+    "extract_quotes",
     "flatten_index_snapshot",
     "iter_ticks",
 ]

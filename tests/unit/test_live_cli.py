@@ -221,6 +221,26 @@ def test_cmd_probe_connections(tmp_path) -> None:
     assert main(["probe-connections", "--max", "5"], deps=deps) == 0
 
 
+def test_cmd_lake_persists_ticks_and_candles(tmp_path) -> None:
+    from brutex.live.lake import read_live_candles, read_live_ticks
+
+    src = tmp_path / "t.jsonl"
+    with TickStore.open(src) as store:
+        store.append(
+            {"NSE:IDX:NIFTY": 22500.0},
+            recv_ts=datetime(2026, 6, 15, 3, 45, 10, tzinfo=UTC),
+            recv_ns=1,
+        )
+    lake_root = tmp_path / "lake"
+    rc = main(
+        ["lake", "--in", str(src), "--lake-root", str(lake_root), "--run-id", "r1"],
+        deps=_noop_deps(),
+    )
+    assert rc == 0
+    assert read_live_ticks(lake_root).shape[0] == 1
+    assert read_live_candles(lake_root).shape[0] == 1
+
+
 # ──────────────────────── helpers + real-deps branch ─────────────
 
 

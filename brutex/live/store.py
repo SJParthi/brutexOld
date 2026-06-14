@@ -31,14 +31,20 @@ class TickRecord:
     seq
         Zero-based, gap-free sequence number within the log.
     recv_ts
-        UTC tz-aware wall-clock time the callback was recorded.
+        UTC tz-aware wall-clock time the callback was recorded (µs resolution).
     snapshot
-        The raw feed snapshot mapping exactly as the SDK returned it.
+        The raw feed snapshot mapping exactly as the SDK returned it — the
+        vendor's own ``tsInMillis`` lives in here, UNTAMPERED.
+    recv_ns
+        OUR receive time in **nanoseconds** since the epoch (``time.time_ns()``)
+        — the high-resolution cadence oracle. Defaults to ``recv_ts`` in ns for
+        records read from a pre-``recv_ns`` log.
     """
 
     seq: int
     recv_ts: datetime
     snapshot: Mapping[str, Any]
+    recv_ns: int = 0
 
 
 def _json_default(obj: object) -> str:
@@ -89,8 +95,14 @@ class TickStore:
         """The sequence number the next :meth:`append` will assign."""
         return self._seq
 
-    def append(self, snapshot: Mapping[str, Any], *, recv_ts: datetime) -> TickRecord:
+    def append(
+        self, snapshot: Mapping[str, Any], *, recv_ts: datetime, recv_ns: int | None = None
+    ) -> TickRecord:
         """Persist one snapshot, returning the :class:`TickRecord` written.
+
+        *recv_ns* is OUR nanosecond receive time (``time.time_ns()``); when
+        omitted it is derived from *recv_ts* (µs). The vendor timestamp is NOT a
+        parameter — it rides inside *snapshot* untampered.
 
         Raises
         ------
@@ -103,11 +115,13 @@ class TickStore:
             raise ValueError(f"recv_ts must be timezone-aware, got naive {recv_ts!r}")
         if self._handle is None:
             raise RuntimeError("TickStore is closed; reopen before appending")
-        record = TickRecord(seq=self._seq, recv_ts=recv_ts, snapshot=dict(snapshot))
+        ns = recv_ns if recv_ns is not None else int(recv_ts.timestamp() * 1_000_000_000)
+        record = TickRecord(seq=self._seq, recv_ts=recv_ts, snapshot=dict(snapshot), recv_ns=ns)
         line = json.dumps(
             {
                 "seq": record.seq,
                 "recv_ts": recv_ts.astimezone(UTC).isoformat(),
+                "recv_ns": record.recv_ns,
                 "snapshot": record.snapshot,
             },
             sort_keys=True,
@@ -155,6 +169,7 @@ class TickStore:
                         seq=int(payload["seq"]),
                         recv_ts=datetime.fromisoformat(payload["recv_ts"]),
                         snapshot=payload["snapshot"],
+                        recv_ns=int(payload.get("recv_ns", 0)),
                     )
                 )
         return records

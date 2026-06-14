@@ -110,6 +110,30 @@ def test_iter_ticks_expands_and_skips_empty() -> None:
     ]
 
 
+def test_extract_quotes_all_shapes_and_vendor_ts() -> None:
+    from brutex.live.tick import Quote, extract_quotes
+
+    # flat numeric leaf → value only.
+    assert extract_quotes({"NIFTY": 100.0})["NIFTY"] == Quote(
+        value=Decimal("100.0"), vendor_ts_ms=None, volume=None, open_interest=None
+    )
+    # nested index leaf → UNTAMPERED tsInMillis, no volume.
+    idx = extract_quotes({"NSE": {"IDX": {"NIFTY": {"tsInMillis": 123.0, "value": 22500.5}}}})
+    q = idx["NSE:IDX:NIFTY"]
+    assert q.value == Decimal("22500.5") and q.vendor_ts_ms == 123.0 and q.volume is None
+    # LTP leaf → volume/OI coerced from the proto's doubles; ms kept.
+    ltp = extract_quotes({"X": {"tsInMillis": 5, "value": 10, "volume": 7.0, "openInterest": 3.0}})[
+        "X"
+    ]
+    assert ltp.vendor_ts_ms == 5.0 and ltp.volume == 7 and ltp.open_interest == 3
+    # price leaf WITHOUT a vendor timestamp → vendor_ts_ms None.
+    assert extract_quotes({"Z": {"value": 5}})["Z"].vendor_ts_ms is None
+    # a bool is never a timestamp.
+    assert extract_quotes({"Y": {"value": 1, "tsInMillis": True}})["Y"].vendor_ts_ms is None
+    # a non-price mapping recurses to nothing; a non-numeric leaf is skipped.
+    assert extract_quotes({"a": {"foo": "bar"}}) == {}
+
+
 # ─────────────────────────── store.py ───────────────────────────
 
 

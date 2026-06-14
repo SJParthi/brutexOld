@@ -15,6 +15,7 @@ modifies, or cancels an order (Golden Rule #3 scope guard).
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -46,6 +47,7 @@ class TickCapture:
         subscribe: SubscribeFn,
         read_snapshot: SnapshotFn,
         clock: Callable[[], datetime] = _utc_now,
+        ns_clock: Callable[[], int] = time.time_ns,
         on_record: Callable[[TickRecord], None] | None = None,
     ) -> None:
         """Wire the capture.
@@ -61,6 +63,9 @@ class TickCapture:
             Pulls the current snapshot (e.g. ``feed.get_index_value``).
         clock
             Returns the UTC receive timestamp (injectable for tests).
+        ns_clock
+            Returns OUR receive time in nanoseconds (``time.time_ns`` — the
+            high-resolution cadence oracle; injectable for tests).
         on_record
             Optional per-record hook (e.g. a live counter / progress log).
         """
@@ -68,6 +73,7 @@ class TickCapture:
         self._subscribe = subscribe
         self._read_snapshot = read_snapshot
         self._clock = clock
+        self._ns_clock = ns_clock
         self._on_record = on_record
         self._count = 0
 
@@ -82,10 +88,11 @@ class TickCapture:
         self._subscribe(self._on_tick)
 
     def _on_tick(self) -> None:
-        """Feed callback: snapshot now, persist, advance the counter."""
+        """Feed callback: stamp ns + snapshot now, persist, advance the counter."""
+        recv_ns = self._ns_clock()
         recv_ts = self._clock()
         snapshot = self._read_snapshot()
-        record = self._store.append(snapshot, recv_ts=recv_ts)
+        record = self._store.append(snapshot, recv_ts=recv_ts, recv_ns=recv_ns)
         self._count += 1
         if self._on_record is not None:
             self._on_record(record)
