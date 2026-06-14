@@ -37,7 +37,19 @@
     --blue: #5B8DEF;
     --purple: #9D7BFF;
     --pink: #FF6B9D;
+
+    /* Design tokens (DEC-DASHBOARD-UI-POLISH-003) — additive scale/elevation
+       primitives; existing rules untouched, available for future polish. */
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
+    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
   }
+  /* Accessibility polish (DEC-DASHBOARD-UI-POLISH-003) — additive; keyboard
+     focus rings + reduced-motion honoring. Does not alter the mouse layout. */
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; scroll-behavior:auto !important; } }
   html, body { background: var(--bg); }
   body {
     color: var(--text);
