@@ -4062,30 +4062,6 @@ def _resolve_historical_contracts(
     return []
 
 
-_CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"
-_CREDENTIALS_TEMPLATE_CACHE: str | None = None
-
-
-def _load_credentials_template() -> str:
-    """Load + cache the Credentials page template (DEC-CREDENTIALS-STORE-001).
-
-    Ships as a package-relative resource at
-    ``brutex/dashboard/templates/credentials.html``. The page POSTs the API
-    key + TOTP secret to ``/api/v1/credentials`` (body, never query) and
-    GETs ``/api/v1/credentials/status`` for a boolean status line — it
-    never displays a secret value. Loaded once, then served verbatim.
-    """
-    global _CREDENTIALS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
-    if _CREDENTIALS_TEMPLATE_CACHE is None:
-        _CREDENTIALS_TEMPLATE_CACHE = _CREDENTIALS_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return _CREDENTIALS_TEMPLATE_CACHE
-
-
-def _render_credentials_html() -> str:
-    """Return the Credentials page HTML (DEC-CREDENTIALS-STORE-001)."""
-    return _load_credentials_template()
-
-
 _GROWW_CREDENTIALS_TEMPLATE_PATH = (
     Path(__file__).resolve().parent / "templates" / "groww_credentials.html"
 )
