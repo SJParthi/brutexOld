@@ -74,8 +74,9 @@ def test_nav_is_class_driven_with_current_marker() -> None:
     assert '<nav class="topnav" aria-label="Primary">' in html, (
         "the primary nav landmark is missing"
     )
-    assert '<a href="/db" aria-current="page">Database</a>' in html, (
-        "the primary nav must be class-driven with an aria-current marker"
+    assert '<a href="/universe" aria-current="page">Universe</a>' in html, (
+        "the /universe page must mark its OWN nav link active (not /db), and a "
+        "Universe link must exist so other pages can navigate back"
     )
     assert ".topnav a:hover" in html, "the nav hover affordance is missing"
 
