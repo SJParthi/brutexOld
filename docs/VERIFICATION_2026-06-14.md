@@ -1,6 +1,6 @@
 # BruteX Workspace Verification — 2026-06-14
 
-> **Decision:** DEC-WORKSPACE-VERIFY-003 (MIGRATION.md entry #764)
+> **Decision:** DEC-WORKSPACE-VERIFY-003 (MIGRATION.md entry #765)
 > **Branch:** `claude/zen-meitner-am13gf`
 > **Verified tip:** `259f366` — *"fix(live): connection-scaling probe holds
 > connections concurrently (DEC-LIVE-PROBE-CONCURRENT-001) (#718)"*
