@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Live</title>
+<style>
+  :root {
+    --bg:#0A0D11; --surface:#131722; --surface-2:#1A1F2C; --surface-3:#232938;
+    --border:#1E222D; --border-strong:#2B313F;
+    --text:#E5E8EC; --text-bright:#FFFFFF; --muted:#787B86;
+    --green:#26D9B0; --green-bright:#4FFFD0; --green-dim:#1A8870;
+    --red:#FF5C5C; --yellow:#FFB74D; --blue:#5B8DEF; --purple:#9D7BFF; --pink:#FF6B9D;
+    --r-sm:8px; --r-md:10px; --r-lg:14px; --r-pill:999px;
+    --ease:cubic-bezier(.22,.61,.36,1); --mono:"SF Mono",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; background:var(--bg); height:100%; }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;
+    color:var(--text); min-height:100vh; display:flex; flex-direction:column;
+    background:
+      radial-gradient(ellipse at top,rgba(91,141,239,.06),transparent 50%),
+      radial-gradient(ellipse at bottom right,rgba(38,217,176,.04),transparent 60%),
+      var(--bg);
+  }
+  header {
+    display:flex; align-items:center; gap:14px; padding:16px 24px;
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:6;
+    background:rgba(10,13,17,.82); backdrop-filter:blur(11px); -webkit-backdrop-filter:blur(11px);
+  }
+  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
+  .brandmark { width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+    font-size:16px; color:#0A0D11; font-weight:900;
+    background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%;
+    box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
+    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { color:var(--muted); font-size:12px; }
+  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; }
+  .topnav a { color:var(--muted); text-decoration:none; padding:6px 10px; border-radius:var(--r-sm); }
+  .topnav a:hover { color:var(--text-bright); }
+  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3);
+    box-shadow:inset 0 0 0 1px var(--border-strong); }
+  .statepill { margin-left:auto; font-size:12px; font-family:var(--mono); display:flex; align-items:center; gap:8px;
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--r-pill); padding:6px 14px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.on { background:var(--green); box-shadow:0 0 10px var(--green); animation:pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+
+  main { flex:1; padding:18px 24px 28px; display:flex; flex-direction:column; gap:16px; }
+  .band { display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--r-lg); padding:16px 20px; }
+  .toggle-wrap { display:flex; align-items:center; gap:14px; }
+  .toggle { width:74px; height:38px; border-radius:var(--r-pill); background:var(--surface-3);
+    border:1px solid var(--border-strong); position:relative; cursor:pointer; transition:.25s var(--ease); flex:0 0 auto; }
+  .toggle .knob { position:absolute; top:3px; left:3px; width:30px; height:30px; border-radius:50%;
+    background:var(--muted); transition:.25s var(--ease); }
+  .toggle.on { background:linear-gradient(90deg,var(--green-dim),var(--green)); border-color:var(--green); }
+  .toggle.on .knob { left:41px; background:#04140f; box-shadow:0 0 12px rgba(79,255,208,.6); }
+  .toggle[aria-disabled="true"] { opacity:.5; pointer-events:none; }
+  .toggle-label .t { font-size:15px; font-weight:800; }
+  .toggle-label .s { font-size:12px; color:var(--muted); font-family:var(--mono); }
+  .seg { display:flex; gap:8px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .chip { font-family:var(--mono); font-size:12px; padding:6px 11px; border-radius:var(--r-sm);
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text); }
+  .chip b { color:var(--green); }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--r-md); padding:14px 16px; }
+  .card .k { font-size:11px; text-transform:uppercase; letter-spacing:.7px; color:var(--muted); }
+  .card .v { font-size:20px; font-weight:800; font-family:var(--mono); margin-top:6px; }
+  .card .v.green { color:var(--green-bright); } .card .v.blue { color:var(--blue); }
+  .card .v.muted { color:var(--muted); }
+  .card .x { font-size:11px; color:var(--muted); margin-top:4px; font-family:var(--mono); }
+
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--r-lg);
+    display:flex; flex-direction:column; overflow:hidden; }
+  .tabs { display:flex; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); align-items:center; }
+  .tab { font-family:var(--mono); font-size:12px; padding:6px 12px; border-radius:var(--r-sm); cursor:pointer;
+    background:var(--surface-2); border:1px solid var(--border); color:var(--muted); }
+  .tab.sel { color:var(--text-bright); border-color:var(--blue); background:var(--surface-3); }
+  .tab .b { color:var(--green); }
+  .gridwrap { overflow:auto; max-height:420px; }
+  table { width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11.5px; }
+  th,td { text-align:left; padding:6px 11px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted); font-weight:700; z-index:1; }
+  tbody tr:nth-child(even) { background:rgba(255,255,255,.018); }
+  td.nullcell { color:var(--muted); font-style:italic; }
+  .empty { color:var(--muted); font-size:13px; padding:30px 16px; text-align:center; }
+  .note { color:var(--muted); font-size:12px; } .note b { color:var(--text); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brandmark">B</div>
+    <div class="logo">BruteX</div>
+    <div class="sub">Live — Groww websocket feed · capture → 1-min candles → parity</div>
+    <nav class="topnav" aria-label="Primary">
+      <a href="/universe">Universe</a>
+      <a href="/groww-credentials">Credentials</a>
+      <a href="/db">Database</a>
+      <a href="/live" aria-current="page">Live</a>
+      <a href="/coverage">Coverage</a>
+      <a href="/movers">Movers</a>
+      <a href="/reports">Reports</a>
+    </nav>
+    <span class="statepill"><span class="dot" id="hdrDot"></span><span id="hdrState">—</span></span>
+  </header>
+
+  <main>
+    <div class="band">
+      <div class="toggle-wrap">
+        <div class="toggle" id="toggle" role="switch" aria-checked="false" tabindex="0">
+          <div class="knob"></div>
+        </div>
+        <div class="toggle-label">
+          <div class="t" id="toggleTitle">Live feed</div>
+          <div class="s" id="toggleSub">loading…</div>
+        </div>
+      </div>
+      <div class="seg">
+        <span class="chip">symbols <b>all</b></span>
+        <span class="chip">feed <b>ltp</b></span>
+        <span class="chip">cap <b>1000 / conn</b></span>
+        <span class="chip note">spawns <b>python -m brutex.live capture</b> (separate process)</span>
+      </div>
+    </div>
+
+    <div class="cards">
+      <div class="card"><div class="k">Feed state</div><div class="v muted" id="cState">—</div><div class="x" id="cPid">pid —</div></div>
+      <div class="card"><div class="k">Uptime</div><div class="v blue" id="cUptime">—</div><div class="x">since start</div></div>
+      <div class="card"><div class="k">Ticks captured</div><div class="v green" id="cTicks">—</div><div class="x">JSONL log lines</div></div>
+      <div class="card"><div class="k">Out log</div><div class="v muted" style="font-size:13px" id="cOut">—</div><div class="x">runs/ + .brutex-logs/</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="tabs">
+        <div class="tab sel" data-tab="live_ticks">📈 live_ticks <span class="b" id="tabTicks">0</span></div>
+        <div class="tab" data-tab="live_candles_1m">🕯 live_candles_1m <span class="b" id="tabCandles">0</span></div>
+        <button class="tab" id="refresh" style="margin-left:auto">↻ refresh</button>
+        <span class="note">read directly from the Parquet lake · <b>brutex/live/</b> stays portable</span>
+      </div>
+      <div class="gridwrap" id="grid"><div class="empty">loading…</div></div>
+    </div>
+
+    <p class="note">The ON/OFF switch spawns/stops the capture as a <b>separate OS process</b> (subprocess + read-lake, DEC-LIVE-DECOUPLE-001) — read-only market data, no orders.</p>
+  </main>
+
+<script>
+const $=id=>document.getElementById(id);
+let tab="live_ticks", busy=false;
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+async function refreshStatus(){
+  try{
+    const r=await fetch("/api/v1/live/status"); const s=await r.json();
+    const on=!!s.running;
+    $("toggle").classList.toggle("on",on); $("toggle").setAttribute("aria-checked",on?"true":"false");
+    $("hdrDot").classList.toggle("on",on); $("hdrState").textContent=on?"RUNNING":"STOPPED";
+    $("toggleTitle").textContent="Live feed: "+(on?"ON":"OFF");
+    $("toggleSub").textContent=on?"capturing — click to stop":"stopped — click to start";
+    $("cState").textContent=on?"● running":"○ stopped"; $("cState").className="v "+(on?"green":"muted");
+    $("cPid").textContent="pid "+(s.pid==null?"—":s.pid);
+    $("cUptime").textContent=s.uptime_s==null?"—":Math.floor(s.uptime_s)+"s";
+    $("cTicks").textContent=(s.ticks_captured==null?0:s.ticks_captured).toLocaleString();
+    $("cOut").textContent=s.out||"—";
+  }catch(e){ $("hdrState").textContent="offline"; }
+}
+async function toggle(){
+  if(busy) return; busy=true;
+  const on=$("toggle").classList.contains("on");
+  $("toggle").setAttribute("aria-disabled","true");
+  try{ await fetch(on?"/api/v1/live/stop":"/api/v1/live/start",{method:"POST"}); }
+  catch(e){}
+  $("toggle").removeAttribute("aria-disabled"); busy=false;
+  await refreshStatus();
+}
+async function loadTables(){
+  try{
+    const r=await fetch("/api/v1/live/tables"); const b=await r.json();
+    (b.tables||[]).forEach(t=>{
+      if(t.table==="live_ticks") $("tabTicks").textContent=(t.row_count||0).toLocaleString();
+      if(t.table==="live_candles_1m") $("tabCandles").textContent=(t.row_count||0).toLocaleString();
+    });
+  }catch(e){}
+  await loadGrid();
+}
+async function loadGrid(){
+  const g=$("grid"); g.innerHTML='<div class="empty">loading…</div>';
+  try{
+    const r=await fetch("/api/v1/live/table/"+encodeURIComponent(tab)+"?limit=100");
+    const b=await r.json(); const cols=b.columns||[], rows=b.rows||[];
+    if(!rows.length){ g.innerHTML='<div class="empty">no rows yet — start the feed, then materialise the lake (<b>python -m brutex.live lake</b>)</div>'; return; }
+    const head="<thead><tr>"+cols.map(c=>"<th>"+esc(c)+"</th>").join("")+"</tr></thead>";
+    const body="<tbody>"+rows.map(row=>"<tr>"+row.map(cell=>cell==null?'<td class="nullcell">null</td>':"<td>"+esc(cell)+"</td>").join("")+"</tr>").join("")+"</tbody>";
+    g.innerHTML="<table>"+head+body+"</table>";
+  }catch(e){ g.innerHTML='<div class="empty">offline</div>'; }
+}
+$("toggle").addEventListener("click",toggle);
+$("toggle").addEventListener("keydown",e=>{ if(e.key===" "||e.key==="Enter"){e.preventDefault();toggle();}});
+$("refresh").addEventListener("click",()=>{ loadTables(); refreshStatus(); });
+document.querySelectorAll(".tab[data-tab]").forEach(t=>t.addEventListener("click",()=>{
+  document.querySelectorAll(".tab[data-tab]").forEach(x=>x.classList.remove("sel"));
+  t.classList.add("sel"); tab=t.dataset.tab; loadGrid();
+}));
+refreshStatus(); loadTables();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>
