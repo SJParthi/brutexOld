@@ -34,6 +34,7 @@ import structlog
 from brutex.live.candle_builder import build_minute_candles
 from brutex.live.capture import SnapshotFn, SubscribeFn, TickCapture, _utc_now
 from brutex.live.lake import minute_tick_counts, write_live_candles, write_live_ticks
+from brutex.live.multiconn import build_report, make_multiconn_capture, plan_connections
 from brutex.live.parity import compare_candles
 from brutex.live.probe import analyze_cadence, probe_connections
 from brutex.live.report import render_parity_markdown
@@ -440,8 +441,66 @@ def _cmd_verify(args: argparse.Namespace, deps: LiveDeps) -> int:
     return 0 if report.all_requested_ticking else 1
 
 
+def _cmd_capture_all(  # pragma: no cover — opens N real websockets (operator's Mac)
+    args: argparse.Namespace, deps: LiveDeps
+) -> int:
+    """Open N connections per the grouped plan + capture, writing the per-connection proof.
+
+    Connection #0 carries the spot universe (``--feed both``: indices on the
+    index-value feed + stocks on ltp); connections #1..N carry the F&O leg shards
+    on ltp (``DEC-LIVE-MULTICONN-001``). Each connection feeds ONE
+    :class:`~brutex.live.capture.TickCapture` (the loop is unchanged). The
+    per-connection subscription proof is logged + written to ``--report`` so the
+    operator can SEE how many connections opened + what each subscribed (and, at
+    market open, which are ticking). Leg resolution (``get_expiries`` →
+    ``get_contracts``) is the named follow-up; until then *legs* is empty and the
+    plan is the spot connection(s).
+    """
+    deps.configure_logging(args.log_file)
+    spot = deps.instrument_resolver(args.symbols, "both")
+    legs: list[Mapping[str, Any]] = []  # leg resolution = named follow-up
+    bindings, skipped, plan = plan_connections(
+        spot, legs, per_connection_cap=args.cap, ceiling=args.ceiling
+    )
+    report = build_report(bindings, skipped)
+    _LOG.info(
+        "capture_all_plan",
+        connections=report.num_connections,
+        instruments=report.total_instruments,
+        skipped_shards=report.skipped_shards,
+        ceiling=args.ceiling,
+    )
+    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.report).write_text(report.render_markdown(), encoding="utf-8")
+
+    subscribe, read_snapshot, _opened = make_multiconn_capture(
+        bindings,
+        open_feed=lambda _ordinal: deps.feed_builder(),
+        make_subscribe=_make_subscribe,
+        snapshot_of=lambda feed, feed_kind: _make_snapshot_reader(feed, feed_kind)(),
+    )
+    with TickStore.open(args.out, resume=args.resume) as store:
+        capture = TickCapture(store=store, subscribe=subscribe, read_snapshot=read_snapshot)
+        captured = capture.run_for(
+            args.seconds,
+            sleep=deps.sleep,
+            monotonic=deps.monotonic,
+            heartbeat_interval=args.heartbeat,
+        )
+    _LOG.info(
+        "capture_all_complete",
+        captured=captured,
+        connections=report.num_connections,
+        plan_connections=plan.num_connections,
+        out=str(args.out),
+        report=str(args.report),
+    )
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
     "capture": _cmd_capture,
+    "capture-all": _cmd_capture_all,
     "cadence": _cmd_cadence,
     "build": _cmd_build,
     "parity": _cmd_parity,
@@ -479,6 +538,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cap.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     cap.add_argument("--resume", action="store_true", help="append to an existing log")
+
+    cal = sub.add_parser(
+        "capture-all", help="open N connections (spot on #0, legs on #1..N) + capture"
+    )
+    cal.add_argument("--out", required=True, help="destination JSONL path")
+    cal.add_argument("--report", required=True, help="per-connection subscription proof (Markdown)")
+    cal.add_argument("--seconds", type=float, default=60.0, help="capture duration")
+    cal.add_argument("--symbols", default=DEFAULT_SYMBOLS, help="spot selector (see capture)")
+    cal.add_argument(
+        "--cap", type=int, default=1000, help="per-connection subscription cap (default 1000)"
+    )
+    cal.add_argument(
+        "--ceiling",
+        type=int,
+        default=None,
+        help="max concurrent connections (the probe ceiling; default: no limit)",
+    )
+    cal.add_argument("--heartbeat", type=float, default=30.0, help="progress-log interval (s)")
+    cal.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
+    cal.add_argument("--resume", action="store_true", help="append to an existing log")
 
     cad = sub.add_parser("cadence", help="report tick cadence (ms vs seconds)")
     cad.add_argument("--in", dest="in_path", required=True, help="captured JSONL path")
