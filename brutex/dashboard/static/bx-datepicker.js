@@ -119,7 +119,8 @@
       if (t.dataset.x == "apply") { fromInput.value = ymd(start); if (!single) toInput.value = ymd(end); setTrig(); close(); try { fromInput.dispatchEvent(new Event("change")); if (!single) toInput.dispatchEvent(new Event("change")); } catch (_) { } return; }
     });
     trig.addEventListener("click", function (e) { e.stopPropagation(); wrap.classList.contains("open") ? close() : open(); });
-    document.addEventListener("click", function (e) { if (!wrap.contains(e.target)) close(); });
+    /* A loose <input type=date> nested in a <label> re-fires drill clicks at the hidden native input; that label-forwarded click bubbles here with e.target === our own input (a sibling of wrap), tricking the outside-close. Treat the picker's own backing input(s) as INSIDE so the drill never self-closes on /movers + /reports (DEC-DATEPICKER-LABEL-CLOSE-FIX-001). */
+    document.addEventListener("click", function (e) { if (wrap.contains(e.target) || e.target === fromInput || (!single && e.target === toInput)) return; close(); });
     document.addEventListener("keydown", function (e) { if (e.key == "Escape") close(); });
     setTrig();
   }

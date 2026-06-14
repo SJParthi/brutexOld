@@ -1561,6 +1561,49 @@ def build_app(
                 status_code=400,
                 detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
             )
+        # Skip reference-only underlyings BEFORE the chain pull's network calls
+        # (DEC-SKIP-REF-METADATA-001). A REFERENCE_ONLY underlying — a spot-only
+        # index (INDIAVIX / MIDCAP50 / NIFTY100, …) or a non-F&O NTM constituent
+        # (DEC-NTM-GROWW-REPOINT-001 / DEC-NON-OPTION-INDEX-REFTAG-001) — has NO
+        # F&O chain, so ``get_expiries`` would return empty and persist nothing
+        # (already SAFE), but it still costs one wasted empty network call. The
+        # store's ``reference_only_security_ids`` is the SAME set the /universe REF
+        # badge uses; partition on it so a mistaken REF selection is a TRUE
+        # zero-call no-op. The set is reported (never silently dropped); TRADABLE
+        # behaviour is byte-unchanged (observability + an efficiency guard, NOT a
+        # behaviour change for F&O underlyings).
+        reference_only_ids = _require_store().reference_only_security_ids()
+        tradable = [inst for inst in instruments if inst.security_id not in reference_only_ids]
+        skipped_reference_only = [
+            inst.symbol_name for inst in instruments if inst.security_id in reference_only_ids
+        ]
+        if not tradable:
+            _LOG.info(
+                "universe.pull_expiries_contracts.all_reference_only",
+                kind=kind,
+                symbol=symbol,
+                symbols=symbols,
+                skipped_reference_only=skipped_reference_only,
+                skipped_count=len(skipped_reference_only),
+            )
+            note = (
+                f"all {len(skipped_reference_only)} selected are reference-only "
+                "(no F&O chain) — nothing to pull"
+            )
+            return JSONResponse(
+                {
+                    "started": False,
+                    "kind": kind,
+                    "symbol": symbol,
+                    "symbols": symbols,
+                    "years": years,
+                    "dry_run": dry_run,
+                    "skipped_reference_only": skipped_reference_only,
+                    "skipped_count": len(skipped_reference_only),
+                    "note": note,
+                }
+            )
+        instruments = tradable
         # The registry cache is a sibling of the lean instruments.duckdb master
         # (DEC-DERIV-METADATA-HISTORICAL-SPLIT-001); the wired InstrumentStore IS
         # the coverage_store (its upsert_coverage / list_coverage back /coverage).
@@ -1572,6 +1615,8 @@ def build_app(
             symbol=symbol,
             symbols=symbols,
             count=len(instruments),
+            skipped_reference_only=skipped_reference_only,
+            skipped_count=len(skipped_reference_only),
             years=years,
             from_date=from_date,
             to_date=to_date,
@@ -1601,6 +1646,8 @@ def build_app(
                 "symbols": symbols,
                 "years": years,
                 "dry_run": dry_run,
+                "skipped_reference_only": skipped_reference_only,
+                "skipped_count": len(skipped_reference_only),
             }
         )
 
