@@ -33,12 +33,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
-from brutex.dashboard.instrument_loader import load_instrument_master
+from brutex.adapters.groww.instruments import build_index
+from brutex.dashboard.instrument_loader import _groww_symbol_index_bridge, load_instrument_master
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import (
     OptionUnderlyingGap,
+    build_options_eligible_underlyings,
     diagnose_unmatched_option_underlyings,
+    is_spot_only_index,
     normalize_underlying_symbol,
 )
 from structlog.testing import capture_logs
@@ -457,3 +460,206 @@ class TestLoaderEmitsFnoIndexGapLine:
         assert finnifty is not None
         # FINNIFTY (exact option match) is NOT tagged reference_only — unchanged.
         assert finnifty.security_id not in refs
+
+
+# ════════════════════════════════════════════════════════════════════════
+# DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001 — the groww_symbol bridge
+# ════════════════════════════════════════════════════════════════════════
+#
+# The REAL vendor shape the live ``make run`` exposed: the option legs name the
+# compact F&O symbol ("MIDCPNIFTY" / "NIFTYNXT50") while the IDX spot row carries
+# a VERBOSE trading_symbol ("NIFTY MID SELECT" / "NIFTY NEXT 50") — so the
+# symbol_name-only badge dropped the index to REF (count=2, nearest_index=None).
+# The IDX's own groww_symbol ("NSE-MIDCPNIFTY") carries the F&O symbol, which IS
+# the option legs' underlying_symbol → the vendor-canonical bridge.
+
+# A MIDCPNIFTY index spot row: groww_symbol's F&O symbol "MIDCPNIFTY" matches the
+# option leg, but its VERBOSE trading_symbol does NOT (the real-world shape).
+_MIDCP_IDX = _row(
+    exchange="NSE",
+    exchange_token="MIDCPNIFTY",
+    trading_symbol="NIFTY MID SELECT",
+    groww_symbol="NSE-MIDCPNIFTY",
+    name="Nifty Midcap Select",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_MIDCP_IDX_CE = _row(
+    exchange="NSE",
+    exchange_token="71001",
+    trading_symbol="MIDCPNIFTY2661612000CE",
+    groww_symbol="NSE-MIDCPNIFTY-16Jun26-12000-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="MIDCPNIFTY",
+    underlying_exchange_token="71002",
+    expiry_date="2026-06-16",
+    strike_price="12000",
+    lot_size="120",
+    tick_size="0.05",
+)
+# A NIFTY NEXT 50 index spot row: F&O symbol "NIFTYNXT50" (abbreviated NXT) vs
+# verbose trading_symbol "NIFTY NEXT 50" — normalization cannot bridge NXT↔NEXT.
+_NXT50_IDX = _row(
+    exchange="NSE",
+    exchange_token="NIFTYNXT50",
+    trading_symbol="NIFTY NEXT 50",
+    groww_symbol="NSE-NIFTYNXT50",
+    name="Nifty Next 50",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_NXT50_IDX_CE = _row(
+    exchange="NSE",
+    exchange_token="72001",
+    trading_symbol="NIFTYNXT502661670000CE",
+    groww_symbol="NSE-NIFTYNXT50-16Jun26-70000-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="NIFTYNXT50",
+    underlying_exchange_token="72002",
+    expiry_date="2026-06-16",
+    strike_price="70000",
+    lot_size="25",
+    tick_size="0.05",
+)
+
+
+class TestDiagnoseAliasBridgeParam:
+    """The ``index_alias_symbols`` arg suppresses an underlying the bridge resolved."""
+
+    def test_bridged_underlying_is_not_reported(self) -> None:
+        # IDX symbol_name "NIFTY MID SELECT" ≠ option underlying "MIDCPNIFTY"
+        # (normalization fails) → WITHOUT the alias it is a gap…
+        instruments = [_idx("NIFTY MID SELECT"), _option("MIDCPNIFTY")]
+        assert diagnose_unmatched_option_underlyings(instruments) != []
+        # …but with the groww-symbol alias (NSE, "MIDCPNIFTY") it is bridged → no gap.
+        aliases = frozenset({(Exchange.NSE, "MIDCPNIFTY")})
+        assert diagnose_unmatched_option_underlyings(instruments, aliases) == []
+
+    def test_residual_gap_still_reported_when_alias_does_not_cover(self) -> None:
+        # An alias for a DIFFERENT index does not suppress an unrelated orphan.
+        instruments = [_option("ORPHANIDX")]
+        aliases = frozenset({(Exchange.NSE, "MIDCPNIFTY")})
+        (gap,) = diagnose_unmatched_option_underlyings(instruments, aliases)
+        assert gap.underlying_symbol == "ORPHANIDX"
+        assert gap.nearest_index_symbol_name is None
+
+    def test_none_default_preserves_symbol_name_only_behaviour(self) -> None:
+        # Passing None (the default) is identical to omitting the arg.
+        instruments = [_idx("NIFTY MID SELECT"), _option("MIDCPNIFTY")]
+        assert diagnose_unmatched_option_underlyings(
+            instruments, None
+        ) == diagnose_unmatched_option_underlyings(instruments)
+
+
+class TestGrowwSymbolIndexBridge:
+    """``_groww_symbol_index_bridge`` reads the vendor groww_symbol identity."""
+
+    def _index(self, rows: list[Instrument], groww_symbols: list[str]) -> object:
+        """Build a real InstrumentIndex from explicit (groww_symbol, Instrument) pairs."""
+        return build_index(zip(groww_symbols, rows, strict=True))
+
+    def test_verbose_index_is_bridged_into_options_eligible(self) -> None:
+        # The MIDCPNIFTY IDX (verbose symbol_name) + its option leg.
+        midcap = _idx("NIFTY MID SELECT")
+        leg = _option("MIDCPNIFTY")
+        index = self._index(
+            [midcap, leg],
+            ["NSE-MIDCPNIFTY", "NSE-MIDCPNIFTY-16Jun26-12000-CE"],
+        )
+        options_eligible = build_options_eligible_underlyings(index.universe)  # type: ignore[attr-defined]
+        bridged, aliases = _groww_symbol_index_bridge(index, options_eligible)  # type: ignore[arg-type]
+        # The verbose IDX symbol_name is now in the bridged eligible set → its
+        # unchanged is_spot_only_index symbol_name check passes (NOT spot-only).
+        assert (Exchange.NSE, "NIFTY MID SELECT") in bridged
+        assert is_spot_only_index(midcap, bridged) is False
+        # Every IDX groww-symbol F&O alias is surfaced for the diagnostic.
+        assert (Exchange.NSE, "MIDCPNIFTY") in aliases
+
+    def test_non_idx_rows_are_ignored(self) -> None:
+        # An equity + an option leg (no IDX) contribute no alias / bridge.
+        index = self._index(
+            [_equity("RELIANCE"), _option("RELIANCE")],
+            ["NSE-RELIANCE", "NSE-RELIANCE-16Jun26-3000-CE"],
+        )
+        options_eligible = build_options_eligible_underlyings(index.universe)  # type: ignore[attr-defined]
+        bridged, aliases = _groww_symbol_index_bridge(index, options_eligible)  # type: ignore[arg-type]
+        assert bridged == options_eligible  # nothing bridged
+        assert aliases == frozenset()
+
+    def test_index_without_options_adds_alias_but_no_bridge(self) -> None:
+        # A spot-only sectoral IDX (no option leg) → its alias is surfaced but it
+        # is NOT bridged into the eligible set (stays spot-only).
+        nifty_it = _idx("NIFTYIT")
+        index = self._index([nifty_it], ["NSE-NIFTYIT"])
+        bridged, aliases = _groww_symbol_index_bridge(index, frozenset())  # type: ignore[arg-type]
+        assert bridged == frozenset()
+        assert aliases == frozenset({(Exchange.NSE, "NIFTYIT")})
+
+    def test_dashless_groww_symbol_is_skipped(self) -> None:
+        # Defensive: a malformed groww_symbol with no "-" yields an empty F&O
+        # symbol → skipped (no alias, no bridge), never raises.
+        index = self._index([_idx("WEIRD")], ["WEIRD"])
+        bridged, aliases = _groww_symbol_index_bridge(index, frozenset())  # type: ignore[arg-type]
+        assert bridged == frozenset()
+        assert aliases == frozenset()
+
+
+class TestLoaderBridgesVerboseIndex:
+    """End-to-end: a verbose-named F&O index keeps its OPT badge + is not a gap."""
+
+    def test_midcpnifty_and_niftynxt50_are_pullable_and_silent(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        rows = [_NIFTY, _MIDCP_IDX, _MIDCP_IDX_CE, _NXT50_IDX, _NXT50_IDX_CE]
+        with capture_logs() as logs:
+            load_instrument_master(
+                store,
+                http_get=lambda _url: _csv(rows),
+                run_id_factory=lambda: "bridge-load",
+                constituent_opener=_empty_opener,
+                constituent_cache_dir=tmp_path / "cache",
+            )
+        refs = store.reference_only_security_ids()
+        midcap = store.get("NIFTY MID SELECT")
+        nxt50 = store.get("NIFTY NEXT 50")
+        assert midcap is not None and nxt50 is not None
+        # Both verbose-named F&O indices keep their OPT badge (NOT reference_only).
+        assert midcap.security_id not in refs
+        assert nxt50.security_id not in refs
+        # The diagnostic is SILENT — the bridge resolved both, no residual gap.
+        assert _events(logs, "universe.load.fno_index_unmatched") == []
+
+    def test_residual_unbridged_index_still_logged(self, tmp_path: Path) -> None:
+        # An orphan option underlying with NO IDX spot row at all is NOT
+        # bridgeable → the diagnostic still reports it (retains its value).
+        store = _store(tmp_path)
+        orphan_ce = _row(
+            exchange="NSE",
+            exchange_token="73001",
+            trading_symbol="ORPHANIDX2661650000CE",
+            groww_symbol="NSE-ORPHANIDX-16Jun26-50000-CE",
+            instrument_type="CE",
+            segment="FNO",
+            underlying_symbol="ORPHANIDX",
+            underlying_exchange_token="73002",
+            expiry_date="2026-06-16",
+            strike_price="50000",
+            lot_size="40",
+            tick_size="0.05",
+        )
+        rows = [_NIFTY, _MIDCP_IDX, _MIDCP_IDX_CE, orphan_ce]
+        with capture_logs() as logs:
+            load_instrument_master(
+                store,
+                http_get=lambda _url: _csv(rows),
+                run_id_factory=lambda: "residual-load",
+                constituent_opener=_empty_opener,
+                constituent_cache_dir=tmp_path / "cache",
+            )
+        (line,) = _events(logs, "universe.load.fno_index_unmatched")
+        # MIDCPNIFTY bridged (not reported); the orphan remains a gap.
+        assert line["count"] == 1
+        assert line["gaps"] == [
+            {"underlying": "ORPHANIDX", "nearest_index": None, "exchange": "NSE"},
+        ]

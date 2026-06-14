@@ -89,7 +89,7 @@ from typing import Any
 import structlog
 
 from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
-from brutex.adapters.groww.instruments import InstrumentIndex
+from brutex.adapters.groww.instruments import InstrumentIndex, index_symbol_of
 from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
 from brutex.dashboard.ntm_cache import (
     default_cache_dir,
@@ -264,6 +264,74 @@ def _ntm_admission(
     return reference_security_ids, note
 
 
+def _groww_symbol_index_bridge(
+    index: InstrumentIndex,
+    options_eligible: frozenset[tuple[Exchange, str]],
+) -> tuple[frozenset[tuple[Exchange, str]], frozenset[tuple[Exchange, str]]]:
+    """Bridge each spot ``IDX`` row to its options via its ``groww_symbol``.
+
+    DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001. The OPT-vs-REF badge keys on an EXACT
+    ``(exchange, symbol_name)`` match against *options_eligible* (the option
+    legs' ``underlying_symbol`` set — DEC-NON-OPTION-INDEX-REFTAG-001). That
+    silently drops a genuine F&O index to REFERENCE_ONLY whenever its ``IDX``
+    row carries a VERBOSE ``trading_symbol`` (``symbol_name``, e.g.
+    ``"NIFTY MID SELECT"`` / ``"NIFTY NEXT 50"``) that differs from the
+    compact F&O symbol the vendor stamps on its option legs
+    (``"MIDCPNIFTY"`` / ``"NIFTYNXT50"``) — the live ``make run`` proved both as
+    ``count=2`` gaps with ``nearest_index=None`` (normalization cannot bridge
+    ``NXT`` ↔ ``NEXT`` or ``MIDCP`` ↔ ``MIDCAP SELECT``).
+
+    The vendor-CANONICAL bridge is the ``IDX`` row's own ``groww_symbol`` key:
+    its SYMBOL component (:func:`~brutex.adapters.groww.instruments.index_symbol_of`,
+    ``"NSE-MIDCPNIFTY"`` → ``"MIDCPNIFTY"``) IS the vendor's F&O symbol — the
+    SAME string the option legs name as ``underlying_symbol`` (the brute-force
+    universe proves this convention: the ``NSE-NIFTY`` spot row ↔ option
+    ``underlying_symbol`` ``"NIFTY"``). This reads the vendor's OWN identity, so
+    it is NOT a hardcoded per-index alias (Golden Rule #1).
+
+    Returns a ``(options_eligible_bridged, index_alias_symbols)`` pair:
+
+    * ``options_eligible_bridged`` — *options_eligible* UNION the
+      ``(exchange, symbol_name)`` of every ``IDX`` whose ``groww_symbol`` F&O
+      symbol IS options-eligible, so the unchanged
+      :func:`~brutex.universe.is_spot_only_index` symbol_name check now matches
+      such an index → it keeps its OPT badge (``reference_only=FALSE``).
+    * ``index_alias_symbols`` — ``(exchange, groww_symbol_F&O_symbol)`` for
+      EVERY ``IDX`` row, fed to
+      :func:`~brutex.universe.diagnose_unmatched_option_underlyings` so it stops
+      reporting an underlying the bridge already resolved (keeps the diagnostic
+      honest — no permanent false ``count`` after the fix).
+
+    Parameters
+    ----------
+    index
+        The freshly parsed Groww :class:`InstrumentIndex` (its
+        ``by_groww_symbol`` keys carry the vendor ``"EXCH-SYMBOL"`` strings,
+        only available here before the lean ingest discards the legs).
+    options_eligible
+        The options-bearing ``(exchange, underlying_symbol)`` set from
+        :func:`~brutex.universe.build_options_eligible_underlyings`.
+
+    Returns
+    -------
+    tuple[frozenset[tuple[Exchange, str]], frozenset[tuple[Exchange, str]]]
+        ``(options_eligible_bridged, index_alias_symbols)``.
+    """
+    index_alias_symbols: set[tuple[Exchange, str]] = set()
+    bridged: set[tuple[Exchange, str]] = set()
+    for groww_symbol, inst in index.by_groww_symbol.items():
+        if inst.instrument is not InstrumentType.IDX:
+            continue
+        f_and_o_symbol = index_symbol_of(groww_symbol)
+        if not f_and_o_symbol:  # a groww_symbol with no "-" → nothing to bridge.
+            continue
+        alias = (inst.exch_id, f_and_o_symbol)
+        index_alias_symbols.add(alias)
+        if alias in options_eligible:
+            bridged.add((inst.exch_id, inst.symbol_name))
+    return frozenset(options_eligible | bridged), frozenset(index_alias_symbols)
+
+
 def _reference_only_of(
     reference_security_ids: frozenset[int],
     options_eligible: frozenset[tuple[Exchange, str]],
@@ -285,16 +353,21 @@ def _reference_only_of(
        100 / TOTAL MARKET (DEC-NON-OPTION-INDEX-REFTAG-001). This closes the bug
        where every non-F&O index wrongly showed "OPT" + survived the dashboard's
        "F&O only" filter, while the options-bearing indices (NIFTY / BANKNIFTY /
-       FINNIFTY …) keep their pullable chain.
+       FINNIFTY / MIDCPNIFTY / NIFTYNXT50 …) keep their pullable chain.
 
     Parameters
     ----------
     reference_security_ids
         ``SECURITY_ID``s of the admitted non-F&O NTM constituents.
     options_eligible
-        The options-bearing ``(exchange, underlying_symbol)`` set from
+        The options-bearing ``(exchange, underlying_symbol)`` set — the
+        groww-symbol-BRIDGED variant from :func:`_groww_symbol_index_bridge`
+        (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001), i.e.
         :func:`brutex.universe.build_options_eligible_underlyings` (harvested at
-        ingest from the full master before the legs are discarded).
+        ingest before the legs are discarded) UNION the ``symbol_name`` of every
+        ``IDX`` whose ``groww_symbol`` F&O symbol is options-eligible, so an
+        index with a verbose ``trading_symbol`` (MIDCPNIFTY / NIFTYNXT50) still
+        matches the unchanged ``is_spot_only_index`` symbol_name check.
     """
 
     def _is_reference_only(instr: Instrument) -> bool:
@@ -520,13 +593,25 @@ def load_instrument_master(
         # to tag spot-only indices reference_only so the dashboard never badges a
         # non-option index "OPT" (DEC-NON-OPTION-INDEX-REFTAG-001).
         options_eligible = build_options_eligible_underlyings(index.universe)
+        # Bridge each IDX spot row to its options via its groww_symbol F&O
+        # symbol (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001) — so an index whose
+        # verbose trading_symbol differs from the option legs' underlying_symbol
+        # (MIDCPNIFTY / NIFTYNXT50) keeps its OPT badge instead of dropping to
+        # REF. The bridge reads the vendor's OWN groww_symbol identity, never a
+        # hardcoded alias (Golden Rule #1).
+        options_eligible_bridged, index_alias_symbols = _groww_symbol_index_bridge(
+            index, options_eligible
+        )
 
         # OBSERVE-ONLY diagnostic (DEC-FNO-INDEX-MATCH-DIAG-001): surface any
         # NSE option underlying that LOOKS like an index but matches no IDX
-        # spot row — such an index is silently tagged REFERENCE_ONLY (loses
-        # its OPT badge) by is_spot_only_index's EXACT symbol match. This logs
-        # the real strings only; it changes NO classification or badge.
-        _log_fno_index_gaps(diagnose_unmatched_option_underlyings(index.universe))
+        # spot row even AFTER the groww_symbol bridge — a residual gap the
+        # bridge could not resolve (logged with the real strings, changes no
+        # classification). Indices the bridge fixed are passed as
+        # index_alias_symbols so they are no longer reported (honest count).
+        _log_fno_index_gaps(
+            diagnose_unmatched_option_underlyings(index.universe, index_alias_symbols)
+        )
 
         # NTM enrichment is fail-soft — it never blocks the keyless core load
         # (DEC-NTM-GROWW-REPOINT-001). The returned ids ADMIT the non-F&O
@@ -563,7 +648,7 @@ def load_instrument_master(
             run_id=run_id,
             csv_source_sha256=csv_sha256,
             replace_snapshot=True,
-            reference_only_of=_reference_only_of(reference_security_ids, options_eligible),
+            reference_only_of=_reference_only_of(reference_security_ids, options_eligible_bridged),
         )
         pruned = store.prune_to_latest_snapshot()
         summary = _summarise_stored(store)
