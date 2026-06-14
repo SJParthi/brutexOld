@@ -59,11 +59,14 @@ def test_universe_wires_the_shared_component() -> None:
     html = _render_universe_html()
     assert "/static/bx-datepicker.css" in html, "the component stylesheet is not linked"
     assert "/static/bx-datepicker.js" in html, "the component script is not linked"
-    # the from->to RANGE container + the three custom dropdowns.
+    # the from->to RANGE container + the granularity dropdown. The two derivatives
+    # dropdowns (interval / contract-type) were removed when the bulk derivative
+    # buttons became metadata-only (DEC-DERIV-DECOMMISSION-FUSED-001) — a metadata
+    # pull has no candles, so there is no interval/contract-type knob left to wire.
     assert 'data-bxdp="range" data-from="fromDate" data-to="toDate"' in html, (
         "the date-range container is not wired to the component"
     )
-    assert html.count("data-bxsel") == 3, "the granularity/deriv selects are not wired"
+    assert html.count("data-bxsel") == 1, "the granularity select is not wired to the component"
     # the inline picker must be GONE (single source of truth in the static file).
     assert "function enhanceCalendar" not in html and "function buildCalendar" not in html, (
         "the picker JS must not be inlined in the template (it lives in the static asset)"
