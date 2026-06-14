@@ -350,6 +350,160 @@ def build_options_eligible_underlyings(
     return frozenset(eligible)
 
 
+@dataclass(frozen=True, slots=True)
+class OptionUnderlyingGap:
+    """One NSE option ``underlying_symbol`` that has NO admitted spot-index row.
+
+    DEC-FNO-INDEX-MATCH-DIAG-001 — the observe-only record of a *symbol
+    mismatch*: an underlying that the vendor stamps on its ``CE`` / ``PE``
+    legs but whose spelling does NOT exactly equal any admitted ``IDX``
+    row's ``symbol_name``. Because :func:`is_spot_only_index` keys the
+    OPT-vs-REF badge on that EXACT ``(exchange, symbol_name)`` match
+    (DEC-NON-OPTION-INDEX-REFTAG-001), such an index is silently tagged
+    REFERENCE_ONLY even though it genuinely has a listed option chain. This
+    record SURFACES the real strings so the operator can see WHICH spelling
+    differs — it never invents an alias (Golden Rule #1).
+
+    Attributes
+    ----------
+    exchange
+        The leg's exchange (always :attr:`Exchange.NSE` — the diagnostic
+        only scans NSE option legs, mirroring
+        :func:`build_options_eligible_underlyings`).
+    underlying_symbol
+        The exact ``underlying_symbol`` string the vendor stamped on the
+        option leg (e.g. ``"NIFTY NEXT 50"``) — reported verbatim.
+    matched_index_symbol_name
+        ``None`` by construction: a gap is reported ONLY when no admitted
+        ``IDX`` row's ``symbol_name`` equals *underlying_symbol* exactly.
+        Kept as an explicit field (always ``None``) so the record's shape
+        documents the contract — "this underlying matched no index spot row".
+    nearest_index_symbol_name
+        The admitted ``IDX`` ``symbol_name`` whose NORMALIZED form
+        (:func:`normalize_underlying_symbol` — uppercase, spaces/``-``
+        removed) equals *underlying_symbol*'s normalized form, else ``None``.
+        A non-``None`` value means the mismatch is a pure CASE / SPACE
+        difference (e.g. leg ``"NIFTY NEXT 50"`` vs IDX ``"NIFTYNEXT50"``);
+        ``None`` means a genuinely different abbreviation (e.g. leg
+        ``"MIDCPNIFTY"`` vs an IDX spelled ``"NIFTY MIDCAP SELECT"``), which
+        normalization alone cannot bridge.
+    """
+
+    exchange: Exchange
+    underlying_symbol: str
+    matched_index_symbol_name: str | None
+    nearest_index_symbol_name: str | None
+
+
+def normalize_underlying_symbol(symbol: str) -> str:
+    """Return *symbol* uppercased with spaces and ``-`` removed.
+
+    A pure, total normalizer used ONLY to detect a CASE / SPACE mismatch
+    between an option leg's ``underlying_symbol`` and an admitted index's
+    ``symbol_name`` (DEC-FNO-INDEX-MATCH-DIAG-001). It is deliberately
+    minimal — uppercase + strip the two separators the vendor varies
+    (ASCII space and hyphen) — so it can flag ``"NIFTY NEXT 50"`` ≈
+    ``"NIFTYNEXT50"`` WITHOUT ever bridging a genuine abbreviation
+    (``"MIDCPNIFTY"`` ≠ ``"NIFTY MIDCAP SELECT"``). It NEVER encodes a
+    per-index alias (Golden Rule #1); it only folds whitespace + case.
+
+    Parameters
+    ----------
+    symbol
+        The raw symbol string (an option ``underlying_symbol`` or an index
+        ``symbol_name``).
+
+    Returns
+    -------
+    str
+        The uppercased symbol with every ASCII space and ``-`` removed.
+    """
+    return symbol.upper().replace(" ", "").replace("-", "")
+
+
+def diagnose_unmatched_option_underlyings(
+    instruments: Iterable[Instrument],
+) -> list[OptionUnderlyingGap]:
+    """Report NSE option underlyings that look like an INDEX but match no IDX spot row.
+
+    DEC-FNO-INDEX-MATCH-DIAG-001 — a pure, OBSERVE-ONLY diagnostic (it
+    changes no classification). It surfaces the silent failure mode of
+    :func:`is_spot_only_index`: a real F&O index is tagged REFERENCE_ONLY
+    (loses its OPT badge) whenever its ``IDX`` row's ``symbol_name`` differs
+    from the ``underlying_symbol`` the vendor stamps on its ``CE`` / ``PE``
+    legs, because the OPT-vs-REF badge keys on an EXACT
+    ``(exchange, symbol_name)`` match (DEC-NON-OPTION-INDEX-REFTAG-001).
+
+    For every distinct NSE option ``underlying_symbol`` in *instruments*:
+
+    * If an admitted ``IDX`` row has ``symbol_name == underlying_symbol``
+      (exact), the index is correctly matched → NOT a gap.
+    * Else, if the underlying ALSO names an NSE ``EQ`` row's ``symbol_name``,
+      it is a STOCK option (not an index) → NOT reported (the operator is
+      hunting for *index* mismatches; a stock's own spot row is the EQ row).
+    * Else it is an index-like underlying with NO exact spot row → reported
+      as an :class:`OptionUnderlyingGap`. Its ``nearest_index_symbol_name``
+      is the admitted ``IDX`` ``symbol_name`` whose
+      :func:`normalize_underlying_symbol` form equals the underlying's
+      normalized form (a pure CASE / SPACE mismatch), else ``None`` (a
+      genuine abbreviation mismatch normalization cannot bridge).
+
+    The function NEVER invents an alias (Golden Rule #1): it reports the real
+    vendor strings + the normalization-only nearest match, and the caller
+    fixes the data, not this diagnostic.
+
+    Parameters
+    ----------
+    instruments
+        The fully parsed instrument set (the same iterable fed to
+        :func:`build_options_eligible_underlyings`), including the option
+        legs and the IDX / EQ spot rows.
+
+    Returns
+    -------
+    list[OptionUnderlyingGap]
+        The index-like unmatched option underlyings, sorted deterministically
+        by ``(exchange, underlying_symbol)``. Empty when every NSE option
+        underlying either matches an IDX spot row exactly or is a known
+        equity underlying.
+    """
+    index_symbol_names: set[str] = set()
+    equity_symbol_names: set[str] = set()
+    option_underlyings: set[str] = set()
+    for inst in instruments:
+        if inst.exch_id != Exchange.NSE:
+            continue
+        if inst.instrument == InstrumentType.IDX:
+            index_symbol_names.add(inst.symbol_name)
+        elif inst.instrument == InstrumentType.EQ:
+            equity_symbol_names.add(inst.symbol_name)
+        elif inst.is_option and inst.underlying_symbol is not None:
+            option_underlyings.add(inst.underlying_symbol)
+
+    # Pre-index the admitted IDX symbols by their normalized form so the
+    # nearest-match lookup is O(1) per unmatched underlying (a normalized
+    # form maps to ONE symbol_name; ties keep the first by sorted order so
+    # the result is deterministic for any input ordering).
+    normalized_index: dict[str, str] = {}
+    for name in sorted(index_symbol_names):
+        normalized_index.setdefault(normalize_underlying_symbol(name), name)
+
+    gaps: list[OptionUnderlyingGap] = []
+    for underlying in option_underlyings:
+        if underlying in index_symbol_names or underlying in equity_symbol_names:
+            continue
+        nearest = normalized_index.get(normalize_underlying_symbol(underlying))
+        gaps.append(
+            OptionUnderlyingGap(
+                exchange=Exchange.NSE,
+                underlying_symbol=underlying,
+                matched_index_symbol_name=None,
+                nearest_index_symbol_name=nearest,
+            )
+        )
+    return sorted(gaps, key=lambda gap: (gap.exchange.value, gap.underlying_symbol))
+
+
 def is_spot_only_index(
     instrument: Instrument,
     options_eligible_underlyings: frozenset[tuple[Exchange, str]],
@@ -604,6 +758,7 @@ __all__ = [
     "REFERENCE_ONLY_INDICES",
     "V1_INDICES",
     "V1_UNDERLYINGS",
+    "OptionUnderlyingGap",
     "UnderlyingEconomics",
     "UnderlyingSpec",
     "build_fno_eligible_underlyings",
@@ -611,6 +766,7 @@ __all__ = [
     "build_underlying_economics",
     "classify_underlying_kind",
     "derive_lake_underlyings",
+    "diagnose_unmatched_option_underlyings",
     "is_in_brute_force_scope",
     "is_in_fetch_scope",
     "is_in_scope",
@@ -619,4 +775,5 @@ __all__ = [
     "is_reference_only",
     "is_spot_only_index",
     "is_universe_underlying",
+    "normalize_underlying_symbol",
 ]
