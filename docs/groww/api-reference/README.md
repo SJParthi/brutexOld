@@ -21,6 +21,8 @@ Locally cached Python SDK documentation, fetched from the official Groww docs on
 | [04-annexures.md](./04-annexures.md) | All SDK constants: exchanges, segments, order types, candle intervals | https://groww.in/trade-api/docs/python-sdk/annexures |
 | [05-exceptions.md](./05-exceptions.md) | Custom exception hierarchy and error handling | https://groww.in/trade-api/docs/python-sdk/exceptions |
 | [06-changelog.md](./06-changelog.md) | SDK version history and feature additions | https://groww.in/trade-api/docs/python-sdk/changelog |
+| [07-feed.md](./07-feed.md) | `GrowwFeed` websocket — LTP / index-value / market-depth / order+position updates; **1000-instrument subscription cap** | https://groww.in/trade-api/docs/python-sdk/feed |
+| [08-live-data.md](./08-live-data.md) | REST snapshots — `get_quote` / `get_ltp` / `get_ohlc` / `get_option_chain` / `get_greeks` (up to 50/call) | https://groww.in/trade-api/docs/python-sdk/live-data |
 
 ---
 
