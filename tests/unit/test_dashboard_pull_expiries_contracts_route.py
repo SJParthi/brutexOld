@@ -1,16 +1,15 @@
 """The ``/api/v1/universe/pull-expiries-contracts`` route (DEC-DERIV-METADATA-ROUTE-001).
 
 PR-3 of the metadata/historical split: the "⛓ Pull expiries + contracts" button now
-calls THIS metadata-only route (persist expiries + contracts, ZERO candles) instead of
-the candle-pulling ``/pull-derivatives``. This covers the route glue — the year-grid
-resolution (+ its 400 arms), the ``symbols`` / ``symbol`` / ``kind`` selection forms
-(+ their 400 arms, which MATCH ``/pull-derivatives``'s), and the single-flight
-background-job start. The background ``_work`` body (which calls
-``pull_expiries_contracts`` on the job thread) is replaced by an OFFLINE fake that asserts
-it is the METADATA pull (NOT ``pull_all_derivatives`` — the candle pull) — NEVER a real
-network call. Mirrors ``test_dashboard_pull_derivatives_route.py``: a real DuckDB-backed
-store + a ``TestClient``, creds pinned dry-run. Skipped cleanly when the ``[ui]`` extra
-(FastAPI) or duckdb is absent.
+calls THIS metadata-only route (persist expiries + contracts, ZERO candles). The fused
+candle-pulling ``/pull-derivatives`` route it replaced was DECOMMISSIONED in PR-6
+(DEC-DERIV-DECOMMISSION-FUSED-001) — the bulk derivative buttons now POST here too.
+This covers the route glue — the year-grid resolution (+ its 400 arms), the
+``symbols`` / ``symbol`` / ``kind`` selection forms (+ their 400 arms), and the
+single-flight background-job start. The background ``_work`` body (which calls
+``pull_expiries_contracts`` on the job thread) is replaced by an OFFLINE fake — NEVER a
+real network call. A real DuckDB-backed store + a ``TestClient``, creds pinned dry-run.
+Skipped cleanly when the ``[ui]`` extra (FastAPI) or duckdb is absent.
 """
 
 from __future__ import annotations
@@ -106,15 +105,14 @@ def _fake_pull_expiries_contracts(
     return _fake_report(instruments, years=kwargs["years"], dry_run=kwargs["dry_run"])
 
 
-def _exploding_pull_all_derivatives(*_args: Any, **_kwargs: Any) -> object:
-    """Sentinel: this route must NEVER call the candle-pulling derivatives ingest."""
-    raise AssertionError("pull-expiries-contracts must not call pull_all_derivatives (candles)")
-
-
 def _patch_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Wire the offline metadata fake AND assert the candle pull is never reached."""
+    """Wire the offline metadata fake so the route never makes a real network call.
+
+    The fused candle-pulling ``pull_all_derivatives`` was decommissioned (PR-6,
+    DEC-DERIV-DECOMMISSION-FUSED-001) and is no longer importable here, so there is
+    nothing left to fence off — the metadata module structurally has no candle sink.
+    """
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_pull_expiries_contracts)
-    monkeypatch.setattr(app_module, "pull_all_derivatives", _exploding_pull_all_derivatives)
 
 
 def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any]:
@@ -182,7 +180,7 @@ def test_date_bounds_narrow_the_year_grid(
     assert _wait_for_job(client)["state"] == "done"
 
 
-# ── 400 arms (match /pull-derivatives) ───────────────────────────────────────
+# ── 400 arms ──────────────────────────────────────────────────────────────────
 
 
 def test_unknown_symbol_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,3 +244,15 @@ def test_universe_page_button_targets_metadata_route(client: TestClient) -> None
     assert 'id="pullDerivBtn"' in resp.text
     # the metadata-only tooltip wording is present
     assert "no history" in resp.text
+
+
+def test_universe_page_no_longer_references_fused_candle_route(client: TestClient) -> None:
+    """PR-6 (DEC-DERIV-DECOMMISSION-FUSED-001): no /universe surface still hits the
+    decommissioned fused candle path — the bulk derivative buttons POST the
+    metadata-only route, never ``/api/v1/universe/pull-derivatives``."""
+    resp = client.get("/universe")
+    assert resp.status_code == 200
+    assert "/api/v1/universe/pull-derivatives" not in resp.text
+    # the bulk derivative buttons survive (repointed, not removed)
+    assert 'id="bulkIdxDeriv"' in resp.text
+    assert 'id="bulkStkDeriv"' in resp.text

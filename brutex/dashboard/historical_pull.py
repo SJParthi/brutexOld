@@ -10,10 +10,11 @@ underlying / all cached), now that the chain metadata is already cached.
 
 ## Why a selection-based pull (not a re-enumeration)
 
-:func:`~brutex.dashboard.derivatives_pull.pull_all_derivatives` RE-ENUMERATES the
-whole chain (``get_expiries`` × ``get_contracts``) every pull — the right shape for a
-"pull everything" bulk run, but wasteful when the operator wants ONLY a handful of
-already-cached contracts. This module takes a concrete
+The retired fused bulk chain pull (decommissioned by
+DEC-DERIV-DECOMMISSION-FUSED-001) RE-ENUMERATED the whole chain (``get_expiries`` ×
+``get_contracts``) AND downloaded every contract's candles on every click — the
+runaway "pull everything" shape that wasted the network when the operator wanted
+ONLY a handful of already-cached contracts. This module takes a concrete
 :class:`~brutex.data.registry_store.ContractRow` selection, rebuilds each into a
 :class:`~brutex.adapters.protocol.DerivativeContract` via
 :func:`~brutex.adapters.groww.contracts.parse_contract_symbol`, and feeds that RAW
@@ -193,10 +194,10 @@ def _build_live_client(  # pragma: no cover - live Groww TOTP token + SDK + netw
 ) -> tuple[GrowwClient, BarSink]:
     """Build the LIVE ``(GrowwClient, ParquetBarSink)`` from stored TOTP credentials.
 
-    LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. Mirrors
-    :func:`brutex.dashboard.derivatives_pull._build_live_derivative_client` — same creds
-    chain, same Path-A candle lake sink, same rate hooks at the one choke point so EVERY
-    candle call is paced + retried + decrement/recover (DEC-GROWW-RATELIMIT-RETRY-001).
+    LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. The same creds
+    chain the spot/metadata pulls use — the Path-A candle lake sink + the rate hooks at
+    the one choke point so EVERY candle call is paced + retried + decrement/recover
+    (DEC-GROWW-RATELIMIT-RETRY-001).
     """
     from brutex.adapters.groww.auth import GrowwCredentials
     from brutex.adapters.groww.live import build_live_client

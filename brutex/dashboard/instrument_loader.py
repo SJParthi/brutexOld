@@ -99,10 +99,12 @@ from brutex.dashboard.ntm_cache import (
 from brutex.dashboard.universe_query import universe_summary
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.universe import (
+    OptionUnderlyingGap,
     UnderlyingEconomics,
     build_fno_eligible_underlyings,
     build_options_eligible_underlyings,
     build_underlying_economics,
+    diagnose_unmatched_option_underlyings,
     is_reference_only,
     is_spot_only_index,
     is_universe_underlying,
@@ -117,6 +119,12 @@ _LOG = structlog.get_logger(__name__)
 #: spelling alias ("NIFTY TOTAL MKT", "NIFTYTOTALMARKET", …) resolves to the same
 #: CSV, so the canonical full name is sufficient here.
 _NTM_INDEX_NAME = "NIFTY TOTAL MARKET"
+
+#: Max gaps inlined in the ``universe.load.fno_index_unmatched`` structlog line
+#: (DEC-FNO-INDEX-MATCH-DIAG-001). The full count is always logged via ``count``;
+#: only the inlined ``gaps`` list is capped so a pathological master can never
+#: bloat one log line. 50 is far above the handful of real F&O indices.
+_FNO_INDEX_GAP_LOG_CAP = 50
 
 #: Serialises concurrent keyless loads (DEC-UNDERLYING-ECONOMICS-001). Two
 #: overlapping ``load-instruments`` POSTs each do a full-snapshot upsert which
@@ -300,6 +308,42 @@ def _reference_only_of(
     return _is_reference_only
 
 
+def _log_fno_index_gaps(gaps: list[OptionUnderlyingGap]) -> None:
+    """Emit ONE ``universe.load.fno_index_unmatched`` line when *gaps* is non-empty.
+
+    DEC-FNO-INDEX-MATCH-DIAG-001 — the observe-only sink for
+    :func:`brutex.universe.diagnose_unmatched_option_underlyings`. When at
+    least one NSE option underlying looks like an index but matches no IDX
+    spot row, this logs the full ``count`` plus an inlined ``gaps`` list
+    (capped at :data:`_FNO_INDEX_GAP_LOG_CAP` so one master can never bloat a
+    log line) of ``{underlying, nearest_index, exchange}`` dicts. It changes
+    NO classification — a non-``None`` ``nearest_index`` flags a pure
+    case/space mismatch, ``None`` a genuine abbreviation mismatch — so the
+    operator can report the real strings for a SEPARATE data-driven fix.
+    Nothing is logged when *gaps* is empty (the healthy steady state).
+
+    Parameters
+    ----------
+    gaps
+        The deterministic gap list from
+        :func:`brutex.universe.diagnose_unmatched_option_underlyings`.
+    """
+    if not gaps:
+        return
+    _LOG.info(
+        "universe.load.fno_index_unmatched",
+        count=len(gaps),
+        gaps=[
+            {
+                "underlying": gap.underlying_symbol,
+                "nearest_index": gap.nearest_index_symbol_name,
+                "exchange": gap.exchange.value,
+            }
+            for gap in gaps[:_FNO_INDEX_GAP_LOG_CAP]
+        ],
+    )
+
+
 def _summarise_stored(store: Any) -> dict[str, int]:
     """Read the stored universe underlyings back and summarise the index/stock split.
 
@@ -476,6 +520,13 @@ def load_instrument_master(
         # to tag spot-only indices reference_only so the dashboard never badges a
         # non-option index "OPT" (DEC-NON-OPTION-INDEX-REFTAG-001).
         options_eligible = build_options_eligible_underlyings(index.universe)
+
+        # OBSERVE-ONLY diagnostic (DEC-FNO-INDEX-MATCH-DIAG-001): surface any
+        # NSE option underlying that LOOKS like an index but matches no IDX
+        # spot row — such an index is silently tagged REFERENCE_ONLY (loses
+        # its OPT badge) by is_spot_only_index's EXACT symbol match. This logs
+        # the real strings only; it changes NO classification or badge.
+        _log_fno_index_gaps(diagnose_unmatched_option_underlyings(index.universe))
 
         # NTM enrichment is fail-soft — it never blocks the keyless core load
         # (DEC-NTM-GROWW-REPOINT-001). The returned ids ADMIT the non-F&O

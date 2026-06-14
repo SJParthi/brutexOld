@@ -8,18 +8,19 @@ metadata sinks PR-1 shipped — the :class:`~brutex.data.registry_store.Registry
 (expiry DATES + contract SYMBOLS) and the shared ``coverage_ledger`` rollup the
 ``/coverage`` page reads.
 
-## Why a NEW sibling (not a change to :mod:`brutex.dashboard.derivatives_pull`)
+## Why a NEW sibling (the metadata HALF of the metadata/historical split)
 
-The existing :func:`~brutex.dashboard.derivatives_pull.pull_all_derivatives`
-enumerates the chain AND pulls historical candles into the ``bars/`` lake (the
-heavy, weeks-scale minute fill). PR-2's button does the OPPOSITE half: it
-enumerates + PERSISTS the metadata (expiries + contracts) and pulls **ZERO
-candles** — so the cheap, NSE-verifiable chain SHAPE lands in minutes and the
-heavy historical fill stays behind its own separate button. Keeping them as two
-siblings (CLAUDE.md §11 COMMON — one job each) means this module NEVER constructs
-a :class:`~brutex.data.sink.BarSink` and NEVER calls ``get_historical_candles`` /
-``run_groww_option_ingest``; that separation is the whole point and is asserted by
-the tests.
+The retired fused bulk chain pull enumerated the chain AND pulled historical
+candles into the ``bars/`` lake (the heavy, weeks-scale minute fill) in one click
+— the runaway behaviour PR-6 (DEC-DERIV-DECOMMISSION-FUSED-001) decommissioned.
+This module is the OPPOSITE half: it enumerates + PERSISTS the metadata (expiries
++ contracts) and pulls **ZERO candles** — so the cheap, NSE-verifiable chain SHAPE
+lands in minutes and the heavy historical fill stays behind its own separate
+button (:func:`~brutex.dashboard.historical_pull.pull_contract_candles`). Keeping
+them as two siblings (CLAUDE.md §11 COMMON — one job each) means this module NEVER
+constructs a :class:`~brutex.data.sink.BarSink` and NEVER calls
+``get_historical_candles`` / ``run_groww_option_ingest``; that separation is the
+whole point and is asserted by the tests.
 
 ## The two phases (delegated to the dormant engine)
 
@@ -131,8 +132,8 @@ class _CoverageSink(Protocol):
 class MetadataPullReport:
     """The honest outcome of one metadata-only expiries+contracts pull.
 
-    Mirrors :class:`~brutex.dashboard.derivatives_pull.DerivativesPullReport`'s
-    style — display + audit — but counts METADATA, never bars (there are none).
+    Mirrors :class:`~brutex.dashboard.historical_pull.HistoricalPullReport`'s style
+    — display + audit — but counts METADATA, never bars (there are none).
 
     Attributes
     ----------
@@ -221,10 +222,11 @@ def _build_live_client(  # pragma: no cover - live Groww TOTP token + SDK + netw
 ) -> GrowwClient:
     """Build the LIVE credentialed :class:`GrowwClient` from stored TOTP creds.
 
-    LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. Mirrors
-    :func:`brutex.dashboard.derivatives_pull._build_live_derivative_client`'s creds
-    chain (same rate hooks at the one choke point), MINUS the candle sink — the
-    metadata pull has no lake sink at all.
+    LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. Mirrors the
+    historical pull's live-client creds chain
+    (:func:`brutex.dashboard.historical_pull._build_live_client`, same rate hooks at
+    the one choke point), MINUS the candle sink — the metadata pull has no lake sink
+    at all.
     """
     from brutex.adapters.groww.auth import GrowwCredentials
     from brutex.adapters.groww.live import build_live_client
