@@ -16,12 +16,32 @@ from brutex.dashboard.live_lake_view import (
     _jsonify,
     clamp_limit,
     clamp_offset,
+    live_columns,
     live_table,
     live_tables_summary,
+    query_live_table,
 )
 from brutex.data.models import CandleBar
 from brutex.live.lake import write_live_candles, write_live_ticks
 from brutex.live.store import TickRecord
+
+
+def _seed_two(lake_root) -> None:
+    recs = [
+        TickRecord(
+            seq=0,
+            recv_ts=datetime(2026, 6, 15, 3, 45, tzinfo=UTC),
+            snapshot={"NSE:IDX:NIFTY": 22500.0},
+            recv_ns=1,
+        ),
+        TickRecord(
+            seq=1,
+            recv_ts=datetime(2026, 6, 15, 3, 46, tzinfo=UTC),
+            snapshot={"NSE:IDX:BANKNIFTY": 48000.0},
+            recv_ns=2,
+        ),
+    ]
+    write_live_ticks(recs, lake_root=lake_root, capture_run_id="r1", feed_kind="index")
 
 
 def _seed(lake_root) -> None:
@@ -86,6 +106,48 @@ def test_reads_ticks_and_candles(tmp_path) -> None:
         "live_ticks": 1,
         "live_candles_1m": 1,
     }
+
+
+def test_live_columns(tmp_path) -> None:
+    assert live_columns(tmp_path, "live_ticks") == []  # no partitions yet
+    _seed(tmp_path)
+    cols = live_columns(tmp_path, "live_ticks")
+    assert "groww_symbol" in cols and "value" in cols
+    with pytest.raises(ValueError, match="unknown live table"):
+        live_columns(tmp_path, "bogus")
+
+
+def test_query_live_table_empty(tmp_path) -> None:
+    page = query_live_table(tmp_path, "live_ticks")
+    assert page["total"] == 0 and page["rows"] == [] and page["limit"] == 100
+
+
+def test_query_live_table_filter_sort_project(tmp_path) -> None:
+    _seed_two(tmp_path)
+    # default → all rows, newest-first by the stable key
+    allrows = query_live_table(tmp_path, "live_ticks")
+    assert allrows["total"] == 2
+    # filter → only NIFTY
+    only = query_live_table(tmp_path, "live_ticks", filters=(("groww_symbol", "eq", "NSE-NIFTY"),))
+    assert only["total"] == 1
+    assert only["rows"][0][only["columns"].index("groww_symbol")] == "NSE-NIFTY"
+    # projection → just two columns
+    proj = query_live_table(tmp_path, "live_ticks", columns=("seq", "groww_symbol"))
+    assert proj["columns"] == ["seq", "groww_symbol"]
+    # explicit ascending order by seq
+    asc = query_live_table(tmp_path, "live_ticks", order_by="seq", descending=False)
+    seqs = [r[asc["columns"].index("seq")] for r in asc["rows"]]
+    assert seqs == sorted(seqs)
+
+
+def test_query_live_table_validation(tmp_path) -> None:
+    _seed(tmp_path)
+    with pytest.raises(ValueError, match="unknown filter column"):
+        query_live_table(tmp_path, "live_ticks", filters=(("nope", "eq", "x"),))
+    with pytest.raises(ValueError, match="unknown order column"):
+        query_live_table(tmp_path, "live_ticks", order_by="nope")
+    with pytest.raises(ValueError, match="unknown live table"):
+        query_live_table(tmp_path, "bogus")
 
 
 def test_jsonify_branches() -> None:
