@@ -75,6 +75,8 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.live_lake_view import LIVE_TABLES, live_table, live_tables_summary
+from brutex.dashboard.live_runner import LiveRunner
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
 from brutex.dashboard.movers_options import build_options_payload, run_options_snapshot
@@ -674,6 +676,7 @@ def build_app(
     instrument_store: Any = None,
     summary_cache: SummaryCache | None = None,
     quota_tracker: Any = None,
+    live_runner: LiveRunner | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -3263,6 +3266,87 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # ── Live feed (Groww websocket): ON/OFF subprocess + Parquet-lake browse ──
+    # DEC-LIVE-DECOUPLE-001: the dashboard SPAWNS `python -m brutex.live capture`
+    # and READS the live/ Parquet lake — it never imports brutex.live, so the live
+    # package stays portable to TickVault/AWS. Read-only market data, no orders.
+    _runner = live_runner or LiveRunner(state_path=Path(".brutex-logs") / "live-feed.json")
+    _live_out = "runs/live-ticks.jsonl"
+    _live_log = str(Path(".brutex-logs") / "brutex-live.log")
+
+    def _live_lake_root() -> Path | None:
+        lake_root = getattr(instrument_store, "path", None)
+        return lake_root.parent if isinstance(lake_root, Path) else None
+
+    def _live_tick_count() -> int:
+        out = Path(_live_out)
+        if not out.exists():
+            return 0
+        with out.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+
+    @app.get("/live", response_class=HTMLResponse)
+    async def live_page() -> HTMLResponse:
+        """GET /live — the Live feed control + Parquet-lake browser page."""
+        return HTMLResponse(_render_live_html(), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/live/status")
+    async def api_live_status() -> JSONResponse:
+        """GET /api/v1/live/status — capture subprocess state + JSONL tick count."""
+        status = await run_in_threadpool(_runner.status)
+        payload = status.as_dict()
+        payload["ticks_captured"] = await run_in_threadpool(_live_tick_count)
+        return JSONResponse(payload)
+
+    @app.post("/api/v1/live/start")
+    async def api_live_start(seconds: float = Query(default=23400.0, gt=0)) -> JSONResponse:
+        """POST /api/v1/live/start — spawn the capture subprocess (idempotent)."""
+        status = await run_in_threadpool(
+            lambda: _runner.start(out=_live_out, log_file=_live_log, seconds=seconds)
+        )
+        return JSONResponse(status.as_dict())
+
+    @app.post("/api/v1/live/stop")
+    async def api_live_stop() -> JSONResponse:
+        """POST /api/v1/live/stop — terminate the capture subprocess."""
+        status = await run_in_threadpool(_runner.stop)
+        return JSONResponse(status.as_dict())
+
+    @app.get("/api/v1/live/tables")
+    async def api_live_tables() -> JSONResponse:
+        """GET /api/v1/live/tables — the live lake table names + row counts."""
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse({"tables": [{"table": t, "row_count": 0} for t in LIVE_TABLES]})
+        return JSONResponse({"tables": await run_in_threadpool(lambda: live_tables_summary(lake))})
+
+    @app.get("/api/v1/live/table/{name}")
+    async def api_live_table(
+        name: str,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/live/table/{name} — one page of a live lake table (newest-first)."""
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse(
+                {
+                    "table": name,
+                    "columns": [],
+                    "rows": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        try:
+            payload = await run_in_threadpool(
+                lambda: live_table(lake, name, limit=limit, offset=offset)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
     @app.get("/db", response_class=HTMLResponse)
     async def db_page() -> HTMLResponse:
         """GET /db — read-only DuckDB browser page (DEC-DB-VIEWER-001).
@@ -3985,6 +4069,26 @@ def _load_db_template() -> str:
 def _render_db_html() -> str:
     """Return the read-only DuckDB browser page HTML (DEC-DB-VIEWER-001)."""
     return _load_db_template()
+
+
+_LIVE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "live.html"
+
+
+def _load_live_template() -> str:
+    """Read the Live feed page template **fresh** each call (no-store, like /db).
+
+    Ships as ``brutex/dashboard/templates/live.html``. The page polls
+    ``/api/v1/live/status`` (capture process state + tick count), drives the
+    ON/OFF toggle via ``POST /api/v1/live/start`` / ``stop``, and browses the two
+    live lake tables via ``/api/v1/live/tables`` + ``/api/v1/live/table/{name}``,
+    escaping every cell before render (XSS — vendor-origin values).
+    """
+    return _LIVE_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def _render_live_html() -> str:
+    """Return the Live feed control + Parquet-lake browser page HTML."""
+    return _load_live_template()
 
 
 _INSTRUMENTS_HTML_BLOCK = """\
