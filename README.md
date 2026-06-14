@@ -50,7 +50,7 @@ to ATM/ITM option fill simulations.
 | **Instruments** | NIFTY 50, BANKNIFTY, SENSEX, India VIX |
 | **Data source** | Groww Trade API |
 | **Timeframes** | 21 (1m base + 19 derived intraday + 1d) |
-| **Range** | Rolling `2021-01-01 → today` |
+| **Range** | Rolling `2020-01-01 → today` |
 | **Hardware reference** | Apple M4 Pro (14-core, 10 P-cores allocated) |
 | **Per-sweep SLA** | 2-4 days wall time on M4 Pro |
 | **Verification** | 9-layer pyramid + 24 property invariants + 3 oracle tests |
@@ -195,13 +195,10 @@ brutex audit verify <file>
 brutex dashboard          # alias: brutex run
 ```
 
-### Logs — the `/logs` web viewer + `LOG_DIR` knob
+### Logs — the rotating log file + `LOG_DIR` knob
 
-The dashboard ships a live log viewer at **`http://127.0.0.1:9080/logs`**
-(also reachable from the nav bar on `/universe`, `/db`, `/credentials`). It
-tails the same rotating JSON log file the runtime writes.
-
-By default that file lives at `~/.brutex/logs/brutex.log`. To redirect it
+The runtime writes a rotating JSON log file. By default it lives at
+`~/.brutex/logs/brutex.log`. To redirect it
 **into the repo tree** so an IDE such as IntelliJ/IDEA can tail it, pass the
 `LOG_DIR` knob — it exports `BRUTEX_LOG_DIR` for the run:
 
@@ -286,7 +283,7 @@ See `LICENSE`.
 
 - Python 3.12, Rust + PyO3, Arrow zero-copy
 - Polars, DuckDB, LMDB, Parquet (Zstd-9)
-- Optuna (CMA-ES) for Stage 3 Bayesian refinement
+- pycma (BIPOP-CMA-ES) for Stage 3 refinement
 - Hypothesis, pytest-benchmark, mutmut, cargo-mutants, cargo-fuzz
 - FastAPI + structlog + Prometheus
 - Claude Code (Anthropic) as the build copilot, with a 4-agent
