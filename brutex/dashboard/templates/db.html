@@ -194,6 +194,7 @@
   }
 </style>
 <link rel="stylesheet" href="/static/bx-datepicker.css">
+<link rel="stylesheet" href="/static/bx-theme.css">
 <script defer src="/static/bx-datepicker.js"></script>
 </head>
 <body>
@@ -201,7 +202,7 @@
     <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
     <div class="sub">Database — DuckDB instrument master (read-only)</div>
-    <nav class="topnav" aria-label="Primary" style="margin-left:18px; display:flex; gap:14px; font-size:13px;">
+    <nav class="topnav" aria-label="Primary">
       <a href="/universe">Universe</a>
       <a href="/groww-credentials">Credentials</a>
       <a href="/db" aria-current="page">Database</a>
@@ -370,10 +371,12 @@ async function loadTables() {
       + '<span class="nm">📈 candles</span>'
       + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">spot</span>'
       + '</div>';
-    const optionRow = '<div class="tbl" data-candles="option">'
-      + '<span class="nm">🅾 expired options</span>'
-      + '<span class="badge" style="color:var(--pink);background:rgba(255,107,157,.13)">options</span>'
-      + '</div>';
+    /* DEC-DASHBOARD-UX-POLISH-001: the expired-options lake is HIDDEN from the
+       browsable Candle-lake list per operator request — it is a documented
+       REFERENCE_ONLY surface that clutters the spot-focused list. SCOPE-SAFE:
+       only the LIST entry is dropped here; the underlying `options/` lake, its
+       data, the `selectCandles("option")` browse path, and the `data-candles`
+       route stay fully intact (nothing is deleted, no write path changed). */
     /* The unified window ledger lives in a Parquet sidecar (`window_ledger/`),
        NOT a DuckDB table — surface it as its OWN clickable read-only row
        (DEC-WINDOW-LEDGER-001) so EVERY fetch window is browsable right here on /db.
@@ -398,7 +401,7 @@ async function loadTables() {
       + '<span class="badge" style="color:var(--yellow);background:rgba(255,183,77,.13)">registry</span>'
       + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
-      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + optionRow
+      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow
       + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow
       + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
