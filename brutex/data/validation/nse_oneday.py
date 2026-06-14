@@ -792,34 +792,55 @@ _FETCH_TIMEOUT_SECONDS: Final[int] = 30
 _GROWW_WINDOW_BACK_DAYS: Final[int] = 4
 
 
-def _default_official_opener(url: str) -> str:  # pragma: no cover - live network only
-    """Fetch *url* and return its text body (the real urllib opener).
+#: Browser-like request headers — NSE/BSE 403 a non-browser User-Agent.
+_BROWSER_HEADERS: Final[dict[str, str]] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/csv,application/csv,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-    LIVE ONLY: NSE/BSE bot-block these endpoints and this build environment
-    network-blocks both hosts, so this cannot be exercised in CI. A browser-like
-    ``User-Agent`` + a generous timeout + a few bounded retries give the
-    best-effort fetch its best chance on the operator's machine. Callers inject a
-    fake ``opener`` in tests. Mirrors ``nse_constituents._default_opener``.
+#: NSE's cookie-priming root — one GET here sets the session cookies the archive
+#: hosts then require (the operator's master NSE-fetch recipe, gotcha #1; verified
+#: 2026-06-13). HTTPS, env-overridable for a mirror/proxy.
+NSE_COOKIE_PRIME_URL: Final[str] = os.environ.get(
+    "BRUTEX_NSE_COOKIE_PRIME_URL", "https://www.nseindia.com"
+)
+
+
+def _default_official_opener(url: str) -> str:  # pragma: no cover - live network only
+    """Fetch *url* via a COOKIE-PRIMED urllib opener (the NSE bot-block dance).
+
+    LIVE ONLY: NSE/BSE bot-block these endpoints and this build env network-blocks
+    both hosts, so this cannot be exercised in CI. **NSE rejects a BARE request
+    (no session cookies) with a 403** — so, per the operator's master NSE-fetch
+    recipe (gotcha #1, verified 2026-06-13, DEC-NSE-COOKIE-DANCE-001): build an
+    opener with a cookie jar, PRIME it with one GET to
+    :data:`NSE_COOKIE_PRIME_URL` (NSE sets its cookies), THEN fetch the archive URL
+    with the SAME opener so the cookies ride along. Browser-like ``User-Agent`` +
+    a generous timeout + bounded retries. Priming is BEST-EFFORT — a failure is
+    swallowed (an archive CDN / a mirror may not need it; the real fetch still
+    tries); the real fetch's errors propagate. Callers inject a fake ``opener`` in
+    tests. Mirrors ``nse_constituents._default_opener``.
     """
+    import contextlib
+    import http.cookiejar
     import time
 
-    request = urllib.request.Request(  # noqa: S310 - https NSE/BSE host, best-effort
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            ),
-            "Accept": "text/csv,application/csv,text/plain,*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    prime_request = urllib.request.Request(  # noqa: S310 - https NSE host
+        NSE_COOKIE_PRIME_URL, headers=_BROWSER_HEADERS
     )
+    with contextlib.suppress(OSError):  # prime NSE cookies (gotcha #1) — best-effort
+        opener.open(prime_request, timeout=_FETCH_TIMEOUT_SECONDS).close()  # nosec B310
+    request = urllib.request.Request(url, headers=_BROWSER_HEADERS)  # noqa: S310 - https host
     last_exc: Exception | None = None
     for attempt in range(_FETCH_MAX_RETRIES):
         try:
-            with urllib.request.urlopen(  # noqa: S310  # nosec B310
-                request, timeout=_FETCH_TIMEOUT_SECONDS
-            ) as response:
+            with opener.open(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:  # nosec B310
                 body: bytes = response.read()
             return body.decode("utf-8")
         except OSError as exc:  # timeout / transport — retry the bounded budget
@@ -1161,6 +1182,7 @@ __all__ = [
     "DEFAULT_INDEX_SOURCES",
     "DEFAULT_TOLERANCE_RUPEES_UNVERIFIED",
     "INDEX_SOURCE_OVERRIDE_ENV",
+    "NSE_COOKIE_PRIME_URL",
     "NSE_OFFICIAL_BASE_URL",
     "OHLC_FIELDS",
     "TOLERANCE_OVERRIDE_ENV",
