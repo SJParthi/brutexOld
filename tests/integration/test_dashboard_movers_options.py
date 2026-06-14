@@ -379,6 +379,83 @@ class TestRunOptionsSnapshot:
         assert ce_row["oi"] == 1050
 
 
+# ── run_options_snapshot WITHIN a cadence track (DEC-MOVERS-OPTIONS-TRACK-001) ──
+
+
+_WK_CE = "NSE-NIFTY-20Jun24-24000-CE"  # June 20 → a weekly (June 27 is the June monthly)
+
+
+def _seed_weekly_plus_monthly(tmp_path: Path) -> None:
+    """The standard June-27 monthly CE/PE/spot PLUS a June-20 weekly CE (same month)."""
+    _seed_options_lake(tmp_path)  # June 27 CE + PE + NIFTY spot
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_WK_CE,
+        interval="1minute",
+        bars=[_min_bar(hour=9, minute=16, close="120", volume=200, oi=700)],
+    )
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_WK_CE,
+        interval="1day",
+        bars=[_day_bar(day=date(2024, 6, 12), close="110", oi=600)],
+    )
+
+
+class TestRunOptionsSnapshotTrack:
+    def test_monthly_keeps_only_the_last_in_month_expiry(self, tmp_path: Path) -> None:
+        _seed_weekly_plus_monthly(tmp_path)
+        payload = run_options_snapshot(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            expiry_track="monthly",
+        )
+        # Only the June-27 monthly CE + PE → the June-20 weekly drops out.
+        assert payload["instrument_count"] == 2
+        names = {row["name"] for row in payload["highest_oi"]}
+        assert names == {"NIFTY 27Jun24 24000 CE", "NIFTY 27Jun24 24000 PE"}
+        assert "Monthly" in payload["note"]
+
+    def test_weekly_keeps_only_the_non_terminal_expiry(self, tmp_path: Path) -> None:
+        _seed_weekly_plus_monthly(tmp_path)
+        payload = run_options_snapshot(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            expiry_track="weekly",
+        )
+        # Only the June-20 weekly CE → the June-27 monthly contracts drop out.
+        assert payload["instrument_count"] == 1
+        assert payload["highest_oi"][0]["name"] == "NIFTY 20Jun24 24000 CE"
+        assert "Weekly" in payload["note"]
+
+    def test_unknown_track_normalises_to_all(self, tmp_path: Path) -> None:
+        _seed_weekly_plus_monthly(tmp_path)
+        payload = run_options_snapshot(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            expiry_track="bogus",
+        )
+        # Normalised to ``all`` → the default Near tier picks the nearest expiry
+        # overall (the June-20 weekly), and the tier label carries NO cadence suffix
+        # (that is what proves it normalised to ``all`` and not to ``weekly``).
+        assert payload["instrument_count"] == 1
+        assert payload["highest_oi"][0]["name"] == "NIFTY 20Jun24 24000 CE"
+        assert "Near expiry" in payload["note"]
+        assert "Near Weekly" not in payload["note"]
+        assert "Near Monthly" not in payload["note"]
+
+
 # ── route wiring (FastAPI TestClient) ─────────────────────────────────────
 
 
@@ -472,6 +549,25 @@ class TestOptionsApi:
         assert nxt["instrument_count"] == 1
         assert nxt["highest_oi"][0]["name"] == "NIFTY 25Jul24 24000 CE"
         assert "Next expiry" in nxt["note"]
+
+    def test_track_monthly_filters_out_the_weekly(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # June-27 monthly CE/PE + a June-20 weekly CE for the SAME underlying/month.
+        _seed_weekly_plus_monthly(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "options",
+                "interval": "1day",
+                "date": "2024-06-13",
+                "track": "Monthly",  # mixed case → lower-cased
+            },
+        ).json()
+        assert body["instrument_count"] == 2  # the weekly June-20 CE is excluded
+        assert all("20Jun24" not in row["name"] for row in body["highest_oi"])
+        assert "Near Monthly expiry" in body["note"]
 
     def test_empty_options_lake_degrades(self, store: InstrumentStore) -> None:
         # Store wired but no options parquet → honest empty payload (never 500).

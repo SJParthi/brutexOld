@@ -23,7 +23,9 @@ from decimal import Decimal
 
 from brutex.dashboard.movers_options import (
     OptionMover,
+    _monthly_expiries,
     _tier_expiry_by_underlying,
+    _track_pool,
     build_options_payload,
     compute_option_mover,
     parse_option_symbol,
@@ -87,6 +89,117 @@ class TestTierExpiry:
         # Only ONE live expiry → Far (3rd) has nothing → the underlying drops out.
         contracts = [_c("NIFTY", date(2025, 6, 26))]
         assert _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="far") == {}
+
+
+# ── _monthly_expiries (structural last-in-month classifier) ────────────────
+
+
+class TestMonthlyExpiries:
+    def test_empty_input_is_empty(self) -> None:
+        assert _monthly_expiries(set()) == set()
+
+    def test_single_expiry_in_a_month_is_its_own_monthly(self) -> None:
+        # A stock / weekly-less index has one expiry per month → it IS the monthly.
+        assert _monthly_expiries({date(2025, 6, 26)}) == {date(2025, 6, 26)}
+
+    def test_last_in_month_wins_over_earlier_weeklies(self) -> None:
+        # Four weeklies in one month → only the last (the monthly settlement) is kept.
+        weeklies = {
+            date(2025, 6, 5),
+            date(2025, 6, 12),
+            date(2025, 6, 19),
+            date(2025, 6, 26),
+        }
+        assert _monthly_expiries(weeklies) == {date(2025, 6, 26)}
+
+    def test_one_monthly_per_calendar_month(self) -> None:
+        # Two months, each with weeklies → one monthly per (year, month).
+        expiries = {
+            date(2025, 6, 12),
+            date(2025, 6, 26),  # June monthly
+            date(2025, 7, 3),
+            date(2025, 7, 31),  # July monthly
+        }
+        assert _monthly_expiries(expiries) == {date(2025, 6, 26), date(2025, 7, 31)}
+
+    def test_same_day_number_different_months_are_distinct(self) -> None:
+        # Guards the (year, month) key — June 30 and July 30 do not collide.
+        assert _monthly_expiries({date(2025, 6, 30), date(2025, 7, 30)}) == {
+            date(2025, 6, 30),
+            date(2025, 7, 30),
+        }
+
+
+# ── _track_pool (All / Monthly / Weekly narrowing) ─────────────────────────
+
+
+class TestTrackPool:
+    @staticmethod
+    def _expiries() -> set[date]:
+        return {
+            date(2025, 6, 12),  # weekly
+            date(2025, 6, 26),  # June monthly
+            date(2025, 7, 31),  # July monthly (sole July expiry)
+        }
+
+    def test_all_returns_every_expiry(self) -> None:
+        assert _track_pool(self._expiries(), "all") == self._expiries()
+
+    def test_monthly_keeps_only_last_in_month(self) -> None:
+        assert _track_pool(self._expiries(), "monthly") == {date(2025, 6, 26), date(2025, 7, 31)}
+
+    def test_weekly_keeps_the_rest(self) -> None:
+        assert _track_pool(self._expiries(), "weekly") == {date(2025, 6, 12)}
+
+    def test_unknown_track_behaves_as_all(self) -> None:
+        # Belt-and-suspenders: an un-normalised value still returns everything.
+        assert _track_pool(self._expiries(), "bogus") == self._expiries()
+
+
+# ── _tier_expiry_by_underlying WITHIN a track ──────────────────────────────
+
+
+class TestTierWithinTrack:
+    _ON = date(2025, 6, 13)
+
+    def _book(self) -> list[tuple[str, str, str, date, Decimal, str]]:
+        # NIFTY: weeklies + monthlies across June/July/August.
+        return [
+            _c("NIFTY", date(2025, 6, 19)),  # June weekly
+            _c("NIFTY", date(2025, 6, 26)),  # June monthly
+            _c("NIFTY", date(2025, 7, 3)),  # July weekly
+            _c("NIFTY", date(2025, 7, 31)),  # July monthly
+            _c("NIFTY", date(2025, 8, 28)),  # August monthly (sole August expiry)
+        ]
+
+    def test_monthly_near_is_the_first_monthly(self) -> None:
+        assert _tier_expiry_by_underlying(
+            self._book(), on_date=self._ON, tier="near", track="monthly"
+        ) == {"NIFTY": date(2025, 6, 26)}
+
+    def test_monthly_next_is_the_second_monthly(self) -> None:
+        assert _tier_expiry_by_underlying(
+            self._book(), on_date=self._ON, tier="next", track="monthly"
+        ) == {"NIFTY": date(2025, 7, 31)}
+
+    def test_weekly_near_is_the_first_weekly(self) -> None:
+        assert _tier_expiry_by_underlying(
+            self._book(), on_date=self._ON, tier="near", track="weekly"
+        ) == {"NIFTY": date(2025, 6, 19)}
+
+    def test_weekly_track_empty_for_a_monthly_only_underlying(self) -> None:
+        # A stock with one expiry per month → its weekly track is empty → it drops out.
+        contracts = [_c("RELIANCE", date(2025, 6, 26)), _c("RELIANCE", date(2025, 7, 31))]
+        assert (
+            _tier_expiry_by_underlying(contracts, on_date=self._ON, tier="near", track="weekly")
+            == {}
+        )
+
+    def test_default_track_is_all(self) -> None:
+        # No track kwarg → every expiry ranked (prior behaviour preserved).
+        assert _tier_expiry_by_underlying(self._book(), on_date=self._ON, tier="near") == {
+            "NIFTY": date(2025, 6, 19)
+        }
 
 
 # ── parse_option_symbol ───────────────────────────────────────────────────
@@ -432,6 +545,63 @@ class TestBuildOptionsPayload:
         )
         assert "Next expiry" in payload["note"]
         assert "Near/Next/Far" in payload["note"]
+
+    def test_default_track_omits_the_cadence_label(self) -> None:
+        # The default ``all`` track adds no cadence suffix → just the tier label.
+        payload = build_options_payload(
+            [_mover()],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            expiry_tier="near",
+            expiry_track="all",
+        )
+        assert "Near expiry" in payload["note"]
+        # No cadence appended to the tier label (the explanatory "(All/Monthly/Weekly)"
+        # legend may still mention the words — the LABEL is what must stay bare).
+        assert "Near Monthly" not in payload["note"]
+        assert "Near Weekly" not in payload["note"]
+
+    def test_ranked_note_appends_the_cadence_track(self) -> None:
+        payload = build_options_payload(
+            [_mover()],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            expiry_tier="next",
+            expiry_track="monthly",
+        )
+        assert "Next Monthly expiry" in payload["note"]
+
+    def test_empty_note_carries_the_cadence_track(self) -> None:
+        payload = build_options_payload(
+            [],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            expiry_tier="near",
+            expiry_track="weekly",
+        )
+        assert "No Near Weekly-expiry option contracts" in payload["note"]
+
+    def test_present_but_no_mover_note_carries_the_cadence_track(self) -> None:
+        payload = build_options_payload(
+            [],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=3,
+            expiry_tier="near",
+            expiry_track="monthly",
+        )
+        assert "Near Monthly-expiry option contract(s)" in payload["note"]
 
     def test_daily_note_shows_daily_label(self) -> None:
         payload = build_options_payload(

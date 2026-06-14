@@ -63,6 +63,21 @@ nearest-relevant expiry, and a near-dated vs a far-dated ``24000 CE`` never mix 
 one ranking. An underlying without that serial expiry simply drops out (honest —
 that month is not listed yet); a blank / unknown selector falls back to ``near``.
 
+## The ``track`` (All / Monthly / Weekly) cadence (DEC-MOVERS-OPTIONS-TRACK-001)
+
+The ``?track=`` selector chooses the cadence the Near/Next/Far tier ranks WITHIN:
+``all`` (default — every live expiry, the prior behaviour), ``monthly`` (only each
+underlying's last expiry per calendar month — the monthly settlement), or
+``weekly`` (the rest). The split is purely STRUCTURAL — ``monthly`` = the
+last-in-calendar-month expiry for that underlying (:func:`_monthly_expiries`),
+derived from the dates actually in the lake, NEVER from a hardcoded NSE
+expiry-weekday rule (Golden Rule #1). That is what makes it handle every
+permutation: a single stock or a weekly-less index has one expiry per month (all
+``monthly``, an empty ``weekly`` track), an index with weeklies has several per
+month (the last is the monthly, the earlier ones the weeklies), and an NSE cadence
+change (weekday shift, an index gaining/losing weeklies) just changes which dates
+appear — no code change. A blank / unknown selector falls back to ``all``.
+
 ## Honesty (Golden Rule #1 / #10)
 
 REFERENCE_ONLY over the **ingested lake** (CLAUDE.md §3) — never a live feed
@@ -150,6 +165,18 @@ _EXPIRY_FORMAT: Final[str] = "%d%b%y"
 #: ``near`` = the front (closest) expiry, ``next`` = the one after, ``far`` = the
 #: third. An unknown / blank selector falls back to ``near``.
 _EXPIRY_TIERS: Final[dict[str, int]] = {"near": 0, "next": 1, "far": 2}
+
+#: The ``?track=`` selector → which expiry CADENCE the Near/Next/Far tier ranks
+#: WITHIN (DEC-MOVERS-OPTIONS-TRACK-001): ``all`` (default — every live expiry,
+#: the prior behaviour), ``monthly`` (only each underlying's last expiry per
+#: calendar month — the monthly settlement), or ``weekly`` (the rest — the
+#: non-terminal weeklies). The classification is purely STRUCTURAL — derived from
+#: the expiry dates actually present in the lake (:func:`_monthly_expiries`),
+#: NEVER from a hardcoded NSE expiry-weekday rule (Golden Rule #1). So a stock or
+#: a weekly-less index simply has one expiry per month (all ``monthly``, an empty
+#: ``weekly`` track) and an NSE cadence change only changes which dates appear —
+#: no code change. An unknown / blank selector falls back to ``all``.
+_EXPIRY_TRACKS: Final[frozenset[str]] = frozenset({"all", "weekly", "monthly"})
 
 
 def parse_option_symbol(symbol: str) -> tuple[str, date_cls, Decimal, str] | None:
@@ -470,6 +497,7 @@ def build_options_payload(
     top_n: int,
     skipped: int,
     expiry_tier: str = "near",
+    expiry_track: str = "all",
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -493,6 +521,9 @@ def build_options_payload(
         reported honestly, never hidden (Golden Rule #1).
     expiry_tier
         The selected ``near`` / ``next`` / ``far`` expiry tier, echoed in the note.
+    expiry_track
+        The selected ``all`` / ``monthly`` / ``weekly`` cadence track, echoed in the
+        note (appended to the tier label, e.g. ``Near Monthly``) unless ``all``.
 
     Returns
     -------
@@ -504,7 +535,10 @@ def build_options_payload(
         category: [_option_row(m) for m in rank_fn(movers, top_n)]
         for category, rank_fn in _OPTIONS_CATEGORIES.items()
     }
-    tier_label = expiry_tier.capitalize()
+    # The tier label, with the cadence track appended (``Near Monthly``) unless the
+    # default ``all`` track (then just ``Near`` — the prior wording is preserved).
+    track_suffix = "" if expiry_track == "all" else f" {expiry_track.capitalize()}"
+    tier_label = f"{expiry_tier.capitalize()}{track_suffix}"
     instrument_count = len(movers) + skipped
     if instrument_count == 0:
         note = (
@@ -522,7 +556,8 @@ def build_options_payload(
             f"As-of {date} {time or '(daily)'} · {interval} · {tier_label} expiry — "
             "reference-only lake view "
             "(CLAUDE.md §3); the contract's expiry nearest the selected date "
-            "(Near/Next/Far); % is vs the contract's previous close, OI change is vs its prior day."
+            "(Near/Next/Far) on the chosen cadence track (All/Monthly/Weekly); "
+            "% is vs the contract's previous close, OI change is vs its prior day."
         )
     return {
         "interval": interval,
@@ -640,21 +675,70 @@ def _discover_options(lake_root: Path) -> list[tuple[str, str, str, date_cls, De
     return contracts
 
 
+def _monthly_expiries(expiries: set[date_cls]) -> set[date_cls]:
+    """The subset of *expiries* that are a monthly settlement (last-in-calendar-month).
+
+    Groups the distinct expiry dates by ``(year, month)`` and keeps the **max** of
+    each group — the LAST expiry in that calendar month, which on the NSE settles
+    as the monthly contract. Every other date is a (non-terminal) weekly. This is
+    purely structural: it reads the dates actually present in the lake, NEVER a
+    hardcoded expiry-weekday rule (Golden Rule #1), so it stays correct under any
+    NSE cadence change and yields the right answer for every permutation — a stock
+    or weekly-less index has one expiry per month (that one date is its monthly, an
+    empty weekly track), an index with weeklies has several per month (the last is
+    the monthly, the earlier ones the weeklies). An empty input yields an empty set.
+
+    Parameters
+    ----------
+    expiries
+        The distinct expiry dates to classify (one underlying's live expiries).
+
+    Returns
+    -------
+    set[datetime.date]
+        The dates that are the last expiry of their calendar month.
+    """
+    by_month: dict[tuple[int, int], list[date_cls]] = {}
+    for expiry in expiries:
+        by_month.setdefault((expiry.year, expiry.month), []).append(expiry)
+    return {max(group) for group in by_month.values()}
+
+
+def _track_pool(expiries: set[date_cls], track: str) -> set[date_cls]:
+    """Keep only *expiries* on the chosen ``track`` (``all`` / ``monthly`` / ``weekly``).
+
+    ``monthly`` keeps the last-in-month settlements (:func:`_monthly_expiries`);
+    ``weekly`` keeps the rest (the non-terminal weeklies); ``all`` — and any other
+    value — returns the set unchanged (the prior behaviour). The caller
+    :func:`run_options_snapshot` already normalises an unknown selector to ``all``,
+    so the catch-all return is the honest belt-and-suspenders fallback.
+    """
+    if track == "monthly":
+        return _monthly_expiries(expiries)
+    if track == "weekly":
+        return expiries - _monthly_expiries(expiries)
+    return expiries
+
+
 def _tier_expiry_by_underlying(
     contracts: Sequence[tuple[str, str, str, date_cls, Decimal, str]],
     *,
     on_date: date_cls,
     tier: str,
+    track: str = "all",
 ) -> dict[str, date_cls]:
-    """Map each underlying → its Near/Next/Far expiry on/after *on_date*.
+    """Map each underlying → its Near/Next/Far expiry on/after *on_date*, within *track*.
 
-    For each underlying the DISTINCT expiries that are ``>= on_date`` are sorted
-    ascending; the *tier* (``near`` / ``next`` / ``far`` via :data:`_EXPIRY_TIERS`,
-    an unknown / blank tier falling back to ``near``) picks the 1st / 2nd / 3rd. An
-    underlying that has fewer live expiries than the tier needs is OMITTED — that
-    serial month is simply not listed yet, so it contributes nothing for that tier
-    (honest, never faked — Golden Rule #1). Already-expired contracts
-    (``expiry < on_date``) are excluded.
+    For each underlying the DISTINCT expiries that are ``>= on_date`` are first
+    narrowed to the chosen ``track`` (``all`` / ``monthly`` / ``weekly`` via
+    :func:`_track_pool`), then sorted ascending; the *tier* (``near`` / ``next`` /
+    ``far`` via :data:`_EXPIRY_TIERS`, an unknown / blank tier falling back to
+    ``near``) picks the 1st / 2nd / 3rd of THAT track. So ``monthly`` + ``next``
+    is "the second monthly from the snapshot date", ``weekly`` + ``near`` is "the
+    nearest weekly", etc. An underlying that has fewer live expiries on the track
+    than the tier needs is OMITTED — that serial month is simply not listed yet, so
+    it contributes nothing (honest, never faked — Golden Rule #1). Already-expired
+    contracts (``expiry < on_date``) are excluded.
 
     Parameters
     ----------
@@ -665,11 +749,15 @@ def _tier_expiry_by_underlying(
         The snapshot date the expiry tier is resolved as-of.
     tier
         The ``?expiry=`` selector, lower-cased (``near`` / ``next`` / ``far``).
+    track
+        The ``?track=`` selector, lower-cased (``all`` / ``monthly`` / ``weekly``;
+        an unknown value behaves as ``all`` via :func:`_track_pool`).
 
     Returns
     -------
     dict[str, datetime.date]
-        ``underlying → the tier's expiry`` for every underlying that has one.
+        ``underlying → the tier's expiry on the track`` for every underlying that
+        has one.
     """
     idx = _EXPIRY_TIERS.get(tier, 0)
     live: dict[str, set[date_cls]] = {}
@@ -678,7 +766,7 @@ def _tier_expiry_by_underlying(
             live.setdefault(underlying, set()).add(expiry)
     target: dict[str, date_cls] = {}
     for underlying, expiries in live.items():
-        ordered = sorted(expiries)
+        ordered = sorted(_track_pool(expiries, track))
         if idx < len(ordered):
             target[underlying] = ordered[idx]
     return target
@@ -692,6 +780,7 @@ def run_options_snapshot(
     time: str | None,
     top_n: int,
     expiry_tier: str = "near",
+    expiry_track: str = "all",
     names: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compute the options movers snapshot over the lake → the ``/api/v1/movers`` payload.
@@ -707,8 +796,10 @@ def run_options_snapshot(
 
     The ``expiry_tier`` (``near`` / ``next`` / ``far``) keeps ONLY the contracts on
     the selected expiry — resolved PER underlying as the 1st / 2nd / 3rd distinct
-    live expiry on/after the snapshot date (:func:`_tier_expiry_by_underlying`) — so
-    a near-dated and a far-dated ``24000 CE`` never mix in one ranking.
+    live expiry on/after the snapshot date (:func:`_tier_expiry_by_underlying`),
+    WITHIN the chosen ``expiry_track`` cadence (``all`` / ``monthly`` / ``weekly``)
+    — so a near-dated and a far-dated ``24000 CE`` never mix in one ranking, and
+    ``monthly`` + ``near`` ranks the nearest monthly settlement only.
 
     Parameters
     ----------
@@ -719,6 +810,11 @@ def run_options_snapshot(
     expiry_tier
         The ``?expiry=`` selector (``near`` / ``next`` / ``far``; blank / unknown ⇒
         ``near``) — which serial expiry, as-of *date*, to rank.
+    expiry_track
+        The ``?track=`` selector (``all`` / ``monthly`` / ``weekly``; blank /
+        unknown ⇒ ``all``) — the cadence the Near/Next/Far tier ranks within. The
+        classification is structural (last-in-month = monthly), so it needs no NSE
+        weekday rule (Golden Rule #1).
     names
         Optional ``underlying → display name`` map; defaults to the underlying
         symbol itself when absent (the contract name keeps the strike + type).
@@ -739,11 +835,16 @@ def run_options_snapshot(
     cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
     resolved_names = names or {}
     tier = expiry_tier.lower()
+    # Normalise the cadence track up-front so the resolver AND the note label agree
+    # (an unknown / blank selector ⇒ the default ``all`` — never a misleading label).
+    track = expiry_track.lower()
+    if track not in _EXPIRY_TRACKS:
+        track = "all"
     contracts = _discover_options(lake_root)
     # Keep ONLY the contracts on the selected Near/Next/Far expiry (resolved per
-    # underlying as-of the snapshot day); an underlying without that serial expiry
-    # drops out honestly.
-    target_expiry = _tier_expiry_by_underlying(contracts, on_date=day, tier=tier)
+    # underlying as-of the snapshot day) WITHIN the chosen cadence track; an
+    # underlying without that serial expiry on the track drops out honestly.
+    target_expiry = _tier_expiry_by_underlying(contracts, on_date=day, tier=tier, track=track)
     contracts = [c for c in contracts if target_expiry.get(c[2]) == c[3]]
     if minutes is None or not contracts:
         return build_options_payload(
@@ -754,6 +855,7 @@ def run_options_snapshot(
             top_n=top_n,
             skipped=0,
             expiry_tier=tier,
+            expiry_track=track,
         )
 
     movers: list[OptionMover] = []
@@ -812,4 +914,5 @@ def run_options_snapshot(
         top_n=top_n,
         skipped=skipped,
         expiry_tier=tier,
+        expiry_track=track,
     )

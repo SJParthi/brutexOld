@@ -464,6 +464,8 @@ class TestMoversPage:
         assert 'href="/coverage"' in resp.text
         assert 'href="/reports"' in resp.text
         assert 'id="head"' in resp.text
+        # Options cadence toggle (All/Monthly/Weekly) wiring (DEC-MOVERS-OPTIONS-TRACK-001).
+        assert 'id="track"' in resp.text
         # A second render is served verbatim from the module template cache
         # (exercises the cached branch of `_load_movers_template`).
         again = client.get("/movers")
