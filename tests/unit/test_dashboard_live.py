@@ -27,6 +27,9 @@ class _FakeProc:
     def __init__(self, pid: int) -> None:
         self.pid = pid
 
+    def poll(self) -> int | None:
+        return None  # always "running" for the route tests
+
 
 class _FakeStore:
     """Minimal stand-in: the routes only read ``.path`` (lake root = its parent)."""
@@ -38,10 +41,11 @@ class _FakeStore:
 def _runner(tmp_path) -> LiveRunner:
     return LiveRunner(
         state_path=tmp_path / "live.json",
-        popen_factory=lambda argv: _FakeProc(4242),
+        popen_factory=lambda argv, env: _FakeProc(4242),
         pid_alive=lambda p: True,
         killer=lambda p, s: None,
         clock=lambda: 1000.0,
+        cred_env=lambda: {},
     )
 
 
