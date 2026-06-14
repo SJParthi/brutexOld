@@ -818,7 +818,8 @@ class TestSessionRateController:
     """The session-scoped rate-controller holder (DEC-DHAN-PERSIST-RATE-001).
 
     Persists ONE controller across pulls so the learned rate carries over instead
-    of every pull restarting at the 5 r/s ceiling.
+    of every pull restarting at the operator-DIRECTED 8 r/s ceiling
+    (DEC-GROWW-RATE-CEILING-8-001).
     """
 
     def test_get_returns_same_instance_and_builds_once(self) -> None:
@@ -842,7 +843,10 @@ class TestSessionRateController:
         # DailyQuotaTracker (Groww backtesting has no daily quota, operator-confirmed),
         # matching the CLI Groww path — so it never halts on a phantom daily cap, while
         # the 500/min per-minute governor stays wired.
-        from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_PER_MIN
+        from brutex.adapters.groww.constants import (
+            GROWW_RATE_LIMIT_PER_MIN,
+            GROWW_RATE_LIMIT_RPS_CEILING,
+        )
         from brutex.adapters.rate_common import RateController
 
         holder = SessionRateController()  # default factory = _build_live_controller
@@ -856,6 +860,12 @@ class TestSessionRateController:
         assert "quota_limit" not in snap and "quota_used" not in snap
         # The per-minute 500/min governor IS still wired.
         assert snap["ceiling_per_min"] == GROWW_RATE_LIMIT_PER_MIN
+        # DEC-GROWW-RATE-CEILING-8-001: the controller starts at the operator-DIRECTED
+        # 8 r/s per-second ceiling (was the implicit 5 via rate_common.CEILING_RPS),
+        # and 8×60 = 480/min stays just under the 500/min governor.
+        assert ctl.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
+        assert snap["current_rps"] == 8.0
+        assert GROWW_RATE_LIMIT_RPS_CEILING * 60 < GROWW_RATE_LIMIT_PER_MIN
 
 
 # ── parse_symbol_list + resolve_pull_symbols — the multi-select pull ──
