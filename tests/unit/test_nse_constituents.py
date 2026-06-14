@@ -22,6 +22,7 @@ from brutex.dashboard.nse_constituents import (
     convention_constituent_url,
     fetch_constituent_csv,
     fetch_constituent_symbols,
+    fetch_rows_at_url,
     fetch_symbols_at_url,
     intersect_with_universe,
     members_in_universe,
@@ -383,4 +384,24 @@ class TestFetchSymbolsAtUrl:
 
         symbols = fetch_symbols_at_url("https://x/ind_niftypharmalist.csv", opener=_opener)
         assert symbols == ["RELIANCE", "M&M", "GVT&D", "HDFCBANK"]
+        assert calls == ["https://x/ind_niftypharmalist.csv"]
+
+
+class TestFetchRowsAtUrl:
+    """Direct-URL ROW fetch (symbol + ISIN) — rename-proof sibling (DEC-INDEX-CONSTITUENTS-NSE-001)."""
+
+    def test_fetches_and_parses_rows_with_isin(self) -> None:
+        calls: list[str] = []
+
+        def _opener(url: str) -> str:
+            calls.append(url)
+            return _FIXTURE_CSV
+
+        rows = fetch_rows_at_url("https://x/ind_niftypharmalist.csv", opener=_opener)
+        assert rows == [
+            ConstituentRow("RELIANCE", "INE002A01018"),
+            ConstituentRow("M&M", "INE101A01026"),
+            ConstituentRow("GVT&D", "INE200A01026"),
+            ConstituentRow("HDFCBANK", "INE040A01034"),
+        ]
         assert calls == ["https://x/ind_niftypharmalist.csv"]
