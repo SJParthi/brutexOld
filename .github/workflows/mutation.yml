@@ -70,7 +70,7 @@ jobs:
     # runner could never finish here (123/804 mutants at cancellation).
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -224,7 +224,7 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -319,7 +319,7 @@ jobs:
       run:
         working-directory: rust/trading-core
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
