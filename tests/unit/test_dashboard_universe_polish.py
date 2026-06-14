@@ -81,11 +81,17 @@ def test_nav_is_class_driven_with_current_marker() -> None:
 
 
 def test_instrument_rows_are_keyboard_operable() -> None:
-    """Rows become real buttons (Tab to reach, Enter/Space to select)."""
+    """Rows are Tab-reachable + Enter/Space-operable (without an invalid nested
+    ``role="button"`` — the row contains an independent multi-select checkbox)."""
     html = _render_universe_html()
-    assert 'd.setAttribute("role", "button")' in html, "rows are not exposed as buttons"
     assert "d.tabIndex = 0" in html, "rows are not focusable (no tabindex)"
     assert "d.onkeydown" in html, "rows have no keyboard activation handler"
+    assert 'd.setAttribute("aria-label"' in html, "rows carry no descriptive label"
+    # a button must NOT contain interactive descendants — the checkbox is one, so
+    # the row deliberately stays a labelled focusable element, not a button.
+    assert 'd.setAttribute("role", "button")' not in html, (
+        "the row must not claim role=button while containing a checkbox"
+    )
 
 
 def test_empty_states_have_icon_affordance() -> None:

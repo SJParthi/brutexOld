@@ -192,7 +192,7 @@
   .inst.refonly { opacity:.82; }   /* subtle dim so F&O rows pop */
   /* Inline legend explaining the row chips. */
   .legend { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
-    margin-left:14px; font-size:11px; color:var(--muted);
+    margin-left:14px; font-size:11px; color:var(--text);
     padding:7px 12px; border:1px solid var(--border); border-radius:var(--r-pill);
     background:rgba(255,255,255,.02); }
   .legend .key { display:inline-flex; align-items:center; gap:6px; }
@@ -851,11 +851,14 @@ function renderInstruments() {
     cb.onclick = (ev) => { ev.stopPropagation(); toggleMulti(i, cb.checked); };
     d.onclick = () => selectInstrument(i);
     /* Keyboard accessibility (DEC-UNIVERSE-UI-POLISH-001): the rows carry a
-       :focus-visible style but were not focusable — make each row a real
-       button (Tab to reach, Enter/Space to select) without altering its markup. */
+       :focus-visible style but were not focusable — make each row Tab-reachable
+       and Enter/Space-operable. We deliberately do NOT set role="button": the
+       row already contains an independent multi-select checkbox, and a button
+       must not contain interactive descendants (WAI-ARIA). The checkbox stays
+       the screen-reader multi-select control; the focusable row adds the
+       sighted-keyboard "open details" affordance via a descriptive aria-label. */
     d.tabIndex = 0;
-    d.setAttribute("role", "button");
-    d.setAttribute("aria-label", "Select " + i.symbol);
+    d.setAttribute("aria-label", "Open " + i.symbol + " details");
     d.onkeydown = (ev) => {
       if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectInstrument(i); }
     };
