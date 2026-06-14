@@ -75,7 +75,13 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.historical_pull import pull_contract_candles
-from brutex.dashboard.live_lake_view import LIVE_TABLES, live_table, live_tables_summary
+from brutex.dashboard.live_lake_view import (
+    LIVE_TABLES,
+    live_columns,
+    live_table,
+    live_tables_summary,
+    query_live_table,
+)
 from brutex.dashboard.live_runner import LiveRunner
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
@@ -3342,6 +3348,69 @@ def build_app(
         try:
             payload = await run_in_threadpool(
                 lambda: live_table(lake, name, limit=limit, offset=offset)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/live/columns/{name}")
+    async def api_live_columns(name: str) -> JSONResponse:
+        """GET /api/v1/live/columns/{name} — a live table's columns (the picker)."""
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse({"table": name, "columns": []})
+        try:
+            cols = await run_in_threadpool(lambda: live_columns(lake, name))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"table": name, "columns": cols})
+
+    @app.get("/api/v1/live/query/{name}")
+    async def api_live_query(
+        name: str,
+        # FastAPI list query params need an in-signature Query() default (see
+        # api_db_query); B008's mutable-default heuristic is a false positive.
+        column: list[str] | None = Query(default=None),  # noqa: B008
+        f: list[str] | None = Query(default=None),  # noqa: B008
+        order_by: str | None = Query(default=None),
+        desc: bool = Query(default=True),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/live/query/{name} — search/sort/filter a live lake table.
+
+        Repeatable ``column=`` (projection), repeatable ``f=col:op:value`` (WHERE,
+        AND-combined; ``op`` is an ``ALLOWED_OPERATORS`` token), ``order_by`` +
+        ``desc``, ``limit`` / ``offset``. Thin wrapper over
+        :func:`brutex.dashboard.live_lake_view.query_live_table` — every
+        identifier is validated + every value parameter-bound there.
+        """
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse(
+                {
+                    "table": name,
+                    "columns": [],
+                    "rows": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        parsed_filters = _parse_filters(f or [])
+        columns = tuple(column) if column else None
+        try:
+            payload = await run_in_threadpool(
+                lambda: query_live_table(
+                    lake,
+                    name,
+                    columns=columns,
+                    filters=parsed_filters,
+                    order_by=order_by,
+                    descending=desc,
+                    limit=limit,
+                    offset=offset,
+                )
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

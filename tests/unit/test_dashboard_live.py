@@ -123,3 +123,41 @@ def test_table_bad_name_is_400(tmp_path) -> None:
         build_app(DashboardState(), instrument_store=store, live_runner=_runner(tmp_path))
     )
     assert client.get("/api/v1/live/table/bogus").status_code == 400
+
+
+def test_live_columns_route(tmp_path) -> None:
+    # no store → empty columns
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    assert client.get("/api/v1/live/columns/live_ticks").json()["columns"] == []
+    # with store → real columns; bad name → 400
+    lake = tmp_path / "lake"
+    (lake / "instruments").mkdir(parents=True)
+    _seed_lake(lake)
+    store = _FakeStore(lake / "instruments")
+    c2 = TestClient(
+        build_app(DashboardState(), instrument_store=store, live_runner=_runner(tmp_path))
+    )
+    assert "instrument_key" in c2.get("/api/v1/live/columns/live_ticks").json()["columns"]
+    assert c2.get("/api/v1/live/columns/bogus").status_code == 400
+
+
+def test_live_query_route(tmp_path) -> None:
+    # no store → empty page
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    empty = client.get("/api/v1/live/query/live_ticks").json()
+    assert empty["total"] == 0 and empty["rows"] == []
+    # with store → filter + project + sort
+    lake = tmp_path / "lake"
+    (lake / "instruments").mkdir(parents=True)
+    _seed_lake(lake)
+    store = _FakeStore(lake / "instruments")
+    c2 = TestClient(
+        build_app(DashboardState(), instrument_store=store, live_runner=_runner(tmp_path))
+    )
+    page = c2.get(
+        "/api/v1/live/query/live_ticks"
+        "?f=groww_symbol:eq:NSE-NIFTY&column=groww_symbol&order_by=seq&desc=false"
+    ).json()
+    assert page["total"] == 1 and page["columns"] == ["groww_symbol"]
+    assert page["rows"][0][0] == "NSE-NIFTY"
+    assert c2.get("/api/v1/live/query/bogus").status_code == 400
