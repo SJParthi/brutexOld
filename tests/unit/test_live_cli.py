@@ -327,6 +327,97 @@ def test_make_subscribe_and_reader_dispatch() -> None:
     assert cli._make_snapshot_reader(feed, "index") == feed.get_index_value
 
 
+# ─────────────────── dual-feed routing (--feed both) ──────────────
+
+
+def _idx(token: str) -> dict[str, Any]:
+    return {"exchange": "NSE", "segment": "IDX", "exchange_token": token, "instrument_type": "IDX"}
+
+
+def _eq(token: str) -> dict[str, Any]:
+    return {"exchange": "NSE", "segment": "CASH", "exchange_token": token, "instrument_type": "EQ"}
+
+
+def test_classify_feed_instruments_routes_and_strips_tag() -> None:
+    index_rows, ltp_rows = cli.classify_feed_instruments([_idx("26000"), _eq("100"), _eq("200")])
+    # indices → index-value list; equities → ltp list; the routing tag is dropped.
+    assert index_rows == [{"exchange": "NSE", "segment": "IDX", "exchange_token": "26000"}]
+    assert ltp_rows == [
+        {"exchange": "NSE", "segment": "CASH", "exchange_token": "100"},
+        {"exchange": "NSE", "segment": "CASH", "exchange_token": "200"},
+    ]
+    assert all("instrument_type" not in row for row in (*index_rows, *ltp_rows))
+
+
+def test_classify_feed_instruments_defaults_untagged_to_ltp() -> None:
+    # A row with no ``instrument_type`` is treated as a tradable (ltp) instrument.
+    index_rows, ltp_rows = cli.classify_feed_instruments(
+        [{"exchange": "NSE", "segment": "CASH", "exchange_token": "9"}]
+    )
+    assert index_rows == []
+    assert ltp_rows == [{"exchange": "NSE", "segment": "CASH", "exchange_token": "9"}]
+
+
+def test_merge_snapshots_unions_and_overrides() -> None:
+    assert cli.merge_snapshots({"A": 1.0}, {"B": 2.0}) == {"A": 1.0, "B": 2.0}
+    assert cli.merge_snapshots({"A": 1.0}, {"A": 2.0}) == {"A": 2.0}  # last writer wins
+    assert cli.merge_snapshots() == {}
+
+
+class _DualFakeFeed:
+    """Records the index-value AND ltp subscriptions separately (for --feed both)."""
+
+    def __init__(self) -> None:
+        self.index_sub: list[Any] | None = None
+        self.ltp_sub: list[Any] | None = None
+        self.cbs: list[Any] = []
+
+    def subscribe_index_value(self, instruments, on_data_received) -> None:
+        self.index_sub = list(instruments)
+        self.cbs.append(on_data_received)
+
+    def subscribe_ltp(self, instruments, on_data_received) -> None:
+        self.ltp_sub = list(instruments)
+        self.cbs.append(on_data_received)
+
+    def get_index_value(self) -> dict[str, Any]:
+        return {"NSE:IDX:NIFTY": 100.0}
+
+    def get_ltp(self) -> dict[str, Any]:
+        return {"NSE:EQ:RELIANCE": 200.0}
+
+
+def test_make_subscribe_both_routes_each_group_to_its_feed() -> None:
+    feed = _DualFakeFeed()
+    cb = lambda: None  # noqa: E731 - tiny sentinel callback
+    cli._make_subscribe(feed, [_idx("26000"), _eq("100")], "both")(cb)
+    assert feed.index_sub == [{"exchange": "NSE", "segment": "IDX", "exchange_token": "26000"}]
+    assert feed.ltp_sub == [{"exchange": "NSE", "segment": "CASH", "exchange_token": "100"}]
+    assert feed.cbs == [cb, cb]  # the SAME callback feeds both subscriptions
+
+
+def test_make_subscribe_both_skips_empty_groups() -> None:
+    only_idx = _DualFakeFeed()
+    cli._make_subscribe(only_idx, [_idx("26000")], "both")(lambda: None)
+    assert only_idx.index_sub == [{"exchange": "NSE", "segment": "IDX", "exchange_token": "26000"}]
+    assert only_idx.ltp_sub is None  # no equities → ltp feed never touched
+
+    only_eq = _DualFakeFeed()
+    cli._make_subscribe(only_eq, [_eq("100")], "both")(lambda: None)
+    assert only_eq.index_sub is None  # no indices → index feed never touched
+    assert only_eq.ltp_sub == [{"exchange": "NSE", "segment": "CASH", "exchange_token": "100"}]
+
+    empty = _DualFakeFeed()
+    cli._make_subscribe(empty, [], "both")(lambda: None)
+    assert empty.index_sub is None and empty.ltp_sub is None
+
+
+def test_make_snapshot_reader_both_merges_index_and_ltp() -> None:
+    feed = _DualFakeFeed()
+    reader = cli._make_snapshot_reader(feed, "both")
+    assert reader() == {"NSE:IDX:NIFTY": 100.0, "NSE:EQ:RELIANCE": 200.0}
+
+
 def test_main_defaults_to_real_deps(monkeypatch, tmp_path) -> None:
     """The ``deps is None`` branch resolves the real bundle (patched here)."""
     monkeypatch.setattr(cli, "_real_deps", _noop_deps)
