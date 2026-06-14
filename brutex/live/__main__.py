@@ -40,6 +40,7 @@ from brutex.live.report import render_parity_markdown
 from brutex.live.serde import read_candles, write_candles
 from brutex.live.store import TickStore
 from brutex.live.tick import iter_ticks
+from brutex.live.verify import render_subscription_markdown, verify_subscription
 
 _LOG = structlog.get_logger("brutex.live.cli")
 
@@ -74,21 +75,40 @@ def _real_feed_builder() -> Any:  # pragma: no cover — needs growwapi + creds 
 def _real_instrument_resolver(  # pragma: no cover — needs the instrument master
     symbols: str, feed_kind: str
 ) -> list[dict[str, Any]]:
-    """Resolve comma-separated ``EXCH-SYMBOL`` strings to feed instrument dicts.
+    """Resolve ``EXCH-SYMBOL`` strings (or ``"all"``) to feed instrument dicts.
 
     Downloads the Groww instrument master and emits the ``{exchange, segment,
-    exchange_token}`` dicts the feed's ``subscribe_*`` methods expect.
+    exchange_token}`` dicts the feed's ``subscribe_*`` methods expect. The
+    sentinel ``"all"`` / ``"universe"`` resolves the FULL universe — every index
+    (``IDX``) PLUS every F&O-eligible single stock (an ``EQ`` row whose symbol is
+    named by at least one ``FUT``/``CE``/``PE`` leg) — so a ``verify`` run
+    subscribes to all indices AND their stocks.
     """
     import csv
     import urllib.request
 
     from brutex.adapters.groww.constants import GROWW_INSTRUMENT_CSV_URL
 
-    wanted = {s.strip().upper() for s in symbols.split(",") if s.strip()}
     text = urllib.request.urlopen(GROWW_INSTRUMENT_CSV_URL, timeout=30).read().decode("utf-8")  # noqa: S310
+    rows = list(csv.DictReader(text.splitlines()))
+    full = symbols.strip().lower() in ("all", "universe")
+    if full:
+        fno_underlyings = {
+            (r.get("underlying_symbol") or "").strip().upper()
+            for r in rows
+            if (r.get("instrument_type") or "").strip().upper() in ("FUT", "CE", "PE")
+        }
+    wanted = {s.strip().upper() for s in symbols.split(",") if s.strip()}
     out: list[dict[str, Any]] = []
-    for row in csv.DictReader(text.splitlines()):
-        if (row.get("groww_symbol") or "").strip().upper() in wanted:
+    for row in rows:
+        itype = (row.get("instrument_type") or "").strip().upper()
+        gsym = (row.get("groww_symbol") or "").strip().upper()
+        tsym = (row.get("trading_symbol") or "").strip().upper()
+        if full:
+            keep = itype == "IDX" or (itype == "EQ" and tsym in fno_underlyings)
+        else:
+            keep = gsym in wanted
+        if keep:
             out.append(
                 {
                     "exchange": row["exchange"],
@@ -250,6 +270,40 @@ def _cmd_lake(args: argparse.Namespace, _deps: LiveDeps) -> int:
     return 0
 
 
+def _cmd_verify(args: argparse.Namespace, deps: LiveDeps) -> int:
+    """Subscribe to ALL requested instruments + PROVE per-instrument tick delivery."""
+    feed = deps.feed_builder()
+    instruments = deps.instrument_resolver(args.symbols, args.feed)
+    _LOG.info(
+        "verify_subscribe", instruments=len(instruments), feed=args.feed, symbols=args.symbols
+    )
+    subscribe = _make_subscribe(feed, instruments, args.feed)
+    read_snapshot = _make_snapshot_reader(feed, args.feed)
+    with TickStore.open(args.out, resume=args.resume) as store:
+        report = verify_subscription(
+            store=store,
+            subscribe=subscribe,
+            read_snapshot=read_snapshot,
+            requested=len(instruments),
+            seconds=args.seconds,
+            sleep=deps.sleep,
+            monotonic=deps.monotonic,
+            clock=deps.clock,
+        )
+    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.report).write_text(render_subscription_markdown(report), encoding="utf-8")
+    _LOG.info(
+        "verify_complete",
+        requested=report.requested,
+        observed=report.observed,
+        total_ticks=report.total_ticks,
+        silent=report.silent,
+        all_ticking=report.all_requested_ticking,
+        report=str(args.report),
+    )
+    return 0 if report.all_requested_ticking else 1
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
     "capture": _cmd_capture,
     "cadence": _cmd_cadence,
@@ -257,6 +311,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
     "parity": _cmd_parity,
     "probe-connections": _cmd_probe_connections,
     "lake": _cmd_lake,
+    "verify": _cmd_verify,
 }
 
 
@@ -293,6 +348,16 @@ def _build_parser() -> argparse.ArgumentParser:
     lk.add_argument("--lake-root", dest="lake_root", required=True, help="lake root directory")
     lk.add_argument("--run-id", dest="run_id", required=True, help="capture/build run id")
     lk.add_argument("--feed", choices=("index", "ltp"), default="index")
+
+    ver = sub.add_parser("verify", help="PROVE the feed subscribes + ticks (per instrument)")
+    ver.add_argument(
+        "--out", required=True, help="JSONL capture path (the self-test also captures)"
+    )
+    ver.add_argument("--report", required=True, help="destination Markdown proof path")
+    ver.add_argument("--symbols", default="all", help='"all" (full universe) or comma EXCH-SYMBOL')
+    ver.add_argument("--seconds", type=float, default=60.0, help="measurement window")
+    ver.add_argument("--feed", choices=("index", "ltp"), default="ltp")
+    ver.add_argument("--resume", action="store_true", help="append to an existing log")
 
     return parser
 

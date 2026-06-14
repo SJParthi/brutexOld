@@ -241,6 +241,55 @@ def test_cmd_lake_persists_ticks_and_candles(tmp_path) -> None:
     assert read_live_candles(lake_root).shape[0] == 1
 
 
+def test_cmd_verify_all_ticking_returns_0(tmp_path) -> None:
+    feed = _FakeFeed([{"NSE:IDX:NIFTY": 22500.0}, {"NSE:IDX:NIFTY": 22501.0}])
+    deps = _deps_with(feed, monotonic_vals=[0.0, 0.4, 0.8, 1.2])
+    rc = main(
+        [
+            "verify",
+            "--out",
+            str(tmp_path / "v.jsonl"),
+            "--report",
+            str(tmp_path / "v.md"),
+            "--seconds",
+            "1",
+            "--feed",
+            "index",
+        ],
+        deps=deps,
+    )
+    assert rc == 0  # requested 1, observed 1 → all ticking
+    assert "subscription self-test" in (tmp_path / "v.md").read_text(encoding="utf-8")
+
+
+def test_cmd_verify_some_silent_returns_1(tmp_path) -> None:
+    feed = _FakeFeed([{"NSE:IDX:NIFTY": 1.0}, {"NSE:IDX:NIFTY": 2.0}])
+    it = iter([0.0, 0.4, 0.8, 1.2])
+    deps = LiveDeps(
+        feed_builder=lambda: feed,
+        instrument_resolver=lambda s, k: [
+            {"exchange": "NSE", "segment": "IDX", "exchange_token": "1"},
+            {"exchange": "NSE", "segment": "IDX", "exchange_token": "2"},
+        ],
+        clock=_clock_seq(),
+        sleep=lambda _s: feed.fire(),
+        monotonic=lambda: next(it),
+    )
+    rc = main(
+        [
+            "verify",
+            "--out",
+            str(tmp_path / "v.jsonl"),
+            "--report",
+            str(tmp_path / "v.md"),
+            "--seconds",
+            "1",
+        ],
+        deps=deps,
+    )
+    assert rc == 1  # requested 2, observed 1 → some silent
+
+
 # ──────────────────────── helpers + real-deps branch ─────────────
 
 
