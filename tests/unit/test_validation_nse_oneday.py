@@ -12,6 +12,7 @@ bar-selection trap and the degrade-never-crash boundary are pinned explicitly.
 from __future__ import annotations
 
 import json
+import urllib.request
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -788,3 +789,55 @@ class TestFetchIndexSnapshot:
             raise OSError("blocked / weekend 404")
 
         assert m.fetch_index_snapshot(_DATE, official_opener=_boom) is None
+
+
+class TestDefaultOfficialOpener:
+    """Regression for the live-only NSE archive opener (DEC-NSE-COOKIE-DANCE-001).
+
+    The opener body is ``# pragma: no cover - live network only`` (real NSE is
+    bot-blocked + this build env network-blocks it), so the REAL fetch stays
+    unverifiable in CI — but the cookie-dance LOGIC (prime the session cookies
+    FIRST, then fetch the archive with the SAME opener so the cookies carry) is
+    pinned here with a fake ``build_opener``. This test FAILS on the pre-fix bare
+    ``urlopen(request)`` (no prime → NSE 403): the prior code never opened the
+    prime URL and never built a cookie-jar opener.
+    """
+
+    class _FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self) -> TestDefaultOfficialOpener._FakeResponse:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class _RecordingOpener:
+        def __init__(self) -> None:
+            self.opened: list[str] = []
+
+        def open(
+            self, request: urllib.request.Request, timeout: float | None = None
+        ) -> TestDefaultOfficialOpener._FakeResponse:
+            self.opened.append(request.full_url)
+            return TestDefaultOfficialOpener._FakeResponse(b"SYMBOL,CLOSE\nNIFTY,24080.40\n")
+
+    def test_primes_cookies_before_fetching_the_archive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        opener = self._RecordingOpener()
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *_a, **_k: opener)
+        body = m._default_official_opener("https://nsearchives.nseindia.com/x.csv")
+        assert body == "SYMBOL,CLOSE\nNIFTY,24080.40\n"
+        # the cookie dance: prime URL FIRST, archive URL SECOND, on the SAME opener
+        assert opener.opened == [
+            m.NSE_COOKIE_PRIME_URL,
+            "https://nsearchives.nseindia.com/x.csv",
+        ]
