@@ -18,6 +18,11 @@
     --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
     --red: #FF5C5C; --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
     --grad: linear-gradient(100deg, var(--green-bright), var(--blue) 45%, var(--purple) 80%, var(--pink));
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
+    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); }
@@ -67,6 +72,10 @@
     background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
     background-size: 220% auto; animation: shimmer 6s linear infinite; }
   @keyframes shimmer { to { background-position: 220% center; } }
+  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
+  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
+  .topnav a:hover { color:var(--text-bright); }
+  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
   .bar nav { margin-left: auto; display: flex; gap: 18px; font-size: 13.5px; flex-wrap: wrap; }
   .bar nav a { color: var(--muted); transition: color .2s; }
   .bar nav a:hover { color: var(--text-bright); }
@@ -179,6 +188,7 @@
 
   <main>
     <div class="bar">
+      <div class="brandmark" aria-hidden="true">B</div>
       <span class="brand">BruteX</span>
       <nav aria-label="Primary">
         <a href="/">Dashboard</a>
