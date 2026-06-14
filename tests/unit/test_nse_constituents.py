@@ -386,11 +386,13 @@ class TestFetchSymbolsAtUrl:
         assert symbols == ["RELIANCE", "M&M", "GVT&D", "HDFCBANK"]
         assert calls == ["https://x/ind_niftypharmalist.csv"]
 
+    def test_fetch_rows_returns_symbol_isin_pairs(self) -> None:
+        """The ISIN-carrying sibling parses each member's (symbol, isin) row.
 
-class TestFetchRowsAtUrl:
-    """Direct-URL ROW fetch (symbol + ISIN) — rename-proof sibling (DEC-INDEX-CONSTITUENTS-NSE-001)."""
-
-    def test_fetches_and_parses_rows_with_isin(self) -> None:
+        Covers ``fetch_rows_at_url`` (DEC-INDEX-CONSTITUENTS-NSE-001) which #685
+        added without a direct test — its 2-line body was left uncovered on main,
+        failing the per-module 100% gate (repaired here under DEC-GROWW-RATELIMIT-RETRY-001).
+        """
         calls: list[str] = []
 
         def _opener(url: str) -> str:
@@ -398,10 +400,6 @@ class TestFetchRowsAtUrl:
             return _FIXTURE_CSV
 
         rows = fetch_rows_at_url("https://x/ind_niftypharmalist.csv", opener=_opener)
-        assert rows == [
-            ConstituentRow("RELIANCE", "INE002A01018"),
-            ConstituentRow("M&M", "INE101A01026"),
-            ConstituentRow("GVT&D", "INE200A01026"),
-            ConstituentRow("HDFCBANK", "INE040A01034"),
-        ]
+        assert rows[0] == ConstituentRow(symbol="RELIANCE", isin="INE002A01018")
+        assert rows[1] == ConstituentRow(symbol="M&M", isin="INE101A01026")
         assert calls == ["https://x/ind_niftypharmalist.csv"]

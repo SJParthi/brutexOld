@@ -76,17 +76,71 @@ _SDK_NAME_TO_ERROR: dict[str, type[GrowwError]] = {
 }
 
 
+#: HTTP-ish status codes the SDK may carry on a GENERIC ``GrowwAPIException(msg,
+#: code)`` when it does NOT raise the typed subclass — mapped to the retryable
+#: neutral error. ``429`` = rate-limit; ``408``/``504`` = timeout
+#: (``docs/groww/api-reference/05-exceptions.md``; the SDK's ``GrowwAPIException``
+#: carries ``code``).
+_CODE_TO_ERROR: dict[int, type[GrowwError]] = {
+    429: GrowwRateLimitError,
+    408: GrowwTimeoutError,
+    504: GrowwTimeoutError,
+}
+
+#: Message substrings (lower-cased) that mark a RETRYABLE failure when the SDK
+#: raised a generic exception with no typed subclass + no recognised ``code``. The
+#: live Groww SDK surfaces a rate-limit as
+#: ``GrowwAPIException("Rate limit has breached for your request. ...")`` — the
+#: BASE client-error class, NOT ``GrowwAPIRateLimitException`` — so the message is
+#: the only reliable signal. Kept narrow (only the two transient classes) so an
+#: unknown failure is never blindly retried (Golden Rule #1).
+_RATE_LIMIT_HINTS: tuple[str, ...] = ("rate limit", "too many request", "429")
+_TIMEOUT_HINTS: tuple[str, ...] = ("timed out", "timeout", "deadline exceeded")
+
+
+def _classify_generic(exc: Exception) -> type[GrowwError]:
+    """Classify a GENERIC SDK exception by its ``code`` attr + message (retryable-first).
+
+    Used only when the class name is NOT a known typed subclass — i.e. the SDK
+    raised a bare ``GrowwAPIException`` / ``GrowwBaseException``. Checks the
+    HTTP-ish ``code`` first (``429``→rate-limit, ``408``/``504``→timeout, int or
+    digit-string), then sniffs the message for the two transient classes. Anything
+    unrecognised stays the terminal base :class:`GrowwError` (conservative — an
+    unknown failure is never retried, Golden Rule #1).
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, bool):  # bool is an int subclass — never a status code
+        code = None
+    if isinstance(code, int) and code in _CODE_TO_ERROR:
+        return _CODE_TO_ERROR[code]
+    if isinstance(code, str) and code.strip().isdigit() and int(code) in _CODE_TO_ERROR:
+        return _CODE_TO_ERROR[int(code)]
+    message = str(exc).casefold()
+    if any(hint in message for hint in _RATE_LIMIT_HINTS):
+        return GrowwRateLimitError
+    if any(hint in message for hint in _TIMEOUT_HINTS):
+        return GrowwTimeoutError
+    return GrowwError
+
+
 def from_groww_exception(exc: Exception) -> GrowwError:
     """Map a ``growwapi`` SDK exception instance to a neutral :class:`GrowwError`.
 
     Classification is by the exception's class name (string), so no SDK import is
-    needed. Any unmapped exception (a bare ``GrowwAPIException`` /
-    ``GrowwBaseException`` / non-SDK error) maps to the terminal base
-    :class:`GrowwError` — conservative: an unknown failure is never blindly
-    retried (Golden Rule #1).
+    needed. **A bare ``GrowwAPIException`` / ``GrowwBaseException`` (the SDK does
+    NOT always raise the typed subclass — a rate-limit commonly arrives as the
+    base ``GrowwAPIException`` with a ``429`` ``code`` and/or a "Rate limit has
+    breached" message) is then classified by :func:`_classify_generic` so it is
+    still recognised as retryable** (DEC-GROWW-RATELIMIT-RETRY-001 — without this
+    the live derivatives chain pull mis-saw a 429 as terminal and died instantly).
+    Any still-unrecognised failure maps to the terminal base :class:`GrowwError` —
+    conservative: an unknown failure is never blindly retried (Golden Rule #1).
     """
-    error_cls = _SDK_NAME_TO_ERROR.get(type(exc).__name__, GrowwError)
-    return error_cls(f"{type(exc).__name__}: {exc}")
+    name = type(exc).__name__
+    error_cls = _SDK_NAME_TO_ERROR.get(name)
+    if error_cls is None:
+        error_cls = _classify_generic(exc)
+    return error_cls(f"{name}: {exc}")
 
 
 def is_rate_limit(exc: GrowwError) -> bool:
