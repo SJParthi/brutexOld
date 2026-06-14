@@ -2051,7 +2051,15 @@ jobs:
           python -m brutex run --no-browser > run.log 2>&1 &
           server_pid=$!
           ok=0
-          for i in $(seq 1 30); do
+          # Cold-start boot loads the full ~750-row instrument universe before it
+          # binds :9080, so the readiness budget must cover the SLOWEST cold boot,
+          # not the median. A 30-retry (~30s) budget produced a flaky false-red
+          # (PR #735 push-run: the dashboard had logged its banner + was mid
+          # `universe.load` when retry #30 expired) while the SAME gate passed on
+          # the parallel PR run and on main post-merge. Budget widened to ~90s; we
+          # still fail FAST the instant the server process dies, so a genuine
+          # boot crash is caught immediately rather than waiting out the budget.
+          for i in $(seq 1 90); do
             if curl -fsS http://127.0.0.1:9080/ -o index.html; then ok=1; break; fi
             # fail fast if the server process already died
             if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
