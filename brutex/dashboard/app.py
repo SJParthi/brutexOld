@@ -4125,8 +4125,11 @@ def _load_live_template() -> str:
     Ships as ``brutex/dashboard/templates/live.html``. The page polls
     ``/api/v1/live/status`` (capture process state + tick count), drives the
     ON/OFF toggle via ``POST /api/v1/live/start`` / ``stop``, and browses the two
-    live lake tables via ``/api/v1/live/tables`` + ``/api/v1/live/table/{name}``,
-    escaping every cell before render (XSS — vendor-origin values).
+    live lake tables with a query-builder UI (column picker + filter rows + sort
+    dropdown + Prev/Next paging) via ``/api/v1/live/tables`` +
+    ``/api/v1/live/columns/{name}`` + ``/api/v1/live/query/{name}``, mirroring the
+    ``/db`` Database browser 1:1 (DEC-LIVE-UI-CONTROLS-001), escaping every column
+    name + cell before render (XSS — vendor-origin values).
     """
     return _LIVE_TEMPLATE_PATH.read_text(encoding="utf-8")
 
