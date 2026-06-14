@@ -146,6 +146,24 @@ def test_symbols_form_starts_job(client: TestClient, monkeypatch: pytest.MonkeyP
     assert _wait_for_job(client)["state"] == "done"
 
 
+def test_until_clean_flag_is_accepted_and_echoed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ?until_clean=true escalates to the derivatives until-clean round-loop
+    # (DEC-GROWW-DERIV-UNTIL-CLEAN-001); the route accepts + echoes it.
+    _force_dry_run(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_derivatives", _fake_pull_all_derivatives)
+    resp = client.post(
+        "/api/v1/universe/pull-derivatives",
+        params={"kind": "index", "until_clean": "true"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["until_clean"] is True
+    assert body["started"] is True
+    assert _wait_for_job(client)["state"] == "done"
+
+
 # ── 400 arms ─────────────────────────────────────────────────────────────────
 
 

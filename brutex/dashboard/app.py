@@ -1496,6 +1496,7 @@ def build_app(
         contract_type: str = Query(default="both"),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        until_clean: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-derivatives — start a bulk F&O CHAIN pull.
 
@@ -1512,6 +1513,10 @@ def build_app(
         value for either is a 400. ``dry_run`` is forced when Groww creds are absent —
         and the dry-run enumerates an honest EMPTY chain (the strikes/expiries are
         real vendor data, never fabricated offline, Golden Rule #1).
+        ``?until_clean=true`` (DEC-GROWW-DERIV-UNTIL-CLEAN-001) escalates to the
+        bounded re-pull-until-clean round-loop (the derivatives twin of the spot
+        ``retry-failed?until_clean=true``) — keep re-pulling the still-failed
+        transient windows until the chain drains / the token dies / the budget stops.
         """
         dry_run = not groww_credentials_present()
         try:
@@ -1575,6 +1580,7 @@ def build_app(
                 to_date=to_date,
                 on_progress=_deriv_progress,
                 session_rate=_session_rate,
+                until_clean=until_clean,
             )
 
         # The chain size is only known after live enumeration, so the job total is a
@@ -1591,6 +1597,7 @@ def build_app(
                 "contract_type": contract_type,
                 "intervals": list(intervals),
                 "contract_types": list(contract_types),
+                "until_clean": until_clean,
                 "dry_run": dry_run,
             }
         )

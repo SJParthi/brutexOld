@@ -44,6 +44,11 @@ from brutex.adapters.groww.option_ingest import (
     ingest_underlying_options,
 )
 from brutex.adapters.groww.run_ingest import ProgressHook
+from brutex.adapters.ingest_common import (
+    AUTO_RESUME_MAX_ROUNDS,
+    UntilCleanRound,
+    run_until_clean,
+)
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -157,6 +162,12 @@ class DerivativesPullReport:
     failed_pairs: int
     auth_aborted: bool
     note: str
+    #: Transient windows (rate-limit/timeout) STILL failing after the pull. With
+    #: ``until_clean=True`` this is the residual after the LAST re-pull round (0 ⇒
+    #: the chain drained clean); the single-pass default reports the one pass's
+    #: transient residual. Defaults to ``0`` so every existing constructor + JSON
+    #: consumer is backward-compatible (DEC-GROWW-DERIV-UNTIL-CLEAN-001).
+    still_failed_windows: int = 0
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the ``pull-derivatives`` route + the live panel."""
@@ -170,6 +181,7 @@ class DerivativesPullReport:
             "bars_appended": self.bars_appended,
             "windows": self.windows,
             "failed_pairs": self.failed_pairs,
+            "still_failed_windows": self.still_failed_windows,
             "auth_aborted": self.auth_aborted,
             "note": self.note,
         }
@@ -298,6 +310,25 @@ def _make_progress(
     return _progress
 
 
+@dataclass(frozen=True, slots=True)
+class _PassResult:
+    """One full enumerate-and-ingest pass's aggregate counts (cross-round accounting).
+
+    The derivatives twin of the spot pass's report: ``bars`` / ``windows`` are
+    SUMMED across rounds (round N re-appends only the windows the prior round left
+    FAILED — the keep-first sink + WindowLedger skip make double-counting
+    impossible), while ``failed_pairs`` / ``still_failed_windows`` / ``auth_aborted``
+    describe THIS pass's residual (the loop reports the LAST round's). Internal —
+    never crosses the module boundary (DEC-GROWW-DERIV-UNTIL-CLEAN-001).
+    """
+
+    bars: int
+    windows: int
+    failed_pairs: int
+    still_failed_windows: int
+    auth_aborted: bool
+
+
 def pull_all_derivatives(
     instruments: Sequence[Instrument],
     *,
@@ -311,6 +342,8 @@ def pull_all_derivatives(
     client_factory: DerivativeClientFactory | None = None,
     on_progress: ProgressHook | None = None,
     session_rate: SessionRateController | None = None,
+    until_clean: bool = False,
+    until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
 ) -> DerivativesPullReport:
     """Pull the FULL F&O chain (all expiries × all strikes) for *instruments*.
 
@@ -320,6 +353,28 @@ def pull_all_derivatives(
     makes every window rerun-safe (idempotent). Stops early on a dead auth token
     (re-pulling is futile). Reuses the shared ledger lifecycle + the session rate
     controller; tests inject ``client_factory`` for a 100%-offline run.
+
+    With ``until_clean=True`` (the derivatives twin of the spot
+    ``pull_all_spot(until_clean=True)`` — DEC-GROWW-DERIV-UNTIL-CLEAN-001) the pull
+    runs BOUNDED re-pull rounds over the SHARED WindowLedger until the transient
+    residual drains to zero, the token dies, or the round budget / a no-progress
+    round stops it (:func:`~brutex.adapters.ingest_common.run_until_clean`,
+    ``stop_when_stuck=True``). Each round re-enumerates the chain and re-ingests;
+    the ledger SKIPS already-`SUCCESS` windows and RE-ATTEMPTS the prior round's
+    `FAILED` (transient) ones, so successive rounds only re-fetch what is still
+    failing. TERMINAL quarantines (bad-request/auth — `failed_pairs`) are NOT
+    transient and are correctly excluded from the clean test (consistent with the
+    spot twin); they remain visible via ``failed_pairs`` + the note. Default
+    ``until_clean=False`` is one single pass — byte-identical to the prior behaviour.
+
+    Honest envelope (Golden Rule #10): a round is **O(chain enumeration) +
+    O(failed windows)** — NOT ``O(failed_windows)`` like the spot round, because the
+    derivatives chain is re-enumerated (``get_expiries`` × ``get_contracts``) every
+    round. ``stop_when_stuck=True`` is therefore load-bearing — a round that drains
+    zero residual halts immediately rather than re-paying the enumeration to the
+    budget cap. Re-enumeration is paced by the SAME rate bucket (it cannot bypass the
+    500/min governor). Groww backtesting has NO daily quota (DEC-GROWW-NO-DAILY-QUOTA-001),
+    so the wired ``quota_exhausted`` brake is dormant.
 
     Parameters
     ----------
@@ -347,6 +402,13 @@ def pull_all_derivatives(
         Per ``(contract, interval)`` progress hook ``(label, bars, failed)``.
     session_rate
         The dashboard's ``SessionRateController`` (live pacing); ``None`` offline.
+    until_clean
+        When ``True``, run bounded re-pull rounds until the transient residual
+        drains (default ``False`` — one single pass, byte-identical to before).
+    until_clean_rounds
+        The OUTER round budget for ``until_clean`` (default
+        :data:`~brutex.adapters.ingest_common.AUTO_RESUME_MAX_ROUNDS`); ``<= 0``
+        runs zero rounds (a safe no-op).
     """
     now = now or datetime.now(UTC)
     start, end = resolve_derivative_range(from_date=from_date, to_date=to_date, now=now)
@@ -361,11 +423,21 @@ def pull_all_derivatives(
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
     progress = _make_progress(on_progress, flush)
 
-    bars_appended = 0
-    windows = 0
-    failed_pairs = 0
-    auth_aborted = False
-    try:
+    passes: list[_PassResult] = []
+
+    def _one_pass() -> _PassResult:
+        """Run ONE full enumerate-and-ingest pass over instruments × contract_types.
+
+        The single ingest call site (CLAUDE.md §11 COMMON) — the one-shot path AND
+        every until-clean round funnel through here, so the args can never drift.
+        Re-attempts the SHARED ledger's prior-round FAILED windows (the ledger skips
+        the done ones). Stops early on a dead auth token.
+        """
+        pass_bars = 0
+        pass_windows = 0
+        pass_failed_pairs = 0
+        pass_still_failed = 0
+        pass_auth = False
         for instrument in instruments:
             exchange = str(instrument.exch_id)
             for kind in contract_types:
@@ -392,19 +464,77 @@ def pull_all_derivatives(
                     on_success=on_success,
                     on_progress=progress,
                 )
-                bars_appended += report.bars_appended
-                windows += report.windows
-                failed_pairs += report.failed_pairs
-                auth_aborted = auth_aborted or report.auth_aborted
-                if auth_aborted:
+                pass_bars += report.bars_appended
+                pass_windows += report.windows
+                pass_failed_pairs += report.failed_pairs
+                pass_still_failed += report.still_failed_windows
+                pass_auth = pass_auth or report.auth_aborted
+                if pass_auth:
                     break
-            if auth_aborted:
+            if pass_auth:
                 break
+        result = _PassResult(
+            bars=pass_bars,
+            windows=pass_windows,
+            failed_pairs=pass_failed_pairs,
+            still_failed_windows=pass_still_failed,
+            auth_aborted=pass_auth,
+        )
+        passes.append(result)
+        return result
+
+    try:
+        if until_clean:
+            # The derivatives until-clean twin (DEC-GROWW-DERIV-UNTIL-CLEAN-001):
+            # bounded re-pull rounds over the SHARED ledger until the transient
+            # residual drains / the token dies / the budget or a no-progress round
+            # halts. ``stop_when_stuck=True`` is load-bearing — a round draining zero
+            # residual stops it before re-paying the chain enumeration to the cap.
+            def _round_runner() -> UntilCleanRound:
+                res = _one_pass()
+                # Groww derives auth_aborted from quarantined failures and carries no
+                # auth_cause string (the documented divergence — mirrors the spot
+                # path), so auth_cause stays at its None default.
+                return UntilCleanRound(
+                    still_failed_windows=res.still_failed_windows,
+                    auth_aborted=res.auth_aborted,
+                )
+
+            # Groww backtesting has NO daily quota (DEC-GROWW-NO-DAILY-QUOTA-001), so
+            # this brake is dormant; wired for parity with the spot path. Offline /
+            # dry-run pulls have no controller → no hook (never the limit).
+            quota_hook = (
+                session_rate.get().quota_exhausted
+                if (session_rate is not None and not dry_run)
+                else None
+            )
+            run_until_clean(
+                _round_runner,
+                max_rounds=until_clean_rounds,
+                quota_exhausted=quota_hook,
+                stop_when_stuck=True,
+            )
+        else:
+            _one_pass()
     finally:
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
 
+    # bars/windows SUM across rounds (round N re-appends only newly-fetched windows —
+    # the keep-first sink + ledger skip make double-counting impossible); the residual
+    # (failed_pairs / still_failed / auth) reflects the LAST round. ``until_clean_rounds
+    # <= 0`` runs zero rounds → empty ``passes`` → an honest all-zero no-op report.
+    bars_appended = sum(p.bars for p in passes)
+    windows = sum(p.windows for p in passes)
+    failed_pairs = passes[-1].failed_pairs if passes else 0
+    still_failed_windows = passes[-1].still_failed_windows if passes else 0
+    auth_aborted = passes[-1].auth_aborted if passes else False
+
     note = _build_note(
-        dry_run=dry_run, auth_aborted=auth_aborted, windows=windows, failed_pairs=failed_pairs
+        dry_run=dry_run,
+        auth_aborted=auth_aborted,
+        windows=windows,
+        failed_pairs=failed_pairs,
+        still_failed_windows=still_failed_windows,
     )
     return DerivativesPullReport(
         dry_run=dry_run,
@@ -416,12 +546,20 @@ def pull_all_derivatives(
         bars_appended=bars_appended,
         windows=windows,
         failed_pairs=failed_pairs,
+        still_failed_windows=still_failed_windows,
         auth_aborted=auth_aborted,
         note=note,
     )
 
 
-def _build_note(*, dry_run: bool, auth_aborted: bool, windows: int, failed_pairs: int) -> str:
+def _build_note(
+    *,
+    dry_run: bool,
+    auth_aborted: bool,
+    windows: int,
+    failed_pairs: int,
+    still_failed_windows: int = 0,
+) -> str:
     """Honest one-line outcome note for the report / live panel."""
     if dry_run:
         return (
@@ -434,5 +572,12 @@ def _build_note(*, dry_run: bool, auth_aborted: bool, windows: int, failed_pairs
         return (
             f"pulled {windows} windows; {failed_pairs} contract/interval pair(s) quarantined — "
             "re-pull to retry the deferred windows (WindowLedger skips the done ones)"
+        )
+    if still_failed_windows:
+        # until-clean stopped with transient residual (budget/no-progress) — honest
+        # about the leftover so it never reads as clean (DEC-GROWW-DERIV-UNTIL-CLEAN-001).
+        return (
+            f"pulled {windows} windows; {still_failed_windows} transient window(s) still "
+            "failing after the re-pull rounds — re-pull to drain them (WindowLedger skips the done)"
         )
     return f"pulled {windows} windows across the chain (rerun-safe — WindowLedger dedups)"
