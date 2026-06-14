@@ -148,7 +148,7 @@ def test_build_report_summarises_per_connection() -> None:
     assert report.num_connections == 2
     assert report.total_instruments == 3
     assert report.connections[0].feed_kind == "both" and report.connections[0].subscribed == 2
-    assert "2 connections (1 spot + 1 leg), 3 instruments" == report.summary()
+    assert report.summary() == "2 connections (1 spot + 1 leg), 3 instruments"
     md = report.render_markdown()
     assert "| #0 | both | 2 |" in md and "| #1 | ltp | 1 |" in md
 
