@@ -427,7 +427,9 @@ def test_cmd_fetch_live_inspect_reports_failures(
     # so its ``__self__`` is the RateController — assert it started at the 8 r/s ceiling.
     from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
 
-    controller = seen["pace"].__self__
+    # ``__self__`` exists on the bound method at runtime; pyright only sees a
+    # ``FunctionType`` so reach it via ``getattr`` (typed ``Any``) to stay gate-clean.
+    controller = getattr(seen["pace"], "__self__")  # noqa: B009
     assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
     assert controller.snapshot()["ceiling_per_min"] == 500
 
