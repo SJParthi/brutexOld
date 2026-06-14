@@ -13,9 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import brutex.dashboard
+import pytest
 
 _STATIC = Path(brutex.dashboard.__file__).resolve().parent / "static"
 _JS = (_STATIC / "bx-datepicker.js").read_text(encoding="utf-8")
