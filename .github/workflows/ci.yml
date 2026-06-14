@@ -1506,9 +1506,11 @@ jobs:
           # table summaries + structured query + spot/option candle readers,
           # the date-only daily timestamp renderer, and the per-bar derived
           # change_pct + open_gap_pct columns (vs the previous trading day's 1d
-          # close). 100% line+branch across both viewer test files.
+          # close) + the F&O registry expiries/contracts readers
+          # (DEC-DERIV-REGISTRY-DB-VIEW-001). 100% line+branch across the viewer
+          # + registry test files.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi

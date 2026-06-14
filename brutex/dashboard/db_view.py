@@ -147,6 +147,41 @@ OPTION_CANDLE_COLUMNS: Final = (
 #: the read-side viewer never traverses outside ``<lake>/options``.
 OPTIONS_DIR_NAME: Final = "options"
 
+#: The F&O expiries+contracts REGISTRY cache file
+#: (:class:`brutex.data.registry_store.RegistryStore`,
+#: DEC-DERIV-METADATA-HISTORICAL-SPLIT-001) — a SIBLING of the lean instrument
+#: master (``instruments.duckdb``), so it lives in the SAME directory (the lake
+#: root). :func:`registry_path_for` resolves it from the master's on-disk path
+#: the same way the candle/option readers resolve the lake root, keeping the
+#: ``/db`` page's path-resolution discipline in one place (CLAUDE.md §11 COMMON).
+REGISTRY_DB_NAME: Final = "registry.duckdb"
+
+#: The 7 browsable columns surfaced for the registry ``expiries`` table — the
+#: ``expiries`` schema minus ``last_run_id`` (an opaque blake3 run id, noise for
+#: the operator), in a stable display order. ``year`` is the derived Phase-1 cell
+#: key (:attr:`brutex.data.registry_store.ExpiryRow.year`).
+REGISTRY_EXPIRY_COLUMNS: Final = (
+    "exch",
+    "underlying",
+    "expiry_date",
+    "year",
+    "fetched_at",
+)
+
+#: The 8 browsable columns surfaced for the registry ``contracts`` table — the
+#: structured chain view the operator asked for (expiry / strike / CE-PE /
+#: per-contract historical ``candle_status``), ``last_run_id`` again omitted.
+REGISTRY_CONTRACT_COLUMNS: Final = (
+    "exch",
+    "underlying",
+    "expiry_date",
+    "contract_symbol",
+    "strike",
+    "side",
+    "candle_status",
+    "fetched_at",
+)
+
 #: A filesystem-safe option series segment is the writer's ``_safe_segment``
 #: output: a ``|``-joined series key with ``|`` rewritten to ``__``. The real
 #: parts are alnum + ``.`` + ``-`` + ``+`` (vendor coordinates) joined by
@@ -1930,12 +1965,231 @@ def build_window_payload(
     }
 
 
+# ── F&O expiries+contracts REGISTRY browser (DEC-DERIV-REGISTRY-DB-VIEW-001) ──
+# The registry is a SEPARATE `registry.duckdb` cache (PR-1,
+# DEC-DERIV-METADATA-HISTORICAL-SPLIT-001) holding the actual expiry DATES +
+# contract SYMBOLS the lean instrument master discards. Surfacing it here makes a
+# pulled chain browsable on /db, structured by expiry / strike / CE-PE — the
+# structured-table view the operator wants. It is EMPTY until a later PR
+# populates it; a missing file degrades to an honest empty result + note (never
+# an invented row — Golden Rule #1), mirroring the expired-options "empty" path.
+
+#: The honest note returned when no ``registry.duckdb`` exists yet — the registry
+#: is written by the (separate) "Pull expiries + contracts" button, so before the
+#: first metadata pull there is simply no cache to browse.
+_REGISTRY_MISSING_NOTE: Final = "no registry yet — pull expiries + contracts first"
+
+
+def registry_path_for(store_path: Path) -> Path:
+    """Resolve the ``registry.duckdb`` path as a SIBLING of the instrument master.
+
+    The registry cache lives in the SAME directory as ``instruments.duckdb`` (the
+    lean master) — a sibling file, NOT inside it (DEC-DERIV-METADATA-HISTORICAL-
+    SPLIT-001). Given the master's on-disk path (the dashboard wires it as
+    ``store.path``), the registry is ``<that dir>/registry.duckdb``. Keeping this
+    one resolver here means the ``/db`` routes never re-derive the path
+    (CLAUDE.md §11 COMMON).
+
+    Parameters
+    ----------
+    store_path
+        The instrument store's on-disk path (``<lake_root>/instruments.duckdb``).
+
+    Returns
+    -------
+    Path
+        The sibling ``<lake_root>/registry.duckdb``.
+    """
+    return store_path.parent / REGISTRY_DB_NAME
+
+
+def _expiry_grid_row(row: Any) -> list[Any]:
+    """Project one :class:`~brutex.data.registry_store.ExpiryRow` to a JSON-safe grid row.
+
+    Columns follow :data:`REGISTRY_EXPIRY_COLUMNS`: the ``expiry_date`` is rendered
+    as an ISO ``YYYY-MM-DD`` string and ``fetched_at`` as clean IST (CLAUDE.md §6
+    store-UTC / display-IST); ``year`` is the derived Phase-1 cell key.
+    """
+    return [
+        row.exch,
+        row.underlying,
+        row.expiry_date.isoformat(),
+        row.year,
+        format_ist_clock(row.fetched_at.isoformat()),
+    ]
+
+
+def _contract_grid_row(row: Any) -> list[Any]:
+    """Project one :class:`~brutex.data.registry_store.ContractRow` to a grid row.
+
+    Columns follow :data:`REGISTRY_CONTRACT_COLUMNS`: the structured chain view
+    (expiry / strike / CE-PE / per-contract historical ``candle_status``). The
+    ``strike`` stays full numeric precision (it is not money — never rounded,
+    CLAUDE.md §4) and is ``None`` for a ``FUT`` leg; ``expiry_date`` is an ISO
+    string, ``fetched_at`` clean IST.
+    """
+    return [
+        row.exch,
+        row.underlying,
+        row.expiry_date.isoformat(),
+        row.contract_symbol,
+        _json_safe(row.strike),
+        row.side,
+        row.candle_status,
+        format_ist_clock(row.fetched_at.isoformat()),
+    ]
+
+
+def registry_counts(registry_path: Path) -> dict[str, Any]:
+    """Return ``{"expiries", "contracts", "exists", "note"}`` for the registry cache.
+
+    A MISSING ``registry.duckdb`` degrades honestly to ``{"expiries": 0,
+    "contracts": 0, "exists": False, "note": <missing note>}`` — never opens /
+    creates a file just to count it (so a count never side-effects a brand-new
+    empty cache) and never invents rows (Golden Rule #1). When the file exists the
+    counts are read read-only via :class:`~brutex.data.registry_store.RegistryStore`
+    (which is closed before returning), and ``note`` is ``None``.
+
+    Parameters
+    ----------
+    registry_path
+        The ``registry.duckdb`` path (see :func:`registry_path_for`).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"expiries": <int>, "contracts": <int>, "exists": <bool>,
+        "note": <str|None>}``.
+    """
+    if not registry_path.is_file():
+        return {"expiries": 0, "contracts": 0, "exists": False, "note": _REGISTRY_MISSING_NOTE}
+    from brutex.data.registry_store import RegistryStore
+
+    store = RegistryStore.open(registry_path)
+    try:
+        return {
+            "expiries": store.count_expiries(),
+            "contracts": store.count_contracts(),
+            "exists": True,
+            "note": None,
+        }
+    finally:
+        store.close()
+
+
+def list_registry_expiries(
+    registry_path: Path,
+    *,
+    exch: str | None = None,
+    underlying: str | None = None,
+) -> dict[str, Any]:
+    """List the registry's persisted expiry DATES as a browsable grid (``/db``).
+
+    Reads the SEPARATE ``registry.duckdb`` cache read-only via
+    :meth:`~brutex.data.registry_store.RegistryStore.list_expiries` (static
+    ``(? IS NULL OR col = ?)`` filters — parameterized values only) and returns the
+    grid shape the ``/db`` page renders (``{columns, rows, total}``), each row
+    JSON-safe (``expiry_date`` ISO string, ``fetched_at`` clean IST). A MISSING
+    registry file degrades to an empty grid plus an honest ``note`` (never an
+    invented row — Golden Rule #1), mirroring the expired-options "empty" path.
+
+    Parameters
+    ----------
+    registry_path
+        The ``registry.duckdb`` path (see :func:`registry_path_for`).
+    exch, underlying
+        Optional exact-match filters (``None`` = no filter), passed straight to
+        the store's parameterized SELECT.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"columns": REGISTRY_EXPIRY_COLUMNS, "rows": [...], "total": <int>,
+        "note": <str|None>}`` — ``note`` is the missing-registry message when the
+        cache file does not exist yet, else ``None``.
+    """
+    columns = list(REGISTRY_EXPIRY_COLUMNS)
+    if not registry_path.is_file():
+        return {"columns": columns, "rows": [], "total": 0, "note": _REGISTRY_MISSING_NOTE}
+    from brutex.data.registry_store import RegistryStore
+
+    store = RegistryStore.open(registry_path)
+    try:
+        rows = [_expiry_grid_row(r) for r in store.list_expiries(exch=exch, underlying=underlying)]
+    finally:
+        store.close()
+    return {"columns": columns, "rows": rows, "total": len(rows), "note": None}
+
+
+def list_registry_contracts(
+    registry_path: Path,
+    *,
+    exch: str | None = None,
+    underlying: str | None = None,
+    expiry_date: str | None = None,
+) -> dict[str, Any]:
+    """List the registry's persisted contract SYMBOLS as a browsable grid (``/db``).
+
+    The structured chain view the operator asked for: one row per contract leg
+    (expiry / strike / CE-PE / per-contract historical ``candle_status``), read
+    read-only via :meth:`~brutex.data.registry_store.RegistryStore.list_contracts`
+    (static parameterized filters). *expiry_date*, when given, is a strict ISO
+    ``YYYY-MM-DD`` string (a ``<input type="date">`` value), parsed via the shared
+    :func:`_parse_iso_date` (a malformed bound raises ``ValueError`` → HTTP 400 at
+    the route). A MISSING registry file degrades to an empty grid plus an honest
+    ``note`` (never an invented row — Golden Rule #1).
+
+    Parameters
+    ----------
+    registry_path
+        The ``registry.duckdb`` path (see :func:`registry_path_for`).
+    exch, underlying
+        Optional exact-match filters (``None`` = no filter).
+    expiry_date
+        Optional ISO ``YYYY-MM-DD`` expiry filter (``None`` = no filter); a
+        malformed value raises ``ValueError``.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"columns": REGISTRY_CONTRACT_COLUMNS, "rows": [...], "total": <int>,
+        "note": <str|None>}``.
+
+    Raises
+    ------
+    ValueError
+        On a malformed *expiry_date* bound (not strict ISO ``YYYY-MM-DD``).
+    """
+    columns = list(REGISTRY_CONTRACT_COLUMNS)
+    # Parse the date BEFORE the file check so a malformed bound is rejected
+    # consistently whether or not the cache exists yet (no silent empty page).
+    parsed_expiry = _parse_iso_date(expiry_date, "expiry_date") if expiry_date is not None else None
+    if not registry_path.is_file():
+        return {"columns": columns, "rows": [], "total": 0, "note": _REGISTRY_MISSING_NOTE}
+    from brutex.data.registry_store import RegistryStore
+
+    store = RegistryStore.open(registry_path)
+    try:
+        rows = [
+            _contract_grid_row(r)
+            for r in store.list_contracts(
+                exch=exch, underlying=underlying, expiry_date=parsed_expiry
+            )
+        ]
+    finally:
+        store.close()
+    return {"columns": columns, "rows": rows, "total": len(rows), "note": None}
+
+
 __all__ = [
     "ALLOWED_OPERATORS",
     "CANDLE_COLUMNS",
     "KNOWN_TABLES",
     "OPTIONS_DIR_NAME",
     "OPTION_CANDLE_COLUMNS",
+    "REGISTRY_CONTRACT_COLUMNS",
+    "REGISTRY_DB_NAME",
+    "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
     "build_window_payload",
     "clamp_limit",
@@ -1944,9 +2198,13 @@ __all__ = [
     "list_columns",
     "list_option_datasets",
     "list_option_series",
+    "list_registry_contracts",
+    "list_registry_expiries",
     "query_candles",
     "query_option_candles",
     "query_table",
+    "registry_counts",
+    "registry_path_for",
     "sample_rows",
     "spot_window_rollup",
     "summarize_option_datasets",
