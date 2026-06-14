@@ -63,9 +63,7 @@ class LiveTick:
 
     def __post_init__(self) -> None:
         if self.recv_ts.tzinfo is None:
-            raise ValueError(
-                f"LiveTick.recv_ts must be timezone-aware, got naive {self.recv_ts!r}"
-            )
+            raise ValueError(f"LiveTick.recv_ts must be timezone-aware, got naive {self.recv_ts!r}")
         if not self.value.is_finite():
             raise ValueError(f"LiveTick.value must be finite, got {self.value!r}")
 
@@ -98,9 +96,7 @@ def _leaf_price(mapping: Mapping[str, Any]) -> Decimal | None:
     return None
 
 
-def flatten_index_snapshot(
-    snapshot: Mapping[str, Any], *, prefix: str = ""
-) -> dict[str, Decimal]:
+def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> dict[str, Decimal]:
     """Flatten a (possibly nested) Groww feed snapshot to ``{key: Decimal}``.
 
     Handles all three shapes the SDK is documented/observed to emit:
