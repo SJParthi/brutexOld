@@ -129,8 +129,8 @@ def live_table(
 def _parquet_columns(conn: Any, glob: str) -> list[str]:
     """Read a live partition set's column names (a zero-row ``LIMIT 0`` probe)."""
     cursor = conn.execute(
-        f"SELECT * FROM {_SOURCE} LIMIT 0",
-        [glob],  # noqa: S608  # nosec B608 - bound parquet path
+        f"SELECT * FROM {_SOURCE} LIMIT 0",  # noqa: S608  # nosec B608 - bound parquet path
+        [glob],
     )
     columns = [str(col[0]) for col in cast("list[Any]", cursor.description)]
     cursor.fetchall()  # free the cursor (mirrors db_view.list_columns)
