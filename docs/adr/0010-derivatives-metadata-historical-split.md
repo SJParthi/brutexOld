@@ -97,6 +97,11 @@ recreates it (a re-pull restores it), so a stale file never blocks a boot.
 - **PR-5 — separate "Pull historical" button:** selection-based (single/multi/all),
   reuse the candle spine + the until-clean loop; set `candle_status`.
 - **PR-6 — decommission** the fused candle path in the old combined button.
+  **SHIPPED** (DEC-DERIV-DECOMMISSION-FUSED-001, MIGRATION.md #749): the fused
+  `POST /pull-derivatives` route + `pull_all_derivatives` engine were removed and the
+  bulk derivative buttons repointed to the metadata-only `/pull-expiries-contracts` —
+  so no dashboard click triggers a one-click whole-chain candle download. The
+  surviving `resolve_pull_intervals` knob feeds the separate `/pull-historical` route.
 
 ## 6. Honest envelope (Golden Rule #10)
 
