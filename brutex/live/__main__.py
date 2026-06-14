@@ -137,6 +137,9 @@ def _real_instrument_resolver(  # pragma: no cover — needs the instrument mast
                     "exchange": row["exchange"],
                     "segment": row["segment"],
                     "exchange_token": row["exchange_token"],
+                    # Tag the feed routing: indices ride the index-VALUE feed, every
+                    # other instrument the LTP feed (consumed by ``--feed both``).
+                    "instrument_type": itype,
                 }
             )
     return out
@@ -178,10 +181,70 @@ def _real_deps() -> LiveDeps:  # pragma: no cover — wires the real network col
     )
 
 
+#: Groww instrument-master ``instrument_type`` whose rows carry an index VALUE
+#: (not a last-traded-price) and so MUST ride the index-value feed.
+_INDEX_FEED_TYPE = "IDX"
+#: The three keys the SDK ``subscribe_*`` methods accept (drop our routing tag).
+_FEED_KEYS = ("exchange", "segment", "exchange_token")
+
+
+def classify_feed_instruments(
+    instruments: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split resolver instruments into ``(index_value_rows, ltp_rows)`` by type.
+
+    Indices (``instrument_type == "IDX"``) carry an index VALUE, not a
+    last-traded-price, so they would be SILENT on the LTP feed — they must ride
+    ``subscribe_index_value``. Every other instrument (equities, F&O legs) rides
+    ``subscribe_ltp``. Each returned dict is stripped to :data:`_FEED_KEYS` (our
+    ``instrument_type`` routing tag is dropped before it reaches the SDK).
+
+    This is the fix for the operator-observed gap where a single ``--feed ltp``
+    run subscribed the indices on the wrong feed, so they never ticked.
+    """
+    index_rows: list[dict[str, Any]] = []
+    ltp_rows: list[dict[str, Any]] = []
+    for inst in instruments:
+        feed_row = {key: inst[key] for key in _FEED_KEYS}
+        itype = str(inst.get("instrument_type", "")).strip().upper()
+        target = index_rows if itype == _INDEX_FEED_TYPE else ltp_rows
+        target.append(feed_row)
+    return index_rows, ltp_rows
+
+
+def merge_snapshots(*snapshots: Mapping[str, Any]) -> dict[str, Any]:
+    """Union several feed snapshots into one mapping (index-value + ltp combined).
+
+    The two feeds key on DISJOINT instruments, so this is a straight union; the
+    last writer wins on the (not-expected) key collision, keeping it total.
+    """
+    merged: dict[str, Any] = {}
+    for snapshot in snapshots:
+        merged.update(snapshot)
+    return merged
+
+
 def _make_subscribe(
     feed: Any, instruments: Sequence[Mapping[str, Any]], feed_kind: str
 ) -> SubscribeFn:
-    """Return a 0-arg-callback subscriber bound to *feed* for *feed_kind*."""
+    """Return a 0-arg-callback subscriber bound to *feed* for *feed_kind*.
+
+    ``"both"`` routes indices to ``subscribe_index_value`` and everything else to
+    ``subscribe_ltp`` on the SAME feed/callback (one connection, two
+    subscriptions) — so a single capture carries the whole spot universe with
+    each instrument on the feed that actually delivers it.
+    """
+    if feed_kind == "both":
+        index_rows, ltp_rows = classify_feed_instruments(instruments)
+
+        def subscribe_both(callback: Callable[[], None]) -> None:
+            if index_rows:
+                feed.subscribe_index_value(index_rows, on_data_received=callback)
+            if ltp_rows:
+                feed.subscribe_ltp(ltp_rows, on_data_received=callback)
+
+        return subscribe_both
+
     method = feed.subscribe_ltp if feed_kind == "ltp" else feed.subscribe_index_value
 
     def subscribe(callback: Callable[[], None]) -> None:
@@ -191,7 +254,17 @@ def _make_subscribe(
 
 
 def _make_snapshot_reader(feed: Any, feed_kind: str) -> SnapshotFn:
-    """Return the snapshot reader for *feed_kind* (``get_ltp`` / ``get_index_value``)."""
+    """Return the snapshot reader for *feed_kind*.
+
+    ``"both"`` merges the index-value AND ltp snapshots so the capture callback
+    persists every instrument from either feed in one record.
+    """
+    if feed_kind == "both":
+
+        def read_both() -> Mapping[str, Any]:
+            return merge_snapshots(feed.get_index_value(), feed.get_ltp())
+
+        return read_both
     if feed_kind == "ltp":
         return feed.get_ltp  # type: ignore[no-any-return]
     return feed.get_index_value  # type: ignore[no-any-return]
@@ -394,10 +467,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cap.add_argument(
         "--feed",
-        choices=("index", "ltp"),
-        default="ltp",
-        help="ltp = index + stock last-traded-price (whole universe); "
-        "index = index-value feed (parity-accurate for the 3 indexes)",
+        choices=("index", "ltp", "both"),
+        default="both",
+        help="both = indices on the index-value feed + stocks on the ltp feed "
+        "(the whole spot universe, each on the feed that delivers it — the default); "
+        "ltp = last-traded-price only (indices would be silent); "
+        "index = index-value only (parity-accurate for the 3 indexes)",
     )
     cap.add_argument(
         "--heartbeat", type=float, default=30.0, help="progress-log interval (seconds)"
@@ -435,7 +510,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ver.add_argument("--report", required=True, help="destination Markdown proof path")
     ver.add_argument("--symbols", default="all", help='"all" (full universe) or comma EXCH-SYMBOL')
     ver.add_argument("--seconds", type=float, default=60.0, help="measurement window")
-    ver.add_argument("--feed", choices=("index", "ltp"), default="ltp")
+    ver.add_argument("--feed", choices=("index", "ltp", "both"), default="both")
     ver.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     ver.add_argument("--resume", action="store_true", help="append to an existing log")
 
