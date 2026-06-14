@@ -954,52 +954,70 @@ async function selectInstrument(i) {
   ex.innerHTML = '<div class="empty">loading…</div>';
   document.getElementById("contracts").innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⛓</span>Pick an expiry to see the chain</div>';
   try {
-    const r = await fetch('/api/v1/expiries?underlying=' + encodeURIComponent(i.symbol));
+    /* DEC-UNIVERSE-REGISTRY-PANELS-001: the EXPIRIES panel now reads the F&O
+       metadata REGISTRY (registry.duckdb) that the "⛓ Pull expiries + contracts"
+       button fills — NOT the expired-options OHLC lake. Rows follow
+       REGISTRY_EXPIRY_COLUMNS = [exch, underlying, expiry_date, year, fetched_at]. */
+    const r = await fetch('/api/v1/db/registry/expiries?underlying=' + encodeURIComponent(i.symbol));
     const body = await r.json();
-    const expiries = (body.expiries || []);
-    if (!expiries.length) { ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No expired-option series in the lake yet</div>'; return; }
+    const rows = (body.rows || []);
+    if (!rows.length) {
+      const msg = body.note || 'No expiries pulled yet — click "⛓ Pull expiries + contracts"';
+      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
+      return;
+    }
     ex.innerHTML = "";
-    /* DEC-EXPIRED-OPTIONS-TABLE-001: an "expiry" is now a distinct
-       (flag, code) series in the expired-options lake, not a calendar date. */
-    expiries.forEach((e, ix) => {
+    rows.forEach((row, ix) => {
+      const expiryDate = row[2];  // REGISTRY_EXPIRY_COLUMNS[2] = expiry_date (ISO yyyy-mm-dd)
       const p = document.createElement("span");
       p.className = "pill" + (ix === 0 ? " near" : "");
       p.style.animationDelay = (ix * 0.05) + "s";
-      p.textContent = e.expiry_flag + " " + e.expiry_code;
-      p.onclick = () => selectExpiry(i.symbol, e.expiry_code, p);
+      p.textContent = expiryDate;
+      p.onclick = () => selectExpiry(i.symbol, expiryDate, p);
       ex.appendChild(p);
     });
   } catch (e) { ex.innerHTML = '<div class="empty">error loading expiries</div>'; }
 }
 
-function selectExpiry(symbol, expiryCode, el) {
-  selExp = expiryCode;
+function selectExpiry(symbol, expiryDate, el) {
+  selExp = expiryDate;
   document.querySelectorAll('#expiries .pill').forEach(x => x.classList.remove('sel'));
   el.classList.add('sel');
-  renderContracts(symbol, expiryCode);
+  renderContracts(symbol, expiryDate);
 }
 
-async function renderContracts(symbol, expiryCode) {
+async function renderContracts(symbol, expiryDate) {
   const c = document.getElementById("contracts");
   c.innerHTML = '<div class="empty">loading…</div>';
   try {
-    const r = await fetch('/api/v1/contracts?underlying=' + encodeURIComponent(symbol)
-      + '&expiry_code=' + encodeURIComponent(expiryCode));
+    /* DEC-UNIVERSE-REGISTRY-PANELS-001: the CONTRACTS chain now reads the F&O
+       registry's contracts table for this (underlying, expiry_date). Rows follow
+       REGISTRY_CONTRACT_COLUMNS = [exch, underlying, expiry_date, contract_symbol,
+       strike, side, candle_status, fetched_at]. */
+    const r = await fetch('/api/v1/db/registry/contracts?underlying=' + encodeURIComponent(symbol)
+      + '&expiry_date=' + encodeURIComponent(expiryDate));
     const body = await r.json();
-    const contracts = body.contracts || [];
-    if (!contracts.length) { c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No option series in the lake for this expiry</div>'; return; }
+    const rows = body.rows || [];
+    if (!rows.length) {
+      const msg = body.note || 'No contracts pulled for this expiry yet';
+      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
+      return;
+    }
     c.innerHTML = "";
-    /* DEC-EXPIRED-OPTIONS-TABLE-001: the chain is the distinct
-       (strike, side) series present in the expired-options lake — grouped by
-       the RESOLVED strike, with the requested strike_offset as a hint. */
+    /* Group the registry contracts by RESOLVED strike → CE / PE presence. A FUT
+       leg carries a null strike + side "FUT" and is not part of the CE/PE strike
+       ladder (browse it in /db → F&O registry). */
     const byStrike = {};
-    contracts.forEach(ct => {
-      const s = (ct.strike != null) ? ct.strike : "—";
-      byStrike[s] = byStrike[s] || {offset: ct.strike_offset};
-      if (ct.side === "CE") byStrike[s].ce = true;
-      else if (ct.side === "PE") byStrike[s].pe = true;
+    rows.forEach(row => {
+      const strike = row[4], side = row[5];
+      if (strike == null) return;  // FUT leg — no strike, skip the option ladder
+      const s = strike;
+      byStrike[s] = byStrike[s] || {};
+      if (side === "CE") byStrike[s].ce = true;
+      else if (side === "PE") byStrike[s].pe = true;
     });
     const strikes = Object.keys(byStrike).sort((a, b) => parseFloat(a) - parseFloat(b));
+    if (!strikes.length) { c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No CE/PE strikes for this expiry yet</div>'; return; }
     const ladder = document.createElement("div");
     ladder.className = "ladder";
     ladder.innerHTML = '<div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
@@ -1007,7 +1025,7 @@ async function renderContracts(symbol, expiryCode) {
       const row = byStrike[s];
       ladder.appendChild(optionCell("ce", row.ce, ix));
       const st = document.createElement("div");
-      st.className = "strike"; st.textContent = s + (row.offset ? " (" + row.offset + ")" : "");
+      st.className = "strike"; st.textContent = s;
       ladder.appendChild(st);
       ladder.appendChild(optionCell("pe", row.pe, ix));
     });
