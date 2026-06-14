@@ -60,9 +60,13 @@ from brutex.dashboard.db_view import (
     list_columns,
     list_option_datasets,
     list_option_series,
+    list_registry_contracts,
+    list_registry_expiries,
     query_candles,
     query_option_candles,
     query_table,
+    registry_counts,
+    registry_path_for,
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
@@ -3120,6 +3124,81 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
+
+    # ── F&O expiries+contracts REGISTRY browser (DEC-DERIV-REGISTRY-DB-VIEW-001) ─
+    # The registry is a SEPARATE `registry.duckdb` cache (PR-1,
+    # DEC-DERIV-METADATA-HISTORICAL-SPLIT-001) holding the actual expiry DATES +
+    # contract SYMBOLS the lean master discards. These thin wrappers surface a
+    # pulled chain on /db, structured by expiry / strike / CE-PE. The cache is
+    # EMPTY (and the file absent) until a later PR populates it — the db_view
+    # helpers degrade to an empty grid + an honest `note`, never a 500.
+
+    @app.get("/api/v1/db/registry/expiries")
+    async def api_db_registry_expiries(
+        exch: str | None = Query(default=None),
+        underlying: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/db/registry/expiries — the registry's persisted expiry dates.
+
+        Reads the sibling ``registry.duckdb`` cache read-only. Returns the grid
+        shape (``{columns, rows, total, counts, note}``) the /db page renders;
+        ``counts`` carries the registry-wide expiry/contract totals for the nav
+        badges. Thin wrapper over
+        :func:`brutex.dashboard.db_view.list_registry_expiries`; never raises
+        (an empty grid + ``note`` when no registry exists yet — Golden Rule #1).
+        """
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            return JSONResponse(
+                {"columns": [], "rows": [], "total": 0, "counts": {}, "note": "no store wired"}
+            )
+        registry_path = registry_path_for(store_path)
+
+        def _load() -> dict[str, Any]:
+            """Read the expiry grid + registry counts off the event loop."""
+            payload = list_registry_expiries(registry_path, exch=exch, underlying=underlying)
+            payload["counts"] = registry_counts(registry_path)
+            return payload
+
+        return JSONResponse(await run_in_threadpool(_load))
+
+    @app.get("/api/v1/db/registry/contracts")
+    async def api_db_registry_contracts(
+        exch: str | None = Query(default=None),
+        underlying: str | None = Query(default=None),
+        expiry_date: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/db/registry/contracts — the registry's persisted contract legs.
+
+        The structured chain view: one row per contract (expiry / strike / CE-PE /
+        per-contract historical ``candle_status``). Optional ``exch`` /
+        ``underlying`` / ``expiry_date`` (ISO ``YYYY-MM-DD``) filters. Reads the
+        sibling ``registry.duckdb`` read-only; thin wrapper over
+        :func:`brutex.dashboard.db_view.list_registry_contracts` — a malformed
+        ``expiry_date`` raises ``ValueError`` there → HTTP 400 here; a missing
+        registry degrades to an empty grid + ``note`` (never a 500).
+        """
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            return JSONResponse(
+                {"columns": [], "rows": [], "total": 0, "counts": {}, "note": "no store wired"}
+            )
+        registry_path = registry_path_for(store_path)
+
+        def _load() -> dict[str, Any]:
+            """Read the contract grid + registry counts off the event loop."""
+            payload = list_registry_contracts(
+                registry_path, exch=exch, underlying=underlying, expiry_date=expiry_date
+            )
+            payload["counts"] = registry_counts(registry_path)
+            return payload
+
+        try:
+            return JSONResponse(await run_in_threadpool(_load))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/db", response_class=HTMLResponse)
     async def db_page() -> HTMLResponse:
