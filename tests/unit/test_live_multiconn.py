@@ -6,6 +6,7 @@ Every collaborator (feed open, subscribe) is injected with a fake — no
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -190,3 +191,53 @@ def test_make_multiconn_capture_subscribes_all_and_merges_snapshots() -> None:
     assert [o.binding.connection_index for o in opened] == [0, 1]
     # the merged snapshot unions every connection's snapshot
     assert read_snapshot() == {"conn0:both": 0.0, "conn1:ltp": 1.0}
+
+
+# ─────────────────── subscription manifest (775 + legs) ───────────
+
+
+def test_read_subscription_manifest_splits_spot_and_legs(tmp_path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {"spot": [_idx("NIFTY"), _eq("2885")], "legs": [_leg("35241", underlying="NIFTY")]}
+        ),
+        encoding="utf-8",
+    )
+    spot, legs = mc.read_subscription_manifest(path)
+    assert [r["exchange_token"] for r in spot] == ["NIFTY", "2885"]
+    assert [r["exchange_token"] for r in legs] == ["35241"]
+    # the rows feed straight into plan_connections (spot #0, legs #1..N)
+    bindings, _skipped, _plan = mc.plan_connections(spot, legs, per_connection_cap=1000)
+    assert [b.feed_kind for b in bindings] == ["both", "ltp"]
+
+
+def test_read_subscription_manifest_defaults_missing_groups_to_empty(tmp_path) -> None:
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"spot": [_idx("NIFTY")]}), encoding="utf-8")  # no "legs"
+    spot, legs = mc.read_subscription_manifest(path)
+    assert len(spot) == 1 and legs == []
+
+
+def test_read_subscription_manifest_rejects_bad_shapes(tmp_path) -> None:
+    bad_top = tmp_path / "top.json"
+    bad_top.write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # not an object
+    with pytest.raises(ValueError, match="manifest must be a JSON object"):
+        mc.read_subscription_manifest(bad_top)
+
+    bad_group = tmp_path / "group.json"
+    bad_group.write_text(json.dumps({"spot": "NIFTY"}), encoding="utf-8")  # group not a list
+    with pytest.raises(ValueError, match="'spot' must be a list"):
+        mc.read_subscription_manifest(bad_group)
+
+    bad_row = tmp_path / "row.json"
+    bad_row.write_text(json.dumps({"legs": ["NIFTY"]}), encoding="utf-8")  # row not an object
+    with pytest.raises(ValueError, match="'legs' row must be an object"):
+        mc.read_subscription_manifest(bad_row)
+
+    missing_key = tmp_path / "miss.json"
+    missing_key.write_text(
+        json.dumps({"spot": [{"exchange": "NSE", "segment": "CASH"}]}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="missing keys"):
+        mc.read_subscription_manifest(missing_key)

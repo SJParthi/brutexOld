@@ -24,8 +24,10 @@ distinct instruments — NOT an O(1)-total claim. Read-only market data; no orde
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -50,6 +52,53 @@ LEG_FEED_KIND = "ltp"
 OpenFeedFn = Callable[[int], Any]
 #: Build a 0-arg-callback subscriber for ``(feed, instruments, feed_kind)``.
 MakeSubscribeFn = Callable[[Any, Sequence[Mapping[str, Any]], str], SubscribeFn]
+
+
+#: The feed keys every subscription-manifest row must carry.
+_MANIFEST_ROW_KEYS: tuple[str, ...] = ("exchange", "segment", "exchange_token", "instrument_type")
+
+
+def _validate_manifest_rows(rows: object, *, group: str) -> list[dict[str, Any]]:
+    """Coerce + validate one manifest group into feed-row dicts (raises on a bad row)."""
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise ValueError(f"manifest {group!r} must be a list, got {type(rows).__name__}")
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError(f"manifest {group!r} row must be an object, got {type(row).__name__}")
+        missing = [key for key in _MANIFEST_ROW_KEYS if key not in row]
+        if missing:
+            raise ValueError(f"manifest {group!r} row missing keys {missing}: {dict(row)}")
+        out.append(dict(row))
+    return out
+
+
+def read_subscription_manifest(
+    path: str | Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read a ``{"spot": [...], "legs": [...]}`` JSON manifest → ``(spot, legs)``.
+
+    The dashboard — which owns the instrument store (the exact 775 spot
+    underlyings) + the F&O ``contracts`` registry (the option/future legs) —
+    writes this manifest; the capture process reads it. Keeping the manifest a
+    PLAIN JSON keeps ``brutex/live/`` DECOUPLED from the lake schema
+    (``DEC-LIVE-DECOUPLE-001``): it never imports the dashboard or the data plane,
+    just parses a file of feed-row dicts. Each row must carry the four feed keys
+    (``exchange``, ``segment``, ``exchange_token``, ``instrument_type``) so it can
+    be classified (index-value vs ltp) + sharded.
+
+    Raises
+    ------
+    ValueError
+        If the manifest is not a JSON object, a group is not a list, or any row
+        is not an object / is missing a required feed key.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, Mapping):
+        raise ValueError(f"manifest must be a JSON object, got {type(data).__name__}")
+    spot = _validate_manifest_rows(data.get("spot", []), group="spot")
+    legs = _validate_manifest_rows(data.get("legs", []), group="legs")
+    return spot, legs
 
 
 def _instrument_of(row: Mapping[str, Any]) -> Instrument:
@@ -317,4 +366,5 @@ __all__ = [
     "make_multiconn_capture",
     "open_and_subscribe",
     "plan_connections",
+    "read_subscription_manifest",
 ]
