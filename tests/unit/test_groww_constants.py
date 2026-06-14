@@ -64,6 +64,17 @@ def test_unverified_gates_are_flagged() -> None:
     assert c.GROWW_DAILY_QUOTA_UNVERIFIED is None
 
 
+def test_operator_directed_per_second_ceiling_stays_under_the_per_minute_governor() -> None:
+    # DEC-GROWW-RATE-CEILING-8-001: the production per-second ceiling is the
+    # operator-DIRECTED 8 r/s — the per-second backtesting cap itself stays officially
+    # UNVERIFIED. 8 is chosen because 8×60 = 480/min sits just UNDER the 500/min
+    # governor, so the per-second ceiling is the binding gate yet never overshoots
+    # the per-minute cap (GROWW_RATE_LIMIT_PER_MIN).
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING == 8.0
+    assert c.GROWW_RATE_LIMIT_PER_MIN == 500
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 < c.GROWW_RATE_LIMIT_PER_MIN
+
+
 def test_instrument_master_url_matches_allowlist_host() -> None:
     assert c.GROWW_CSV_ALLOWED_HOST in c.GROWW_INSTRUMENT_CSV_URL
     assert c.GROWW_INSTRUMENT_CSV_URL.startswith("https://")

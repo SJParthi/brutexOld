@@ -422,6 +422,14 @@ def test_cmd_fetch_live_inspect_reports_failures(
     assert callable(seen["pace"])
     assert callable(seen["on_rate_limit"])
     assert callable(seen["on_success"])
+    # DEC-GROWW-RATE-CEILING-8-001: the live CLI pull paces at the operator-DIRECTED
+    # 8 r/s ceiling (was the UNVERIFIED 10). ``pace`` is the controller's bound method,
+    # so its ``__self__`` is the RateController — assert it started at the 8 r/s ceiling.
+    from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
+
+    controller = seen["pace"].__self__
+    assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
+    assert controller.snapshot()["ceiling_per_min"] == 500
 
 
 def test_cmd_fetch_live_persisting_pull_succeeds(
