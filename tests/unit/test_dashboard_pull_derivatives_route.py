@@ -216,9 +216,16 @@ def test_no_selection_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_universe_page_carries_derivatives_ui(client: TestClient) -> None:
-    """The /universe page wires the derivatives button, bulk buttons, dropdowns + route."""
+    """The /universe page wires the derivatives button, bulk buttons, dropdowns + route.
+
+    The BULK derivatives buttons (``bulkIdxDeriv`` / ``bulkStkDeriv``) still call the
+    candle-pulling ``/pull-derivatives`` (untouched by DEC-DERIV-METADATA-ROUTE-001);
+    only the per-selection ``#pullDerivBtn`` was repointed to the metadata-only route
+    (asserted in ``test_dashboard_pull_expiries_contracts_route.py``).
+    """
     resp = client.get("/universe")
     assert resp.status_code == 200
+    # the bulk derivatives buttons still target the candle pull route
     assert "/api/v1/universe/pull-derivatives" in resp.text
     assert 'id="pullDerivBtn"' in resp.text
     assert 'id="bulkIdxDeriv"' in resp.text
@@ -226,3 +233,5 @@ def test_universe_page_carries_derivatives_ui(client: TestClient) -> None:
     assert 'id="derivInterval"' in resp.text
     assert 'id="derivType"' in resp.text
     assert "Pull expiries + contracts" in resp.text
+    # the per-selection ⛓ button was repointed to the metadata-only route (PR-3)
+    assert "/api/v1/universe/pull-expiries-contracts" in resp.text

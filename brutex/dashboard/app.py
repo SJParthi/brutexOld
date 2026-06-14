@@ -74,6 +74,7 @@ from brutex.dashboard.derivatives_pull import (
     resolve_contract_types,
     resolve_pull_intervals,
 )
+from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
 from brutex.dashboard.movers_options import build_options_payload, run_options_snapshot
 from brutex.dashboard.movers_snapshot import (
@@ -112,6 +113,7 @@ from brutex.dashboard.sweep_runner import (
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
+from brutex.data.registry_store import RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
     make_lake_read_1m,
@@ -1598,6 +1600,108 @@ def build_app(
                 "intervals": list(intervals),
                 "contract_types": list(contract_types),
                 "until_clean": until_clean,
+                "dry_run": dry_run,
+            }
+        )
+
+    @app.post("/api/v1/universe/pull-expiries-contracts")
+    async def api_universe_pull_expiries_contracts(
+        kind: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-expiries-contracts — METADATA-only chain pull.
+
+        Backs the "⛓ Pull expiries + contracts" button (DEC-DERIV-METADATA-ROUTE-001,
+        PR-3 of the metadata/historical split). It enumerates + PERSISTS the F&O
+        chain SHAPE — every expiry DATE + every listed contract SYMBOL for the
+        selected underlyings — into the separate ``registry.duckdb`` cache via
+        :func:`brutex.dashboard.metadata_pull.pull_expiries_contracts` on the
+        single-flight background job (poll ``/pull-progress``), and pulls **ZERO
+        historical candles** (the heavy minute fill stays behind its own separate
+        "Pull historical" button — PR-5). This is the metadata HALF that the fused
+        ``/pull-derivatives`` route used to do alongside the weeks-scale candle
+        download; the button now calls THIS route so a click lands the cheap,
+        NSE-verifiable chain shape in minutes (the candle pull moved off this
+        button). Selection precedence mirrors ``/pull-derivatives``: ``symbols``
+        (ticked many) > ``symbol`` (one) > ``kind`` (every admitted index/stock);
+        a bad selection is a 400. ``from_date`` / ``to_date`` narrow the Phase-1
+        YEAR grid (the metadata grid is year-granular) — absent ⇒ the full
+        2020 → current-year vendor-history floor; a reversed or non-ISO range is a
+        400. ``dry_run`` is forced when Groww creds are absent, and the dry-run
+        enumerates an honest EMPTY chain (strikes/expiries are real vendor data,
+        never fabricated offline, Golden Rule #1).
+        """
+        dry_run = not groww_credentials_present()
+        try:
+            years = _resolve_metadata_years(from_date, to_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if symbols is not None:
+            try:
+                instruments = resolve_pull_symbols(symbols, _require_store().get)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            detail = f"{len(instruments)} symbols metadata"
+        elif symbol is not None:
+            store = _require_store()
+            instrument = store.get(symbol)
+            if instrument is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                )
+            instruments = [instrument]
+            detail = f"{symbol} metadata"
+        elif kind is not None:
+            instruments = _select_bulk_targets(kind)
+            detail = f"{kind} metadata"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
+            )
+        # The registry cache is a sibling of the lean instruments.duckdb master
+        # (DEC-DERIV-METADATA-HISTORICAL-SPLIT-001); the wired InstrumentStore IS
+        # the coverage_store (its upsert_coverage / list_coverage back /coverage).
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        registry_path = lake_root / "registry.duckdb"
+        _LOG.info(
+            "universe.pull_expiries_contracts.requested",
+            kind=kind,
+            symbol=symbol,
+            symbols=symbols,
+            count=len(instruments),
+            years=years,
+            from_date=from_date,
+            to_date=to_date,
+            dry_run=dry_run,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: enumerate + persist the chain METADATA (no candles)."""
+            del on_progress  # the metadata pull reports via its MetadataPullReport
+            with RegistryStore.open(registry_path) as registry:
+                report = pull_expiries_contracts(
+                    instruments,
+                    registry=registry,
+                    coverage_store=instrument_store,
+                    years=years,
+                    dry_run=dry_run,
+                    session_rate=_session_rate,
+                )
+            return report.to_dict()
+
+        started = _pull_job.start(_work, total=len(instruments), detail=detail)
+        return JSONResponse(
+            {
+                "started": started,
+                "kind": kind,
+                "symbol": symbol,
+                "symbols": symbols,
+                "years": years,
                 "dry_run": dry_run,
             }
         )
@@ -3569,6 +3673,40 @@ def _coverage_years() -> list[int]:
     pickers default to, so a pulled 2020 cell is never invisible on /coverage.
     """
     return list(range(2020, datetime.now(UTC).year + 1))
+
+
+def _metadata_year(value: str, *, field: str) -> int:
+    """Parse the calendar YEAR out of one ISO date string (``YYYY-MM-DD``).
+
+    The metadata pull's Phase-1 grid keys on YEARS (not days), so the
+    ``from_date`` / ``to_date`` pickers collapse to their year here. A
+    non-ISO value raises :class:`ValueError` (the route maps it to a 400),
+    so a typo can never silently widen or skip a year (Golden Rule #1).
+    """
+    try:
+        return date.fromisoformat(value).year
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO date (YYYY-MM-DD), got {value!r}") from exc
+
+
+def _resolve_metadata_years(from_date: str | None, to_date: str | None) -> list[int]:
+    """Resolve the inclusive Phase-1 year grid for the metadata pull.
+
+    With neither bound supplied the grid is the full Track-1 vendor history
+    floor → current year (the SAME 2020 floor :func:`_coverage_years` and the
+    metadata pull's ``GROWW_METADATA_HISTORY_FLOOR`` use, so a metadata pull
+    covers exactly the /coverage grid). A supplied ``from_date`` / ``to_date``
+    narrows the floor / ceiling to that bound's YEAR (the metadata grid is
+    year-granular). A reversed range (``from`` year after ``to`` year) raises
+    :class:`ValueError` (→ 400) rather than silently yielding an empty pull.
+    """
+    floor = _metadata_year(from_date, field="from_date") if from_date else 2020
+    ceiling = _metadata_year(to_date, field="to_date") if to_date else datetime.now(UTC).year
+    if floor > ceiling:
+        raise ValueError(
+            f"from_date year {floor} is after to_date year {ceiling} — empty year range"
+        )
+    return list(range(floor, ceiling + 1))
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"
