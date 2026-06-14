@@ -21,7 +21,11 @@ import statistics
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+import structlog
+
 from brutex.live.store import TickRecord
+
+_LOG = structlog.get_logger("brutex.live.probe")
 
 #: Inter-arrival thresholds (milliseconds) → cadence classification.
 TICK_BY_TICK_MS = 100.0
@@ -87,38 +91,58 @@ def probe_connections(
     open_connection: Callable[[int], object],
     max_conns: int,
     between: Callable[[], None] = lambda: None,
+    close: Callable[[object], None] = lambda _conn: None,
 ) -> ConnectionProbeResult:
-    """Open connections 1..*max_conns*, stopping at the first failure.
+    """Open connections 1..*max_conns* and HOLD them open CONCURRENTLY, stopping
+    at the first refusal.
+
+    The ceiling that matters is the **concurrent** one: a per-account limit makes
+    the vendor refuse (or auto-close) the N+1-th socket while the first N are still
+    open. So every opened connection is **retained** (kept referenced — hence open)
+    for the whole ramp and only released via *close* in a ``finally`` at the end —
+    never opened-then-dropped, which would measure sequential reopen capacity, not
+    the concurrent hold the scaling design (``plan.py``: ``connections × cap``)
+    needs.
 
     Parameters
     ----------
     open_connection
-        Called with the 1-based ordinal; must open + return a live connection or
-        raise to signal refusal. Exceptions are caught and treated as the ceiling.
+        Called with the 1-based ordinal; opens + RETURNS a live connection (kept),
+        or raises to signal refusal (caught → the ceiling).
     max_conns
         Upper bound on the ramp.
     between
-        Optional pacing hook called after each successful open (e.g. a small
-        sleep so the ramp does not hammer the endpoint).
+        Optional pacing hook after each successful open (e.g. a small sleep so the
+        ramp does not hammer the endpoint).
+    close
+        Best-effort release for each held connection at the end; a close error is
+        logged and swallowed so it never masks the probe result.
 
     Returns
     -------
     ConnectionProbeResult
-        The ceiling held and how #N+1 failed.
+        The max number held concurrently and how #N+1 was refused.
     """
-    held = 0
-    for ordinal in range(1, max_conns + 1):
-        try:
-            open_connection(ordinal)
-        except Exception as exc:
-            return ConnectionProbeResult(
-                max_held=held,
-                failed_at=ordinal,
-                failure=f"{type(exc).__name__}: {exc}",
-            )
-        held = ordinal
-        between()
-    return ConnectionProbeResult(max_held=held, failed_at=None, failure=None)
+    held: list[object] = []
+    try:
+        for ordinal in range(1, max_conns + 1):
+            try:
+                conn = open_connection(ordinal)
+            except Exception as exc:
+                return ConnectionProbeResult(
+                    max_held=len(held),
+                    failed_at=ordinal,
+                    failure=f"{type(exc).__name__}: {exc}",
+                )
+            held.append(conn)  # retain → stays open for the rest of the ramp
+            between()
+        return ConnectionProbeResult(max_held=len(held), failed_at=None, failure=None)
+    finally:
+        for conn in held:
+            try:
+                close(conn)
+            except Exception:
+                _LOG.warning("probe_connection_close_failed")
 
 
 def _classify(median_ms: float) -> str:

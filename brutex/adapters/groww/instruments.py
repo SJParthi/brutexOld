@@ -257,9 +257,46 @@ def resolve_by_pair(index: InstrumentIndex, exchange: Exchange, trading_symbol: 
     return index.by_exchange_symbol[(exchange, trading_symbol)]
 
 
+def index_symbol_of(groww_symbol: str) -> str:
+    """Return the SYMBOL component of an index ``groww_symbol``.
+
+    DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001. For an ``IDX`` row the
+    ``groww_symbol`` is the two-part vendor key ``"EXCH-SYMBOL"`` (e.g.
+    ``"NSE-NIFTY"`` → ``"NIFTY"``, ``"NSE-MIDCPNIFTY"`` → ``"MIDCPNIFTY"``,
+    ``"BSE-SENSEX"`` → ``"SENSEX"``). The SYMBOL component is the vendor's
+    F&O symbol for the index — the SAME string the vendor stamps as the
+    ``underlying_symbol`` on that index's ``CE`` / ``PE`` option legs (the
+    brute-force universe proves this convention: ``NSE-NIFTY`` ↔ option
+    ``underlying_symbol`` ``"NIFTY"``). It is therefore the vendor-canonical
+    bridge from a spot ``IDX`` row to its options when the row's verbose
+    ``trading_symbol`` (``symbol_name``, e.g. ``"NIFTY MID SELECT"``) differs
+    from that F&O symbol (DEC-NON-OPTION-INDEX-REFTAG-001 keyed the OPT badge
+    on ``symbol_name`` alone, which silently dropped such indices to REF).
+
+    This is a PURE string split on the FIRST ``-`` (an NSE index symbol never
+    contains a hyphen, and an ``IDX`` ``groww_symbol`` has exactly one) — it
+    NEVER encodes a per-index alias (Golden Rule #1); it only reads the
+    vendor's own key. A ``groww_symbol`` with no ``-`` yields ``""`` (matches
+    nothing — safe).
+
+    Parameters
+    ----------
+    groww_symbol
+        An ``IDX`` row's Groww-native ``"EXCH-SYMBOL"`` key.
+
+    Returns
+    -------
+    str
+        The SYMBOL component (everything after the first ``-``), or ``""``
+        when *groww_symbol* carries no ``-``.
+    """
+    return groww_symbol.partition("-")[2]
+
+
 __all__ = [
     "InstrumentIndex",
     "build_index",
+    "index_symbol_of",
     "is_in_scope_row",
     "load_index_from_csv",
     "parse_instrument_csv",
