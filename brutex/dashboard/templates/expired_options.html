@@ -12,6 +12,11 @@
     --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
     --red: #FF5C5C;
     --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
+    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
@@ -26,6 +31,10 @@
   @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .5; transform: scale(.9);} }
+  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
+  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
+  .topnav a:hover { color:var(--text-bright); }
+  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
 
   header {
     display:flex; align-items:center; gap:14px; padding:16px 24px;
@@ -86,14 +95,15 @@
 </head>
 <body>
   <header>
+    <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
     <div class="sub">Expired options — per underlying · present-in-lake = pulled (date-range completeness not asserted)</div>
-    <nav class="topnav">
+    <nav class="topnav" aria-label="Primary">
       <a href="/groww-credentials">Credentials</a>
       <span class="sep">·</span>
       <a href="/db">Database</a>
       <span class="sep">·</span>
-      <a href="/coverage">Coverage</a> <a href="/movers">Movers</a>
+      <a href="/coverage" aria-current="page">Coverage</a> <a href="/movers">Movers</a>
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
