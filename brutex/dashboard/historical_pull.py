@@ -697,37 +697,40 @@ def _discover_start_dates(
         _LOG.warning("historical.start_discovery.catalog_unavailable", lake_root=str(lake_root))
         return {}
     windows: dict[str, tuple[date, date]] = {}
-    try:
-        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    # ``with`` manages the catalog lifetime (close on ANY exit) — CodeQL prefers this over a
+    # ``finally: catalog.close()``; the two distinct degrade-messages are preserved.
+    with catalog:
+        try:
+            from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
-        reconcile_catalog_from_lake(
-            lake_root=lake_root, catalog=catalog, segment=OPTION_SEGMENT, interval=_PHASE1_DAILY
-        )
-        for _row, contract in rebuilt:
-            try:
-                coverage = contract_daily_coverage(catalog, contract=contract)
-            except (CatalogError, ValueError) as exc:
-                # A malformed contract symbol / mid-loop catalog error excludes THIS contract
-                # from Phase 2 only (loud, per-contract) — never blanks the whole map.
-                _LOG.warning(
-                    "historical.start_discovery.contract_skipped",
-                    symbol=contract.symbol,
-                    error=str(exc),
-                )
-                continue
-            if coverage is None:
-                # No 1-day data for this contract — it never traded in range, so its
-                # 1-minute would be empty too: EXCLUDE it from Phase 2 (honestly reported).
-                continue
-            windows[contract.symbol] = coverage_to_minute_window(
-                coverage, full_start=start, full_end=end, expiry=contract.expiry
+            reconcile_catalog_from_lake(
+                lake_root=lake_root, catalog=catalog, segment=OPTION_SEGMENT, interval=_PHASE1_DAILY
             )
-    except CatalogError:
-        # The reconcile itself failed (busy lake / missing deps) — degrade to EMPTY, loud.
-        _LOG.warning("historical.start_discovery.reconcile_unavailable", lake_root=str(lake_root))
-        return {}
-    finally:
-        catalog.close()
+            for _row, contract in rebuilt:
+                try:
+                    coverage = contract_daily_coverage(catalog, contract=contract)
+                except (CatalogError, ValueError) as exc:
+                    # A malformed contract symbol / mid-loop catalog error excludes THIS contract
+                    # from Phase 2 only (loud, per-contract) — never blanks the whole map.
+                    _LOG.warning(
+                        "historical.start_discovery.contract_skipped",
+                        symbol=contract.symbol,
+                        error=str(exc),
+                    )
+                    continue
+                if coverage is None:
+                    # No 1-day data for this contract — it never traded in range, so its
+                    # 1-minute would be empty too: EXCLUDE it from Phase 2 (honestly reported).
+                    continue
+                windows[contract.symbol] = coverage_to_minute_window(
+                    coverage, full_start=start, full_end=end, expiry=contract.expiry
+                )
+        except CatalogError:
+            # The reconcile itself failed (busy lake / missing deps) — degrade to EMPTY, loud.
+            _LOG.warning(
+                "historical.start_discovery.reconcile_unavailable", lake_root=str(lake_root)
+            )
+            return {}
     return windows
 
 
