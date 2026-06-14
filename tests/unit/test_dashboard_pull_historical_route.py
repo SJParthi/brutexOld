@@ -135,6 +135,11 @@ def _patch_historical(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any])
             still_failed_windows=0,
             auth_aborted=False,
             note="offline fake",
+            phase1_clean=True,
+            phase1_complete=tuple(c.contract_symbol for c in contracts),
+            start_dates={},
+            minute_requested="1minute" in kwargs["intervals"],
+            minute_skipped=False,
         )
 
     monkeypatch.setattr(app_module, "pull_contract_candles", _fake_pull_contract_candles)
