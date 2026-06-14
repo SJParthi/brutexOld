@@ -148,7 +148,7 @@ one **test** (`brutex/dashboard/templates/groww_credentials.html`,
 1. **Live lifecycle hardening** — watchdog (heartbeat-silence auto-restart), cross-process OS-lock, `(pid,start_time)` PID-identity (PR #717 deferred items). **← operator-selected next workstream (4-agent review first).**
 2. **Live structural B1/B2/B6** — `feed.consume()` pump, candle binning on vendor `tsInMillis`, wire the 1000-cap sharding into `subscribe` (PR #715 out-of-scope).
 3. **Rust mutation verification run** (DEC-MUTATION-RUNTIME-002 — STANDARDS §1 row 3 🟡).
-4. **M4-Pro strict 1.1× O(1) tier + 50 M/s absolute floor** (wired, awaits self-hosted runner — STANDARDS row 14 📋).
+4. **M4-Pro strict O(1) tier + 50 M/s absolute floor** — ✅ LIVE on the registered self-hosted runner (`Parthibans-MacBook-Pro`, labels `[self-hosted, macos, m4pro]`): `bench-m4pro.yml` runs them daily + on push + dispatch and they PASS (MIGRATION #655; run #109, 2026-06-14 — mask-AND ≈ 2.0 B ops/s = 40× the 50 M/s floor). NOT a per-PR blocker by design (no `pull_request` trigger, DEC-M4PRO-PR-TRIGGER-001).
 5. **First production 5y × 3-index × ~33B sweep + lockbox OOS** (Phase 4).
 6. **Track 2 — Options translation** for execution realism (post-Phase-4).
 7. **Server-side branch protection** (operator one-time setup; `branch-protection-drift.yml` alerts only).
@@ -167,7 +167,7 @@ one **test** (`brutex/dashboard/templates/groww_credentials.html`,
 | Secure? | ✅ `bandit` 0 high/medium; `pip-audit` 0 known CVEs. |
 | Can it accidentally see the future (the backtest lie)? | ✅ No — two independent runtime look-ahead guards, both tested. |
 | Will it overrun the data vendor's limits? | ✅ No — 8 r/s ceiling + 500/min hard governor + adaptive back-off. |
-| Fast where it matters? | ✅ Lookup / dedup / mask-AND hot paths hold O(1) ratio gates in CI (loose 3–10× ceiling on shared runners; strict 1.1× is M4-Pro-runner-gated, 📋). |
+| Fast where it matters? | ✅ Lookup / dedup / mask-AND hold O(1) ratio gates on shared CI (3–10×); the strict tier (1.1× same-footprint / 3.0× cross-cache) + the 50 M/s absolute floor run + PASS on the **registered** M4-Pro runner (`bench-m4pro.yml`; MIGRATION #655; run #109). |
 | Finished as a product? | 🟡 Honestly **no** — the research engine + data plane + dashboard are production-grade; the first full production sweep, live lifecycle hardening, and Track-2 options realism are the remaining roadmap. |
 | Defects found this inspection? | ✅ **Zero functional defects** — 2 doc-drift fixes shipped; new dashboard polish items queued. |
 
@@ -176,7 +176,7 @@ one **test** (`brutex/dashboard/templates/groww_credentials.html`,
 | Operator demand | 🟢 Real & verified | 🟡 Honest gap |
 |---|---|---|
 | Whole workspace works | Toolchain rebuilt; 7,435/0 tests; ruff/mypy/pyright/bandit/doctor green | "269 errors" on a bare clone are provisioning noise — `make setup` first |
-| O(1) uniqueness/dedup/lookup | Bloom (fixed-k) + LMDB (B+tree) + u64-AND + dict-by-symbol; CI blocks O(n) regressions | Strict 1.1× ratio + 50 M/s floor coded but dormant (no M4-Pro runner) |
+| O(1) uniqueness/dedup/lookup | Bloom (fixed-k) + LMDB (B+tree) + u64-AND + dict-by-symbol; CI blocks O(n) regressions | Strict tier + 50 M/s floor run + PASS on the **registered** M4-Pro runner (MIGRATION #655; run #109) — daily/push/dispatch, not a per-PR blocker by design |
 | 100% tested & hardened | 100% coverage gate + 7 test types on every PR | Full mutation / 24h soak / sanitizers run nightly, not per-PR |
 | Fully automated merge | auto-merge squashes trusted `claude/*` PRs on green `ci-ok` | No auto-conflict-resolution (refuses `dirty`/`behind` — git cannot auto-merge true conflicts); server-side branch protection not yet applied |
 | No illusion / hallucination | Env fixed *before* any green claim; every figure traces to a command/file | — |
@@ -193,9 +193,12 @@ one **test** (`brutex/dashboard/templates/groww_credentials.html`,
 ## 6. Honest envelope (Golden Rule #10)
 
 - ✅ Everything in §1 is green and was actually executed here.
-- 🟡 This container is NOT the production envelope: the M4-Pro-only
-  absolute gates (50 M/s floor, 33B-trial SLA, strict 1.1× tier) cannot
-  run here — the loose CI ratio gates stand in.
+- 🟡 This verification CONTAINER is not the production envelope, so the
+  M4-Pro-only absolute gates (50 M/s floor, 33B-trial SLA, strict tier)
+  could not run *here* — but they DO run + PASS on the **registered**
+  M4-Pro self-hosted runner in CI (`bench-m4pro.yml`; MIGRATION #655;
+  run #109, 2026-06-14). The loose CI ratio gates are the per-PR blocker;
+  the M4-Pro absolute gates run daily/push/dispatch.
 - 🟡 CodeQL / Semgrep / Trivy / gitleaks / SBOM / jscpd / vulture /
   mutation / chaos-race / stress-soak run on GitHub CI, not locally — they
   gate this PR via the required `CI OK (aggregate gate)`.
@@ -226,3 +229,5 @@ one **test** (`brutex/dashboard/templates/groww_credentials.html`,
 figure traces to a command executed in this session or a file:line cited
 inline. Predecessors: `VERIFICATION_2026-06-02.md`,
 `VERIFICATION_2026-06-06.md`, `VERIFICATION_2026-06-10.md`.*
+
+*Amendment (2026-06-14, DEC-M4PRO-DOC-RECONCILE-001, MIGRATION.md #769): the four M4-Pro lines above originally read "dormant / awaits self-hosted runner / 📋" — that was STALE. The M4-Pro runner (`Parthibans-MacBook-Pro`) has been REGISTERED + CERTIFIED since 2026-06-11 (MIGRATION #655 / DEC-O1-CACHE-TIER-001); `bench-m4pro.yml` runs the absolute 50 M/s floor + strict 1.1×/3.0× tier + 33B-SLA gate daily + on push + dispatch and they PASS (run #109, 2026-06-14). Corrected per Golden Rule #1.*
