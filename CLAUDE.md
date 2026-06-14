@@ -89,7 +89,7 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/sharp-mendel-lgbckj`
+- **Active branch:** `claude/zen-meitner-am13gf`
 
 ---
 
@@ -313,7 +313,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sharp-mendel-lgbckj`
+- **Active feature branch:** `claude/zen-meitner-am13gf`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
