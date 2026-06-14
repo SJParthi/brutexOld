@@ -174,7 +174,15 @@ def analyze_cadence(records: Sequence[TickRecord]) -> CadenceStats:
     # cadence oracle — and fall back to the µs `recv_ts` only for pre-`recv_ns`
     # logs (where `recv_ns` defaults to 0). Sorting + gaps both use the same clock.
     use_ns = bool(records) and all(r.recv_ns > 0 for r in records)
-    ordered = sorted(records, key=(lambda r: r.recv_ns) if use_ns else (lambda r: r.recv_ts))
+    # Split rather than a ternary of two differently-typed key lambdas (int
+    # `recv_ns` vs datetime `recv_ts`): mypy infers a single key return type for
+    # the ternary, so isolated type-checking (the pre-commit hook checks changed
+    # files alone) rejects it. Two statements keep each sort key internally
+    # consistent — behaviour is identical.
+    if use_ns:
+        ordered = sorted(records, key=lambda r: r.recv_ns)
+    else:
+        ordered = sorted(records, key=lambda r: r.recv_ts)
     samples = len(ordered)
     if samples < MIN_CADENCE_SAMPLES:
         return CadenceStats(

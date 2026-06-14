@@ -2,6 +2,18 @@
 
 > **Status:** Locked 2026-05-15. Companion to `TRACK1_BACKTEST_SPEC.md §19`.
 
+> **✅ VENDOR RE-RECONCILIATION (DEC-DHAN-GROWW-REMIGRATE-001 / ADR-0009,
+> 2026-06-12) — SUPERSEDES the 2026-06-06 banner below.** The live vendor is
+> **Groww** again (the `growwapi` SDK + TOTP auth). The short-lived Dhan revert
+> (DEC-GROWW-DHAN-REVERT-001 / ADR-0002) was itself REVERTED: the Track-1
+> backtesting data source was fully re-migrated back to the Groww Trade API and
+> the `brutex/adapters/dhan/` package was DELETED (a `no-dhan-guard.sh` CI gate
+> now enforces zero-`dhan` on the live surface). **So read every forward-looking
+> "Groww" in this plan as Groww (NOT as "Dhan").** The 2026-06-06 banner
+> immediately below is retained as immutable history of the abandoned revert —
+> do NOT action its "read Groww as Dhan" instruction. Authoritative, repo-sourced
+> vendor facts live in CLAUDE.md §6 + `docs/adr/0009-*`.
+
 > **⚠️ VENDOR RECONCILIATION (DEC-DHAN-DOC-RECONCILE-001, 2026-06-06):** this
 > plan was written 2026-05-15 and revised during the short-lived Dhan→Groww
 > pivot, so its forward-looking phases say "Groww". **The live vendor is Dhan
