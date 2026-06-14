@@ -1387,9 +1387,9 @@ def build_app(
         All forms route to :func:`brutex.dashboard.pull_controller.pull_all_spot`
         on the **background job** (returns at once; poll ``/pull-progress``): its
         cross-symbol ``(symbol, interval, window)`` fan-out keeps the ONE shared
-        :class:`SessionRateController` SATURATED at the 5 r/s ceiling, replacing the
-        old serial per-symbol ``/universe/pull`` loop that only kept ~3 r/s in
-        flight. ``from_date`` / ``to_date`` / ``year`` carry the date picker; when
+        :class:`SessionRateController` SATURATED at the operator-DIRECTED 8 r/s
+        ceiling (DEC-GROWW-RATE-CEILING-8-001), replacing the old serial per-symbol
+        ``/universe/pull`` loop that only kept ~3 r/s in flight. ``from_date`` / ``to_date`` / ``year`` carry the date picker; when
         ALL are blank the full Track-1 history applies (the Pull-ALL default, so
         the ``?kind=`` callers are byte-for-byte unchanged). Single-flight; an empty
         / unknown ``?symbols=`` id fails CLOSED (400, naming offenders — never a
