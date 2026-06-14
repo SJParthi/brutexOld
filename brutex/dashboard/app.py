@@ -2086,6 +2086,7 @@ def build_app(
         time: str | None = Query(default=None),
         top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=200),
         expiry: str | None = Query(default=None),
+        track: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -2106,6 +2107,11 @@ def build_app(
         expiry
             Options only — the ``near`` / ``next`` / ``far`` expiry tier (blank /
             unknown ⇒ ``near``); ranks only that serial expiry as-of *date*.
+        track
+            Options only — the ``all`` / ``monthly`` / ``weekly`` expiry cadence
+            (blank / unknown ⇒ ``all``); the Near/Next/Far tier ranks within it.
+            ``monthly`` = the last expiry per calendar month (structural, no NSE
+            weekday rule — Golden Rule #1); ``weekly`` = the rest.
         interval
             The lake timeframe to snapshot (default ``1day``); the 21-timeframe
             vocab (1minute … 1day). An unknown label degrades to "pull spot first".
@@ -2177,7 +2183,8 @@ def build_app(
                     )
                 )
             if asset == "options":
-                # Options carries the extra Near/Next/Far expiry tier (blank ⇒ near).
+                # Options carries the extra Near/Next/Far expiry tier (blank ⇒ near)
+                # plus the All/Monthly/Weekly cadence track (blank ⇒ all).
                 payload = await run_in_threadpool(
                     run_options_snapshot,
                     lake_root=store_path.parent,
@@ -2186,6 +2193,7 @@ def build_app(
                     time=time,
                     top_n=top_n,
                     expiry_tier=(expiry or "near").lower(),
+                    expiry_track=(track or "all").lower(),
                 )
             else:
                 runner = run_futures_snapshot if asset == "futures" else run_movers_snapshot
