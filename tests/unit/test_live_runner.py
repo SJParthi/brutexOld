@@ -36,6 +36,8 @@ def _mk(
     pid=4242,
     returncode=None,
     cred_env=lambda: {},
+    manifest_writer=lambda path: None,
+    sleeper=lambda s: None,
 ):
     return LiveRunner(
         state_path=tmp_path / "live.json",
@@ -44,7 +46,27 @@ def _mk(
         killer=killer,
         clock=clock,
         cred_env=cred_env,
+        manifest_writer=manifest_writer,
+        sleeper=sleeper,
     )
+
+
+def _start(runner, **overrides):
+    """Call ``runner.start`` with the now-required report/manifest args filled in.
+
+    The N-connection capture (DEC-LIVE-DASHBOARD-WIRE-001) made ``report`` +
+    ``manifest`` required; this helper centralises the defaults so each test only
+    overrides what it asserts on.
+    """
+    kwargs = {
+        "out": "o",
+        "log_file": "l",
+        "report": "r.md",
+        "manifest": "m.json",
+        "seconds": 60,
+    }
+    kwargs.update(overrides)
+    return runner.start(**kwargs)
 
 
 # ───────────────────────────── status ────────────────────────────
@@ -59,26 +81,54 @@ def test_status_stopped_when_no_state(tmp_path) -> None:
 def test_start_then_status_uptime(tmp_path) -> None:
     now = {"t": 1000.0}
     r = _mk(tmp_path, alive=lambda p: True, clock=lambda: now["t"])
-    s = r.start(out="o.jsonl", log_file="l.log", seconds=60)
+    s = _start(r, out="o.jsonl", log_file="l.log")
     assert s.running and s.pid == 4242
     assert s.argv is not None
-    assert s.argv[:4] == [sys.executable, "-m", "brutex.live", "capture"]
+    # The toggle now spawns the N-connection `capture-all` (DEC-LIVE-DASHBOARD-WIRE-001).
+    assert s.argv[:4] == [sys.executable, "-m", "brutex.live", "capture-all"]
+    assert s.feed == "both" and s.report == "r.md"  # feed/report surfaced for the chip + proof
     now["t"] = 1007.5
     s2 = r.status()
     assert s2.running and s2.uptime_s == 7.5 and s2.out == "o.jsonl"
+    assert s2.feed == "both" and s2.report == "r.md"
+
+
+def test_start_writes_manifest_and_passes_capture_all_flags(tmp_path) -> None:
+    """start() writes the manifest then spawns capture-all --manifest/--report/--feed."""
+    written: list[str] = []
+    captured_argv: list[str] = []
+
+    def popen(argv, env):
+        captured_argv.extend(argv)
+        return _FakeProc(9)
+
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=popen,
+        pid_alive=lambda p: True,
+        clock=lambda: 1.0,
+        cred_env=lambda: {},
+        manifest_writer=written.append,
+    )
+    _start(r, manifest="man.json", report="rep.md")
+    assert written == ["man.json"]  # manifest written exactly once, before the spawn
+    assert "capture-all" in captured_argv
+    assert captured_argv[captured_argv.index("--manifest") + 1] == "man.json"
+    assert captured_argv[captured_argv.index("--report") + 1] == "rep.md"
+    assert captured_argv[captured_argv.index("--feed") + 1] == "both"
 
 
 def test_start_is_idempotent_when_running(tmp_path) -> None:
     r = _mk(tmp_path, alive=lambda p: True, pid=111)
-    r.start(out="a", log_file="la", seconds=60)
-    s = r.start(out="b", log_file="lb", seconds=99)  # already running → no 2nd spawn
+    _start(r, out="a", log_file="la")
+    s = _start(r, out="b", log_file="lb", seconds=99)  # already running → no 2nd spawn
     assert s.pid == 111 and s.out == "a"  # unchanged
 
 
 def test_status_reaps_crashed_child(tmp_path) -> None:
     """A child that exits (poll → returncode) reads STOPPED — never a zombie 'running'."""
     r = _mk(tmp_path, alive=lambda p: True, returncode=1)  # the capture crashed
-    r.start(out="o", log_file="l", seconds=60)
+    _start(r)
     s = r.status()
     assert s.running is False and not (tmp_path / "live.json").exists()  # reaped
 
@@ -124,8 +174,9 @@ def test_start_injects_dashboard_creds_into_child_env(tmp_path) -> None:
         pid_alive=lambda p: True,
         clock=lambda: 1.0,
         cred_env=lambda: {"BRUTEX_GROWW_API_KEY": "K", "BRUTEX_GROWW_TOTP_SECRET": "S"},
+        manifest_writer=lambda path: None,
     )
-    r.start(out="o", log_file="l", seconds=1)
+    _start(r, seconds=1)
     assert captured_env["BRUTEX_GROWW_API_KEY"] == "K"
     assert captured_env["BRUTEX_GROWW_TOTP_SECRET"] == "S"
     # creds are NOT on argv (ps hygiene).
@@ -158,7 +209,7 @@ def test_load_cred_env_branches(monkeypatch) -> None:
 def test_stop_escalates_sigterm_then_sigkill(tmp_path) -> None:
     sent: list[int] = []
     r = _mk(tmp_path, alive=lambda p: True, killer=lambda p, s: sent.append(s))
-    r.start(out="o", log_file="l", seconds=60)
+    _start(r)
     s = r.stop()
     assert s.running is False and not (tmp_path / "live.json").exists()
     assert sent == [signal.SIGTERM, signal.SIGKILL]  # still alive after TERM → KILL
@@ -174,7 +225,7 @@ def test_stop_sigterm_only_when_process_dies(tmp_path) -> None:
             state["alive"] = False  # TERM worked → no escalation
 
     r = _mk(tmp_path, alive=lambda p: state["alive"], killer=killer)
-    r.start(out="o", log_file="l", seconds=60)
+    _start(r)
     r.stop()
     assert sent == [signal.SIGTERM]
 
@@ -201,7 +252,7 @@ def test_terminate_sigterm_process_lookup(tmp_path) -> None:
         raise ProcessLookupError
 
     r = _mk(tmp_path, alive=lambda p: True, killer=killer)
-    r.start(out="o", log_file="l", seconds=1)
+    _start(r, seconds=1)
     assert r.stop().running is False  # SIGTERM raises → handled, never propagates
 
 
@@ -214,7 +265,7 @@ def test_terminate_sigkill_process_lookup(tmp_path) -> None:
             raise ProcessLookupError
 
     r = _mk(tmp_path, alive=lambda p: True, killer=killer)
-    r.start(out="o", log_file="l", seconds=1)
+    _start(r, seconds=1)
     r.stop()
     assert sent == [signal.SIGTERM, signal.SIGKILL]  # KILL raises → handled
 
@@ -251,6 +302,91 @@ def test_default_clock_runs(tmp_path) -> None:
         popen_factory=lambda argv, env: _FakeProc(7),
         pid_alive=lambda p: True,
         cred_env=lambda: {},
-    )  # clock + killer defaulted
-    s = r.start(out="o", log_file="l", seconds=1)
+        manifest_writer=lambda path: None,
+    )  # clock + killer + sleeper defaulted
+    s = _start(r, seconds=1)
     assert s.running and isinstance(s.uptime_s, float)
+
+
+def test_default_manifest_writer_is_noop(tmp_path) -> None:
+    """The default ``manifest_writer`` no-op runs end-to-end (no real store needed)."""
+    assert lr._noop_manifest_writer("anything.json") is None
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=lambda argv, env: _FakeProc(8),
+        pid_alive=lambda p: True,
+        clock=lambda: 1.0,
+        cred_env=lambda: {},
+    )  # manifest_writer + sleeper defaulted
+    assert _start(r, seconds=1).running
+
+
+# ───────────────────────────── watchdog ──────────────────────────
+
+
+class _DeadProc:
+    """A subprocess that polls DEAD immediately (the crash the watchdog catches)."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def poll(self) -> int | None:
+        return 1  # exited → status().running is False
+
+
+def test_watch_restarts_dead_capture_with_backoff(tmp_path) -> None:
+    """While ON, a dead capture is restarted with doubling backoff (bounded)."""
+    spawns: list[int] = []
+    waits: list[float] = []
+
+    def popen(argv, env):
+        spawns.append(1)
+        return _DeadProc(700 + len(spawns))
+
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=popen,
+        pid_alive=lambda p: False,  # the OS confirms the crashed pid is gone
+        clock=lambda: 1.0,
+        cred_env=lambda: {},
+        manifest_writer=lambda path: None,
+        sleeper=waits.append,
+    )
+    _start(r)  # toggle ON (1 spawn) — but the child is immediately dead
+    restarts = r.watch(max_restarts=3, base_backoff_s=1.0, max_backoff_s=4.0)
+    assert restarts == 3
+    assert waits == [1.0, 2.0, 4.0]  # doubling, capped at 4.0
+    assert len(spawns) == 1 + 3  # the initial start + 3 watchdog restarts
+
+
+def test_watch_stops_when_feed_turned_off(tmp_path) -> None:
+    """A clean stop() clears the spawn — the watchdog does NOT resurrect it."""
+    r = _mk(tmp_path, alive=lambda p: True)
+    _start(r)
+    r.stop()  # operator turned the toggle OFF
+    assert r.watch(max_restarts=5) == 0  # nothing resurrected
+
+
+def test_watch_noop_when_feed_healthy(tmp_path) -> None:
+    """A running capture is left alone (no restart)."""
+    r = _mk(tmp_path, alive=lambda p: True)  # _FakeProc.poll → None = running
+    _start(r)
+    assert r.watch(max_restarts=5) == 0
+
+
+def test_watch_never_ran_returns_zero(tmp_path) -> None:
+    """watch() with no start in effect (toggle never ON) restarts nothing."""
+    r = _mk(tmp_path, alive=lambda p: True)
+    assert r.watch(max_restarts=5) == 0
+
+
+def test_watch_aborts_when_stopped_during_backoff(tmp_path) -> None:
+    """A stop() during the backoff wait aborts the pending restart (no resurrection)."""
+    r = _mk(tmp_path, alive=lambda p: False, returncode=1)  # child crashes immediately
+
+    def stop_during_wait(_seconds: float) -> None:
+        r.stop()  # operator turns OFF mid-backoff
+
+    r._sleeper = stop_during_wait
+    _start(r)
+    assert r.watch(max_restarts=3) == 0  # the wait's stop() aborts before any respawn

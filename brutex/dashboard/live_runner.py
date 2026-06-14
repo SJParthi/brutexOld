@@ -19,9 +19,23 @@ reads as "running" (bare ``os.kill(pid,0)`` would). After a dashboard restart we
 no longer hold the handle and fall back to OS liveness for adoption.
 
 This is the v1 lifecycle (exactly-once start, crash-honest status, terminate +
-clear on stop). The heartbeat-silence watchdog (auto-restart on a real drop) +
-the cross-process OS lock + the ``(pid, start_time)`` identity check are the
-explicit Phase-2 follow-ups stacking on this PR.
+clear on stop). The cross-process OS lock + the ``(pid, start_time)`` identity
+check are the explicit Phase-2 follow-ups stacking on this PR.
+
+**N-connection capture (``DEC-LIVE-DASHBOARD-WIRE-001``):** the ON toggle now
+WRITES the ``{spot, legs}`` subscription manifest (the dashboard's exact 775 +
+the F&O legs, via the injected ``manifest_writer``) and spawns ``capture-all
+--manifest <path> --report <path> --feed both`` — opening connection #0 = spot
+(dual-feed) + #1..N = legs, and writing the per-connection proof the ``/live``
+page renders — instead of the single-connection ``capture``.
+
+**Restart watchdog (``DEC-LIVE-DASHBOARD-WIRE-001``):** :meth:`LiveRunner.watch`
+is a calendar-free supervisor — while the toggle is ON it detects the capture
+subprocess DIED (``status().running`` flips False with the spawn args still
+remembered) and RESTARTS it with bounded exponential backoff (the operator's
+rule: always restart while ON; no session-calendar gate). A clean operator
+``stop()`` clears the remembered spawn, so the watchdog does NOT resurrect a
+deliberately-stopped feed.
 """
 
 from __future__ import annotations
@@ -31,11 +45,12 @@ import os
 import signal
 import subprocess  # nosec B404 - spawns the trusted `python -m brutex.live` CLI, fixed argv
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -45,11 +60,35 @@ from brutex.config.runtime import is_pid_alive
 
 _LOG = structlog.get_logger("brutex.dashboard.live_runner")
 
+#: Watchdog backoff floor (seconds) — the first restart waits this long.
+_WATCH_BASE_BACKOFF_S: Final[float] = 1.0
+#: Watchdog backoff ceiling (seconds) — the exponential backoff never exceeds it,
+#: so a persistent feed failure retries steadily (never a thundering hammer, never
+#: an unbounded wait).
+_WATCH_MAX_BACKOFF_S: Final[float] = 60.0
+
 PopenFactory = Callable[[list[str], Mapping[str, str]], Any]
 Killer = Callable[[int, int], None]
 PidAlive = Callable[[int], bool]
 Clock = Callable[[], float]
 CredEnv = Callable[[], dict[str, str]]
+#: Writes the ``{spot, legs}`` subscription manifest to the given path. Injected
+#: by the dashboard (it composes the manifest from the instrument store + the F&O
+#: registry); a default no-op keeps ``brutex.live`` DECOUPLED — this module never
+#: imports the data plane (``DEC-LIVE-DECOUPLE-001``).
+ManifestWriter = Callable[[str], None]
+#: Sleeps for the given seconds (the watchdog's backoff; injected in tests).
+Sleeper = Callable[[float], None]
+
+
+def _noop_manifest_writer(_path: str) -> None:
+    """Default manifest writer — a no-op (the real store-backed writer is injected).
+
+    With the no-op, ``capture-all --manifest`` reads an absent file and the
+    capture resolves the spot from the instrument master itself (its documented
+    no-manifest fallback); the dashboard injects the real writer so the manifest
+    carries the EXACT persisted 775 + the F&O legs.
+    """
 
 
 def _now_epoch() -> float:
@@ -90,8 +129,11 @@ class LiveStatus:
     running
         True iff a live capture process is currently alive (poll-verified when we
         hold the handle, so a crashed/zombie child reads ``False``).
-    pid, started_at, uptime_s, argv, out
+    pid, started_at, uptime_s, argv, out, feed, report
         The tracked process identity + spawn details (all ``None`` when stopped).
+        ``feed`` is the actual feed mode the capture runs (``"both"`` for the
+        N-connection capture — the Live-bar chip reflects it); ``report`` is the
+        per-connection proof path the ``/live`` page reads.
     """
 
     running: bool
@@ -100,6 +142,8 @@ class LiveStatus:
     uptime_s: float | None = None
     argv: list[str] | None = None
     out: str | None = None
+    feed: str | None = None
+    report: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-serialisable mapping for the ``/api/v1/live/status`` route."""
@@ -118,13 +162,16 @@ class LiveRunner:
         killer: Killer = os.kill,
         clock: Clock = _now_epoch,
         cred_env: CredEnv = _load_cred_env,
+        manifest_writer: ManifestWriter = _noop_manifest_writer,
+        sleeper: Sleeper = time.sleep,
     ) -> None:
         """Wire the runner.
 
         Parameters
         ----------
         state_path
-            JSON file recording ``{pid, start_ts, argv, out}`` for the live run.
+            JSON file recording ``{pid, start_ts, argv, out, feed, report}`` for
+            the live run.
         popen_factory
             Spawns the subprocess given ``(argv, env)`` (injected fake in tests).
         pid_alive
@@ -136,6 +183,13 @@ class LiveRunner:
         cred_env
             Returns the Groww creds as env vars to inject into the child
             (defaults to loading the dashboard-saved file).
+        manifest_writer
+            Writes the ``{spot, legs}`` subscription manifest to a path (injected
+            by the dashboard; the default is a no-op so ``brutex.live`` stays
+            decoupled). Called on every ``start`` before the spawn.
+        sleeper
+            Sleeps the watchdog's backoff (injected in tests so no real wall-time
+            passes).
         """
         self._state_path = Path(state_path)
         self._popen = popen_factory
@@ -143,7 +197,13 @@ class LiveRunner:
         self._kill = killer
         self._clock = clock
         self._cred_env = cred_env
+        self._manifest_writer = manifest_writer
+        self._sleeper = sleeper
         self._proc: Any = None
+        #: The kwargs of the most recent ``start`` — the watchdog re-spawns with
+        #: these on a death. ``None`` after a clean ``stop`` (so the watchdog never
+        #: resurrects a deliberately-stopped feed).
+        self._last_start: dict[str, Any] | None = None
 
     # ── state file ────────────────────────────────────────────────
     def _read_state(self) -> dict[str, Any] | None:
@@ -198,6 +258,8 @@ class LiveRunner:
             uptime_s=round(self._clock() - float(state["start_ts"]), 1),
             argv=state.get("argv"),
             out=state.get("out"),
+            feed=state.get("feed"),
+            report=state.get("report"),
         )
 
     def start(
@@ -205,26 +267,50 @@ class LiveRunner:
         *,
         out: str,
         log_file: str,
+        report: str,
+        manifest: str,
         seconds: float,
         symbols: str = "all",
         feed: str = "both",
     ) -> LiveStatus:
-        """Spawn the capture subprocess (idempotent — a no-op if already running).
+        """Spawn the N-connection capture subprocess (idempotent — no-op if running).
 
-        The dashboard-saved Groww creds are injected into the child's environment
+        Writes the ``{spot, legs}`` subscription manifest (via the injected
+        ``manifest_writer``) to *manifest*, then spawns ``capture-all --manifest
+        <manifest> --report <report> --feed both`` — connection #0 = spot
+        (dual-feed) + #1..N = the F&O legs (``DEC-LIVE-DASHBOARD-WIRE-001``). The
+        per-connection proof lands at *report* for the ``/live`` page. The
+        dashboard-saved Groww creds are injected into the child's environment
         (``DEC-LIVE-CREDS-BRIDGE-001``) so the capture authenticates without the
         operator re-exporting them.
+
+        The spawn args are remembered (:attr:`_last_start`) so :meth:`watch` can
+        re-spawn on a crash.
         """
+        self._last_start = {
+            "out": out,
+            "log_file": log_file,
+            "report": report,
+            "manifest": manifest,
+            "seconds": seconds,
+            "symbols": symbols,
+            "feed": feed,
+        }
         current = self.status()
         if current.running:
             return current
+        self._manifest_writer(manifest)
         argv = [
             sys.executable,
             "-m",
             "brutex.live",
-            "capture",
+            "capture-all",
             "--out",
             out,
+            "--report",
+            report,
+            "--manifest",
+            manifest,
             "--symbols",
             symbols,
             "--feed",
@@ -245,6 +331,8 @@ class LiveRunner:
                 "started_at": datetime.fromtimestamp(now, UTC).isoformat(),
                 "argv": argv,
                 "out": out,
+                "feed": feed,
+                "report": report,
             }
         )
         _LOG.info(
@@ -253,18 +341,25 @@ class LiveRunner:
             symbols=symbols,
             feed=feed,
             out=out,
+            report=report,
+            manifest=manifest,
             creds_from_dashboard=bool(cred_env),
         )
         return self.status()
 
     def stop(self) -> LiveStatus:
-        """Terminate the capture subprocess (SIGTERM→SIGKILL) and clear the state."""
+        """Terminate the capture subprocess (SIGTERM→SIGKILL) and clear the state.
+
+        Clears :attr:`_last_start` so the watchdog never resurrects a
+        deliberately-stopped feed (the operator turned the toggle OFF).
+        """
         state = self._read_state()
         if state is not None and self._is_live(int(state["pid"])):
             self._terminate(int(state["pid"]))
             _LOG.info("live_runner_stop", pid=int(state["pid"]))
         self._clear_state()
         self._proc = None
+        self._last_start = None
         return LiveStatus(running=False)
 
     def _terminate(self, pid: int) -> None:
@@ -278,6 +373,67 @@ class LiveRunner:
                 self._kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 return
+
+    # ── watchdog ──────────────────────────────────────────────────
+    def watch(
+        self,
+        *,
+        max_restarts: int,
+        base_backoff_s: float = _WATCH_BASE_BACKOFF_S,
+        max_backoff_s: float = _WATCH_MAX_BACKOFF_S,
+    ) -> int:
+        """Restart the capture subprocess whenever it DIES while the feed is ON.
+
+        The calendar-free supervisor (``DEC-LIVE-DASHBOARD-WIRE-001``, the
+        operator's rule): while a :meth:`start` is in effect (``_last_start`` set,
+        i.e. the toggle is ON) and the tracked subprocess is no longer running
+        (a crash — feed drop, auth failure, OOM kill), it RESTARTS with bounded
+        EXPONENTIAL backoff (``base_backoff_s`` doubling each consecutive restart,
+        capped at ``max_backoff_s``) — no session-calendar gate, always restart
+        while ON. A clean operator :meth:`stop` (``_last_start`` cleared) ends the
+        loop: the watchdog never resurrects a deliberately-stopped feed.
+
+        Bounded by *max_restarts* so a runaway crash-loop (and any test) always
+        terminates — the production supervisor calls this in a thread with a high
+        bound; each restart logs ``live_runner_watchdog_restart`` so a flapping
+        feed is visible, never silently hammered (Golden Rule #10 honest envelope).
+
+        Parameters
+        ----------
+        max_restarts
+            Maximum restarts to perform before returning (the loop bound).
+        base_backoff_s
+            First-restart wait; doubles each consecutive restart.
+        max_backoff_s
+            Backoff ceiling — the wait never exceeds this.
+
+        Returns
+        -------
+        int
+            How many restarts were performed (``0`` if the feed stayed up / was
+            stopped before any death).
+        """
+        restarts = 0
+        backoff = base_backoff_s
+        while restarts < max_restarts:
+            last = self._last_start
+            if last is None:
+                break  # the operator stopped the feed — do not resurrect it.
+            if self.status().running:
+                break  # the feed is healthy — nothing to restart.
+            _LOG.warning(
+                "live_runner_watchdog_restart",
+                restart=restarts + 1,
+                backoff_s=backoff,
+            )
+            self._sleeper(backoff)
+            # Re-check after the backoff: a stop() during the wait must abort.
+            if self._last_start is None:
+                break
+            self.start(**last)
+            restarts += 1
+            backoff = min(backoff * 2.0, max_backoff_s)
+        return restarts
 
 
 __all__ = ["LiveRunner", "LiveStatus"]

@@ -100,9 +100,51 @@ def test_start_status_stop_cycle(tmp_path, monkeypatch) -> None:
     assert client.get("/api/v1/live/status").json()["running"] is False
     started = client.post("/api/v1/live/start").json()
     assert started["running"] is True and started["pid"] == 4242
+    # The N-connection capture-all is spawned with --report/--manifest/--feed both.
+    assert started["feed"] == "both"
+    assert "capture-all" in started["argv"]
+    assert "--report" in started["argv"] and "--manifest" in started["argv"]
     status = client.get("/api/v1/live/status").json()
     assert status["running"] is True and status["ticks_captured"] == 0
     assert client.post("/api/v1/live/stop").json()["running"] is False
+
+
+def test_live_connections_empty_when_no_report(tmp_path, monkeypatch) -> None:
+    """No proof written yet → an empty connections payload + honest note."""
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    body = client.get("/api/v1/live/connections").json()
+    assert body["connections"] == [] and body["note"]
+
+
+def test_live_connections_parses_report(tmp_path, monkeypatch) -> None:
+    """A written proof Markdown is parsed into the per-connection table."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "live-connections.md").write_text(
+        "# Live-feed connection subscription plan\n\n"
+        "**2 connections (1 spot + 1 leg), 1775 instruments**\n\n"
+        "| Connection | Feed | Instruments |\n|---|---|---|\n"
+        "| #0 | both | 775 |\n| #1 | ltp | 1000 |\n",
+        encoding="utf-8",
+    )
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    body = client.get("/api/v1/live/connections").json()
+    assert body["note"] is None
+    assert body["connections"] == [
+        {"index": 0, "feed": "both", "subscribed": 775},
+        {"index": 1, "feed": "ltp", "subscribed": 1000},
+    ]
+
+
+def test_live_page_renders_connections_panel_and_feed_chip(tmp_path) -> None:
+    """The /live page ships the per-connection panel + the feed chip element."""
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    text = client.get("/live").text
+    assert 'id="connGrid"' in text and 'id="connCount"' in text  # connection proof panel
+    assert 'id="chipFeed"' in text  # the feed chip the status drives (no hardcoded ltp)
+    assert "capture-all" in text  # the chip note reflects the N-connection spawn
+    assert "/api/v1/live/connections" in text  # the page calls the connections route
 
 
 def test_status_counts_jsonl_ticks(tmp_path, monkeypatch) -> None:

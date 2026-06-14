@@ -165,9 +165,9 @@
       </div>
       <div class="seg">
         <span class="chip">symbols <b>all</b></span>
-        <span class="chip">feed <b>ltp</b></span>
+        <span class="chip">feed <b id="chipFeed">both</b></span>
         <span class="chip">cap <b>1000 / conn</b></span>
-        <span class="chip note">spawns <b>python -m brutex.live capture</b> (separate process)</span>
+        <span class="chip note">spawns <b>python -m brutex.live capture-all</b> (separate process)</span>
       </div>
     </div>
 
@@ -176,6 +176,14 @@
       <div class="card"><div class="k">Uptime</div><div class="v blue" id="cUptime">—</div><div class="x">since start</div></div>
       <div class="card"><div class="k">Ticks captured</div><div class="v green" id="cTicks">—</div><div class="x">JSONL log lines</div></div>
       <div class="card"><div class="k">Out log</div><div class="v muted" style="font-size:13px" id="cOut">—</div><div class="x">runs/ + .brutex-logs/</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="tabs">
+        <div class="tab sel" style="cursor:default">🔌 connections <span class="b" id="connCount">0</span></div>
+        <span class="note" id="connSummary">per-connection subscription proof — #0 spot (dual-feed) · #1..N F&amp;O legs</span>
+      </div>
+      <div id="connGrid"><div class="empty">turn the Live feed ON to capture</div></div>
     </div>
 
     <div class="panel">
@@ -230,7 +238,29 @@ async function refreshStatus(){
     $("cUptime").textContent=s.uptime_s==null?"—":Math.floor(s.uptime_s)+"s";
     $("cTicks").textContent=(s.ticks_captured==null?0:s.ticks_captured).toLocaleString();
     $("cOut").textContent=s.out||"—";
+    /* Feed chip reflects the ACTUAL feed from the status (both for capture-all),
+       no longer a hardcoded 'ltp' (DEC-LIVE-DASHBOARD-WIRE-001). */
+    if(s.feed) $("chipFeed").textContent=s.feed;
   }catch(e){ $("hdrState").textContent="offline"; }
+}
+
+/* Per-connection subscription proof (DEC-LIVE-DASHBOARD-WIRE-001): the honest
+   "are all my N connections + their subscriptions working?" table. */
+async function loadConnections(){
+  try{
+    const r=await fetch("/api/v1/live/connections"); const b=await r.json();
+    const conns=b.connections||[];
+    $("connCount").textContent=conns.length.toLocaleString();
+    if(b.summary) $("connSummary").textContent=b.summary;
+    if(!conns.length){
+      $("connGrid").innerHTML='<div class="empty">'+esc(b.note||"no connection proof yet")+'</div>';
+      return;
+    }
+    const thead='<thead><tr><th>Connection</th><th>Feed</th><th>Subscribed</th></tr></thead>';
+    const tbody='<tbody>'+conns.map(c=>'<tr><td>#'+esc(c.index)+'</td><td>'+esc(c.feed)
+      +'</td><td>'+Number(c.subscribed||0).toLocaleString()+'</td></tr>').join("")+'</tbody>';
+    $("connGrid").innerHTML='<div class="gridwrap"><table>'+thead+tbody+'</table></div>';
+  }catch(e){ $("connGrid").innerHTML='<div class="empty">offline</div>'; }
 }
 async function toggle(){
   if(busy) return; busy=true;
@@ -239,7 +269,7 @@ async function toggle(){
   try{ await fetch(on?"/api/v1/live/stop":"/api/v1/live/start",{method:"POST"}); }
   catch(e){}
   $("toggle").removeAttribute("aria-disabled"); busy=false;
-  await refreshStatus();
+  await refreshStatus(); await loadConnections();
 }
 async function loadTables(){
   try{
@@ -377,10 +407,10 @@ function renderView(name, body, err){
 
 $("toggle").addEventListener("click",toggle);
 $("toggle").addEventListener("keydown",e=>{ if(e.key===" "||e.key==="Enter"){e.preventDefault();toggle();}});
-$("refresh").addEventListener("click",()=>{ loadTables(); refreshStatus(); });
+$("refresh").addEventListener("click",()=>{ loadTables(); refreshStatus(); loadConnections(); });
 document.querySelectorAll(".tab[data-tab]").forEach(t=>t.addEventListener("click",()=>selectTable(t.dataset.tab)));
-refreshStatus(); loadTables();
-setInterval(refreshStatus, 5000);
+refreshStatus(); loadTables(); loadConnections();
+setInterval(()=>{ refreshStatus(); loadConnections(); }, 5000);
 </script>
 </body>
 </html>

@@ -75,6 +75,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.live_connections import read_connections
 from brutex.dashboard.live_lake_view import (
     LIVE_TABLES,
     live_columns,
@@ -82,6 +83,7 @@ from brutex.dashboard.live_lake_view import (
     live_tables_summary,
     query_live_table,
 )
+from brutex.dashboard.live_manifest import make_store_manifest_writer
 from brutex.dashboard.live_runner import LiveRunner
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
@@ -3273,12 +3275,20 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # ── Live feed (Groww websocket): ON/OFF subprocess + Parquet-lake browse ──
-    # DEC-LIVE-DECOUPLE-001: the dashboard SPAWNS `python -m brutex.live capture`
+    # DEC-LIVE-DECOUPLE-001: the dashboard SPAWNS `python -m brutex.live capture-all`
     # and READS the live/ Parquet lake — it never imports brutex.live, so the live
     # package stays portable to TickVault/AWS. Read-only market data, no orders.
-    _runner = live_runner or LiveRunner(state_path=Path(".brutex-logs") / "live-feed.json")
     _live_out = "runs/live-ticks.jsonl"
     _live_log = str(Path(".brutex-logs") / "brutex-live.log")
+    _live_report = "runs/live-connections.md"
+    _live_manifest = "runs/live-manifest.json"
+    # The ON toggle writes the {spot, legs} manifest from the persisted tables
+    # (the EXACT 775 + the F&O legs) so capture-all subscribes the real universe
+    # (DEC-LIVE-DASHBOARD-WIRE-001); the writer stays in live_manifest (COMMON).
+    _runner = live_runner or LiveRunner(
+        state_path=Path(".brutex-logs") / "live-feed.json",
+        manifest_writer=make_store_manifest_writer(instrument_store),
+    )
 
     def _live_lake_root() -> Path | None:
         lake_root = getattr(instrument_store, "path", None)
@@ -3306,9 +3316,20 @@ def build_app(
 
     @app.post("/api/v1/live/start")
     async def api_live_start(seconds: float = Query(default=23400.0, gt=0)) -> JSONResponse:
-        """POST /api/v1/live/start — spawn the capture subprocess (idempotent)."""
+        """POST /api/v1/live/start — spawn the N-connection capture (idempotent).
+
+        Writes the ``{spot, legs}`` manifest from the persisted tables, then spawns
+        ``capture-all --manifest … --report … --feed both`` (connection #0 = spot
+        dual-feed + #1..N = F&O legs; DEC-LIVE-DASHBOARD-WIRE-001).
+        """
         status = await run_in_threadpool(
-            lambda: _runner.start(out=_live_out, log_file=_live_log, seconds=seconds)
+            lambda: _runner.start(
+                out=_live_out,
+                log_file=_live_log,
+                report=_live_report,
+                manifest=_live_manifest,
+                seconds=seconds,
+            )
         )
         return JSONResponse(status.as_dict())
 
@@ -3317,6 +3338,20 @@ def build_app(
         """POST /api/v1/live/stop — terminate the capture subprocess."""
         status = await run_in_threadpool(_runner.stop)
         return JSONResponse(status.as_dict())
+
+    @app.get("/api/v1/live/connections")
+    async def api_live_connections() -> JSONResponse:
+        """GET /api/v1/live/connections — the per-connection subscription proof.
+
+        Reads the capture's ``--report`` Markdown back into ``{connections:
+        [{index, feed, subscribed}], summary, note}`` (DEC-LIVE-DASHBOARD-WIRE-001)
+        — the honest "are all my N connections + their subscriptions really
+        working?" view. Degrades to an empty payload + ``note`` when no proof has
+        been written yet (the toggle is OFF). Thin wrapper over
+        :func:`brutex.dashboard.live_connections.read_connections`.
+        """
+        payload = await run_in_threadpool(lambda: read_connections(_live_report))
+        return JSONResponse(payload)
 
     @app.get("/api/v1/live/tables")
     async def api_live_tables() -> JSONResponse:
