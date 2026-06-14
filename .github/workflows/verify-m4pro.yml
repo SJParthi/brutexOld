@@ -1,0 +1,122 @@
+# verify-m4pro.yml — Full workspace verification on the M4 Pro (macOS) runner.
+#
+# WHY (DEC-M4PRO-VERIFY-001)
+# -------------------------
+# The shared GitHub CI (ci.yml) runs on ubuntu-24.04. The operator DEVELOPS +
+# RUNS on an Apple-Silicon Mac (CLAUDE.md §8). This workflow runs the FULL
+# functional verification — bootstrap + the entire pytest suite + mypy/pyright +
+# brutex doctor + both Rust kernels — on the REGISTERED self-hosted M4 Pro
+# runner (`Parthibans-MacBook-Pro`, labels [self-hosted, macos, m4pro]), so the
+# "entire workspace works" guarantee is proven on the ACTUAL production
+# hardware + OS, not just on the ubuntu shared runner. It catches any
+# macOS/arm64-specific breakage the shared CI cannot.
+#
+# RELATIONSHIP TO bench-m4pro.yml
+# -------------------------------
+# `bench-m4pro.yml` runs the PERFORMANCE gates (50 M/s floor, strict 1.1×/3.0×
+# O(1) tier, 33B SLA). THIS workflow runs the FUNCTIONAL verification (does the
+# whole workspace build + pass on macOS). Same runner, complementary purpose.
+#
+# TRIGGERS (no `pull_request` — DEC-M4PRO-PR-TRIGGER-001)
+# ------------------------------------------------------
+# Like bench-m4pro.yml, this has NO pull_request trigger: a self-hosted runner
+# that is offline (the operator's Mac asleep) would otherwise hang every PR's
+# mergeable state. It runs on a daily cron + manual dispatch — where a
+# perpetually-queued run is harmless. The shared ci.yml is the per-PR gate.
+#
+# Decision: DEC-M4PRO-VERIFY-001.
+
+name: verify-m4pro
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily 12:00 UTC = 17:30 IST (post-market, after bench-m4pro's 11:00 run).
+    - cron: "0 12 * * *"
+
+concurrency:
+  group: verify-m4pro-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  m4pro-full-verification:
+    # Gated to the self-hosted M4 Pro runner. If no runner with this label set
+    # is online the job sits "queued" indefinitely — harmless (no PR to block).
+    runs-on: [self-hosted, macos, m4pro]
+    timeout-minutes: 45
+
+    env:
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner identity (real hardware proof)
+        run: |
+          echo "::group::Runner info"
+          uname -a
+          sw_vers || true
+          sysctl -n hw.model || true
+          sysctl -n hw.ncpu || true
+          # Report the GPU/Metal device for the record (informational — the
+          # engine is CPU/rayon today per ADR-0004; this just proves what HW
+          # a future Metal kernel would target).
+          system_profiler SPDisplaysDataType 2>/dev/null | grep -iE "chipset|metal|cores" || true
+          echo "::endgroup::"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bootstrap (venv + deps + both Rust kernels + doctor)
+        run: |
+          # The repo's own turnkey bootstrap is the single source of truth
+          # (CLAUDE.md §11 COMMON): 3.12 venv, [dev,data,ui] + optimize extras,
+          # fno_math + trading_core via maturin, then `brutex doctor`.
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev,optimize]"
+          pip install maturin
+          (cd rust/fno-math && maturin develop --release)
+          (cd rust/trading-core && maturin develop --release)
+
+      - name: Lint + format (ruff)
+        run: |
+          . .venv/bin/activate
+          ruff check brutex tests
+          ruff format --check brutex
+
+      - name: Type check (mypy --strict + pyright)
+        run: |
+          . .venv/bin/activate
+          mypy --strict brutex
+          pyright brutex
+
+      - name: Full test suite (unit + integration + property + golden + bench)
+        run: |
+          . .venv/bin/activate
+          pytest -q -p no:cacheprovider
+
+      - name: Runtime health (brutex doctor)
+        run: |
+          . .venv/bin/activate
+          brutex doctor
+
+      - name: Rust kernels (fno-math + trading-core)
+        run: |
+          . .venv/bin/activate
+          (cd rust/fno-math && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --release)
+          (cd rust/trading-core && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --release)
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "::notice::Full workspace verification ran on ${{ runner.name }} (macOS / Apple Silicon)"
+          echo "::notice::Functional twin of bench-m4pro.yml (which gates the absolute perf floors)"
