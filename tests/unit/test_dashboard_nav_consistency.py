@@ -42,12 +42,11 @@ _TOPNAV_PAGES = {
 #: explicitly (not silently skipped) so the meta-guard stays exhaustive:
 #:  - ``_render_index_html`` — the operator dashboard uses in-page tabs, not topnav.
 #:  - ``_render_welcome_html`` — the marketing landing page has its own nav + footer.
-#:  - ``_render_credentials_html`` — the orphaned Dhan-era page (no route; superseded
-#:    by ``/groww-credentials``). Slated for deletion in a follow-up.
+#: (The orphaned Dhan-era ``credentials.html`` + its loaders were deleted in
+#: DEC-DASHBOARD-CREDS-ORPHAN-DELETE-001 — the live page is ``/groww-credentials``.)
 _EXEMPT_HELPERS = {
     "_render_index_html",
     "_render_welcome_html",
-    "_render_credentials_html",
 }
 
 _NAV_RE = re.compile(r'<nav class="topnav".*?</nav>', re.S)
