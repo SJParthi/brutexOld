@@ -89,9 +89,10 @@ def _real_instrument_resolver(  # pragma: no cover — needs the instrument mast
 
     from brutex.adapters.groww.constants import GROWW_INSTRUMENT_CSV_URL
 
-    text = urllib.request.urlopen(GROWW_INSTRUMENT_CSV_URL, timeout=30).read().decode("utf-8")  # noqa: S310
+    text = urllib.request.urlopen(GROWW_INSTRUMENT_CSV_URL, timeout=30).read().decode("utf-8")  # noqa: S310  # nosec B310
     rows = list(csv.DictReader(text.splitlines()))
     full = symbols.strip().lower() in ("all", "universe")
+    fno_underlyings: set[str] = set()
     if full:
         fno_underlyings = {
             (r.get("underlying_symbol") or "").strip().upper()
