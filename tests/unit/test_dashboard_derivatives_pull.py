@@ -19,7 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClient, GrowwSDK
 from brutex.adapters.groww.constants import GROWW_FUTURE_COVERAGE_MARKET
 from brutex.dashboard import derivatives_pull as dp
 from brutex.dashboard.derivatives_pull import (
@@ -95,7 +95,7 @@ class _RecordingSink:
         return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
 
 
-def _client(sdk: _FakeSDK) -> GrowwClient:
+def _client(sdk: GrowwSDK) -> GrowwClient:
     return GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
 
 
@@ -129,7 +129,7 @@ def _expiries_2024(**kw: object) -> Mapping[str, object]:
     return {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {"expiries": []}
 
 
-def _factory_for(sdk: _FakeSDK, sink: BarSink) -> dp.DerivativeClientFactory:
+def _factory_for(sdk: GrowwSDK, sink: BarSink) -> dp.DerivativeClientFactory:
     def _factory(_lake_root: Path) -> tuple[GrowwClient, BarSink]:
         return _client(sdk), sink
 
@@ -224,6 +224,8 @@ def test_report_to_dict_round_trips() -> None:
     assert payload["underlyings"] == ["NIFTY"]
     assert payload["bars_appended"] == 3
     assert payload["note"] == "ok"
+    # still_failed_windows defaults to 0 (backward-compatible) and rides to_dict.
+    assert payload["still_failed_windows"] == 0
 
 
 # ── empty-chain dry-run SDK + factory ────────────────────────────────────────
@@ -451,3 +453,230 @@ def test_resolve_client_factory_live_returns_callable() -> None:
         on_success=lambda: None,
     )
     assert callable(factory)
+
+
+# ── until-clean round-loop (DEC-GROWW-DERIV-UNTIL-CLEAN-001) ──────────────────
+
+
+class GrowwAPITimeoutException(Exception):
+    """A RETRYABLE (transient) Groww error — recorded FAILED, re-attempted next round."""
+
+
+class _FailFirstRoundSDK:
+    """Candles raise a transient error during round 1, succeed from round 2.
+
+    Round detection is by chain (re-)enumeration count: ``get_contracts`` fires once
+    per round, so ``enumerations <= 1`` means "still in the first pass". This proves
+    the until-clean loop RE-ATTEMPTS the prior round's FAILED window (the
+    make-or-break — DEC-GROWW-DERIV-UNTIL-CLEAN-001), independent of the per-window
+    retry depth.
+    """
+
+    def __init__(self) -> None:
+        self.enumerations = 0
+
+    def get_expiries(self, **kw: object) -> Mapping[str, object]:
+        return _expiries_2024(**kw)
+
+    def get_contracts(self, **kw: object) -> Mapping[str, object]:
+        self.enumerations += 1
+        return _option_chain(**kw)
+
+    def get_historical_candles(self, **_kw: object) -> Mapping[str, object]:
+        if self.enumerations <= 1:
+            raise GrowwAPITimeoutException("transient timeout (round 1)")
+        return _candles()
+
+
+def _silence_backoffs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No-op BOTH real sleeps (per-window retry + inter-round) so loops run instantly."""
+    monkeypatch.setattr("brutex.adapters.groww.option_ingest._time_sleep", lambda _s: None)
+    monkeypatch.setattr("brutex.adapters.ingest_common._time_sleep", lambda _s: None)
+
+
+def test_until_clean_dry_run_reaches_clean() -> None:
+    # The empty-chain dry-run has 0 windows → round 1 is clean → stop_clean, with
+    # NO controller (quota hook None branch) and no real sleeps.
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=Path("/tmp/lake-uc-dry"),
+        dry_run=True,
+        contract_types=("option",),
+        intervals=("1day",),
+        now=_NOW,
+        until_clean=True,
+        until_clean_rounds=3,
+    )
+    assert report.dry_run is True
+    assert report.windows == 0
+    assert report.still_failed_windows == 0
+    assert report.auth_aborted is False
+
+
+def test_until_clean_zero_round_budget_is_a_safe_noop(tmp_path: Path) -> None:
+    # until_clean_rounds=0 → run_until_clean runs ZERO rounds → empty passes → an
+    # honest all-zero report (never an IndexError on passes[-1]).
+    sdk = _FakeSDK(expiries=_expiries_2024, contracts=_option_chain)
+    sink = _RecordingSink()
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=tmp_path,
+        dry_run=False,
+        contract_types=("option",),
+        intervals=("1day",),
+        from_date="2024-01-01",
+        to_date="2024-01-25",
+        now=_NOW,
+        client_factory=_factory_for(sdk, sink),
+        until_clean=True,
+        until_clean_rounds=0,
+    )
+    assert report.windows == 0
+    assert report.bars_appended == 0
+    assert report.still_failed_windows == 0
+    assert report.auth_aborted is False
+    assert sink.appends == []
+
+
+def test_until_clean_reattempts_failed_window_until_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # THE make-or-break: round 1 fails the CE window (transient), the ledger records
+    # it FAILED (not skippable), round 2 re-attempts and succeeds → residual drains
+    # to 0 → stop_clean. The bar eventually lands.
+    _silence_backoffs(monkeypatch)
+    sdk = _FailFirstRoundSDK()
+    sink = _RecordingSink()
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=tmp_path,
+        dry_run=False,
+        contract_types=("option",),
+        intervals=("1day",),
+        from_date="2024-01-01",
+        to_date="2024-01-25",
+        now=_NOW,
+        client_factory=_factory_for(sdk, sink),
+        until_clean=True,
+        until_clean_rounds=5,
+    )
+    assert report.still_failed_windows == 0
+    assert report.auth_aborted is False
+    assert sink.appends == [("NSE-NIFTY-25Jan24-100-CE", "1day", 1)]
+    assert sdk.enumerations >= 2  # at least two rounds enumerated the chain
+
+
+def test_until_clean_live_session_wires_quota_brake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A LIVE SessionRateController + not-dry-run wires the (dormant, Groww has no
+    # quota) quota_exhausted brake — the `session_rate is not None and not dry_run`
+    # branch. A clean chain reaches stop_clean on round 1.
+    _silence_backoffs(monkeypatch)
+    sdk = _FakeSDK(expiries=_expiries_2024, contracts=_option_chain)
+    sink = _RecordingSink()
+    rate = SessionRateController()  # real (pure) controller; .quota_exhausted() → False
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=tmp_path,
+        dry_run=False,
+        contract_types=("option",),
+        intervals=("1day",),
+        from_date="2024-01-01",
+        to_date="2024-01-25",
+        now=_NOW,
+        client_factory=_factory_for(sdk, sink),
+        session_rate=rate,
+        until_clean=True,
+        until_clean_rounds=3,
+    )
+    assert report.still_failed_windows == 0
+    assert report.bars_appended == 1
+
+
+def test_until_clean_stops_on_no_progress_with_residual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A PERSISTENT transient (every round fails the same window) makes no progress →
+    # stop_no_progress (stop_when_stuck) after the second round, leaving residual.
+    # The note honestly surfaces the still-failing transient window.
+    _silence_backoffs(monkeypatch)
+    sdk = _FakeSDK(
+        expiries=_expiries_2024,
+        contracts=_option_chain,
+        raise_for={"NSE-NIFTY-25Jan24-100-CE": GrowwAPITimeoutException("always failing")},
+    )
+    sink = _RecordingSink()
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=tmp_path,
+        dry_run=False,
+        contract_types=("option",),
+        intervals=("1day",),
+        from_date="2024-01-01",
+        to_date="2024-01-25",
+        now=_NOW,
+        client_factory=_factory_for(sdk, sink),
+        until_clean=True,
+        until_clean_rounds=10,
+    )
+    assert report.still_failed_windows == 1
+    assert report.failed_pairs == 0
+    assert "transient window(s) still failing" in report.note
+    assert sink.appends == []
+
+
+def test_until_clean_auth_death_stops_dead(tmp_path: Path) -> None:
+    # A dead token under until_clean → stop_dead on round 1 (auth outranks everything);
+    # auth is a quarantined pair, not a transient window, so still_failed stays 0.
+    sdk = _FakeSDK(
+        expiries=_expiries_2024,
+        contracts=_option_chain,
+        raise_for={"NSE-NIFTY-25Jan24-100-CE": GrowwAPIAuthenticationException("dead token")},
+    )
+    sink = _RecordingSink()
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=tmp_path,
+        dry_run=False,
+        contract_types=("option",),
+        intervals=("1day",),
+        from_date="2024-01-01",
+        to_date="2024-01-25",
+        now=_NOW,
+        client_factory=_factory_for(sdk, sink),
+        until_clean=True,
+        until_clean_rounds=5,
+    )
+    assert report.auth_aborted is True
+    assert report.still_failed_windows == 0
+    assert "auth token expired" in report.note
+
+
+def test_single_pass_still_failed_window_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The DEFAULT single pass (until_clean=False) now also surfaces the transient
+    # residual + the to_dict key + the honest note (no until-clean loop involved).
+    monkeypatch.setattr("brutex.adapters.groww.option_ingest._time_sleep", lambda _s: None)
+    sdk = _FakeSDK(
+        expiries=_expiries_2024,
+        contracts=_option_chain,
+        raise_for={"NSE-NIFTY-25Jan24-100-CE": GrowwAPITimeoutException("transient")},
+    )
+    sink = _RecordingSink()
+    report = pull_all_derivatives(
+        [_instrument("NIFTY")],
+        lake_root=tmp_path,
+        dry_run=False,
+        contract_types=("option",),
+        intervals=("1day",),
+        from_date="2024-01-01",
+        to_date="2024-01-25",
+        now=_NOW,
+        client_factory=_factory_for(sdk, sink),
+    )
+    assert report.failed_pairs == 0
+    assert report.still_failed_windows == 1
+    assert report.to_dict()["still_failed_windows"] == 1
+    assert "transient window(s) still failing" in report.note
