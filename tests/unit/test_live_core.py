@@ -349,6 +349,41 @@ def test_probe_connections_fails_at_n() -> None:
     assert result.failure == "RuntimeError: max connections"
 
 
+def test_probe_holds_then_closes_each_connection() -> None:
+    """Every opened connection is RETAINED for the ramp, then released via close."""
+    opened: list[object] = []
+    closed: list[object] = []
+
+    def opener(_ordinal: int) -> object:
+        conn = object()
+        opened.append(conn)
+        return conn
+
+    result = probe_connections(open_connection=opener, max_conns=3, close=closed.append)
+    assert result.max_held == 3
+    assert len(opened) == 3 and closed == opened  # all held concurrently, then all closed
+
+
+def test_probe_close_errors_are_swallowed() -> None:
+    """A close failure is logged + swallowed — it never masks the probe result."""
+
+    def bad_close(_conn: object) -> None:
+        raise RuntimeError("close failed")
+
+    result = probe_connections(open_connection=lambda _o: object(), max_conns=2, close=bad_close)
+    assert result.max_held == 2 and result.failed_at is None
+
+
+def test_probe_fails_at_first_connection() -> None:
+    """A refusal on the very first open holds nothing (the empty-cleanup path)."""
+
+    def opener(_ordinal: int) -> object:
+        raise RuntimeError("refused")
+
+    result = probe_connections(open_connection=opener, max_conns=5, close=lambda _c: None)
+    assert result.max_held == 0 and result.failed_at == 1 and result.reached_ceiling
+
+
 def test_analyze_cadence_insufficient() -> None:
     stats = analyze_cadence([])
     assert stats.samples == 0 and stats.median_interval_ms is None
