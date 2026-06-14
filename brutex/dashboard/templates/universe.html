@@ -590,7 +590,7 @@
       <button class="pullbtn" id="pullbtn" title="Pull the selected granularity (1-day only by default — verify-first; pick 1-minute or both from the dropdown once the OHLCV-vs-bhavcopy check passes). Tick rows for many, or click one. Blank dates = full history (2020 → prev day)." disabled>⤓ Pull spot</button>
       <span class="pull-div" aria-hidden="true"></span>
       <button class="loadbtn" id="verifybtn" title="Cross-check the highlighted symbol's pulled spot 1-day data against the official NSE for the 'to' date — the trust anchor before any bulk pull. An INDEX checks 4 OHLC fields (NIFTY / BANKNIFTY; SENSEX needs an operator-verified BSE source); a STOCK checks full OHLCV including VOLUME vs the NSE security bhavcopy." disabled>🛡 Verify vs NSE</button>
-      <button class="loadbtn" id="pullDerivBtn" title="Pull the ENTIRE F&amp;O chain (all expiries × all listed strikes, Jan-2020 → today) for the selected instrument(s) — interval + contract-type set by the dropdowns above. Re-click is safe (already-pulled windows are skipped)." disabled>⛓ Pull expiries + contracts</button>
+      <button class="loadbtn" id="pullDerivBtn" title="Pull expiries + contracts METADATA ONLY (every expiry date + every listed contract symbol, Jan-2020 → today) for the selected instrument(s) — no history, fast. The historical candle fill is a separate button. Re-click is safe (the immutable past is skipped)." disabled>⛓ Pull expiries + contracts</button>
       <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
       <span class="pull-div" aria-hidden="true"></span>
       <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
@@ -1208,18 +1208,20 @@ document.getElementById("verifybtn").onclick = async () => {
   }
 };
 
-/* ── "⛓ Pull expiries + contracts" (DEC-PULL-DERIVATIVES-001): the per-selection
-   bulk F&O CHAIN pull — every expiry × every listed strike for the ticked /
-   highlighted underlying(s), at the dropdowns' interval + contract-type (1day
-   first). No date picker → the full Jan-2020 → today FNO range; re-click is
-   idempotent (the WindowLedger skips already-pulled windows). ── */
+/* ── "⛓ Pull expiries + contracts" (DEC-DERIV-METADATA-ROUTE-001): the per-selection
+   METADATA-only chain pull — every expiry DATE + every listed contract SYMBOL for
+   the ticked / highlighted underlying(s), persisted to the registry cache with NO
+   historical candles (the heavy minute fill moved to a separate "Pull historical"
+   button). No interval/contract-type knobs (there are no candles) → the full
+   Jan-2020 → today FNO year grid; re-click is idempotent (the registry PKs +
+   coverage skip-set skip the immutable past). ── */
 document.getElementById("pullDerivBtn").onclick = () => {
   const items = spotSelection();
   if (!items.length) return;
   const ids = items.map(it => it.pull_symbol).join(",");
   startAndPoll(
-    "/api/v1/universe/pull-derivatives?symbols=" + encodeURIComponent(ids) + derivKnobs(),
-    `${items.length} derivatives`);
+    "/api/v1/universe/pull-expiries-contracts?symbols=" + encodeURIComponent(ids),
+    `${items.length} metadata`);
 };
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
