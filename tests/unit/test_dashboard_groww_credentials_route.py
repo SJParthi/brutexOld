@@ -99,6 +99,35 @@ def test_groww_credentials_page_serves_html(client: TestClient) -> None:
     assert "Test / verify" in resp.text
 
 
+def test_groww_credentials_nav_is_canonical(client: TestClient) -> None:
+    """The page carries the canonical 6-link nav, identical to every other page.
+
+    Regression for DEC-DASHBOARD-NAV-CREDS-RECONCILE-001: the credentials page
+    used to render a divergent nav (``Groww (legacy)`` / ``Groww`` toggle tabs,
+    a missing ``Reports`` link, and a dead ``/credentials`` 404 link). Every
+    dashboard page must expose the same nav surface: Universe · Credentials ·
+    Database · Coverage · Movers · Reports.
+    """
+    html = client.get("/groww-credentials").text
+    # The six canonical links are present, with "Credentials" as the current page.
+    for href in (
+        '"/universe"',
+        '"/groww-credentials"',
+        '"/db"',
+        '"/coverage"',
+        '"/movers"',
+        '"/reports"',
+    ):
+        assert f"href={href}" in html
+    assert 'href="/groww-credentials" aria-current="page"' in html
+    assert ">Credentials</a>" in html
+    assert ">Reports</a>" in html
+    # The migration-era divergences are gone: no dead /credentials 404 link and
+    # no "Groww (legacy)" toggle label.
+    assert 'href="/credentials"' not in html
+    assert "Groww (legacy)" not in html
+
+
 # ── Test / verify route ─────────────────────────────────────────────────────
 
 
