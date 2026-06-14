@@ -159,8 +159,10 @@ def _classify(median_ms: float) -> str:
 def analyze_cadence(records: Sequence[TickRecord]) -> CadenceStats:
     """Compute the feed callback inter-arrival distribution from *records*.
 
-    Each record is one feed callback; the gaps between their ``recv_ts`` answer
-    "ms or seconds?". Records are sorted by ``recv_ts`` defensively.
+    Each record is one feed callback; the gaps between their receive instants
+    answer "ms or seconds?". Gaps are measured on OUR nanosecond ``recv_ns``
+    clock when present (the high-resolution cadence oracle), falling back to the
+    µs ``recv_ts`` for pre-``recv_ns`` logs. Records are sorted defensively.
 
     Returns
     -------
@@ -168,7 +170,11 @@ def analyze_cadence(records: Sequence[TickRecord]) -> CadenceStats:
         With ``classification == "insufficient data (<2 samples)"`` when fewer
         than two records are supplied.
     """
-    ordered = sorted(records, key=lambda r: r.recv_ts)
+    # Prefer OUR nanosecond clock (`recv_ns`, time.time_ns) — the high-resolution
+    # cadence oracle — and fall back to the µs `recv_ts` only for pre-`recv_ns`
+    # logs (where `recv_ns` defaults to 0). Sorting + gaps both use the same clock.
+    use_ns = bool(records) and all(r.recv_ns > 0 for r in records)
+    ordered = sorted(records, key=(lambda r: r.recv_ns) if use_ns else (lambda r: r.recv_ts))
     samples = len(ordered)
     if samples < MIN_CADENCE_SAMPLES:
         return CadenceStats(
@@ -180,12 +186,18 @@ def analyze_cadence(records: Sequence[TickRecord]) -> CadenceStats:
             max_interval_ms=None,
             classification="insufficient data (<2 samples)",
         )
-    gaps_ms = [
-        (ordered[i].recv_ts - ordered[i - 1].recv_ts).total_seconds() * 1000.0
-        for i in range(1, samples)
-    ]
+    if use_ns:
+        gaps_ms = [
+            (ordered[i].recv_ns - ordered[i - 1].recv_ns) / 1_000_000.0 for i in range(1, samples)
+        ]
+        duration = (ordered[-1].recv_ns - ordered[0].recv_ns) / 1_000_000_000.0
+    else:
+        gaps_ms = [
+            (ordered[i].recv_ts - ordered[i - 1].recv_ts).total_seconds() * 1000.0
+            for i in range(1, samples)
+        ]
+        duration = (ordered[-1].recv_ts - ordered[0].recv_ts).total_seconds()
     median_ms = statistics.median(gaps_ms)
-    duration = (ordered[-1].recv_ts - ordered[0].recv_ts).total_seconds()
     return CadenceStats(
         samples=samples,
         duration_seconds=duration,
