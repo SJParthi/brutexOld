@@ -370,7 +370,8 @@ jobs:
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_universe.py
+              tests/unit/test_universe.py \
+              tests/unit/test_fno_index_diagnostic.py
           else
             echo "(brutex.universe test file not present yet — gate inactive)"
           fi
