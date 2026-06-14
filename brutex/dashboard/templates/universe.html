@@ -521,36 +521,27 @@
         <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
         <span class="bmeta">all F&amp;O stock · granularity ↓ (1d default)</span>
       </button>
-      <button class="bulkbtn idx" id="bulkIdxDeriv" data-surface="derivatives" data-kind="index">
+      <button class="bulkbtn idx" id="bulkIdxDeriv" data-surface="derivatives" data-kind="index"
+              title="Metadata-only: enumerate + persist every expiry date + every listed contract symbol for ALL indices into the registry cache — no history. Use ⤓ Pull historical for OHLC. Re-click is safe (the immutable past is skipped).">
         <span class="shine"></span><span class="bnum">③</span>
-        <span class="bicon">🔗</span><span class="blabel">Indices · Derivatives</span>
-        <span class="bmeta">all index expiries + strikes</span>
+        <span class="bicon">🔗</span><span class="blabel">Indices · Expiries + contracts</span>
+        <span class="bmeta">metadata only · no history</span>
       </button>
-      <button class="bulkbtn stk" id="bulkStkDeriv" data-surface="derivatives" data-kind="stock">
+      <button class="bulkbtn stk" id="bulkStkDeriv" data-surface="derivatives" data-kind="stock"
+              title="Metadata-only: enumerate + persist every expiry date + every listed contract symbol for ALL F&amp;O stocks into the registry cache — no history. Use ⤓ Pull historical for OHLC. Re-click is safe (the immutable past is skipped).">
         <span class="shine"></span><span class="bnum">④</span>
-        <span class="bicon">🔗</span><span class="blabel">Stocks · Derivatives</span>
-        <span class="bmeta">all F&amp;O stock expiries + strikes</span>
+        <span class="bicon">🔗</span><span class="blabel">Stocks · Expiries + contracts</span>
+        <span class="bmeta">metadata only · no history</span>
       </button>
     </div>
-    <!-- Derivatives knobs (DEC-PULL-DERIVATIVES-001): drive BOTH the ③④ bulk
-         buttons AND the per-selection "⤓ Pull expiries + contracts" button.
-         ALL expiries × ALL strikes · Jan-2020 → today · 1day FIRST. -->
+    <!-- Metadata-only caption (DEC-DERIV-DECOMMISSION-FUSED-001): the ③④ bulk
+         derivative buttons now persist expiry DATES + contract SYMBOLS into the
+         registry cache and pull ZERO candles (the fused /pull-derivatives candle
+         path is decommissioned — no single click downloads the whole chain). The
+         historical OHLC fill is the separate "⤓ Pull historical" button, so the
+         per-pull interval/contract-type knobs are gone (metadata has no candles). -->
     <div class="derivctl" style="margin:12px 0 0; display:flex; gap:16px; align-items:center; flex-wrap:wrap; color:var(--muted); font-size:12px;">
-      <label>Interval&nbsp;
-        <select id="derivInterval" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;">
-          <option value="1day">1 day · cheap, NSE-verifiable</option>
-          <option value="1minute">1 minute · heavy fill</option>
-          <option value="both">both · 1day → 1minute</option>
-        </select>
-      </label>
-      <label>Contract type&nbsp;
-        <select id="derivType" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;">
-          <option value="both">options + futures</option>
-          <option value="option">options · CE+PE</option>
-          <option value="future">futures · FUT</option>
-        </select>
-      </label>
-      <span>⛓ ALL expiries × ALL strikes · Jan-2020 → today · 1day first (verify, then 1-minute)</span>
+      <span>⛓ ALL expiries + contracts (metadata only · no history) · Jan-2020 → today — use ⤓ Pull historical for OHLC</span>
     </div>
   </div>
 
@@ -1485,24 +1476,20 @@ function setBulkDisabled(on) {
   BULK_BTNS.forEach(b => { if (b) b.disabled = on; });
 }
 
-/* The interval + contract-type dropdowns drive every derivatives pull (bulk +
-   per-selection): &interval=1day|1minute|both &contract_type=option|future|both. */
-function derivKnobs() {
-  const ivSel = document.getElementById('derivInterval');
-  const ctSel = document.getElementById('derivType');
-  const iv = ivSel ? ivSel.value : '1day';
-  const ct = ctSel ? ctSel.value : 'both';
-  return '&interval=' + encodeURIComponent(iv) + '&contract_type=' + encodeURIComponent(ct);
-}
-
 BULK_BTNS.forEach(btn => {
   if (!btn) return;
   btn.addEventListener('click', () => {
     const kind = btn.dataset.kind;             // "index" | "stock"
     const noun = kind === 'index' ? 'indices' : 'stocks';
     if (btn.dataset.surface === 'derivatives') {
-      const path = '/api/v1/universe/pull-derivatives?kind=' + encodeURIComponent(kind) + derivKnobs();
-      startAndPoll(path, `ALL ${noun} derivatives`);
+      /* METADATA-ONLY (DEC-DERIV-DECOMMISSION-FUSED-001): the bulk derivative
+         buttons enumerate + persist every expiry DATE + contract SYMBOL into the
+         registry cache and pull ZERO candles — NO interval/contract-type knobs
+         (there are no candles in a metadata pull). The historical OHLC fill is the
+         separate ⤓ Pull historical button. This decommissions the fused
+         /pull-derivatives candle path so no single click downloads the whole chain. */
+      const path = '/api/v1/universe/pull-expiries-contracts?kind=' + encodeURIComponent(kind);
+      startAndPoll(path, `ALL ${noun} expiries + contracts (metadata)`);
     } else {
       const iv = (document.getElementById('spotInterval') || {}).value || '1day';
       const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind)
@@ -1845,7 +1832,7 @@ bootstrap();
     document.addEventListener("click",function(e){if(!wrap.contains(e.target))close();});
     wrap.appendChild(trig);wrap.appendChild(menu);sel.parentNode.insertBefore(wrap,sel.nextSibling);setTrig();
   }
-  function init(){try{enhanceCalendar();}catch(e){}["spotInterval","derivInterval","derivType"].forEach(function(id){try{var s=document.getElementById(id);if(s)enhanceSelect(s);}catch(e){}});}
+  function init(){try{enhanceCalendar();}catch(e){}["spotInterval"].forEach(function(id){try{var s=document.getElementById(id);if(s)enhanceSelect(s);}catch(e){}});}
   if(document.readyState!="loading")init(); else document.addEventListener("DOMContentLoaded",init);
 })();
 

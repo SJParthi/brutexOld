@@ -32,10 +32,11 @@ def test_custom_select_dropdowns_present() -> None:
     html = _render_universe_html()
     assert ".cs-menu" in html, "the custom-select menu style is missing"
     assert "function enhanceSelect" in html, "the select enhancer is missing"
-    # the granularity + derivatives selects are all enhanced.
-    assert '["spotInterval","derivInterval","derivType"]' in html, (
-        "the enhanced-select id list is missing"
-    )
+    # The granularity select is enhanced. The derivatives interval/contract-type
+    # selects were removed when the bulk derivative buttons became metadata-only
+    # (DEC-DERIV-DECOMMISSION-FUSED-001) — a metadata pull has no candles, so there
+    # is no interval/contract-type knob left to enhance.
+    assert '["spotInterval"]' in html, "the enhanced-select id list is missing"
 
 
 def test_native_controls_remain_as_value_source() -> None:
