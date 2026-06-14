@@ -74,6 +74,7 @@ from brutex.dashboard.derivatives_pull import (
     resolve_contract_types,
     resolve_pull_intervals,
 )
+from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
 from brutex.dashboard.movers_options import build_options_payload, run_options_snapshot
@@ -113,7 +114,7 @@ from brutex.dashboard.sweep_runner import (
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
-from brutex.data.registry_store import RegistryStore
+from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
     make_lake_read_1m,
@@ -1702,6 +1703,128 @@ def build_app(
                 "symbol": symbol,
                 "symbols": symbols,
                 "years": years,
+                "dry_run": dry_run,
+            }
+        )
+
+    @app.post("/api/v1/universe/pull-historical")
+    async def api_universe_pull_historical(
+        contract: str | None = Query(default=None),
+        contracts: str | None = Query(default=None),
+        underlying: str | None = Query(default=None),
+        expiry: str | None = Query(default=None),
+        kind: str | None = Query(default=None),
+        all: bool = Query(default=False),  # noqa: A002 — the public ?all=true query name
+        interval: str = Query(default="1day"),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        until_clean: bool = Query(default=True),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-historical — download OHLC for the SELECTED contracts.
+
+        Backs the "⤓ Pull historical" button (DEC-DERIV-PULL-HISTORICAL-001, PR-5 — the
+        capstone of the metadata/historical split). The HEAVY half: the metadata-only
+        "⛓ Pull expiries + contracts" button (PR-3) has already cached every expiry DATE +
+        contract SYMBOL in the separate ``registry.duckdb``; this route resolves an
+        operator SELECTION to those cached
+        :class:`~brutex.data.registry_store.ContractRow` rows and pulls THEIR candles into
+        the verified candle lake (``bars/<exch>/FNO/<symbol>/<interval>/`` — PATH A) via
+        :func:`brutex.dashboard.historical_pull.pull_contract_candles` on the single-flight
+        background job (poll ``/pull-progress``), WITHOUT re-enumerating the chain.
+
+        Selection grammar (first non-empty wins): ``?contract=NSE-NIFTY-02Jan20-12100-CE``
+        (single) · ``?contracts=a,b,c`` (multi) · ``?underlying=NIFTY[&expiry=2020-01-02]``
+        (one expiry's chain or a whole underlying) · ``?kind=index|stock`` (every cached
+        contract of that kind's admitted underlyings) · ``?all=true`` (every cached
+        contract). ``interval`` is ``1day`` / ``1minute`` / ``both`` (1day first). A bad
+        ``interval`` or ``expiry`` is a 400. An EMPTY registry / no-match is an honest 400
+        pointing at the metadata button (NEVER a fabricated contract — Golden Rule #1).
+        ``until_clean`` DEFAULTS to ``true`` (DEC-GROWW-DERIV-UNTIL-CLEAN-001 #730 —
+        auto-retry every failed window until the selection drains clean). ``dry_run`` is
+        forced when Groww creds are absent (the empty-candle client appends 0 bars — an
+        expired contract's OHLC is real vendor data, never fabricated offline).
+        """
+        dry_run = not groww_credentials_present()
+        try:
+            intervals = resolve_pull_intervals(interval)
+            expiry_date = _parse_iso_date_arg(expiry, "expiry") if expiry is not None else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        registry_path = lake_root / "registry.duckdb"
+        # Resolve the selection to concrete registry rows BEFORE the job starts, so an
+        # empty/no-match selection is an immediate honest 400 (never a fabricated contract).
+        with RegistryStore.open(registry_path) as registry:
+            selected = _resolve_historical_contracts(
+                registry,
+                contract=contract,
+                contracts=contracts,
+                underlying=underlying,
+                expiry_date=expiry_date,
+                kind=kind,
+                all_cached=all,
+                select_kind=_select_bulk_targets,
+            )
+        if not selected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "no cached contracts matched — pull expiries + contracts first "
+                    "(the ⛓ button), then select a contract / chain / underlying / all"
+                ),
+            )
+        detail = f"{len(selected)} contracts historical"
+        _LOG.info(
+            "universe.pull_historical.requested",
+            contract=contract,
+            contracts=contracts,
+            underlying=underlying,
+            expiry=expiry,
+            kind=kind,
+            all=all,
+            count=len(selected),
+            interval=interval,
+            until_clean=until_clean,
+            dry_run=dry_run,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: pull the selected contracts' candles (Path A, until-clean)."""
+
+            # The historical ingest fires a 3-arg Groww ProgressHook per (contract,
+            # interval) pair; adapt it onto the job's 4-arg hook (no known-gap concept).
+            def _hist_progress(label: str, bars: int, failed: bool) -> None:
+                on_progress(label, bars, failed, False)
+
+            with RegistryStore.open(registry_path) as registry:
+                report = pull_contract_candles(
+                    selected,
+                    lake_root=lake_root,
+                    dry_run=dry_run,
+                    intervals=intervals,
+                    registry=registry,
+                    from_date=_parse_iso_date_arg(from_date, "from_date") if from_date else None,
+                    to_date=_parse_iso_date_arg(to_date, "to_date") if to_date else None,
+                    on_progress=_hist_progress,
+                    session_rate=_session_rate,
+                    until_clean=until_clean,
+                )
+            return report.to_dict()
+
+        started = _pull_job.start(_work, total=len(selected), detail=detail)
+        return JSONResponse(
+            {
+                "started": started,
+                "contract": contract,
+                "contracts": contracts,
+                "underlying": underlying,
+                "expiry": expiry,
+                "kind": kind,
+                "all": all,
+                "interval": interval,
+                "intervals": list(intervals),
+                "selected": len(selected),
+                "until_clean": until_clean,
                 "dry_run": dry_run,
             }
         )
@@ -3707,6 +3830,64 @@ def _resolve_metadata_years(from_date: str | None, to_date: str | None) -> list[
             f"from_date year {floor} is after to_date year {ceiling} — empty year range"
         )
     return list(range(floor, ceiling + 1))
+
+
+def _parse_iso_date_arg(value: str, field: str) -> date:
+    """Parse one ISO ``YYYY-MM-DD`` *value* → :class:`date` (``ValueError`` on junk).
+
+    Shared by the historical-pull route's ``expiry`` / ``from_date`` / ``to_date``
+    bounds; a non-ISO value raises so a typo is a clean 400, never a silent skip
+    (Golden Rule #1).
+    """
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO date (YYYY-MM-DD), got {value!r}") from exc
+
+
+def _resolve_historical_contracts(
+    registry: RegistryStore,
+    *,
+    contract: str | None,
+    contracts: str | None,
+    underlying: str | None,
+    expiry_date: date | None,
+    kind: str | None,
+    all_cached: bool,
+    select_kind: Callable[[str], list[Instrument]],
+) -> list[ContractRow]:
+    """Resolve the historical-pull SELECTION to concrete registry :class:`ContractRow` rows.
+
+    The selection grammar, first non-empty wins (mirrors the metadata route's selection
+    precedence but at CONTRACT granularity):
+
+    * ``contract`` — one full ``contract_symbol`` (exact match against the registry).
+    * ``contracts`` — a comma-separated list of full ``contract_symbol`` strings.
+    * ``underlying`` (``+ expiry_date``) — one expiry's CHAIN, or (no expiry) the whole
+      underlying's cached contracts, via the registry's static filters.
+    * ``kind`` — every cached contract of the admitted index/stock underlyings of that
+      *kind* (resolved via *select_kind*, the same classifier the bulk pull uses).
+    * ``all_cached`` — every cached contract (no filter).
+
+    Returns the matched rows (possibly EMPTY — the route turns an empty match into an
+    honest 400 pointing at the metadata button; this never FABRICATES a contract, Golden
+    Rule #1). A ``contract`` / ``contracts`` symbol absent from the registry simply does
+    not appear in the result (an honest no-match, not an error here).
+    """
+    if contract is not None:
+        wanted = {contract}
+        return [row for row in registry.list_contracts() if row.contract_symbol in wanted]
+    if contracts is not None:
+        wanted = {token for token in (t.strip() for t in contracts.split(",")) if token}
+        return [row for row in registry.list_contracts() if row.contract_symbol in wanted]
+    if underlying is not None:
+        return registry.list_contracts(underlying=underlying, expiry_date=expiry_date)
+    if kind is not None:
+        names = {inst.symbol_name for inst in select_kind(kind)}
+        return [row for row in registry.list_contracts() if row.underlying in names]
+    if all_cached:
+        return registry.list_contracts()
+    return []
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"
