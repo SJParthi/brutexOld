@@ -18,18 +18,16 @@ from __future__ import annotations
 import pytest
 from brutex.dashboard.app import (
     _render_coverage_html,
-    _render_credentials_html,
     _render_db_html,
     _render_reports_html,
 )
 
-#: The four pages that gained a mobile breakpoint in D5, keyed by their render
+#: The three pages that gained a mobile breakpoint in D5, keyed by their render
 #: helper, each with a page-specific rule the breakpoint must carry.
 _PAGES = {
     "db": (_render_db_html, "grid-template-columns: 1fr"),
     "coverage": (_render_coverage_html, "grid-template-columns: 1fr"),
     "reports": (_render_reports_html, "width: 100%"),
-    "credentials": (_render_credentials_html, "margin-left: 0"),
 }
 
 
