@@ -1,8 +1,8 @@
 """Unit tests for the dashboard live-capture subprocess lifecycle.
 
-Every collaborator (process spawn, PID-liveness, signal send, clock) is injected
-with a fake — no real subprocess, no real signals, deterministic time. Covers
-:mod:`brutex.dashboard.live_runner`.
+Every collaborator (process spawn, PID-liveness, signal send, clock, creds) is
+injected with a fake — no real subprocess, no real signals, deterministic time,
+no real credentials file. Covers :mod:`brutex.dashboard.live_runner`.
 """
 
 from __future__ import annotations
@@ -10,22 +10,40 @@ from __future__ import annotations
 import json
 import signal
 import sys
+from collections.abc import Mapping
 
+from brutex.dashboard import live_runner as lr
 from brutex.dashboard.live_runner import LiveRunner, _now_epoch
 
 
 class _FakeProc:
-    def __init__(self, pid: int) -> None:
+    """A stand-in for ``subprocess.Popen`` — ``poll()`` drives crash-detection."""
+
+    def __init__(self, pid: int, *, returncode: int | None = None) -> None:
         self.pid = pid
+        self._returncode = returncode
+
+    def poll(self) -> int | None:
+        return self._returncode  # None → still running; an int → exited
 
 
-def _mk(tmp_path, *, alive, killer=lambda p, s: None, clock=lambda: 1000.0, pid=4242):
+def _mk(
+    tmp_path,
+    *,
+    alive,
+    killer=lambda p, s: None,
+    clock=lambda: 1000.0,
+    pid=4242,
+    returncode=None,
+    cred_env=lambda: {},
+):
     return LiveRunner(
         state_path=tmp_path / "live.json",
-        popen_factory=lambda argv: _FakeProc(pid),
+        popen_factory=lambda argv, env: _FakeProc(pid, returncode=returncode),
         pid_alive=alive,
         killer=killer,
         clock=clock,
+        cred_env=cred_env,
     )
 
 
@@ -57,13 +75,81 @@ def test_start_is_idempotent_when_running(tmp_path) -> None:
     assert s.pid == 111 and s.out == "a"  # unchanged
 
 
-def test_status_reaps_dead_pid(tmp_path) -> None:
-    flag = {"alive": True}
-    r = _mk(tmp_path, alive=lambda p: flag["alive"])
+def test_status_reaps_crashed_child(tmp_path) -> None:
+    """A child that exits (poll → returncode) reads STOPPED — never a zombie 'running'."""
+    r = _mk(tmp_path, alive=lambda p: True, returncode=1)  # the capture crashed
     r.start(out="o", log_file="l", seconds=60)
-    flag["alive"] = False
     s = r.status()
     assert s.running is False and not (tmp_path / "live.json").exists()  # reaped
+
+
+def test_status_adopts_running_after_restart(tmp_path) -> None:
+    """No in-process handle (dashboard restart) → fall back to OS liveness = running."""
+    (tmp_path / "live.json").write_text(
+        json.dumps({"pid": 99, "start_ts": 1.0, "started_at": "x", "argv": ["a"], "out": "o"}),
+        encoding="utf-8",
+    )
+    r = _mk(tmp_path, alive=lambda p: True, clock=lambda: 1010.0)
+    s = r.status()
+    assert s.running and s.pid == 99 and s.uptime_s == 1009.0
+
+
+def test_status_reaps_dead_pid_after_restart(tmp_path) -> None:
+    """No handle + OS says the pid is gone → reaped (stopped)."""
+    (tmp_path / "live.json").write_text(
+        json.dumps({"pid": 99, "start_ts": 1.0, "started_at": "x", "argv": [], "out": "o"}),
+        encoding="utf-8",
+    )
+    r = _mk(tmp_path, alive=lambda p: False)
+    s = r.status()
+    assert s.running is False and not (tmp_path / "live.json").exists()
+
+
+# ───────────────────────── credentials bridge ────────────────────
+
+
+def test_start_injects_dashboard_creds_into_child_env(tmp_path) -> None:
+    """The saved Groww creds ride in the child ENV (never argv → ps stays clean)."""
+    captured_argv: list[str] = []
+    captured_env: dict[str, str] = {}
+
+    def popen(argv: list[str], env: Mapping[str, str]) -> _FakeProc:
+        captured_argv.extend(argv)
+        captured_env.update(env)
+        return _FakeProc(5)
+
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=popen,
+        pid_alive=lambda p: True,
+        clock=lambda: 1.0,
+        cred_env=lambda: {"BRUTEX_GROWW_API_KEY": "K", "BRUTEX_GROWW_TOTP_SECRET": "S"},
+    )
+    r.start(out="o", log_file="l", seconds=1)
+    assert captured_env["BRUTEX_GROWW_API_KEY"] == "K"
+    assert captured_env["BRUTEX_GROWW_TOTP_SECRET"] == "S"
+    # creds are NOT on argv (ps hygiene).
+    assert "K" not in captured_argv and "S" not in captured_argv
+
+
+def test_load_cred_env_branches(monkeypatch) -> None:
+    """`_load_cred_env`: no creds → {}; present → env vars; unreadable → {} (swallowed)."""
+    monkeypatch.setattr(lr, "load_groww_credentials", lambda: None)
+    assert lr._load_cred_env() == {}
+
+    class _Creds:
+        api_key = "K"
+        totp_secret = "S"
+
+    monkeypatch.setattr(lr, "load_groww_credentials", _Creds)
+    env = lr._load_cred_env()
+    assert env == {"BRUTEX_GROWW_API_KEY": "K", "BRUTEX_GROWW_TOTP_SECRET": "S"}
+
+    def _raise():
+        raise lr.CredentialsError("bad perms")
+
+    monkeypatch.setattr(lr, "load_groww_credentials", _raise)
+    assert lr._load_cred_env() == {}
 
 
 # ───────────────────────────── stop ──────────────────────────────
@@ -162,8 +248,9 @@ def test_default_clock_runs(tmp_path) -> None:
     assert isinstance(_now_epoch(), float)
     r = LiveRunner(
         state_path=tmp_path / "live.json",
-        popen_factory=lambda argv: _FakeProc(7),
+        popen_factory=lambda argv, env: _FakeProc(7),
         pid_alive=lambda p: True,
+        cred_env=lambda: {},
     )  # clock + killer defaulted
     s = r.start(out="o", log_file="l", seconds=1)
     assert s.running and isinstance(s.uptime_s, float)
