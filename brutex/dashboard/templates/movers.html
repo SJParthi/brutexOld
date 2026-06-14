@@ -37,6 +37,11 @@
   nav a { color:var(--blue); text-decoration:none; } nav a:hover { color:var(--green); }
   .wrap { flex:1; padding:20px 24px; max-width:1340px; width:100%; }
   .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
+  .card > h1 { font-size:17px; margin:0 0 14px; color:var(--text-bright);
+    display:flex; align-items:center; gap:10px;
+    padding-bottom:10px; border-bottom:1px solid var(--border); }
+  .card > h1::before { content:""; flex:0 0 auto; width:3px; height:18px; border-radius:2px;
+    background:linear-gradient(180deg,var(--blue),var(--purple)); }
   .tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:12px; }
   .tab { padding:8px 16px; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer;
     color:var(--muted); background:transparent; border:1px solid transparent; user-select:none; }
@@ -95,6 +100,7 @@
 
   <div class="wrap">
     <div class="card">
+      <h1>📊 Markets Movers</h1>
       <div class="tabs" id="tabs">
         <div class="tab on" data-asset="spot">📈 Spot</div>
         <div class="tab" data-asset="futures">🔮 Futures</div>
