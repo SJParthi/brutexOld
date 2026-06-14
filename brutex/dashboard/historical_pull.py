@@ -691,9 +691,11 @@ def _discover_start_dates(
     """
     try:
         catalog = Catalog.open(lake_root / "catalog.duckdb")
-    except CatalogError:
-        # The data-lake deps are missing / the catalog file is unopenable — degrade to an
-        # EMPTY map (Phase 2 excludes every contract), loud, never silent (Golden Rule #10).
+    except (CatalogError, OSError):
+        # The data-lake deps are missing / the catalog file is unopenable / the lake_root is
+        # not accessible (e.g. a dry-run sentinel path that is not writable on a hardened CI
+        # runner — PermissionError is an OSError) — degrade to an EMPTY map (Phase 2 excludes
+        # every contract), loud, never silent (Golden Rule #10).
         _LOG.warning("historical.start_discovery.catalog_unavailable", lake_root=str(lake_root))
         return {}
     windows: dict[str, tuple[date, date]] = {}
