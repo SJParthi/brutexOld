@@ -125,10 +125,25 @@ class TestNoFalseNegatives:
 class TestEmpiricalFprBounded:
     """Empirical FPR ≤ fpr_target × 5 at full capacity."""
 
+    # Minimum EXPECTED false-positive count the probe sample must yield, so the
+    # 5× multiplicative envelope below is statistically meaningful. A pure
+    # multiplicative bound is noise at small expected counts: at fpr_target=1e-3
+    # a fixed 1000-probe sample expects only ~1 false positive, so a single
+    # extra FP from sampling variance (the deterministic SHA-256 inputs make the
+    # breach reproducible, not flaky) blows a 5× bound. Scaling the probe count
+    # to expect ≥ this many FPs keeps the measurement adequately powered across
+    # the whole fpr_target range (DEC-BLOOM-FPR-SAMPLE-001).
+    _MIN_EXPECTED_FP = 10
+    # Absolute discrete-tail cushion on top of the 5× envelope. With expected
+    # count E ≥ 10 the 5× bound (50) is already astronomically safe under
+    # Poisson noise (P(X≥55 | λ=10) ≈ 1e-20); the +5 only absorbs the modest,
+    # legitimate design-FPR overshoot from integer-k rounding at small E.
+    _FPR_TAIL_CUSHION = 5
+
     @given(
         capacity=st.integers(min_value=200, max_value=1000),
         fpr_target=st.floats(
-            min_value=1e-3,  # below this, 1000 probes can't measure FPR
+            min_value=1e-3,
             max_value=0.1,
             allow_nan=False,
             allow_infinity=False,
@@ -149,17 +164,25 @@ class TestEmpiricalFprBounded:
         inserted = {hashlib.sha256(f"in:{i}".encode()).digest() for i in range(capacity)}
         for h in inserted:
             bf.add(h)
-        # Probe with 1000 disjoint hashes that were NEVER inserted.
-        probes = [hashlib.sha256(f"probe:{i}".encode()).digest() for i in range(1000)]
+        # Probe with enough disjoint, never-inserted hashes that the EXPECTED
+        # false-positive count is ≥ _MIN_EXPECTED_FP (floor 1000), so the 5×
+        # envelope is statistically sound at every fpr_target — not just loose.
+        n_probes = max(1000, math.ceil(self._MIN_EXPECTED_FP / fpr_target))
+        probes = [hashlib.sha256(f"probe:{i}".encode()).digest() for i in range(n_probes)]
         # Filter out any probe that accidentally collides with the
         # inserted set (statistically zero but defensive).
         probes = [p for p in probes if p not in inserted]
         false_positives = sum(1 for p in probes if bf.might_contain(p))
         empirical_fpr = false_positives / len(probes)
-        # Loose 5× envelope to accommodate 1000-sample variance.
-        assert empirical_fpr <= fpr_target * 5, (
+        # 5× design envelope (absorbs integer-k rounding overshoot) plus an
+        # absolute discrete-tail cushion for the low-count regime. Asserting on
+        # the COUNT keeps the cushion meaningful when expected counts are small.
+        expected_fp = len(probes) * fpr_target
+        max_false_positives = expected_fp * 5 + self._FPR_TAIL_CUSHION
+        assert false_positives <= max_false_positives, (
             f"FPR breach at capacity={capacity}, fpr_target={fpr_target}: "
-            f"observed {empirical_fpr} on {len(probes)} probes"
+            f"observed {false_positives} FPs (empirical_fpr={empirical_fpr}) on "
+            f"{len(probes)} probes; allowed ≤ {max_false_positives:.1f}"
         )
 
 
