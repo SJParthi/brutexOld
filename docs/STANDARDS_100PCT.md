@@ -92,7 +92,7 @@ Status legend:
 **Post-DEC-COV-CLI-HARNESS-001 reality (2026-06-12):** **16 🟢 / 1 🟡 / 1 📋 / 3 👁️** → **76% / 5% / 5% / 14%** — rows 1+2 flipped 🟢: the coverage ratchet arc (90 → 99 → 100, DEC-COV-SMALL-GAPS-001 → DEC-COV-APP-BACKFILL-001 → DEC-COV-CLI-HARNESS-001) ended with the `[tool.coverage.run] omit` key DELETED and the whole `brutex/` package measured at exactly 100.00% line+branch (6738 tests, fail_under=100, exit 0). The single remaining 🟡 is row 3, pending only the DEC-MUTATION-RUNTIME-002 verification run (next scheduled Monday 04:00 UTC).
 
 **The 1 genuinely remaining ROADMAP gap that DOES need code work:**
-1. **Row 14 — Throughput canary 50 M/s absolute on CI** — ratio gate live (status 🟡 not 📋 strictly); absolute 50 M/s requires M4 Pro local-runner per documented shared-GHA flake-mitigation. ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel.
+1. **Row 14 — Throughput canary 50 M/s absolute on CI** — ✅ the M4-Pro self-hosted runner (`Parthibans-MacBook-Pro`) is REGISTERED + CERTIFIED; `bench-m4pro.yml` runs the absolute 50 M/s floor daily/push/dispatch and it PASSES (MIGRATION #655; run #109, 2026-06-14 — mask-AND ≈ 2.0 B ops/s = 40× the floor). Remaining lift: Phase 3 PyO3 kernel. NOT a per-PR blocker by design (DEC-M4PRO-PR-TRIGGER-001).
 
 **~~Row 5b — pylint standalone~~** — ✅ CLOSED by DEC-PYLINT-DROP-001 (2026-05-24). ruff `PL` subset in `pyproject.toml [tool.ruff.lint].select` covers pylint-equivalent rules; standalone pylint dropped. See MIGRATION.md entry #207.
 
@@ -247,7 +247,7 @@ Every task follows this sequence:
 | `brutex doctor` runs every workday | 07:30 IST cron | **CLI LIVE** (DEC-DOCTOR-001 entry #209); cron wrapper `.github/workflows/doctor-daily.yml` tracked as P2 follow-up | 🟡 |
 | Backtest reproducible | bit-for-bit | **L3 replay oracle LIVE** (DEC-L3-REPLAY-ORACLE-001 entry #241); `brutex/orchestrator/replay.py::assert_dedup_consistent` re-projects audit log → subjects → diffs vs LMDB; wired into `brutex doctor --live-subjects-file` and into `MonitorLoop` via `compose_standard_monitor` | 🟢 (L3 oracle wired; full Parquet bit-equality test is Phase 2/3) |
 | No data loss on crash | always | audit chain property tests assert append correctness; **adaptive rate limiter** (DEC-ADAPTIVE-RATE-LIMITER-001 entry #249) provides backpressure under load. Crash-recovery property test is Phase 2 | 🟡 |
-| O(1) per hot path | p99(1M)/p99(1K) ≤ 1.1 | **Ratio gates LIVE** in `ci.yml::bench` (DEC-STANDARDS-AUDIT-001 + DEC-P0-020 entry #158); 5 of 6 hot paths gated at 3-10× ratio per shared-GHA flake-tolerance; absolute 1.1× target requires M4 Pro runner (DEC-M4PRO-ABSOLUTE-001 entry #236) | 🟢 (ratio gates live; absolute target ROADMAP) |
+| O(1) per hot path | p99(1M)/p99(1K) ≤ 1.1 | **Ratio gates LIVE** in `ci.yml::bench` (DEC-STANDARDS-AUDIT-001 + DEC-P0-020 entry #158); 5 of 6 hot paths gated at 3-10× ratio per shared-GHA flake-tolerance; absolute 1.1× target requires M4 Pro runner (DEC-M4PRO-ABSOLUTE-001 entry #236) | 🟢 (ratio gates live; strict M4-Pro tier ACTIVE on the registered runner — MIGRATION #655) |
 | Combo dedup unique | always | implementation in `brutex/orchestrator/store.py` + `brutex/strategies/combo.py`; **uniqueness property tests** (DEC-COMBO-HASH-UNIQUENESS-001) live in `tests/property/test_combo_hash_uniqueness.py` + `test_dedup_hash_properties.py` — 9-field BLAKE3 + distinct-combo→distinct-hash | 🟢 |
 | Hung-worker watchdog | within 5 min | **Watchdog LIVE** (DEC-WATCHDOG-001 entry #240); `brutex/observability/watchdog.py::Watchdog` + `make_heartbeat_subscriber` for `PhaseRunner` + `on_hung` Telegram routing via `compose_standard_monitor` (entry #243). Phase 2 workers activate via `make_heartbeat_subscriber` | 🟢 |
 | SLA breach detection | rule-driven NORMAL↔BREACHED | **SLA detector LIVE** (DEC-SLA-DETECTOR-001 entry #239); `brutex/observability/sla.py::SLADetector` state-machine + `on_breach` / `on_recovery` callbacks; runs under `brutex monitor` per env-driven `MonitorConfig(sla_rules=...)` | 🟢 |
@@ -305,7 +305,7 @@ By honoring this standards document on every PR, the operator gets:
 
 **ROADMAP (closing path remaining):**
 - Full 100% coverage line + branch globally (currently 90% floor + **140** strict-100% modules; the remaining below-strict set is the CLI layer, covered via global `--cov=brutex` — the formerly ABI3-blocked orchestrator modules are ALL strict-gated as of DEC-ORCH-STRICT-GATES-001 #613; "103 + 8 blocked" was the pre-#589/#613 state)
-- M4 Pro absolute throughput gate ≥ 50 M/s (DEC-M4PRO-ABSOLUTE-001 entry #236) — workflow stub exists; activates when operator registers M4 Pro self-hosted runner
+- M4 Pro absolute throughput gate ≥ 50 M/s (DEC-M4PRO-ABSOLUTE-001 entry #236) — ✅ ACTIVE: runner registered + certified (MIGRATION #655); `bench-m4pro.yml` runs + passes it daily/push/dispatch (run #109, 2026-06-14)
 - `.github/workflows/doctor-daily.yml` cron — CLI exists, cron wrapper is P2 follow-up
 - Server-side GitHub branch protection per `docs/runbooks/github-branch-protection-setup.md` (operator-applied)
 - Re-promote 6 demoted pyright report-codes from per-test "warning" → "error" by fixing each pattern in source (P1, tracked in DEC-P0-004)
@@ -352,7 +352,7 @@ made without primary DEC-ID evidence.
 | P3 | Merkle audit batching upgrade (per Agent B industry research) | 16 hr | 📋 still tracked |
 | P3 | SLSA L3 provenance workflow | 8 hr | 📋 still tracked |
 | P3 | Chaos injection harness | 8 hr | 📋 still tracked |
-| P3 | M4 Pro absolute-throughput ≥ 50 M/s gate activation | 1 hr (operator) | 🟡 STUB LANDED (DEC-M4PRO-ABSOLUTE-001 entry #236); activates when operator registers M4 Pro self-hosted runner |
+| P3 | M4 Pro absolute-throughput ≥ 50 M/s gate activation | ✅ DONE | runner registered + certified (MIGRATION #655); `bench-m4pro.yml` passes daily/push/dispatch (run #109, 2026-06-14) — DEC-M4PRO-DOC-RECONCILE-001 |
 | OPERATOR | GitHub server-side branch protection (only operator can configure) | 5 min | 📋 still tracked per `docs/runbooks/github-branch-protection-setup.md` |
 | OPERATOR | Subscribe to Groww (₹499/mo) + set env vars + run `scripts/groww_probe.py` | 30 min | 📋 HARD GATE blocking Phase 2 per DEC-VENDOR-PIVOT-001 entry #246 |
 | OPERATOR | Phase 1 sign-off (10-item checklist) | 15 min | 📋 per `docs/PHASE1_EMPTY_PYRAMID_BASELINE.md §7` |
