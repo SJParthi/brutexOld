@@ -21,7 +21,11 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
+import structlog
+
 from brutex.live.store import TickRecord
+
+_LOG = structlog.get_logger("brutex.live.tick")
 
 #: Leaf mapping keys (in priority order) that carry the numeric price/value of an
 #: instrument inside a nested Groww feed snapshot. Tolerant by design — the exact
@@ -86,11 +90,22 @@ def _coerce_number(raw: object) -> Decimal | None:
     return None
 
 
+def _coerce_price(raw: object) -> Decimal | None:
+    """Coerce a *price* leaf: a finite, **non-negative** Decimal, or ``None``.
+
+    A negative index/spot/LTP value is never valid — a vendor sign-flip glitch
+    is dropped (skipped, not raised, so one bad tick never aborts a build) and
+    the raw snapshot still preserves it for offline audit.
+    """
+    coerced = _coerce_number(raw)
+    return coerced if (coerced is not None and coerced >= 0) else None
+
+
 def _leaf_price(mapping: Mapping[str, Any]) -> Decimal | None:
     """If *mapping* is a price leaf dict, return its value, else ``None``."""
     for key in PRICE_LEAF_KEYS:
         if key in mapping:
-            coerced = _coerce_number(mapping[key])
+            coerced = _coerce_price(mapping[key])
             if coerced is not None:
                 return coerced
     return None
@@ -156,6 +171,23 @@ def _leaf_quote(mapping: Mapping[str, Any]) -> Quote | None:
     )
 
 
+def _is_drifted_leaf(mapping: Mapping[str, Any]) -> bool:
+    """True if *mapping* is a feed LEAF (carries ``tsInMillis``) but no known price.
+
+    Such a mapping is a vendor leaf whose price field was renamed/added (schema
+    drift) — recursing INTO it would mint phantom instruments (e.g. a
+    ``…:tsInMillis`` key whose "value" is the timestamp). We skip it instead and
+    warn; the raw snapshot is persisted verbatim, so the real price is
+    re-parseable offline once :data:`PRICE_LEAF_KEYS` is updated.
+    """
+    return VENDOR_TS_MS_KEY in mapping
+
+
+def _warn_schema_drift(key: str, mapping: Mapping[str, Any]) -> None:
+    """Emit a one-line schema-drift alarm for an unrecognized-price feed leaf."""
+    _LOG.warning("live_tick_unknown_price_key", instrument_key=key, fields=sorted(mapping))
+
+
 def extract_quotes(snapshot: Mapping[str, Any], *, prefix: str = "") -> dict[str, Quote]:
     """Flatten a snapshot to ``{instrument_key: Quote}`` — the FULL leaf.
 
@@ -171,10 +203,12 @@ def extract_quotes(snapshot: Mapping[str, Any], *, prefix: str = "") -> dict[str
             quote = _leaf_quote(raw_value)
             if quote is not None:
                 out[key] = quote
+            elif _is_drifted_leaf(raw_value):
+                _warn_schema_drift(key, raw_value)
             else:
                 out.update(extract_quotes(raw_value, prefix=key))
         else:
-            number = _coerce_number(raw_value)
+            number = _coerce_price(raw_value)
             if number is not None:
                 out[key] = Quote(value=number, vendor_ts_ms=None, volume=None, open_interest=None)
     return out
@@ -212,10 +246,12 @@ def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> 
             leaf = _leaf_price(raw_value)
             if leaf is not None:
                 out[key] = leaf
+            elif _is_drifted_leaf(raw_value):
+                _warn_schema_drift(key, raw_value)
             else:
                 out.update(flatten_index_snapshot(raw_value, prefix=key))
         else:
-            coerced = _coerce_number(raw_value)
+            coerced = _coerce_price(raw_value)
             if coerced is not None:
                 out[key] = coerced
     return out

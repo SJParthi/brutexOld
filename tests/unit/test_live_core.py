@@ -8,6 +8,7 @@ Covers :mod:`brutex.live.tick`, :mod:`~brutex.live.store`,
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -134,6 +135,26 @@ def test_extract_quotes_all_shapes_and_vendor_ts() -> None:
     assert extract_quotes({"a": {"foo": "bar"}}) == {}
 
 
+def test_negative_price_is_skipped() -> None:
+    """A negative index/LTP (vendor sign-flip) is dropped, never a candle (L1)."""
+    from brutex.live.tick import extract_quotes, flatten_index_snapshot
+
+    assert flatten_index_snapshot({"NIFTY": -5}) == {}
+    assert extract_quotes({"NIFTY": -5}) == {}
+    assert flatten_index_snapshot({"X": {"value": -1}}) == {}  # negative inside a leaf dict
+
+
+def test_schema_drift_leaf_is_skipped_not_recursed() -> None:
+    """A leaf with `tsInMillis` but an UNKNOWN price key emits NO phantom keys (H-a)."""
+    from brutex.live.tick import extract_quotes, flatten_index_snapshot
+
+    # `lastTradePrice` is not in PRICE_LEAF_KEYS → schema drift; the leaf is
+    # skipped (not recursed), so `…:tsInMillis` / `…:x` never become instruments.
+    snap = {"NSE": {"IDX": {"NIFTY": {"tsInMillis": 1.0, "lastTradePrice": 22500.5, "x": 9}}}}
+    assert flatten_index_snapshot(snap) == {}
+    assert extract_quotes(snap) == {}
+
+
 # ─────────────────────────── store.py ───────────────────────────
 
 
@@ -184,6 +205,60 @@ def test_store_resume_counts_past_blank_line(tmp_path) -> None:
     path.write_text('{"seq":0,"recv_ts":"2026-06-15T03:45:00+00:00","snapshot":{}}\n\n')
     with TickStore.open(path, resume=True) as store:
         assert store.next_seq == 1  # the blank line is not counted
+
+
+_REC0 = '{"recv_ns":1,"recv_ts":"2026-06-15T03:45:00+00:00","seq":0,"snapshot":{}}\n'
+_REC1 = '{"recv_ns":2,"recv_ts":"2026-06-15T03:46:00+00:00","seq":1,"snapshot":{}}\n'
+
+
+def test_store_resume_truncates_torn_tail(tmp_path) -> None:
+    """A crash-torn partial last line is truncated on resume; seq stays exact (B4)."""
+    path = tmp_path / "torn.jsonl"
+    path.write_text(_REC0 + _REC1 + '{"seq":2,"recv_ts":"2026-06-15T03:4', encoding="utf-8")
+    with TickStore.open(path, resume=True) as store:
+        assert store.next_seq == 2  # the torn tail is not counted
+        store.append({"N": 9}, recv_ts=_utc(3, 47))  # appends cleanly after the repair
+    assert [r.seq for r in TickStore.read(path)] == [0, 1, 2]
+
+
+def test_store_repair_truncates_lone_partial(tmp_path) -> None:
+    """A file that is ONLY a torn partial line repairs to empty (rfind → -1 branch)."""
+    path = tmp_path / "lone.jsonl"
+    path.write_text('{"seq":0,"recv', encoding="utf-8")
+    with TickStore.open(path, resume=True) as store:
+        assert store.next_seq == 0
+    assert TickStore.read(path) == []
+
+
+def test_store_resume_empty_file_is_zero(tmp_path) -> None:
+    """An existing but empty file resumes at seq 0 (the `not data` branch)."""
+    path = tmp_path / "empty.jsonl"
+    path.touch()
+    with TickStore.open(path, resume=True) as store:
+        assert store.next_seq == 0
+
+
+def test_store_read_skips_torn_tail(tmp_path) -> None:
+    """read() tolerates a torn final line (no newline) but keeps the good records (B3)."""
+    path = tmp_path / "tail.jsonl"
+    path.write_text(_REC0 + '{"seq":1,"recv_ts":"2026-06-15', encoding="utf-8")
+    assert [r.seq for r in TickStore.read(path)] == [0]
+
+
+def test_store_read_raises_on_midfile_corruption(tmp_path) -> None:
+    """A malformed NON-final line is real corruption — never hidden (B3)."""
+    path = tmp_path / "corrupt.jsonl"
+    path.write_text("not-json\n" + _REC1, encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        TickStore.read(path)
+
+
+def test_store_read_raises_on_terminated_malformed_last_line(tmp_path) -> None:
+    """A newline-terminated malformed LAST line is corruption, not a torn tail (B3)."""
+    path = tmp_path / "badlast.jsonl"
+    path.write_text(_REC0 + "garbage\n", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        TickStore.read(path)
 
 
 def test_store_json_default_stringifies_decimal(tmp_path) -> None:
@@ -410,6 +485,22 @@ def test_analyze_cadence_classifications(gap_ms: int, expect: str) -> None:
     assert stats.samples == 4
     assert expect in stats.classification
     assert stats.min_interval_ms == pytest.approx(gap_ms)
+
+
+def test_analyze_cadence_prefers_recv_ns() -> None:
+    """When every record carries recv_ns, gaps come from the ns oracle (M4)."""
+    base_ns = 1_700_000_000_000_000_000
+    records = [
+        TickRecord(seq=i, recv_ts=_OPEN_UTC, snapshot={"N": i}, recv_ns=base_ns + i * 50_000_000)
+        for i in range(4)
+    ]
+    # recv_ts is identical for all → a recv_ts-based cadence would read 0ms; the
+    # 50ms gaps prove recv_ns drove the calculation.
+    stats = analyze_cadence(list(reversed(records)))
+    assert stats.samples == 4
+    assert stats.min_interval_ms == pytest.approx(50.0)
+    assert stats.duration_seconds == pytest.approx(0.15)
+    assert "tick-by-tick" in stats.classification
 
 
 # ───────────────────────────── serde.py ──────────────────────────
