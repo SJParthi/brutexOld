@@ -9,12 +9,17 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
+import duckdb
+import polars as pl
 import pytest
 from brutex.dashboard.live_lake_view import (
+    _CANONICAL_SCHEMA,
     FRESH_MAX_AGE_S,
     LIVE_TABLES,
     MOVERS_EMPTY_NOTE,
+    SCHEMA_ONLY_NOTE,
     TICKS_EMPTY_NOTE,
     _age_seconds,
     _jsonify,
@@ -28,12 +33,18 @@ from brutex.dashboard.live_lake_view import (
     live_columns,
     live_movers,
     live_table,
+    live_table_schema,
     live_tables_summary,
     query_live_table,
     ticks_flowing,
 )
 from brutex.data.models import CandleBar
-from brutex.live.lake import write_live_candles, write_live_ticks
+from brutex.live.lake import (
+    CANDLE_SCHEMA,
+    TICK_SCHEMA,
+    write_live_candles,
+    write_live_ticks,
+)
 from brutex.live.prevday import PrevDayOHLCV, write_prev_day
 from brutex.live.store import TickRecord
 
@@ -85,16 +96,34 @@ def test_live_tables_constant() -> None:
     assert LIVE_TABLES == ("live_ticks", "live_candles_1m")
 
 
-def test_empty_lake_returns_empty_page(tmp_path) -> None:
+def test_empty_lake_returns_schema_only_page(tmp_path) -> None:
+    """No partitions yet → the canonical COLUMN DEFINITIONS + honest note, 0 rows.
+
+    The operator-hit gap (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): an empty live lake must
+    still surface the column names + types so the merged columns can be verified —
+    never a fabricated row (Golden Rule #1).
+    """
     page = live_table(tmp_path, "live_ticks")
+    tick_names = [name for name, _ in _CANONICAL_SCHEMA["live_ticks"]]
     assert page == {
         "table": "live_ticks",
-        "columns": [],
+        "columns": tick_names,
+        "schema": live_table_schema("live_ticks"),
         "rows": [],
         "total": 0,
         "limit": 100,
         "offset": 0,
+        "note": SCHEMA_ONLY_NOTE,
     }
+    # The merged live-tick columns are visible even with zero captured ticks.
+    for merged in ("exchange_ts", "avg_price", "payload_hash"):
+        assert merged in page["columns"]
+    # The candle table likewise surfaces its derived-% columns when empty.
+    candles = live_table(tmp_path, "live_candles_1m")
+    assert candles["rows"] == [] and candles["total"] == 0
+    assert candles["note"] == SCHEMA_ONLY_NOTE
+    for merged in ("pct_change", "pct_from_open"):
+        assert merged in candles["columns"]
     assert live_tables_summary(tmp_path) == [
         {"table": "live_ticks", "row_count": 0},
         {"table": "live_candles_1m", "row_count": 0},
@@ -121,7 +150,10 @@ def test_reads_ticks_and_candles(tmp_path) -> None:
 
 
 def test_live_columns(tmp_path) -> None:
-    assert live_columns(tmp_path, "live_ticks") == []  # no partitions yet
+    # No partitions yet → the canonical schema names (schema-when-empty), not [].
+    empty = live_columns(tmp_path, "live_ticks")
+    assert empty == [name for name, _ in _CANONICAL_SCHEMA["live_ticks"]]
+    assert "exchange_ts" in empty  # a merged column the operator must see
     _seed(tmp_path)
     cols = live_columns(tmp_path, "live_ticks")
     assert "groww_symbol" in cols and "value" in cols
@@ -129,9 +161,33 @@ def test_live_columns(tmp_path) -> None:
         live_columns(tmp_path, "bogus")
 
 
-def test_query_live_table_empty(tmp_path) -> None:
+def test_query_live_table_empty_returns_schema(tmp_path) -> None:
     page = query_live_table(tmp_path, "live_ticks")
     assert page["total"] == 0 and page["rows"] == [] and page["limit"] == 100
+    assert page["columns"] == [name for name, _ in _CANONICAL_SCHEMA["live_ticks"]]
+    assert page["note"] == SCHEMA_ONLY_NOTE
+    assert page["schema"] == live_table_schema("live_ticks")
+
+
+def test_query_live_table_empty_honours_projection(tmp_path) -> None:
+    """A *columns* projection on the empty path is honoured + validated."""
+    proj = query_live_table(tmp_path, "live_ticks", columns=("seq", "groww_symbol"))
+    assert proj["columns"] == ["seq", "groww_symbol"]
+    assert proj["rows"] == [] and proj["note"] == SCHEMA_ONLY_NOTE
+    # An unknown projected column raises on the empty path too (matches populated path).
+    with pytest.raises(ValueError, match="unknown column"):
+        query_live_table(tmp_path, "live_ticks", columns=("nope",))
+
+
+def test_live_table_schema_shape_and_unknown(tmp_path) -> None:
+    """live_table_schema returns name+type dicts; unknown table raises."""
+    schema = live_table_schema("live_candles_1m")
+    assert schema == [
+        {"name": name, "type": dtype} for name, dtype in _CANONICAL_SCHEMA["live_candles_1m"]
+    ]
+    assert {"name": "pct_change", "type": "DOUBLE"} in schema
+    with pytest.raises(ValueError, match="unknown live table"):
+        live_table_schema("bogus")
 
 
 def test_query_live_table_filter_sort_project(tmp_path) -> None:
@@ -357,9 +413,6 @@ def test_ticks_flowing_present_but_empty_partition_is_honest(tmp_path) -> None:
     ``flowing=False`` + an empty instrument list + the note, but the session date is
     still surfaced — never fabricated flow (Golden Rule #1).
     """
-    import polars as pl
-    from brutex.live.lake import TICK_SCHEMA
-
     ticks = tmp_path / "live" / "ticks"
     ticks.mkdir(parents=True)
     pl.DataFrame(schema=dict(TICK_SCHEMA)).write_parquet(ticks / "dt=2026-06-15.parquet")
@@ -586,3 +639,42 @@ def test_live_movers_latest_minute_per_instrument(tmp_path) -> None:
     # The 09:46 candle (close 120 vs prev 100 → +20%) ranks, not the 09:45 (+5%).
     assert payload["gainers"][0]["pct_change"] == 20.0
     assert payload["gainers"][0]["timestamp"].startswith("2026-06-15 ")
+
+
+# ───── schema-when-empty drift guard (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001) ─────
+
+
+def _duckdb_schema_of(pl_schema: dict[str, pl.DataType], dest: Path) -> tuple[tuple[str, str], ...]:
+    """The DuckDB ``read_parquet`` description of an EMPTY Parquet built from a lake schema.
+
+    The dashboard NEVER imports ``brutex.live`` at RUNTIME (DEC-LIVE-DECOUPLE-001), but a
+    TEST may — so this builds an empty Parquet from the real ``brutex.live.lake`` Polars
+    schema (written to *dest*) and reads back the exact ``(name, duckdb_type)`` pairs the
+    POPULATED browse path would derive. This is what the dashboard's decoupled canonical
+    constant must equal byte-for-byte.
+    """
+    pl.DataFrame(schema=pl_schema).write_parquet(dest)
+    conn = duckdb.connect(":memory:")
+    try:
+        cur = conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [dest.as_posix()])
+        description = cur.description
+        assert description is not None  # a SELECT always carries a description
+        out = tuple((str(col[0]), str(col[1])) for col in description)
+    finally:
+        conn.close()
+    return out
+
+
+def test_canonical_schema_matches_real_lake_schema(tmp_path: Path) -> None:
+    """The dashboard's DECOUPLED canonical schema must not drift from ``brutex.live.lake``.
+
+    Asserts the dashboard's ``_CANONICAL_SCHEMA`` (names + DuckDB types + ORDER) equals
+    what an empty Parquet built from the authoritative ``TICK_SCHEMA`` / ``CANDLE_SCHEMA``
+    reports through DuckDB. If the live writer adds / renames / retypes a column without
+    updating the dashboard mirror, THIS fails — closing the decoupling's drift risk while
+    keeping the runtime import boundary intact (DEC-LIVE-DECOUPLE-001 / -SCHEMA-WHEN-EMPTY).
+    """
+    real_tick = _duckdb_schema_of(dict(TICK_SCHEMA), tmp_path / "tick.parquet")
+    real_candle = _duckdb_schema_of(dict(CANDLE_SCHEMA), tmp_path / "candle.parquet")
+    assert real_tick == _CANONICAL_SCHEMA["live_ticks"]
+    assert real_candle == _CANONICAL_SCHEMA["live_candles_1m"]
