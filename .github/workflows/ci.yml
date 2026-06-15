@@ -2761,28 +2761,28 @@ jobs:
     steps:
       - name: Download coverage artifact
         if: always()
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: coverage-xml
           path: proof/coverage/
         continue-on-error: true
       - name: Download benchmark artifact
         if: always()
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: bench-results
           path: proof/bench/
         continue-on-error: true
       - name: Download Trivy artifact
         if: always()
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: trivy-results
           path: proof/trivy/
         continue-on-error: true
       - name: Download SBOM artifact
         if: always()
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: sbom
           path: proof/sbom/
