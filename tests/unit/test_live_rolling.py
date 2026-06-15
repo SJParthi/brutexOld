@@ -111,6 +111,148 @@ def test_open_rejects_non_positive_bounds(tmp_path: Path) -> None:
             RollingTickStore.open(tmp_path / "live.jsonl", **kwargs)  # type: ignore[arg-type]
 
 
+# ─────────────────── time-based rotation (DEC-LIVE-REALTIME-FOLD-001) ───────────────────
+
+
+class _FakeClock:
+    """A driveable monotonic clock — ``advance`` moves the returned time forward."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._t = start
+
+    def __call__(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
+
+
+def test_time_rotation_folds_at_interval(tmp_path: Path) -> None:
+    """A non-empty active segment older than max_seconds rotates (and folds)."""
+    clock = _FakeClock()
+    lake = tmp_path / "lake"
+    on_rotate = make_fold_on_rotate(lake_root=lake, capture_run_id="r1", feed_kind="index")
+    store = RollingTickStore.open(
+        tmp_path / "live.jsonl",
+        max_lines=1_000_000,  # huge — size/line never trips; only TIME can rotate
+        max_seconds=5.0,
+        on_rotate=on_rotate,
+        monotonic=clock,
+        resume=False,
+    )
+    # First tick lands in seg-000000; no time has passed → no rotation yet.
+    store.append(_snap(100.0), recv_ts=_ts(0), recv_ns=1)
+    assert store.rotations == 0
+    # Time advances past the 5s interval — the NEXT append rotates first (folding
+    # the just-closed seg-000000) before landing in seg-000001.
+    clock.advance(5.0)
+    store.append(_snap(101.0), recv_ts=_ts(1), recv_ns=2)
+    assert store.rotations == 1
+    tail = store.flush_active()
+    store.close()
+    assert tail is not None
+    # Both ticks reached the lake via the time-triggered fold + the tail flush.
+    assert read_live_ticks(lake).shape[0] == 2
+    assert list_segments(segment_dir_for(tmp_path / "live.jsonl")) == []
+
+
+def test_time_rotation_not_before_interval_elapses(tmp_path: Path) -> None:
+    """Below the interval, the time trigger does NOT rotate (no premature fold)."""
+    clock = _FakeClock()
+    store = RollingTickStore.open(
+        tmp_path / "live.jsonl",
+        max_lines=1_000_000,
+        max_seconds=5.0,
+        monotonic=clock,
+        max_segments=99,
+        resume=False,
+    )
+    store.append(_snap(100.0), recv_ts=_ts(0), recv_ns=1)
+    clock.advance(4.999)  # just under the interval
+    store.append(_snap(101.0), recv_ts=_ts(1), recv_ns=2)
+    store.close()
+    assert store.rotations == 0  # not aged out yet
+    segments = list_segments(segment_dir_for(tmp_path / "live.jsonl"))
+    assert [len(TickStore.read(s)) for s in segments] == [2]  # both in one segment
+
+
+def test_empty_active_segment_never_time_rotates(tmp_path: Path) -> None:
+    """A QUIET feed (no ticks) never time-rotates — no empty-segment fold.
+
+    Drive the clock far past the interval but only ever append into the SAME
+    (initially empty) segment; the very first append into an empty segment must
+    NOT rotate it away (nothing to fold), so rotations stays 0.
+    """
+    clock = _FakeClock()
+    folds: list[Path] = []
+    store = RollingTickStore.open(
+        tmp_path / "live.jsonl",
+        max_lines=1_000_000,
+        max_seconds=5.0,
+        on_rotate=folds.append,  # records any (erroneous) empty-segment fold
+        monotonic=clock,
+        resume=False,
+    )
+    clock.advance(100.0)  # eons pass on a silent feed
+    rec = store.append(_snap(100.0), recv_ts=_ts(0), recv_ns=1)  # the FIRST tick
+    store.close()
+    assert rec.seq == 0
+    assert store.rotations == 0  # the empty segment was NOT rotated before the write
+    assert folds == []  # and nothing was folded (no empty-segment fold)
+
+
+def test_time_trigger_disabled_when_max_seconds_none(tmp_path: Path) -> None:
+    """max_seconds=None (the default) disables the time trigger entirely."""
+    clock = _FakeClock()
+    store = RollingTickStore.open(
+        tmp_path / "live.jsonl",
+        max_lines=1_000_000,
+        max_seconds=None,
+        monotonic=clock,
+        max_segments=99,
+        resume=False,
+    )
+    store.append(_snap(100.0), recv_ts=_ts(0), recv_ns=1)
+    clock.advance(10_000.0)  # huge — but the time trigger is OFF
+    store.append(_snap(101.0), recv_ts=_ts(1), recv_ns=2)
+    store.close()
+    assert store.rotations == 0
+
+
+def test_time_rotation_clock_resets_each_rotation(tmp_path: Path) -> None:
+    """The age clock restarts on every rotation — two intervals → two rotations."""
+    clock = _FakeClock()
+    store = RollingTickStore.open(
+        tmp_path / "live.jsonl",
+        max_lines=1_000_000,
+        max_seconds=5.0,
+        monotonic=clock,
+        max_segments=99,
+        resume=False,
+    )
+    store.append(_snap(100.0), recv_ts=_ts(0), recv_ns=1)  # seg0
+    clock.advance(5.0)
+    store.append(_snap(101.0), recv_ts=_ts(1), recv_ns=2)  # rotates → seg1
+    clock.advance(5.0)
+    store.append(_snap(102.0), recv_ts=_ts(2), recv_ns=3)  # rotates again → seg2
+    store.close()
+    assert store.rotations == 2
+    # Global seqs stay gap-free + monotonic across the two time rotations.
+    segments = list_segments(segment_dir_for(tmp_path / "live.jsonl"))
+    all_seqs = [rec.seq for seg in segments for rec in TickStore.read(seg)]
+    assert all_seqs == [0, 1, 2]
+
+
+def test_default_monotonic_clock_used(tmp_path: Path) -> None:
+    """With no injected clock, the real time.monotonic default is wired (no crash)."""
+    store = RollingTickStore.open(
+        tmp_path / "live.jsonl", max_seconds=3600.0, max_segments=99, resume=False
+    )
+    rec = store.append(_snap(100.0), recv_ts=_ts(0), recv_ns=1)
+    store.close()
+    assert rec.seq == 0 and store.rotations == 0  # 1h interval, real clock → no rotation
+
+
 # ───────────────────────── bounded ring ─────────────────────────
 
 

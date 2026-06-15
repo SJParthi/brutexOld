@@ -135,7 +135,90 @@ def test_start_writes_manifest_and_passes_capture_all_flags(tmp_path) -> None:
     assert parsed.command == "capture-all"
 
 
-def test_start_is_idempotent_when_running(tmp_path) -> None:
+def test_start_with_lake_root_appends_realtime_fold_flags(tmp_path) -> None:
+    """start(lake_root=…) appends --lake-root/--roll-max-seconds/--run-id (real-time fold).
+
+    REGRESSION GUARD (#743/#744 lesson — a flag capture-all REJECTS crashes the
+    launch): the EXACT spawned argv is fed through the REAL CLI parser and must
+    parse to ``command == "capture-all"`` with the lake-root resolved
+    (DEC-LIVE-REALTIME-FOLD-001).
+    """
+    captured_argv: list[str] = []
+
+    def popen(argv, env):
+        captured_argv.extend(argv)
+        return _FakeProc(9)
+
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=popen,
+        pid_alive=lambda p: True,
+        clock=lambda: 1.0,
+        cred_env=lambda: {},
+        manifest_writer=lambda path: None,
+    )
+    _start(r, lake_root="data/lake")
+    assert captured_argv[captured_argv.index("--lake-root") + 1] == "data/lake"
+    assert captured_argv[captured_argv.index("--roll-max-seconds") + 1] == "5"
+    assert captured_argv[captured_argv.index("--run-id") + 1] == "live"
+    # The EXACT spawned args parse cleanly through the real capture-all parser, so a
+    # rejected flag fails HERE, not at runtime on the operator's Mac.
+    from brutex.live.__main__ import _build_parser
+
+    cli_args = captured_argv[captured_argv.index("brutex.live") + 1 :]
+    parsed = _build_parser().parse_args(cli_args)
+    assert parsed.command == "capture-all"
+    assert parsed.lake_root == "data/lake" and parsed.roll_max_seconds == 5.0
+
+
+def test_start_without_lake_root_omits_fold_flags(tmp_path) -> None:
+    """start() with no lake_root spawns plain capture-all (no --lake-root flag)."""
+    captured_argv: list[str] = []
+
+    def popen(argv, env):
+        captured_argv.extend(argv)
+        return _FakeProc(9)
+
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=popen,
+        pid_alive=lambda p: True,
+        clock=lambda: 1.0,
+        cred_env=lambda: {},
+        manifest_writer=lambda path: None,
+    )
+    _start(r)  # lake_root defaults to None
+    assert "--lake-root" not in captured_argv
+    assert "--roll-max-seconds" not in captured_argv
+    # Still a valid capture-all spawn.
+    from brutex.live.__main__ import _build_parser
+
+    cli_args = captured_argv[captured_argv.index("brutex.live") + 1 :]
+    assert _build_parser().parse_args(cli_args).lake_root is None
+
+
+def test_watch_respawns_with_remembered_lake_root(tmp_path) -> None:
+    """The watchdog re-spawn carries the lake_root from _last_start (re-fold on crash)."""
+    spawns: list[list[str]] = []
+
+    def popen(argv, env):
+        spawns.append(list(argv))
+        return _DeadProc(700 + len(spawns))
+
+    r = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=popen,
+        pid_alive=lambda p: False,
+        clock=lambda: 1.0,
+        cred_env=lambda: {},
+        manifest_writer=lambda path: None,
+        sleeper=lambda s: None,
+    )
+    _start(r, lake_root="data/lake")  # toggle ON with a lake root; child is dead
+    assert r.watch(max_restarts=1) == 1
+    # The watchdog re-spawn (the 2nd argv) still carries --lake-root data/lake.
+    respawn = spawns[-1]
+    assert respawn[respawn.index("--lake-root") + 1] == "data/lake"
     r = _mk(tmp_path, alive=lambda p: True, pid=111)
     _start(r, out="a", log_file="la")
     s = _start(r, out="b", log_file="lb", seconds=99)  # already running → no 2nd spawn

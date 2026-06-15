@@ -109,6 +109,53 @@ def test_start_status_stop_cycle(tmp_path, monkeypatch) -> None:
     assert client.post("/api/v1/live/stop").json()["running"] is False
 
 
+def test_start_forwards_lake_root_to_capture(tmp_path, monkeypatch) -> None:
+    """The Live-ON toggle passes the dashboard's READ lake root to the capture spawn.
+
+    DEC-LIVE-REALTIME-FOLD-001: the capture must materialise the SAME lake root the
+    dashboard reads (``instrument_store.path.parent``) or the live tables stay
+    empty. This captures the spawned argv and asserts ``--lake-root`` is that exact
+    root, and the argv still parses as a valid ``capture-all`` spawn.
+    """
+    monkeypatch.chdir(tmp_path)
+    captured_argv: list[str] = []
+    lake = tmp_path / "lake"
+    (lake / "instruments").mkdir(parents=True)
+    store = _FakeStore(lake / "instruments")  # lake root = .path.parent = <tmp>/lake
+    runner = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=lambda argv, env: (captured_argv.extend(argv), _FakeProc(4242))[1],
+        pid_alive=lambda p: True,
+        clock=lambda: 1000.0,
+        cred_env=lambda: {},
+    )
+    client = TestClient(build_app(DashboardState(), instrument_store=store, live_runner=runner))
+    assert client.post("/api/v1/live/start").json()["running"] is True
+    assert captured_argv[captured_argv.index("--lake-root") + 1] == str(lake)
+    # The exact spawned argv parses cleanly through the real capture-all parser.
+    from brutex.live.__main__ import _build_parser
+
+    cli_args = captured_argv[captured_argv.index("brutex.live") + 1 :]
+    parsed = _build_parser().parse_args(cli_args)
+    assert parsed.command == "capture-all" and parsed.lake_root == str(lake)
+
+
+def test_start_without_store_passes_no_lake_root(tmp_path, monkeypatch) -> None:
+    """With no instrument store, the toggle omits --lake-root (no crash)."""
+    monkeypatch.chdir(tmp_path)
+    captured_argv: list[str] = []
+    runner = LiveRunner(
+        state_path=tmp_path / "live.json",
+        popen_factory=lambda argv, env: (captured_argv.extend(argv), _FakeProc(4242))[1],
+        pid_alive=lambda p: True,
+        clock=lambda: 1000.0,
+        cred_env=lambda: {},
+    )
+    client = TestClient(build_app(DashboardState(), live_runner=runner))
+    assert client.post("/api/v1/live/start").json()["running"] is True
+    assert "--lake-root" not in captured_argv
+
+
 def test_live_connections_empty_when_no_report(tmp_path, monkeypatch) -> None:
     """No proof written yet → an empty connections payload + honest note."""
     monkeypatch.chdir(tmp_path)

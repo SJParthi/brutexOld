@@ -4,9 +4,9 @@ The operator's single growing ``runs/live-ticks.jsonl`` reached GBs over a
 session. PR #746 cut the per-callback bulk (a DELTA write — only changed
 instruments). This module adds the SECOND layer the operator asked for ("the
 live ticks should be rolling … the size is gbs"): the capture sink rotates to a
-fresh **segment file** whenever the active segment crosses a size or line
-threshold, so no single file ever grows unbounded, and a completed (rotated)
-segment is folded into the existing live Parquet lake (REUSING
+fresh **segment file** whenever the active segment crosses a size, line, OR
+**time** threshold, so no single file ever grows unbounded, and a completed
+(rotated) segment is folded into the existing live Parquet lake (REUSING
 :func:`brutex.live.lake.write_live_ticks` / :func:`~brutex.live.lake.write_live_candles`
 — never duplicated, Golden Rule #11 COMMON) then pruned, so disk stays bounded.
 
@@ -39,6 +39,17 @@ Invariants (Golden Rule #7 idempotence + crash-safety):
   ``max_segments`` raw segments, deleting the oldest as it rotates (a pure ring
   buffer; the operator opted into bounded disk over full raw retention).
 
+**Near-real-time materialisation (DEC-LIVE-REALTIME-FOLD-001):** the size/line
+caps alone only flush the lake when a segment FILLS, which on a quiet feed can be
+minutes. The optional ``max_seconds`` time trigger is the WAL→micro-batch→columnar
+pattern's TIME-based batch trigger: a NON-EMPTY active segment that has been open
+for at least ``max_seconds`` of MONOTONIC wall-clock rotates (and so folds) even
+if it is far from its size/line cap, so the dashboard's ``live_ticks`` /
+``live_candles_1m`` lake tables fill within a few seconds of capture rather than
+only on a full segment. An EMPTY active segment NEVER time-rotates — there is
+nothing to fold, so a quiet feed produces no empty-segment folds. The clock is the
+injected ``monotonic`` (``time.monotonic`` by default; a fake in tests).
+
 Read-only measurement surface (Golden Rule #3): no orders, never imported by the
 engine or dashboard (DEC-LIVE-DECOUPLE-001). Pure + injected (clock/paths/folder)
 → unit-tested with fakes, no ``growwapi`` and no network.
@@ -47,6 +58,7 @@ engine or dashboard (DEC-LIVE-DECOUPLE-001). Pure + injected (clock/paths/folder
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -288,11 +300,14 @@ class RollingTickStore:
     A drop-in for :class:`~brutex.live.store.TickStore` from
     :class:`~brutex.live.capture.TickCapture`'s point of view — it exposes the
     same :attr:`next_seq` / :meth:`append` / :meth:`close` / context-manager
-    surface — but each :meth:`append` checks the active segment's size and line
-    count and, when either crosses its threshold, CLOSES the current segment and
-    OPENS the next (carrying the global ``seq`` forward). A rotated segment is
-    handed to :meth:`_handle_closed` which either folds-then-prunes it (when a
-    folder is wired) or drops the oldest to keep a bounded ring.
+    surface — but each :meth:`append` checks the active segment's size, line
+    count, AND (optionally) its age and, when any crosses its threshold, CLOSES
+    the current segment and OPENS the next (carrying the global ``seq`` forward).
+    The optional ``max_seconds`` time trigger (DEC-LIVE-REALTIME-FOLD-001) rotates
+    a NON-EMPTY active segment by age so the lake materialises in near-real-time
+    on a quiet feed. A rotated segment is handed to :meth:`_handle_closed` which
+    either folds-then-prunes it (when a folder is wired) or drops the oldest to
+    keep a bounded ring.
     """
 
     def __init__(
@@ -305,6 +320,8 @@ class RollingTickStore:
         max_lines: int,
         max_segments: int,
         on_rotate: Callable[[Path], None] | None,
+        max_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Construct directly; prefer :meth:`open`, which wires the active segment."""
         self._dir = directory
@@ -315,6 +332,13 @@ class RollingTickStore:
         self._max_lines = max_lines
         self._max_segments = max_segments
         self._on_rotate = on_rotate
+        # Time-based rotation (DEC-LIVE-REALTIME-FOLD-001): a NON-EMPTY active
+        # segment older than ``max_seconds`` of monotonic wall-clock rotates so the
+        # lake materialises in near-real-time. ``None`` disables the time trigger
+        # (size/line caps only — the prior behaviour).
+        self._max_seconds = max_seconds
+        self._monotonic = monotonic
+        self._last_rotation_time = monotonic()
         # Byte size comes from the active store's in-process counter (seeded with
         # the file size at open) — no ``stat`` on the per-tick append path. The
         # line count is a ONE-TIME read at construction (off the hot path).
@@ -332,6 +356,8 @@ class RollingTickStore:
         max_segments: int = 8,
         on_rotate: Callable[[Path], None] | None = None,
         resume: bool = True,
+        max_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> RollingTickStore:
         """Open the rolling sink for the segment directory derived from *base*.
 
@@ -356,6 +382,15 @@ class RollingTickStore:
             fold-then-prune hook). When ``None`` the bounded ring applies instead.
         resume
             Continue an existing segment set (default) vs. start fresh numbering.
+        max_seconds
+            Time trigger (DEC-LIVE-REALTIME-FOLD-001): rotate a NON-EMPTY active
+            segment once it is at least this many seconds of monotonic wall-clock
+            old, so the lake fold runs in near-real-time even on a quiet feed.
+            ``None`` (default) disables the time trigger. An EMPTY active segment
+            never time-rotates.
+        monotonic
+            Monotonic clock for the *max_seconds* trigger (``time.monotonic`` by
+            default; injected as a fake in tests).
         """
         if max_bytes < 1 or max_lines < 1 or max_segments < 1:
             raise ValueError("max_bytes, max_lines and max_segments must all be >= 1")
@@ -409,6 +444,8 @@ class RollingTickStore:
             max_lines=max_lines,
             max_segments=max_segments,
             on_rotate=on_rotate,
+            max_seconds=max_seconds,
+            monotonic=monotonic,
         )
 
     @property
@@ -434,18 +471,39 @@ class RollingTickStore:
     def append(
         self, snapshot: Mapping[str, Any], *, recv_ts: datetime, recv_ns: int | None = None
     ) -> TickRecord:
-        """Append one snapshot, rotating FIRST if the active segment is full.
+        """Append one snapshot, rotating FIRST if the active segment is full or aged.
 
         The threshold is checked BEFORE the write so a segment never exceeds its
         bound by more than one in-flight line, and an empty active segment is
         never rotated (a single oversized record still lands rather than looping).
+
+        After the size/line check, the optional ``max_seconds`` TIME trigger
+        (DEC-LIVE-REALTIME-FOLD-001) rotates a NON-EMPTY active segment that has
+        been open for at least ``max_seconds`` of monotonic wall-clock — so the
+        lake fold runs in near-real-time on a quiet feed. An EMPTY active segment
+        is left untouched (nothing to fold → no empty-segment fold).
         """
-        if self._lines >= self._max_lines or (self._lines > 0 and self._bytes >= self._max_bytes):
+        size_full = self._lines >= self._max_lines or (
+            self._lines > 0 and self._bytes >= self._max_bytes
+        )
+        aged_out = self._lines > 0 and self._time_to_rotate()
+        if size_full or aged_out:
             self._rotate()
         record = self._active.append(snapshot, recv_ts=recv_ts, recv_ns=recv_ns)
         self._bytes = self._active.bytes_written  # O(1) in-process — no stat syscall per tick
         self._lines += 1
         return record
+
+    def _time_to_rotate(self) -> bool:
+        """True when the time trigger is armed AND the active segment has aged out.
+
+        ``max_seconds`` of ``None`` disables the time trigger entirely (the caller
+        also guards on a non-empty active segment, so an empty quiet segment never
+        time-rotates).
+        """
+        if self._max_seconds is None:
+            return False
+        return self._monotonic() - self._last_rotation_time >= self._max_seconds
 
     def _rotate(self) -> None:
         """Close the active segment, open the next, and hand off the closed one."""
@@ -464,6 +522,9 @@ class RollingTickStore:
         self._bytes = 0
         self._lines = 0
         self._rotations += 1
+        # Restart the time-trigger clock so the next segment ages from now, not
+        # from the prior rotation (DEC-LIVE-REALTIME-FOLD-001).
+        self._last_rotation_time = self._monotonic()
         # Persist the durable next-seq floor BEFORE the closed segment can be
         # pruned, so a crash right after the prune still resumes at the right seq
         # even though the new segment is still empty (DEC-LIVE-AUTOROLL-001).
