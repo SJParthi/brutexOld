@@ -9,6 +9,7 @@ from brutex.data.models import CandleBar
 from brutex.live.candle_builder import build_minute_candles
 from brutex.live.lake import (
     CANDLE_SCHEMA,
+    TICK_SCHEMA,
     candles_to_frame,
     minute_tick_counts,
     read_live_candles,
@@ -19,7 +20,7 @@ from brutex.live.lake import (
     write_live_ticks,
 )
 from brutex.live.store import TickRecord
-from brutex.live.tick import iter_ticks
+from brutex.live.tick import iter_ticks, payload_hash
 
 # 1718440510123 ms == 2024-06-15 08:35:10.123 UTC == 14:05:10.123 IST.
 _VENDOR_MS = 1718440510123.0
@@ -466,3 +467,152 @@ def test_index_leaf_buckets_by_exchange_a_no_ts_leaf_by_recv(tmp_path) -> None:
     rows = {r["instrument_key"]: r["timestamp"] for r in frame.to_dicts()}
     assert rows["NSE:IDX:NIFTY"] == datetime(2026, 6, 15, 3, 45, tzinfo=UTC)  # exchange minute
     assert rows["NSE:IDX:BANKNIFTY"] == datetime(2026, 6, 15, 3, 46, tzinfo=UTC)  # recv fallback
+
+
+# ─── tick parity fields: avg_price + payload_hash (DEC-LIVE-TICK-FIELDS-PARITY-001) ───
+
+
+def _equity_rec(seq: int, recv: datetime, *, ltp: float, avg: float | None) -> TickRecord:
+    """A Groww LTP equity leaf record, optionally carrying an avgPrice."""
+    leaf: dict[str, object] = {"ltp": ltp, "tsInMillis": 1718440510123.0, "volume": 7.0}
+    if avg is not None:
+        leaf["avgPrice"] = avg
+    return TickRecord(
+        seq=seq, recv_ts=recv, snapshot={"NSE": {"CASH": {"RELIANCE": leaf}}}, recv_ns=seq + 1
+    )
+
+
+def test_tick_schema_has_avg_price_and_payload_hash_columns() -> None:
+    """The additive columns exist in TICK_SCHEMA without disturbing the prior columns."""
+    assert "avg_price" in TICK_SCHEMA and "payload_hash" in TICK_SCHEMA
+    # Prior columns untouched (a sanity subset of the #756 baseline).
+    for col in ("value", "vendor_ts_ms", "exchange_ts", "volume", "open_interest", "raw_json"):
+        assert col in TICK_SCHEMA
+
+
+def test_ticks_to_frame_avg_price_2dp_and_payload_hash() -> None:
+    """A leaf with avgPrice → 2dp-snapped avg_price + a blake3 payload_hash."""
+    rec = _equity_rec(0, _T0, ltp=2396.7, avg=2400.005)  # avg snaps 2400.005 → 2400.01
+    row = ticks_to_frame([rec], capture_run_id="r", feed_kind="ltp").to_dicts()[0]
+    assert row["avg_price"] == 2400.01  # ROUND_HALF_UP money snap (DEC-SPOT-PRICE-2DP)
+    leaf = {"ltp": 2396.7, "tsInMillis": 1718440510123.0, "volume": 7.0, "avgPrice": 2400.005}
+    assert row["payload_hash"] == payload_hash(leaf)
+
+
+def test_ticks_to_frame_avg_price_null_when_absent() -> None:
+    """An index leaf / a leaf with no avgPrice → null avg_price (the None ternary branch)."""
+    rec = _equity_rec(0, _T0, ltp=2396.7, avg=None)
+    row = ticks_to_frame([rec], capture_run_id="r", feed_kind="ltp").to_dicts()[0]
+    assert row["avg_price"] is None  # honest null, never fabricated
+    assert row["payload_hash"] is not None  # the leaf still hashes
+
+
+def test_ticks_to_frame_flat_scalar_has_null_avg_and_hash() -> None:
+    """A flat numeric snapshot leaf → null avg_price AND null payload_hash."""
+    rec = TickRecord(seq=0, recv_ts=_T0, snapshot={"NSE:IDX:NIFTY": 22500.5}, recv_ns=1)
+    row = ticks_to_frame([rec], capture_run_id="r", feed_kind="index").to_dicts()[0]
+    assert row["avg_price"] is None and row["payload_hash"] is None
+
+
+# ─── candle DERIVED percentages (DEC-LIVE-CANDLE-DERIVED-PCT-001) ───
+
+
+def _pct_bar(*, open_: str, close: str) -> CandleBar:
+    """A 1-minute CandleBar with a given open/close (high/low immaterial here)."""
+    return CandleBar(
+        timestamp=_MINUTE,
+        open=Decimal(open_),
+        high=Decimal(close),
+        low=Decimal(open_),
+        close=Decimal(close),
+        volume=0,
+        open_interest=None,
+    )
+
+
+def test_candle_schema_has_derived_pct_columns() -> None:
+    assert "pct_from_open" in CANDLE_SCHEMA and "pct_change" in CANDLE_SCHEMA
+
+
+def test_candles_to_frame_derived_pcts_full_precision() -> None:
+    """pct_from_open + pct_change are FULL precision (never 2dp) — statistics, not money."""
+    bar = _pct_bar(open_="100", close="103")  # +3% from open
+    frame = candles_to_frame(
+        {"NSE:IDX:NIFTY": [bar]},
+        built_run_id="r",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("99")},  # (103-99)/99*100 = 4.0404...
+    )
+    row = frame.to_dicts()[0]
+    assert row["pct_from_open"] == 3.0
+    # FULL precision — NOT snapped to 2dp (would be 4.04); the statistic keeps its tail.
+    assert abs(row["pct_change"] - (4.0 / 99.0 * 100 + 0.0)) < 1e-9
+    assert row["pct_change"] != round(row["pct_change"], 2)  # genuinely un-rounded
+
+
+def test_candles_to_frame_pct_change_null_without_prev_close() -> None:
+    """No prev_close for the instrument → pct_change null (honest); pct_from_open still set."""
+    bar = _pct_bar(open_="100", close="110")
+    # prev_closes omitted entirely (None map) AND a present-but-other-instrument map.
+    none_map = candles_to_frame({"NSE:IDX:NIFTY": [bar]}, built_run_id="r").to_dicts()[0]
+    assert none_map["pct_change"] is None and none_map["pct_from_open"] == 10.0
+    other = candles_to_frame(
+        {"NSE:IDX:NIFTY": [bar]}, built_run_id="r", prev_closes={"OTHER": Decimal("5")}
+    ).to_dicts()[0]
+    assert other["pct_change"] is None
+
+
+def test_candles_to_frame_pct_divide_by_zero_guards() -> None:
+    """A 0-rupee open → null pct_from_open; a 0-rupee prev_close → null pct_change."""
+    zero_open = _pct_bar(open_="0", close="10")
+    row = candles_to_frame(
+        {"NSE:IDX:NIFTY": [zero_open]},
+        built_run_id="r",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("0")},  # zero prev_close
+    ).to_dicts()[0]
+    assert row["pct_from_open"] is None  # no divide-by-zero, no inf
+    assert row["pct_change"] is None
+
+
+def test_write_live_candles_threads_prev_close_through_tick_rebuild(tmp_path) -> None:
+    """pct_change is computed on the tick-lake REBUILD path, idempotent under a double-fold."""
+    full = _slice(0, [(5, 100.0), (58, 110.0)])  # open 100, close 110 in the 09:15 minute
+    write_live_ticks(full, lake_root=tmp_path, capture_run_id="run1")
+    candles = build_minute_candles(iter_ticks(full))
+    prevs = {"NSE:IDX:NIFTY": Decimal("100")}  # (110-100)/100*100 = 10.0 ; (100/100..)=0 open
+    write_live_candles(
+        candles,
+        lake_root=tmp_path,
+        built_run_id="run1",
+        tick_counts=minute_tick_counts(full),
+        prev_closes=prevs,
+    )
+    row = read_live_candles(tmp_path).to_dicts()[0]
+    assert row["pct_from_open"] == 10.0  # (110-100)/100*100
+    assert row["pct_change"] == 10.0  # (110-100)/100*100 vs prev_close
+    # Re-fold (crash replay) with the SAME prev_closes → byte-identical (idempotent).
+    write_live_candles(
+        candles,
+        lake_root=tmp_path,
+        built_run_id="run1",
+        tick_counts=minute_tick_counts(full),
+        prev_closes=prevs,
+    )
+    assert read_live_candles(tmp_path).to_dicts()[0] == row
+
+
+def test_pct_columns_populated_on_fallback_no_tick_lake_path(tmp_path) -> None:
+    """The no-tick-lake FALLBACK path (passed candle written as-is) still carries pcts.
+
+    `_merge_candles` falls back to the passed `frame` (built by `candles_to_frame`
+    WITH prev_closes), so a pure-candle write (no `write_live_ticks` first) still
+    persists the derived percentages (DEC-LIVE-CANDLE-DERIVED-PCT-001).
+    """
+    bar = _pct_bar(open_="100", close="105")  # +5% from open
+    write_live_candles(
+        {"NSE:IDX:NIFTY": [bar]},
+        lake_root=tmp_path,
+        built_run_id="run1",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("100")},  # (105-100)/100*100 = 5.0
+    )
+    row = read_live_candles(tmp_path).to_dicts()[0]
+    assert row["pct_from_open"] == 5.0 and row["pct_change"] == 5.0
