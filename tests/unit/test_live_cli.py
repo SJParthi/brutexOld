@@ -415,6 +415,59 @@ def test_cmd_probe_connections(tmp_path) -> None:
     assert main(["probe-connections", "--max", "5"], deps=deps) == 0
 
 
+def test_cmd_probe_connections_stamps_manifest(tmp_path) -> None:
+    """``--manifest`` stamps the REAL measured ceiling into meta.probe (DEC-LIVE-PROBE-MANIFEST-001)."""
+    import json
+
+    manifest = tmp_path / "live-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "spot": [
+                    {
+                        "exchange": "NSE",
+                        "segment": "CASH",
+                        "exchange_token": "NIFTY",
+                        "instrument_type": "IDX",
+                    }
+                ],
+                "legs": [],
+                "meta": {"plan": {"per_connection_cap": 1000, "spot": 1, "legs": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = {"n": 0}
+
+    def failing_builder() -> object:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise RuntimeError("ceiling")
+        return object()
+
+    deps = LiveDeps(feed_builder=failing_builder, instrument_resolver=lambda s, k: [])
+    exit_code = main(["probe-connections", "--max", "5", "--manifest", str(manifest)], deps=deps)
+    assert exit_code == 0
+    on_disk = json.loads(manifest.read_text(encoding="utf-8"))
+    # 2 held, the 3rd refused → max_held 2, failed_at 3, reached_ceiling True.
+    assert on_disk["meta"]["probe"] == {"max_held": 2, "failed_at": 3, "reached_ceiling": True}
+    # The pre-existing plan block is preserved.
+    assert on_disk["meta"]["plan"] == {"per_connection_cap": 1000, "spot": 1, "legs": 0}
+
+
+def test_cmd_probe_connections_missing_manifest_left_untouched(tmp_path) -> None:
+    """``--manifest`` pointing at an absent file → probe still succeeds, nothing written."""
+    manifest = tmp_path / "absent.json"
+
+    deps = LiveDeps(
+        feed_builder=object,
+        instrument_resolver=lambda s, k: [],
+    )
+    exit_code = main(["probe-connections", "--max", "2", "--manifest", str(manifest)], deps=deps)
+    assert exit_code == 0
+    assert not manifest.exists()
+
+
 def test_cmd_lake_persists_ticks_and_candles(tmp_path) -> None:
     from brutex.live.lake import read_live_candles, read_live_ticks
 

@@ -24,6 +24,7 @@ distinct instruments — NOT an O(1)-total claim. Read-only market data; no orde
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from brutex.live.plan import (
     build_grouped_plan,
     connection_count,
 )
+from brutex.live.probe import ConnectionProbeResult
 
 _LOG = structlog.get_logger("brutex.live.multiconn")
 
@@ -99,6 +101,131 @@ def read_subscription_manifest(
     spot = _validate_manifest_rows(data.get("spot", []), group="spot")
     legs = _validate_manifest_rows(data.get("legs", []), group="legs")
     return spot, legs
+
+
+def probe_meta_block(probe_result: ConnectionProbeResult) -> dict[str, Any]:
+    """Project a :class:`~brutex.live.probe.ConnectionProbeResult` to the ``meta.probe`` block.
+
+    Emits the EXACT shape the dashboard reader
+    (:func:`brutex.dashboard.live_plan_view.read_connection_plan` →
+    ``_probe_from_meta``) consumes — ``{"max_held": int, "failed_at": int|None,
+    "reached_ceiling": bool}`` — so a stamped manifest surfaces the REAL measured
+    concurrent-connection ceiling on ``/live`` with NO dashboard change
+    (DEC-LIVE-PROBE-MANIFEST-001). The ``failure`` reason string is deliberately
+    NOT carried: the reader keys only on the numeric ceiling, and the human-readable
+    reason already lands in the ``connection_probe`` structured log line.
+
+    This is a PURE projection of an ALREADY-RUN probe result; it never fabricates a
+    ceiling (Golden Rule #1) — the caller only invokes the stamp after a real probe.
+    """
+    return {
+        "max_held": probe_result.max_held,
+        "failed_at": probe_result.failed_at,
+        "reached_ceiling": probe_result.reached_ceiling,
+    }
+
+
+def merge_probe_into_manifest(
+    manifest: Mapping[str, Any], probe_result: ConnectionProbeResult
+) -> dict[str, Any]:
+    """Return a NEW manifest dict with ``meta.probe`` stamped from *probe_result*.
+
+    A pure deep-merge: every existing top-level block (``spot`` / ``legs`` /
+    anything else) and every existing ``meta`` key (e.g. the writer's ``meta.plan``,
+    DEC-LIVE-DASH-PROBE-001) is PRESERVED — only ``meta.probe`` is set/replaced with
+    the projection of *probe_result*. A malformed existing ``meta`` (not a mapping)
+    is replaced by a fresh ``meta`` carrying only ``probe`` rather than crashing.
+
+    PURE: every preserved block is :func:`copy.deepcopy`-ed, so the returned dict
+    shares NO mutable sub-object with *manifest* — a later mutation of the result
+    can never corrupt the caller's input (and vice-versa). Re-stamping the SAME
+    *probe_result* yields an equal dict (the projection is a deterministic function
+    of the result), which keeps :func:`stamp_probe_manifest_file` byte-idempotent.
+    """
+    merged: dict[str, Any] = {
+        key: copy.deepcopy(value) for key, value in manifest.items() if key != "meta"
+    }
+    existing_meta = manifest.get("meta")
+    new_meta: dict[str, Any] = (
+        copy.deepcopy(dict(existing_meta)) if isinstance(existing_meta, Mapping) else {}
+    )
+    new_meta["probe"] = probe_meta_block(probe_result)
+    merged["meta"] = new_meta
+    return merged
+
+
+def stamp_probe_manifest_file(
+    manifest_path: str | Path, probe_result: ConnectionProbeResult
+) -> bool:
+    """Stamp a REAL *probe_result*'s ceiling into the manifest at *manifest_path*.
+
+    The probe→manifest wiring for DEC-LIVE-PROBE-MANIFEST-001: after
+    ``python -m brutex.live probe-connections --manifest <path>`` runs a REAL
+    connection ramp, this writes the measured concurrent-connection ceiling into the
+    manifest's ``meta.probe`` block — the EXACT shape the merged dashboard panel
+    (``GET /api/v1/live/plan`` → :func:`brutex.dashboard.live_plan_view.read_connection_plan`)
+    reads, so ``/live`` surfaces the ACCOUNT ceiling instead of "probe not run", with
+    NO dashboard-reader change.
+
+    Decoupling (``DEC-LIVE-DECOUPLE-001``): this lives on the WRITER / live side and
+    imports nothing from the dashboard — the manifest JSON is the file contract. The
+    existing ``spot`` / ``legs`` / ``meta.plan`` blocks are PRESERVED (deep-merge via
+    :func:`merge_probe_into_manifest`); only ``meta.probe`` is set.
+
+    Honesty (Golden Rule #1): a MISSING / unreadable / non-object manifest is LEFT
+    UNTOUCHED and ``False`` returned — the dashboard keeps showing "probe not run"
+    rather than a fabricated ceiling. The stamp is performed ONLY here, after a real
+    probe, so no default/guessed ceiling is ever written.
+
+    Idempotence (Golden Rule #7): the manifest is rewritten with canonical,
+    sort-stable JSON, so stamping the SAME *probe_result* a second time produces
+    byte-identical file content.
+
+    Parameters
+    ----------
+    manifest_path
+        The capture's ``--manifest`` JSON path (the dashboard's ON-toggle sink).
+    probe_result
+        The outcome of a REAL :func:`~brutex.live.probe.probe_connections` ramp.
+
+    Returns
+    -------
+    bool
+        ``True`` when the manifest was stamped; ``False`` when it was absent /
+        unreadable / not a JSON object (left untouched — honest absence).
+    """
+    path = Path(manifest_path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        _LOG.warning("probe_manifest_absent", path=str(path), max_held=probe_result.max_held)
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        _LOG.warning("probe_manifest_unreadable", path=str(path), max_held=probe_result.max_held)
+        return False
+    if not isinstance(data, Mapping):
+        _LOG.warning("probe_manifest_not_object", path=str(path), max_held=probe_result.max_held)
+        return False
+    merged = merge_probe_into_manifest(data, probe_result)
+    # Canonical, deterministic bytes so re-stamping the same probe is byte-identical
+    # (Golden Rule #7). sort_keys keeps the ordering stable regardless of how the
+    # dashboard writer ordered the original keys; no trailing newline (mirrors
+    # live_manifest.write_manifest's compact json.dumps). Written atomically
+    # (temp sibling + os.replace) — mirroring live_manifest.write_manifest — so the
+    # dashboard's concurrent read can never see a torn half-written manifest.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(merged, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+    _LOG.info(
+        "probe_manifest_stamped",
+        path=str(path),
+        max_held=probe_result.max_held,
+        failed_at=probe_result.failed_at,
+        reached_ceiling=probe_result.reached_ceiling,
+    )
+    return True
 
 
 def _instrument_of(row: Mapping[str, Any]) -> Instrument:
@@ -364,7 +491,10 @@ __all__ = [
     "SubscriptionPlanReport",
     "build_report",
     "make_multiconn_capture",
+    "merge_probe_into_manifest",
     "open_and_subscribe",
     "plan_connections",
+    "probe_meta_block",
     "read_subscription_manifest",
+    "stamp_probe_manifest_file",
 ]

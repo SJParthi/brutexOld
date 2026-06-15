@@ -47,6 +47,7 @@ from brutex.live.multiconn import (
     make_multiconn_capture,
     plan_connections,
     read_subscription_manifest,
+    stamp_probe_manifest_file,
 )
 from brutex.live.parity import compare_candles
 from brutex.live.probe import analyze_cadence, probe_connections
@@ -565,7 +566,17 @@ def _cmd_parity(args: argparse.Namespace, _deps: LiveDeps) -> int:
 
 
 def _cmd_probe_connections(args: argparse.Namespace, deps: LiveDeps) -> int:
-    """Ramp websocket connections 1..``--max`` to find the ceiling."""
+    """Ramp websocket connections 1..``--max`` to find the ceiling.
+
+    With ``--manifest <path>`` the REAL measured ceiling is then stamped into the
+    subscription manifest's ``meta.probe`` block (DEC-LIVE-PROBE-MANIFEST-001), the
+    exact shape the dashboard's ``GET /api/v1/live/plan`` panel reads — so ``/live``
+    surfaces the account's concurrent-connection ceiling instead of "probe not run",
+    with NO dashboard change. An absent / unreadable manifest is left untouched
+    (the panel keeps showing "probe not run"; Golden Rule #1) — the stamp happens
+    only AFTER this real probe ran, never a fabricated default. The stamp is on the
+    live/WRITER side; the dashboard imports nothing from here (DEC-LIVE-DECOUPLE-001).
+    """
     deps.configure_logging(args.log_file)
 
     def open_connection(ordinal: int) -> Any:
@@ -581,6 +592,14 @@ def _cmd_probe_connections(args: argparse.Namespace, deps: LiveDeps) -> int:
         failure=result.failure,
         reached_ceiling=result.reached_ceiling,
     )
+    if args.manifest is not None:
+        stamped = stamp_probe_manifest_file(args.manifest, result)
+        _LOG.info(
+            "probe_manifest_result",
+            manifest=str(args.manifest),
+            stamped=stamped,
+            max_held=result.max_held,
+        )
     return 0
 
 
@@ -1015,6 +1034,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     prb = sub.add_parser("probe-connections", help="ramp connections 1..N")
     prb.add_argument("--max", type=int, default=100, help="max connections to try")
+    prb.add_argument(
+        "--manifest",
+        default=None,
+        help="stamp the REAL measured concurrent-connection ceiling into this "
+        "subscription manifest's meta.probe block (the dashboard /live panel reads "
+        "it; absent/unreadable manifest is left untouched — DEC-LIVE-PROBE-MANIFEST-001)",
+    )
     prb.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
 
     lk = sub.add_parser("lake", help="persist a captured log into the live lake tables")
