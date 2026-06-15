@@ -54,46 +54,68 @@ _SPOT_INSTRUMENT_TYPES: Final[frozenset[str]] = frozenset({"IDX", "EQ"})
 _LEG_SEGMENT: Final[str] = "FNO"
 
 
-def _spot_row(instrument: Any) -> dict[str, Any]:
-    """Project one in-scope :class:`~brutex.models.Instrument` to a feed-row dict.
+#: The segment EVERY spot row rides on the Groww live feed. Both
+#: ``subscribe_index_value`` (indices) AND ``subscribe_ltp`` (cash equities) take
+#: ``segment="CASH"`` — ``docs/groww/api-reference/07-feed.md:54,132``. This is
+#: NOT the persisted ``Segment`` (indices are stored as the internal ``"INDEX"``
+#: for PK disambiguation, DEC-INDEX-SEGMENT-PK-FIX-001); the feed needs ``CASH``.
+_SPOT_FEED_SEGMENT: Final[str] = "CASH"
 
-    Maps the persisted store columns to the four manifest feed keys the capture
-    validates — ``exchange`` (``exch_id``), ``segment``, ``exchange_token``
-    (``security_id``), ``instrument_type`` (``instrument``) — plus the optional
-    ``underlying_symbol`` so a ``"both"`` spot connection can route each row to
-    the feed that delivers it (indices → index-value, stocks → ltp).
+
+def _spot_row(instrument: Any) -> dict[str, Any]:
+    """Project one :class:`~brutex.models.Instrument` to a Groww FEED-row dict.
+
+    Emits the EXACT shape ``subscribe_index_value`` / ``subscribe_ltp`` expect
+    (``07-feed.md:54,132``), NOT the persisted engine identifiers:
+
+    * ``segment`` = ``"CASH"`` (:data:`_SPOT_FEED_SEGMENT`) — the feed segment for
+      BOTH indices and equities, never the internal ``"INDEX"`` segment;
+    * ``exchange_token`` = the RAW Groww feed token (``instrument.feed_token``:
+      ``"NIFTY"`` / ``"1"`` / ``"2885"``), NOT ``security_id`` (which hashes a
+      non-numeric index token into a surrogate). Legacy rows with no
+      ``feed_token`` fall back to ``security_id`` (correct for numeric equities;
+      a string-token index without ``feed_token`` is a pre-v7 store that
+      re-loads on the next ``make run``).
+
+    Plus ``instrument_type`` (for the dual-feed routing) and the optional
+    ``underlying_symbol``.
     """
+    token = instrument.feed_token if instrument.feed_token is not None else instrument.security_id
     return {
         "exchange": str(instrument.exch_id),
-        "segment": str(instrument.segment),
-        "exchange_token": str(instrument.security_id),
+        "segment": _SPOT_FEED_SEGMENT,
+        "exchange_token": str(token),
         "instrument_type": str(instrument.instrument),
         "underlying_symbol": instrument.underlying_symbol,
     }
 
 
 def build_spot_rows(store: Any) -> list[dict[str, Any]]:
-    """Return the in-scope spot feed-rows (the 775) from the instrument store.
+    """Return the FULL spot feed-rows (the 775) from the instrument store.
 
-    Reads ``store.list_in_scope()`` — the latest-snapshot, in-scope universe —
-    and keeps only the SUBSCRIBABLE spot types (``IDX`` / ``EQ``); FUT / CE / PE
-    legs (if any survived in the master) are excluded (they are the manifest's
-    ``legs``, sourced from the registry instead). Read-only.
+    Reads ``store.list_index_equity_instruments()`` — every latest-snapshot
+    ``IDX`` + ``EQ`` row (the 25 admitted indices + the ~750 cash equities = the
+    exact 775 the ``/db`` instruments table holds), NOT ``list_in_scope`` (which
+    is the ~4 brute-force-tradable rows only). The live feed is REFERENCE/RESEARCH
+    so it captures the whole spot universe, not just the engine's tradable scope.
+    FUT / CE / PE legs (if any survived the lean master) are not returned here —
+    they are the manifest's ``legs``, sourced from the registry. Read-only.
 
     Parameters
     ----------
     store
         The wired :class:`~brutex.data.instrument_store.InstrumentStore` (its
-        ``list_in_scope`` is the latest-snapshot in-scope reader).
+        ``list_index_equity_instruments`` is the full IDX+EQ latest-snapshot
+        reader, already used by the ``/universe`` explorer).
 
     Returns
     -------
     list[dict[str, Any]]
-        One feed-row per subscribable spot instrument, in the store's
-        ``list_in_scope`` order (stable for an idempotent manifest).
+        One Groww feed-row per spot instrument, in the store's
+        ``list_index_equity_instruments`` order (stable for an idempotent manifest).
     """
     rows: list[dict[str, Any]] = []
-    for instrument in store.list_in_scope():
+    for instrument in store.list_index_equity_instruments():
         if str(instrument.instrument) in _SPOT_INSTRUMENT_TYPES:
             rows.append(_spot_row(instrument))
     return rows

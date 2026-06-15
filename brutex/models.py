@@ -147,6 +147,14 @@ class Instrument:
     # the vendor-faithful change — was is_reserved).
     asm_gsm_flag: bool = False
 
+    # RAW Groww feed token — the literal instrument-CSV ``exchange_token`` string
+    # (e.g. "NIFTY" / "1" / "2885"), preserved because ``security_id`` hashes a
+    # non-numeric index token into a surrogate. The live websocket feed
+    # (subscribe_index_value / subscribe_ltp) addresses instruments by THIS token,
+    # not security_id (docs/groww/api-reference/07-feed.md:54,132;
+    # DEC-LIVE-MANIFEST-FEED-FORMAT-001). None for instruments built without it.
+    feed_token: str | None = None
+
     # ─────────────────────────────────────────────────────────────────
     # Derived properties
     # ─────────────────────────────────────────────────────────────────

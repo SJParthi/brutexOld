@@ -136,7 +136,17 @@ from brutex.models import (
 #: row); Stage-2b's later sub-PRs set it for the admitted non-F&O constituents.
 #: ``instruments`` is already in the drop+recreate list (rebuildable from the
 #: CSV), so any v5 store rebuilds at the new shape on open.
-SCHEMA_VERSION: Final[int] = 6
+#:
+#: v7 (DEC-LIVE-MANIFEST-FEED-FORMAT-001, 2026-06-15): added the
+#: ``feed_token VARCHAR`` column — the RAW Groww ``exchange_token`` string from
+#: the instrument CSV (e.g. ``"NIFTY"`` / ``"1"`` / ``"2885"``). The numeric
+#: ``security_id`` HASHES a non-numeric index token into a surrogate, so the live
+#: websocket feed (``subscribe_index_value`` / ``subscribe_ltp``) — which needs
+#: the literal CSV token, ``docs/groww/api-reference/07-feed.md:54,132`` — cannot
+#: be addressed from ``security_id`` for string-token indices. ``feed_token``
+#: preserves the ground-truth token so the dashboard live-manifest emits the
+#: exact Groww feed row. Append-only column → drop+recreate rebuilds it from CSV.
+SCHEMA_VERSION: Final[int] = 7
 
 #: Default DuckDB file name inside the configured lake root.
 DEFAULT_DB_NAME: Final[str] = "instruments.duckdb"
@@ -181,6 +191,15 @@ CREATE TABLE IF NOT EXISTS instruments (
     -- the non-F&O NIFTY-Total-Market constituents in later Stage-2b sub-PRs).
     -- DEFAULT FALSE so the column is back-fill-safe on the drop+recreate.
     reference_only         BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- RAW Groww feed token (v7, DEC-LIVE-MANIFEST-FEED-FORMAT-001): the literal
+    -- instrument-CSV ``exchange_token`` string (e.g. "NIFTY"/"1"/"2885"). The
+    -- numeric ``security_id`` hashes a non-numeric index token into a surrogate,
+    -- so the live websocket feed (which needs the literal token, 07-feed.md) is
+    -- addressed from THIS column, not ``security_id``. NULLable (legacy rows /
+    -- non-feed instruments). Appended last so the column-order invariant across
+    -- _INSTR_COLUMNS / _instrument_to_params / _row_to_instrument is shift-free.
+    feed_token             VARCHAR,
 
     -- Vendor identity is (securityId, exchangeSegment) — a security_id is
     -- unique only WITHIN an (exch_id, segment); the same id recurs across
@@ -291,6 +310,7 @@ _INSTR_COLUMNS: Final[tuple[str, ...]] = (
     "run_id",
     "csv_source_sha256",
     "reference_only",
+    "feed_token",
 )
 
 
@@ -1913,6 +1933,7 @@ def _instrument_to_params(
         run_id,
         csv_source_sha256,
         reference_only,
+        instrument.feed_token,
     ]
 
 
@@ -1948,6 +1969,7 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
         _run_id,
         _csv_sha,
         _reference_only,
+        feed_token,
     ) = row
     return Instrument(
         exch_id=Exchange(exch_id),
@@ -1970,6 +1992,7 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
         option_type=option_type,
         expiry_flag=expiry_flag,
         asm_gsm_flag=bool(asm_gsm_flag),
+        feed_token=feed_token,
     )
 
 
