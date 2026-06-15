@@ -88,3 +88,97 @@ python -m brutex.live parity \
 
 `runs/parity.md` is the deliverable — a human-readable table that says
 **IDENTICAL ✅** or shows exactly which minute/field diverged.
+
+---
+
+# Part B — Dashboard one-click go-live (the N-connection path)
+
+> Sections 0–6 above are the **CLI / parity** deep-dive. This part is the
+> **dashboard toggle** flow that wires the whole universe — all **775 spot**
+> (25 admitted indices + 750 stocks) **+ the F&O legs** — across **N
+> websocket connections** from a single ON switch. It is the operator path
+> shipped by `DEC-LIVE-DASHBOARD-WIRE-001` (MIGRATION.md #780), building on
+> `DEC-LIVE-MULTICONN-MANIFEST-001` (#779), `DEC-LIVE-DUAL-FEED-001` (#774),
+> and `DEC-LIVE-CREDS-BRIDGE-001` (#771). Read-only market data, no orders
+> (CLAUDE.md §3).
+
+## B0. Save the creds ONCE (no env export needed)
+
+The dashboard **Credentials** page saves the Groww API key + TOTP secret to
+`~/.brutex/credentials.json` (mode `0600`). The Live toggle injects them into
+the capture subprocess's **environment** — never on the command line, so `ps`
+stays clean (`DEC-LIVE-CREDS-BRIDGE-001`, #771). Save once → "Live ON" just
+works; no `export` step.
+
+> ⚠️ **Rotate first.** If a key/secret was ever pasted into a chat, an email,
+> or a screenshot, treat it as compromised — rotate it in the Groww account and
+> save the NEW pair on the Credentials page before going live
+> (`DEC-LIVE-CREDS-BRIDGE-001`; the TOTP creds-flow facts are CLAUDE.md §6).
+
+## B1. Tonight (pre-market) — the DRY-RUN that proves the plumbing
+
+The market is closed outside **09:15–15:30 IST** (CLAUDE.md §7), so this run
+proves everything EXCEPT the ticks — which is exactly what you want to de-risk
+ahead of the open.
+
+1. Open the dashboard → **Live** tab → flip the toggle **ON**.
+2. The toggle writes the subscription **manifest** from the already-persisted
+   tables — the `instruments` table (the 775) + the F&O `contracts` registry
+   (the legs) — then spawns `capture-all --manifest … --report … --feed both`
+   (`DEC-LIVE-DASHBOARD-WIRE-001`, #780).
+3. Watch the **per-connection proof** (the `#connGrid` table, polled from
+   `GET /api/v1/live/connections`):
+
+   ```
+   #0  feed: both   775   ← 25 indices on the index-value feed + 750 stocks on ltp
+   #1  feed: ltp   1000   ← F&O legs
+   #2  feed: ltp   1000
+   …                       (one extra connection per 1000 legs; total = 1 + ceil(legs/1000))
+   ```
+
+**Healthy dry-run = ✅ connections open · ✅ proof table populated · ✅ status
+`running` · ✅ heartbeat ticking · ⬜ ticks = 0.** Zero ticks is CORRECT with
+the market closed — it is not a failure.
+
+**If something OTHER than zero ticks looks wrong**, that is the real signal to
+catch tonight:
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| Status flips to `stopped` / auth error in the log | creds missing / not rotated / wrong TOTP | re-save on the Credentials page (B0) |
+| `legs: []`, only `#0` shows | F&O `contracts` registry not pulled yet | run "Fetch all expiries/contracts" on `/universe` |
+| A connection refuses to open at #N | per-key websocket ceiling | `python -m brutex.live probe-connections --max 100` (§1) and cap below #N |
+
+## B2. Monday 09:15 IST — the real run
+
+With the dry-run green, the open adds only ONE new variable: the ticks.
+
+1. Leave Live **ON** (or flip it on a minute before 09:15). The
+   restart-watchdog auto-relaunches a dropped capture with bounded backoff
+   (`DEC-LIVE-DASHBOARD-WIRE-001`, #780), so a transient feed blip self-heals.
+2. At **09:15:00 IST** the indices start ticking (CLAUDE.md §7); the
+   per-connection proof's tick counters move and the live lake fills.
+3. Spot ticks become **live 1-minute candles** (09:15:00–15:29:00, 375 bars
+   max/instrument — same builder as §4; a missing live minute is left as a gap,
+   never synthesised).
+
+The adapter paces every connection with the adaptive token bucket + the
+500 req/min governor (CLAUDE.md §6, `DEC-GROWW-RATE-PERMIN-001`); the per-second
+ceiling is the operator-directed 8 r/s — do not raise either without approval.
+
+## B3. End of day — the parity verdict
+
+Run §4 → §5 → §6 against Monday's capture. `runs/parity.md` is the proof the
+**live** 1-minute candle equals the **backtest** 1-minute candle, instrument by
+instrument. **IDENTICAL ✅** is the go-live success criterion.
+
+## B4. What is proven offline vs only at the open
+
+Market-hours facts below are CLAUDE.md §7; the feed/universe facts are
+CLAUDE.md §6.
+
+| Layer | Proven without the market? | Where |
+|---|---|---|
+| Dashboard view · N-connection plan · per-connection proof · the 775/legs manifest | ✅ yes — deterministic from the stored tables, 100% tested | B1 · `DEC-LIVE-DASHBOARD-WIRE-001` #780 |
+| Sockets open + Groww accepts the subscribe calls | 🟡 dry-run can confirm (0 ticks) — real-socket path is the operator-Mac run | B1 · CLAUDE.md §6 |
+| Real ticks → 1-minute candles → parity | ❌ needs the market open (09:15 IST) | B2–B3 · CLAUDE.md §7 |
