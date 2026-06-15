@@ -51,6 +51,7 @@ from brutex.live.multiconn import (
 from brutex.live.parity import compare_candles
 from brutex.live.probe import analyze_cadence, probe_connections
 from brutex.live.report import render_parity_markdown
+from brutex.live.ring import RingFlusher, TickRing
 from brutex.live.rolling import (
     RollingTickStore,
     fold_segment,
@@ -59,7 +60,7 @@ from brutex.live.rolling import (
     segment_dir_for,
 )
 from brutex.live.serde import read_candles, write_candles
-from brutex.live.store import TickStore
+from brutex.live.store import TickSink, TickStore
 from brutex.live.tick import iter_ticks
 from brutex.live.verify import render_subscription_markdown, verify_subscription
 
@@ -382,6 +383,23 @@ def _make_snapshot_reader(feed: Any, feed_kind: str) -> SnapshotFn:
     return feed.get_index_value  # type: ignore[no-any-return]
 
 
+def _make_flusher(args: argparse.Namespace, store: TickSink, deps: LiveDeps) -> RingFlusher | None:
+    """Build a :class:`~brutex.live.ring.RingFlusher` when ``--ring`` is set, else ``None``.
+
+    DEC-LIVE-RAM-RING-001 / DEC-LIVE-FLUSH-LOOP-001: the in-RAM ring + ~1s flush
+    wraps the SAME durable sink (``TickStore``/``RollingTickStore``) so the
+    per-callback hot path is a zero-disk O(1) append. Absent → the prior per-tick
+    durable path is unchanged. The monotonic clock is injected from *deps* so the
+    cadence is deterministic in tests.
+    """
+    if not args.ring:
+        return None
+    ring = TickRing(capacity=args.ring_capacity)
+    return RingFlusher(
+        sink=store, ring=ring, flush_interval=args.flush_interval, monotonic=deps.monotonic
+    )
+
+
 def _capture_with_rolling(
     args: argparse.Namespace,
     deps: LiveDeps,
@@ -413,12 +431,19 @@ def _capture_with_rolling(
         on_rotate=on_rotate,
         resume=args.resume,
     )
+    flusher = _make_flusher(args, store, deps)
     capture = TickCapture(
-        store=store, subscribe=subscribe, read_snapshot=read_snapshot, clock=deps.clock
+        store=store,
+        subscribe=subscribe,
+        read_snapshot=read_snapshot,
+        clock=deps.clock,
+        flusher=flusher,
     )
     captured = capture.run_for(
         args.seconds, sleep=deps.sleep, monotonic=deps.monotonic, heartbeat_interval=args.heartbeat
     )
+    # run_for already drained the ring (DEC-LIVE-FLUSH-LOOP-001) before this point,
+    # so every captured tick is durable in the active segment when we fold the tail.
     tail = store.flush_active()
     store.close()
     _LOG.info(
@@ -427,6 +452,7 @@ def _capture_with_rolling(
         segment_dir=str(segment_dir_for(args.out)),
         rotations=store.rotations,
         tail_folded=tail is not None,
+        ring=flusher is not None,
         lake_root=str(args.roll_lake_root) if args.roll_lake_root else None,
     )
     return 0
@@ -445,11 +471,13 @@ def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
     if args.roll:
         return _capture_with_rolling(args, deps, subscribe, read_snapshot)
     with TickStore.open(args.out, resume=args.resume) as store:
+        flusher = _make_flusher(args, store, deps)
         capture = TickCapture(
             store=store,
             subscribe=subscribe,
             read_snapshot=read_snapshot,
             clock=deps.clock,
+            flusher=flusher,
         )
         captured = capture.run_for(
             args.seconds,
@@ -463,6 +491,7 @@ def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
         captured=captured,
         out=str(args.out),
         cadence=stats.classification,
+        ring=args.ring,
         median_interval_ms=stats.median_interval_ms,
     )
     return 0
@@ -807,6 +836,39 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
 }
 
 
+def _add_ring_args(parser: argparse.ArgumentParser) -> None:
+    """Add the in-RAM ring + periodic-flush flags (DEC-LIVE-RAM-RING-001 / -FLUSH-LOOP-001).
+
+    With ``--ring`` the per-callback hot path is a single O(1) in-RAM append; the
+    durable write to the SAME sink happens off the feed thread on a ~1s flush, and
+    the ring is fully drained on shutdown (graceful-shutdown zero loss; hard-crash
+    loss bounded by one ``--flush-interval`` of un-flushed ticks). Absent → the
+    prior per-tick durable path is unchanged.
+    """
+    parser.add_argument(
+        "--ring",
+        action="store_true",
+        help="buffer ticks in an in-RAM ring (O(1) hot path) + flush to --out every "
+        "--flush-interval seconds; drained fully on shutdown (zero loss on a clean "
+        "stop; hard-crash loss bounded by one flush interval)",
+    )
+    parser.add_argument(
+        "--ring-capacity",
+        dest="ring_capacity",
+        type=int,
+        default=10_000,
+        help="ring high-watermark: at this many buffered ticks the overflow is "
+        "spilled SYNCHRONOUSLY to --out (never dropped); default 10,000",
+    )
+    parser.add_argument(
+        "--flush-interval",
+        dest="flush_interval",
+        type=float,
+        default=1.0,
+        help="seconds between periodic ring drains (default 1.0; also the hard-crash loss bound)",
+    )
+
+
 def _add_roll_args(parser: argparse.ArgumentParser) -> None:
     """Add the bounded/rolling capture flags (DEC-LIVE-AUTOROLL-001) to *parser*."""
     parser.add_argument(
@@ -873,6 +935,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     cap.add_argument("--resume", action="store_true", help="append to an existing log")
     _add_roll_args(cap)
+    _add_ring_args(cap)
 
     cal = sub.add_parser(
         "capture-all", help="open N connections (spot on #0, legs on #1..N) + capture"
