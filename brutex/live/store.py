@@ -66,11 +66,13 @@ class TickSink(Protocol):
     @property
     def next_seq(self) -> int:
         """The sequence number the next :meth:`append` will assign."""
+        ...
 
     def append(
         self, snapshot: Mapping[str, Any], *, recv_ts: datetime, recv_ns: int | None = None
     ) -> TickRecord:
         """Persist one snapshot, returning the :class:`TickRecord` written."""
+        ...
 
 
 def _json_default(obj: object) -> str:
