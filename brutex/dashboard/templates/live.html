@@ -174,8 +174,23 @@
     <div class="cards">
       <div class="card"><div class="k">Feed state</div><div class="v muted" id="cState">—</div><div class="x" id="cPid">pid —</div></div>
       <div class="card"><div class="k">Uptime</div><div class="v blue" id="cUptime">—</div><div class="x">since start</div></div>
-      <div class="card"><div class="k">Ticks captured</div><div class="v green" id="cTicks">—</div><div class="x">JSONL log lines</div></div>
+      <div class="card"><div class="k">Ticks captured</div><div class="v green" id="cTicks">—</div><div class="x">JSONL WAL lines</div></div>
+      <div class="card"><div class="k">Ticks flowing</div><div class="v muted" id="cFlow">—</div><div class="x" id="cFlowX">lake freshness</div></div>
       <div class="card"><div class="k">Out log</div><div class="v muted" style="font-size:13px" id="cOut">—</div><div class="x">runs/ + .brutex-logs/</div></div>
+    </div>
+
+    <!-- N-connection plan + probe (DEC-LIVE-DASH-PROBE-001): READ from the manifest the
+         ON toggle wrote — never imports brutex.live (DEC-LIVE-DECOUPLE-001). -->
+    <div class="band" id="planBand">
+      <div class="seg">
+        <span class="chip">plan <b id="planConns">0</b> conn</span>
+        <span class="chip">cap <b id="planCap">1000</b> / conn</span>
+        <span class="chip">spot <b id="planSpot">0</b></span>
+        <span class="chip">legs <b id="planLegs">0</b></span>
+        <span class="chip">total <b id="planTotal">0</b></span>
+        <span class="chip">probe ceiling <b id="planProbe">—</b></span>
+      </div>
+      <span class="note" id="planNote" style="margin-left:auto"></span>
     </div>
 
     <div class="panel">
@@ -184,6 +199,16 @@
         <span class="note" id="connSummary">per-connection subscription proof — #0 spot (dual-feed) · #1..N F&amp;O legs</span>
       </div>
       <div id="connGrid"><div class="empty">turn the Live feed ON to capture</div></div>
+    </div>
+
+    <!-- Are ticks FLOWING? per-instrument lake freshness (DEC-LIVE-DASH-PROBE-001):
+         the ACTUAL live/ticks Parquet lake, reconciling /live "captured 0" vs /db rows. -->
+    <div class="panel">
+      <div class="tabs">
+        <div class="tab sel" style="cursor:default">💧 ticks flowing <span class="b" id="flowCount">0</span></div>
+        <span class="note" id="flowSummary">per-instrument freshness — last-tick age from the live lake (max recv_ts / exchange_ts)</span>
+      </div>
+      <div id="flowGrid"><div class="empty">turn the Live feed ON to capture</div></div>
     </div>
 
     <div class="panel">
@@ -262,6 +287,53 @@ async function loadConnections(){
     $("connGrid").innerHTML='<div class="gridwrap"><table>'+thead+tbody+'</table></div>';
   }catch(e){ $("connGrid").innerHTML='<div class="empty">offline</div>'; }
 }
+
+/* N-connection plan + probe (DEC-LIVE-DASH-PROBE-001): READ from the manifest the
+   ON toggle wrote (ceil((spot+legs)/cap)) — never imports brutex.live. */
+async function loadPlan(){
+  try{
+    const r=await fetch("/api/v1/live/plan"); const b=await r.json();
+    const p=b.plan||{};
+    $("planConns").textContent=Number(p.connections||0).toLocaleString();
+    $("planCap").textContent=Number(p.per_connection_cap||0).toLocaleString();
+    $("planSpot").textContent=Number(p.spot||0).toLocaleString();
+    $("planLegs").textContent=Number(p.legs||0).toLocaleString();
+    $("planTotal").textContent=Number(p.total||0).toLocaleString();
+    /* Probe ceiling: the concurrent connections the account allows, ONLY if a probe
+       was stamped into the manifest — honestly "—" otherwise (never fabricated). */
+    $("planProbe").textContent=(b.probe&&b.probe.max_held!=null)?b.probe.max_held.toLocaleString():"—";
+    $("planNote").textContent=esc(b.note||b.probe_note||"");
+  }catch(e){ $("planNote").textContent="offline"; }
+}
+
+/* Are ticks FLOWING? per-instrument lake freshness (DEC-LIVE-DASH-PROBE-001): reads
+   the ACTUAL live/ticks Parquet lake, reconciling /live "captured 0" vs /db rows. */
+async function loadTicksFlowing(){
+  try{
+    const r=await fetch("/api/v1/live/ticks-flowing"); const b=await r.json();
+    const insts=b.instruments||[];
+    $("flowCount").textContent=insts.length.toLocaleString();
+    const flowing=!!b.flowing;
+    $("cFlow").textContent=flowing?"● flowing":(insts.length?"○ stale":"—");
+    $("cFlow").className="v "+(flowing?"green":"muted");
+    $("cFlowX").textContent=Number(b.total_ticks||0).toLocaleString()+" ticks · "
+      +Number(b.fresh_instruments||0).toLocaleString()+" fresh";
+    if(!insts.length){
+      $("flowGrid").innerHTML='<div class="empty">'+esc(b.note||"no ticks yet")+'</div>';
+      return;
+    }
+    const thead='<thead><tr><th>Instrument</th><th>Ticks</th><th>Last recv (IST)</th>'
+      +'<th>Last exchange (IST)</th><th>Age (s)</th><th>Flowing</th></tr></thead>';
+    const tbody='<tbody>'+insts.map(i=>'<tr><td>'+esc(i.groww_symbol||i.instrument_key)+'</td>'
+      +'<td>'+Number(i.ticks||0).toLocaleString()+'</td>'
+      +'<td>'+esc(i.last_recv_ts==null?"—":i.last_recv_ts)+'</td>'
+      +'<td>'+(i.last_exchange_ts==null?'<span class="note">null</span>':esc(i.last_exchange_ts))+'</td>'
+      +'<td>'+(i.last_tick_age_s==null?"—":esc(i.last_tick_age_s))+'</td>'
+      +'<td>'+(i.fresh?'<b style="color:var(--green)">● yes</b>':'<span class="note">○ no</span>')+'</td></tr>'
+    ).join("")+'</tbody>';
+    $("flowGrid").innerHTML='<div class="gridwrap"><table>'+thead+tbody+'</table></div>';
+  }catch(e){ $("flowGrid").innerHTML='<div class="empty">offline</div>'; }
+}
 async function toggle(){
   if(busy) return; busy=true;
   const on=$("toggle").classList.contains("on");
@@ -269,7 +341,7 @@ async function toggle(){
   try{ await fetch(on?"/api/v1/live/stop":"/api/v1/live/start",{method:"POST"}); }
   catch(e){}
   $("toggle").removeAttribute("aria-disabled"); busy=false;
-  await refreshStatus(); await loadConnections();
+  await refreshStatus(); await loadConnections(); await loadPlan(); await loadTicksFlowing();
 }
 async function loadTables(){
   try{
@@ -407,10 +479,10 @@ function renderView(name, body, err){
 
 $("toggle").addEventListener("click",toggle);
 $("toggle").addEventListener("keydown",e=>{ if(e.key===" "||e.key==="Enter"){e.preventDefault();toggle();}});
-$("refresh").addEventListener("click",()=>{ loadTables(); refreshStatus(); loadConnections(); });
+$("refresh").addEventListener("click",()=>{ loadTables(); refreshStatus(); loadConnections(); loadPlan(); loadTicksFlowing(); });
 document.querySelectorAll(".tab[data-tab]").forEach(t=>t.addEventListener("click",()=>selectTable(t.dataset.tab)));
-refreshStatus(); loadTables(); loadConnections();
-setInterval(()=>{ refreshStatus(); loadConnections(); }, 5000);
+refreshStatus(); loadTables(); loadConnections(); loadPlan(); loadTicksFlowing();
+setInterval(()=>{ refreshStatus(); loadConnections(); loadPlan(); loadTicksFlowing(); }, 5000);
 </script>
 </body>
 </html>

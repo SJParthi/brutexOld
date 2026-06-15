@@ -7,6 +7,7 @@ process, no signals), and the lake is seeded via ``brutex.live.lake``. Covers th
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -272,3 +273,79 @@ def test_live_query_route(tmp_path) -> None:
     assert page["total"] == 1 and page["columns"] == ["groww_symbol"]
     assert page["rows"][0][0] == "NSE-NIFTY"
     assert c2.get("/api/v1/live/query/bogus").status_code == 400
+
+
+# ── N-connection plan + probe + ticks-flowing (DEC-LIVE-DASH-PROBE-001) ──
+
+
+def test_live_plan_empty_when_no_manifest(tmp_path, monkeypatch) -> None:
+    """No manifest written yet → an empty plan payload + honest note."""
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    body = client.get("/api/v1/live/plan").json()
+    assert body["plan"]["connections"] == 0 and body["note"]
+    assert body["probe"] is None and body["probe_note"]
+
+
+def test_live_plan_reads_manifest(tmp_path, monkeypatch) -> None:
+    """A written manifest is parsed into the planned connection count + probe."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "live-manifest.json").write_text(
+        json.dumps(
+            {
+                "spot": [{"exchange": "NSE", "exchange_token": str(i)} for i in range(775)],
+                "legs": [{"exchange": "NSE", "exchange_token": str(i)} for i in range(1000)],
+                "meta": {
+                    "plan": {"per_connection_cap": 1000},
+                    "probe": {"max_held": 8, "failed_at": 9, "reached_ceiling": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    body = client.get("/api/v1/live/plan").json()
+    assert body["note"] is None
+    # 775 spot + 1000 legs at cap 1000 → ceil(1775/1000) = 2 connections.
+    assert body["plan"] == {
+        "connections": 2,
+        "per_connection_cap": 1000,
+        "spot": 775,
+        "legs": 1000,
+        "total": 1775,
+    }
+    assert body["probe"] == {"max_held": 8, "failed_at": 9, "reached_ceiling": True}
+
+
+def test_live_ticks_flowing_without_store_is_empty(tmp_path) -> None:
+    """No instrument store → an honest empty ticks-flowing payload (never fabricated)."""
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    body = client.get("/api/v1/live/ticks-flowing").json()
+    assert body["flowing"] is False and body["instruments"] == [] and body["note"]
+
+
+def test_live_ticks_flowing_reads_the_lake(tmp_path) -> None:
+    """With a store + seeded lake the freshness payload reflects the ACTUAL lake state."""
+    lake = tmp_path / "lake"
+    (lake / "instruments").mkdir(parents=True)
+    _seed_lake(lake)  # one NSE-NIFTY tick at 2026-06-15 03:45 UTC
+    store = _FakeStore(lake / "instruments")
+    client = TestClient(
+        build_app(DashboardState(), instrument_store=store, live_runner=_runner(tmp_path))
+    )
+    body = client.get("/api/v1/live/ticks-flowing").json()
+    assert body["total_ticks"] == 1 and len(body["instruments"]) == 1
+    inst = body["instruments"][0]
+    assert inst["groww_symbol"] == "NSE-NIFTY"
+    # The rendered last-tick time is clean IST (no +05:30 offset).
+    assert "+05:30" not in inst["last_recv_ts"] and inst["last_recv_ts"].startswith("2026-06-15 ")
+
+
+def test_live_page_renders_plan_and_flow_panels(tmp_path) -> None:
+    """The /live page ships the plan band + the ticks-flowing panel + their routes."""
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    text = client.get("/live").text
+    assert 'id="planBand"' in text and 'id="planConns"' in text and 'id="planProbe"' in text
+    assert 'id="flowGrid"' in text and 'id="flowCount"' in text and 'id="cFlow"' in text
+    assert "/api/v1/live/plan" in text and "/api/v1/live/ticks-flowing" in text

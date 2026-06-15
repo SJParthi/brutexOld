@@ -53,6 +53,17 @@ _SPOT_INSTRUMENT_TYPES: Final[frozenset[str]] = frozenset({"IDX", "EQ"})
 #: stamped here from the single F&O segment the legs belong to.
 _LEG_SEGMENT: Final[str] = "FNO"
 
+#: The per-connection subscription cap stamped into the manifest's ``meta.plan`` so
+#: the ``/live`` page can show the planned connection count WITHOUT importing
+#: :mod:`brutex.live` (the dashboard reader re-derives ``ceil((spot+legs)/cap)`` from
+#: this; DEC-LIVE-DASH-PROBE-001). Mirrors
+#: :data:`brutex.live.plan.DEFAULT_PER_CONNECTION_CAP` (operator-confirmed Groww
+#: per-connection limit, CLAUDE.md §6) AND the ``capture-all --cap`` default — kept a
+#: LOCAL literal so this dashboard module never imports :mod:`brutex.live`
+#: (``DEC-LIVE-DECOUPLE-001``). The capture's real sharding still uses its own
+#: ``--cap`` (1000); the manifest just records it for the read-side plan display.
+_MANIFEST_PER_CONNECTION_CAP: Final[int] = 1000
+
 #: A resolver ``contract_symbol -> numeric exchange_token string`` (or ``None``
 #: when the symbol is unknown / expired). The numeric token is the value
 #: ``subscribe_ltp`` requires for an F&O leg ("as provided in instrument csv" —
@@ -219,16 +230,32 @@ def build_leg_rows(
 def build_manifest(
     spot: Sequence[Mapping[str, Any]],
     legs: Sequence[Mapping[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Assemble the ``{"spot": [...], "legs": [...]}`` manifest from row sequences.
+) -> dict[str, Any]:
+    """Assemble the ``{"spot": [...], "legs": [...], "meta": {...}}`` manifest.
 
     Pure — takes already-built feed-row sequences and returns the manifest dict
     the capture's ``read_subscription_manifest`` parses. Each row is copied into a
     plain ``dict`` so the manifest never aliases a caller's mutable row.
+
+    A ``meta.plan`` block is stamped (DEC-LIVE-DASH-PROBE-001) recording the
+    per-connection cap (:data:`_MANIFEST_PER_CONNECTION_CAP`) + the spot / leg counts,
+    so the ``/live`` page can surface the planned N-connection count
+    (``ceil((spot+legs)/cap)``) by READING the manifest — never importing
+    :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001``). The capture's
+    ``read_subscription_manifest`` only reads ``spot`` / ``legs`` and IGNORES ``meta``,
+    so the extra block is inert to the subscribe path (a probe block can later land
+    under ``meta.probe`` the same way).
     """
     return {
         "spot": [dict(row) for row in spot],
         "legs": [dict(row) for row in legs],
+        "meta": {
+            "plan": {
+                "per_connection_cap": _MANIFEST_PER_CONNECTION_CAP,
+                "spot": len(spot),
+                "legs": len(legs),
+            }
+        },
     }
 
 
@@ -237,7 +264,7 @@ def build_live_manifest(
     registry_path: Path,
     *,
     resolve_feed_token: FeedTokenResolver = _no_feed_token,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     """Build the full live manifest from the instrument store + the F&O registry.
 
     The dashboard-side composition: the subscribable spot universe
@@ -257,8 +284,8 @@ def build_live_manifest(
 
     Returns
     -------
-    dict[str, list[dict[str, Any]]]
-        The ``{"spot", "legs"}`` manifest.
+    dict[str, Any]
+        The ``{"spot", "legs", "meta"}`` manifest.
     """
     spot = build_spot_rows(store)
     legs = build_leg_rows(registry_path, resolve_feed_token=resolve_feed_token)

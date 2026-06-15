@@ -210,10 +210,22 @@ def test_build_manifest_copies_rows() -> None:
     ]
     legs: list[dict] = []
     manifest = build_manifest(spot, legs)
-    assert manifest == {"spot": spot, "legs": []}
+    assert manifest["spot"] == spot and manifest["legs"] == []
     # The manifest copies rows — mutating the source does not leak into it.
     spot[0]["exchange_token"] = "CHANGED"
     assert manifest["spot"][0]["exchange_token"] == "1"
+
+
+def test_build_manifest_stamps_plan_meta() -> None:
+    """The manifest carries a ``meta.plan`` block (cap + spot/leg counts) the /live
+    page reads to surface the planned N-connection count (DEC-LIVE-DASH-PROBE-001)."""
+    spot = [
+        {"exchange": "NSE", "segment": "CASH", "exchange_token": "1", "instrument_type": "IDX"},
+        {"exchange": "BSE", "segment": "CASH", "exchange_token": "2", "instrument_type": "IDX"},
+    ]
+    legs = [{"exchange": "NSE", "segment": "FNO", "exchange_token": "9", "instrument_type": "CE"}]
+    manifest = build_manifest(spot, legs)
+    assert manifest["meta"] == {"plan": {"per_connection_cap": 1000, "spot": 2, "legs": 1}}
 
 
 def test_build_live_manifest_composes_spot_and_legs(tmp_path) -> None:
@@ -289,7 +301,10 @@ def test_make_writer_none_store_writes_empty_manifest(tmp_path) -> None:
     writer = make_store_manifest_writer(None)
     out = tmp_path / "m.json"
     writer(str(out))
-    assert json.loads(out.read_text(encoding="utf-8")) == {"spot": [], "legs": []}
+    manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert manifest["spot"] == [] and manifest["legs"] == []
+    # The empty manifest still stamps a 0/0 plan block (DEC-LIVE-DASH-PROBE-001).
+    assert manifest["meta"]["plan"] == {"per_connection_cap": 1000, "spot": 0, "legs": 0}
 
 
 def test_make_writer_store_with_path_writes_spot(tmp_path) -> None:

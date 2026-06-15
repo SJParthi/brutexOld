@@ -78,15 +78,18 @@ from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.live_connections import read_connections
 from brutex.dashboard.live_lake_view import (
     LIVE_TABLES,
+    TICKS_EMPTY_NOTE,
     live_columns,
     live_table,
     live_tables_summary,
     query_live_table,
+    ticks_flowing,
 )
 from brutex.dashboard.live_manifest import (
     make_master_feed_token_resolver,
     make_store_manifest_writer,
 )
+from brutex.dashboard.live_plan_view import read_connection_plan
 from brutex.dashboard.live_runner import LiveRunner
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
@@ -3367,6 +3370,53 @@ def build_app(
         """
         payload = await run_in_threadpool(lambda: read_connections(_live_report))
         return JSONResponse(payload)
+
+    @app.get("/api/v1/live/plan")
+    async def api_live_plan() -> JSONResponse:
+        """GET /api/v1/live/plan — the N-connection plan + probe from the manifest.
+
+        Reads the subscription manifest the ON toggle wrote (the EXACT 775 spot + the
+        F&O legs) into ``{plan: {connections, per_connection_cap, spot, legs, total},
+        probe, probe_note, note}`` (DEC-LIVE-DASH-PROBE-001): the planned websocket
+        connection count (``ceil((spot+legs)/cap)``), the per-connection cap, and the
+        spot/leg subscription summary — plus the account's concurrent-connection
+        ceiling IF a probe was stamped into ``meta.probe``, honestly ``None`` otherwise.
+        Degrades to an empty plan + ``note`` when no manifest has been written yet (the
+        toggle is OFF). Thin wrapper over
+        :func:`brutex.dashboard.live_plan_view.read_connection_plan` — the dashboard
+        READS the manifest JSON, never imports :mod:`brutex.live` (DEC-LIVE-DECOUPLE-001).
+        """
+        payload = await run_in_threadpool(lambda: read_connection_plan(_live_manifest))
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/live/ticks-flowing")
+    async def api_live_ticks_flowing() -> JSONResponse:
+        """GET /api/v1/live/ticks-flowing — per-instrument live-tick freshness.
+
+        Reads the NEWEST ``live/ticks`` Parquet partition (a bounded, O(1)-in-history
+        read) for the max ``recv_ts`` / ``exchange_ts`` + tick count per instrument and
+        the last-tick age, so the operator can SEE whether ticks are actually FLOWING
+        into the lake — reconciling the "TICKS CAPTURED 0 while /db shows tens of
+        thousands of rows" mismatch (the old counter counts JSONL WAL lines; this reads
+        the ACTUAL lake the /db tables show). An absent/empty lake → ``flowing=False`` +
+        an honest note, never fabricated flow (Golden Rule #1). No store wired → the
+        same honest empty payload. Thin wrapper over
+        :func:`brutex.dashboard.live_lake_view.ticks_flowing` (DEC-LIVE-DASH-PROBE-001;
+        reads the lake directly, never imports :mod:`brutex.live`, DEC-LIVE-DECOUPLE-001).
+        """
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse(
+                {
+                    "flowing": False,
+                    "total_ticks": 0,
+                    "fresh_instruments": 0,
+                    "instruments": [],
+                    "session_date": None,
+                    "note": TICKS_EMPTY_NOTE,
+                }
+            )
+        return JSONResponse(await run_in_threadpool(lambda: ticks_flowing(lake)))
 
     @app.get("/api/v1/live/tables")
     async def api_live_tables() -> JSONResponse:
