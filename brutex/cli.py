@@ -1311,6 +1311,88 @@ def cmd_notify_test() -> int:  # pragma: no cover — live network + singleton +
     return EXIT_INTERNAL_ERROR
 
 
+def _autoload_instrument_master(
+    store: Any, log: Any
+) -> None:  # pragma: no cover - live network + server path (cli.py coverage-excluded)
+    """Best-effort instrument-master autoload, run OFF the port-bind path.
+
+    Auto-populates the keyless instrument master so /universe is never empty on a
+    fresh lake (DEC-INDEX-PARSE-FIX-001), then best-effort enriches with the
+    NIFTY-Total-Market constituents. The NTM fetch hits niftyindices.com, which
+    bot-blocks / slow-first-bytes non-browser clients (3 x 30 s retries in
+    ``nse_constituents.fetch_constituent_csv`` -- up to ~90 s), so this whole body
+    runs in a background daemon thread (DEC-DASHBOARD-INSTANT-LAUNCH-001): the
+    ``InstrumentStore`` read/write split (DEC-STORE-READ-WRITE-SPLIT-001) keeps
+    concurrent route reads consistent against the loader's writes. A network
+    failure must NEVER stop the dashboard from serving, so the broad except just
+    logs and the server keeps running on whatever the store already holds.
+    """
+    try:
+        from brutex.dashboard.auto_pull import should_reload_instrument_master
+        from brutex.dashboard.instrument_loader import load_instrument_master
+        from brutex.dashboard.universe_query import universe_summary
+
+        # Lean-correct counts (DEC-INSTRUMENT-UNIVERSE-FAST-001): the IDX+EQ
+        # candidates plus the SQL-derived F&O-eligible set, so an EQ is classed a
+        # "stock" (the bare load_snapshot path left every equity unclassified).
+        summary = universe_summary(
+            store.list_index_equity_instruments(),
+            fno_eligible=store.fno_eligible_underlyings(),
+        )
+        # Auto-heal: reload on an empty lake, missing indices, leftover FUT/CE/PE
+        # legs (pre-lean), placeholder economics (lot_size=1), or stale option
+        # eligibility -- the lean refresh replaces + prunes to the enriched set.
+        if should_reload_instrument_master(
+            index_count=summary["index_count"],
+            stock_count=summary["stock_count"],
+            legs_present=store.has_derivative_legs(),
+            stale_economics=store.has_placeholder_stock_economics(),
+            stale_eligibility=store.has_stale_option_eligibility(),
+        ):
+            counts = load_instrument_master(store)
+            log.info(
+                "instrument_master.autoloaded",
+                indices=counts["index_count"],
+                stocks=counts["stock_count"],
+            )
+        else:
+            log.info(
+                "instrument_master.present",
+                indices=summary["index_count"],
+                stocks=summary["stock_count"],
+            )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log.warning("instrument_master.autoload_skipped", error=str(exc))
+
+    # NO auto-pull of expiries/contracts on startup (DEC-UNIVERSE-PULL-PHASED-001,
+    # operator decree 2026-05-30: "remove the auto pull"). The universe pull is
+    # driven by the two MANUAL /universe buttons (Fetch all expiries / contracts),
+    # so nothing hits Groww until the operator clicks.
+    log.info(
+        "universe.autopull.disabled",
+        hint="use the 'Fetch all expiries' / 'Fetch all contracts' buttons on /universe",
+    )
+
+
+def _start_instrument_autoload(
+    store: Any, log: Any
+) -> None:  # pragma: no cover - daemon thread + live network/server path
+    """Run :func:`_autoload_instrument_master` in a background daemon thread.
+
+    A dedicated seam so the slow, network-bound autoload never blocks the uvicorn
+    port bind -- and so the unit tests can stub THIS to run the body synchronously
+    and offline (DEC-DASHBOARD-INSTANT-LAUNCH-001).
+    """
+    import threading
+
+    threading.Thread(
+        target=_autoload_instrument_master,
+        args=(store, log),
+        name="brutex-instrument-autoload",
+        daemon=True,
+    ).start()
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -1413,65 +1495,16 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
 
         store = InstrumentStore.open(lake_root / "instruments.duckdb")
 
-        # Auto-populate the keyless instrument master on startup so /universe is
-        # never empty on a fresh lake (DEC-INDEX-PARSE-FIX-001). Best-effort: a
-        # network failure (the public CSV needs internet, no keys) must NOT stop
-        # the dashboard from serving.
-        try:  # pragma: no cover — live network + server path (cli.py coverage-excluded)
-            from brutex.dashboard.auto_pull import should_reload_instrument_master
-            from brutex.dashboard.instrument_loader import load_instrument_master
-            from brutex.dashboard.universe_query import universe_summary
-
-            # Lean-correct counts (DEC-INSTRUMENT-UNIVERSE-FAST-001): summarise
-            # the IDX+EQ candidates plus the SQL-derived F&O-eligible set, so an
-            # EQ is classed as a "stock". The bare load_snapshot path carried no
-            # derivative legs, so every equity fell through unclassified — the
-            # "25 indices · 0 stocks" message the operator hit (the data was fine;
-            # only the startup tally was wrong).
-            summary = universe_summary(
-                store.list_index_equity_instruments(),
-                fno_eligible=store.fno_eligible_underlyings(),
-            )
-            # Auto-heal: reload when the lake is empty, missing indices (the
-            # pre-DEC-INDEX-PARSE-FIX-001 fingerprint), still holds FUT/CE/PE
-            # legs (the pre-lean fingerprint — DEC-LEAN-REINGEST-FIX-001), OR
-            # carries placeholder stock economics (lot_size=1, the pre-back-fill
-            # fingerprint — DEC-STALE-ECONOMICS-HEAL-001). The lean refresh does a
-            # full-snapshot replace + prune-to-latest, so a reload purges the
-            # stale dump down to the ~236 enriched universe underlyings.
-            if should_reload_instrument_master(
-                index_count=summary["index_count"],
-                stock_count=summary["stock_count"],
-                legs_present=store.has_derivative_legs(),
-                stale_economics=store.has_placeholder_stock_economics(),
-                stale_eligibility=store.has_stale_option_eligibility(),
-            ):
-                counts = load_instrument_master(store)
-                _log.info(
-                    "instrument_master.autoloaded",
-                    indices=counts["index_count"],
-                    stocks=counts["stock_count"],
-                )
-            else:
-                _log.info(
-                    "instrument_master.present",
-                    indices=summary["index_count"],
-                    stocks=summary["stock_count"],
-                )
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            _log.warning("instrument_master.autoload_skipped", error=str(exc))
-
-        # NO auto-pull of expiries/contracts on startup (DEC-UNIVERSE-PULL-
-        # PHASED-001, operator decree 2026-05-30: "remove the auto pull"). The
-        # universe pull is now driven by the two MANUAL /universe buttons —
-        # "Fetch all expiries" (Phase 1) then "Fetch all contracts" (Phase 2) —
-        # so nothing hits Groww until the operator clicks. The keyless
-        # instrument master still auto-loads above (it needs no auth) so the
-        # /universe list is populated and the buttons have something to pull.
-        _log.info(
-            "universe.autopull.disabled",
-            hint="use the 'Fetch all expiries' / 'Fetch all contracts' buttons on /universe",
-        )
+        # The instrument autoload (keyless Groww master + best-effort NTM
+        # constituent enrichment) can block ~90 s when niftyindices.com
+        # bot-blocks / slow-first-bytes a cold start (3 × 30 s retries in
+        # nse_constituents.fetch_constituent_csv). On the bind path that left the
+        # dashboard unreachable (ERR_CONNECTION_REFUSED) for the whole window, so
+        # run it in a background daemon thread — uvicorn binds the port INSTANTLY
+        # and the InstrumentStore read/write split (DEC-STORE-READ-WRITE-SPLIT-001)
+        # keeps concurrent route reads safe against the loader's writes
+        # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
+        _start_instrument_autoload(store, _log)
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     # The /logs WEBPAGE was removed (DEC-DASHBOARD-LOGS-REMOVE-001); point at the
