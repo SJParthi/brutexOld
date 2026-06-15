@@ -16,10 +16,13 @@ from datetime import UTC, datetime
 
 import pytest
 from brutex.dashboard.live_manifest import (
+    _index_feed_token,
+    _no_feed_token,
     build_leg_rows,
     build_live_manifest,
     build_manifest,
     build_spot_rows,
+    make_master_feed_token_resolver,
     make_store_manifest_writer,
     write_manifest,
 )
@@ -117,8 +120,8 @@ def test_build_leg_rows_missing_registry_is_empty(tmp_path) -> None:
     assert build_leg_rows(tmp_path / "registry.duckdb") == []
 
 
-def test_build_leg_rows_reads_contracts(tmp_path) -> None:
-    """A seeded registry yields one FNO leg feed-row per contract."""
+def _seed_two_legs(tmp_path):
+    """Seed a registry with a CE + a FUT leg; return its path."""
     pytest.importorskip("duckdb", reason="registry leg test needs the [data] extra")
     from brutex.data.registry_store import RegistryStore
 
@@ -146,18 +149,56 @@ def test_build_leg_rows_reads_contracts(tmp_path) -> None:
         fetched_at=now,
     )
     store.close()
+    return path
 
-    legs = build_leg_rows(path)
+
+#: A fake resolver: maps the seeded contract symbols to NUMERIC feed tokens.
+_FAKE_TOKENS = {
+    "NSE-NIFTY-26Jun26-23000-CE": "35241",
+    "NSE-NIFTY-26Jun26-FUT": "53001",
+}
+
+
+def test_build_leg_rows_emits_numeric_feed_token(tmp_path) -> None:
+    """A resolvable leg → row carries the NUMERIC token + segment FNO (07-feed.md:54)."""
+    path = _seed_two_legs(tmp_path)
+    legs = build_leg_rows(path, resolve_feed_token=_FAKE_TOKENS.get)
     assert len(legs) == 2
     ce = next(leg for leg in legs if leg["instrument_type"] == "CE")
     assert ce == {
         "exchange": "NSE",
         "segment": "FNO",
-        "exchange_token": "NSE-NIFTY-26Jun26-23000-CE",
+        "exchange_token": "35241",  # the NUMERIC csv token, NOT the contract string
         "instrument_type": "CE",
         "underlying_symbol": "NIFTY",
     }
     assert {leg["instrument_type"] for leg in legs} == {"CE", "FUT"}
+
+
+def test_build_leg_rows_skips_unresolved_leg(tmp_path) -> None:
+    """A leg the resolver cannot map (None) is SKIPPED — never invents a token."""
+    path = _seed_two_legs(tmp_path)
+    # Only the CE resolves; the FUT returns None → dropped.
+    resolver = {"NSE-NIFTY-26Jun26-23000-CE": "35241"}.get
+    legs = build_leg_rows(path, resolve_feed_token=resolver)
+    assert [leg["instrument_type"] for leg in legs] == ["CE"]
+    assert legs[0]["exchange_token"] == "35241"
+
+
+def test_build_leg_rows_default_resolver_skips_all(tmp_path) -> None:
+    """The default _no_feed_token resolver → every leg skipped (honest legs=[])."""
+    path = _seed_two_legs(tmp_path)
+    assert build_leg_rows(path) == []
+
+
+def test_build_leg_rows_missing_registry_with_resolver(tmp_path) -> None:
+    """No registry file → [] even with a resolver wired (degrade honestly)."""
+    assert build_leg_rows(tmp_path / "registry.duckdb", resolve_feed_token=_FAKE_TOKENS.get) == []
+
+
+def test_no_feed_token_resolves_nothing() -> None:
+    """The default resolver returns None for any symbol (honest skip)."""
+    assert _no_feed_token("NSE-NIFTY-26Jun26-23000-CE") is None
 
 
 # ───────────────────────────── assembly ──────────────────────────
@@ -179,6 +220,16 @@ def test_build_live_manifest_composes_spot_and_legs(tmp_path) -> None:
     """The full composition: spot from the store + legs [] when no registry."""
     manifest = build_live_manifest(_FakeStore(_universe()), tmp_path / "registry.duckdb")
     assert len(manifest["spot"]) == 3 and manifest["legs"] == []
+
+
+def test_build_live_manifest_threads_resolver_to_legs(tmp_path) -> None:
+    """The resolver reaches the legs: a seeded registry yields numeric-token leg rows."""
+    path = _seed_two_legs(tmp_path)
+    manifest = build_live_manifest(
+        _FakeStore(_universe()), path, resolve_feed_token=_FAKE_TOKENS.get
+    )
+    assert len(manifest["spot"]) == 3
+    assert {leg["exchange_token"] for leg in manifest["legs"]} == {"35241", "53001"}
 
 
 # ───────────────────────────── write + round-trip ─────────────────
@@ -206,6 +257,20 @@ def test_write_manifest_creates_parent_dirs(tmp_path) -> None:
     out = write_manifest(tmp_path / "nested" / "deeper" / "m.json", {"spot": [], "legs": []})
     assert out.is_file()
     assert json.loads(out.read_text(encoding="utf-8")) == {"spot": [], "legs": []}
+
+
+def test_round_trip_with_numeric_token_legs(tmp_path) -> None:
+    """A manifest whose legs carry numeric tokens still parses through the capture reader."""
+    from brutex.live.multiconn import read_subscription_manifest
+
+    path = _seed_two_legs(tmp_path)
+    manifest = build_live_manifest(
+        _FakeStore(_universe()), path, resolve_feed_token=_FAKE_TOKENS.get
+    )
+    out = write_manifest(tmp_path / "m.json", manifest)
+    spot, legs = read_subscription_manifest(out)
+    assert len(spot) == 3 and len(legs) == 2
+    assert {leg["exchange_token"] for leg in legs} == {"35241", "53001"}
 
 
 # ─────────────────────── store-bound writer builder ──────────────
@@ -246,3 +311,58 @@ def test_make_writer_store_without_path_falls_back(tmp_path, monkeypatch) -> Non
     writer(str(out))
     manifest = json.loads(out.read_text(encoding="utf-8"))
     assert len(manifest["spot"]) == 3 and manifest["legs"] == []
+
+
+def test_make_writer_threads_resolver_to_legs(tmp_path) -> None:
+    """The writer forwards its resolver to the legs (numeric tokens reach the file)."""
+    instruments_path = tmp_path / "instruments.duckdb"
+    registry_path = _seed_two_legs(tmp_path / "sub")
+    # Place the seeded registry where ``registry_path_for`` expects the sibling.
+    sibling = instruments_path.with_name("registry.duckdb")
+    sibling.write_bytes(registry_path.read_bytes())
+    store = _StoreWithPath(_universe(), instruments_path)
+    writer = make_store_manifest_writer(store, resolve_feed_token=_FAKE_TOKENS.get)
+    out = tmp_path / "m.json"
+    writer(str(out))
+    manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert len(manifest["spot"]) == 3
+    assert {leg["exchange_token"] for leg in manifest["legs"]} == {"35241", "53001"}
+
+
+# ────────────────── master feed-token resolver ───────────────────
+
+
+@dataclass
+class _FakeMasterInstr:
+    """A minimal stand-in for an ``InstrumentIndex`` row (only ``security_id``)."""
+
+    security_id: int
+
+
+class _FakeIndex:
+    """An ``InstrumentIndex``-like object exposing ``by_groww_symbol`` only."""
+
+    def __init__(self, mapping: dict[str, _FakeMasterInstr]) -> None:
+        self.by_groww_symbol = mapping
+
+
+def test_index_feed_token_hit_and_miss() -> None:
+    """The pure mapping: a known symbol → str(security_id); an unknown → None."""
+    index = _FakeIndex({"NSE-NIFTY-26Jun26-23000-CE": _FakeMasterInstr(35241)})
+    assert _index_feed_token(index, "NSE-NIFTY-26Jun26-23000-CE") == "35241"
+    assert _index_feed_token(index, "NSE-NIFTY-26Jun26-FUT") is None
+
+
+def test_master_resolver_maps_and_caches_index() -> None:
+    """The resolver lazily loads ONCE (cached) then maps symbol→token (hit + miss)."""
+    index = _FakeIndex({"NSE-NIFTY-26Jun26-23000-CE": _FakeMasterInstr(35241)})
+    loads: list[int] = []
+
+    def _load() -> _FakeIndex:
+        loads.append(1)
+        return index
+
+    resolve = make_master_feed_token_resolver(load_index=_load)
+    assert resolve("NSE-NIFTY-26Jun26-23000-CE") == "35241"  # hit (triggers the load)
+    assert resolve("NSE-NIFTY-26Jun26-FUT") is None  # miss (reuses the cached index)
+    assert sum(loads) == 1  # the master is loaded exactly once
