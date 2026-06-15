@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 import structlog
 
@@ -52,6 +52,27 @@ class TickRecord:
     recv_ts: datetime
     snapshot: Mapping[str, Any]
     recv_ns: int = 0
+
+
+class TickSink(Protocol):
+    """The append-only sink contract :class:`~brutex.live.capture.TickCapture` needs.
+
+    Both :class:`TickStore` (a single file) and
+    :class:`~brutex.live.rolling.RollingTickStore` (a rotating segment set) satisfy
+    it structurally, so the capture loop is agnostic to which sink it drives
+    (Golden Rule #11 COMMON — one interface, two implementations).
+    """
+
+    @property
+    def next_seq(self) -> int:
+        """The sequence number the next :meth:`append` will assign."""
+        ...
+
+    def append(
+        self, snapshot: Mapping[str, Any], *, recv_ts: datetime, recv_ns: int | None = None
+    ) -> TickRecord:
+        """Persist one snapshot, returning the :class:`TickRecord` written."""
+        ...
 
 
 def _json_default(obj: object) -> str:
@@ -89,11 +110,19 @@ def _repair_and_count(path: Path) -> int:
 class TickStore:
     """Append-only JSONL writer/reader for raw feed snapshots."""
 
-    def __init__(self, path: Path, *, start_seq: int, handle: IO[str] | None) -> None:
-        """Construct directly; prefer :meth:`open` which wires the file handle."""
+    def __init__(
+        self, path: Path, *, start_seq: int, handle: IO[str] | None, bytes_written: int = 0
+    ) -> None:
+        """Construct directly; prefer :meth:`open` which wires the file handle.
+
+        *bytes_written* seeds the in-process byte counter (the file's current size
+        for a resumed/existing file, ``0`` for a fresh one) so :attr:`bytes_written`
+        is exact without ever calling ``stat`` on the append path.
+        """
         self._path = path
         self._seq = start_seq
         self._handle = handle
+        self._bytes_written = bytes_written
 
     @classmethod
     def open(cls, path: str | Path, *, resume: bool = True) -> TickStore:
@@ -111,13 +140,24 @@ class TickStore:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         start = _repair_and_count(target) if (resume and target.exists()) else 0
+        size = target.stat().st_size if target.exists() else 0  # ONE stat at open, not per-append
         handle = target.open("a", encoding="utf-8")
-        return cls(target, start_seq=start, handle=handle)
+        return cls(target, start_seq=start, handle=handle, bytes_written=size)
 
     @property
     def next_seq(self) -> int:
         """The sequence number the next :meth:`append` will assign."""
         return self._seq
+
+    @property
+    def bytes_written(self) -> int:
+        """Total bytes in this file (in-process — NO per-append ``stat`` syscall).
+
+        Seeded with the file's size at :meth:`open` and advanced by the exact
+        UTF-8 byte length of every appended line, so a rolling sink can decide a
+        size-based rotation in O(1) without a filesystem call per tick.
+        """
+        return self._bytes_written
 
     def append(
         self, snapshot: Mapping[str, Any], *, recv_ts: datetime, recv_ns: int | None = None
@@ -153,8 +193,10 @@ class TickStore:
             ensure_ascii=False,
             default=_json_default,
         )
-        self._handle.write(line + "\n")
+        data = line + "\n"
+        self._handle.write(data)
         self._handle.flush()
+        self._bytes_written += len(data.encode("utf-8"))  # exact bytes; no stat syscall
         self._seq += 1
         return record
 
@@ -210,4 +252,4 @@ class TickStore:
         return records
 
 
-__all__ = ["TickRecord", "TickStore"]
+__all__ = ["TickRecord", "TickSink", "TickStore"]

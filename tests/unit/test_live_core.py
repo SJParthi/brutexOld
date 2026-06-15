@@ -294,6 +294,29 @@ def test_prune_idle_callback_leaves_baseline_byte_untouched() -> None:
 # ─────────────────────────── store.py ───────────────────────────
 
 
+def test_store_bytes_written_matches_file_size_including_non_ascii(tmp_path) -> None:
+    """`bytes_written` is the EXACT on-disk byte size — the rotation oracle.
+
+    The rolling sink decides a size-based rotation from this in-process counter
+    instead of a per-append ``stat`` syscall, so it MUST equal the file's real
+    byte growth — including a non-ASCII snapshot (a ``₹`` rupee sign / Unicode
+    name) whose UTF-8 byte length differs from its character length, AND across a
+    resume that re-seeds the counter from the existing file size.
+    """
+    path = tmp_path / "bytes.jsonl"
+    with TickStore.open(path) as store:
+        assert store.bytes_written == 0
+        store.append({"NSE:IDX:NIFTY": 22500.5}, recv_ts=_OPEN_UTC)
+        assert store.bytes_written == path.stat().st_size
+        store.append({"₹-NIFTY-Ünïçödé": 1.0}, recv_ts=_OPEN_UTC)  # multibyte UTF-8
+        assert store.bytes_written == path.stat().st_size
+    # Resume re-seeds the counter from the existing file, then keeps tracking exactly.
+    with TickStore.open(path, resume=True) as resumed:
+        assert resumed.bytes_written == path.stat().st_size
+        resumed.append({"X": 2.0}, recv_ts=_OPEN_UTC)
+        assert resumed.bytes_written == path.stat().st_size
+
+
 def test_store_append_read_roundtrip_and_resume(tmp_path) -> None:
     path = tmp_path / "ticks.jsonl"
     with TickStore.open(path) as store:
