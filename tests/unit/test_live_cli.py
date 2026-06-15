@@ -122,19 +122,172 @@ def test_tickcapture_on_tick_accepts_groww_meta_arg(tmp_path) -> None:
     ``_on_tick() takes 1 positional argument but 2 were given``. The callback
     must accept + ignore the meta (it pulls the full snapshot itself). This
     fires the callback BOTH with the meta (Groww) and with no arg (the 0-arg
-    convention) and asserts both capture a record.
+    convention) and asserts both capture a record. The two reads return DIFFERENT
+    values so the delta prune (DEC-LIVE-DELTA-CAPTURE-001) writes BOTH — the
+    point under test is the callback signature, not the delta.
     """
+    snapshots = iter([{"NIFTY": 100.0}, {"NIFTY": 101.0}])
     store = TickStore.open(tmp_path / "t.jsonl")
     capture = TickCapture(
         store=store,
         subscribe=lambda _cb: None,
-        read_snapshot=lambda: {"NIFTY": 100.0},
+        read_snapshot=lambda: next(snapshots),
         clock=_clock_seq(),
     )
     capture._on_tick({"feed_type": "index_value", "exchange": "NSE"})  # Groww 1-arg call
     capture._on_tick()  # the 0-arg convention still works
     store.close()
     assert capture.count == 2
+
+
+def _delta_capture(store: TickStore, snapshots: list[dict[str, Any]], clock) -> TickCapture:
+    """A `TickCapture` fed *snapshots* in order, firing one callback per snapshot."""
+    feed = _FakeFeed(snapshots)
+    capture = TickCapture(
+        store=store,
+        subscribe=lambda cb: feed.subscribe_index_value([], on_data_received=cb),
+        read_snapshot=feed.get_index_value,
+        clock=clock,
+    )
+    capture.start()
+    for _ in snapshots:
+        feed.fire()
+    return capture
+
+
+def test_tickcapture_delta_writes_only_changes(tmp_path) -> None:
+    """A sequence with unchanged + partial-change callbacks writes ONLY the deltas.
+
+    DEC-LIVE-DELTA-CAPTURE-001: an identical callback writes NOTHING (no record,
+    counter frozen); a partial change writes only the moved instruments.
+    """
+    path = tmp_path / "t.jsonl"
+    snapshots = [
+        {"NIFTY": 100.0, "BANKNIFTY": 200.0},  # seq 0 — first, both kept
+        {"NIFTY": 100.0, "BANKNIFTY": 200.0},  # identical — written NOTHING
+        {"NIFTY": 101.0, "BANKNIFTY": 200.0},  # NIFTY moved — only NIFTY
+        {"NIFTY": 101.0, "BANKNIFTY": 201.0},  # BANKNIFTY moved — only BANKNIFTY
+    ]
+    store = TickStore.open(path)
+    capture = _delta_capture(store, snapshots, _clock_seq())
+    store.close()
+
+    written = [r.snapshot for r in TickStore.read(path)]
+    assert written == [
+        {"NIFTY": 100.0, "BANKNIFTY": 200.0},
+        {"NIFTY": 101.0},
+        {"BANKNIFTY": 201.0},
+    ]
+    assert capture.count == 3  # the identical callback did NOT advance the counter
+    assert [r.seq for r in TickStore.read(path)] == [0, 1, 2]  # seq only on writes
+
+
+def test_tickcapture_delta_all_identical_writes_nothing(tmp_path) -> None:
+    """If every callback after the first is identical, only the first is written."""
+    path = tmp_path / "t.jsonl"
+    store = TickStore.open(path)
+    capture = _delta_capture(store, [{"N": 1.0}, {"N": 1.0}, {"N": 1.0}], _clock_seq())
+    store.close()
+    assert capture.count == 1
+    assert [r.snapshot for r in TickStore.read(path)] == [{"N": 1.0}]
+
+
+def test_golden_delta_candles_identical_to_full(tmp_path) -> None:
+    """GOLDEN no-data-loss: delta-built candles == full-snapshot-built candles.
+
+    A representative sequence of FULL snapshots is (a) captured the OLD way (every
+    snapshot written verbatim) and (b) captured the NEW delta way; the 1-minute
+    candles built from each stream MUST be byte-identical — proof the delta loses
+    no tick (DEC-LIVE-DELTA-CAPTURE-001).
+    """
+    from brutex.live.candle_builder import build_minute_candles
+    from brutex.live.tick import iter_ticks
+
+    # A sequence spanning two session minutes, with repeats, partial moves, and a
+    # value that rises then FALLS within a minute (so high/low/open/close all
+    # matter) and a value that goes quiet (unchanged) before the minute ends.
+    base = datetime(2026, 6, 15, 3, 45, 5, tzinfo=UTC)  # 09:15:05 IST
+    timeline: list[tuple[datetime, dict[str, Any]]] = [
+        (base, {"NIFTY": 100.0, "BANKNIFTY": 200.0}),
+        (base.replace(second=15), {"NIFTY": 100.0, "BANKNIFTY": 200.0}),  # both quiet
+        (base.replace(second=25), {"NIFTY": 105.0, "BANKNIFTY": 200.0}),  # NIFTY up
+        (base.replace(second=35), {"NIFTY": 99.0, "BANKNIFTY": 200.0}),  # NIFTY down (low)
+        (base.replace(second=45), {"NIFTY": 102.0, "BANKNIFTY": 200.0}),  # NIFTY close
+        (base.replace(second=55), {"NIFTY": 102.0, "BANKNIFTY": 200.0}),  # all quiet
+        # next minute — BANKNIFTY finally moves, NIFTY stays put across the boundary
+        (base.replace(minute=46, second=5), {"NIFTY": 102.0, "BANKNIFTY": 207.0}),
+        (base.replace(minute=46, second=20), {"NIFTY": 102.0, "BANKNIFTY": 203.0}),
+        (base.replace(minute=46, second=40), {"NIFTY": 102.0, "BANKNIFTY": 203.0}),
+    ]
+    snapshots = [snap for _ts, snap in timeline]
+    stamps = [ts for ts, _snap in timeline]
+
+    # (a) OLD behaviour — write every full snapshot verbatim.
+    full_path = tmp_path / "full.jsonl"
+    with TickStore.open(full_path) as full_store:
+        for ts, snap in timeline:
+            full_store.append(snap, recv_ts=ts)
+    full_candles = build_minute_candles(iter_ticks(TickStore.read(full_path)))
+
+    # (b) NEW behaviour — the real TickCapture delta path, SAME recv_ts per call.
+    delta_path = tmp_path / "delta.jsonl"
+    stamp_iter = iter(stamps)
+    store = TickStore.open(delta_path)
+    _delta_capture(store, snapshots, lambda: next(stamp_iter))
+    store.close()
+    delta_candles = build_minute_candles(iter_ticks(TickStore.read(delta_path)))
+
+    assert delta_candles == full_candles
+    # sanity: the delta really WAS smaller (it dropped redundant records).
+    assert len(TickStore.read(delta_path)) < len(TickStore.read(full_path))
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_golden_delta_candles_identical_randomized(tmp_path, seed: int) -> None:
+    """GOLDEN (randomized): across many random tick streams, delta candles == full.
+
+    Generates a pseudo-random sequence of full snapshots over several session
+    minutes for three instruments — each callback independently either repeats or
+    jumps a price — and asserts the delta-stream candles are byte-identical to the
+    full-stream candles for EVERY instrument. This stresses the per-minute
+    keyframe invariant (instruments quiet across minute boundaries) broadly, not
+    just the one hand-built case (DEC-LIVE-DELTA-CAPTURE-001).
+    """
+    import random
+
+    from brutex.live.candle_builder import build_minute_candles
+    from brutex.live.tick import iter_ticks
+
+    rng = random.Random(seed)  # deterministic test fixture, not crypto
+    instruments = ["NIFTY", "BANKNIFTY", "SENSEX"]
+    prices = {name: float(rng.randint(100, 500)) for name in instruments}
+    start = datetime(2026, 6, 15, 3, 45, 2, tzinfo=UTC)  # inside the session window
+
+    timeline: list[tuple[datetime, dict[str, Any]]] = []
+    ts = start
+    for _ in range(rng.randint(40, 90)):
+        for name in instruments:
+            if rng.random() < 0.4:  # 40% of callbacks move this instrument
+                prices[name] = float(rng.randint(100, 500))
+        timeline.append((ts, dict(prices)))
+        ts += timedelta(seconds=rng.choice([3, 7, 11, 19, 31]))  # cross minute lines
+
+    snapshots = [snap for _ts, snap in timeline]
+    stamps = [t for t, _snap in timeline]
+
+    full_path = tmp_path / "full.jsonl"
+    with TickStore.open(full_path) as full_store:
+        for t, snap in timeline:
+            full_store.append(snap, recv_ts=t)
+    full_candles = build_minute_candles(iter_ticks(TickStore.read(full_path)))
+
+    delta_path = tmp_path / "delta.jsonl"
+    stamp_iter = iter(stamps)
+    with TickStore.open(delta_path) as store:
+        _delta_capture(store, snapshots, lambda: next(stamp_iter))
+    delta_candles = build_minute_candles(iter_ticks(TickStore.read(delta_path)))
+
+    assert delta_candles == full_candles
 
 
 def test_tickcapture_emits_heartbeats(tmp_path) -> None:
