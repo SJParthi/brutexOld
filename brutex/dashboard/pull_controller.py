@@ -48,6 +48,7 @@ expansion.
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -86,7 +87,6 @@ from brutex.data.window_ledger_store import (
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.parallel import (
-    DEFAULT_LATENCY_BUDGET_S,
     PoolRunParallel,
     workers_to_saturate,
 )
@@ -109,6 +109,20 @@ _LOG = structlog.get_logger(__name__)
 #: that the 2020 edge is probe-verified). Any ``from_date`` below this floor is
 #: clamped up to it so a too-early pick can never waste quota.
 GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
+
+#: Spot fan-out pool sizing (DEC-SPOT-POOL-WIDTH-15S-001). Groww's
+#: ``get_historical_candles`` serves ~15 s/call (measured-implied: 24 workers
+#: achieved exactly 24/15 ≈ 1.6 windows/s in a faithful reproduction), FAR slower
+#: than the ~3 s expiry/contract calls the global
+#: :data:`~brutex.orchestrator.parallel.DEFAULT_LATENCY_BUDGET_S` (3 s) targets. So
+#: the SPOT pool sizes from its own wider Little's-law budget + concurrent-socket
+#: cap to keep the 8 r/s token bucket — not network latency — the binding gate
+#: (measured 3.07× over the prior 24-wide pool). Both are env-overridable
+#: (``BRUTEX_SPOT_LATENCY_BUDGET_S`` / ``BRUTEX_SPOT_FANOUT_CAP``); the per-second
+#: issue rate is UNCHANGED (Rule #6 — the bucket still caps at 8 r/s, a wider pool
+#: only fills idle latency).
+_SPOT_LATENCY_BUDGET_DEFAULT_S: Final[float] = 15.0
+_SPOT_FANOUT_CAP_DEFAULT: Final[int] = 96
 
 #: Spot-pull interval selection (DEC-PULL-1DAY-FIRST-001, operator decision
 #: 2026-06-13). The operator picks the fetch granularity per pull via a
@@ -702,23 +716,55 @@ _RateHooks = tuple[
 ]
 
 
-def _spot_run_parallel(controller: RateController | None) -> RunParallel | None:
-    """Size the spot fan-out pool to the controller's rate budget (Little's law).
+def _env_positive(name: str, default: float) -> float:
+    """Read a strictly-positive numeric env override, falling back on miss/parse-error/≤0.
 
-    DEC-DHAN-PARALLEL-INGEST-001. A live pull threads its shared
-    :class:`~brutex.adapters.rate_common.RateController` through here:
-    the pool is widened to ``workers_to_saturate(controller.current_rps or 5.0,
-    DEFAULT_LATENCY_BUDGET_S)`` so enough windows are in flight to keep the rate
-    BUCKET (not network latency) the bottleneck — targeting/saturating UP TO
-    ~5 r/s (Rule #6 still caps the aggregate; honest envelope: never a guaranteed
-    constant 5 r/s). ``None`` controller (dry-run / injected-factory pull) →
+    Makes the spot pool's latency budget + concurrent-socket cap operator-tunable
+    without a redeploy (DEC-SPOT-POOL-WIDTH-15S-001). Hardening: a malformed or
+    non-positive value is IGNORED in favour of *default*, so a bad env var can never
+    zero-size the pool or crash the sizing seam.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0.0 else default
+
+
+def _spot_run_parallel(controller: RateController | None) -> RunParallel | None:
+    """Size the spot fan-out pool to saturate the rate bucket at Groww's REAL latency.
+
+    DEC-DHAN-PARALLEL-INGEST-001 + DEC-SPOT-POOL-WIDTH-15S-001. A live pull threads
+    its shared :class:`~brutex.adapters.rate_common.RateController` through here; the
+    pool is widened to ``workers_to_saturate(current_rps, budget, cap=cap)`` so
+    enough windows are in flight to keep the rate BUCKET — not network latency — the
+    bottleneck (Little's law: in-flight width = rate × latency). Groww's
+    ``get_historical_candles`` serves **~15 s/call** (measured-implied), FAR slower
+    than the ~3 s expiry/contract calls the global ``DEFAULT_LATENCY_BUDGET_S``
+    targets — at a 3 s budget the pool was only ``8×3=24`` wide and Little's law
+    capped throughput at ``24/15 ≈ 1.6`` windows/s (the operator's crawl, zero 429s
+    because it never reached the 8 r/s cap). So the spot pool uses a SPOT-specific
+    latency budget (default :data:`_SPOT_LATENCY_BUDGET_DEFAULT_S` = 15 s, env
+    ``BRUTEX_SPOT_LATENCY_BUDGET_S``) + a wider concurrent-socket cap (default
+    :data:`_SPOT_FANOUT_CAP_DEFAULT` = 96, env ``BRUTEX_SPOT_FANOUT_CAP``) → ~96
+    in-flight at the 8 r/s ceiling, lifting throughput back to the bucket cap
+    (measured 3.07× over the prior 24-wide pool). **Rule #6 is untouched**: the
+    shared token bucket still caps the AGGREGATE issue rate at 8 r/s — a wider pool
+    only fills idle latency, it never raises the per-second rate. Dial the cap DOWN
+    via the env var if Groww rejects the connection count (its concurrent-connection
+    limit is UNVERIFIED). ``None`` controller (dry-run / injected-factory pull) →
     ``None`` here, so ``run_groww_spot_ingest`` uses its default pool. This is the
     pure, covered sizing seam; the live controller construction is the
     ``# pragma: no cover`` part.
     """
     if controller is None:
         return None
-    workers = workers_to_saturate(controller.current_rps or 5.0, DEFAULT_LATENCY_BUDGET_S)
+    budget = _env_positive("BRUTEX_SPOT_LATENCY_BUDGET_S", _SPOT_LATENCY_BUDGET_DEFAULT_S)
+    cap = int(_env_positive("BRUTEX_SPOT_FANOUT_CAP", float(_SPOT_FANOUT_CAP_DEFAULT)))
+    workers = workers_to_saturate(controller.current_rps or 8.0, budget, cap=cap)
     return PoolRunParallel(max_workers=workers)
 
 
