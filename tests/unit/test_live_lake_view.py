@@ -12,14 +12,20 @@ from decimal import Decimal
 
 import pytest
 from brutex.dashboard.live_lake_view import (
+    FRESH_MAX_AGE_S,
     LIVE_TABLES,
+    TICKS_EMPTY_NOTE,
+    _age_seconds,
     _jsonify,
+    _jsonify_for_column,
+    _latest_tick_partition,
     clamp_limit,
     clamp_offset,
     live_columns,
     live_table,
     live_tables_summary,
     query_live_table,
+    ticks_flowing,
 )
 from brutex.data.models import CandleBar
 from brutex.live.lake import write_live_candles, write_live_ticks
@@ -163,3 +169,217 @@ def test_jsonify_branches() -> None:
             return "obj"
 
     assert _jsonify(_Obj()) == "obj"
+
+
+# ───────────── clean-IST live-table timestamps (DEC-LIVE-DASH-PROBE-001) ────────
+
+
+def _tick_with_exchange_ts(symbol: str, *, ts_in_millis: int | None) -> TickRecord:
+    """A TickRecord whose snapshot carries ``tsInMillis`` → a non-null exchange_ts.
+
+    ``None`` ``ts_in_millis`` → the leaf carries no usable vendor time, so exchange_ts
+    lands as SQL NULL (the null-exchange_ts edge the formatter must tolerate).
+    """
+    leaf: dict[str, object] = {"ltp": 22500.0}
+    if ts_in_millis is not None:
+        leaf["tsInMillis"] = ts_in_millis
+    return TickRecord(
+        seq=0,
+        recv_ts=datetime(2026, 6, 15, 10, 4, 41, 335741, tzinfo=UTC),  # 15:34:41.335 IST
+        snapshot={symbol: leaf},
+        recv_ns=1,
+    )
+
+
+def test_jsonify_for_column_renders_clean_ist_millis() -> None:
+    """The timestamp columns render clean IST (no +05:30, millisecond-trimmed)."""
+    value = datetime(2026, 6, 15, 10, 4, 41, 335741, tzinfo=UTC)
+    for col in ("recv_ts", "exchange_ts", "timestamp"):
+        assert _jsonify_for_column(value, col) == "2026-06-15 15:34:41.335"
+        assert "+05:30" not in _jsonify_for_column(value, col)
+    # A non-timestamp column with a datetime falls through to the raw isoformat.
+    assert _jsonify_for_column(value, "session_date") == value.isoformat()
+    # A null cell in a timestamp column stays None (the null-exchange_ts edge).
+    assert _jsonify_for_column(None, "exchange_ts") is None
+    # A non-datetime in a timestamp column falls through to _jsonify.
+    assert _jsonify_for_column(5, "recv_ts") == 5
+
+
+def test_live_ticks_recv_and_exchange_ts_render_clean_ist(tmp_path) -> None:
+    """live_ticks recv_ts + exchange_ts render clean IST without the +05:30 suffix."""
+    ms = int(datetime(2026, 6, 15, 10, 4, 41, tzinfo=UTC).timestamp() * 1000)
+    write_live_ticks(
+        [_tick_with_exchange_ts("NSE:IDX:NIFTY", ts_in_millis=ms)],
+        lake_root=tmp_path,
+        capture_run_id="r1",
+        feed_kind="index",
+    )
+    page = live_table(tmp_path, "live_ticks")
+    recv = page["rows"][0][page["columns"].index("recv_ts")]
+    exch = page["rows"][0][page["columns"].index("exchange_ts")]
+    assert recv == "2026-06-15 15:34:41.335" and "+05:30" not in recv
+    assert exch == "2026-06-15 15:34:41.000" and "+05:30" not in exch
+
+
+def test_live_ticks_null_exchange_ts_still_renders_recv_ts(tmp_path) -> None:
+    """A row whose exchange_ts is NULL still renders its recv_ts cleanly (null edge)."""
+    write_live_ticks(
+        [_tick_with_exchange_ts("NSE:IDX:NIFTY", ts_in_millis=None)],
+        lake_root=tmp_path,
+        capture_run_id="r1",
+        feed_kind="index",
+    )
+    page = query_live_table(tmp_path, "live_ticks")  # query path shares _render_rows
+    recv = page["rows"][0][page["columns"].index("recv_ts")]
+    exch = page["rows"][0][page["columns"].index("exchange_ts")]
+    assert recv == "2026-06-15 15:34:41.335"
+    assert exch is None  # null vendor time → null cell, not a crash
+
+
+def test_live_candles_timestamp_renders_clean_ist_minute_boundary(tmp_path) -> None:
+    """live_candles_1m.timestamp renders clean IST at a minute boundary (no +05:30)."""
+    bar = CandleBar(
+        timestamp=datetime(2026, 6, 15, 4, 0, tzinfo=UTC),  # 09:30:00 IST minute start
+        open=Decimal("1"),
+        high=Decimal("1"),
+        low=Decimal("1"),
+        close=Decimal("1"),
+        volume=0,
+        open_interest=None,
+    )
+    write_live_candles({"NSE:IDX:NIFTY": [bar]}, lake_root=tmp_path, built_run_id="r1")
+    page = live_table(tmp_path, "live_candles_1m", limit=10)
+    ts = page["rows"][0][page["columns"].index("timestamp")]
+    assert ts == "2026-06-15 09:30:00.000" and "+05:30" not in ts
+
+
+# ───────────── ticks-flowing freshness indicator (DEC-LIVE-DASH-PROBE-001) ──────
+
+
+def test_age_seconds_branches() -> None:
+    now = datetime(2026, 6, 15, 10, 5, 0, tzinfo=UTC)
+    assert _age_seconds(None, now) is None
+    assert _age_seconds(datetime(2026, 6, 15, 10, 4, 0, tzinfo=UTC), now) == 60.0
+    # A tick stamped slightly ahead of the reader clamps to 0.0 (never negative).
+    assert _age_seconds(datetime(2026, 6, 15, 10, 6, 0, tzinfo=UTC), now) == 0.0
+
+
+def test_latest_tick_partition_none_when_absent(tmp_path) -> None:
+    assert _latest_tick_partition(tmp_path) is None
+
+
+def test_latest_tick_partition_skips_malformed_name(tmp_path) -> None:
+    """A non-ISO ``dt=garbage.parquet`` is SKIPPED (never chosen as 'newest').
+
+    Without the date-parse guard a ``dt=zzz.parquet`` would sort lexicographically
+    last and be wrongly read; here it must be ignored in favour of the real ISO date.
+    """
+    ticks = tmp_path / "live" / "ticks"
+    ticks.mkdir(parents=True)
+    write_live_ticks(
+        [_tick_with_exchange_ts("NSE:IDX:NIFTY", ts_in_millis=None)],
+        lake_root=tmp_path,
+        capture_run_id="r1",
+        feed_kind="index",
+    )
+    # A stray malformed partition that sorts AFTER the real dt=2026-06-15.
+    (ticks / "dt=zzz-garbage.parquet").write_bytes(b"")
+    latest = _latest_tick_partition(tmp_path)
+    assert latest is not None and latest.stem == "dt=2026-06-15"
+
+
+def test_latest_tick_partition_none_when_all_malformed(tmp_path) -> None:
+    """Only malformed partition names present → None (never reads a non-session file)."""
+    ticks = tmp_path / "live" / "ticks"
+    ticks.mkdir(parents=True)
+    (ticks / "dt=garbage.parquet").write_bytes(b"")
+    assert _latest_tick_partition(tmp_path) is None
+
+
+def test_ticks_flowing_empty_lake_is_honest(tmp_path) -> None:
+    payload = ticks_flowing(tmp_path)
+    assert payload == {
+        "flowing": False,
+        "total_ticks": 0,
+        "fresh_instruments": 0,
+        "instruments": [],
+        "session_date": None,
+        "note": TICKS_EMPTY_NOTE,
+    }
+
+
+def test_ticks_flowing_fresh_within_threshold(tmp_path) -> None:
+    """A recent tick (age <= FRESH_MAX_AGE_S) → flowing=True + clean-IST last times."""
+    ms = int(datetime(2026, 6, 15, 10, 4, 41, tzinfo=UTC).timestamp() * 1000)
+    write_live_ticks(
+        [_tick_with_exchange_ts("NSE:IDX:NIFTY", ts_in_millis=ms)],
+        lake_root=tmp_path,
+        capture_run_id="r1",
+        feed_kind="index",
+    )
+    # 30s after the tick → fresh (< 60s).
+    payload = ticks_flowing(tmp_path, now=datetime(2026, 6, 15, 10, 5, 11, 335741, tzinfo=UTC))
+    assert payload["flowing"] is True
+    assert payload["total_ticks"] == 1 and payload["fresh_instruments"] == 1
+    assert payload["session_date"] == "2026-06-15"
+    inst = payload["instruments"][0]
+    assert inst["groww_symbol"] == "NSE-NIFTY" and inst["ticks"] == 1
+    assert inst["last_recv_ts"] == "2026-06-15 15:34:41.335" and inst["fresh"] is True
+    assert inst["last_exchange_ts"] == "2026-06-15 15:34:41.000"
+    assert inst["last_tick_age_s"] == 30.0
+
+
+def test_ticks_flowing_stale_when_old(tmp_path) -> None:
+    """A tick older than the freshness threshold → flowing=False, fresh=False."""
+    write_live_ticks(
+        [_tick_with_exchange_ts("NSE:IDX:NIFTY", ts_in_millis=None)],
+        lake_root=tmp_path,
+        capture_run_id="r1",
+        feed_kind="index",
+    )
+    payload = ticks_flowing(tmp_path, now=datetime(2026, 6, 15, 11, 0, 0, tzinfo=UTC))
+    assert payload["flowing"] is False and payload["fresh_instruments"] == 0
+    inst = payload["instruments"][0]
+    assert inst["fresh"] is False and inst["last_tick_age_s"] > FRESH_MAX_AGE_S
+    assert inst["last_exchange_ts"] is None  # null vendor time surfaced honestly
+
+
+def test_ticks_flowing_present_but_empty_partition_is_honest(tmp_path) -> None:
+    """A partition file that exists but holds ZERO rows → honest empty payload.
+
+    Exercises the ``note = ... else TICKS_EMPTY_NOTE`` path with a partition present:
+    ``flowing=False`` + an empty instrument list + the note, but the session date is
+    still surfaced — never fabricated flow (Golden Rule #1).
+    """
+    import polars as pl
+    from brutex.live.lake import TICK_SCHEMA
+
+    ticks = tmp_path / "live" / "ticks"
+    ticks.mkdir(parents=True)
+    pl.DataFrame(schema=dict(TICK_SCHEMA)).write_parquet(ticks / "dt=2026-06-15.parquet")
+    payload = ticks_flowing(tmp_path, now=datetime(2026, 6, 15, 11, 0, 0, tzinfo=UTC))
+    assert payload["flowing"] is False and payload["instruments"] == []
+    assert payload["total_ticks"] == 0 and payload["fresh_instruments"] == 0
+    assert payload["session_date"] == "2026-06-15" and payload["note"] == TICKS_EMPTY_NOTE
+
+
+def test_ticks_flowing_reads_only_latest_partition(tmp_path) -> None:
+    """Two session-date partitions → the indicator scans ONLY the newest (bounded)."""
+    old = TickRecord(
+        seq=0,
+        recv_ts=datetime(2026, 6, 12, 10, 0, 0, tzinfo=UTC),
+        snapshot={"NSE:IDX:NIFTY": {"ltp": 1.0}},
+        recv_ns=1,
+    )
+    new = TickRecord(
+        seq=1,
+        recv_ts=datetime(2026, 6, 15, 10, 0, 0, tzinfo=UTC),
+        snapshot={"NSE:IDX:BANKNIFTY": {"ltp": 2.0}},
+        recv_ns=2,
+    )
+    write_live_ticks([old], lake_root=tmp_path, capture_run_id="r1", feed_kind="index")
+    write_live_ticks([new], lake_root=tmp_path, capture_run_id="r1", feed_kind="index")
+    payload = ticks_flowing(tmp_path, now=datetime(2026, 6, 15, 10, 0, 30, tzinfo=UTC))
+    # Only the 2026-06-15 partition is scanned → only BANKNIFTY, never the old NIFTY.
+    assert payload["session_date"] == "2026-06-15"
+    assert [i["groww_symbol"] for i in payload["instruments"]] == ["NSE-BANKNIFTY"]

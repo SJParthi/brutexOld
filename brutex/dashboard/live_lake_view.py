@@ -20,7 +20,12 @@ from typing import Any, Final, cast
 
 import duckdb
 
-from brutex.dashboard.db_view import _build_order_by, _build_where, _select_list
+from brutex.dashboard.db_view import (
+    _build_order_by,
+    _build_where,
+    _select_list,
+    format_clean_ist_millis,
+)
 
 #: The two browsable live tables and their on-disk subdirectory + stable sort key.
 _TABLES: Final[dict[str, tuple[str, str]]] = {
@@ -29,6 +34,15 @@ _TABLES: Final[dict[str, tuple[str, str]]] = {
 }
 #: Public list of browsable table names (newest-first when rendered).
 LIVE_TABLES: Final[tuple[str, ...]] = tuple(_TABLES)
+
+#: The live-table timestamp columns that render as **clean IST** (no ``+05:30``
+#: offset suffix, trimmed to milliseconds) instead of the raw ``isoformat()`` the
+#: operator saw — ``live_ticks.recv_ts`` / ``.exchange_ts`` + ``live_candles_1m
+#: .timestamp`` (DEC-LIVE-DASH-PROBE-001). DISPLAY-ONLY: the lake storage stays UTC
+#: ``Datetime("us","UTC")`` (CLAUDE.md §6 "stored UTC, displayed IST"). Reuses the
+#: shared :func:`brutex.dashboard.db_view.format_clean_ist_millis` formatter (COMMON,
+#: CLAUDE.md §11) — the spot candle viewer's own clean formatting is untouched.
+_IST_TIMESTAMP_COLUMNS: Final[frozenset[str]] = frozenset({"recv_ts", "exchange_ts", "timestamp"})
 
 #: The bound-parameter ``read_parquet`` source (the glob is always bound, never
 #: interpolated — no path-traversal / glob-injection surface).
@@ -77,6 +91,37 @@ def _jsonify(cell: object) -> Any:
     return str(cell)
 
 
+def _jsonify_for_column(cell: object, column: str) -> Any:
+    """JSON-safe a cell, rendering the live-table timestamp columns as clean IST.
+
+    For a :data:`_IST_TIMESTAMP_COLUMNS` column holding a ``datetime`` (the lake's
+    UTC ``recv_ts`` / ``exchange_ts`` / ``timestamp``) the value renders as the clean
+    IST wall-clock ``2026-06-15 15:34:41.335`` — no ``+05:30`` offset suffix, trimmed
+    to milliseconds (DEC-LIVE-DASH-PROBE-001) — via the shared
+    :func:`brutex.dashboard.db_view.format_clean_ist_millis`. A NULL cell in such a
+    column (e.g. ``exchange_ts`` null when the leaf carried no usable ``tsInMillis``)
+    stays ``None``, and any non-datetime falls through to :func:`_jsonify`. Every other
+    column is unchanged. DISPLAY-ONLY — the stored UTC value is never mutated.
+    """
+    if column in _IST_TIMESTAMP_COLUMNS and isinstance(cell, _dt.datetime):
+        return format_clean_ist_millis(cell)
+    return _jsonify(cell)
+
+
+def _render_rows(columns: list[str], raw_rows: list[Any]) -> list[list[Any]]:
+    """Render DuckDB *raw_rows* to JSON-safe rows, clean-IST per column.
+
+    Pairs each cell with its column name so the timestamp columns route through
+    :func:`_jsonify_for_column` (clean IST) while every other cell uses the plain
+    :func:`_jsonify` — one place the row coercion lives (CLAUDE.md §11 COMMON), shared
+    by :func:`live_table` + :func:`query_live_table`.
+    """
+    return [
+        [_jsonify_for_column(cell, col) for cell, col in zip(row, columns, strict=True)]
+        for row in raw_rows
+    ]
+
+
 def live_table(
     lake_root: str | Path, table: str, *, limit: int = 100, offset: int = 0
 ) -> dict[str, Any]:
@@ -113,7 +158,7 @@ def live_table(
         )
         # A SELECT always carries a description (column metadata) → cast, no guard.
         columns = [str(col[0]) for col in cast("list[Any]", cursor.description)]
-        rows = [[_jsonify(cell) for cell in row] for row in cursor.fetchall()]
+        rows = _render_rows(columns, cursor.fetchall())
     finally:
         conn.close()
     return {
@@ -209,7 +254,7 @@ def query_live_table(
             [glob, *where_params, safe_limit, safe_offset],
         )
         out_columns = [str(col[0]) for col in cast("list[Any]", cursor.description)]
-        rows = [[_jsonify(cell) for cell in row] for row in cursor.fetchall()]
+        rows = _render_rows(out_columns, cursor.fetchall())
     finally:
         conn.close()
     return {
@@ -228,12 +273,165 @@ def live_tables_summary(lake_root: str | Path) -> list[dict[str, Any]]:
     return [{"table": t, "row_count": live_table(root, t, limit=1)["total"]} for t in LIVE_TABLES]
 
 
+#: The honest empty-state note when the live-tick lake has no partitions yet.
+TICKS_EMPTY_NOTE: Final[str] = "no ticks yet — turn the Live feed ON to start capturing"
+
+#: A feed/instrument is "fresh" while its last tick is within this many seconds
+#: (``age <= FRESH_MAX_AGE_S``); once the gap EXCEEDS it the instrument reads "stale".
+#: The Groww live feed delivers ~1+ updates/sec per subscribed instrument
+#: (DEC-LIVE-PROBE-CONCURRENT-001 cadence classes), so a gap past 60s means the feed
+#: has stopped flowing for that instrument (closed market, dropped connection, or OFF).
+FRESH_MAX_AGE_S: Final[float] = 60.0
+
+
+def _latest_tick_partition(lake_root: Path) -> Path | None:
+    """Return the NEWEST ``live/ticks/dt=<YYYY-MM-DD>.parquet`` partition, or ``None``.
+
+    The writer (:func:`brutex.live.lake._partition_path`) names every partition
+    ``dt=<session_date>.parquet`` with ``session_date`` a ``date`` → always an ISO
+    ``YYYY-MM-DD`` calendar date. We pick the newest by PARSING that date and taking
+    the max, **skipping any name that is not a valid ISO date** — so a stray /
+    hand-crafted ``dt=garbage.parquet`` (which would otherwise sort lexicographically
+    last) can never be chosen as "newest", keeping the freshness scan both BOUNDED
+    (Golden Rule #5 — only the latest day's one file is read) and HONEST (it reads a
+    real session partition, never a malformed file).
+    """
+    base = lake_root / "live" / _subdir("live_ticks")
+    if not base.is_dir():
+        return None
+    dated: list[tuple[_dt.date, Path]] = []
+    for path in base.glob("dt=*.parquet"):
+        try:
+            session = _dt.date.fromisoformat(path.stem.removeprefix("dt="))
+        except ValueError:
+            continue  # a non-ISO partition name → not a real session file, skipped
+        dated.append((session, path))
+    if not dated:
+        return None
+    return max(dated, key=lambda pair: pair[0])[1]
+
+
+def _age_seconds(last: _dt.datetime | None, now: _dt.datetime) -> float | None:
+    """Age of *last* relative to *now* in seconds, to one decimal (``None`` if null).
+
+    Both are UTC instants from the lake; the gap is rounded to a tenth of a second
+    (e.g. ``30.0``). A negative computed age (a tick stamped slightly ahead of the
+    reader's clock) is clamped to ``0.0`` so the indicator never shows a nonsensical
+    negative freshness.
+    """
+    if last is None:
+        return None
+    return max(0.0, round((now - last).total_seconds(), 1))
+
+
+def ticks_flowing(lake_root: str | Path, *, now: _dt.datetime | None = None) -> dict[str, Any]:
+    """Per-instrument "are ticks FLOWING?" freshness from the live-tick lake.
+
+    Reads ONLY the newest ``live/ticks`` partition (:func:`_latest_tick_partition` —
+    a BOUNDED, O(1)-in-history read; DuckDB further skips row-groups via the Parquet
+    min/max stats) and returns, per ``(instrument_key, groww_symbol)``: the latest
+    ``recv_ts`` (OUR receive clock) + ``exchange_ts`` (the vendor exchange clock,
+    null when the leaf carried no usable ``tsInMillis``), the tick count in that
+    partition, and the **last-tick age** in seconds vs *now*. A feed is ``fresh`` iff
+    its last tick is within :data:`FRESH_MAX_AGE_S`.
+
+    This reconciles the operator-observed "``/live`` shows TICKS CAPTURED 0 while
+    ``/db`` shows tens of thousands of rows" mismatch: the old counter counts JSONL
+    write-ahead-log LINES (often 0 once folded/rotated), whereas THIS reads the ACTUAL
+    Parquet lake the ``/db`` tables show — so the indicator reflects real lake state.
+
+    **Honest envelope (Golden Rule #1 / #10):** an absent / empty tick lake yields
+    ``flowing=False`` + :data:`TICKS_EMPTY_NOTE` and an empty instrument list — never a
+    fabricated flow. The dashboard reads the lake directly (DuckDB, bound-parameter
+    glob) and never imports :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001``).
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (the parent of ``live/``).
+    now
+        The reference instant for the age (defaults to ``datetime.now(UTC)``);
+        injected in tests for a deterministic age.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"flowing": bool, "total_ticks": int, "fresh_instruments": int,
+        "instruments": [{"instrument_key", "groww_symbol", "ticks",
+        "last_recv_ts", "last_exchange_ts", "last_tick_age_s", "fresh"}],
+        "session_date": <YYYY-MM-DD|None>, "note": <str|None>}`` — sorted by freshest
+        first (smallest age). ``flowing`` is True iff at least one instrument is fresh.
+    """
+    reference = now if now is not None else _dt.datetime.now(_dt.UTC)
+    root = Path(lake_root)
+    partition = _latest_tick_partition(root)
+    if partition is None:
+        return {
+            "flowing": False,
+            "total_ticks": 0,
+            "fresh_instruments": 0,
+            "instruments": [],
+            "session_date": None,
+            "note": TICKS_EMPTY_NOTE,
+        }
+    # dt=<YYYY-MM-DD>.parquet → the session date (display only).
+    session_date = partition.stem.removeprefix("dt=")
+    conn = duckdb.connect(":memory:")
+    try:
+        # One bounded aggregate over the newest partition: max receive / exchange clock
+        # + count per instrument. The path is a BOUND parameter (no glob/SQL-injection
+        # surface) and the column list is the fixed lake schema (no free user text).
+        cursor = conn.execute(
+            "SELECT instrument_key, groww_symbol, COUNT(*) AS ticks, "  # noqa: S608  # nosec B608 - static SQL, bound path
+            'MAX("recv_ts") AS last_recv_ts, MAX("exchange_ts") AS last_exchange_ts '
+            f"FROM {_SOURCE} "
+            "GROUP BY instrument_key, groww_symbol "
+            "ORDER BY last_recv_ts DESC",
+            [partition.as_posix()],
+        )
+        raw = cursor.fetchall()
+    finally:
+        conn.close()
+    instruments: list[dict[str, Any]] = []
+    total_ticks = 0
+    fresh_count = 0
+    for instrument_key, groww_symbol, ticks, last_recv_ts, last_exchange_ts in raw:
+        count = int(ticks)
+        total_ticks += count
+        age = _age_seconds(last_recv_ts, reference)
+        fresh = age is not None and age <= FRESH_MAX_AGE_S
+        if fresh:
+            fresh_count += 1
+        instruments.append(
+            {
+                "instrument_key": instrument_key,
+                "groww_symbol": groww_symbol,
+                "ticks": count,
+                "last_recv_ts": _jsonify_for_column(last_recv_ts, "recv_ts"),
+                "last_exchange_ts": _jsonify_for_column(last_exchange_ts, "exchange_ts"),
+                "last_tick_age_s": age,
+                "fresh": fresh,
+            }
+        )
+    return {
+        "flowing": fresh_count > 0,
+        "total_ticks": total_ticks,
+        "fresh_instruments": fresh_count,
+        "instruments": instruments,
+        "session_date": session_date,
+        "note": None if instruments else TICKS_EMPTY_NOTE,
+    }
+
+
 __all__ = [
+    "FRESH_MAX_AGE_S",
     "LIVE_TABLES",
+    "TICKS_EMPTY_NOTE",
     "clamp_limit",
     "clamp_offset",
     "live_columns",
     "live_table",
     "live_tables_summary",
     "query_live_table",
+    "ticks_flowing",
 ]
