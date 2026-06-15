@@ -82,17 +82,22 @@ def test_ring_rejects_non_positive_capacity() -> None:
 
 def test_ring_append_below_capacity_returns_false_and_buffers() -> None:
     ring = TickRing(capacity=3)
-    assert ring.append(_item(100.0)) is False
-    assert ring.append(_item(101.0)) is False
+    full_after_1 = ring.append(_item(100.0))
+    full_after_2 = ring.append(_item(101.0))
+    assert full_after_1 is False
+    assert full_after_2 is False
     assert len(ring) == 2
     assert ring.capacity == 3
 
 
 def test_ring_append_at_capacity_returns_true() -> None:
     ring = TickRing(capacity=2)
-    assert ring.append(_item(100.0)) is False
-    assert ring.append(_item(101.0)) is True  # now AT capacity → signal flush
-    assert ring.append(_item(102.0)) is True  # OVER capacity (no eviction) → still True
+    below = ring.append(_item(100.0))
+    at_cap = ring.append(_item(101.0))  # now AT capacity → signal flush
+    over_cap = ring.append(_item(102.0))  # OVER capacity (no eviction) → still True
+    assert below is False
+    assert at_cap is True
+    assert over_cap is True
 
 
 def test_ring_drain_pending_returns_fifo_and_empties() -> None:
@@ -103,7 +108,8 @@ def test_ring_drain_pending_returns_fifo_and_empties() -> None:
     drained = ring.drain_pending()
     assert [i.snapshot["NSE:IDX:NIFTY"] for i in drained] == [1.0, 2.0, 3.0]
     assert len(ring) == 0
-    assert ring.drain_pending() == []  # second drain is empty
+    second_drain = ring.drain_pending()
+    assert second_drain == []  # second drain is empty
 
 
 def test_ring_snapshot_reads_without_removing() -> None:
@@ -136,9 +142,11 @@ def test_flusher_capture_buffers_without_disk_until_flush_due() -> None:
     flusher.capture({"NSE:IDX:NIFTY": 101.0}, recv_ts=_ts(1), recv_ns=11)
     assert sink.records == []  # nothing on disk yet — both in RAM
     assert len(ring) == 2
-    assert flusher.flush_due(0.5) == 0  # below the 1.0 deadline → no-op
+    drained_below = flusher.flush_due(0.5)  # below the 1.0 deadline → no-op
+    assert drained_below == 0
     assert sink.records == []
-    assert flusher.flush_due(1.0) == 2  # at deadline → drains both
+    drained_at = flusher.flush_due(1.0)  # at deadline → drains both
+    assert drained_at == 2
     assert [r.snapshot["NSE:IDX:NIFTY"] for r in sink.records] == [100.0, 101.0]
     assert [r.seq for r in sink.records] == [0, 1]  # sink assigned seq, FIFO order
     assert flusher.flushed == 2 and flusher.flushes == 1
@@ -162,10 +170,13 @@ def test_flusher_flush_due_advances_deadline_by_one_interval() -> None:
     # start monotonic = 0.0 → first deadline = 1.0
     flusher = RingFlusher(sink=sink, ring=ring, flush_interval=1.0, monotonic=lambda: 0.0)
     flusher.capture({"NSE:IDX:NIFTY": 1.0}, recv_ts=_ts(0), recv_ns=1)
-    assert flusher.flush_due(1.0) == 1  # deadline 1.0 met → drained, next deadline 2.0
+    drained_1 = flusher.flush_due(1.0)  # deadline 1.0 met → drained, next deadline 2.0
+    assert drained_1 == 1
     flusher.capture({"NSE:IDX:NIFTY": 2.0}, recv_ts=_ts(1), recv_ns=2)
-    assert flusher.flush_due(1.5) == 0  # below the NEW 2.0 deadline → no-op
-    assert flusher.flush_due(2.0) == 1  # next deadline met
+    drained_early = flusher.flush_due(1.5)  # below the NEW 2.0 deadline → no-op
+    assert drained_early == 0
+    drained_2 = flusher.flush_due(2.0)  # next deadline met
+    assert drained_2 == 1
     assert [r.snapshot["NSE:IDX:NIFTY"] for r in sink.records] == [1.0, 2.0]
 
 
@@ -173,10 +184,12 @@ def test_flusher_drain_writes_everything_and_is_empty_safe() -> None:
     sink = _FakeSink()
     ring = TickRing(capacity=100)
     flusher = RingFlusher(sink=sink, ring=ring, flush_interval=1.0, monotonic=lambda: 0.0)
-    assert flusher.drain() == 0  # empty ring → no-op write, but counts a flush pass
+    empty_drain = flusher.drain()  # empty ring → no-op write, but counts a flush pass
+    assert empty_drain == 0
     assert flusher.flushes == 1
     flusher.capture({"NSE:IDX:NIFTY": 7.0}, recv_ts=_ts(0), recv_ns=7)
-    assert flusher.drain() == 1
+    one_drain = flusher.drain()
+    assert one_drain == 1
     assert [r.snapshot["NSE:IDX:NIFTY"] for r in sink.records] == [7.0]
 
 

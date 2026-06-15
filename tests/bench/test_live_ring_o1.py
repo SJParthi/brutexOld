@@ -65,8 +65,13 @@ class TestRingAppendIsO1:
         def _do() -> bool:
             return ring.append(sample)
 
-        # Below capacity the append always reports "not full" (False).
-        assert benchmark(_do) is False
+        # pytest-benchmark calls _do across many calibration rounds; TickRing
+        # never evicts, so the ring grows past capacity during the run and the
+        # append's flush signal flips to True once full — irrelevant to the
+        # O(1) latency this benchmark measures. Hoist the call out of the assert
+        # (no side effect inside assert) and just check the documented bool type.
+        result = benchmark(_do)
+        assert isinstance(result, bool)
 
     def test_append_ratio_below_ceiling(self) -> None:
         """Append latency ratio at 1M / 1K occupancy must stay under the CI ceiling.
