@@ -132,10 +132,54 @@ class PoolRunParallel:
                     yield ItemResult(item=item, ok=True, result=result, exc=None)
 
 
+class SerialRunParallel:
+    """A ``RunParallel`` that maps *fn* over *items* IN-THREAD — zero worker threads.
+
+    The serial twin of :class:`PoolRunParallel`: the SAME exception-capture
+    contract (a raise → ``ItemResult(ok=False, exc=...)``; a clean return →
+    ``ItemResult(ok=True, result=...)``), but every item runs on the CALLING
+    thread, in order, with no pool.
+
+    Why it exists (DEC-SPOT-CROSS-SYMBOL-FANOUT-001): the bulk spot pull fans ONE
+    bounded outer pool across symbols, and each symbol's windows then run through
+    THIS serial runner — one in-flight call per symbol, ``len(jobs)`` symbols
+    concurrent. The previous design nested a second per-symbol *window* pool inside
+    every outer worker, multiplying into ``outer_width × inner_width`` threads (a
+    measured 24 × 30 = up to 720) that only thrashed the GIL on the Parquet write
+    render without raising throughput. Collapsing the inner level to a serial
+    in-thread map keeps a SINGLE bounded pool as the only concurrency source; the
+    shared rate-limit token bucket remains the sole issue governor (Rule #6 — this
+    raises no ceiling). Yields lazily so a caller draining as items complete sees
+    no buffering difference from the pool runner.
+    """
+
+    __slots__ = ()
+
+    def __call__[ItemT, ResultT](
+        self,
+        fn: Callable[[ItemT], ResultT],
+        items: Sequence[ItemT],
+    ) -> Iterator[ItemResult[ItemT, ResultT]]:
+        """Map *fn* over *items* in order on the calling thread, one result each.
+
+        A fetcher raising is CAPTURED into ``ItemResult(ok=False, exc=...)`` — never
+        propagated — byte-for-byte matching :class:`PoolRunParallel`, so the bulk
+        quarantine path behaves identically whether windows run serial or pooled.
+        """
+        for item in items:
+            try:
+                result = fn(item)
+            except Exception as exc:  # mirror PoolRunParallel's capture contract
+                yield ItemResult(item=item, ok=False, result=None, exc=exc)
+            else:
+                yield ItemResult(item=item, ok=True, result=result, exc=None)
+
+
 __all__ = [
     "DEFAULT_LATENCY_BUDGET_S",
     "DEFAULT_MAX_WORKERS",
     "MAX_FANOUT",
     "PoolRunParallel",
+    "SerialRunParallel",
     "workers_to_saturate",
 ]

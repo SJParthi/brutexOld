@@ -55,7 +55,7 @@ from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
-from brutex.orchestrator.parallel import PoolRunParallel
+from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
@@ -257,6 +257,19 @@ def run_groww_spot_ingest(
     jobs: list[SpotJob] = [
         (instrument, interval) for instrument in instruments for interval in intervals
     ]
+    # Concurrency model (DEC-SPOT-CROSS-SYMBOL-FANOUT-001). A MULTI-pair (bulk)
+    # pull fans the ONE bounded outer pool ACROSS symbols and runs each symbol's
+    # windows SERIALLY (``SerialRunParallel``) — one in-flight call per symbol,
+    # ``len(jobs)`` symbols concurrent — so a single bounded pool saturates the
+    # shared rate bucket. The previous design nested a second per-symbol *window*
+    # pool inside every outer worker, multiplying into ``outer × inner`` threads
+    # (a measured 24 × 30 ≈ up to 720) that only thrashed the GIL on the Parquet
+    # write render without raising throughput. A SINGLE-pair pull (one symbol —
+    # the /universe per-symbol button or the CLI) instead hands that one pair the
+    # full outer ``runner`` for its WINDOWS (no symbol-level fan-out to spend it
+    # on), preserving single-symbol window parallelism. The shared token bucket
+    # stays the sole issue governor either way (Rule #6 — no ceiling is raised).
+    inner_runner: RunParallel = runner if len(jobs) <= 1 else SerialRunParallel()
 
     def _run_pair(job: SpotJob) -> IngestReport:
         """Pull one ``(instrument, interval)`` pair — runs inside a worker thread.
@@ -264,6 +277,8 @@ def run_groww_spot_ingest(
         Re-binds *pull_id* into THIS thread's structlog context-vars. A raised
         :class:`GrowwError` is captured by *run_parallel* and quarantined below;
         any other exception is captured too and re-raised on the controller thread.
+        Each pair's windows run through *inner_runner* (serial for a bulk pull;
+        the full pool for a single-pair pull) — see the concurrency-model note above.
         """
         instrument, interval = job
         with pull_id_scope(pull_id):
@@ -279,6 +294,7 @@ def run_groww_spot_ingest(
                 on_rate_limit=on_rate_limit,
                 on_timeout=on_timeout,
                 on_success=on_success,
+                run_parallel=inner_runner,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
