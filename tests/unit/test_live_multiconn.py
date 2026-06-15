@@ -7,6 +7,7 @@ Every collaborator (feed open, subscribe) is injected with a fake — no
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -241,3 +242,237 @@ def test_read_subscription_manifest_rejects_bad_shapes(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="missing keys"):
         mc.read_subscription_manifest(missing_key)
+
+
+# ─────────────────── probe→manifest stamping (DEC-LIVE-PROBE-MANIFEST-001) ───────────────────
+
+
+def _probe(max_held: int, *, failed_at: int | None, failure: str | None) -> Any:
+    """Build a :class:`~brutex.live.probe.ConnectionProbeResult` for the stamp tests."""
+    from brutex.live.probe import ConnectionProbeResult
+
+    return ConnectionProbeResult(max_held=max_held, failed_at=failed_at, failure=failure)
+
+
+def test_probe_meta_block_matches_dashboard_reader_shape() -> None:
+    # A refused ramp: 7 held, #8 refused → reached_ceiling True.
+    block = mc.probe_meta_block(_probe(7, failed_at=8, failure="RuntimeError: refused"))
+    assert block == {"max_held": 7, "failed_at": 8, "reached_ceiling": True}
+    # A ramp that hit --max with no refusal → failed_at None, reached_ceiling False.
+    clean = mc.probe_meta_block(_probe(100, failed_at=None, failure=None))
+    assert clean == {"max_held": 100, "failed_at": None, "reached_ceiling": False}
+    # The failure REASON string is deliberately not carried (reader keys on the int).
+    assert "failure" not in block
+
+
+def test_merge_probe_preserves_spot_legs_and_meta_plan() -> None:
+    manifest = {
+        "spot": [_idx("NIFTY")],
+        "legs": [_leg("900", underlying="NIFTY")],
+        "meta": {"plan": {"per_connection_cap": 1000, "spot": 1, "legs": 1}},
+    }
+    merged = mc.merge_probe_into_manifest(manifest, _probe(5, failed_at=6, failure="x"))
+    # spot/legs/meta.plan untouched, meta.probe added.
+    assert merged["spot"] == manifest["spot"]
+    assert merged["legs"] == manifest["legs"]
+    assert merged["meta"]["plan"] == {"per_connection_cap": 1000, "spot": 1, "legs": 1}
+    assert merged["meta"]["probe"] == {"max_held": 5, "failed_at": 6, "reached_ceiling": True}
+    # Pure: the input manifest is not mutated.
+    assert "probe" not in manifest["meta"]
+
+
+def test_merge_probe_replaces_malformed_meta() -> None:
+    # A non-mapping meta is replaced by a fresh meta carrying only probe.
+    merged = mc.merge_probe_into_manifest(
+        {"spot": [], "legs": [], "meta": "broken"}, _probe(3, failed_at=None, failure=None)
+    )
+    assert merged["meta"] == {"probe": {"max_held": 3, "failed_at": None, "reached_ceiling": False}}
+
+
+def test_merge_probe_replaces_existing_probe() -> None:
+    manifest = {
+        "spot": [],
+        "legs": [],
+        "meta": {"probe": {"max_held": 1, "failed_at": 2, "reached_ceiling": True}},
+    }
+    merged = mc.merge_probe_into_manifest(manifest, _probe(9, failed_at=None, failure=None))
+    assert merged["meta"]["probe"] == {"max_held": 9, "failed_at": None, "reached_ceiling": False}
+
+
+def test_merge_probe_when_no_meta_present() -> None:
+    merged = mc.merge_probe_into_manifest(
+        {"spot": [], "legs": []}, _probe(4, failed_at=5, failure="y")
+    )
+    assert merged["meta"] == {"probe": {"max_held": 4, "failed_at": 5, "reached_ceiling": True}}
+
+
+def test_stamp_probe_manifest_file_present(tmp_path) -> None:
+    path = tmp_path / "live-manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "spot": [_idx("NIFTY")],
+                "legs": [],
+                "meta": {"plan": {"per_connection_cap": 1000, "spot": 1, "legs": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    stamped = mc.stamp_probe_manifest_file(path, _probe(6, failed_at=7, failure="refused"))
+    assert stamped is True
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["spot"] == [_idx("NIFTY")]
+    assert on_disk["meta"]["plan"] == {"per_connection_cap": 1000, "spot": 1, "legs": 0}
+    assert on_disk["meta"]["probe"] == {"max_held": 6, "failed_at": 7, "reached_ceiling": True}
+
+
+def test_stamp_probe_manifest_file_missing_is_untouched(tmp_path) -> None:
+    """An absent manifest → False, nothing written (dashboard keeps 'probe not run')."""
+    path = tmp_path / "nope.json"
+    stamped = mc.stamp_probe_manifest_file(path, _probe(6, failed_at=7, failure="refused"))
+    assert stamped is False
+    assert not path.exists()
+
+
+def test_stamp_probe_manifest_file_unreadable_json_is_untouched(tmp_path) -> None:
+    path = tmp_path / "broken.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    stamped = mc.stamp_probe_manifest_file(path, _probe(6, failed_at=None, failure=None))
+    assert stamped is False
+    # The corrupt file is left exactly as-is, never overwritten with a fabricated probe.
+    assert path.read_text(encoding="utf-8") == "{not valid json"
+
+
+def test_stamp_probe_manifest_file_non_object_is_untouched(tmp_path) -> None:
+    path = tmp_path / "list.json"
+    path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    stamped = mc.stamp_probe_manifest_file(path, _probe(6, failed_at=None, failure=None))
+    assert stamped is False
+    assert json.loads(path.read_text(encoding="utf-8")) == [1, 2, 3]
+
+
+def test_stamp_probe_manifest_file_oserror_is_untouched(tmp_path, monkeypatch) -> None:
+    """A read that raises OSError (e.g. a directory path) → False, never raises."""
+    path = tmp_path / "amanifest.json"
+    path.write_text(json.dumps({"spot": [], "legs": []}), encoding="utf-8")
+
+    def _boom(*_args: Any, **_kwargs: Any) -> str:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    stamped = mc.stamp_probe_manifest_file(path, _probe(6, failed_at=None, failure=None))
+    assert stamped is False
+
+
+def test_stamp_probe_manifest_file_is_byte_idempotent(tmp_path) -> None:
+    """Stamping the SAME probe twice yields byte-identical manifest content (Golden Rule #7)."""
+    path = tmp_path / "live-manifest.json"
+    path.write_text(
+        json.dumps({"spot": [_idx("NIFTY")], "legs": [], "meta": {"plan": {"spot": 1}}}),
+        encoding="utf-8",
+    )
+    probe = _probe(8, failed_at=9, failure="ceiling")
+    first_ok = mc.stamp_probe_manifest_file(path, probe)
+    first_bytes = path.read_bytes()
+    second_ok = mc.stamp_probe_manifest_file(path, probe)
+    second_bytes = path.read_bytes()
+    assert first_ok is True and second_ok is True
+    assert first_bytes == second_bytes
+
+
+def test_stamp_then_read_round_trip_surfaces_ceiling(tmp_path) -> None:
+    """A stamped manifest, read by the REAL dashboard reader, surfaces the ceiling."""
+    from brutex.dashboard.live_plan_view import read_connection_plan
+
+    path = tmp_path / "live-manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "spot": [_idx("NIFTY"), _eq("100")],
+                "legs": [_leg("900", underlying="NIFTY")],
+                "meta": {"plan": {"per_connection_cap": 1000, "spot": 2, "legs": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    ok = mc.stamp_probe_manifest_file(path, _probe(42, failed_at=43, failure="ceiling"))
+    assert ok is True
+    payload = read_connection_plan(Path(path))
+    # The dashboard panel now shows the REAL ceiling, not "probe not run".
+    assert payload["probe"] == {"max_held": 42, "failed_at": 43, "reached_ceiling": True}
+    assert payload["probe_note"] is None
+    # The plan band (spot/legs/total/connections) is preserved + re-derived.
+    assert payload["plan"]["spot"] == 2 and payload["plan"]["legs"] == 1
+    assert payload["plan"]["total"] == 3
+
+
+def test_merge_probe_is_pure_no_shared_mutable_subobjects() -> None:
+    """The merge deep-copies — mutating the result never corrupts the input (purity)."""
+    manifest: dict[str, Any] = {
+        "spot": [_idx("NIFTY")],
+        "legs": [],
+        "meta": {"plan": {"per_connection_cap": 1000, "spot": 1, "legs": 0}},
+    }
+    merged = mc.merge_probe_into_manifest(manifest, _probe(5, failed_at=6, failure="x"))
+    # No mutable sub-object is shared between input and result.
+    assert merged["spot"] is not manifest["spot"]
+    assert merged["meta"]["plan"] is not manifest["meta"]["plan"]
+    # Mutating the result leaves the input untouched.
+    merged["spot"].append(_eq("999"))
+    merged["meta"]["plan"]["per_connection_cap"] = 4242
+    assert manifest["spot"] == [_idx("NIFTY")]
+    assert manifest["meta"]["plan"]["per_connection_cap"] == 1000
+
+
+def test_stamp_probe_manifest_canonicalises_key_order(tmp_path) -> None:
+    """An OUT-OF-ORDER manifest stamps to canonical sort_keys bytes (the idempotence guard).
+
+    Proves ``sort_keys=True`` is load-bearing: a manifest whose keys were emitted in
+    a non-sorted order yields the SAME canonical bytes as a sorted one, so re-stamping
+    is byte-stable regardless of how the dashboard writer ordered the original keys.
+    """
+    import json as _json
+
+    out_of_order = tmp_path / "scrambled.json"
+    # Deliberately reversed top-level + nested key order; no sort on write.
+    out_of_order.write_text(
+        _json.dumps(
+            {"meta": {"plan": {"spot": 1, "legs": 0}}, "legs": [], "spot": [_idx("NIFTY")]}
+        ),
+        encoding="utf-8",
+    )
+    probe = _probe(8, failed_at=9, failure="ceiling")
+    stamped = mc.stamp_probe_manifest_file(out_of_order, probe)
+    assert stamped is True
+    scrambled_bytes = out_of_order.read_bytes()
+
+    # A second manifest with the SAME content but already-sorted insertion order.
+    sorted_src = tmp_path / "sorted.json"
+    sorted_src.write_text(
+        _json.dumps(
+            {"legs": [], "meta": {"plan": {"legs": 0, "spot": 1}}, "spot": [_idx("NIFTY")]}
+        ),
+        encoding="utf-8",
+    )
+    stamped2 = mc.stamp_probe_manifest_file(sorted_src, probe)
+    assert stamped2 is True
+    # Identical canonical bytes despite different source key orderings.
+    assert scrambled_bytes == sorted_src.read_bytes()
+
+
+def test_stamp_zero_max_held_round_trips_as_real_ceiling(tmp_path) -> None:
+    """A probe that held ZERO connections before the first refusal surfaces 0, not 'probe not run'.
+
+    ``max_held=0`` is a VALID ceiling (the account refused even the first connection);
+    the reader's ``isinstance(int) and not bool`` guard accepts 0, so it must NOT be
+    dropped as a falsy/absent ceiling (Golden Rule #1 — an honest zero, not a guess).
+    """
+    from brutex.dashboard.live_plan_view import read_connection_plan
+
+    path = tmp_path / "live-manifest.json"
+    path.write_text(json.dumps({"spot": [], "legs": []}), encoding="utf-8")
+    stamped = mc.stamp_probe_manifest_file(path, _probe(0, failed_at=1, failure="refused"))
+    assert stamped is True
+    payload = read_connection_plan(Path(path))
+    assert payload["probe"] == {"max_held": 0, "failed_at": 1, "reached_ceiling": True}
+    assert payload["probe_note"] is None
