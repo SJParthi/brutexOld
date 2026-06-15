@@ -284,19 +284,20 @@ TICKS_EMPTY_NOTE: Final[str] = "no ticks yet — turn the Live feed ON to start 
 FRESH_MAX_AGE_S: Final[float] = 60.0
 
 
-def _latest_tick_partition(lake_root: Path) -> Path | None:
-    """Return the NEWEST ``live/ticks/dt=<YYYY-MM-DD>.parquet`` partition, or ``None``.
+def _latest_partition(base: Path) -> Path | None:
+    """Return the NEWEST ``dt=<YYYY-MM-DD>.parquet`` partition under *base*, or ``None``.
 
-    The writer (:func:`brutex.live.lake._partition_path`) names every partition
+    The live writers (:func:`brutex.live.lake._partition_path` /
+    :func:`brutex.live.prevday._partition_path`) name every partition
     ``dt=<session_date>.parquet`` with ``session_date`` a ``date`` → always an ISO
     ``YYYY-MM-DD`` calendar date. We pick the newest by PARSING that date and taking
     the max, **skipping any name that is not a valid ISO date** — so a stray /
     hand-crafted ``dt=garbage.parquet`` (which would otherwise sort lexicographically
-    last) can never be chosen as "newest", keeping the freshness scan both BOUNDED
-    (Golden Rule #5 — only the latest day's one file is read) and HONEST (it reads a
-    real session partition, never a malformed file).
+    last) can never be chosen as "newest", keeping the scan both BOUNDED (Golden Rule
+    #5 — only the latest day's one file is read) and HONEST (it reads a real session
+    partition, never a malformed file). One place this newest-by-date pick lives
+    (CLAUDE.md §11 COMMON), shared by the ticks / candles / prevday readers.
     """
-    base = lake_root / "live" / _subdir("live_ticks")
     if not base.is_dir():
         return None
     dated: list[tuple[_dt.date, Path]] = []
@@ -309,6 +310,15 @@ def _latest_tick_partition(lake_root: Path) -> Path | None:
     if not dated:
         return None
     return max(dated, key=lambda pair: pair[0])[1]
+
+
+def _latest_tick_partition(lake_root: Path) -> Path | None:
+    """Return the NEWEST ``live/ticks/dt=<YYYY-MM-DD>.parquet`` partition, or ``None``.
+
+    Thin wrapper over :func:`_latest_partition` for the live-tick subdirectory (the
+    freshness scan); see that helper for the newest-by-date / skip-malformed contract.
+    """
+    return _latest_partition(lake_root / "live" / _subdir("live_ticks"))
 
 
 def _age_seconds(last: _dt.datetime | None, now: _dt.datetime) -> float | None:
@@ -423,13 +433,240 @@ def ticks_flowing(lake_root: str | Path, *, now: _dt.datetime | None = None) -> 
     }
 
 
+#: The honest empty-state note when no live-candle lake exists yet (no movers to show).
+MOVERS_EMPTY_NOTE: Final[str] = (
+    "no live candles yet — turn the Live feed ON to start ranking gainers / losers"
+)
+
+#: Default + max gainers/losers each side of the live movers ranking (a bounded list,
+#: never the full universe; clamped to keep the JSON payload + render small).
+_MOVERS_TOP_N_DEFAULT: Final = 25
+_MOVERS_TOP_N_MAX: Final = 100
+
+
+def clamp_top_n(n: int) -> int:
+    """Clamp a requested movers count to ``[1, 100]`` per gainers/losers side."""
+    return max(1, min(_MOVERS_TOP_N_MAX, n))
+
+
+def _latest_candle_partition(lake_root: Path) -> Path | None:
+    """Return the NEWEST ``live/candles_1m/dt=<YYYY-MM-DD>.parquet`` partition, or ``None``.
+
+    Thin wrapper over :func:`_latest_partition` for the live 1-minute candle
+    subdirectory (the movers ranking); see that helper for the newest-by-date /
+    skip-malformed contract.
+    """
+    return _latest_partition(lake_root / "live" / _subdir("live_candles_1m"))
+
+
+def _latest_prevday_partition(lake_root: Path) -> Path | None:
+    """Return the NEWEST ``live/prevday/dt=<YYYY-MM-DD>.parquet`` partition, or ``None``.
+
+    The prev-day reference lake (:func:`brutex.live.prevday._partition_path`) is keyed
+    by the reference date; the movers reader joins its ``prev_close`` onto the latest
+    candle per instrument. Thin wrapper over :func:`_latest_partition`.
+    """
+    return _latest_partition(lake_root / "live" / "prevday")
+
+
+def _mover_row(raw: Any) -> dict[str, Any]:
+    """Coerce one movers aggregate tuple to a JSON-safe row dict.
+
+    The tuple order matches the ``SELECT`` in :func:`live_movers`:
+    ``(instrument_key, groww_symbol, timestamp, close, pct_change, pct_from_open,
+    volume, prev_close)``. Money-ish prices (``close`` / ``prev_close``) and the
+    derived percentages (``pct_change`` / ``pct_from_open``) are full-precision
+    ``float`` statistics — NEVER rounded here (DEC-MONEY-2DP-001 forbids rounding
+    non-money; the lake already snapped prices to the 2dp tick grid at write).
+    ``volume`` is an int; ``timestamp`` renders clean IST.
+    """
+    (
+        instrument_key,
+        groww_symbol,
+        timestamp,
+        close,
+        pct_change,
+        pct_from_open,
+        volume,
+        prev_close,
+    ) = raw
+    return {
+        "instrument_key": instrument_key,
+        "groww_symbol": groww_symbol,
+        "timestamp": _jsonify_for_column(timestamp, "timestamp"),
+        "close": _jsonify(close),
+        "pct_change": _jsonify(pct_change),
+        "pct_from_open": _jsonify(pct_from_open),
+        "volume": int(volume) if volume is not None else None,
+        "prev_close": _jsonify(prev_close),
+    }
+
+
+def live_movers(lake_root: str | Path, *, top_n: int = _MOVERS_TOP_N_DEFAULT) -> dict[str, Any]:
+    """Top live gainers / losers by ``pct_change`` from the newest 1-minute candle lake.
+
+    Reads ONLY the newest ``live/candles_1m`` partition (:func:`_latest_candle_partition`
+    — a BOUNDED, O(1)-in-history read; mirrors :func:`ticks_flowing`), takes each
+    instrument's LATEST minute candle, and ranks by the merged
+    ``pct_change`` derived statistic (``(close - prev_close) / prev_close * 100`` vs the
+    prior session's daily close; DEC-LIVE-CANDLE-DERIVED-PCT-001). Each row also carries
+    the intraday ``pct_from_open`` and the **prev-day reference** ``prev_close`` —
+    the authoritative value left-joined from the newest ``live/prevday`` partition
+    (DEC-LIVE-PREVDAY-LAKE-001) on the shared ``instrument_key``, with an EXACT
+    ``close / (1 + pct_change/100)`` fallback when the join misses (see
+    :func:`_query_movers` — the candle's own ``pct_change`` was computed against that
+    prior close, so the fallback is reconstruction, never fabrication), and honestly
+    ``None`` only when neither is available. So this ONE read surfaces BOTH
+    newly-merged live datasets (the derived percentages + the prev-day reference) the
+    operator previously could only see in ``/db``.
+
+    Instruments with a NULL ``pct_change`` (no prior close yet) are EXCLUDED from the
+    ranked gainers / losers (they cannot be ranked honestly) but still counted in
+    ``total_instruments``. The top ``top_n`` (clamped ``[1, 100]``) per side are
+    returned, gainers descending / losers ascending by ``pct_change``.
+
+    **Honest envelope (Golden Rule #1 / #10):** an absent / empty candle lake yields
+    empty ``gainers`` / ``losers`` + :data:`MOVERS_EMPTY_NOTE` — never a fabricated
+    mover. The dashboard reads the Parquet lake directly (DuckDB, bound-parameter glob)
+    and never imports :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001``).
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (the parent of ``live/``).
+    top_n
+        Rows per side (gainers AND losers); clamped to ``[1, 100]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"gainers": [row, ...], "losers": [row, ...], "session_date":
+        <YYYY-MM-DD|None>, "total_instruments": int, "ranked_instruments": int,
+        "top_n": int, "note": <str|None>}`` where each ``row`` is
+        ``{"instrument_key", "groww_symbol", "timestamp", "close", "pct_change",
+        "pct_from_open", "volume", "prev_close"}``.
+    """
+    root = Path(lake_root)
+    safe_top_n = clamp_top_n(top_n)
+    candle_partition = _latest_candle_partition(root)
+    if candle_partition is None:
+        return {
+            "gainers": [],
+            "losers": [],
+            "session_date": None,
+            "total_instruments": 0,
+            "ranked_instruments": 0,
+            "top_n": safe_top_n,
+            "note": MOVERS_EMPTY_NOTE,
+        }
+    session_date = candle_partition.stem.removeprefix("dt=")
+    prevday_partition = _latest_prevday_partition(root)
+    conn = duckdb.connect(":memory:")
+    try:
+        rows = _query_movers(conn, candle_partition, prevday_partition, safe_top_n)
+    finally:
+        conn.close()
+    total, ranked, gainers, losers = rows
+    return {
+        "gainers": gainers,
+        "losers": losers,
+        "session_date": session_date,
+        "total_instruments": total,
+        "ranked_instruments": ranked,
+        "top_n": safe_top_n,
+        "note": None if ranked else MOVERS_EMPTY_NOTE,
+    }
+
+
+def _query_movers(
+    conn: Any, candle_partition: Path, prevday_partition: Path | None, top_n: int
+) -> tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run the bounded movers aggregate + ranking over the newest candle partition.
+
+    Builds a ``latest`` CTE — each instrument's newest minute candle (``ROW_NUMBER``
+    over ``timestamp DESC``) — LEFT JOINed to the prev-day reference lake on the SHARED
+    ``instrument_key`` (only when a ``prevday_partition`` exists). Returns
+    ``(total_instruments, ranked_instruments, gainers, losers)``: ``total`` counts every
+    instrument in the partition, ``ranked`` only those with a non-NULL ``pct_change``.
+    Both Parquet paths are BOUND parameters (no glob/SQL-injection surface) and the
+    column list is the fixed lake schema.
+
+    **prev_close resilience (Golden Rule #1 — exact, not fabricated):** the stored
+    ``live/prevday.prev_close`` is the authoritative reference, BUT it is surfaced only
+    when its partition uses the SAME ``instrument_key`` form the candle lake does (both
+    write the flattened ``<EXCH>:<SEGMENT>:<SYMBOL>`` feed key, so a same-pipeline
+    producer matches). To stay correct even if a future prev-day producer keys the
+    column differently (the join would silently miss), ``prev_close`` falls back via
+    ``COALESCE`` to the value the candle's OWN ``pct_change`` was computed against —
+    ``close / (1 + pct_change/100)`` — which is the EXACT prior daily close by
+    construction (``pct_change = (close - prev_close) / prev_close * 100``;
+    DEC-LIVE-CANDLE-DERIVED-PCT-001), never an invented number. ``NULLIF(...,0)`` guards
+    the impossible ``pct_change == -100`` (an infinite prior close) so it degrades to
+    ``NULL`` rather than dividing by zero; a NULL ``pct_change`` leaves ``prev_close``
+    NULL.
+    """
+    candle_src = candle_partition.as_posix()
+    if prevday_partition is None:
+        # The NULL columns MUST be CAST to the real types: an untyped NULL is INTEGER,
+        # and the `USING (instrument_key)` join would then try to coerce the VARCHAR
+        # candle key to INT and raise. CAST keeps the empty-reference join type-safe.
+        prevday_cte = (
+            "prevday AS (SELECT CAST(NULL AS VARCHAR) AS instrument_key, "
+            "CAST(NULL AS DOUBLE) AS prev_close WHERE FALSE)"
+        )
+        params: list[Any] = [candle_src]
+    else:
+        prevday_cte = f"prevday AS (SELECT instrument_key, prev_close FROM {_SOURCE})"  # noqa: S608  # nosec B608 - static SQL, bound path
+        params = [candle_src, prevday_partition.as_posix()]
+    base_sql = (
+        "WITH latest AS ("  # noqa: S608  # nosec B608 - static SQL, bound Parquet paths
+        "SELECT instrument_key, groww_symbol, timestamp, close, pct_change, pct_from_open, "
+        'volume, ROW_NUMBER() OVER (PARTITION BY instrument_key ORDER BY "timestamp" DESC) AS rn '
+        f"FROM read_parquet(?, union_by_name=true)), {prevday_cte}, "
+        "snapshot AS (SELECT l.instrument_key, l.groww_symbol, l.timestamp, l.close, "
+        "l.pct_change, l.pct_from_open, l.volume, "
+        "COALESCE(p.prev_close, l.close / NULLIF(1 + l.pct_change / 100.0, 0)) AS prev_close "
+        "FROM latest l LEFT JOIN prevday p USING (instrument_key) WHERE l.rn = 1)"
+    )
+    total = int(
+        conn.execute(
+            f"{base_sql} SELECT COUNT(*) FROM snapshot",  # noqa: S608  # nosec B608 - static SQL, bound paths
+            params,
+        ).fetchall()[0][0]
+    )
+    ranked = int(
+        conn.execute(
+            f"{base_sql} SELECT COUNT(*) FROM snapshot WHERE pct_change IS NOT NULL",  # noqa: S608  # nosec B608 - static SQL, bound paths
+            params,
+        ).fetchall()[0][0]
+    )
+    select_cols = (
+        "instrument_key, groww_symbol, timestamp, close, pct_change, pct_from_open, "
+        "volume, prev_close"
+    )
+    gainers_raw = conn.execute(
+        f"{base_sql} SELECT {select_cols} FROM snapshot "  # noqa: S608  # nosec B608 - bound paths + fixed cols
+        "WHERE pct_change IS NOT NULL ORDER BY pct_change DESC, instrument_key LIMIT ?",
+        [*params, top_n],
+    ).fetchall()
+    losers_raw = conn.execute(
+        f"{base_sql} SELECT {select_cols} FROM snapshot "  # noqa: S608  # nosec B608 - bound paths + fixed cols
+        "WHERE pct_change IS NOT NULL ORDER BY pct_change ASC, instrument_key LIMIT ?",
+        [*params, top_n],
+    ).fetchall()
+    return total, ranked, [_mover_row(r) for r in gainers_raw], [_mover_row(r) for r in losers_raw]
+
+
 __all__ = [
     "FRESH_MAX_AGE_S",
     "LIVE_TABLES",
+    "MOVERS_EMPTY_NOTE",
     "TICKS_EMPTY_NOTE",
     "clamp_limit",
     "clamp_offset",
+    "clamp_top_n",
     "live_columns",
+    "live_movers",
     "live_table",
     "live_tables_summary",
     "query_live_table",

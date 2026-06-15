@@ -14,14 +14,19 @@ import pytest
 from brutex.dashboard.live_lake_view import (
     FRESH_MAX_AGE_S,
     LIVE_TABLES,
+    MOVERS_EMPTY_NOTE,
     TICKS_EMPTY_NOTE,
     _age_seconds,
     _jsonify,
     _jsonify_for_column,
+    _latest_candle_partition,
+    _latest_prevday_partition,
     _latest_tick_partition,
     clamp_limit,
     clamp_offset,
+    clamp_top_n,
     live_columns,
+    live_movers,
     live_table,
     live_tables_summary,
     query_live_table,
@@ -29,6 +34,7 @@ from brutex.dashboard.live_lake_view import (
 )
 from brutex.data.models import CandleBar
 from brutex.live.lake import write_live_candles, write_live_ticks
+from brutex.live.prevday import PrevDayOHLCV, write_prev_day
 from brutex.live.store import TickRecord
 
 
@@ -383,3 +389,200 @@ def test_ticks_flowing_reads_only_latest_partition(tmp_path) -> None:
     # Only the 2026-06-15 partition is scanned → only BANKNIFTY, never the old NIFTY.
     assert payload["session_date"] == "2026-06-15"
     assert [i["groww_symbol"] for i in payload["instruments"]] == ["NSE-BANKNIFTY"]
+
+
+# ── live_movers (DEC-LIVE-DASH-MOVERS-PARITY-001) ──
+
+
+def _candle(ts: datetime, *, o: str, h: str, low: str, c: str, volume: int = 100) -> CandleBar:
+    """Build one minute :class:`CandleBar` (close validated within [low, high])."""
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(o),
+        high=Decimal(h),
+        low=Decimal(low),
+        close=Decimal(c),
+        volume=volume,
+        open_interest=None,
+    )
+
+
+def _seed_movers(lake_root, *, prev_closes, with_prevday: bool = True) -> None:
+    """Seed a one-session live candle lake (+ optional prev-day reference partition).
+
+    Two index instruments at 2026-06-15 09:45 UTC: NIFTY up (close 110 vs open 100),
+    BANKNIFTY down (close 190 vs open 200). *prev_closes* feeds the merged candle
+    ``pct_change``; *with_prevday* additionally writes the ``live/prevday`` reference
+    row for NIFTY only (so the join-absent path is also exercised for BANKNIFTY).
+    """
+    ts = datetime(2026, 6, 15, 9, 45, tzinfo=UTC)
+    write_live_candles(
+        {
+            "NSE:IDX:NIFTY": [_candle(ts, o="100", h="112", low="99", c="110")],
+            "NSE:IDX:BANKNIFTY": [_candle(ts, o="200", h="205", low="189", c="190")],
+        },
+        lake_root=lake_root,
+        built_run_id="r1",
+        prev_closes=prev_closes,
+    )
+    if with_prevday:
+        write_prev_day(
+            lake_root,
+            [
+                PrevDayOHLCV(
+                    instrument_key="NSE:IDX:NIFTY",
+                    session_date=date(2026, 6, 14),
+                    open=Decimal("99"),
+                    high=Decimal("101"),
+                    low=Decimal("98"),
+                    close=Decimal("100"),
+                    volume=1,
+                    open_interest=None,
+                )
+            ],
+            as_of_date=date(2026, 6, 15),
+        )
+
+
+def test_clamp_top_n() -> None:
+    assert clamp_top_n(0) == 1 and clamp_top_n(9999) == 100 and clamp_top_n(25) == 25
+
+
+def test_live_movers_empty_lake_is_honest(tmp_path) -> None:
+    """Absent candle lake → empty gainers/losers + the honest note, never fabricated."""
+    payload = live_movers(tmp_path)
+    assert payload == {
+        "gainers": [],
+        "losers": [],
+        "session_date": None,
+        "total_instruments": 0,
+        "ranked_instruments": 0,
+        "top_n": 25,
+        "note": MOVERS_EMPTY_NOTE,
+    }
+
+
+def test_live_movers_ranks_by_pct_change_and_joins_prevday(tmp_path) -> None:
+    """Gainers desc / losers asc by pct_change; prev_close joined from live/prevday."""
+    _seed_movers(
+        tmp_path, prev_closes={"NSE:IDX:NIFTY": Decimal("100"), "NSE:IDX:BANKNIFTY": Decimal("200")}
+    )
+    payload = live_movers(tmp_path, top_n=5)
+    assert payload["session_date"] == "2026-06-15"
+    assert payload["total_instruments"] == 2 and payload["ranked_instruments"] == 2
+    assert payload["note"] is None
+    gainers, losers = payload["gainers"], payload["losers"]
+    # NIFTY +10% leads gainers; BANKNIFTY -5% leads losers.
+    assert [g["groww_symbol"] for g in gainers] == ["NSE-NIFTY", "NSE-BANKNIFTY"]
+    assert [low["groww_symbol"] for low in losers] == ["NSE-BANKNIFTY", "NSE-NIFTY"]
+    top = gainers[0]
+    assert top["pct_change"] == 10.0 and top["pct_from_open"] == 10.0
+    # NIFTY's prev_close is the AUTHORITATIVE value from the live/prevday join.
+    assert top["close"] == 110.0 and top["prev_close"] == 100.0 and top["volume"] == 100
+    # The candle timestamp renders clean IST (no +05:30 offset).
+    assert "+05:30" not in top["timestamp"] and top["timestamp"].startswith("2026-06-15 ")
+    # BANKNIFTY had NO prevday reference row → prev_close falls back to the
+    # reconstruction from its candle's own pct_change (190 / (1 + -5/100) == 200.0,
+    # exact to float precision), never fabricated and never gratuitously null (the
+    # join-miss resilience path).
+    bank = next(g for g in gainers if g["groww_symbol"] == "NSE-BANKNIFTY")
+    assert bank["prev_close"] == pytest.approx(200.0) and bank["pct_change"] == -5.0
+
+
+def test_live_movers_without_prevday_partition_reconstructs_prev_close(tmp_path) -> None:
+    """No live/prevday partition → prev_close is reconstructed from close + pct_change.
+
+    The exact reconstruction (``close / (1 + pct_change/100)``) is the prior close the
+    candle's own pct_change was computed against — so the reference column is populated
+    (not gratuitously null) even with no prev-day lake, and ranking still works.
+    """
+    _seed_movers(
+        tmp_path,
+        prev_closes={"NSE:IDX:NIFTY": Decimal("100"), "NSE:IDX:BANKNIFTY": Decimal("200")},
+        with_prevday=False,
+    )
+    assert _latest_prevday_partition(tmp_path) is None
+    payload = live_movers(tmp_path, top_n=5)
+    assert payload["ranked_instruments"] == 2
+    by_symbol = {g["groww_symbol"]: g for g in payload["gainers"]}
+    # 110 / (1 + 10/100) ≈ 100.0 ; 190 / (1 + -5/100) ≈ 200.0 — reconstructed to float
+    # precision (the reconstruction is approximate, NOT bit-exact like the stored join).
+    assert by_symbol["NSE-NIFTY"]["prev_close"] == pytest.approx(100.0)
+    assert by_symbol["NSE-BANKNIFTY"]["prev_close"] == pytest.approx(200.0)
+    assert payload["gainers"][0]["groww_symbol"] == "NSE-NIFTY"
+
+
+def test_live_movers_prev_close_null_when_total_wipeout(tmp_path) -> None:
+    """A ``pct_change == -100`` (close → 0) → prev_close honestly NULL (NULLIF guard).
+
+    The reconstruction ``close / (1 + pct_change/100)`` would divide by zero (an
+    infinite prior close); ``NULLIF`` degrades it to NULL rather than raising — the one
+    ranked row whose prev_close cannot be derived (covers the ``_jsonify(None)`` path).
+    """
+    ts = datetime(2026, 6, 15, 9, 45, tzinfo=UTC)
+    write_live_candles(
+        {"NSE:IDX:WIPEOUT": [_candle(ts, o="1", h="1", low="0", c="0", volume=5)]},
+        lake_root=tmp_path,
+        built_run_id="r1",
+        prev_closes={"NSE:IDX:WIPEOUT": Decimal("10")},  # 0 vs 10 → pct_change = -100
+    )
+    payload = live_movers(tmp_path, top_n=5)
+    assert payload["ranked_instruments"] == 1
+    row = payload["losers"][0]
+    assert row["pct_change"] == -100.0 and row["close"] == 0.0 and row["prev_close"] is None
+
+
+def test_live_movers_excludes_null_pct_change(tmp_path) -> None:
+    """An instrument with no prior close (null pct_change) is counted but NOT ranked."""
+    # Only NIFTY gets a prev_close → BANKNIFTY's pct_change is null and is unrankable.
+    _seed_movers(tmp_path, prev_closes={"NSE:IDX:NIFTY": Decimal("100")}, with_prevday=False)
+    payload = live_movers(tmp_path, top_n=5)
+    assert payload["total_instruments"] == 2 and payload["ranked_instruments"] == 1
+    assert [g["groww_symbol"] for g in payload["gainers"]] == ["NSE-NIFTY"]
+    assert [low["groww_symbol"] for low in payload["losers"]] == ["NSE-NIFTY"]
+
+
+def test_live_movers_top_n_is_clamped(tmp_path) -> None:
+    """A requested top_n above the cap is clamped to 100 (bounded payload)."""
+    _seed_movers(tmp_path, prev_closes={"NSE:IDX:NIFTY": Decimal("100")}, with_prevday=False)
+    payload = live_movers(tmp_path, top_n=9999)
+    assert payload["top_n"] == 100
+
+
+def test_live_movers_reads_only_latest_partition(tmp_path) -> None:
+    """Two candle session partitions → only the newest is ranked (bounded read)."""
+    old_ts = datetime(2026, 6, 12, 9, 45, tzinfo=UTC)
+    write_live_candles(
+        {"NSE:IDX:NIFTY": [_candle(old_ts, o="50", h="60", low="49", c="60")]},
+        lake_root=tmp_path,
+        built_run_id="r0",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("50")},
+    )
+    _seed_movers(tmp_path, prev_closes={"NSE:IDX:BANKNIFTY": Decimal("200")}, with_prevday=False)
+    latest = _latest_candle_partition(tmp_path)  # narrow the Optional before .stem access
+    assert latest is not None and latest.stem == "dt=2026-06-15"
+    payload = live_movers(tmp_path, top_n=5)
+    # Only the 2026-06-15 partition is scanned → no NIFTY-on-2026-06-12 row.
+    symbols = {g["groww_symbol"] for g in payload["gainers"]}
+    assert symbols == {"NSE-BANKNIFTY"} and payload["session_date"] == "2026-06-15"
+
+
+def test_live_movers_latest_minute_per_instrument(tmp_path) -> None:
+    """When an instrument has multiple minutes, the NEWEST candle's pct_change ranks."""
+    early = datetime(2026, 6, 15, 9, 45, tzinfo=UTC)
+    late = datetime(2026, 6, 15, 9, 46, tzinfo=UTC)
+    write_live_candles(
+        {
+            "NSE:IDX:NIFTY": [
+                _candle(early, o="100", h="105", low="99", c="105"),
+                _candle(late, o="105", h="120", low="104", c="120"),
+            ]
+        },
+        lake_root=tmp_path,
+        built_run_id="r1",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("100")},
+    )
+    payload = live_movers(tmp_path, top_n=5)
+    # The 09:46 candle (close 120 vs prev 100 → +20%) ranks, not the 09:45 (+5%).
+    assert payload["gainers"][0]["pct_change"] == 20.0
+    assert payload["gainers"][0]["timestamp"].startswith("2026-06-15 ")

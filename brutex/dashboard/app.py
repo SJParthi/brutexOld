@@ -78,8 +78,10 @@ from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.live_connections import read_connections
 from brutex.dashboard.live_lake_view import (
     LIVE_TABLES,
+    MOVERS_EMPTY_NOTE,
     TICKS_EMPTY_NOTE,
     live_columns,
+    live_movers,
     live_table,
     live_tables_summary,
     query_live_table,
@@ -3417,6 +3419,41 @@ def build_app(
                 }
             )
         return JSONResponse(await run_in_threadpool(lambda: ticks_flowing(lake)))
+
+    @app.get("/api/v1/live/movers")
+    async def api_live_movers(
+        top_n: int = Query(default=25, ge=1, le=100),
+    ) -> JSONResponse:
+        """GET /api/v1/live/movers — top live gainers / losers by derived ``pct_change``.
+
+        Reads the NEWEST ``live/candles_1m`` Parquet partition (a bounded,
+        O(1)-in-history read; mirrors :func:`ticks_flowing`), takes each instrument's
+        LATEST minute candle, and ranks by the merged ``pct_change`` derived statistic
+        (vs the prior session's daily close; DEC-LIVE-CANDLE-DERIVED-PCT-001). Each row
+        also carries the intraday ``pct_from_open`` AND the **prev-day reference**
+        ``prev_close`` joined from the newest ``live/prevday`` partition
+        (DEC-LIVE-PREVDAY-LAKE-001) — so the operator sees BOTH newly-merged live
+        datasets that previously lived only in ``/db``. An absent/empty candle lake →
+        empty ``gainers`` / ``losers`` + an honest note, never fabricated movers (Golden
+        Rule #1). No store wired → the same honest empty payload. Thin wrapper over
+        :func:`brutex.dashboard.live_lake_view.live_movers`
+        (DEC-LIVE-DASH-MOVERS-PARITY-001; reads the lake directly, never imports
+        :mod:`brutex.live`, DEC-LIVE-DECOUPLE-001).
+        """
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse(
+                {
+                    "gainers": [],
+                    "losers": [],
+                    "session_date": None,
+                    "total_instruments": 0,
+                    "ranked_instruments": 0,
+                    "top_n": top_n,
+                    "note": MOVERS_EMPTY_NOTE,
+                }
+            )
+        return JSONResponse(await run_in_threadpool(lambda: live_movers(lake, top_n=top_n)))
 
     @app.get("/api/v1/live/tables")
     async def api_live_tables() -> JSONResponse:
