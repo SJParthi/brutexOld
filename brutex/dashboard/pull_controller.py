@@ -85,11 +85,7 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
-from brutex.orchestrator.parallel import (
-    DEFAULT_LATENCY_BUDGET_S,
-    PoolRunParallel,
-    workers_to_saturate,
-)
+from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
@@ -703,26 +699,27 @@ _RateHooks = tuple[
 
 
 def _spot_run_parallel(controller: RateController | None) -> RunParallel | None:
-    """Size the spot fan-out pool the SAME way as every other Groww pull (uniform).
+    """Give the spot pull the IDENTICAL default pool the expiry/contract pulls use.
 
-    DEC-DHAN-PARALLEL-INGEST-001 + DEC-SPOT-POOL-UNIFORM-001. The historical/spot
-    pull uses the IDENTICAL Little's-law sizing as the expiry/contract pulls —
-    ``workers_to_saturate(current_rps, DEFAULT_LATENCY_BUDGET_S)`` (bounded by the
-    shared :data:`~brutex.orchestrator.parallel.MAX_FANOUT` = 32) — NO spot-special
-    widening. The earlier spot-only 96-wide pool (DEC-SPOT-POOL-WIDTH-15S-001,
-    reverted here) HUNG: the ONE shared ``GrowwAPI`` SDK that every pull funnels
-    through does not tolerate ~96 simultaneous connections, and historical is the
-    only pull that ever pushed that high. Expiries/contracts have always worked on
-    this modest pool, so spot uses it too. ``None`` controller (dry-run /
-    injected-factory pull) → ``None`` here, so ``run_groww_spot_ingest`` uses its
-    default pool. The per-second issue rate is the shared token bucket's job (Rule
-    #6), unchanged. This is the pure, covered sizing seam; the live controller
-    construction is the ``# pragma: no cover`` part.
+    DEC-DHAN-PARALLEL-INGEST-001 + DEC-SPOT-POOL-UNIFORM-001. There is NO spot-special
+    sizing: a live spot pull gets the same bounded
+    :class:`~brutex.orchestrator.parallel.PoolRunParallel` (default
+    :data:`~brutex.orchestrator.parallel.DEFAULT_MAX_WORKERS` = 8) that
+    ``get_expiries`` / ``get_contracts`` have always used against the SAME shared
+    ``GrowwAPI`` SDK — the modest concurrency that SDK reliably tolerates. The
+    spot-only 96-wide pool (DEC-SPOT-POOL-WIDTH-15S-001, reverted) HUNG it; the
+    operator's cross-check is decisive — expiries/contracts run fine on 8 workers
+    through that same SDK, so spot uses 8 too (not a special number). ``None``
+    controller (dry-run / injected-factory pull) → ``None`` here, so
+    ``run_groww_spot_ingest`` uses its own default pool. The per-second issue rate is
+    the shared token bucket's job (Rule #6); the REAL per-call latency is now logged
+    (``groww.call``, DEC-GROWW-CALL-LATENCY-LOG-001) so throughput is measured, not
+    assumed. This is the pure, covered sizing seam; the live controller construction
+    is the ``# pragma: no cover`` part.
     """
     if controller is None:
         return None
-    workers = workers_to_saturate(controller.current_rps or 8.0, DEFAULT_LATENCY_BUDGET_S)
-    return PoolRunParallel(max_workers=workers)
+    return PoolRunParallel()
 
 
 def _build_live_controller() -> RateController:

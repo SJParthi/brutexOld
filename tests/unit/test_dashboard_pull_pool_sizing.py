@@ -22,13 +22,9 @@ silences the friend-access warning, per the codebase's whitebox-test convention)
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
-from brutex.adapters.rate_common import CEILING_RPS, RateController
+from brutex.adapters.rate_common import RateController
 from brutex.dashboard.pull_controller import _spot_run_parallel
-from brutex.orchestrator.parallel import (
-    DEFAULT_LATENCY_BUDGET_S,
-    PoolRunParallel,
-    workers_to_saturate,
-)
+from brutex.orchestrator.parallel import DEFAULT_MAX_WORKERS, PoolRunParallel
 
 
 class TestSpotPoolSizing:
@@ -37,21 +33,19 @@ class TestSpotPoolSizing:
         # (run_groww_spot_ingest then uses its own default PoolRunParallel).
         assert _spot_run_parallel(None) is None
 
-    def test_real_controller_sizes_pool_uniformly(self) -> None:
-        # The default RateController ceiling is the vendor-neutral CEILING_RPS (5).
-        controller = RateController(sleep=lambda _s: None)
-        pool = _spot_run_parallel(controller)
-        assert isinstance(pool, PoolRunParallel)
-        # Sized to saturate the controller's current rate × the GLOBAL latency
-        # budget — identical to the expiry/contract pulls (no spot-special widening).
-        expected = workers_to_saturate(CEILING_RPS, DEFAULT_LATENCY_BUDGET_S)
-        assert pool._max_workers == expected
-        assert expected == 15  # 5 r/s × 3 s = 15
-
-    def test_production_ceiling_stays_within_the_shared_cap(self) -> None:
-        # At the live Groww 8 r/s ceiling, 8 × 3 = 24 — well under MAX_FANOUT (32),
-        # the modest concurrency the shared GrowwAPI SDK is known to tolerate.
+    def test_live_pull_uses_the_same_default_pool_as_expiries(self) -> None:
+        # NO spot-special sizing: a live spot pull gets the IDENTICAL default
+        # PoolRunParallel (DEFAULT_MAX_WORKERS=8) that get_expiries/get_contracts use
+        # against the same shared GrowwAPI SDK — the modest concurrency it tolerates.
         controller = RateController(ceiling_rps=8.0, sleep=lambda _s: None)
         pool = _spot_run_parallel(controller)
         assert isinstance(pool, PoolRunParallel)
-        assert pool._max_workers == 24
+        assert pool._max_workers == DEFAULT_MAX_WORKERS == 8
+
+    def test_pool_is_not_rate_sized(self) -> None:
+        # Even at a different controller ceiling the pool stays the default 8 — it is
+        # NOT widened by rate/latency (the reverted #768 behaviour that hung the SDK).
+        controller = RateController(ceiling_rps=3.0, sleep=lambda _s: None)
+        pool = _spot_run_parallel(controller)
+        assert isinstance(pool, PoolRunParallel)
+        assert pool._max_workers == DEFAULT_MAX_WORKERS == 8

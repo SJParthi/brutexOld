@@ -10,6 +10,7 @@ from collections.abc import Mapping
 import pytest
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.errors import GrowwRateLimitError, GrowwTimeoutError
+from structlog.testing import capture_logs
 
 
 # Fakes named like the SDK exceptions so from_groww_exception maps them.
@@ -64,6 +65,42 @@ def test_happy_path_returns_payload_one_call() -> None:
     )
     assert out == {"candles": [[1, 2, 3, 4, 5, 6, None]]}
     assert sdk.calls == 1
+
+
+def test_call_logs_real_per_call_latency() -> None:
+    """Every successful Groww call logs its REAL wall-clock latency (DEC-GROWW-CALL-LATENCY-LOG-001).
+
+    So the operator SEES the true per-call response time live in /logs instead of it
+    being back-derived — the measurement that ends the "is it 15 s or stuck?" guessing.
+    """
+    sdk = _FakeSDK(payload={"candles": []})
+    times = iter([10.0, 10.5])  # start, end → 0.5 s = 500 ms
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None, clock=lambda: next(times))
+    with capture_logs() as logs:
+        client.historical_candles(
+            exchange="NSE",
+            segment="INDEX",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start="2020-01-01 09:15:00",
+            end="2020-06-29 15:30:00",
+        )
+    calls = [e for e in logs if e["event"] == "groww.call"]
+    assert len(calls) == 1
+    assert calls[0]["method"] == "historical_candles"
+    assert calls[0]["attempt"] == 1
+    assert calls[0]["elapsed_ms"] == 500.0
+
+
+def test_call_latency_log_labels_each_method() -> None:
+    """The latency log tags WHICH Groww call it timed (historical / expiries / contracts)."""
+    sdk = _FakeSDK(payload={"expiries": []})
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None, clock=lambda: 0.0)
+    with capture_logs() as logs:
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+        client.contracts(exchange="NSE", underlying_symbol="NIFTY", expiry_date="2024-01-25")
+    methods = [e["method"] for e in logs if e["event"] == "groww.call"]
+    assert methods == ["get_expiries", "get_contracts"]
 
 
 def test_timeout_then_success_retries() -> None:

@@ -27,15 +27,25 @@ client holds no per-symbol state.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+import structlog
 
 from brutex.adapters.groww.errors import (
     GrowwRateLimitError,
     from_groww_exception,
     is_retryable,
 )
+
+#: Per-call observability (DEC-GROWW-CALL-LATENCY-LOG-001): every physical Groww REST
+#: call logs its wall-clock latency at INFO (``groww.call``) so the operator can SEE
+#: the real per-call response time live in ``/logs`` — instead of back-deriving it.
+#: Covers ALL three calls (historical / expiries / contracts), so the historical
+#: pull's true latency is finally measurable rather than assumed.
+_LOG = structlog.get_logger("brutex.adapters.groww.client")
 
 
 def _noop_pace() -> None:
@@ -146,8 +156,13 @@ class GrowwClient:
     #: behaviour for unit tests + dry-runs; the LIVE pull build sites inject
     #: ``GROWW_PULL_CALL_TIMEOUT_S`` so a stalled SDK call can never hang the pull.
     call_timeout_seconds: float | None = None
+    #: Wall-clock source for the per-call latency log (DEC-GROWW-CALL-LATENCY-LOG-001);
+    #: injected in tests for deterministic ``elapsed_ms`` assertions.
+    clock: Callable[[], float] = time.perf_counter
 
-    def _call(self, fn: Callable[[], Mapping[str, object]]) -> Mapping[str, object]:
+    def _call(
+        self, fn: Callable[[], Mapping[str, object]], *, label: str = ""
+    ) -> Mapping[str, object]:
         """Run *fn* through the adaptive limiter: pace → retry retryable → decrement/recover.
 
         Every physical call acquires a token (:attr:`pace`), then on a RETRYABLE
@@ -165,6 +180,7 @@ class GrowwClient:
         while True:
             attempt += 1
             self.pace()
+            started = self.clock()
             try:
                 # Bound EVERY physical call by the wall-clock deadline so a stalled
                 # connection can never freeze the pull (DEC-GROWW-PULL-CALL-DEADLINE-001);
@@ -189,6 +205,15 @@ class GrowwClient:
                 raise err from exc
             else:
                 self.on_success()  # recover the rate up on a clean call
+                # Per-call latency observability (DEC-GROWW-CALL-LATENCY-LOG-001): the
+                # REAL response time of THIS Groww REST call, so the operator can SEE
+                # it live in /logs instead of it being back-derived/assumed.
+                _LOG.info(
+                    "groww.call",
+                    method=label,
+                    attempt=attempt,
+                    elapsed_ms=round((self.clock() - started) * 1000.0, 1),
+                )
                 return result
 
     def historical_candles(
@@ -210,7 +235,8 @@ class GrowwClient:
                 start_time=start,
                 end_time=end,
                 candle_interval=interval,
-            )
+            ),
+            label="historical_candles",
         )
 
     def expiries(
@@ -235,7 +261,7 @@ class GrowwClient:
             kwargs["year"] = year
         if month is not None:
             kwargs["month"] = month
-        return self._call(lambda: self.sdk.get_expiries(**kwargs))
+        return self._call(lambda: self.sdk.get_expiries(**kwargs), label="get_expiries")
 
     def contracts(
         self, *, exchange: str, underlying_symbol: str, expiry_date: str
@@ -244,7 +270,8 @@ class GrowwClient:
         return self._call(
             lambda: self.sdk.get_contracts(
                 exchange=exchange, underlying_symbol=underlying_symbol, expiry_date=expiry_date
-            )
+            ),
+            label="get_contracts",
         )
 
 
