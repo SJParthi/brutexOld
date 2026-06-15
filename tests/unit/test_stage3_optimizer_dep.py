@@ -2,7 +2,7 @@
 
 The BIPOP-CMA-ES refinement (ADR-0007 / DEC-STAGE3-DESIGN-LOCK-001) hashes the
 pycma version into every refinement-run identity, so the dependency contract is
-load-bearing: the EXACT pin (``cma==3.4.0``) and same-environment seed
+load-bearing: the EXACT pin (``cma==4.4.4``) and same-environment seed
 determinism (condition 5) are pinned here, in CI, on every push. The CI unit job
 installs the ``[optimize]`` extra so these tests RUN rather than silently skip
 (the DEC-DASHBOARD-CI-UNMASK-001 masking lesson).
@@ -23,7 +23,7 @@ cma = pytest.importorskip("cma")
 #: environment (auto-bumped or hand-upgraded optimizer) must fail loudly here,
 #: because a version change silently changes search trajectories and
 #: invalidates every cached refinement-run identity.
-_PINNED_VERSION = "3.4.0"
+_PINNED_VERSION = "4.4.4"
 
 
 def _sphere(x: list[float]) -> float:

@@ -201,7 +201,7 @@ the indicator precompute (Stage 1A) and the bitmask AND (Stage 1B).
 | GPU (Stage 1B only) | Metal Shading Language | 4.0 | 32-thread simdgroups (WWDC20) |
 | BLAS | accelerate-src | 0.3 | Apple AMX coprocessor |
 | ~~Outer optimizer~~ | ~~Optuna~~ | — | NOT adopted — dead dependency as specified (ADR-0007 condition 1) |
-| Inner optimizer | pycma | 3.4.0 (pinned; Renovate carve-out per ADR-0007 condition 9) | Hansen BIPOP-CMA-ES |
+| Inner optimizer | pycma | 4.4.4 (pinned; Renovate carve-out per ADR-0007 condition 9) | Hansen BIPOP-CMA-ES |
 | Data | Polars | 1.18 | Columnar AArch64 native (was 0.20; bumped to stable 1.x) |
 | Storage | Parquet + Zstd 9 | Arrow 18 (arrow-rs v53) | Industry standard |
 | Query | DuckDB | 1.1 | Ad-hoc SQL on results |
