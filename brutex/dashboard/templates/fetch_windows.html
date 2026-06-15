@@ -180,9 +180,10 @@ function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 function winStatus(r) {
   const v = String(r.status == null ? "" : r.status).toUpperCase();
   const color = v === "SUCCESS" ? "#34d399" : v === "FAILED" ? "#f87171" : "#9aa4b2";
-  /* EMPTY rows show the CONSECUTIVE clean-empty streak vs the promotion
-     threshold (window_ledger R1): an interleaved FAILED resets the streak, so
-     "attempts 5, EMPTY 1/3" is by-design retrying, not a stuck row. */
+  /* EMPTY rows show the genuine clean-empty streak vs the promotion threshold
+     (window_ledger R1): an interleaved FAILED (429/timeout) PRESERVES the streak
+     (a rate-limit is not evidence of data), only a SUCCESS resets it, so
+     "attempts 5, EMPTY 2/3" is by-design retrying, not a stuck row. */
   const streak = v === "EMPTY" && r.empty_streak != null
     ? ' <span style="color:#9aa4b2;font-weight:400;">' + esc(r.empty_streak) + "/" + esc(emptyThreshold) + "</span>"
     : "";

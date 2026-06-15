@@ -180,17 +180,47 @@ class TestEmptyStreakR1:
         assert record.empty_streak == 1
         assert ledger.is_skippable(_key()) is False
 
-    def test_a_non_empty_outcome_resets_the_streak(self) -> None:
+    def test_a_failed_outcome_preserves_the_empty_streak(self) -> None:
+        # DEC-EMPTY-STREAK-RATELIMIT-001 (R2): a 429 / timeout between empties is NOT
+        # evidence the window has data, so it must PRESERVE the genuine-empty streak
+        # (the old behaviour RESET it, which is why a pre-listing window never strung
+        # 3 clean empties together under a 429 storm → re-fetched forever → STUCK).
         ledger = WindowLedger()
         ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 1
         ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 2
-        # A transient FAIL between empties RESETS the streak to 0.
-        ledger.record(_key(), raw_bars=0, error_type="DhanTimeoutError", bars_appended=0, now=_NOW)
-        assert ledger.records()[0].empty_streak == 0
-        # So the next EMPTY is streak 1 again — three MORE consecutive empties needed.
+        # A transient FAIL between empties now PRESERVES the streak (stays 2).
+        ledger.record(
+            _key(), raw_bars=0, error_type="GrowwRateLimitError", bars_appended=0, now=_NOW
+        )
+        assert ledger.records()[0].empty_streak == 2
+        # So the NEXT clean empty reaches the threshold and the window finally settles.
         status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
-        assert status == "EMPTY"
-        assert ledger.records()[0].empty_streak == 1
+        assert status == SKIPPED
+        assert ledger.records()[0].empty_streak == EMPTY_TERMINAL_THRESHOLD
+        assert ledger.is_skippable(_key()) is True
+
+    def test_pull_converges_under_a_429_storm(self) -> None:
+        # The operator's exact scenario: a genuinely-empty (pre-listing) window that
+        # is 429-throttled between every clean empty STILL converges to SKIPPED — the
+        # full universe pull can finish instead of re-fetching it forever.
+        ledger = WindowLedger()
+        outcomes = [None, "GrowwRateLimitError", None, "GrowwRateLimitError", None]
+        status = ""
+        for err in outcomes:
+            status = ledger.record(_key(), raw_bars=0, error_type=err, bars_appended=0, now=_NOW)
+        assert status == SKIPPED  # 3 CLEAN empties reached despite 2 interleaved 429s
+        assert ledger.is_skippable(_key()) is True
+
+    def test_real_data_after_empties_is_never_masked(self) -> None:
+        # The pull-until-success contract: a window that returns EMPTY twice then
+        # finally returns BARS must record SUCCESS (data wins; streak resets), never
+        # a premature SKIPPED.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 1
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 2
+        status = ledger.record(_key(), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        assert status == SUCCESS
+        assert ledger.records()[0].empty_streak == 0
 
     def test_three_consecutive_empties_still_promote(self) -> None:
         ledger = WindowLedger()

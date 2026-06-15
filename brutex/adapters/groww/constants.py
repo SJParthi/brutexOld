@@ -164,6 +164,17 @@ GROWW_RATE_LIMIT_PER_MIN: Final[int] = 500
 #: rate_common.CEILING_RPS; CLI 10 via GROWW_RATE_LIMIT_RPS_UNVERIFIED).
 GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
 
+#: Hard per-call wall-clock deadline (seconds) for a single historical-candles SDK
+#: call — the pull FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001). The Groww
+#: ``get_historical_candles`` call has no inherent timeout, so a stalled connection
+#: would hang the whole historical pull forever. The live pull build sites inject
+#: this into :class:`~brutex.adapters.groww.client.GrowwClient.call_timeout_seconds`
+#: so any call exceeding it raises a retryable timeout (re-issued by the bounded
+#: retry loop; a persistently-stalled window FAILS + re-attempts next pull) instead
+#: of freezing. 45 s is generous for a single ≤180-day daily window yet bounds a
+#: dead socket to seconds, not forever. NOT a vendor-documented limit.
+GROWW_PULL_CALL_TIMEOUT_S: Final[float] = 45.0
+
 __all__ = [
     "BRUTE_FORCE_INDEX_SYMBOLS",
     "CHUNK_WINDOW_30D_INTERVALS",
@@ -179,6 +190,7 @@ __all__ = [
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
     "GROWW_OPTION_COVERAGE_MARKET",
+    "GROWW_PULL_CALL_TIMEOUT_S",
     "GROWW_RATE_LIMIT_PER_MIN",
     "GROWW_RATE_LIMIT_RPS_CEILING",
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",

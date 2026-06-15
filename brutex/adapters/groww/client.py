@@ -53,6 +53,46 @@ def _noop_sleep(_seconds: float) -> None:  # pragma: no cover — replaced in te
     time.sleep(_seconds)
 
 
+def run_with_deadline(
+    fn: Callable[[], Mapping[str, object]], seconds: float
+) -> Mapping[str, object]:
+    """Run *fn* in a daemon thread, raising a timeout if it blows the wall-clock deadline.
+
+    THE HISTORICAL-PULL FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001). The Groww
+    ``get_historical_candles`` SDK call carries no inherent wall-clock bound, so a
+    stalled connection (half-open socket, server not responding) would block the
+    pull worker FOREVER — the :class:`GrowwClient` retry loop cannot help because it
+    only fires on a *raised* error, and a hung call never raises. This caps EVERY
+    call: if *fn* has not returned within *seconds*, raise a :class:`TimeoutError`
+    whose message carries the ``deadline exceeded`` hint, so
+    :func:`~brutex.adapters.groww.errors.from_groww_exception` classifies it as a
+    retryable :class:`~brutex.adapters.groww.errors.GrowwTimeoutError`. The bounded
+    retry loop then re-issues it; a persistently-stalled window finally FAILS (and
+    is re-attempted next pull) instead of freezing the whole pull. The abandoned
+    worker is a daemon — it dies with the process and never blocks shutdown.
+    """
+    import threading
+
+    result: dict[str, Mapping[str, object]] = {}
+    failure: dict[str, Exception] = {}
+    done = threading.Event()
+
+    def _runner() -> None:
+        try:
+            result["value"] = fn()
+        except Exception as exc:  # re-raised on the caller thread below (any SDK error)
+            failure["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_runner, name="groww-pull-call", daemon=True).start()
+    if not done.wait(seconds):
+        raise TimeoutError(f"Groww historical pull call deadline exceeded ({seconds:g}s)")
+    if "error" in failure:
+        raise failure["error"]
+    return result["value"]
+
+
 @runtime_checkable
 class GrowwSDK(Protocol):
     """The subset of the ``growwapi.GrowwAPI`` surface BruteX calls.
@@ -101,6 +141,11 @@ class GrowwClient:
     max_attempts: int = 6
     backoff_seconds: float = 0.5
     rate_limit_backoff_seconds: float = 2.0
+    #: Hard per-call wall-clock deadline (seconds) — the historical-pull FREEZE GUARD
+    #: (DEC-GROWW-PULL-CALL-DEADLINE-001). ``None`` (the default) keeps the bare
+    #: behaviour for unit tests + dry-runs; the LIVE pull build sites inject
+    #: ``GROWW_PULL_CALL_TIMEOUT_S`` so a stalled SDK call can never hang the pull.
+    call_timeout_seconds: float | None = None
 
     def _call(self, fn: Callable[[], Mapping[str, object]]) -> Mapping[str, object]:
         """Run *fn* through the adaptive limiter: pace → retry retryable → decrement/recover.
@@ -121,7 +166,14 @@ class GrowwClient:
             attempt += 1
             self.pace()
             try:
-                result = fn()
+                # Bound EVERY physical call by the wall-clock deadline so a stalled
+                # connection can never freeze the pull (DEC-GROWW-PULL-CALL-DEADLINE-001);
+                # a timeout raises → classified retryable → handled by this same loop.
+                result = (
+                    fn()
+                    if self.call_timeout_seconds is None
+                    else run_with_deadline(fn, self.call_timeout_seconds)
+                )
             except Exception as exc:  # broad: any SDK error → neutral GrowwError
                 err = from_groww_exception(exc)
                 if isinstance(err, GrowwRateLimitError):

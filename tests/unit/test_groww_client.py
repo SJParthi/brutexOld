@@ -232,3 +232,78 @@ def test_expiries_forwards_both_year_and_month() -> None:
         exchange="NSE", underlying_symbol="NIFTY", year=2024, month=3
     )
     assert sdk.expiry_kwargs["year"] == 2024 and sdk.expiry_kwargs["month"] == 3
+
+
+# ── Historical-pull FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001) ──────────
+
+
+class TestCallDeadline:
+    """A stalled SDK call is bounded by ``call_timeout_seconds`` — the pull never freezes."""
+
+    def test_stalled_call_times_out_instead_of_freezing(self) -> None:
+        import threading
+
+        from brutex.adapters.groww.client import GrowwClient
+
+        release = threading.Event()
+
+        class _HangingSDK:
+            calls = 0
+
+            def get_historical_candles(self, **_kw: object) -> Mapping[str, object]:
+                type(self).calls += 1
+                release.wait(5)  # would block ~forever without the deadline guard
+                return {"candles": []}
+
+            def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+                return {}  # GrowwSDK Protocol conformance only — never called by this test
+
+            def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+                return {}  # GrowwSDK Protocol conformance only — never called by this test
+
+        sdk = _HangingSDK()
+        client = GrowwClient(
+            sdk=sdk, sleep=lambda _s: None, max_attempts=2, call_timeout_seconds=0.05
+        )
+        try:
+            with pytest.raises(GrowwTimeoutError):
+                client.historical_candles(
+                    exchange="NSE",
+                    segment="INDEX",
+                    groww_symbol="NSE-NIFTY",
+                    interval="1day",
+                    start="2020-01-01 09:15:00",
+                    end="2020-06-29 15:30:00",
+                )
+        finally:
+            release.set()  # let the abandoned daemon worker(s) exit
+        # It RETRIED (each attempt hit the deadline), proving the loop handled the
+        # timeout as retryable rather than the call hanging forever.
+        assert _HangingSDK.calls == 2
+
+    def test_fast_call_within_the_deadline_returns_normally(self) -> None:
+        sdk = _FakeSDK(payload={"candles": [[1, 2, 3, 4, 5, 6, None]]})
+        client = GrowwClient(sdk=sdk, sleep=lambda _s: None, call_timeout_seconds=5.0)
+        out = client.historical_candles(
+            exchange="NSE",
+            segment="INDEX",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start="2020-01-01 09:15:00",
+            end="2020-06-29 15:30:00",
+        )
+        assert out == {"candles": [[1, 2, 3, 4, 5, 6, None]]}
+
+    def test_run_with_deadline_propagates_the_underlying_error(self) -> None:
+        from brutex.adapters.groww.client import run_with_deadline
+
+        def _boom() -> Mapping[str, object]:
+            raise ValueError("real failure, not a timeout")
+
+        with pytest.raises(ValueError, match="real failure"):
+            run_with_deadline(_boom, 5.0)
+
+    def test_run_with_deadline_returns_the_value_when_fast(self) -> None:
+        from brutex.adapters.groww.client import run_with_deadline
+
+        assert run_with_deadline(lambda: {"candles": []}, 5.0) == {"candles": []}
