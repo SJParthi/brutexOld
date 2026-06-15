@@ -212,6 +212,12 @@ def test_tables_without_store_are_empty(tmp_path) -> None:
     assert {t["table"]: t["row_count"] for t in tabs} == {"live_ticks": 0, "live_candles_1m": 0}
     page = client.get("/api/v1/live/table/live_ticks").json()
     assert page["total"] == 0 and page["rows"] == []
+    # Schema-when-empty: the column DEFINITIONS show even with no store
+    # (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001).
+    assert "exchange_ts" in page["columns"] and "avg_price" in page["columns"]
+    assert page["note"] == "schema only — no data yet (market closed / feed off)"
+    # An unknown table is still a 400 even with no store.
+    assert client.get("/api/v1/live/table/bogus").status_code == 400
 
 
 def test_tables_with_store_read_the_lake(tmp_path) -> None:
@@ -239,9 +245,12 @@ def test_table_bad_name_is_400(tmp_path) -> None:
 
 
 def test_live_columns_route(tmp_path) -> None:
-    # no store → empty columns
+    # no store → the canonical schema column names (schema-when-empty), incl. merged cols
+    # (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001); an unknown table is still a 400.
     client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
-    assert client.get("/api/v1/live/columns/live_ticks").json()["columns"] == []
+    no_store_cols = client.get("/api/v1/live/columns/live_ticks").json()["columns"]
+    assert "exchange_ts" in no_store_cols and "payload_hash" in no_store_cols
+    assert client.get("/api/v1/live/columns/bogus").status_code == 400
     # with store → real columns; bad name → 400
     lake = tmp_path / "lake"
     (lake / "instruments").mkdir(parents=True)
@@ -255,10 +264,14 @@ def test_live_columns_route(tmp_path) -> None:
 
 
 def test_live_query_route(tmp_path) -> None:
-    # no store → empty page
+    # no store → a schema-only page (canonical columns + note), 0 rows; bad name → 400
+    # (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001).
     client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
     empty = client.get("/api/v1/live/query/live_ticks").json()
     assert empty["total"] == 0 and empty["rows"] == []
+    assert "exchange_ts" in empty["columns"]
+    assert empty["note"] == "schema only — no data yet (market closed / feed off)"
+    assert client.get("/api/v1/live/query/bogus").status_code == 400
     # with store → filter + project + sort
     lake = tmp_path / "lake"
     (lake / "instruments").mkdir(parents=True)

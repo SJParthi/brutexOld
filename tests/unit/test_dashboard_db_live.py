@@ -76,10 +76,28 @@ def test_db_live_tables_without_store_are_zero(tmp_path: Path) -> None:
 
 
 def test_db_live_table_empty_when_no_store(tmp_path: Path) -> None:
-    """No store → an honest empty page for a live table (never a 500)."""
+    """No store → a schema-only page (canonical columns + note), 0 rows, never a 500.
+
+    DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001: even with no lake configured the /db browser
+    surfaces the column DEFINITIONS so the operator can verify the merged columns.
+    """
     client = TestClient(build_app(DashboardState()))
     page = client.get("/api/v1/db/live/table/live_ticks").json()
-    assert page["total"] == 0 and page["rows"] == [] and page["columns"] == []
+    assert page["total"] == 0 and page["rows"] == []
+    assert "exchange_ts" in page["columns"] and "payload_hash" in page["columns"]
+    assert page["note"] == "schema only — no data yet (market closed / feed off)"
+    assert {"name": "avg_price", "type": "DOUBLE"} in page["schema"]
+    # The candles table likewise surfaces its derived-% columns via the route.
+    candles = client.get("/api/v1/db/live/table/live_candles_1m").json()
+    assert candles["total"] == 0 and candles["rows"] == []
+    assert "pct_change" in candles["columns"] and "pct_from_open" in candles["columns"]
+    assert {"name": "pct_change", "type": "DOUBLE"} in candles["schema"]
+
+
+def test_db_live_table_bad_name_without_store_is_400(tmp_path: Path) -> None:
+    """An unknown live table is a 400 even with no store (allowlist enforced)."""
+    client = TestClient(build_app(DashboardState()))
+    assert client.get("/api/v1/db/live/table/bogus").status_code == 400
 
 
 def test_db_live_tables_with_store_read_the_lake(tmp_path: Path) -> None:
@@ -110,19 +128,31 @@ def test_db_live_table_bad_name_is_400(tmp_path: Path) -> None:
 
 
 def test_db_live_columns_route(tmp_path: Path) -> None:
-    """The /db live columns picker: empty without a store, real cols with one, 400 on a bad name."""
+    """The /db live columns picker: schema names without a store, real cols with one, 400 on a bad name."""
     no_store = TestClient(build_app(DashboardState()))
-    assert no_store.get("/api/v1/db/live/columns/live_ticks").json()["columns"] == []
+    no_store_cols = no_store.get("/api/v1/db/live/columns/live_ticks").json()["columns"]
+    # Schema-when-empty: the canonical columns (incl. the merged ones) even with no store.
+    assert "exchange_ts" in no_store_cols and "payload_hash" in no_store_cols
+    assert no_store.get("/api/v1/db/live/columns/bogus").status_code == 400
     client = _wired_client(tmp_path)
     assert "instrument_key" in client.get("/api/v1/db/live/columns/live_ticks").json()["columns"]
     assert client.get("/api/v1/db/live/columns/bogus").status_code == 400
 
 
 def test_db_live_query_route(tmp_path: Path) -> None:
-    """The /db live structured query: empty without a store, filter+project+sort with one, 400 on bad name."""
+    """The /db live structured query: schema without a store, filter+project+sort with one, 400 on bad name."""
     no_store = TestClient(build_app(DashboardState()))
     empty = no_store.get("/api/v1/db/live/query/live_ticks").json()
     assert empty["total"] == 0 and empty["rows"] == []
+    assert "pct_from_open" not in empty["columns"]  # ticks table, not candles
+    assert "exchange_ts" in empty["columns"]
+    assert empty["note"] == "schema only — no data yet (market closed / feed off)"
+    # A projection on the no-store path is honoured + validated.
+    proj = no_store.get("/api/v1/db/live/query/live_ticks?column=seq&column=groww_symbol").json()
+    assert proj["columns"] == ["seq", "groww_symbol"]
+    # An unknown projected column → 400 even with no store.
+    assert no_store.get("/api/v1/db/live/query/live_ticks?column=nope").status_code == 400
+    assert no_store.get("/api/v1/db/live/query/bogus").status_code == 400
     client = _wired_client(tmp_path)
     page = client.get(
         "/api/v1/db/live/query/live_ticks"
