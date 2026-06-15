@@ -16,6 +16,8 @@ from brutex.live.lake import read_live_candles, read_live_ticks
 from brutex.live.rolling import (
     FoldResult,
     RollingTickStore,
+    _read_watermark,
+    _write_watermark,
     fold_segment,
     list_segments,
     make_fold_on_rotate,
@@ -231,6 +233,93 @@ def test_resume_continues_seq_after_clean_restart(tmp_path: Path) -> None:
     rec = store2.append(_snap(200.0), recv_ts=_ts(9), recv_ns=9)
     store2.close()
     assert rec.seq == 3  # no gap, no duplicate across the restart
+
+
+def test_resume_after_fold_prune_continues_global_seq_no_loss(tmp_path: Path) -> None:
+    """REGRESSION (DEC-LIVE-AUTOROLL-001): resume after a rotated segment was
+    folded + PRUNED must continue the GLOBAL seq, never reset it.
+
+    The pre-fix ``open`` rebuilt the seq from line counts of the segments still on
+    disk; once ``seg-000000`` is folded + pruned, that under-counted and reset the
+    seq, so the post-crash ticks re-used seqs already in the lake and were SILENTLY
+    DROPPED by the lake PK ``(capture_run_id, seq, instrument_key)``. This asserts
+    the resumed seq is exact AND every tick survives end-to-end.
+    """
+    base = tmp_path / "live.jsonl"
+    lake = tmp_path / "lake"
+    on_rotate = make_fold_on_rotate(lake_root=lake, capture_run_id="r1", feed_kind="index")
+    # Session 1: 4 ticks, max_lines=2 → seg0 (seq 0,1) rotates, folds + PRUNES;
+    # seg1 (seq 2,3) is the active segment on disk. Crash = close without flush.
+    store = RollingTickStore.open(base, max_lines=2, on_rotate=on_rotate, resume=False)
+    for i in range(4):
+        store.append(_snap(100.0 + i), recv_ts=_ts(i), recv_ns=i + 1)
+    store.close()
+    assert read_live_ticks(lake).shape[0] == 2  # seg0's seq 0,1 folded before prune
+    # Session 2: resume MUST see next_seq == 4 (NOT reset to 2 by the pruned seg0).
+    store2 = RollingTickStore.open(base, max_lines=2, on_rotate=on_rotate, resume=True)
+    assert store2.next_seq == 4
+    rec = store2.append(_snap(200.0), recv_ts=_ts(9), recv_ns=99)
+    assert rec.seq == 4
+    store2.flush_active()
+    store2.close()
+    # Every tick reached the lake exactly once — no reset-collision, no drop.
+    frame = read_live_ticks(lake)
+    seqs = sorted(frame.filter(frame["capture_run_id"] == "r1")["seq"].to_list())
+    assert seqs == [0, 1, 2, 3, 4]
+
+
+def test_resume_empty_active_after_prune_uses_watermark(tmp_path: Path) -> None:
+    """A crash right after a rotation (empty active, prior already pruned) → resume
+    seeds the global seq from the DURABLE watermark, not 0 (DEC-LIVE-AUTOROLL-001).
+
+    Reconstructs the on-disk post-rotation crash state directly: ``seg-000000`` was
+    folded + pruned (gone), ``seg-000001`` is the active segment but EMPTY (no
+    append landed before the crash), and the ``.next-seq`` watermark records that
+    the global next seq is 5.
+    """
+    base = tmp_path / "live.jsonl"
+    seg_dir = segment_dir_for(base)
+    seg_dir.mkdir(parents=True)
+    (seg_dir / "seg-000001.jsonl").write_text("", encoding="utf-8")  # empty active
+    _write_watermark(seg_dir, 5)
+    store = RollingTickStore.open(base, resume=True)
+    assert store.next_seq == 5  # the watermark floor — NOT 0
+    rec = store.append(_snap(1.0), recv_ts=_ts(0), recv_ns=1)
+    store.close()
+    assert rec.seq == 5
+
+
+def test_resume_after_flush_active_prune_seeds_from_watermark(tmp_path: Path) -> None:
+    """``flush_active`` folds + prunes the tail → empty dir; a fresh ``--resume``
+    continues the global seq from the watermark, never re-using a lake seq.
+    """
+    base = tmp_path / "live.jsonl"
+    lake = tmp_path / "lake"
+    on_rotate = make_fold_on_rotate(lake_root=lake, capture_run_id="r1", feed_kind="index")
+    store = RollingTickStore.open(base, max_lines=2, on_rotate=on_rotate, resume=False)
+    for i in range(3):  # seq 0,1 rotate+fold+prune; seq 2 in the active tail
+        store.append(_snap(100.0 + i), recv_ts=_ts(i), recv_ns=i + 1)
+    store.flush_active()  # folds + prunes the tail (seq 2) → segment dir now empty
+    store.close()
+    assert list_segments(segment_dir_for(base)) == []  # every segment pruned
+    # Resume on an EMPTY dir: the durable watermark continues the seq at 3.
+    store2 = RollingTickStore.open(base, max_lines=2, on_rotate=on_rotate, resume=True)
+    assert store2.next_seq == 3
+    store2.append(_snap(200.0), recv_ts=_ts(9), recv_ns=99)
+    store2.flush_active()
+    store2.close()
+    frame = read_live_ticks(lake)
+    seqs = sorted(frame.filter(frame["capture_run_id"] == "r1")["seq"].to_list())
+    assert seqs == [0, 1, 2, 3]  # complete, no loss, no collision
+
+
+def test_read_watermark_missing_and_corrupt_degrade_to_zero(tmp_path: Path) -> None:
+    """The watermark sidecar degrades to 0 when absent or unparseable (round-trips otherwise)."""
+    assert _read_watermark(tmp_path) == 0  # missing file
+    (tmp_path / ".next-seq").write_text("not-an-int", encoding="utf-8")
+    assert _read_watermark(tmp_path) == 0  # corrupt value
+    _write_watermark(tmp_path, 7)
+    assert _read_watermark(tmp_path) == 7  # written value round-trips
 
 
 def test_resume_repairs_torn_tail_in_active_segment(tmp_path: Path) -> None:

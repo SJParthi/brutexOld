@@ -70,10 +70,45 @@ _SEG_GLOB = "seg-*.jsonl"
 _SEG_RE = re.compile(r"^seg-(\d{6,})\.jsonl$")
 _SEG_DIGITS = 6
 
+#: Durable GLOBAL next-``seq`` high-watermark sidecar, written on every rotation +
+#: the final flush. It exists because a rotated segment is folded then **PRUNED**
+#: (the production path), so on resume the segments still on disk no longer hold
+#: the pruned seqs — reconstructing the global ``seq`` from on-disk record counts
+#: would UNDER-count and RESET it, re-emitting seqs already in the lake and
+#: silently dropping the post-crash ticks via the lake PK ``(capture_run_id, seq,
+#: instrument_key)``. The watermark is the durable floor that survives pruning
+#: (DEC-LIVE-AUTOROLL-001 resume fix). It is NOT a ``seg-*.jsonl`` so it is
+#: invisible to :func:`list_segments` / :func:`segment_dir_for`.
+_WATERMARK_NAME = ".next-seq"
+
 
 def _segment_name(ordinal: int) -> str:
     """Render a zero-padded segment filename for *ordinal* (``0`` → ``seg-000000.jsonl``)."""
     return f"seg-{ordinal:0{_SEG_DIGITS}d}.jsonl"
+
+
+def _read_watermark(directory: Path) -> int:
+    """Read the durable global next-``seq`` watermark, or ``0`` when absent/unreadable.
+
+    A missing sidecar (a fresh dir, or a session that predates the watermark) or a
+    corrupt value degrades to ``0`` — the on-disk record seqs then carry the floor,
+    so this is never worse than the pre-watermark behaviour, only better.
+    """
+    try:
+        return int((directory / _WATERMARK_NAME).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _write_watermark(directory: Path, next_seq: int) -> None:
+    """Persist the global next-``seq`` watermark ATOMICALLY (tmp + ``replace``).
+
+    Written before a rotated/flushed segment can be pruned, so even a crash
+    immediately after the prune leaves the correct floor on disk.
+    """
+    tmp = directory / f"{_WATERMARK_NAME}.tmp"
+    tmp.write_text(str(next_seq), encoding="utf-8")
+    tmp.replace(directory / _WATERMARK_NAME)
 
 
 def segment_dir_for(base: str | Path) -> Path:
@@ -280,7 +315,10 @@ class RollingTickStore:
         self._max_lines = max_lines
         self._max_segments = max_segments
         self._on_rotate = on_rotate
-        self._bytes = self._active_path.stat().st_size if self._active_path.exists() else 0
+        # Byte size comes from the active store's in-process counter (seeded with
+        # the file size at open) — no ``stat`` on the per-tick append path. The
+        # line count is a ONE-TIME read at construction (off the hot path).
+        self._bytes = active.bytes_written
         self._lines = len(TickStore.read(self._active_path)) if self._active_path.exists() else 0
         self._rotations = 0
 
@@ -324,21 +362,45 @@ class RollingTickStore:
         directory = segment_dir_for(base)
         directory.mkdir(parents=True, exist_ok=True)
         existing = list_segments(directory) if resume else []
+        # The durable global next-``seq`` floor — survives rotated segments being
+        # folded + PRUNED (the production path), where counting on-disk records
+        # would under-count the pruned ones and RESET seq (lake-PK collision +
+        # silent post-crash tick loss). DEC-LIVE-AUTOROLL-001 resume fix.
+        watermark = _read_watermark(directory) if resume else 0
         if existing:
             last = existing[-1]
             ordinal = _segment_ordinal(last)
-            # The single-segment ``TickStore`` only counts ITS OWN lines, but the
-            # global seq must span every prior segment too. Repair the active
-            # segment's torn tail (open+resume), then re-wrap it with the GLOBAL
-            # ``start_seq`` = ticks in all prior segments + this one's repaired count.
-            prior = sum(len(TickStore.read(seg)) for seg in existing[:-1])
-            local = TickStore.open(last, resume=True)
-            global_seq = prior + local.next_seq
-            local.close()
-            active = TickStore(last, start_seq=global_seq, handle=last.open("a", encoding="utf-8"))
+            # Reconstruct the GLOBAL next seq from the seqs the records THEMSELVES
+            # carry (each line stores its global ``seq``), so a folded+pruned prior
+            # segment can never under-count it. Repair the active segment's torn
+            # tail first, then take ``max(every on-disk record's seq) + 1`` and the
+            # durable watermark, whichever is higher (the watermark is the floor
+            # when the active segment is EMPTY — a crash right after a rotation
+            # whose prior was already pruned).
+            TickStore.open(last, resume=True).close()  # repair torn tail in place
+            seqs = [record.seq for seg in existing for record in TickStore.read(seg)]
+            from_records = (max(seqs) + 1) if seqs else 0
+            global_seq = max(from_records, watermark)
+            active = TickStore(
+                last,
+                start_seq=global_seq,
+                handle=last.open("a", encoding="utf-8"),
+                bytes_written=last.stat().st_size,
+            )
         else:
+            # Empty directory: a fresh start (``resume=False`` → watermark 0) OR
+            # every segment was folded + pruned on a clean shutdown — seed
+            # ``seg-000000`` from the durable watermark so a resumed session never
+            # re-uses a seq already in the lake.
             ordinal = 0
-            active = TickStore.open(directory / _segment_name(0), resume=resume)
+            seg0 = directory / _segment_name(0)
+            seg0_size = seg0.stat().st_size if seg0.exists() else 0
+            active = TickStore(
+                seg0,
+                start_seq=watermark,
+                handle=seg0.open("a", encoding="utf-8"),
+                bytes_written=seg0_size,
+            )
         return cls(
             directory,
             active=active,
@@ -381,7 +443,7 @@ class RollingTickStore:
         if self._lines >= self._max_lines or (self._lines > 0 and self._bytes >= self._max_bytes):
             self._rotate()
         record = self._active.append(snapshot, recv_ts=recv_ts, recv_ns=recv_ns)
-        self._bytes = self._active_path.stat().st_size
+        self._bytes = self._active.bytes_written  # O(1) in-process — no stat syscall per tick
         self._lines += 1
         return record
 
@@ -402,6 +464,10 @@ class RollingTickStore:
         self._bytes = 0
         self._lines = 0
         self._rotations += 1
+        # Persist the durable next-seq floor BEFORE the closed segment can be
+        # pruned, so a crash right after the prune still resumes at the right seq
+        # even though the new segment is still empty (DEC-LIVE-AUTOROLL-001).
+        _write_watermark(self._dir, next_seq)
         _LOG.info("live_segment_rotated", closed=str(closed), opened=str(self._active_path))
         self._handle_closed(closed)
 
@@ -431,6 +497,10 @@ class RollingTickStore:
         """
         if self._lines == 0:
             return None
+        # Record the final next-seq floor before the tail can be folded + pruned,
+        # so a fresh `--resume` after a clean shutdown continues the global seq
+        # (never re-using a seq already in the lake) — DEC-LIVE-AUTOROLL-001.
+        _write_watermark(self._dir, self._active.next_seq)
         self._active.close()
         closed = self._active_path
         self._handle_closed(closed)
