@@ -24,13 +24,21 @@ from __future__ import annotations
 import argparse
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+if TYPE_CHECKING:
+    from brutex.adapters.groww.client import GrowwClient
+    from brutex.adapters.groww.contract_pull import PullTarget
+
+from brutex.adapters.groww.contract_pull import (
+    DEFAULT_EXPIRIES_PER_UNDERLYING,
+    DEFAULT_PULL_RUN_ID,
+)
 from brutex.live.candle_builder import build_minute_candles
 from brutex.live.capture import SnapshotFn, SubscribeFn, TickCapture, _utc_now
 from brutex.live.lake import minute_tick_counts, write_live_candles, write_live_ticks
@@ -82,6 +90,17 @@ class LiveDeps:
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
     configure_logging: Callable[[Path | None], None] = _noop_configure_logging
+    #: Resolve the F&O-eligible underlyings + indices to ``PullTarget`` rows for the
+    #: contracts pull (the ``# pragma`` instrument-master boundary). Injected so the
+    #: ``pull-contracts`` handler is testable with a fake target set. The
+    #: ``default_factory`` returns the real boundary function (a forward reference —
+    #: it is defined below the dataclass); each instance defaults to it.
+    contract_target_resolver: Callable[[], Sequence[PullTarget]] = field(
+        default_factory=lambda: _real_contract_targets
+    )
+    #: Build the LIVE credentialed Groww client paced by the shared 8 r/s + 500/min
+    #: rate controller (the ``# pragma`` TOTP + network boundary). Injected for tests.
+    client_builder: Callable[[], GrowwClient] = field(default_factory=lambda: _real_groww_client)
 
 
 def _real_feed_builder() -> Any:  # pragma: no cover — needs growwapi + creds + network
@@ -156,6 +175,86 @@ def _real_instrument_resolver(  # pragma: no cover — needs the instrument mast
                 }
             )
     return out
+
+
+def _real_contract_targets() -> list[PullTarget]:  # pragma: no cover — needs the master CSV
+    """Resolve the F&O-eligible underlyings + indices to ``PullTarget`` rows.
+
+    Downloads the Groww instrument master (the SSRF-allowlisted CSV, CLAUDE.md §6)
+    and emits one ``(exchange, underlying_symbol)`` target per:
+
+    * every INDEX (``IDX``) row — its ``groww_symbol``'s SYMBOL component is the
+      vendor F&O symbol ``get_expiries``/``get_contracts`` key on
+      (``index_symbol_of``; e.g. ``NSE-NIFTY`` → ``("NSE", "NIFTY")``); and
+    * every F&O-ELIGIBLE single stock — an ``EQ`` row whose ``trading_symbol`` is
+      named as the ``underlying_symbol`` of at least one ``FUT``/``CE``/``PE`` leg
+      (the 212-stock set, CLAUDE.md §6 / ``groww/instruments.py:174``).
+
+    NTM-only reference equities (non-F&O) are EXCLUDED — they have no derivative
+    chain to resolve. This is the same master parse + F&O-eligibility rule the
+    lean-universe ingest uses (CLAUDE.md §1 DEC-INSTRUMENT-UNIVERSE-FAST-001); the
+    legs it produces are LAKE / live-subscription REFERENCE_ONLY (CLAUDE.md §3) —
+    NEVER the brute-force engine.
+    """
+    import csv
+    import urllib.request
+
+    from brutex.adapters.groww.constants import GROWW_INSTRUMENT_CSV_URL
+    from brutex.adapters.groww.contract_pull import PullTarget
+
+    text = urllib.request.urlopen(GROWW_INSTRUMENT_CSV_URL, timeout=30).read().decode("utf-8")  # noqa: S310  # nosec B310
+    rows = list(csv.DictReader(text.splitlines()))
+    fno_underlyings = {
+        (r.get("underlying_symbol") or "").strip().upper()
+        for r in rows
+        if (r.get("instrument_type") or "").strip().upper() in ("FUT", "CE", "PE")
+    }
+    targets: list[PullTarget] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        itype = (row.get("instrument_type") or "").strip().upper()
+        exchange = (row.get("exchange") or "").strip()
+        if itype == "IDX":
+            underlying = (row.get("groww_symbol") or "").strip().upper().partition("-")[2]
+        elif itype == "EQ" and (row.get("trading_symbol") or "").strip().upper() in fno_underlyings:
+            underlying = (row.get("trading_symbol") or "").strip().upper()
+        else:
+            continue
+        pair = (exchange, underlying)
+        if underlying and pair not in seen:
+            seen.add(pair)
+            targets.append(PullTarget(exchange=exchange, underlying_symbol=underlying))
+    return targets
+
+
+def _real_groww_client() -> GrowwClient:  # pragma: no cover — TOTP token + SDK + network
+    """Build the LIVE credentialed Groww client paced by the shared rate controller.
+
+    Mirrors the CLI live pull (``cli.py:2019``) + the dashboard metadata pull's
+    live-client chain: the per-second ceiling is the operator-DIRECTED **8 r/s**
+    (``GROWW_RATE_LIMIT_RPS_CEILING``, DEC-GROWW-RATE-CEILING-8-001) and the HARD
+    **500/min** governor (``GROWW_RATE_LIMIT_PER_MIN``, DEC-GROWW-RATE-PERMIN-001),
+    so the contracts pull can never bypass the limiter (CLAUDE.md §2 Rule 6). The
+    per-second backtesting cap itself stays officially UNVERIFIED — 8 r/s is an
+    operator decision fed as the controller CEILING, not a vendor-verified rate.
+    """
+    from brutex.adapters.groww.auth import GrowwCredentials
+    from brutex.adapters.groww.constants import (
+        GROWW_RATE_LIMIT_PER_MIN,
+        GROWW_RATE_LIMIT_RPS_CEILING,
+    )
+    from brutex.adapters.groww.live import build_live_client
+    from brutex.adapters.rate_common import RateController
+    from brutex.config.credentials import resolve_groww_file_credentials
+
+    file_creds = resolve_groww_file_credentials()
+    creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
+    rate = RateController(
+        ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING, ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN
+    )
+    return build_live_client(
+        creds, pace=rate.pace, on_rate_limit=rate.on_rate_limit, on_success=rate.on_success
+    )
 
 
 def _real_configure_logging(log_file: Path | None) -> None:  # pragma: no cover — global I/O
@@ -553,6 +652,52 @@ def _cmd_verify(args: argparse.Namespace, deps: LiveDeps) -> int:
     return 0 if report.all_requested_ticking else 1
 
 
+def _cmd_pull_contracts(args: argparse.Namespace, deps: LiveDeps) -> int:
+    """Resolve each F&O underlying's nearest-N chain → POPULATE the contracts registry.
+
+    The activation step for the live N-connection sharding (DEC-LIVE-LEG-RESOLUTION-001):
+    today the live capture only subscribes the ~779 spot instruments, so
+    :func:`~brutex.live.plan.plan_connections` always builds ONE connection. This
+    command resolves the F&O option/future legs (``get_expiries`` →
+    ``get_contracts``) and upserts them into the ``registry.duckdb`` cache, so the
+    dashboard's :func:`~brutex.dashboard.live_manifest.build_leg_rows` then emits the
+    legs, the universe crosses the 1000/conn cap, and the connections shard
+    automatically.
+
+    Decoupling (``DEC-LIVE-DECOUPLE-001``): this handler resolves its targets +
+    builds its Groww client through injected :class:`LiveDeps` collaborators (the
+    network is behind their ``# pragma`` defaults) and calls the adapter-layer
+    :func:`~brutex.adapters.groww.contract_pull.pull_contracts_to_registry` — it does
+    NOT import the dashboard. The legs are LAKE / live-subscription REFERENCE_ONLY
+    (CLAUDE.md §3); the brute-force engine is UNTOUCHED.
+    """
+    from brutex.adapters.groww.contract_pull import pull_contracts_to_registry
+    from brutex.data.registry_store import RegistryStore
+
+    deps.configure_logging(args.log_file)
+    targets = deps.contract_target_resolver()
+    client = deps.client_builder()
+    _LOG.info("pull_contracts_start", targets=len(targets), expiries=args.expiries)
+    with RegistryStore.open(Path(args.registry)) as registry:
+        report = pull_contracts_to_registry(
+            client,
+            registry,
+            targets=targets,
+            expiries_per_underlying=args.expiries,
+            run_id=args.run_id,
+        )
+        contracts_total = registry.count_contracts()
+    _LOG.info(
+        "pull_contracts_complete",
+        registry=str(args.registry),
+        **report.to_dict(),
+        registry_contracts=contracts_total,
+    )
+    # Honest exit: non-zero iff EVERY underlying was quarantined (a credential /
+    # connectivity failure) — a partial success (some legs persisted) is still a 0.
+    return 1 if report.underlyings > 0 and report.failures == report.underlyings else 0
+
+
 def _cmd_capture_all(  # pragma: no cover — opens N real websockets (operator's Mac)
     args: argparse.Namespace, deps: LiveDeps
 ) -> int:
@@ -658,6 +803,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
     "lake": _cmd_lake,
     "roll-fold": _cmd_roll_fold,
     "verify": _cmd_verify,
+    "pull-contracts": _cmd_pull_contracts,
 }
 
 
@@ -835,6 +981,26 @@ def _build_parser() -> argparse.ArgumentParser:
     ver.add_argument("--feed", choices=("index", "ltp", "both"), default="both")
     ver.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     ver.add_argument("--resume", action="store_true", help="append to an existing log")
+
+    pc = sub.add_parser(
+        "pull-contracts",
+        help="resolve each F&O underlying's nearest-N expiries/contracts → populate "
+        "the registry (so the live legs subscribe + the N-connection sharding engages)",
+    )
+    pc.add_argument(
+        "--registry", required=True, help="destination registry.duckdb path (the F&O leg cache)"
+    )
+    pc.add_argument(
+        "--expiries",
+        type=int,
+        default=DEFAULT_EXPIRIES_PER_UNDERLYING,
+        help="nearest expiries to subscribe per underlying "
+        f"(default {DEFAULT_EXPIRIES_PER_UNDERLYING}; the near-term active chain)",
+    )
+    pc.add_argument(
+        "--run-id", dest="run_id", default=DEFAULT_PULL_RUN_ID, help="reproducibility run id"
+    )
+    pc.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
 
     return parser
 
