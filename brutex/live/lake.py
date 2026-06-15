@@ -52,7 +52,7 @@ TICK_SCHEMA: dict[str, pl.DataType] = {
     "segment": pl.String(),
     "instrument_key": pl.String(),
     "groww_symbol": pl.String(),
-    "value": pl.Float64(),  # raw observation — FULL precision (only candles snap to 2dp)
+    "value": pl.Float64(),  # price — snapped to 2dp (DEC-SPOT-PRICE-2DP); exact raw kept in raw_json
     "volume": pl.Int64(),
     "open_interest": pl.Int64(),
     "feed_kind": pl.String(),
@@ -135,7 +135,9 @@ def ticks_to_frame(
                     "segment": segment,
                     "instrument_key": instrument_key,
                     "groww_symbol": _groww_symbol(exchange, symbol),
-                    "value": float(quote.value),  # raw — NOT rounded (only candles snap)
+                    "value": float(
+                        round_money(quote.value)
+                    ),  # 2dp snap (DEC-SPOT-PRICE-2DP); raw kept in raw_json
                     "volume": quote.volume,
                     "open_interest": quote.open_interest,
                     "feed_kind": feed_kind,

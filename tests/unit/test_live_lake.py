@@ -45,11 +45,15 @@ def test_split_instrument_key_branches() -> None:
     assert split_instrument_key("NIFTY") == ("", "", "NIFTY")
 
 
-def test_ticks_to_frame_full_precision_and_recv_ns() -> None:
+def test_ticks_to_frame_price_2dp_snapped_and_recv_ns() -> None:
     frame = ticks_to_frame(_records(), capture_run_id="run1", feed_kind="index")
     assert frame.shape[0] == 3
     nifty = frame.filter(frame["instrument_key"] == "NSE:IDX:NIFTY").sort("seq")
-    assert nifty["value"].to_list() == [22500.499, 22510.0]  # RAW — ticks are not rounded
+    # Price column is snapped to 2dp, ROUND_HALF_UP (22500.499 → 22500.50) — the
+    # Dhan/Groww/NSE standard (DEC-SPOT-PRICE-2DP-001). The EXACT raw value is kept
+    # in raw_json for audit/re-parse, so nothing is lost.
+    assert nifty["value"].to_list() == [22500.5, 22510.0]
+    assert "22500.499" in frame["raw_json"].to_list()[0]  # exact raw preserved
     assert nifty["recv_ns"].to_list()[0] == 1718440510000000001  # OURS — nanoseconds
     assert nifty["vendor_ts_ms"].to_list()[0] is None  # flat snapshot has no tsInMillis
     assert nifty["groww_symbol"].to_list()[0] == "NSE-NIFTY"
