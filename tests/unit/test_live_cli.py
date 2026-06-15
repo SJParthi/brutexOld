@@ -733,3 +733,76 @@ def test_cmd_roll_fold_keep_retains_segments(tmp_path) -> None:
 
 def test_fold_feed_is_identity() -> None:
     assert cli._fold_feed("both") == "both"
+
+
+# ─────────────────── capture-all real-time fold args (DEC-LIVE-REALTIME-FOLD-001) ──────
+
+
+def test_capture_all_parser_lake_root_and_roll_args() -> None:
+    """The capture-all parser accepts --lake-root/--roll-max-seconds/--run-id/etc.
+
+    The dashboard appends these flags to the spawned argv; a flag capture-all
+    REJECTS would crash the launch (the #743/#744 lesson). This parses the EXACT
+    dashboard-shaped argv and asserts every value resolves on the namespace.
+    """
+    from brutex.live.__main__ import _build_parser
+
+    args = _build_parser().parse_args(
+        [
+            "capture-all",
+            "--out",
+            "runs/live-ticks.jsonl",
+            "--report",
+            "runs/live-connections.md",
+            "--manifest",
+            "runs/live-manifest.json",
+            "--symbols",
+            "all",
+            "--seconds",
+            "23400",
+            "--log-file",
+            ".brutex-logs/brutex-live.log",
+            "--lake-root",
+            "data/lake",
+            "--roll-max-seconds",
+            "5",
+            "--run-id",
+            "live",
+        ]
+    )
+    assert args.command == "capture-all"
+    assert args.lake_root == "data/lake"
+    assert args.roll_max_seconds == 5.0
+    assert args.run_id == "live"
+
+
+def test_capture_all_parser_defaults_no_lake_root() -> None:
+    """Without --lake-root the new args default (lake_root None, 5s, run-id live)."""
+    from brutex.live.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["capture-all", "--out", "o.jsonl", "--report", "r.md"])
+    assert args.lake_root is None
+    assert args.roll_max_seconds == 5.0
+    assert args.run_id == "live"
+    assert args.roll_max_bytes == 64 * 1024 * 1024
+    assert args.roll_max_lines == 1_000_000
+
+
+def test_capture_all_parser_roll_byte_and_line_overrides() -> None:
+    """--roll-max-bytes / --roll-max-lines override the segment size caps."""
+    from brutex.live.__main__ import _build_parser
+
+    args = _build_parser().parse_args(
+        [
+            "capture-all",
+            "--out",
+            "o.jsonl",
+            "--report",
+            "r.md",
+            "--roll-max-bytes",
+            "2048",
+            "--roll-max-lines",
+            "500",
+        ]
+    )
+    assert args.roll_max_bytes == 2048 and args.roll_max_lines == 500

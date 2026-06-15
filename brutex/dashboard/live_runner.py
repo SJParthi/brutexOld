@@ -272,6 +272,7 @@ class LiveRunner:
         seconds: float,
         symbols: str = "all",
         feed: str = "both",
+        lake_root: str | None = None,
     ) -> LiveStatus:
         """Spawn the N-connection capture subprocess (idempotent — no-op if running).
 
@@ -284,6 +285,13 @@ class LiveRunner:
         (``DEC-LIVE-CREDS-BRIDGE-001``) so the capture authenticates without the
         operator re-exporting them.
 
+        When *lake_root* is given, ``--lake-root <lake_root> --roll-max-seconds 5
+        --run-id live`` is appended so the capture MATERIALISES the live Parquet
+        lake continuously (time-rotate + fold every ~5s — DEC-LIVE-REALTIME-FOLD-001),
+        filling the dashboard's ``live_ticks`` / ``live_candles_1m`` tables in
+        near-real-time. The lake root MUST be the same path the dashboard reads
+        (``instrument_store.path.parent``) or the tables stay empty.
+
         The spawn args are remembered (:attr:`_last_start`) so :meth:`watch` can
         re-spawn on a crash.
         """
@@ -295,6 +303,7 @@ class LiveRunner:
             "seconds": seconds,
             "symbols": symbols,
             "feed": feed,
+            "lake_root": lake_root,
         }
         current = self.status()
         if current.running:
@@ -324,6 +333,13 @@ class LiveRunner:
             "--log-file",
             log_file,
         ]
+        if lake_root is not None:
+            # Near-real-time materialisation: capture-all folds rotated segments to
+            # this lake root every ~5s so the dashboard tables fill live. Only
+            # capture-all-recognised flags are appended (verified by the runner
+            # test feeding the exact argv through the real parser — the #743/#744
+            # "rejected flag crashes the launch" lesson).
+            argv += ["--lake-root", lake_root, "--roll-max-seconds", "5", "--run-id", "live"]
         cred_env = self._cred_env()
         proc = self._popen(argv, {**os.environ, **cred_env})
         self._proc = proc

@@ -599,14 +599,43 @@ def _cmd_capture_all(  # pragma: no cover — opens N real websockets (operator'
         make_subscribe=_make_subscribe,
         snapshot_of=lambda feed, feed_kind: _make_snapshot_reader(feed, feed_kind)(),
     )
-    with TickStore.open(args.out, resume=args.resume) as store:
-        capture = TickCapture(store=store, subscribe=subscribe, read_snapshot=read_snapshot)
+    if args.lake_root:
+        # Near-real-time lake materialisation (DEC-LIVE-REALTIME-FOLD-001): a
+        # RollingTickStore that TIME-rotates every --roll-max-seconds, folding each
+        # rotated segment into the live lake so the dashboard tables fill within a
+        # few seconds. capture-all is dual-feed ("both"), so the fold is stamped
+        # "both" (mirrors _fold_feed). The end-of-session tail is flushed + folded.
+        rolling = RollingTickStore.open(
+            args.out,
+            max_bytes=args.roll_max_bytes,
+            max_lines=args.roll_max_lines,
+            max_seconds=args.roll_max_seconds,
+            on_rotate=make_fold_on_rotate(
+                lake_root=args.lake_root, capture_run_id=args.run_id, feed_kind="both"
+            ),
+            resume=args.resume,
+            monotonic=deps.monotonic,
+        )
+        capture = TickCapture(store=rolling, subscribe=subscribe, read_snapshot=read_snapshot)
         captured = capture.run_for(
             args.seconds,
             sleep=deps.sleep,
             monotonic=deps.monotonic,
             heartbeat_interval=args.heartbeat,
         )
+        rolling.flush_active()
+        rolling.close()
+    else:
+        with TickStore.open(args.out, resume=args.resume) as plain_store:
+            capture = TickCapture(
+                store=plain_store, subscribe=subscribe, read_snapshot=read_snapshot
+            )
+            captured = capture.run_for(
+                args.seconds,
+                sleep=deps.sleep,
+                monotonic=deps.monotonic,
+                heartbeat_interval=args.heartbeat,
+            )
     _LOG.info(
         "capture_all_complete",
         captured=captured,
@@ -614,6 +643,7 @@ def _cmd_capture_all(  # pragma: no cover — opens N real websockets (operator'
         plan_connections=plan.num_connections,
         out=str(args.out),
         report=str(args.report),
+        lake_root=str(args.lake_root) if args.lake_root else None,
     )
     return 0
 
@@ -724,6 +754,42 @@ def _build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--heartbeat", type=float, default=30.0, help="progress-log interval (s)")
     cal.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     cal.add_argument("--resume", action="store_true", help="append to an existing log")
+    # Real-time lake materialisation (DEC-LIVE-REALTIME-FOLD-001): when --lake-root
+    # is given, capture-all writes into a RollingTickStore that time-rotates every
+    # --roll-max-seconds and folds each rotated segment to the live lake, so the
+    # dashboard tables fill in near-real-time. Absent → plain TickStore (unchanged).
+    cal.add_argument(
+        "--lake-root",
+        dest="lake_root",
+        default=None,
+        help="fold rotated segments into this live lake root (near-real-time "
+        "materialisation); absent → plain JSONL capture (unchanged)",
+    )
+    cal.add_argument(
+        "--roll-max-seconds",
+        dest="roll_max_seconds",
+        type=float,
+        default=5.0,
+        help="time-rotate a non-empty active segment every N seconds so the lake "
+        "fold runs in near-real-time (default 5.0; only with --lake-root)",
+    )
+    cal.add_argument(
+        "--run-id", dest="run_id", default="live", help="capture/fold run id (lake provenance)"
+    )
+    cal.add_argument(
+        "--roll-max-bytes",
+        dest="roll_max_bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+        help="rotate the active segment at this byte size (default 64 MiB)",
+    )
+    cal.add_argument(
+        "--roll-max-lines",
+        dest="roll_max_lines",
+        type=int,
+        default=1_000_000,
+        help="rotate the active segment at this line count (default 1,000,000)",
+    )
 
     cad = sub.add_parser("cadence", help="report tick cadence (ms vs seconds)")
     cad.add_argument("--in", dest="in_path", required=True, help="captured JSONL path")

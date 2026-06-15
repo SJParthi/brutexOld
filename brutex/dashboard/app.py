@@ -3331,6 +3331,11 @@ def build_app(
         ``capture-all --manifest … --report … --feed both`` (connection #0 = spot
         dual-feed + #1..N = F&O legs; DEC-LIVE-DASHBOARD-WIRE-001).
         """
+        # Pass the SAME lake root the dashboard READS (`_live_lake_root` =
+        # instrument_store.path.parent) so the capture's real-time fold writes
+        # exactly where /live + /db read — or the tables stay empty
+        # (DEC-LIVE-REALTIME-FOLD-001). None when no instrument store is wired.
+        live_lake = _live_lake_root()
         status = await run_in_threadpool(
             lambda: _runner.start(
                 out=_live_out,
@@ -3338,6 +3343,7 @@ def build_app(
                 report=_live_report,
                 manifest=_live_manifest,
                 seconds=seconds,
+                lake_root=str(live_lake) if live_lake is not None else None,
             )
         )
         return JSONResponse(status.as_dict())
