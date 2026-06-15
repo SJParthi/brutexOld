@@ -88,11 +88,18 @@ def test_empty_state_art_present() -> None:
 
 
 def test_query_controls_and_routes_unchanged() -> None:
-    """The upgrade is additive — the structured-query + candle wiring is intact."""
+    """The upgrade is additive — the structured-query + candle wiring is intact.
+
+    The DuckDB structured-query URL is now built from the ``DB_API`` base
+    (``DB_API + "/query/"``) so the SAME table mode can also browse the live
+    lake via ``LIVE_API`` (DEC-DB-LIVE-TABLES-001) — the ``/api/v1/db/query/``
+    route is unchanged server-side; only the JS construction is parameterised.
+    """
     html = _render_db_html()
     for needle in (
         "/api/v1/db/tables",
-        "/api/v1/db/query/",
+        'const DB_API = "/api/v1/db";',
+        '(st.api || DB_API) + "/query/"',
         "/api/v1/db/candles/datasets",
         "function runTableQuery",
         "function runCandleQuery",
@@ -124,4 +131,33 @@ def test_option_dataset_label_rendered_with_raw_series_fallback() -> None:
     )
     assert '"/api/v1/db/options?series=" + encodeURIComponent(d.series)' in html, (
         "the option query URL must keep addressing the raw series key"
+    )
+
+
+def test_live_lake_section_present_and_wired() -> None:
+    """The /db sidebar ships a LIVE LAKE section for the two live tables.
+
+    DEC-DB-LIVE-TABLES-001: ``live_ticks`` + ``live_candles_1m`` are surfaced
+    PRIMARILY here on /db (operator request) in their own "Live lake" section,
+    browsed with the SAME table mode + columns/rows grid the other /db tables
+    use, via the /db-side ``/api/v1/db/live`` route family.
+    """
+    html = _render_db_html()
+    # The section header + the per-table allowlist + the route family constants.
+    assert "Live lake" in html, "the LIVE LAKE sidebar section is missing"
+    assert 'const LIVE_TABLES = ["live_ticks", "live_candles_1m"];' in html, (
+        "the live-table allowlist is missing"
+    )
+    assert 'const LIVE_API = "/api/v1/db/live";' in html, "the live route base is missing"
+    # The rows are clickable + route through the SAME table mode (selectTable)
+    # with the live API base, and the badges are filled from the live counts route.
+    assert 'data-live="' in html, "the live rows are not rendered"
+    assert 'selectTable(el.getAttribute("data-live"), LIVE_API)' in html, (
+        "the live rows must browse via the shared table mode with the live API base"
+    )
+    assert "async function loadLiveTables()" in html, "the live row-count loader is missing"
+    assert 'fetch(LIVE_API + "/tables")' in html, "the live counts fetch is missing"
+    # The header count includes the two live tables now browsable here.
+    assert "tables.length + LIVE_TABLES.length" in html, (
+        "the /db header table count must include the live tables"
     )
