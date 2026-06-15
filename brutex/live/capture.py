@@ -12,15 +12,19 @@ unit-tested with fakes, no ``growwapi`` and no network. The real feed is built a
 the CLI boundary (:mod:`brutex.live.__main__`), the only ``# pragma: no cover``.
 
 Each callback persists a **DELTA**, not the full snapshot: only the
-instruments whose value CHANGED since the previous callback are written (via
+instruments whose FULL observation (price + vendor ``tsInMillis`` + volume / OI)
+CHANGED since the previous callback are written (via
 :func:`~brutex.live.tick.prune_unchanged`), and a callback in which NOTHING
-changed writes nothing at all. This is the O(1)-per-instrument fix for the
-operator's live run, where writing the entire 779-instrument snapshot verbatim on
-every ~140/sec callback produced **4.33 GB in 4 minutes** of almost-pure
-redundancy. The candle builder takes open/high/low/close as first/max/min/last,
-none of which an unchanged leaf can alter, so the 1-minute candles built from the
-delta stream are byte-identical to those from the full-snapshot stream
-(DEC-LIVE-DELTA-CAPTURE-001).
+changed writes nothing at all. Keying on the whole leaf — not price alone —
+keeps every DISTINCT vendor tick, including a liquid equity's same-price reprint
+with a fresh timestamp ("save ALL the ticks"); only a byte-for-byte re-read of an
+identical leaf is dropped. This is the O(1)-per-instrument fix for the operator's
+live run, where writing the entire 779-instrument snapshot verbatim on every
+~140/sec callback produced **4.33 GB in 4 minutes** of almost-pure redundancy.
+The candle builder takes open/high/low/close as first/max/min/last (volume
+hard-0), none of which an extra same-price observation can alter, so the 1-minute
+candles built from the delta stream are byte-identical to those from the
+full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
 
 Read-only: this subscribes to market data and writes a log. It never places,
 modifies, or cancels an order (Golden Rule #3 scope guard).
@@ -31,13 +35,12 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 import structlog
 
 from brutex.live.store import TickRecord, TickStore
-from brutex.live.tick import prune_unchanged
+from brutex.live.tick import Quote, prune_unchanged
 
 _LOG = structlog.get_logger("brutex.live.capture")
 
@@ -95,13 +98,16 @@ class TickCapture:
         self._on_record = on_record
         self._count = 0
         self._heartbeats = 0
-        #: Last WRITTEN coerced price per instrument key — the delta baseline.
-        #: Seeded empty so the first callback keeps every instrument; advanced
-        #: only when a record is actually written (a skipped callback never
-        #: changes the baseline, so the next real change is still detected). The
-        #: baseline is CLEARED at every minute boundary (see :meth:`_on_tick`) so
-        #: the first callback of each new minute re-writes a full keyframe.
-        self._last_prices: dict[str, Decimal] = {}
+        #: Last WRITTEN :class:`~brutex.live.tick.Quote` per instrument key — the
+        #: delta baseline. A FULL-leaf key (price + vendor ``tsInMillis`` +
+        #: volume / OI), so a same-price reprint with a fresh timestamp is kept as
+        #: a genuine new tick ("save ALL the ticks"). Seeded empty so the first
+        #: callback keeps every instrument; advanced only when a record is
+        #: actually written (a skipped callback never changes the baseline, so the
+        #: next real change is still detected). The baseline is CLEARED at every
+        #: minute boundary (see :meth:`_on_tick`) so the first callback of each new
+        #: minute re-writes a full keyframe.
+        self._last_obs: dict[str, Quote] = {}
         #: The UTC minute of the last WRITTEN record (``None`` before the first).
         #: When the incoming callback's minute differs, the baseline is reset so a
         #: per-minute keyframe is emitted — this is what makes the delta-stream
@@ -156,12 +162,12 @@ class TickCapture:
         recv_ts = self._clock()
         snapshot = self._read_snapshot()
         minute = recv_ts.replace(second=0, microsecond=0)
-        baseline = self._last_prices if minute == self._last_minute else {}
+        baseline = self._last_obs if minute == self._last_minute else {}
         pruned, updated = prune_unchanged(snapshot, baseline)
         if not pruned:
             return
         record = self._store.append(pruned, recv_ts=recv_ts, recv_ns=recv_ns)
-        self._last_prices = updated
+        self._last_obs = updated
         self._last_minute = minute
         self._count += 1
         if self._on_record is not None:

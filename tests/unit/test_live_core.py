@@ -29,12 +29,19 @@ from brutex.live.serde import (
 from brutex.live.store import TickRecord, TickStore
 from brutex.live.tick import (
     LiveTick,
+    Quote,
     _coerce_number,
     _leaf_price,
     flatten_index_snapshot,
     iter_ticks,
     prune_unchanged,
 )
+
+
+def _bare(price: str) -> Quote:
+    """A flat-numeric leaf's Quote (price only — no vendor ts / volume / OI)."""
+    return Quote(value=Decimal(price), vendor_ts_ms=None, volume=None, open_interest=None)
+
 
 # 09:15 IST == 03:45 UTC; 15:29 IST == 09:59 UTC; 15:30 IST == 10:00 UTC.
 _OPEN_UTC = datetime(2026, 6, 15, 3, 45, tzinfo=UTC)
@@ -164,7 +171,7 @@ def test_prune_first_snapshot_keeps_all() -> None:
     snap = {"NIFTY": 100.0, "BANKNIFTY": 200.0}
     pruned, updated = prune_unchanged(snap, {})
     assert pruned == snap
-    assert updated == {"NIFTY": Decimal("100.0"), "BANKNIFTY": Decimal("200.0")}
+    assert updated == {"NIFTY": _bare("100.0"), "BANKNIFTY": _bare("200.0")}
 
 
 def test_prune_identical_snapshot_is_empty() -> None:
@@ -181,7 +188,25 @@ def test_prune_partial_change_keeps_only_changed() -> None:
     _first, baseline = prune_unchanged({"NIFTY": 100.0, "BANKNIFTY": 200.0}, {})
     pruned, updated = prune_unchanged({"NIFTY": 100.0, "BANKNIFTY": 201.0}, baseline)
     assert pruned == {"BANKNIFTY": 201.0}  # NIFTY unchanged → dropped
-    assert updated == {"NIFTY": Decimal("100.0"), "BANKNIFTY": Decimal("201.0")}
+    assert updated == {"NIFTY": _bare("100.0"), "BANKNIFTY": _bare("201.0")}
+
+
+def test_prune_same_price_new_vendor_ts_is_kept() -> None:
+    """Same price but a NEW vendor ``tsInMillis`` is a NEW tick — KEPT, not dropped.
+
+    A liquid equity prints many trades at the same price, each carrying a fresh
+    ``tsInMillis`` (and a rising cumulative volume). A price-only delta would drop
+    them (lost ticks); the full-leaf :class:`Quote` signature keeps every distinct
+    vendor observation — the operator's "save ALL the ticks" rule
+    (DEC-LIVE-DELTA-CAPTURE-001).
+    """
+    leaf1 = {"value": 100.0, "tsInMillis": 1000.0, "volume": 5.0}
+    leaf2 = {"value": 100.0, "tsInMillis": 2000.0, "volume": 9.0}
+    _first, baseline = prune_unchanged({"NSE": {"FNO": {"RELIANCE": leaf1}}}, {})
+    pruned, updated = prune_unchanged({"NSE": {"FNO": {"RELIANCE": leaf2}}}, baseline)
+    assert pruned == {"NSE": {"FNO": {"RELIANCE": leaf2}}}  # same price, new ts → kept
+    assert updated["NSE:FNO:RELIANCE"].vendor_ts_ms == 2000.0
+    assert updated["NSE:FNO:RELIANCE"].volume == 9
 
 
 def test_prune_kept_leaf_preserves_volume_oi_and_ts() -> None:
@@ -193,6 +218,20 @@ def test_prune_kept_leaf_preserves_volume_oi_and_ts() -> None:
     assert pruned["NSE"]["FNO"]["RELIANCE"] == leaf
 
 
+def test_prune_identical_leaf_dict_is_dropped() -> None:
+    """A byte-identical leaf-dict re-read (same price/ts/volume/OI) prunes to empty.
+
+    Exercises the :func:`Quote` equality FALSE path: previous observation equals
+    the new one, so nothing is written (the redundancy the delta exists to strip).
+    """
+    leaf = {"value": 100.0, "tsInMillis": 1234.0, "volume": 7.0, "openInterest": 3.0}
+    snap = {"NSE": {"FNO": {"RELIANCE": leaf}}}
+    _first, baseline = prune_unchanged(snap, {})
+    pruned, updated = prune_unchanged(snap, baseline)
+    assert pruned == {}  # identical leaf → nothing written
+    assert updated == baseline
+
+
 def test_prune_nested_only_changed_branch_survives() -> None:
     """In a nested snapshot, only the sub-tree holding a changed leaf is rebuilt."""
     snap1 = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}, "BANKNIFTY": {"value": 2.0}}}}
@@ -201,8 +240,8 @@ def test_prune_nested_only_changed_branch_survives() -> None:
     pruned, updated = prune_unchanged(snap2, baseline)
     # NIFTY unchanged is dropped; only BANKNIFTY's leaf rides up the same nesting.
     assert pruned == {"NSE": {"IDX": {"BANKNIFTY": {"value": 9.0}}}}
-    assert updated["NSE:IDX:NIFTY"] == Decimal("1.0")
-    assert updated["NSE:IDX:BANKNIFTY"] == Decimal("9.0")
+    assert updated["NSE:IDX:NIFTY"] == _bare("1.0")
+    assert updated["NSE:IDX:BANKNIFTY"] == _bare("9.0")
 
 
 def test_prune_empty_nested_branch_is_dropped() -> None:
@@ -226,15 +265,15 @@ def test_prune_skips_drift_and_non_numeric_leaves() -> None:
     snap = {"good": 5.0, "junk": "x", "drift": {"tsInMillis": 1.0, "lastTradePrice": 9.0}}
     pruned, updated = prune_unchanged(snap, {})
     assert pruned == {"good": 5.0}  # junk + drift never kept
-    assert updated == {"good": Decimal("5.0")}
+    assert updated == {"good": _bare("5.0")}
 
 
 def test_prune_does_not_mutate_caller_baseline() -> None:
     """`prune_unchanged` returns a NEW baseline; the passed-in map is untouched."""
-    baseline = {"NIFTY": Decimal("100.0")}
+    baseline = {"NIFTY": _bare("100.0")}
     pruned, updated = prune_unchanged({"NIFTY": 101.0}, baseline)
-    assert baseline == {"NIFTY": Decimal("100.0")}  # caller's copy unchanged
-    assert updated == {"NIFTY": Decimal("101.0")}
+    assert baseline == {"NIFTY": _bare("100.0")}  # caller's copy unchanged
+    assert updated == {"NIFTY": _bare("101.0")}
     assert pruned == {"NIFTY": 101.0}
 
 

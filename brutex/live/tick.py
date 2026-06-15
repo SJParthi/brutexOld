@@ -258,70 +258,79 @@ def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> 
 
 
 def prune_unchanged(
-    snapshot: Mapping[str, Any], last_prices: Mapping[str, Decimal]
-) -> tuple[Mapping[str, Any], dict[str, Decimal]]:
-    """Keep ONLY the instruments whose coerced price CHANGED since *last_prices*.
+    snapshot: Mapping[str, Any], last_obs: Mapping[str, Quote]
+) -> tuple[Mapping[str, Any], dict[str, Quote]]:
+    """Keep ONLY the instruments whose FULL observation CHANGED since *last_obs*.
 
     Walks *snapshot* the SAME way :func:`extract_quotes` /
-    :func:`flatten_index_snapshot` do — reusing :func:`_leaf_price`, the
+    :func:`flatten_index_snapshot` do — reusing :func:`_leaf_quote`, the
     ``"prefix:key"`` instrument-key rule, the drift guard, and ``_coerce_price``
-    — and rebuilds the SAME nested shape containing only the leaves whose price
-    differs from ``last_prices[instrument_key]`` (a never-seen instrument is
-    ALWAYS kept). A kept leaf is copied **verbatim** (the full raw mapping), so
+    — and rebuilds the SAME nested shape containing only the leaves whose
+    :class:`Quote` (price **and** the vendor ``tsInMillis`` **and** volume / open
+    interest) differs from ``last_obs[instrument_key]`` (a never-seen instrument
+    is ALWAYS kept). A kept leaf is copied **verbatim** (the full raw mapping), so
     ``tsInMillis`` / volume / open interest survive for every kept instrument.
 
-    This is the delta the capture persists instead of the full 779-instrument
-    snapshot: the vast majority of leaves are unchanged callback-to-callback and
-    are dropped (the redundancy the operator's 4.33 GB / 4-minute run was
-    writing). Because the candle builder takes open = first value, close = last
-    value, high = max, low = min, and an UNCHANGED leaf can never alter any of
-    those four (the first occurrence of every DISTINCT value is always kept), the
-    1-minute candle rebuilt from the delta stream is byte-identical to the one
-    rebuilt from the full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
+    **Full-leaf, not price-only — "save ALL the ticks" (operator rule).** A
+    liquid equity prints many trades at the *same price*, each carrying a fresh
+    ``tsInMillis`` (and a rising cumulative volume). A price-only delta would drop
+    every same-price reprint as "unchanged" and silently lose those ticks; keying
+    on the whole :class:`Quote` keeps every DISTINCT vendor observation and drops
+    ONLY a byte-for-byte re-read of the identical leaf (the ~140/sec redundancy
+    the operator's 4.33 GB / 4-minute run was writing). Indices carry no volume
+    and re-stamp ``tsInMillis`` on every print, so for the brute-force trio
+    (NIFTY / BANKNIFTY / SENSEX) the full-leaf key is exact; the equity rows
+    (REFERENCE_ONLY) are the ones a price-only key would have thinned.
+
+    Keeping a *superset* of the price-only delta never disturbs the candle:
+    the builder takes open = first value, close = last value, high = max, low =
+    min, volume hard-0, and an extra same-price observation alters none of those.
+    So the 1-minute candle rebuilt from the delta stream stays byte-identical to
+    the one rebuilt from the full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
 
     Parameters
     ----------
     snapshot
         The raw (possibly nested) feed snapshot, exactly as the SDK returned it.
-    last_prices
-        ``{instrument_key: Decimal}`` — the coerced price last WRITTEN per
+    last_obs
+        ``{instrument_key: Quote}`` — the FULL observation last WRITTEN per
         instrument (the capture seeds ``{}`` for the first callback).
 
     Returns
     -------
-    tuple[Mapping[str, Any], dict[str, Decimal]]
-        ``(pruned_snapshot, updated_last_prices)`` where *pruned_snapshot* is the
+    tuple[Mapping[str, Any], dict[str, Quote]]
+        ``(pruned_snapshot, updated_last_obs)`` where *pruned_snapshot* is the
         same nested shape holding only changed instruments' full raw leaves (an
-        EMPTY mapping when nothing changed), and *updated_last_prices* is
-        ``last_prices`` merged with every kept instrument's new price (a flat
-        ``dict`` — the caller adopts it as the next-callback baseline). Unchanged
-        instruments keep their prior price; instruments absent from *snapshot*
-        are left untouched in the baseline.
+        EMPTY mapping when nothing changed), and *updated_last_obs* is
+        ``last_obs`` merged with every kept instrument's new :class:`Quote` (a
+        flat ``dict`` — the caller adopts it as the next-callback baseline).
+        Unchanged instruments keep their prior Quote; instruments absent from
+        *snapshot* are left untouched in the baseline.
     """
-    updated = dict(last_prices)
+    updated = dict(last_obs)
     pruned = _prune_into(snapshot, updated, prefix="")
     return pruned, updated
 
 
 def _prune_into(
-    snapshot: Mapping[str, Any], updated: dict[str, Decimal], *, prefix: str
+    snapshot: Mapping[str, Any], updated: dict[str, Quote], *, prefix: str
 ) -> dict[str, Any]:
     """Recursive worker for :func:`prune_unchanged` — see its contract.
 
-    Mutates *updated* in place with every kept leaf's new price and returns the
-    rebuilt nested mapping for this level (only branches that contain a changed
-    leaf appear). The traversal mirrors :func:`extract_quotes` exactly: a price
-    leaf-dict (matched by :func:`_leaf_price`) is a leaf, a drifted leaf
+    Mutates *updated* in place with every kept leaf's new :class:`Quote` and
+    returns the rebuilt nested mapping for this level (only branches that contain
+    a changed leaf appear). The traversal mirrors :func:`extract_quotes` exactly:
+    a price leaf-dict (matched by :func:`_leaf_quote`) is a leaf, a drifted leaf
     (:func:`_is_drifted_leaf`) is skipped, any other mapping recurses, and a flat
-    numeric value is coerced via :func:`_coerce_price`.
+    numeric value is coerced via :func:`_coerce_price` into a bare-price Quote.
     """
     out: dict[str, Any] = {}
     for raw_key, raw_value in snapshot.items():
         key = f"{prefix}:{raw_key}" if prefix else str(raw_key)
         if isinstance(raw_value, Mapping):
-            leaf = _leaf_price(raw_value)
-            if leaf is not None:
-                if _changed(key, leaf, updated):
+            quote = _leaf_quote(raw_value)
+            if quote is not None:
+                if _changed(key, quote, updated):
                     out[raw_key] = raw_value
             elif _is_drifted_leaf(raw_value):
                 _warn_schema_drift(key, raw_value)
@@ -331,21 +340,26 @@ def _prune_into(
                     out[raw_key] = child
         else:
             coerced = _coerce_price(raw_value)
-            if coerced is not None and _changed(key, coerced, updated):
-                out[raw_key] = raw_value
+            if coerced is not None:
+                quote = Quote(value=coerced, vendor_ts_ms=None, volume=None, open_interest=None)
+                if _changed(key, quote, updated):
+                    out[raw_key] = raw_value
     return out
 
 
-def _changed(key: str, price: Decimal, updated: dict[str, Decimal]) -> bool:
-    """True if *price* differs from the recorded baseline for *key*.
+def _changed(key: str, quote: Quote, updated: dict[str, Quote]) -> bool:
+    """True if *quote* differs from the recorded observation for *key*.
 
     A never-seen *key* counts as changed (always kept). On a change the baseline
-    is advanced in place to *price* (so the SAME value next callback is dropped).
+    is advanced in place to *quote* (so the IDENTICAL leaf next callback is
+    dropped). Equality is the frozen :class:`Quote`'s value equality — price AND
+    vendor ``tsInMillis`` AND volume / open interest — so a same-price reprint
+    with a fresh timestamp is a genuine new tick and is KEPT.
     """
     previous = updated.get(key)
-    if previous is not None and previous == price:
+    if previous is not None and previous == quote:
         return False
-    updated[key] = price
+    updated[key] = quote
     return True
 
 
