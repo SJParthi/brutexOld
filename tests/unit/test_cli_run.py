@@ -185,6 +185,12 @@ def _stub_dashboard_runtime(
             sys.stdout.flush()
 
     monkeypatch.setattr(uvicorn_mod, "run", fake_run)
+    # The instrument autoload now runs in a background daemon thread
+    # (DEC-DASHBOARD-INSTANT-LAUNCH-001). For deterministic, OFFLINE unit tests,
+    # run it SYNCHRONOUSLY in-process instead of spawning the thread — the
+    # network-bound ``load_instrument_master`` is never reached here because
+    # ``should_reload_instrument_master`` is stubbed above (False / raising).
+    monkeypatch.setattr(cli, "_start_instrument_autoload", cli._autoload_instrument_master)
 
 
 def test_dashboard_missing_uvicorn_is_user_error(
@@ -299,3 +305,58 @@ def test_dashboard_without_file_handler_keeps_plain_stdout(
     assert "[brutex] dashboard → http://0.0.0.0:9095  (Ctrl-C to stop)" in out
     assert probes["port"] == 9095
     assert not (tmp_path / "instruments.duckdb").exists()
+
+
+def test_dashboard_autoload_runs_off_the_bind_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The instrument autoload must NOT block the uvicorn port bind.
+
+    DEC-DASHBOARD-INSTANT-LAUNCH-001: a cold start can spend ~90 s in the
+    niftyindices-blocked NTM constituent fetch. That work now runs in a
+    background daemon thread, so ``uvicorn.run`` (the port bind) is reached
+    BEFORE the autoload finishes — proving the launch is instant. Here the
+    autoload is stubbed to BLOCK until the bind releases it; the real
+    ``_start_instrument_autoload`` thread is exercised (not stubbed).
+    """
+    import threading
+
+    pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+
+    obs_logging = importlib.import_module("brutex.observability.logging")
+    monkeypatch.setattr(obs_logging, "configure_logging", lambda **kwargs: tmp_path / "brutex.log")
+
+    autoload_started = threading.Event()
+    release = threading.Event()
+    probes: dict[str, Any] = {}
+
+    def blocking_autoload(store: Any, log: Any) -> None:
+        """Stand in for the slow niftyindices-bound autoload: block until released."""
+        autoload_started.set()
+        release.wait(timeout=5)
+
+    # NOTE: _start_instrument_autoload is deliberately NOT stubbed — the real
+    # daemon-thread starter runs, targeting this blocking stub.
+    monkeypatch.setattr(cli, "_autoload_instrument_master", blocking_autoload)
+
+    uvicorn_mod = importlib.import_module("uvicorn")
+
+    def fake_run(app: Any, *, host: str, port: int, log_config: Any) -> None:
+        """The port bind: record that the autoload was STILL blocked at this point."""
+        probes["port"] = port
+        probes["autoload_blocked_at_bind"] = not release.is_set()
+        release.set()  # let the daemon thread unblock + finish
+
+    monkeypatch.setattr(uvicorn_mod, "run", fake_run)
+
+    rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9083)
+
+    assert rc == cli.EXIT_OK
+    assert probes["port"] == 9083
+    # The bind was reached while the (threaded) autoload had not yet completed —
+    # i.e. the autoload did not block the port from binding.
+    assert probes["autoload_blocked_at_bind"] is True
+    # The daemon thread really did start (proving _start_instrument_autoload ran).
+    assert autoload_started.wait(timeout=5)
