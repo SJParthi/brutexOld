@@ -373,10 +373,12 @@ def test_audit_writer_memory_flat(tmp_path: Path) -> None:
 
 #: Fixed window universe — the steady-state working set a re-pull cycles over,
 #: partitioned production-faithfully: settled-``SUCCESS`` rows, settled
-#: ``DH-905``-gap rows (``SKIPPED``), and perpetual-churn rows whose
-#: ``FAILED → EMPTY → EMPTY`` outcome cycle can never settle (a ``FAILED``
-#: resets ``empty_streak``, so the EMPTY→SKIPPED promotion at streak 3 never
-#: fires) — exactly the windows production re-fetches every pull.
+#: ``DH-905``-gap rows (``SKIPPED``), and perpetual-churn rows that took two
+#: clean empties (``empty_streak == 2``, one short of the threshold-3 promotion)
+#: and then keep TIMING OUT — every later outcome is a ``FAILED``, which under
+#: DEC-EMPTY-STREAK-RATELIMIT-001 PRESERVES the streak (a timeout is not evidence
+#: of data) WITHOUT ever incrementing it to 3, so the EMPTY→SKIPPED promotion
+#: never fires — exactly the windows production re-fetches every pull.
 _WINDOW_UNIVERSE: Final[int] = 512
 _SETTLED_SUCCESS: Final[int] = 128
 _SETTLED_GAP: Final[int] = 64
@@ -411,6 +413,7 @@ def test_window_ledger_memory_flat() -> None:
     success_keys = keys[:_SETTLED_SUCCESS]
     gap_keys = keys[_SETTLED_SUCCESS : _SETTLED_SUCCESS + _SETTLED_GAP]
     churn_keys = keys[_SETTLED_SUCCESS + _SETTLED_GAP :]
+    assert len(churn_keys) == _CHURN
     now = datetime(2026, 6, 10, 9, 15, 0)
     ledger = WindowLedger()
 
@@ -422,8 +425,13 @@ def test_window_ledger_memory_flat() -> None:
         ledger.record(key, raw_bars=375, error_type=None, bars_appended=375, now=now)
     for key in gap_keys:
         ledger.settle_known_gap(key, now=now, reason="DH-905 no data in range")
+    # Seed each churn window with two CLEAN empties (streak 2, one short of the
+    # threshold-3 promotion); the pull loop below then keeps them TIMING OUT, and
+    # a FAILED preserves the streak at 2 forever without ever settling.
+    for key in churn_keys:
+        assert ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=now) == EMPTY
+        assert ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=now) == EMPTY
 
-    churn_step = [0] * _CHURN  # per-key position in the FAILED→EMPTY→EMPTY cycle
     ops = 0
 
     def pull_cycles(min_ops: int) -> None:
@@ -434,17 +442,18 @@ def test_window_ledger_memory_flat() -> None:
             for key in keys:
                 ledger.plan(key, now=now)  # production upsert — no-op on existing
                 ops += 1
-            for j, key in enumerate(keys):
+            for key in keys:
                 skippable = ledger.is_skippable(key)
                 ops += 1
                 if skippable:
                     continue  # production never fetches a settled window
-                churn_index = j - _SETTLED_SUCCESS - _SETTLED_GAP
-                step = churn_step[churn_index] % 3
-                error = "DhanTimeoutError" if step == 0 else None
-                status = ledger.record(key, raw_bars=0, error_type=error, bars_appended=0, now=now)
-                assert status in (FAILED, EMPTY), "churn window must never settle"
-                churn_step[churn_index] += 1
+                # Perpetual timeout: a FAILED PRESERVES the streak (frozen at 2)
+                # without ever reaching 3 — the window never settles, never skips
+                # (DEC-EMPTY-STREAK-RATELIMIT-001).
+                status = ledger.record(
+                    key, raw_bars=0, error_type="DhanTimeoutError", bars_appended=0, now=now
+                )
+                assert status == FAILED, "churn window must never settle"
                 ops += 1
 
     pull_cycles(_WARMUP)

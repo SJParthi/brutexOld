@@ -255,6 +255,12 @@ class TestCallDeadline:
                 release.wait(5)  # would block ~forever without the deadline guard
                 return {"candles": []}
 
+            def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+                return {}  # GrowwSDK Protocol conformance only — never called by this test
+
+            def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+                return {}  # GrowwSDK Protocol conformance only — never called by this test
+
         sdk = _HangingSDK()
         client = GrowwClient(
             sdk=sdk, sleep=lambda _s: None, max_attempts=2, call_timeout_seconds=0.05

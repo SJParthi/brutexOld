@@ -1758,11 +1758,13 @@ def _window_row(
         "status": record.status,
         "bars": record.bars,
         "attempts": record.attempts,
-        # The CONSECUTIVE genuine-EMPTY count (window_ledger R1) — surfaces WHY
-        # an EMPTY row at attempts 5-6 is not yet SKIPPED: interleaved FAILED
-        # outcomes reset the streak, so promotion needs `empty_threshold` clean
-        # EMPTYs RUNNING, not in total (DEC-EMPTY-STREAK-VISIBLE-001). The
-        # legacy status log has no streak — getattr keeps ONE row shape.
+        # The genuine-EMPTY count (window_ledger R1) — surfaces WHY an EMPTY row
+        # at attempts 5-6 is not yet SKIPPED: promotion needs `empty_threshold`
+        # genuine EMPTYs, and an interleaved FAILED (429/timeout) now PRESERVES
+        # the streak rather than resetting it (a rate-limit is not evidence of
+        # data — DEC-EMPTY-STREAK-RATELIMIT-001), so only a SUCCESS resets it
+        # (DEC-EMPTY-STREAK-VISIBLE-001). The legacy status log has no streak —
+        # getattr keeps ONE row shape.
         "empty_streak": getattr(record, "empty_streak", 0),
         "last_error": record.last_error,
         # Display the stored UTC stamps as clean IST (CLAUDE.md §6 store-UTC /

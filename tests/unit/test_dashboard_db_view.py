@@ -397,9 +397,11 @@ def test_build_window_payload_falls_back_to_status_sidecar(tmp_path: Path) -> No
 
 
 def test_build_window_payload_ships_the_live_empty_streak(tmp_path: Path) -> None:
-    # DEC-EMPTY-STREAK-VISIBLE-001: an EMPTY row at attempts 3 with interleaved
-    # FAILED resets shows streak 1/3 — the page can now SAY why it is not yet
-    # SKIPPED (R1 promotes on CONSECUTIVE clean EMPTYs, not total attempts).
+    # DEC-EMPTY-STREAK-VISIBLE-001 + DEC-EMPTY-STREAK-RATELIMIT-001: an EMPTY row at
+    # attempts 3 with an INTERLEAVED rate-limit FAILED shows streak 2/3 — the page
+    # can SAY why it is not yet SKIPPED. The FAILED no longer RESETS the streak (a
+    # 429 is not evidence of data), so two genuine empties separated by a transient
+    # rate-limit still count as two toward the threshold-3 promotion.
     ledger = WindowLedger()
     key = _window_key("NIFTY")
     ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_WINDOW_NOW)
@@ -412,7 +414,7 @@ def test_build_window_payload_ships_the_live_empty_streak(tmp_path: Path) -> Non
     (window,) = build_window_payload(tmp_path, status="EMPTY")["windows"]
     assert window["status"] == "EMPTY"
     assert window["attempts"] == 3
-    assert window["empty_streak"] == 1  # the FAILED reset the streak
+    assert window["empty_streak"] == 2  # the FAILED PRESERVED the streak (not yet 3 → not SKIPPED)
 
 
 def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
