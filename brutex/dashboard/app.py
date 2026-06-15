@@ -81,8 +81,10 @@ from brutex.dashboard.live_lake_view import (
     TICKS_EMPTY_NOTE,
     live_columns,
     live_table,
+    live_table_schema,
     live_tables_summary,
     query_live_table,
+    schema_only_page,
     ticks_flowing,
 )
 from brutex.dashboard.live_manifest import (
@@ -3435,16 +3437,13 @@ def build_app(
         """GET /api/v1/live/table/{name} — one page of a live lake table (newest-first)."""
         lake = _live_lake_root()
         if lake is None:
-            return JSONResponse(
-                {
-                    "table": name,
-                    "columns": [],
-                    "rows": [],
-                    "total": 0,
-                    "limit": limit,
-                    "offset": offset,
-                }
-            )
+            # No lake configured yet → still surface the canonical COLUMN DEFINITIONS so
+            # the operator can verify the columns (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001);
+            # an unknown name → 400, matching the with-lake path.
+            try:
+                return JSONResponse(schema_only_page(name, limit=limit, offset=offset))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             payload = await run_in_threadpool(
                 lambda: live_table(lake, name, limit=limit, offset=offset)
@@ -3458,7 +3457,13 @@ def build_app(
         """GET /api/v1/live/columns/{name} — a live table's columns (the picker)."""
         lake = _live_lake_root()
         if lake is None:
-            return JSONResponse({"table": name, "columns": []})
+            # No lake configured → the canonical schema names (schema-when-empty);
+            # an unknown name → 400 (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001).
+            try:
+                cols = [col["name"] for col in live_table_schema(name)]
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse({"table": name, "columns": cols})
         try:
             cols = await run_in_threadpool(lambda: live_columns(lake, name))
         except ValueError as exc:
@@ -3486,19 +3491,17 @@ def build_app(
         identifier is validated + every value parameter-bound there.
         """
         lake = _live_lake_root()
-        if lake is None:
-            return JSONResponse(
-                {
-                    "table": name,
-                    "columns": [],
-                    "rows": [],
-                    "total": 0,
-                    "limit": limit,
-                    "offset": offset,
-                }
-            )
-        parsed_filters = _parse_filters(f or [])
         columns = tuple(column) if column else None
+        if lake is None:
+            # No lake configured → the schema-only page (canonical columns + note),
+            # honouring + validating a projection (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001);
+            # an unknown table / projected column → 400, matching the with-lake path.
+            try:
+                page = schema_only_page(name, columns=columns, limit=limit, offset=offset)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(page)
+        parsed_filters = _parse_filters(f or [])
         try:
             payload = await run_in_threadpool(
                 lambda: query_live_table(
@@ -3544,16 +3547,12 @@ def build_app(
         """GET /api/v1/db/live/table/{name} — one page of a live lake table (/db)."""
         lake = _live_lake_root()
         if lake is None:
-            return JSONResponse(
-                {
-                    "table": name,
-                    "columns": [],
-                    "rows": [],
-                    "total": 0,
-                    "limit": limit,
-                    "offset": offset,
-                }
-            )
+            # Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): the /db alias mirrors
+            # /api/v1/live — surface the canonical column definitions; unknown name → 400.
+            try:
+                return JSONResponse(schema_only_page(name, limit=limit, offset=offset))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             payload = await run_in_threadpool(
                 lambda: live_table(lake, name, limit=limit, offset=offset)
@@ -3567,7 +3566,13 @@ def build_app(
         """GET /api/v1/db/live/columns/{name} — a live table's columns (the /db picker)."""
         lake = _live_lake_root()
         if lake is None:
-            return JSONResponse({"table": name, "columns": []})
+            # Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): canonical schema
+            # names so the /db column picker shows them; unknown name → 400.
+            try:
+                cols = [col["name"] for col in live_table_schema(name)]
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse({"table": name, "columns": cols})
         try:
             cols = await run_in_threadpool(lambda: live_columns(lake, name))
         except ValueError as exc:
@@ -3595,19 +3600,16 @@ def build_app(
         identifier is validated + every value parameter-bound there.
         """
         lake = _live_lake_root()
-        if lake is None:
-            return JSONResponse(
-                {
-                    "table": name,
-                    "columns": [],
-                    "rows": [],
-                    "total": 0,
-                    "limit": limit,
-                    "offset": offset,
-                }
-            )
-        parsed_filters = _parse_filters(f or [])
         columns = tuple(column) if column else None
+        if lake is None:
+            # Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): canonical columns +
+            # honest note, projection honoured + validated; unknown table/column → 400.
+            try:
+                page = schema_only_page(name, columns=columns, limit=limit, offset=offset)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(page)
+        parsed_filters = _parse_filters(f or [])
         try:
             payload = await run_in_threadpool(
                 lambda: query_live_table(

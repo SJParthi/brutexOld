@@ -9,6 +9,23 @@ mutation — it only renders rows the capture subprocess wrote.
 
 Layout (the lake contract): ``<lake_root>/live/ticks/dt=*.parquet`` and
 ``<lake_root>/live/candles_1m/dt=*.parquet``.
+
+## Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001)
+
+When a live table has NO partitions yet (no ticks captured — market closed / feed
+OFF) the browser still returns that table's full canonical **column list (names +
+types)** so the operator can verify the columns exist (e.g. the merged
+``exchange_ts`` / ``avg_price`` / ``payload_hash`` / ``pct_change`` /
+``pct_from_open`` columns) without waiting for a live session. The schema is a
+DECOUPLED canonical constant defined HERE — :data:`_CANONICAL_SCHEMA`, mirroring
+:data:`brutex.live.lake.TICK_SCHEMA` / ``CANDLE_SCHEMA`` — so the dashboard never
+imports :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001`` HELD). A drift-guard test
+(``tests/unit/test_live_lake_view.py``) — which MAY import :mod:`brutex.live`
+because TESTS are not the dashboard runtime — fails if this constant ever drifts
+from the real lake schema. When the table HAS data the behaviour is UNCHANGED: the
+columns are derived from the real Parquet ``cursor.description`` (so a future schema
+migration shows through verbatim). Honest (Golden Rule #1): the schema-only page
+NEVER fabricates rows — it surfaces the column DEFINITION + an explicit note only.
 """
 
 from __future__ import annotations
@@ -48,8 +65,170 @@ _IST_TIMESTAMP_COLUMNS: Final[frozenset[str]] = frozenset({"recv_ts", "exchange_
 #: interpolated — no path-traversal / glob-injection surface).
 _SOURCE: Final = "read_parquet(?, union_by_name=true)"
 
+#: The DECOUPLED canonical column schema (name + DuckDB type) of each live table —
+#: the schema-when-empty surface (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001). It MIRRORS
+#: :data:`brutex.live.lake.TICK_SCHEMA` / ``CANDLE_SCHEMA`` (the live writer's
+#: authoritative Polars schemas) but is duplicated HERE on purpose so the dashboard
+#: never imports :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001`` — ``brutex/live/``
+#: stays imported-by-nothing, portable to TickVault / AWS). The ``type`` strings are
+#: the EXACT DuckDB ``read_parquet`` ``cursor.description`` type names (``VARCHAR`` /
+#: ``BIGINT`` / ``DOUBLE`` / ``DATE`` / ``TIMESTAMP WITH TIME ZONE``), so the
+#: schema-only page shows the SAME types the populated page derives from the real
+#: Parquet (consistency). A drift-guard test (``test_live_lake_view.py``) builds an
+#: empty Parquet from the real lake schema, reads its DuckDB description, and asserts
+#: it equals this constant — any name / type / order / count drift fails CI (the test
+#: MAY import :mod:`brutex.live`; tests are not the dashboard runtime). Order matches
+#: the lake schema declaration order so the schema-only columns render in the SAME
+#: order as a populated ``SELECT *``.
+_LIVE_TICK_SCHEMA: Final[tuple[tuple[str, str], ...]] = (
+    ("capture_run_id", "VARCHAR"),
+    ("seq", "BIGINT"),
+    ("recv_ns", "BIGINT"),
+    ("recv_ts", "TIMESTAMP WITH TIME ZONE"),
+    ("vendor_ts_ms", "DOUBLE"),
+    ("exchange_ts", "TIMESTAMP WITH TIME ZONE"),
+    ("session_date", "DATE"),
+    ("exchange", "VARCHAR"),
+    ("segment", "VARCHAR"),
+    ("instrument_key", "VARCHAR"),
+    ("groww_symbol", "VARCHAR"),
+    ("value", "DOUBLE"),
+    ("avg_price", "DOUBLE"),
+    ("volume", "BIGINT"),
+    ("open_interest", "BIGINT"),
+    ("payload_hash", "VARCHAR"),
+    ("feed_kind", "VARCHAR"),
+    ("raw_json", "VARCHAR"),
+)
+_LIVE_CANDLE_SCHEMA: Final[tuple[tuple[str, str], ...]] = (
+    ("instrument_key", "VARCHAR"),
+    ("groww_symbol", "VARCHAR"),
+    ("exchange", "VARCHAR"),
+    ("segment", "VARCHAR"),
+    ("timestamp", "TIMESTAMP WITH TIME ZONE"),
+    ("session_date", "DATE"),
+    ("open", "DOUBLE"),
+    ("high", "DOUBLE"),
+    ("low", "DOUBLE"),
+    ("close", "DOUBLE"),
+    ("volume", "BIGINT"),
+    ("open_interest", "BIGINT"),
+    ("tick_count", "BIGINT"),
+    ("pct_from_open", "DOUBLE"),
+    ("pct_change", "DOUBLE"),
+    ("source", "VARCHAR"),
+    ("built_run_id", "VARCHAR"),
+)
+#: Table name → its canonical schema (the schema-when-empty lookup).
+_CANONICAL_SCHEMA: Final[dict[str, tuple[tuple[str, str], ...]]] = {
+    "live_ticks": _LIVE_TICK_SCHEMA,
+    "live_candles_1m": _LIVE_CANDLE_SCHEMA,
+}
+
+#: The honest empty-state note surfaced on a schema-only page: the columns ARE the
+#: real definitions, but there is no captured data yet (market closed / feed OFF).
+#: Golden Rule #1 — never imply rows exist (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001).
+SCHEMA_ONLY_NOTE: Final[str] = "schema only — no data yet (market closed / feed off)"
+
 _LIMIT_MIN: Final = 1
 _LIMIT_MAX: Final = 500
+
+
+def live_table_schema(table: str) -> list[dict[str, str]]:
+    """Return *table*'s canonical column schema as ``[{"name", "type"}, ...]``.
+
+    The DECOUPLED schema-when-empty source (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): the
+    full canonical column list (name + DuckDB type) for ``live_ticks`` /
+    ``live_candles_1m``, read from :data:`_CANONICAL_SCHEMA` — NOT from disk and NOT
+    from :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001`` HELD). Used to surface the
+    columns on an empty live table so the operator can verify they exist. Raises
+    :class:`ValueError` on an unknown table name (the same allowlist as
+    :func:`_subdir`).
+
+    Parameters
+    ----------
+    table
+        ``"live_ticks"`` or ``"live_candles_1m"``.
+
+    Returns
+    -------
+    list[dict[str, str]]
+        ``[{"name": <col>, "type": <duckdb type>}, ...]`` in lake declaration order.
+
+    Raises
+    ------
+    ValueError
+        If *table* is not a known live table.
+    """
+    if table not in _CANONICAL_SCHEMA:
+        raise ValueError(f"unknown live table {table!r}; expected one of {LIVE_TABLES}")
+    return [{"name": name, "type": dtype} for name, dtype in _CANONICAL_SCHEMA[table]]
+
+
+def _schema_column_names(table: str) -> list[str]:
+    """The canonical column NAMES of *table* (the schema-only column list)."""
+    return [name for name, _dtype in _CANONICAL_SCHEMA[table]]
+
+
+def schema_only_page(
+    table: str,
+    *,
+    columns: tuple[str, ...] | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Build the schema-only browse page for *table* WITHOUT touching disk.
+
+    The lake-less twin of :func:`live_table`'s no-partition branch
+    (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): returns the SAME
+    ``{table, columns, schema, rows, total, limit, offset, note}`` shape with the
+    canonical column DEFINITIONS + an honest note + zero rows, derived purely from
+    :data:`_CANONICAL_SCHEMA`. The dashboard ``/live`` + ``/db`` routes call this when
+    they have NO lake root configured yet (``_live_lake_root() is None``), so an empty
+    live table shows its columns even before a lake path exists — never an import of
+    :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001`` HELD). Raises :class:`ValueError` on
+    an unknown table name (so the caller maps it to a 400, matching the populated path).
+
+    Parameters
+    ----------
+    table
+        ``"live_ticks"`` or ``"live_candles_1m"``.
+    columns
+        Optional projection — when given, ``columns`` is validated against the
+        canonical schema (an unknown column raises :class:`ValueError`, matching the
+        populated structured-query path) and becomes the page's ``columns``; the full
+        ``schema`` block is always the table's complete definition. ``None`` projects
+        every canonical column.
+    limit, offset
+        Echoed back (clamped) so the page shape matches :func:`live_table`.
+
+    Returns
+    -------
+    dict[str, Any]
+        The schema-only page (0 rows, full columns + schema + note).
+
+    Raises
+    ------
+    ValueError
+        If *table* is not a known live table, or a projected column is unknown.
+    """
+    schema = live_table_schema(table)  # raises ValueError on an unknown table
+    canonical = _schema_column_names(table)
+    if columns is not None:
+        _select_list(columns, frozenset(canonical))  # validate the projection names
+        page_columns = list(columns)
+    else:
+        page_columns = canonical
+    return {
+        "table": table,
+        "columns": page_columns,
+        "schema": schema,
+        "rows": [],
+        "total": 0,
+        "limit": clamp_limit(limit),
+        "offset": clamp_offset(offset),
+        "note": SCHEMA_ONLY_NOTE,
+    }
 
 
 def clamp_limit(n: int) -> int:
@@ -137,14 +316,11 @@ def live_table(
     safe_limit, safe_offset = clamp_limit(limit), clamp_offset(offset)
     sort = _TABLES[table][1] if table in _TABLES else _subdir(table)  # validates table
     if not _has_partitions(root, table):
-        return {
-            "table": table,
-            "columns": [],
-            "rows": [],
-            "total": 0,
-            "limit": safe_limit,
-            "offset": safe_offset,
-        }
+        # Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): no partitions yet, so
+        # surface the canonical COLUMN DEFINITIONS (names + types) + an honest note so
+        # the operator can verify the columns exist (e.g. exchange_ts / avg_price /
+        # payload_hash / pct_change / pct_from_open) — never a fabricated row.
+        return schema_only_page(table, limit=safe_limit, offset=safe_offset)
     glob = _glob(root, table)
     conn = duckdb.connect(":memory:")
     try:
@@ -185,13 +361,18 @@ def _parquet_columns(conn: Any, glob: str) -> list[str]:
 def live_columns(lake_root: str | Path, table: str) -> list[str]:
     """Return a live table's column names (the search/sort column picker).
 
-    Empty when the table has no partitions yet. Raises ``ValueError`` on an
-    unknown table name (``_subdir`` validates the allowlist).
+    When the table has no partitions yet the canonical schema column NAMES are
+    returned (the schema-when-empty surface, DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001) so the
+    column picker + grid header show the columns even before any tick is captured —
+    read from :data:`_CANONICAL_SCHEMA`, NOT :mod:`brutex.live` (``DEC-LIVE-DECOUPLE-001``
+    HELD). With data present the names are derived from the REAL Parquet (a future
+    schema migration shows through verbatim). Raises ``ValueError`` on an unknown table
+    name (``_subdir`` validates the allowlist).
     """
     root = Path(lake_root)
     _subdir(table)  # validate the allowlisted table name
     if not _has_partitions(root, table):
-        return []
+        return _schema_column_names(table)
     conn = duckdb.connect(":memory:")
     try:
         return _parquet_columns(conn, _glob(root, table))
@@ -228,14 +409,12 @@ def query_live_table(
     safe_limit, safe_offset = clamp_limit(limit), clamp_offset(offset)
     default_sort = _TABLES[table][1] if table in _TABLES else _subdir(table)  # validates table
     if not _has_partitions(root, table):
-        return {
-            "table": table,
-            "columns": [],
-            "rows": [],
-            "total": 0,
-            "limit": safe_limit,
-            "offset": safe_offset,
-        }
+        # Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): mirror live_table — the
+        # structured-query grid still shows the full canonical column definitions + an
+        # honest note when no partitions exist yet. A *columns* projection is honoured +
+        # validated against the canonical schema (an unknown projected column raises,
+        # matching the populated path); filters / order are no-ops over zero rows.
+        return schema_only_page(table, columns=columns, limit=safe_limit, offset=safe_offset)
     glob = _glob(root, table)
     conn = duckdb.connect(":memory:")
     try:
@@ -426,12 +605,15 @@ def ticks_flowing(lake_root: str | Path, *, now: _dt.datetime | None = None) -> 
 __all__ = [
     "FRESH_MAX_AGE_S",
     "LIVE_TABLES",
+    "SCHEMA_ONLY_NOTE",
     "TICKS_EMPTY_NOTE",
     "clamp_limit",
     "clamp_offset",
     "live_columns",
     "live_table",
+    "live_table_schema",
     "live_tables_summary",
     "query_live_table",
+    "schema_only_page",
     "ticks_flowing",
 ]

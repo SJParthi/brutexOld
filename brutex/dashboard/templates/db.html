@@ -595,12 +595,26 @@ const OPTION_COLS = ["timestamp", "open", "high", "low", "close", "volume", "ope
 
 /* Shared grid + Prev/Next pager HTML (used by both table + candle views).
    The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
-function gridAndPager(cols, rows, total, off, lim) {
+function gridAndPager(cols, rows, total, off, lim, note) {
   const from = total === 0 ? 0 : off + 1;
   const to = off + rows.length;
   let html = "";
   if (!rows.length) {
-    html += '<div class="empty">no rows on this page</div>';
+    /* Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): when the table has no
+       rows BUT the backend returned its column DEFINITIONS (an empty live table —
+       market closed / feed off), render the column header so the operator can verify
+       the columns exist, plus the honest note. With no columns at all, the plain
+       "no rows" message. Never fabricates a data row (Golden Rule #1). */
+    if (cols.length) {
+      const thead = '<thead><tr>' + cols.map(c => {
+        const t = colType(c);
+        return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+      }).join("") + '</tr></thead>';
+      html += '<div class="gridwrap"><table>' + thead + '</table></div>';
+      html += '<div class="empty">' + esc(note || "no rows on this page") + '</div>';
+    } else {
+      html += '<div class="empty">no rows on this page</div>';
+    }
   } else {
     const thead = '<thead><tr>' + cols.map(c => {
       const t = colType(c);
@@ -723,7 +737,7 @@ function renderTableView(name, body, err) {
   const head = '<div class="datahead"><span class="dt">' + esc(name) + '</span><span class="sub">' + sub + '</span></div>';
   const grid = err
     ? '<div class="empty qerr">' + esc(err) + '</div>'
-    : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 50));
+    : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 50), body && body.note);
   dataEl.innerHTML = head + tableControlsHtml(name) + grid;
   const sc = document.getElementById("sortcol"); if (sc) sc.value = st.orderBy || "";
   const sd = document.getElementById("sortdir"); if (sd) sd.value = st.desc ? "desc" : "asc";
