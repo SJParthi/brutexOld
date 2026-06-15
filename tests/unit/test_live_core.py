@@ -6,6 +6,11 @@ Covers :mod:`brutex.live.tick`, :mod:`~brutex.live.store`,
 :mod:`~brutex.live.serde` — every branch, no feed / no network.
 """
 
+# Whitebox: private helpers (`_coerce_number`, `_leaf_price`, `_leaf_avg_price`,
+# `_leaf_quote`) are imported directly to pin their behaviour byte-exact for the
+# mutation gate (DEC-MUTATION-RUNTIME-001) — the repo's whitebox-test convention.
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import json
@@ -31,11 +36,15 @@ from brutex.live.tick import (
     LiveTick,
     Quote,
     _coerce_number,
+    _leaf_avg_price,
     _leaf_price,
+    _leaf_quote,
     effective_clock,
     exchange_ts_from_vendor_ms,
+    extract_quotes,
     flatten_index_snapshot,
     iter_ticks,
+    payload_hash,
     prune_unchanged,
 )
 
@@ -217,6 +226,62 @@ def test_schema_drift_leaf_is_skipped_not_recursed() -> None:
     snap = {"NSE": {"IDX": {"NIFTY": {"tsInMillis": 1.0, "lastTradePrice": 22500.5, "x": 9}}}}
     assert flatten_index_snapshot(snap) == {}
     assert extract_quotes(snap) == {}
+
+
+# ──────── TickVault-parity fields: avg_price + payload_hash (DEC-LIVE-TICK-FIELDS-PARITY-001) ────────
+
+
+def test_leaf_avg_price_present_absent_and_unparseable() -> None:
+    """`_leaf_avg_price` reads the avg/VWAP leaf field, else `None` (honest absence)."""
+    # An equity LTP leaf carries avgPrice (observed shape) → parsed.
+    assert _leaf_avg_price({"ltp": 100.0, "avgPrice": 99.5}) == Decimal("99.5")
+    # Alternate documented spellings are accepted (priority order).
+    assert _leaf_avg_price({"vwap": 12.25}) == Decimal("12.25")
+    # An index leaf / a minimal LTP leaf has NO avg field → None, never fabricated.
+    assert _leaf_avg_price({"value": 22500.5, "tsInMillis": 1.0}) is None
+    # An avg key present but UNPARSEABLE falls through to None (skip-not-raise).
+    assert _leaf_avg_price({"avgPrice": "junk"}) is None
+    # A negative avg (vendor sign-flip) is rejected like any price.
+    assert _leaf_avg_price({"avgPrice": -1.0}) is None
+
+
+def test_extract_quotes_stamps_avg_price_and_payload_hash() -> None:
+    """A dict-leaf Quote carries avg_price (when present) + a stable payload_hash."""
+    equity = {"ltp": 2396.7, "avgPrice": 2400.0, "tsInMillis": 1.0, "volume": 7.0}
+    quote = extract_quotes({"NSE": {"CASH": {"RELIANCE": equity}}})["NSE:CASH:RELIANCE"]
+    assert quote.value == Decimal("2396.7")
+    assert quote.avg_price == Decimal("2400.0")
+    assert quote.payload_hash == payload_hash(equity)  # blake3 of the raw leaf
+    # An index leaf (no avgPrice) → avg_price None, but STILL a payload_hash.
+    idx_leaf = {"value": 22500.5, "tsInMillis": 1.0}
+    idx = extract_quotes({"NSE": {"IDX": {"NIFTY": idx_leaf}}})["NSE:IDX:NIFTY"]
+    assert idx.avg_price is None and idx.payload_hash == payload_hash(idx_leaf)
+
+
+def test_flat_scalar_quote_has_no_avg_or_hash() -> None:
+    """A flat numeric leaf has no avg field and no raw mapping → both fields None."""
+    quote = extract_quotes({"NIFTY": 22500.5})["NIFTY"]
+    assert quote.avg_price is None and quote.payload_hash is None
+
+
+def test_payload_hash_is_stable_order_independent_and_drift_sensitive() -> None:
+    """payload_hash: equal for byte-identical leaves, differs on any drift."""
+    a = {"ltp": 100.0, "tsInMillis": 5.0, "volume": 7.0}
+    b = {"volume": 7.0, "tsInMillis": 5.0, "ltp": 100.0}  # SAME content, different order
+    assert payload_hash(a) == payload_hash(b)  # canonical sort_keys → order-independent
+    assert payload_hash({"ltp": 100.0}) != payload_hash({"ltp": 100.1})  # drift detected
+    # default=str makes a Decimal / datetime leaf hashable without raising.
+    assert isinstance(payload_hash({"ltp": Decimal("100.0")}), str)
+    assert len(payload_hash({})) == 64  # blake3 hex digest length
+
+
+def test_avg_price_quote_equality_used_by_prune() -> None:
+    """avg_price participates in Quote equality (prune keeps a changed avg)."""
+    base = {"ltp": 100.0, "tsInMillis": 1.0, "avgPrice": 99.0}
+    changed_avg = {"ltp": 100.0, "tsInMillis": 1.0, "avgPrice": 98.0}
+    _first, baseline = prune_unchanged({"X": base}, {})
+    pruned, _ = prune_unchanged({"X": changed_avg}, baseline)
+    assert pruned == {"X": changed_avg}  # avg change → kept
 
 
 # ─────────────── exchange_ts derivation (DEC-LIVE-EXCHANGE-TS-IST-001) ───────────────
@@ -411,8 +476,10 @@ def test_prune_nested_only_changed_branch_survives() -> None:
     pruned, updated = prune_unchanged(snap2, baseline)
     # NIFTY unchanged is dropped; only BANKNIFTY's leaf rides up the same nesting.
     assert pruned == {"NSE": {"IDX": {"BANKNIFTY": {"value": 9.0}}}}
-    assert updated["NSE:IDX:NIFTY"] == _bare("1.0")
-    assert updated["NSE:IDX:BANKNIFTY"] == _bare("9.0")
+    # Dict-leaves carry the DERIVED payload_hash (DEC-LIVE-TICK-FIELDS-PARITY-001),
+    # so they equal the FULL leaf Quote, not the bare-scalar `_bare` shape.
+    assert updated["NSE:IDX:NIFTY"] == _leaf_quote({"value": 1.0})
+    assert updated["NSE:IDX:BANKNIFTY"] == _leaf_quote({"value": 9.0})
 
 
 def test_prune_empty_nested_branch_is_dropped() -> None:

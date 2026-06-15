@@ -15,6 +15,7 @@ Prices are kept as exact :class:`~decimal.Decimal` rupees (``str()`` parse, neve
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
+import blake3
 import structlog
 
 from brutex.live.store import TickRecord
@@ -174,6 +176,72 @@ def _leaf_price(mapping: Mapping[str, Any]) -> Decimal | None:
 #: ``stockLivePrice`` both carry ``tsInMillis``). Stored UNTAMPERED.
 VENDOR_TS_MS_KEY: Final[str] = "tsInMillis"
 
+#: Leaf mapping keys (priority order) carrying an instrument's AVERAGE / VWAP
+#: price — the TickVault-parity ``avg_price`` field (DEC-LIVE-TICK-FIELDS-PARITY-001).
+#: Observed on a Groww LTP-feed EQUITY leaf as ``avgPrice`` (``tests/unit/test_live_core.py``
+#: equity-leaf fixture). It is NOT in the documented ``get_ltp`` / ``get_index_value``
+#: snapshot response tables (CLAUDE.md §6; ``docs/groww/api-reference/07-feed.md:105-110,180-185``
+#: list ONLY ``tsInMillis`` + ``ltp`` / ``value``) — so an index leaf and a minimal
+#: LTP leaf carry NO avg price and yield ``None`` (honest null, never fabricated). The
+#: raw leaf is persisted verbatim (``payload_hash`` + ``raw_json``), so if the vendor adds
+#: an avg field under a new name it is re-parseable offline by extending this tuple.
+AVG_PRICE_LEAF_KEYS: Final[tuple[str, ...]] = (
+    "avgPrice",
+    "average_price",
+    "avg_price",
+    "vwap",
+)
+
+
+def _leaf_avg_price(mapping: Mapping[str, Any]) -> Decimal | None:
+    """Return a leaf's average/VWAP price (non-negative Decimal), or ``None``.
+
+    Mirrors :func:`_leaf_price`'s skip-not-raise discipline over
+    :data:`AVG_PRICE_LEAF_KEYS`: the first present-and-parseable non-negative key
+    wins; a leaf with no avg key (every index leaf and a minimal LTP leaf) yields
+    ``None`` (honest — the field is genuinely absent, not zero).
+    """
+    for key in AVG_PRICE_LEAF_KEYS:
+        if key in mapping:
+            coerced = _coerce_price(mapping[key])
+            if coerced is not None:
+                return coerced
+    return None
+
+
+def payload_hash(raw_leaf: object) -> str:
+    """Stable :mod:`blake3` hex digest of a raw feed *raw_leaf* (audit / dedup).
+
+    Canonicalises *raw_leaf* with the SAME deterministic JSON encoding the lake
+    uses for ``raw_json`` (:func:`brutex.live.lake.ticks_to_frame` — ``sort_keys`` +
+    compact separators + ``default=str``), then hashes with :mod:`blake3` — the
+    repo's canonical hash (Golden Rule #4). Hashing the IDENTICAL bytes the
+    ``raw_json`` column stores makes the digest a faithful fingerprint OF THE
+    PERSISTED RECORD: two byte-identical leaves hash equal (dedup) and any drift
+    is detectable (audit). Purely DERIVED + ADDITIVE — the raw leaf is untouched.
+
+    The Groww feed leaf is JSON-native (``int`` / ``float`` / ``str`` / nested
+    ``dict``; ``docs/groww/api-reference/07-feed.md``), so ``json.dumps`` serialises
+    it directly. ``default=str`` is a CRASH-GUARD only — if a non-JSON object (a
+    :class:`~decimal.Decimal` / :class:`~datetime.datetime`) ever reaches here it is
+    stringified rather than raising (one bad leaf never aborts a fold), at the cost
+    of the digest then depending on that object's ``str`` form; it is NOT a
+    feature, and matches ``raw_json`` byte-for-byte, so the hash and the stored raw
+    stay consistent.
+
+    Parameters
+    ----------
+    raw_leaf
+        The raw mapping (or scalar) the vendor sent for one instrument.
+
+    Returns
+    -------
+    str
+        The lowercase hex blake3 digest of the canonical-JSON encoding.
+    """
+    canonical = json.dumps(raw_leaf, sort_keys=True, separators=(",", ":"), default=str)
+    return blake3.blake3(canonical.encode("utf-8")).hexdigest()
+
 
 def _coerce_int(raw: object) -> int | None:
     """Return *raw* as an int (the feed sends volume / OI as doubles), or ``None``."""
@@ -234,16 +302,33 @@ class Quote:
         the leaf omits it (e.g. a flat numeric snapshot).
     volume, open_interest
         Cumulative volume / open interest (LTP feed only; ``None`` for an index).
+    avg_price
+        The leaf's AVERAGE / VWAP price (TickVault-parity), as exact
+        :class:`~decimal.Decimal` — ``None`` when the leaf carries no
+        :data:`AVG_PRICE_LEAF_KEYS` field (every index leaf + a minimal LTP leaf;
+        DEC-LIVE-TICK-FIELDS-PARITY-001). Honest null, never fabricated.
+    payload_hash
+        Stable :mod:`blake3` hex fingerprint of the RAW leaf bytes (audit / dedup;
+        :func:`payload_hash`). ``None`` ONLY for a flat numeric leaf built without
+        a raw mapping to hash (the scalar value itself is the content).
     """
 
     value: Decimal
     vendor_ts_ms: float | None
     volume: int | None
     open_interest: int | None
+    avg_price: Decimal | None = None
+    payload_hash: str | None = None
 
 
 def _leaf_quote(mapping: Mapping[str, Any]) -> Quote | None:
-    """Build a :class:`Quote` from a price-leaf dict, or ``None`` if not one."""
+    """Build a :class:`Quote` from a price-leaf dict, or ``None`` if not one.
+
+    Stamps the TickVault-parity ``avg_price`` (the leaf's avg/VWAP, ``None`` when
+    absent) and ``payload_hash`` (the :mod:`blake3` fingerprint of the WHOLE raw
+    leaf, for audit / dedup) — both purely DERIVED from the untouched leaf
+    (DEC-LIVE-TICK-FIELDS-PARITY-001).
+    """
     price = _leaf_price(mapping)
     if price is None:
         return None
@@ -252,6 +337,8 @@ def _leaf_quote(mapping: Mapping[str, Any]) -> Quote | None:
         vendor_ts_ms=_coerce_ms(mapping.get(VENDOR_TS_MS_KEY)),
         volume=_coerce_int(mapping.get("volume")),
         open_interest=_coerce_int(mapping.get("openInterest")),
+        avg_price=_leaf_avg_price(mapping),
+        payload_hash=payload_hash(mapping),
     )
 
 
@@ -491,6 +578,7 @@ def iter_ticks(records: Sequence[TickRecord]) -> Iterator[LiveTick]:
 
 
 __all__ = [
+    "AVG_PRICE_LEAF_KEYS",
     "PRICE_LEAF_KEYS",
     "VENDOR_TS_MS_KEY",
     "LiveTick",
@@ -500,5 +588,6 @@ __all__ = [
     "extract_quotes",
     "flatten_index_snapshot",
     "iter_ticks",
+    "payload_hash",
     "prune_unchanged",
 ]
