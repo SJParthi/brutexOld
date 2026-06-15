@@ -10,7 +10,12 @@ backtest candle exactly:
   (15:30) are excluded, matching :data:`brutex.calendars.nse.SESSION_DURATION_MINUTES`.
 * **label** — the bar timestamp is the minute's start in **UTC** (closed=left,
   label=left), identical to the lake's historical candle label, so live and
-  backtest bars align by ``==`` on the timestamp.
+  backtest bars align by ``==`` on the timestamp. The bucketing CLOCK is the tick's
+  vendor exchange time (``exchange_ts``) when present, falling back to OUR
+  ``recv_ts`` per-tick when absent (:func:`~brutex.live.tick.effective_clock`) —
+  so a tick stamped 09:15:30 IST by the exchange lands in the 09:15 exchange
+  minute even if OUR receive wall-clock had ticked to 09:16
+  (DEC-LIVE-CANDLE-BUCKET-IST-001).
 * **OHLC** — open = earliest tick value in the minute, high = max, low = min,
   close = latest tick value; **volume = 0** and **open_interest = None** (indices
   do not trade — they mirror the IDX historical bar, per
@@ -22,12 +27,12 @@ Pure function over already-captured ticks → fully unit-testable, no feed/netwo
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from decimal import Decimal
 
 from brutex.calendars.nse import IST, SESSION_OPEN_IST
 from brutex.data.models import CandleBar
-from brutex.live.tick import LiveTick
+from brutex.live.tick import LiveTick, effective_clock
 
 #: The open-minute of the LAST 1-minute candle of the session: 15:29 IST. The
 #: 15:29 bar covers 15:29:00–15:29:59; 15:30:00 is the close instant (no bar).
@@ -73,17 +78,18 @@ def build_minute_candles(
         minutes that actually received a tick produce a bar (gaps are not
         synthesised — a missing live minute is itself a parity signal).
     """
-    # instrument -> minute_label_utc -> list[(recv_ts, value)]
+    # instrument -> minute_label_utc -> list[(clock, value)]
     buckets: dict[str, dict[datetime, list[tuple[datetime, Decimal]]]] = {}
     for tick in ticks:
-        ist_minute = _ist_minute_floor(tick.recv_ts)
+        clock = effective_clock(tick)
+        ist_minute = _ist_minute_floor(clock)
         if not _in_session_window(ist_minute):
             continue
         if session_date is not None and ist_minute.date() != session_date:
             continue
-        label_utc = ist_minute.astimezone(tick.recv_ts.tzinfo)
+        label_utc = ist_minute.astimezone(UTC)
         per_instrument = buckets.setdefault(tick.instrument_key, {})
-        per_instrument.setdefault(label_utc, []).append((tick.recv_ts, tick.value))
+        per_instrument.setdefault(label_utc, []).append((clock, tick.value))
 
     out: dict[str, list[CandleBar]] = {}
     for instrument_key, minute_map in buckets.items():

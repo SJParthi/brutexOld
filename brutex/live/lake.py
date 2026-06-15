@@ -30,7 +30,12 @@ from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.live.candle_builder import build_minute_candles
 from brutex.live.store import TickRecord
-from brutex.live.tick import LiveTick, extract_quotes, flatten_index_snapshot
+from brutex.live.tick import (
+    LiveTick,
+    effective_clock,
+    exchange_ts_from_vendor_ms,
+    extract_quotes,
+)
 from brutex.money import round_money
 
 #: Top-level lake subtree for the live measurement surface.
@@ -47,6 +52,9 @@ TICK_SCHEMA: dict[str, pl.DataType] = {
     "recv_ns": pl.Int64(),  # OURS — nanoseconds (time.time_ns); the cadence oracle
     "recv_ts": pl.Datetime("us", "UTC"),  # OURS — µs convenience mirror of recv_ns
     "vendor_ts_ms": pl.Float64(),  # THEIRS — tsInMillis (milliseconds), UNTAMPERED
+    "exchange_ts": pl.Datetime(  # THEIRS — DERIVED from tsInMillis; ms-precise, null if implausible
+        "us", "UTC"
+    ),
     "session_date": pl.Date(),
     "exchange": pl.String(),
     "segment": pl.String(),
@@ -105,9 +113,13 @@ def _session_date(recv_ts: datetime) -> object:
     return recv_ts.astimezone(IST).date()
 
 
-def _minute_label(recv_ts: datetime) -> datetime:
-    """UTC minute-start label for a tick (matches ``build_minute_candles``)."""
-    return recv_ts.replace(second=0, microsecond=0)
+def _minute_label(clock: datetime) -> datetime:
+    """UTC minute-start label for a *clock* instant (matches ``build_minute_candles``).
+
+    Callers pass the tick's EFFECTIVE clock (``exchange_ts`` when present, else
+    ``recv_ts``) so the label is the exchange minute (DEC-LIVE-CANDLE-BUCKET-IST-001).
+    """
+    return clock.replace(second=0, microsecond=0)
 
 
 def ticks_to_frame(
@@ -130,6 +142,9 @@ def ticks_to_frame(
                     "recv_ns": record.recv_ns,
                     "recv_ts": record.recv_ts,
                     "vendor_ts_ms": quote.vendor_ts_ms,
+                    # Vendor exchange time DERIVED from the untampered tsInMillis (null
+                    # when None/implausible) — DEC-LIVE-EXCHANGE-TS-IST-001.
+                    "exchange_ts": exchange_ts_from_vendor_ms(quote.vendor_ts_ms),
                     "session_date": _session_date(record.recv_ts),
                     "exchange": exchange,
                     "segment": segment,
@@ -186,11 +201,21 @@ def candles_to_frame(
 
 
 def minute_tick_counts(records: Sequence[TickRecord]) -> dict[tuple[str, datetime], int]:
-    """Count ticks per ``(instrument_key, minute-start UTC)`` for the candle stamp."""
+    """Count ticks per ``(instrument_key, exchange-minute-start UTC)`` for the candle stamp.
+
+    Buckets by the tick's EXCHANGE minute (``exchange_ts`` derived from the leaf's
+    ``tsInMillis``) when present, falling back to OUR ``recv_ts`` minute per-tick when
+    absent — the SAME per-tick clock :func:`~brutex.live.candle_builder.build_minute_candles`
+    uses, so this batch-path count matches the bar's bucketing (DEC-LIVE-CANDLE-BUCKET-IST-001).
+    Built from :func:`~brutex.live.tick.extract_quotes` (carries ``tsInMillis``), NOT the
+    timestamp-less :func:`~brutex.live.tick.flatten_index_snapshot`.
+    """
     counts: dict[tuple[str, datetime], int] = {}
     for record in records:
-        minute = _minute_label(record.recv_ts)
-        for instrument_key in flatten_index_snapshot(record.snapshot):
+        recv_minute = _minute_label(record.recv_ts)
+        for instrument_key, quote in extract_quotes(record.snapshot).items():
+            exchange_ts = exchange_ts_from_vendor_ms(quote.vendor_ts_ms)
+            minute = _minute_label(exchange_ts) if exchange_ts is not None else recv_minute
             key = (instrument_key, minute)
             counts[key] = counts.get(key, 0) + 1
     return counts
@@ -232,13 +257,17 @@ def _live_ticks_for_session(lake_root: str | Path, session_date: object) -> pl.D
 def _ticks_from_lake_frame(frame: pl.DataFrame) -> list[LiveTick]:
     """Reconstruct :class:`LiveTick` rows from a deduped ``live_ticks`` lake frame.
 
-    Only the three fields the candle fold needs are read back — ``recv_ts`` (the
-    minute-bucketing / open-close ordering clock), ``instrument_key``, and the raw
-    ``value`` (FULL precision; the 2dp snap happens later at the candle-write
-    boundary). A ``null`` value (defensive — the lake column is nullable) is skipped.
+    Reads back the four fields the candle fold needs — ``recv_ts`` (the fallback
+    clock), ``exchange_ts`` (the DERIVED vendor exchange minute; null when the leaf
+    carried no usable ``tsInMillis``), ``instrument_key``, and the raw ``value``
+    (FULL precision; the 2dp snap happens later at the candle-write boundary). Carrying
+    ``exchange_ts`` back makes the rebuild bucket by the SAME per-tick clock the batch
+    fold used, so the rebuilt bar is byte-identical (DEC-LIVE-CANDLE-BUCKET-IST-001).
+    A ``null`` value (defensive — the lake column is nullable) is skipped.
     """
     ticks: list[LiveTick] = []
-    for row in frame.select("recv_ts", "instrument_key", "value").iter_rows(named=True):
+    cols = frame.select("recv_ts", "exchange_ts", "instrument_key", "value")
+    for row in cols.iter_rows(named=True):
         value = row["value"]
         if value is None:  # pragma: no cover - defensive: writer never emits a null value
             continue
@@ -247,6 +276,7 @@ def _ticks_from_lake_frame(frame: pl.DataFrame) -> list[LiveTick]:
                 recv_ts=row["recv_ts"],
                 instrument_key=row["instrument_key"],
                 value=Decimal(str(value)),
+                exchange_ts=row["exchange_ts"],
             )
         )
     return ticks
@@ -283,15 +313,19 @@ def _rebuild_candles_from_ticks(
 
 
 def _minute_counts_from_ticks(ticks: Sequence[LiveTick]) -> dict[tuple[str, datetime], int]:
-    """Count deduped ticks per ``(instrument_key, minute-start UTC)`` for the rebuild.
+    """Count deduped ticks per ``(instrument_key, exchange-minute-start UTC)`` for the rebuild.
 
     Mirrors :func:`minute_tick_counts` but over reconstructed :class:`LiveTick` rows
     (the deduped lake) rather than raw :class:`TickRecord` snapshots, so the stamped
     ``tick_count`` is the TRUE full-minute count — never one ~5s slice's partial count.
+    Buckets by :func:`~brutex.live.tick.effective_clock` (``exchange_ts`` when present,
+    else ``recv_ts``), the SAME per-tick clock the rebuild's
+    :func:`~brutex.live.candle_builder.build_minute_candles` uses, so the count aligns
+    minute-for-minute with the bar (DEC-LIVE-CANDLE-BUCKET-IST-001).
     """
     counts: dict[tuple[str, datetime], int] = {}
     for tick in ticks:
-        key = (tick.instrument_key, _minute_label(tick.recv_ts))
+        key = (tick.instrument_key, _minute_label(effective_clock(tick)))
         counts[key] = counts.get(key, 0) + 1
     return counts
 

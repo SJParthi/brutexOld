@@ -21,6 +21,10 @@ from brutex.live.lake import (
 from brutex.live.store import TickRecord
 from brutex.live.tick import iter_ticks
 
+# 1718440510123 ms == 2024-06-15 08:35:10.123 UTC == 14:05:10.123 IST.
+_VENDOR_MS = 1718440510123.0
+_EXCHANGE_UTC = datetime(2024, 6, 15, 8, 35, 10, 123000, tzinfo=UTC)
+
 _T0 = datetime(2026, 6, 15, 3, 45, 10, tzinfo=UTC)  # 09:15:10 IST
 _T1 = datetime(2026, 6, 15, 3, 45, 50, tzinfo=UTC)  # 09:15:50 IST
 
@@ -316,3 +320,149 @@ def test_candles_without_tick_lake_fall_back_to_passed_frame(tmp_path) -> None:
     assert frame.shape[0] == 2  # NIFTY + BANKNIFTY, the passed candles verbatim
     nifty = frame.filter(frame["instrument_key"] == "NSE:IDX:NIFTY").to_dicts()[0]
     assert nifty["open"] == 22500.50 and nifty["close"] == 22510.0 and nifty["tick_count"] == 2
+
+
+# ─────────── exchange-time bucketing (DEC-LIVE-EXCHANGE/BUCKET-TS-IST-001) ───────────
+
+
+def _leaf_rec(seq: int, recv: datetime, price: float, *, ts_ms: float | None) -> TickRecord:
+    """A NIFTY index leaf record: optional vendor tsInMillis → derives exchange_ts."""
+    leaf: dict[str, object] = {"value": price}
+    if ts_ms is not None:
+        leaf["tsInMillis"] = ts_ms
+    return TickRecord(
+        seq=seq,
+        recv_ts=recv,
+        snapshot={"NSE": {"IDX": {"NIFTY": leaf}}},
+        recv_ns=1718440510000000000 + seq,
+    )
+
+
+def test_ticks_frame_has_exchange_ts_column_derived_and_null() -> None:
+    """The lake stamps exchange_ts (ms-precise) for a vendor leaf, null for a flat one."""
+    records = [
+        _leaf_rec(0, _T0, 22500.5, ts_ms=_VENDOR_MS),  # derives exchange_ts
+        TickRecord(seq=1, recv_ts=_T1, snapshot={"FLAT": 100.0}),  # flat → null
+    ]
+    frame = ticks_to_frame(records, capture_run_id="r", feed_kind="index")
+    assert "exchange_ts" in frame.columns
+    nifty = frame.filter(frame["instrument_key"] == "NSE:IDX:NIFTY").to_dicts()[0]
+    assert nifty["exchange_ts"] == _EXCHANGE_UTC  # ms preserved
+    assert nifty["vendor_ts_ms"] == _VENDOR_MS  # raw untampered alongside
+    flat = frame.filter(frame["instrument_key"] == "FLAT").to_dicts()[0]
+    assert flat["exchange_ts"] is None  # no tsInMillis → null, recv_ts fallback
+
+
+def test_minute_tick_counts_use_exchange_minute() -> None:
+    """minute_tick_counts buckets by the exchange minute, not OUR recv minute.
+
+    Both leaves are stamped by the exchange inside the 09:15 IST minute
+    (03:45 UTC) but received across the 03:45 / 03:46 wall-clock boundary; the
+    count must collapse them into the single 03:45 exchange minute.
+    """
+    # 09:15:30 IST == 03:45:30 UTC; 09:15:55 IST == 03:45:55 UTC.
+    e30 = datetime(2026, 6, 15, 3, 45, 30, tzinfo=UTC).timestamp() * 1000.0
+    e55 = datetime(2026, 6, 15, 3, 45, 55, tzinfo=UTC).timestamp() * 1000.0
+    records = [
+        _leaf_rec(0, datetime(2026, 6, 15, 3, 45, 31, tzinfo=UTC), 100.0, ts_ms=e30),
+        _leaf_rec(1, datetime(2026, 6, 15, 3, 46, 2, tzinfo=UTC), 110.0, ts_ms=e55),
+    ]
+    counts = minute_tick_counts(records)
+    minute = datetime(2026, 6, 15, 3, 45, tzinfo=UTC)
+    assert counts[("NSE:IDX:NIFTY", minute)] == 2  # one 03:45 bucket, not two
+    assert (datetime(2026, 6, 15, 3, 46, tzinfo=UTC),) not in {(k[1],) for k in counts}
+
+
+def _ms(recv: datetime) -> float:
+    """Vendor tsInMillis equal to *recv* (so exchange minute == recv minute here)."""
+    return recv.timestamp() * 1000.0
+
+
+def _exch_slice(seq0: int, samples: list[tuple[int, float]]) -> list[TickRecord]:
+    """A ~5s slice of NIFTY index leaves carrying a tsInMillis == recv_ts."""
+    out: list[TickRecord] = []
+    for i, (sec, price) in enumerate(samples):
+        recv = datetime(2026, 6, 15, 3, 45, sec, tzinfo=UTC)
+        out.append(_leaf_rec(seq0 + i, recv, price, ts_ms=_ms(recv)))
+    return out
+
+
+def _fold_exch(records: list[TickRecord], *, lake_root, run_id: str = "run1") -> None:
+    write_live_ticks(records, lake_root=lake_root, capture_run_id=run_id)
+    candles = build_minute_candles(iter_ticks(records))
+    write_live_candles(
+        candles, lake_root=lake_root, built_run_id=run_id, tick_counts=minute_tick_counts(records)
+    )
+
+
+def test_micro_batch_fold_equals_single_shot_under_exchange_clock(tmp_path) -> None:
+    """Multi-slice micro-batch fold == single-shot fold under the exchange clock."""
+    s1 = _exch_slice(0, [(5, 22500.0), (8, 22505.0)])
+    s2 = _exch_slice(2, [(20, 22490.0), (25, 22520.0)])
+    s3 = _exch_slice(4, [(50, 22515.0), (58, 22510.0)])
+    for seg in (s1, s2, s3):
+        _fold_exch(seg, lake_root=tmp_path)
+    multi = read_live_candles(tmp_path).to_dicts()
+
+    one_shot = tmp_path / "oneshot"
+    _fold_exch(s1 + s2 + s3, lake_root=one_shot)
+    single = read_live_candles(one_shot).to_dicts()
+    assert multi == single
+    assert len(multi) == 1 and multi[0]["tick_count"] == 6
+    assert multi[0]["open"] == 22500.0 and multi[0]["close"] == 22510.0
+
+
+def test_double_fold_idempotent_under_exchange_clock(tmp_path) -> None:
+    """A re-fold under exchange-ts bucketing is byte-identical (tick_count not doubled)."""
+    s1 = _exch_slice(0, [(5, 22500.0), (8, 22505.0)])
+    s2 = _exch_slice(2, [(20, 22490.0), (25, 22520.0)])
+    _fold_exch(s1, lake_root=tmp_path)
+    _fold_exch(s2, lake_root=tmp_path)
+    once = read_live_candles(tmp_path).to_dicts()
+    _fold_exch(s1, lake_root=tmp_path)  # crash-replay
+    _fold_exch(s2, lake_root=tmp_path)
+    twice = read_live_candles(tmp_path).to_dicts()
+    assert twice == once
+    assert twice[0]["tick_count"] == 4  # NOT 8
+
+
+def test_rebuild_buckets_late_recv_tick_by_exchange_minute(tmp_path) -> None:
+    """A tick the exchange stamped at 09:15:58 but we received at 09:16 lands in 09:15.
+
+    The whole lake path (write ticks → rebuild candle from the deduped lake) must
+    bucket by exchange_ts read back from the tick lake, so a snapshot-cadence delay
+    never spills a 09:15 trade into a phantom 09:16 bar (DEC-LIVE-CANDLE-BUCKET-IST-001).
+    """
+    e_open = datetime(2026, 6, 15, 3, 45, 5, tzinfo=UTC).timestamp() * 1000.0
+    e_late = datetime(2026, 6, 15, 3, 45, 58, tzinfo=UTC).timestamp() * 1000.0  # 09:15:58 IST
+    records = [
+        _leaf_rec(0, datetime(2026, 6, 15, 3, 45, 6, tzinfo=UTC), 100.0, ts_ms=e_open),
+        _leaf_rec(1, datetime(2026, 6, 15, 3, 46, 1, tzinfo=UTC), 110.0, ts_ms=e_late),
+    ]
+    _fold_exch(records, lake_root=tmp_path)
+    frame = read_live_candles(tmp_path)
+    assert frame.shape[0] == 1  # ONE bar — both ticks in the 09:15 exchange minute
+    row = frame.to_dicts()[0]
+    assert row["timestamp"] == datetime(2026, 6, 15, 3, 45, tzinfo=UTC)
+    assert row["open"] == 100.0 and row["close"] == 110.0 and row["tick_count"] == 2
+
+
+def test_index_leaf_buckets_by_exchange_a_no_ts_leaf_by_recv(tmp_path) -> None:
+    """An index leaf (tsInMillis) buckets by exchange minute; a leaf without it by recv."""
+    e_ms = datetime(2026, 6, 15, 3, 45, 40, tzinfo=UTC).timestamp() * 1000.0  # 09:15:40 IST
+    records = [
+        # NIFTY: exchange 09:15:40, received in the 09:16 wall-clock minute.
+        _leaf_rec(0, datetime(2026, 6, 15, 3, 46, 3, tzinfo=UTC), 22500.0, ts_ms=e_ms),
+        # A flat leaf with NO tsInMillis, received at 09:16:03 → recv-minute bucket.
+        TickRecord(
+            seq=1,
+            recv_ts=datetime(2026, 6, 15, 3, 46, 3, tzinfo=UTC),
+            snapshot={"NSE:IDX:BANKNIFTY": 48000.0},
+            recv_ns=1718440560000000001,
+        ),
+    ]
+    _fold_exch(records, lake_root=tmp_path)
+    frame = read_live_candles(tmp_path).sort("instrument_key")
+    rows = {r["instrument_key"]: r["timestamp"] for r in frame.to_dicts()}
+    assert rows["NSE:IDX:NIFTY"] == datetime(2026, 6, 15, 3, 45, tzinfo=UTC)  # exchange minute
+    assert rows["NSE:IDX:BANKNIFTY"] == datetime(2026, 6, 15, 3, 46, tzinfo=UTC)  # recv fallback
