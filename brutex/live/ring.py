@@ -11,7 +11,7 @@ off-cadence on a ~1s flush.
 
 Two ledger entries, both honoured here:
 
-* **DEC-LIVE-RAM-RING-001 (#797)** — :class:`TickRing`: a BOUNDED in-memory ring of
+* **DEC-LIVE-RAM-RING-001 (#801)** — :class:`TickRing`: a BOUNDED in-memory ring of
   the most-recent un-flushed captured items. O(1) :meth:`~TickRing.append`, O(1)
   :meth:`~TickRing.drain_pending` (pointer swap). The bound is honoured WITHOUT
   silent data loss: a ``collections.deque(maxlen=N)`` would drop the OLDEST
@@ -21,7 +21,7 @@ Two ledger entries, both honoured here:
   the ring ONLY after it is either drained to disk OR spilled to disk — never
   dropped.
 
-* **DEC-LIVE-FLUSH-LOOP-001 (#798)** — :class:`RingFlusher`: a periodic (~1s,
+* **DEC-LIVE-FLUSH-LOOP-001 (#802)** — :class:`RingFlusher`: a periodic (~1s,
   injected interval + injected monotonic clock) drain of the ring to the EXISTING
   durable :class:`~brutex.live.store.TickSink` (``TickStore`` /
   ``RollingTickStore`` — REUSED verbatim, the WAL/fold writers are NOT duplicated,
@@ -107,7 +107,7 @@ class RingItem:
 class TickRing:
     """Bounded in-RAM ring of un-flushed captured items — the O(1) hot-path buffer.
 
-    DEC-LIVE-RAM-RING-001 (#797). :meth:`append` is the per-tick hot path: one
+    DEC-LIVE-RAM-RING-001 (#801). :meth:`append` is the per-tick hot path: one
     O(1) in-memory enqueue under a short lock, never touching disk.
     :meth:`drain_pending` atomically SWAPS out everything currently buffered (O(1)
     pointer swap under the lock) so the caller can write the batch to the durable
@@ -191,7 +191,7 @@ class TickRing:
 class RingFlusher:
     """Periodic + on-demand drain of a :class:`TickRing` to a durable sink.
 
-    DEC-LIVE-FLUSH-LOOP-001 (#798). Owns a :class:`TickRing` and the existing
+    DEC-LIVE-FLUSH-LOOP-001 (#802). Owns a :class:`TickRing` and the existing
     durable :class:`~brutex.live.store.TickSink`. The capture callback calls
     :meth:`capture` (ring append + capacity-spill); the host loop calls
     :meth:`flush_due` every poll (cooperative — no dedicated thread needed, so the
