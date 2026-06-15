@@ -39,6 +39,7 @@ from typing import Any
 
 import structlog
 
+from brutex.live.ring import RingFlusher
 from brutex.live.store import TickRecord, TickSink
 from brutex.live.tick import Quote, prune_unchanged
 
@@ -69,13 +70,16 @@ class TickCapture:
         clock: Callable[[], datetime] = _utc_now,
         ns_clock: Callable[[], int] = time.time_ns,
         on_record: Callable[[TickRecord], None] | None = None,
+        flusher: RingFlusher | None = None,
     ) -> None:
         """Wire the capture.
 
         Parameters
         ----------
         store
-            Durable append-only sink (one line per callback).
+            Durable append-only sink (one line per callback). When *flusher* is
+            given, the per-callback durable write is routed through the flusher's
+            in-RAM ring instead of straight to *store* (the flusher owns *store*).
         subscribe
             Registers our callback with the feed (e.g.
             ``lambda cb: feed.subscribe_index_value(instruments, on_data_received=cb)``);
@@ -88,7 +92,15 @@ class TickCapture:
             Returns OUR receive time in nanoseconds (``time.time_ns`` — the
             high-resolution cadence oracle; injectable for tests).
         on_record
-            Optional per-record hook (e.g. a live counter / progress log).
+            Optional per-record hook (e.g. a live counter / progress log). Only
+            fired on the per-tick durable path; the ring path assigns ``seq`` at
+            flush time, so there is no per-callback ``TickRecord`` to hand it.
+        flusher
+            Optional :class:`~brutex.live.ring.RingFlusher` (DEC-LIVE-RAM-RING-001
+            / DEC-LIVE-FLUSH-LOOP-001). When set, every callback buffers into its
+            in-RAM ring (O(1), no per-tick disk I/O) and the periodic flush +
+            final drain move ticks to the durable sink; when ``None`` (default)
+            the prior per-tick ``store.append`` durable path is unchanged.
         """
         self._store = store
         self._subscribe = subscribe
@@ -96,6 +108,7 @@ class TickCapture:
         self._clock = clock
         self._ns_clock = ns_clock
         self._on_record = on_record
+        self._flusher = flusher
         self._count = 0
         self._heartbeats = 0
         #: Last WRITTEN :class:`~brutex.live.tick.Quote` per instrument key — the
@@ -157,6 +170,13 @@ class TickCapture:
 
         The ns/ts stamps and ``seq`` semantics are otherwise identical to the
         full-snapshot capture; ``seq`` advances only on a written record.
+
+        **Ring path (DEC-LIVE-RAM-RING-001 / DEC-LIVE-FLUSH-LOOP-001).** When a
+        :class:`~brutex.live.ring.RingFlusher` is wired, the pruned snapshot is
+        buffered into its in-RAM ring (O(1), no per-tick disk I/O) rather than
+        written straight to the durable sink — the periodic ``flush_due`` +
+        shutdown ``drain`` move it to disk where ``seq`` is assigned. ``on_record``
+        is not fired on this path (there is no per-callback ``TickRecord``).
         """
         recv_ns = self._ns_clock()
         recv_ts = self._clock()
@@ -166,12 +186,15 @@ class TickCapture:
         pruned, updated = prune_unchanged(snapshot, baseline)
         if not pruned:
             return
-        record = self._store.append(pruned, recv_ts=recv_ts, recv_ns=recv_ns)
+        if self._flusher is not None:
+            self._flusher.capture(pruned, recv_ts=recv_ts, recv_ns=recv_ns)
+        else:
+            record = self._store.append(pruned, recv_ts=recv_ts, recv_ns=recv_ns)
+            if self._on_record is not None:
+                self._on_record(record)
         self._last_obs = updated
         self._last_minute = minute
         self._count += 1
-        if self._on_record is not None:
-            self._on_record(record)
 
     def run_for(
         self,
@@ -191,6 +214,15 @@ class TickCapture:
         last beat, elapsed, rate) so an unattended multi-hour run is VISIBLY
         alive — a beat with ``since_last=0`` is itself the signal that the feed
         has gone quiet. Returns the total number of snapshots captured.
+
+        **Cooperative ring flush (DEC-LIVE-FLUSH-LOOP-001).** When a
+        :class:`~brutex.live.ring.RingFlusher` is wired, every poll calls its
+        ``flush_due(now)`` (a no-op until the ~1s interval elapses) so the in-RAM
+        ring drains to the durable sink off the feed's hot path — NO dedicated
+        flush thread, so the whole drain is deterministic under the injected
+        clock. On loop exit the ring is fully ``drain``-ed (graceful-shutdown
+        zero-loss), so no buffered tick is left in RAM when the caller closes the
+        sink.
         """
         self.start()
         start = monotonic()
@@ -204,7 +236,11 @@ class TickCapture:
             if now >= next_beat:
                 last_count = self._heartbeat(now - start, last_count)
                 next_beat += heartbeat_interval
+            if self._flusher is not None:
+                self._flusher.flush_due(now)
             sleep(poll_interval)
+        if self._flusher is not None:
+            self._flusher.drain()
         _LOG.info("live_capture_done", captured=self._count, heartbeats=self._heartbeats)
         return self._count
 
