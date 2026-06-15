@@ -183,6 +183,11 @@ def parse_instrument_row(row: dict[str, str]) -> tuple[str, Instrument]:
         option_type=itype.value if is_option else None,
         expiry_flag=None,
         asm_gsm_flag=_clean(row.get("is_reserved")) == "1",
+        # Preserve the RAW CSV exchange_token (the live-feed token: "NIFTY"/"1"/
+        # "2885") — security_id hashes non-numeric index tokens into a surrogate,
+        # so the websocket feed can only be addressed from this literal token
+        # (07-feed.md:54,132; DEC-LIVE-MANIFEST-FEED-FORMAT-001).
+        feed_token=_clean(row.get("exchange_token")),
     )
     return gsym, instrument
 

@@ -158,6 +158,9 @@ def test_index_row_maps_to_index_segment_zero_lot_surrogate_id() -> None:
     # string token → deterministic surrogate from the groww_symbol
     expected = int.from_bytes(hashlib.blake2b(b"NSE-NIFTY", digest_size=4).digest(), "big")
     assert inst.security_id == expected
+    # but feed_token preserves the RAW CSV token "NIFTY" (the live-feed identity,
+    # 07-feed.md:132) — NOT the surrogate; this is what the live manifest emits.
+    assert inst.feed_token == "NIFTY"
 
 
 def test_vix_present_and_parses() -> None:
@@ -169,6 +172,7 @@ def test_vix_present_and_parses() -> None:
 def test_equity_row_numeric_security_id() -> None:
     inst = gi.load_index_from_csv(_csv(_WIPRO)).by_groww_symbol["NSE-WIPRO"]
     assert inst.security_id == 3787  # numeric token used directly
+    assert inst.feed_token == "3787"  # the raw CSV token (== str(security_id) here)
     assert inst.segment is Segment.CASH
     assert inst.lot_size == 1 and inst.tick_size == Decimal("0.05")
     assert inst.isin == "INE075A01022"

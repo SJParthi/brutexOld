@@ -218,6 +218,44 @@ class TestOpenAndSchema:
             assert s.count() == 1
             assert s.schema_version == SCHEMA_VERSION
 
+    def test_feed_token_round_trips_distinct_from_security_id(self, tmp_path: Path) -> None:
+        """v7: the RAW Groww feed token survives the round-trip, distinct from the surrogate.
+
+        An NSE index has a STRING CSV token (``"NIFTY"``) that ``security_id``
+        hashes into a surrogate; ``feed_token`` must preserve the literal token so
+        the live manifest can address ``subscribe_index_value`` (07-feed.md:132).
+        """
+        nifty = Instrument(
+            exch_id=Exchange.NSE,
+            security_id=935205938,  # the blake2b surrogate (NOT the feed token)
+            symbol_name="NIFTY",
+            display_name="NIFTY 50",
+            instrument=InstrumentType.IDX,
+            segment=Segment.INDEX,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0,
+            tick_size=Decimal(0),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+            feed_token="NIFTY",
+        )
+        db = tmp_path / "feed.duckdb"
+        with InstrumentStore.open(db) as s:
+            s.upsert_many(
+                [nifty],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("feed"),
+            )
+            (read_back,) = s.list_index_equity_instruments()
+            assert read_back.feed_token == "NIFTY"  # the raw token, not the surrogate
+            assert read_back.security_id == 935205938
+
     def test_context_manager_closes(self, tmp_path: Path) -> None:
         db = tmp_path / "c.duckdb"
         with open_instrument_store(db) as s:
@@ -988,15 +1026,16 @@ class TestCoverageLedger:
             error_message=error,
         )
 
-    def test_schema_version_is_six(self, tmp_path: Path) -> None:
-        # v6: added the reference_only column — the explicit REFERENCE_ONLY
-        # scope tier (DEC-NIFTY-TOTAL-MARKET-REFTAG-001). v5 dropped the
-        # empty expiries/contracts tables (DEC-EXPIRED-OPTIONS-TABLE-001); v4
-        # the index segment='INDEX' PK fix (DEC-INDEX-SEGMENT-PK-FIX-001); v3
+    def test_schema_version_is_seven(self, tmp_path: Path) -> None:
+        # v7: added the feed_token column — the RAW Groww CSV exchange_token
+        # preserved for the live websocket feed (DEC-LIVE-MANIFEST-FEED-FORMAT-001).
+        # v6: the reference_only column (DEC-NIFTY-TOTAL-MARKET-REFTAG-001). v5
+        # dropped the empty expiries/contracts tables (DEC-EXPIRED-OPTIONS-TABLE-001);
+        # v4 the index segment='INDEX' PK fix (DEC-INDEX-SEGMENT-PK-FIX-001); v3
         # the Dhan-native rename (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
         with InstrumentStore.open(tmp_path / "db") as s:
-            assert s.schema_version == 6
-            assert SCHEMA_VERSION == 6
+            assert s.schema_version == 7
+            assert SCHEMA_VERSION == 7
 
     def test_upsert_and_get_roundtrip(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:

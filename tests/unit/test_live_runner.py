@@ -94,7 +94,15 @@ def test_start_then_status_uptime(tmp_path) -> None:
 
 
 def test_start_writes_manifest_and_passes_capture_all_flags(tmp_path) -> None:
-    """start() writes the manifest then spawns capture-all --manifest/--report/--feed."""
+    """start() writes the manifest then spawns capture-all --manifest/--report.
+
+    REGRESSION (the toggle launched a CRASHING command): the spawned argv MUST be
+    parseable by the real ``brutex.live`` CLI parser. The old wiring passed
+    ``--feed both`` to ``capture-all`` (which has no ``--feed`` option), so argparse
+    rejected the whole spawn and the capture crashed on every launch. This test
+    feeds the EXACT spawned args through the real parser, so a flag that the
+    subcommand does not accept fails here instead of only at runtime on the Mac.
+    """
     written: list[str] = []
     captured_argv: list[str] = []
 
@@ -115,7 +123,16 @@ def test_start_writes_manifest_and_passes_capture_all_flags(tmp_path) -> None:
     assert "capture-all" in captured_argv
     assert captured_argv[captured_argv.index("--manifest") + 1] == "man.json"
     assert captured_argv[captured_argv.index("--report") + 1] == "rep.md"
-    assert captured_argv[captured_argv.index("--feed") + 1] == "both"
+    # capture-all is inherently dual-feed → it has NO --feed option; the toggle must
+    # NOT pass one (the bug that crashed every launch).
+    assert "--feed" not in captured_argv
+    # And the EXACT spawned args parse cleanly through the real CLI parser (the guard
+    # that would have caught the --feed crash before it ever reached the operator).
+    from brutex.live.__main__ import _build_parser
+
+    cli_args = captured_argv[captured_argv.index("brutex.live") + 1 :]
+    parsed = _build_parser().parse_args(cli_args)
+    assert parsed.command == "capture-all"
 
 
 def test_start_is_idempotent_when_running(tmp_path) -> None:
