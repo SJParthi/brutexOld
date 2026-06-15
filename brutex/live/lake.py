@@ -61,8 +61,10 @@ TICK_SCHEMA: dict[str, pl.DataType] = {
     "instrument_key": pl.String(),
     "groww_symbol": pl.String(),
     "value": pl.Float64(),  # price — snapped to 2dp (DEC-SPOT-PRICE-2DP); exact raw kept in raw_json
+    "avg_price": pl.Float64(),  # THEIRS — avg/VWAP leaf price, 2dp; null when leaf omits it
     "volume": pl.Int64(),
     "open_interest": pl.Int64(),
+    "payload_hash": pl.String(),  # blake3 of the raw leaf (audit/dedup); null for a flat scalar
     "feed_kind": pl.String(),
     "raw_json": pl.String(),
 }
@@ -84,6 +86,10 @@ CANDLE_SCHEMA: dict[str, pl.DataType] = {
     "volume": pl.Int64(),
     "open_interest": pl.Int64(),
     "tick_count": pl.Int64(),
+    # DERIVED intraday percentages — STATISTICS, kept at FULL precision (NEVER 2dp;
+    # DEC-MONEY-2DP-001 forbids rounding non-money) — DEC-LIVE-CANDLE-DERIVED-PCT-001.
+    "pct_from_open": pl.Float64(),  # (close-open)/open*100; null when open == 0
+    "pct_change": pl.Float64(),  # (close-prev_close)/prev_close*100; null w/o a prev_close
     "source": pl.String(),
     "built_run_id": pl.String(),
 }
@@ -122,6 +128,36 @@ def _minute_label(clock: datetime) -> datetime:
     return clock.replace(second=0, microsecond=0)
 
 
+def _pct(numerator: Decimal, denominator: Decimal) -> float | None:
+    """Return ``numerator / denominator * 100`` as a full-precision ``float``, or ``None``.
+
+    A DERIVED STATISTIC — kept at full precision, NEVER 2dp-snapped (the 2dp money
+    rule is money-only; DEC-MONEY-2DP-001). A zero *denominator* (a 0-rupee open /
+    prev-close) yields ``None`` — the honest no-divide-by-zero guard, never a
+    fabricated 0 or an ``inf`` (DEC-LIVE-CANDLE-DERIVED-PCT-001).
+    """
+    if denominator == 0:
+        return None
+    return float(numerator / denominator * 100)
+
+
+def _derived_pcts(bar: CandleBar, prev_close: Decimal | None) -> tuple[float | None, float | None]:
+    """Compute ``(pct_from_open, pct_change)`` for *bar* (both nullable statistics).
+
+    * ``pct_from_open`` = ``(close - open) / open * 100`` — intraday, from the bar
+      alone; ``None`` when ``open == 0``.
+    * ``pct_change`` = ``(close - prev_close) / prev_close * 100`` — vs the prior
+      session's daily close (:func:`brutex.live.prevday.load_prev_day`); ``None``
+      when *prev_close* is missing or zero.
+
+    Computed on exact :class:`~decimal.Decimal` rupees, returned as full-precision
+    ``float`` (no rounding — they are statistics, not money).
+    """
+    pct_from_open = _pct(bar.close - bar.open, bar.open)
+    pct_change = None if prev_close is None else _pct(bar.close - prev_close, prev_close)
+    return pct_from_open, pct_change
+
+
 def ticks_to_frame(
     records: Sequence[TickRecord], *, capture_run_id: str, feed_kind: str
 ) -> pl.DataFrame:
@@ -153,8 +189,15 @@ def ticks_to_frame(
                     "value": float(
                         round_money(quote.value)
                     ),  # 2dp snap (DEC-SPOT-PRICE-2DP); raw kept in raw_json
+                    # avg/VWAP leaf price (TickVault parity) — 2dp money snap; null when the
+                    # leaf carried no avg field (DEC-LIVE-TICK-FIELDS-PARITY-001).
+                    "avg_price": (
+                        None if quote.avg_price is None else float(round_money(quote.avg_price))
+                    ),
                     "volume": quote.volume,
                     "open_interest": quote.open_interest,
+                    # blake3 fingerprint of the RAW leaf bytes (audit/dedup); null for a flat scalar.
+                    "payload_hash": quote.payload_hash,
                     "feed_kind": feed_kind,
                     "raw_json": raw,
                 }
@@ -167,17 +210,30 @@ def candles_to_frame(
     *,
     built_run_id: str,
     tick_counts: Mapping[tuple[str, datetime], int] | None = None,
+    prev_closes: Mapping[str, Decimal] | None = None,
 ) -> pl.DataFrame:
     """Build a ``live_candles_1m`` DataFrame from per-instrument candles.
 
     *tick_counts* (from :func:`minute_tick_counts`) stamps how many ticks formed
     each minute; absent counts default to ``0``.
+
+    *prev_closes* (``{instrument_key: Decimal}`` — e.g. from
+    :func:`brutex.live.prevday.load_prev_day`, ``.close``) supplies each
+    instrument's prior-session daily close for the DERIVED ``pct_change`` statistic;
+    an instrument absent from the mapping (or a ``None`` map) gets a ``null``
+    ``pct_change`` (honest — no prev-close, no fabrication;
+    DEC-LIVE-CANDLE-DERIVED-PCT-001). ``pct_from_open`` needs no prev-close (it is
+    intraday). Both percentages keep FULL precision (NEVER 2dp — statistics, not
+    money; DEC-MONEY-2DP-001).
     """
     counts = tick_counts or {}
+    prevs = prev_closes or {}
     rows: list[dict[str, object]] = []
     for instrument_key, bars in candles.items():
         exchange, segment, symbol = split_instrument_key(instrument_key)
+        prev_close = prevs.get(instrument_key)
         for bar in bars:
+            pct_from_open, pct_change = _derived_pcts(bar, prev_close)
             rows.append(
                 {
                     "instrument_key": instrument_key,
@@ -193,6 +249,8 @@ def candles_to_frame(
                     "volume": bar.volume,
                     "open_interest": bar.open_interest,
                     "tick_count": counts.get((instrument_key, bar.timestamp), 0),
+                    "pct_from_open": pct_from_open,
+                    "pct_change": pct_change,
                     "source": "live",
                     "built_run_id": built_run_id,
                 }
@@ -288,6 +346,7 @@ def _rebuild_candles_from_ticks(
     *,
     affected: set[tuple[str, datetime]],
     built_run_id: str,
+    prev_closes: Mapping[str, Decimal] | None,
 ) -> pl.DataFrame:
     """Rebuild the *affected* ``(instrument_key, minute)`` candles from the tick lake.
 
@@ -297,6 +356,11 @@ def _rebuild_candles_from_ticks(
     each with its TRUE full-minute ``tick_count`` (the deduped per-minute count). This
     is the authoritative + idempotent candle: a double-fold of the same segment reads
     back the SAME deduped tick set, so the rebuilt bar is byte-identical.
+
+    *prev_closes* is threaded into :func:`candles_to_frame` so the DERIVED
+    ``pct_change`` is recomputed identically on every rebuild — it is a pure function
+    of the (deterministic) rebuilt bar + the (fixed) prior-session close, so a
+    double-fold stays byte-identical (DEC-LIVE-CANDLE-DERIVED-PCT-001).
     """
     tick_frame = _live_ticks_for_session(lake_root, session_date)
     if tick_frame.is_empty():
@@ -309,7 +373,9 @@ def _rebuild_candles_from_ticks(
         in_scope = [bar for bar in bars if (instrument_key, bar.timestamp) in affected]
         if in_scope:
             kept[instrument_key] = in_scope
-    return candles_to_frame(kept, built_run_id=built_run_id, tick_counts=counts)
+    return candles_to_frame(
+        kept, built_run_id=built_run_id, tick_counts=counts, prev_closes=prev_closes
+    )
 
 
 def _minute_counts_from_ticks(ticks: Sequence[LiveTick]) -> dict[tuple[str, datetime], int]:
@@ -330,7 +396,13 @@ def _minute_counts_from_ticks(ticks: Sequence[LiveTick]) -> dict[tuple[str, date
     return counts
 
 
-def _merge_candles(frame: pl.DataFrame, dest: Path, *, lake_root: str | Path) -> None:
+def _merge_candles(
+    frame: pl.DataFrame,
+    dest: Path,
+    *,
+    lake_root: str | Path,
+    prev_closes: Mapping[str, Decimal] | None,
+) -> None:
     """Re-aggregate candles on ``(instrument_key, timestamp)`` across folds, write sorted.
 
     The real-time fold (#750) writes a candle for EACH ~5s slice of a minute, then
@@ -350,7 +422,11 @@ def _merge_candles(frame: pl.DataFrame, dest: Path, *, lake_root: str | Path) ->
         for row in frame.select("instrument_key", "timestamp").iter_rows(named=True)
     }
     rebuilt = _rebuild_candles_from_ticks(
-        lake_root, session_date, affected=affected, built_run_id=built_run_id
+        lake_root,
+        session_date,
+        affected=affected,
+        built_run_id=built_run_id,
+        prev_closes=prev_closes,
     )
     # Minutes the tick lake could rebuild are authoritative; any affected minute it
     # could NOT (no ticks persisted) keeps the passed-in candle (batch / test path).
@@ -420,6 +496,7 @@ def write_live_candles(
     lake_root: str | Path,
     built_run_id: str,
     tick_counts: Mapping[tuple[str, datetime], int] | None = None,
+    prev_closes: Mapping[str, Decimal] | None = None,
 ) -> list[Path]:
     """Persist 1-minute *candles* to ``live/candles_1m`` (one file per session date).
 
@@ -428,8 +505,16 @@ def write_live_candles(
     fold writes a candle per ~5s slice and re-folds the same minute as more ticks
     arrive, so each affected minute is rebuilt from the deduped ``live_ticks`` lake to
     the FULL minute — idempotent under a double-fold (DEC-LIVE-CANDLE-PRECISION-001).
+
+    *prev_closes* (``{instrument_key: Decimal}`` prior-session daily close, e.g. from
+    :func:`brutex.live.prevday.load_prev_day`) feeds the DERIVED ``pct_change``
+    statistic — threaded through BOTH the passed-in candle path AND the tick-lake
+    rebuild so the column is consistent and idempotent across folds; an absent
+    instrument gets a ``null`` ``pct_change`` (DEC-LIVE-CANDLE-DERIVED-PCT-001).
     """
-    frame = candles_to_frame(candles, built_run_id=built_run_id, tick_counts=tick_counts)
+    frame = candles_to_frame(
+        candles, built_run_id=built_run_id, tick_counts=tick_counts, prev_closes=prev_closes
+    )
     written: list[Path] = []
     for session_date in frame["session_date"].unique().to_list():
         dest = _partition_path(lake_root, _CANDLES_DIR, session_date)
@@ -437,6 +522,7 @@ def write_live_candles(
             frame.filter(pl.col("session_date") == session_date),
             dest,
             lake_root=lake_root,
+            prev_closes=prev_closes,
         )
         written.append(dest)
     return written
