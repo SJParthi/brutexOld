@@ -69,7 +69,7 @@ ui = [
 # (mirrors the python-data-lake lock-step precedent). Optuna is NOT adopted
 # (ADR-0007 condition 1 — the TPE outer layer selects nothing).
 optimize = [
-    "cma==3.4.0",
+    "cma==4.4.4",
 ]
 # DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009, 2026-06-12): the `groww` optional
 # extra is RE-ADDED for the Dhan → Groww re-migration, superseding the
