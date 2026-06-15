@@ -257,6 +257,98 @@ def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> 
     return out
 
 
+def prune_unchanged(
+    snapshot: Mapping[str, Any], last_prices: Mapping[str, Decimal]
+) -> tuple[Mapping[str, Any], dict[str, Decimal]]:
+    """Keep ONLY the instruments whose coerced price CHANGED since *last_prices*.
+
+    Walks *snapshot* the SAME way :func:`extract_quotes` /
+    :func:`flatten_index_snapshot` do — reusing :func:`_leaf_price`, the
+    ``"prefix:key"`` instrument-key rule, the drift guard, and ``_coerce_price``
+    — and rebuilds the SAME nested shape containing only the leaves whose price
+    differs from ``last_prices[instrument_key]`` (a never-seen instrument is
+    ALWAYS kept). A kept leaf is copied **verbatim** (the full raw mapping), so
+    ``tsInMillis`` / volume / open interest survive for every kept instrument.
+
+    This is the delta the capture persists instead of the full 779-instrument
+    snapshot: the vast majority of leaves are unchanged callback-to-callback and
+    are dropped (the redundancy the operator's 4.33 GB / 4-minute run was
+    writing). Because the candle builder takes open = first value, close = last
+    value, high = max, low = min, and an UNCHANGED leaf can never alter any of
+    those four (the first occurrence of every DISTINCT value is always kept), the
+    1-minute candle rebuilt from the delta stream is byte-identical to the one
+    rebuilt from the full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
+
+    Parameters
+    ----------
+    snapshot
+        The raw (possibly nested) feed snapshot, exactly as the SDK returned it.
+    last_prices
+        ``{instrument_key: Decimal}`` — the coerced price last WRITTEN per
+        instrument (the capture seeds ``{}`` for the first callback).
+
+    Returns
+    -------
+    tuple[Mapping[str, Any], dict[str, Decimal]]
+        ``(pruned_snapshot, updated_last_prices)`` where *pruned_snapshot* is the
+        same nested shape holding only changed instruments' full raw leaves (an
+        EMPTY mapping when nothing changed), and *updated_last_prices* is
+        ``last_prices`` merged with every kept instrument's new price (a flat
+        ``dict`` — the caller adopts it as the next-callback baseline). Unchanged
+        instruments keep their prior price; instruments absent from *snapshot*
+        are left untouched in the baseline.
+    """
+    updated = dict(last_prices)
+    pruned = _prune_into(snapshot, updated, prefix="")
+    return pruned, updated
+
+
+def _prune_into(
+    snapshot: Mapping[str, Any], updated: dict[str, Decimal], *, prefix: str
+) -> dict[str, Any]:
+    """Recursive worker for :func:`prune_unchanged` — see its contract.
+
+    Mutates *updated* in place with every kept leaf's new price and returns the
+    rebuilt nested mapping for this level (only branches that contain a changed
+    leaf appear). The traversal mirrors :func:`extract_quotes` exactly: a price
+    leaf-dict (matched by :func:`_leaf_price`) is a leaf, a drifted leaf
+    (:func:`_is_drifted_leaf`) is skipped, any other mapping recurses, and a flat
+    numeric value is coerced via :func:`_coerce_price`.
+    """
+    out: dict[str, Any] = {}
+    for raw_key, raw_value in snapshot.items():
+        key = f"{prefix}:{raw_key}" if prefix else str(raw_key)
+        if isinstance(raw_value, Mapping):
+            leaf = _leaf_price(raw_value)
+            if leaf is not None:
+                if _changed(key, leaf, updated):
+                    out[raw_key] = raw_value
+            elif _is_drifted_leaf(raw_value):
+                _warn_schema_drift(key, raw_value)
+            else:
+                child = _prune_into(raw_value, updated, prefix=key)
+                if child:
+                    out[raw_key] = child
+        else:
+            coerced = _coerce_price(raw_value)
+            if coerced is not None and _changed(key, coerced, updated):
+                out[raw_key] = raw_value
+    return out
+
+
+def _changed(key: str, price: Decimal, updated: dict[str, Decimal]) -> bool:
+    """True if *price* differs from the recorded baseline for *key*.
+
+    A never-seen *key* counts as changed (always kept). On a change the baseline
+    is advanced in place to *price* (so the SAME value next callback is dropped).
+    """
+    previous = updated.get(key)
+    if previous is not None and previous == price:
+        return False
+    updated[key] = price
+    return True
+
+
 def iter_ticks(records: Sequence[TickRecord]) -> Iterator[LiveTick]:
     """Expand captured :class:`TickRecord` snapshots into per-instrument ticks.
 
@@ -291,4 +383,5 @@ __all__ = [
     "extract_quotes",
     "flatten_index_snapshot",
     "iter_ticks",
+    "prune_unchanged",
 ]

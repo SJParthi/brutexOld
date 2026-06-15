@@ -33,6 +33,7 @@ from brutex.live.tick import (
     _leaf_price,
     flatten_index_snapshot,
     iter_ticks,
+    prune_unchanged,
 )
 
 # 09:15 IST == 03:45 UTC; 15:29 IST == 09:59 UTC; 15:30 IST == 10:00 UTC.
@@ -153,6 +154,88 @@ def test_schema_drift_leaf_is_skipped_not_recursed() -> None:
     snap = {"NSE": {"IDX": {"NIFTY": {"tsInMillis": 1.0, "lastTradePrice": 22500.5, "x": 9}}}}
     assert flatten_index_snapshot(snap) == {}
     assert extract_quotes(snap) == {}
+
+
+# ───────────────────── prune_unchanged (delta) ──────────────────
+
+
+def test_prune_first_snapshot_keeps_all() -> None:
+    """The first snapshot (empty baseline) keeps every instrument (DEC-LIVE-DELTA)."""
+    snap = {"NIFTY": 100.0, "BANKNIFTY": 200.0}
+    pruned, updated = prune_unchanged(snap, {})
+    assert pruned == snap
+    assert updated == {"NIFTY": Decimal("100.0"), "BANKNIFTY": Decimal("200.0")}
+
+
+def test_prune_identical_snapshot_is_empty() -> None:
+    """An identical second snapshot prunes to nothing (write NOTHING)."""
+    snap = {"NIFTY": 100.0, "BANKNIFTY": 200.0}
+    _first, baseline = prune_unchanged(snap, {})
+    pruned, updated = prune_unchanged(snap, baseline)
+    assert pruned == {}
+    assert updated == baseline  # baseline unchanged when nothing moved
+
+
+def test_prune_partial_change_keeps_only_changed() -> None:
+    """Only the instrument(s) whose price moved are kept; others dropped."""
+    _first, baseline = prune_unchanged({"NIFTY": 100.0, "BANKNIFTY": 200.0}, {})
+    pruned, updated = prune_unchanged({"NIFTY": 100.0, "BANKNIFTY": 201.0}, baseline)
+    assert pruned == {"BANKNIFTY": 201.0}  # NIFTY unchanged → dropped
+    assert updated == {"NIFTY": Decimal("100.0"), "BANKNIFTY": Decimal("201.0")}
+
+
+def test_prune_kept_leaf_preserves_volume_oi_and_ts() -> None:
+    """A kept leaf is copied VERBATIM — tsInMillis / volume / openInterest survive."""
+    leaf = {"value": 100.0, "tsInMillis": 1234.0, "volume": 7.0, "openInterest": 3.0}
+    snap = {"NSE": {"FNO": {"RELIANCE": leaf}}}
+    pruned, _updated = prune_unchanged(snap, {})
+    assert pruned == snap  # the full raw leaf, untouched
+    assert pruned["NSE"]["FNO"]["RELIANCE"] == leaf
+
+
+def test_prune_nested_only_changed_branch_survives() -> None:
+    """In a nested snapshot, only the sub-tree holding a changed leaf is rebuilt."""
+    snap1 = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}, "BANKNIFTY": {"value": 2.0}}}}
+    _first, baseline = prune_unchanged(snap1, {})
+    snap2 = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}, "BANKNIFTY": {"value": 9.0}}}}
+    pruned, updated = prune_unchanged(snap2, baseline)
+    # NIFTY unchanged is dropped; only BANKNIFTY's leaf rides up the same nesting.
+    assert pruned == {"NSE": {"IDX": {"BANKNIFTY": {"value": 9.0}}}}
+    assert updated["NSE:IDX:NIFTY"] == Decimal("1.0")
+    assert updated["NSE:IDX:BANKNIFTY"] == Decimal("9.0")
+
+
+def test_prune_empty_nested_branch_is_dropped() -> None:
+    """A nested sub-tree that prunes to nothing is omitted, and the loop continues.
+
+    Exercises the `if child:` FALSE branch — the first branch (`NSE`) recurses to
+    empty (its only leaf is unchanged) while a later top-level key still changes.
+    """
+    snap = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}}}, "BSE": {"SENSEX": {"value": 5.0}}}
+    _first, baseline = prune_unchanged(snap, {})
+    pruned, _updated = prune_unchanged(
+        {"NSE": {"IDX": {"NIFTY": {"value": 1.0}}}, "BSE": {"SENSEX": {"value": 6.0}}},
+        baseline,
+    )
+    # NSE sub-tree is all-unchanged → dropped entirely; only the BSE change rides.
+    assert pruned == {"BSE": {"SENSEX": {"value": 6.0}}}
+
+
+def test_prune_skips_drift_and_non_numeric_leaves() -> None:
+    """A drifted leaf (tsInMillis, no price) and a junk leaf are pruned out."""
+    snap = {"good": 5.0, "junk": "x", "drift": {"tsInMillis": 1.0, "lastTradePrice": 9.0}}
+    pruned, updated = prune_unchanged(snap, {})
+    assert pruned == {"good": 5.0}  # junk + drift never kept
+    assert updated == {"good": Decimal("5.0")}
+
+
+def test_prune_does_not_mutate_caller_baseline() -> None:
+    """`prune_unchanged` returns a NEW baseline; the passed-in map is untouched."""
+    baseline = {"NIFTY": Decimal("100.0")}
+    pruned, updated = prune_unchanged({"NIFTY": 101.0}, baseline)
+    assert baseline == {"NIFTY": Decimal("100.0")}  # caller's copy unchanged
+    assert updated == {"NIFTY": Decimal("101.0")}
+    assert pruned == {"NIFTY": 101.0}
 
 
 # ─────────────────────────── store.py ───────────────────────────
