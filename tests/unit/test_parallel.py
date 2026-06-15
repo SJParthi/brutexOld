@@ -13,6 +13,7 @@ from brutex.orchestrator.parallel import (
     DEFAULT_MAX_WORKERS,
     MAX_FANOUT,
     PoolRunParallel,
+    SerialRunParallel,
     workers_to_saturate,
 )
 from brutex.orchestrator.universe_phases import ItemResult
@@ -65,6 +66,79 @@ class TestPoolRunParallel:
         pool = PoolRunParallel()
         results = list(pool(lambda x: x.upper(), ["nifty"]))
         assert results == [ItemResult(item="nifty", ok=True, result="NIFTY", exc=None)]
+
+
+class TestSerialRunParallel:
+    """The in-thread serial twin (DEC-SPOT-CROSS-SYMBOL-FANOUT-001): the SAME
+    ``RunParallel`` capture contract as the pool, but zero worker threads."""
+
+    def test_maps_every_item_in_order(self) -> None:
+        # Serial → deterministic emission order (unlike the pool's completion order).
+        runner = SerialRunParallel()
+        results = list(runner(lambda x: x * 2, [1, 2, 3, 4, 5]))
+        assert [r.item for r in results] == [1, 2, 3, 4, 5]
+        assert [r.result for r in results] == [2, 4, 6, 8, 10]
+        assert all(r.ok for r in results)
+
+    def test_empty_items_yields_nothing(self) -> None:
+        runner = SerialRunParallel()
+        assert list(runner(lambda x: x, [])) == []
+
+    def test_exception_is_captured_not_raised(self) -> None:
+        runner = SerialRunParallel()
+
+        def boom(x: int) -> int:
+            if x == 2:
+                raise ValueError(f"bad {x}")
+            return x
+
+        results = {r.item: r for r in runner(boom, [1, 2, 3])}
+        assert results[1].ok and results[1].result == 1
+        assert results[3].ok and results[3].result == 3
+        assert not results[2].ok
+        assert isinstance(results[2].exc, ValueError)
+        assert results[2].result is None
+
+    def test_all_results_are_itemresult(self) -> None:
+        runner = SerialRunParallel()
+        for r in runner(lambda x: x, [1, 2, 3]):
+            assert isinstance(r, ItemResult)
+
+    def test_single_item(self) -> None:
+        runner = SerialRunParallel()
+        assert list(runner(lambda x: x.upper(), ["nifty"])) == [
+            ItemResult(item="nifty", ok=True, result="NIFTY", exc=None)
+        ]
+
+    def test_runs_on_the_calling_thread(self) -> None:
+        # No worker threads: every item executes on the caller's own thread.
+        import threading
+
+        runner = SerialRunParallel()
+        seen: list[int] = []
+        caller = threading.get_ident()
+
+        def _record(x: int) -> int:
+            seen.append(threading.get_ident())
+            return x
+
+        list(runner(_record, [1, 2, 3]))
+        assert seen == [caller, caller, caller]
+
+    def test_lazy_yield_does_not_run_ahead(self) -> None:
+        # Generator semantics: pulling N results runs fn exactly N times.
+        runner = SerialRunParallel()
+        ran: list[int] = []
+
+        def _track(x: int) -> int:
+            ran.append(x)
+            return x
+
+        gen = runner(_track, [1, 2, 3])
+        next(gen)
+        assert ran == [1]  # only the first item has run after one pull
+        next(gen)
+        assert ran == [1, 2]
 
 
 class TestWorkersToSaturate:

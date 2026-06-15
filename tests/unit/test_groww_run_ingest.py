@@ -164,6 +164,87 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [sentinel]
 
 
+def test_bulk_pull_runs_each_symbols_windows_serially(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEC-SPOT-CROSS-SYMBOL-FANOUT-001: a MULTI-pair pull fans the OUTER pool
+    # across symbols and hands each symbol's windows a SERIAL inner runner, so the
+    # nested per-symbol window pool (the 720-thread explosion) is gone.
+    from brutex.orchestrator.parallel import SerialRunParallel
+
+    seen: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, run_parallel=None, **_kw):
+        seen.append(run_parallel)
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    outer = SerialRunParallel()  # stand-in outer runner; must NOT leak into pairs
+    run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY"), _index("BANKNIFTY")],
+        intervals=["1day"],
+        start=_START,
+        end=_END,
+        run_parallel=outer,
+    )
+    assert len(seen) == 2
+    assert all(isinstance(r, SerialRunParallel) for r in seen)
+    assert all(r is not outer for r in seen)  # a fresh serial inner runner, not the outer
+
+
+def test_single_pair_pull_hands_its_windows_the_outer_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A SINGLE-pair pull has no symbol-level fan-out to spend the pool on, so the
+    # one pair's WINDOWS get the full outer runner (single-symbol window parallelism
+    # preserved).
+    from brutex.orchestrator.parallel import SerialRunParallel
+
+    seen: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, run_parallel=None, **_kw):
+        seen.append(run_parallel)
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    outer = SerialRunParallel()
+    run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY")],
+        intervals=["1day"],
+        start=_START,
+        end=_END,
+        run_parallel=outer,
+    )
+    assert seen == [outer]  # the single pair gets the outer pool for its windows
+
+
+def test_single_pair_default_runner_is_a_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When no outer runner is injected, a single-pair pull falls back to the
+    # default bounded pool for its windows (covers the ``len(jobs) <= 1`` arm with
+    # ``run_parallel=None``).
+    from brutex.orchestrator.parallel import PoolRunParallel
+
+    seen: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, run_parallel=None, **_kw):
+        seen.append(run_parallel)
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY")],
+        intervals=["1day"],
+        start=_START,
+        end=_END,
+    )
+    assert len(seen) == 1
+    assert isinstance(seen[0], PoolRunParallel)
+
+
 def test_with_paced_client_three_branches() -> None:
     """`_with_paced_client` covers pace None, non-Groww adapter, live Groww adapter."""
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
