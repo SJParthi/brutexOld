@@ -115,6 +115,28 @@ def test_tickcapture_records_and_counts(tmp_path) -> None:
     ]
 
 
+def test_tickcapture_on_tick_accepts_groww_meta_arg(tmp_path) -> None:
+    """REGRESSION: Groww invokes the callback WITH a ``meta`` arg (07-feed.md).
+
+    A 0-arg ``_on_tick`` crashed EVERY live tick at the open with
+    ``_on_tick() takes 1 positional argument but 2 were given``. The callback
+    must accept + ignore the meta (it pulls the full snapshot itself). This
+    fires the callback BOTH with the meta (Groww) and with no arg (the 0-arg
+    convention) and asserts both capture a record.
+    """
+    store = TickStore.open(tmp_path / "t.jsonl")
+    capture = TickCapture(
+        store=store,
+        subscribe=lambda _cb: None,
+        read_snapshot=lambda: {"NIFTY": 100.0},
+        clock=_clock_seq(),
+    )
+    capture._on_tick({"feed_type": "index_value", "exchange": "NSE"})  # Groww 1-arg call
+    capture._on_tick()  # the 0-arg convention still works
+    store.close()
+    assert capture.count == 2
+
+
 def test_tickcapture_emits_heartbeats(tmp_path) -> None:
     """A long-enough window emits a progress heartbeat (tracking/monitoring)."""
     feed = _FakeFeed([{"N": 1.0}, {"N": 2.0}])

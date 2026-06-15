@@ -1,9 +1,11 @@
 """Drive the Groww live feed and persist every callback to the tick store.
 
 The Groww feed delivers asynchronously: once you ``subscribe_index_value(...)``,
-the SDK's daemon thread invokes your **0-argument** ``on_data_received`` callback
-on every update; the callback then pulls the current snapshot via
-``get_index_value()`` (verified against ``growwapi`` v1.5.x). :class:`TickCapture`
+the SDK's daemon thread invokes your ``on_data_received`` callback **with a meta
+argument** on every update (``def on_data_received(meta): ...`` — verified live
+against ``growwapi`` at the open; ``docs/groww/api-reference/07-feed.md``); the
+callback ignores the meta and pulls the current snapshot via
+``get_index_value()``. :class:`TickCapture`
 wraps that contract behind two injected callables — ``subscribe`` (registers our
 callback) and ``read_snapshot`` (pulls the snapshot) — so the whole loop is
 unit-tested with fakes, no ``growwapi`` and no network. The real feed is built at
@@ -26,7 +28,9 @@ from brutex.live.store import TickRecord, TickStore
 
 _LOG = structlog.get_logger("brutex.live.capture")
 
-#: Subscribe a 0-arg callback with the feed (closes over the instrument list).
+#: Subscribe our callback with the feed (closes over the instrument list). Groww
+#: calls it WITH a meta arg (``_on_tick(*_args)`` accepts + ignores it); the
+#: callable type stays 0-arg-compatible since ``*_args`` is assignable to it.
 SubscribeFn = Callable[[Callable[[], None]], None]
 #: Pull the current feed snapshot mapping.
 SnapshotFn = Callable[[], Mapping[str, Any]]
@@ -57,8 +61,9 @@ class TickCapture:
         store
             Durable append-only sink (one line per callback).
         subscribe
-            Registers our 0-arg callback with the feed (e.g.
-            ``lambda cb: feed.subscribe_index_value(instruments, on_data_received=cb)``).
+            Registers our callback with the feed (e.g.
+            ``lambda cb: feed.subscribe_index_value(instruments, on_data_received=cb)``);
+            Groww invokes it with a meta arg, which ``_on_tick`` accepts + ignores.
         read_snapshot
             Pulls the current snapshot (e.g. ``feed.get_index_value``).
         clock
@@ -93,8 +98,18 @@ class TickCapture:
         _LOG.info("live_capture_start")
         self._subscribe(self._on_tick)
 
-    def _on_tick(self) -> None:
-        """Feed callback: stamp ns + snapshot now, persist, advance the counter."""
+    def _on_tick(self, *_args: Any) -> None:
+        """Feed callback: stamp ns + snapshot now, persist, advance the counter.
+
+        Groww's SDK invokes the callback **with a ``meta`` argument** on every
+        update (``def on_data_received(meta): ...`` — ``docs/groww/api-reference/
+        07-feed.md``; CLAUDE.md §6), so this MUST accept it. We take ``*_args``
+        and IGNORE them: the snapshot comes from :attr:`_read_snapshot` (the full
+        current feed state), not the per-callback meta — and ``*_args`` stays
+        robust to both the 1-arg (Groww) and 0-arg feed-callback conventions.
+        Defining it as 0-arg crashed every live tick with ``_on_tick() takes 1
+        positional argument but 2 were given`` (operator open-bell run).
+        """
         recv_ns = self._ns_clock()
         recv_ts = self._clock()
         snapshot = self._read_snapshot()
