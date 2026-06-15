@@ -3460,6 +3460,115 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
 
+    # ── LIVE LAKE under /db (DEC-DB-LIVE-TABLES-001) ─────────────────
+    # The two live Parquet tables (``live_ticks`` + ``live_candles_1m``) are
+    # surfaced PRIMARILY on the /db Database page (operator request) — their own
+    # "LIVE LAKE" sidebar section, browsed with the SAME columns+rows grid the
+    # other /db tables use. These ``/api/v1/db/live/*`` routes are thin /db-side
+    # aliases that delegate to the SAME 100%-tested ``live_lake_view`` reader as
+    # the /live page (no duplicate reader) — the table name is allowlisted to
+    # ``LIVE_TABLES`` inside that module (an unknown name raises ``ValueError``
+    # → 400 here; never an arbitrary name to the Parquet reader). An absent /
+    # empty lake degrades to an empty page (never a 500), mirroring /api/v1/live.
+
+    @app.get("/api/v1/db/live/tables")
+    async def api_db_live_tables() -> JSONResponse:
+        """GET /api/v1/db/live/tables — the live lake table names + row counts (/db)."""
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse({"tables": [{"table": t, "row_count": 0} for t in LIVE_TABLES]})
+        return JSONResponse({"tables": await run_in_threadpool(lambda: live_tables_summary(lake))})
+
+    @app.get("/api/v1/db/live/table/{name}")
+    async def api_db_live_table(
+        name: str,
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/db/live/table/{name} — one page of a live lake table (/db)."""
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse(
+                {
+                    "table": name,
+                    "columns": [],
+                    "rows": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        try:
+            payload = await run_in_threadpool(
+                lambda: live_table(lake, name, limit=limit, offset=offset)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/db/live/columns/{name}")
+    async def api_db_live_columns(name: str) -> JSONResponse:
+        """GET /api/v1/db/live/columns/{name} — a live table's columns (the /db picker)."""
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse({"table": name, "columns": []})
+        try:
+            cols = await run_in_threadpool(lambda: live_columns(lake, name))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"table": name, "columns": cols})
+
+    @app.get("/api/v1/db/live/query/{name}")
+    async def api_db_live_query(
+        name: str,
+        # FastAPI list query params need an in-signature Query() default (see
+        # api_db_query); B008's mutable-default heuristic is a false positive.
+        column: list[str] | None = Query(default=None),  # noqa: B008
+        f: list[str] | None = Query(default=None),  # noqa: B008
+        order_by: str | None = Query(default=None),
+        desc: bool = Query(default=True),
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/db/live/query/{name} — search/sort/filter a live lake table (/db).
+
+        Repeatable ``column=`` (projection), repeatable ``f=col:op:value`` (WHERE,
+        AND-combined; ``op`` is an ``ALLOWED_OPERATORS`` token), ``order_by`` +
+        ``desc``, ``limit`` / ``offset``. Thin /db-side wrapper over
+        :func:`brutex.dashboard.live_lake_view.query_live_table` — every
+        identifier is validated + every value parameter-bound there.
+        """
+        lake = _live_lake_root()
+        if lake is None:
+            return JSONResponse(
+                {
+                    "table": name,
+                    "columns": [],
+                    "rows": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        parsed_filters = _parse_filters(f or [])
+        columns = tuple(column) if column else None
+        try:
+            payload = await run_in_threadpool(
+                lambda: query_live_table(
+                    lake,
+                    name,
+                    columns=columns,
+                    filters=parsed_filters,
+                    order_by=order_by,
+                    descending=desc,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
     @app.get("/db", response_class=HTMLResponse)
     async def db_page() -> HTMLResponse:
         """GET /db — read-only DuckDB browser page (DEC-DB-VIEWER-001).
