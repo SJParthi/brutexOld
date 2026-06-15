@@ -427,10 +427,28 @@ jobs:
           echo "Merging PR #${PR_NUMBER} (ci-ok is green)"
           HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" \
             --json headRefOid --jq .headRefOid)
-          gh pr merge "${PR_NUMBER}" \
+          # A CONCURRENT merge can win the race: a second auto-merge run from a
+          # later push, or the operator clicking Merge. GitHub then returns
+          # "Merge already in progress" / "Pull request is not mergeable"
+          # (already merged). The PR still merged GREEN (ci-ok was verified green
+          # above) — the loser of the race MUST NOT report a scary red failure.
+          # Treat an already-merged PR as success (DEC-AUTOMERGE-RACE-CLEAN-001).
+          merge_err="$(mktemp)"
+          if gh pr merge "${PR_NUMBER}" \
             --repo "${REPO}" \
             --squash \
             --delete-branch \
-            --subject "$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title --jq .title) (#${PR_NUMBER})"
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
-            "🤖 Auto-merged (CI OK aggregate was green on head commit ${HEAD_SHA})."
+            --subject "$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title --jq .title) (#${PR_NUMBER})" \
+            2> "${merge_err}"; then
+            gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
+              "🤖 Auto-merged (CI OK aggregate was green on head commit ${HEAD_SHA})."
+          else
+            cat "${merge_err}" >&2
+            state="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
+            if [ "${state}" = "MERGED" ] || grep -qiE "already in progress|already merged|already been merged|not mergeable" "${merge_err}"; then
+              echo "::notice::PR #${PR_NUMBER} was already merged by a concurrent run/operator — the lost merge-race is SUCCESS, not failure (ci-ok was green; no gate bypassed)."
+              exit 0
+            fi
+            echo "::error::PR #${PR_NUMBER} merge failed for a non-race reason (see stderr above)."
+            exit 1
+          fi
