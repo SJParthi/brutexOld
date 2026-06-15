@@ -230,6 +230,7 @@ _EXCHANGE_UTC = datetime(2024, 6, 15, 8, 35, 10, 123000, tzinfo=UTC)
 def test_exchange_ts_from_vendor_ms_is_millisecond_precise() -> None:
     """tsInMillis → tz-aware UTC datetime preserving the .mmm (the us column keeps it)."""
     dt = exchange_ts_from_vendor_ms(_VENDOR_MS)
+    assert dt is not None
     assert dt == _EXCHANGE_UTC
     assert dt.tzinfo is UTC
     assert dt.microsecond == 123000  # the millisecond survived (no truncation)
@@ -239,9 +240,13 @@ def test_exchange_ts_displays_as_ist_utc_plus_530() -> None:
     """The derived exchange instant reads as IST = UTC+05:30 (CLAUDE.md §6, no DST)."""
     from brutex.calendars.nse import IST
 
-    ist = exchange_ts_from_vendor_ms(_VENDOR_MS).astimezone(IST)
+    exchange = exchange_ts_from_vendor_ms(_VENDOR_MS)
+    assert exchange is not None
+    ist = exchange.astimezone(IST)
     assert ist.isoformat() == "2024-06-15T14:05:10.123000+05:30"
-    assert (ist.utcoffset().total_seconds()) == 5.5 * 3600  # fixed +05:30
+    offset = ist.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 5.5 * 3600  # fixed +05:30
 
 
 def test_exchange_ts_none_when_vendor_ts_absent() -> None:
