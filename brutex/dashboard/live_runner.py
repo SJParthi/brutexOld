@@ -300,6 +300,12 @@ class LiveRunner:
         if current.running:
             return current
         self._manifest_writer(manifest)
+        # NOTE: ``capture-all`` is inherently dual-feed (spot connection #0 routes
+        # indices→index-value + stocks→ltp; leg connections #1..N are ltp), so it
+        # has NO ``--feed`` option — passing one makes argparse reject the whole
+        # spawn (``error: unrecognized arguments: --feed both``) and the capture
+        # crashes on every launch. ``feed`` is kept ONLY for the status/chip
+        # display (it is ``both``), never forwarded to the subprocess.
         argv = [
             sys.executable,
             "-m",
@@ -313,8 +319,6 @@ class LiveRunner:
             manifest,
             "--symbols",
             symbols,
-            "--feed",
-            feed,
             "--seconds",
             str(seconds),
             "--log-file",
