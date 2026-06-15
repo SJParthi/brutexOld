@@ -257,6 +257,121 @@ def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> 
     return out
 
 
+def prune_unchanged(
+    snapshot: Mapping[str, Any], last_obs: dict[str, Quote]
+) -> tuple[Mapping[str, Any], dict[str, Quote]]:
+    """Keep ONLY the instruments whose FULL observation CHANGED since *last_obs*.
+
+    Walks *snapshot* the SAME way :func:`extract_quotes` /
+    :func:`flatten_index_snapshot` do — reusing :func:`_leaf_quote`, the
+    ``"prefix:key"`` instrument-key rule, the drift guard, and ``_coerce_price``
+    — and rebuilds the SAME nested shape containing only the leaves whose
+    :class:`Quote` (price **and** the vendor ``tsInMillis`` **and** volume / open
+    interest) differs from ``last_obs[instrument_key]`` (a never-seen instrument
+    is ALWAYS kept). A kept leaf is copied **verbatim** (the full raw mapping), so
+    ``tsInMillis`` / volume / open interest survive for every kept instrument.
+
+    **Full-leaf, not price-only — "save ALL the ticks" (operator rule).** A
+    liquid equity prints many trades at the *same price*, each carrying a fresh
+    ``tsInMillis`` (and a rising cumulative volume). A price-only delta would drop
+    every same-price reprint as "unchanged" and silently lose those ticks; keying
+    on the whole :class:`Quote` keeps every DISTINCT vendor observation and drops
+    ONLY a byte-for-byte re-read of the identical leaf (the ~140/sec redundancy
+    the operator's 4.33 GB / 4-minute run was writing). Indices carry no volume
+    and re-stamp ``tsInMillis`` on every print, so for the brute-force trio
+    (NIFTY / BANKNIFTY / SENSEX) the full-leaf key is exact; the equity rows
+    (REFERENCE_ONLY) are the ones a price-only key would have thinned.
+
+    Keeping a *superset* of the price-only delta never disturbs the candle:
+    the builder takes open = first value, close = last value, high = max, low =
+    min, volume hard-0, and an extra same-price observation alters none of those.
+    So the 1-minute candle rebuilt from the delta stream stays byte-identical to
+    the one rebuilt from the full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
+
+    **O(1) space — mutated IN PLACE, no per-callback copy.** *last_obs* is
+    updated in place with every kept leaf's new :class:`Quote` and returned as the
+    second tuple element, so a ~140/sec callback over ~779 instruments costs only
+    O(number-of-kept-leaves) extra space, NOT an O(n) full-dict copy every
+    callback (Golden Rule #5 O(1) discipline; the prior `dict(last_obs)` copy was
+    pure overhead on the common idle path, where NOTHING is kept so NOTHING is
+    mutated). The caller owns *last_obs* and passes a fresh ``{}`` whenever it
+    wants a keyframe (the capture clears it at each minute boundary); on an
+    idle callback no leaf is kept, so the baseline is left byte-for-byte untouched.
+
+    Parameters
+    ----------
+    snapshot
+        The raw (possibly nested) feed snapshot, exactly as the SDK returned it.
+    last_obs
+        ``{instrument_key: Quote}`` — the FULL observation last WRITTEN per
+        instrument, **mutated in place** (the capture seeds ``{}`` for the first
+        callback / each minute keyframe). The caller must pass a dict it owns.
+
+    Returns
+    -------
+    tuple[Mapping[str, Any], dict[str, Quote]]
+        ``(pruned_snapshot, last_obs)`` where *pruned_snapshot* is the same nested
+        shape holding only changed instruments' full raw leaves (an EMPTY mapping
+        when nothing changed), and the second element is the SAME *last_obs* dict,
+        now carrying every kept instrument's new :class:`Quote` (the caller adopts
+        it as the next-callback baseline). Unchanged instruments keep their prior
+        Quote; instruments absent from *snapshot* are left untouched.
+    """
+    pruned = _prune_into(snapshot, last_obs, prefix="")
+    return pruned, last_obs
+
+
+def _prune_into(
+    snapshot: Mapping[str, Any], updated: dict[str, Quote], *, prefix: str
+) -> dict[str, Any]:
+    """Recursive worker for :func:`prune_unchanged` — see its contract.
+
+    Mutates *updated* in place with every kept leaf's new :class:`Quote` and
+    returns the rebuilt nested mapping for this level (only branches that contain
+    a changed leaf appear). The traversal mirrors :func:`extract_quotes` exactly:
+    a price leaf-dict (matched by :func:`_leaf_quote`) is a leaf, a drifted leaf
+    (:func:`_is_drifted_leaf`) is skipped, any other mapping recurses, and a flat
+    numeric value is coerced via :func:`_coerce_price` into a bare-price Quote.
+    """
+    out: dict[str, Any] = {}
+    for raw_key, raw_value in snapshot.items():
+        key = f"{prefix}:{raw_key}" if prefix else str(raw_key)
+        if isinstance(raw_value, Mapping):
+            quote = _leaf_quote(raw_value)
+            if quote is not None:
+                if _changed(key, quote, updated):
+                    out[raw_key] = raw_value
+            elif _is_drifted_leaf(raw_value):
+                _warn_schema_drift(key, raw_value)
+            else:
+                child = _prune_into(raw_value, updated, prefix=key)
+                if child:
+                    out[raw_key] = child
+        else:
+            coerced = _coerce_price(raw_value)
+            if coerced is not None:
+                quote = Quote(value=coerced, vendor_ts_ms=None, volume=None, open_interest=None)
+                if _changed(key, quote, updated):
+                    out[raw_key] = raw_value
+    return out
+
+
+def _changed(key: str, quote: Quote, updated: dict[str, Quote]) -> bool:
+    """True if *quote* differs from the recorded observation for *key*.
+
+    A never-seen *key* counts as changed (always kept). On a change the baseline
+    is advanced in place to *quote* (so the IDENTICAL leaf next callback is
+    dropped). Equality is the frozen :class:`Quote`'s value equality — price AND
+    vendor ``tsInMillis`` AND volume / open interest — so a same-price reprint
+    with a fresh timestamp is a genuine new tick and is KEPT.
+    """
+    previous = updated.get(key)
+    if previous is not None and previous == quote:
+        return False
+    updated[key] = quote
+    return True
+
+
 def iter_ticks(records: Sequence[TickRecord]) -> Iterator[LiveTick]:
     """Expand captured :class:`TickRecord` snapshots into per-instrument ticks.
 
@@ -291,4 +406,5 @@ __all__ = [
     "extract_quotes",
     "flatten_index_snapshot",
     "iter_ticks",
+    "prune_unchanged",
 ]

@@ -29,11 +29,19 @@ from brutex.live.serde import (
 from brutex.live.store import TickRecord, TickStore
 from brutex.live.tick import (
     LiveTick,
+    Quote,
     _coerce_number,
     _leaf_price,
     flatten_index_snapshot,
     iter_ticks,
+    prune_unchanged,
 )
+
+
+def _bare(price: str) -> Quote:
+    """A flat-numeric leaf's Quote (price only — no vendor ts / volume / OI)."""
+    return Quote(value=Decimal(price), vendor_ts_ms=None, volume=None, open_interest=None)
+
 
 # 09:15 IST == 03:45 UTC; 15:29 IST == 09:59 UTC; 15:30 IST == 10:00 UTC.
 _OPEN_UTC = datetime(2026, 6, 15, 3, 45, tzinfo=UTC)
@@ -153,6 +161,134 @@ def test_schema_drift_leaf_is_skipped_not_recursed() -> None:
     snap = {"NSE": {"IDX": {"NIFTY": {"tsInMillis": 1.0, "lastTradePrice": 22500.5, "x": 9}}}}
     assert flatten_index_snapshot(snap) == {}
     assert extract_quotes(snap) == {}
+
+
+# ───────────────────── prune_unchanged (delta) ──────────────────
+
+
+def test_prune_first_snapshot_keeps_all() -> None:
+    """The first snapshot (empty baseline) keeps every instrument (DEC-LIVE-DELTA)."""
+    snap = {"NIFTY": 100.0, "BANKNIFTY": 200.0}
+    pruned, updated = prune_unchanged(snap, {})
+    assert pruned == snap
+    assert updated == {"NIFTY": _bare("100.0"), "BANKNIFTY": _bare("200.0")}
+
+
+def test_prune_identical_snapshot_is_empty() -> None:
+    """An identical second snapshot prunes to nothing (write NOTHING)."""
+    snap = {"NIFTY": 100.0, "BANKNIFTY": 200.0}
+    _first, baseline = prune_unchanged(snap, {})
+    pruned, updated = prune_unchanged(snap, baseline)
+    assert pruned == {}
+    assert updated == baseline  # baseline unchanged when nothing moved
+
+
+def test_prune_partial_change_keeps_only_changed() -> None:
+    """Only the instrument(s) whose price moved are kept; others dropped."""
+    _first, baseline = prune_unchanged({"NIFTY": 100.0, "BANKNIFTY": 200.0}, {})
+    pruned, updated = prune_unchanged({"NIFTY": 100.0, "BANKNIFTY": 201.0}, baseline)
+    assert pruned == {"BANKNIFTY": 201.0}  # NIFTY unchanged → dropped
+    assert updated == {"NIFTY": _bare("100.0"), "BANKNIFTY": _bare("201.0")}
+
+
+def test_prune_same_price_new_vendor_ts_is_kept() -> None:
+    """Same price but a NEW vendor ``tsInMillis`` is a NEW tick — KEPT, not dropped.
+
+    A liquid equity prints many trades at the same price, each carrying a fresh
+    ``tsInMillis`` (and a rising cumulative volume). A price-only delta would drop
+    them (lost ticks); the full-leaf :class:`Quote` signature keeps every distinct
+    vendor observation — the operator's "save ALL the ticks" rule
+    (DEC-LIVE-DELTA-CAPTURE-001).
+    """
+    leaf1 = {"value": 100.0, "tsInMillis": 1000.0, "volume": 5.0}
+    leaf2 = {"value": 100.0, "tsInMillis": 2000.0, "volume": 9.0}
+    _first, baseline = prune_unchanged({"NSE": {"FNO": {"RELIANCE": leaf1}}}, {})
+    pruned, updated = prune_unchanged({"NSE": {"FNO": {"RELIANCE": leaf2}}}, baseline)
+    assert pruned == {"NSE": {"FNO": {"RELIANCE": leaf2}}}  # same price, new ts → kept
+    assert updated["NSE:FNO:RELIANCE"].vendor_ts_ms == 2000.0
+    assert updated["NSE:FNO:RELIANCE"].volume == 9
+
+
+def test_prune_kept_leaf_preserves_volume_oi_and_ts() -> None:
+    """A kept leaf is copied VERBATIM — tsInMillis / volume / openInterest survive."""
+    leaf = {"value": 100.0, "tsInMillis": 1234.0, "volume": 7.0, "openInterest": 3.0}
+    snap = {"NSE": {"FNO": {"RELIANCE": leaf}}}
+    pruned, _updated = prune_unchanged(snap, {})
+    assert pruned == snap  # the full raw leaf, untouched
+    assert pruned["NSE"]["FNO"]["RELIANCE"] == leaf
+
+
+def test_prune_identical_leaf_dict_is_dropped() -> None:
+    """A byte-identical leaf-dict re-read (same price/ts/volume/OI) prunes to empty.
+
+    Exercises the :func:`Quote` equality FALSE path: previous observation equals
+    the new one, so nothing is written (the redundancy the delta exists to strip).
+    """
+    leaf = {"value": 100.0, "tsInMillis": 1234.0, "volume": 7.0, "openInterest": 3.0}
+    snap = {"NSE": {"FNO": {"RELIANCE": leaf}}}
+    _first, baseline = prune_unchanged(snap, {})
+    pruned, updated = prune_unchanged(snap, baseline)
+    assert pruned == {}  # identical leaf → nothing written
+    assert updated == baseline
+
+
+def test_prune_nested_only_changed_branch_survives() -> None:
+    """In a nested snapshot, only the sub-tree holding a changed leaf is rebuilt."""
+    snap1 = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}, "BANKNIFTY": {"value": 2.0}}}}
+    _first, baseline = prune_unchanged(snap1, {})
+    snap2 = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}, "BANKNIFTY": {"value": 9.0}}}}
+    pruned, updated = prune_unchanged(snap2, baseline)
+    # NIFTY unchanged is dropped; only BANKNIFTY's leaf rides up the same nesting.
+    assert pruned == {"NSE": {"IDX": {"BANKNIFTY": {"value": 9.0}}}}
+    assert updated["NSE:IDX:NIFTY"] == _bare("1.0")
+    assert updated["NSE:IDX:BANKNIFTY"] == _bare("9.0")
+
+
+def test_prune_empty_nested_branch_is_dropped() -> None:
+    """A nested sub-tree that prunes to nothing is omitted, and the loop continues.
+
+    Exercises the `if child:` FALSE branch — the first branch (`NSE`) recurses to
+    empty (its only leaf is unchanged) while a later top-level key still changes.
+    """
+    snap = {"NSE": {"IDX": {"NIFTY": {"value": 1.0}}}, "BSE": {"SENSEX": {"value": 5.0}}}
+    _first, baseline = prune_unchanged(snap, {})
+    pruned, _updated = prune_unchanged(
+        {"NSE": {"IDX": {"NIFTY": {"value": 1.0}}}, "BSE": {"SENSEX": {"value": 6.0}}},
+        baseline,
+    )
+    # NSE sub-tree is all-unchanged → dropped entirely; only the BSE change rides.
+    assert pruned == {"BSE": {"SENSEX": {"value": 6.0}}}
+
+
+def test_prune_skips_drift_and_non_numeric_leaves() -> None:
+    """A drifted leaf (tsInMillis, no price) and a junk leaf are pruned out."""
+    snap = {"good": 5.0, "junk": "x", "drift": {"tsInMillis": 1.0, "lastTradePrice": 9.0}}
+    pruned, updated = prune_unchanged(snap, {})
+    assert pruned == {"good": 5.0}  # junk + drift never kept
+    assert updated == {"good": _bare("5.0")}
+
+
+def test_prune_updates_baseline_in_place_returns_same_object() -> None:
+    """`prune_unchanged` mutates *last_obs* IN PLACE and returns the SAME dict.
+
+    The O(1)-space contract (no per-callback full-dict copy, Golden Rule #5): a
+    changed leaf is written into the passed-in baseline and that very object is
+    returned, so the caller's `self._last_obs = updated` is a no-op adoption.
+    """
+    baseline = {"NIFTY": _bare("100.0")}
+    pruned, updated = prune_unchanged({"NIFTY": 101.0}, baseline)
+    assert updated is baseline  # SAME object — no copy was made
+    assert baseline == {"NIFTY": _bare("101.0")}  # mutated in place to the new price
+    assert pruned == {"NIFTY": 101.0}
+
+
+def test_prune_idle_callback_leaves_baseline_byte_untouched() -> None:
+    """An all-unchanged callback keeps nothing → mutates nothing (idle path O(1))."""
+    baseline = {"NIFTY": _bare("100.0")}
+    before = dict(baseline)
+    pruned, updated = prune_unchanged({"NIFTY": 100.0}, baseline)
+    assert pruned == {}  # nothing changed → nothing written
+    assert updated is baseline and baseline == before  # baseline untouched
 
 
 # ─────────────────────────── store.py ───────────────────────────

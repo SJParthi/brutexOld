@@ -11,6 +11,21 @@ callback) and ``read_snapshot`` (pulls the snapshot) — so the whole loop is
 unit-tested with fakes, no ``growwapi`` and no network. The real feed is built at
 the CLI boundary (:mod:`brutex.live.__main__`), the only ``# pragma: no cover``.
 
+Each callback persists a **DELTA**, not the full snapshot: only the
+instruments whose FULL observation (price + vendor ``tsInMillis`` + volume / OI)
+CHANGED since the previous callback are written (via
+:func:`~brutex.live.tick.prune_unchanged`), and a callback in which NOTHING
+changed writes nothing at all. Keying on the whole leaf — not price alone —
+keeps every DISTINCT vendor tick, including a liquid equity's same-price reprint
+with a fresh timestamp ("save ALL the ticks"); only a byte-for-byte re-read of an
+identical leaf is dropped. This is the O(1)-per-instrument fix for the operator's
+live run, where writing the entire 779-instrument snapshot verbatim on every
+~140/sec callback produced **4.33 GB in 4 minutes** of almost-pure redundancy.
+The candle builder takes open/high/low/close as first/max/min/last (volume
+hard-0), none of which an extra same-price observation can alter, so the 1-minute
+candles built from the delta stream are byte-identical to those from the
+full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
+
 Read-only: this subscribes to market data and writes a log. It never places,
 modifies, or cancels an order (Golden Rule #3 scope guard).
 """
@@ -25,6 +40,7 @@ from typing import Any
 import structlog
 
 from brutex.live.store import TickRecord, TickSink
+from brutex.live.tick import Quote, prune_unchanged
 
 _LOG = structlog.get_logger("brutex.live.capture")
 
@@ -82,6 +98,21 @@ class TickCapture:
         self._on_record = on_record
         self._count = 0
         self._heartbeats = 0
+        #: Last WRITTEN :class:`~brutex.live.tick.Quote` per instrument key — the
+        #: delta baseline. A FULL-leaf key (price + vendor ``tsInMillis`` +
+        #: volume / OI), so a same-price reprint with a fresh timestamp is kept as
+        #: a genuine new tick ("save ALL the ticks"). Seeded empty so the first
+        #: callback keeps every instrument; advanced only when a record is
+        #: actually written (a skipped callback never changes the baseline, so the
+        #: next real change is still detected). The baseline is CLEARED at every
+        #: minute boundary (see :meth:`_on_tick`) so the first callback of each new
+        #: minute re-writes a full keyframe.
+        self._last_obs: dict[str, Quote] = {}
+        #: The UTC minute of the last WRITTEN record (``None`` before the first).
+        #: When the incoming callback's minute differs, the baseline is reset so a
+        #: per-minute keyframe is emitted — this is what makes the delta-stream
+        #: candles byte-identical to the full-stream candles (DEC-LIVE-DELTA).
+        self._last_minute: datetime | None = None
 
     @property
     def count(self) -> int:
@@ -99,7 +130,7 @@ class TickCapture:
         self._subscribe(self._on_tick)
 
     def _on_tick(self, *_args: Any) -> None:
-        """Feed callback: stamp ns + snapshot now, persist, advance the counter.
+        """Feed callback: stamp ns, read the snapshot, persist the DELTA only.
 
         Groww's SDK invokes the callback **with a ``meta`` argument** on every
         update (``def on_data_received(meta): ...`` — ``docs/groww/api-reference/
@@ -109,11 +140,35 @@ class TickCapture:
         robust to both the 1-arg (Groww) and 0-arg feed-callback conventions.
         Defining it as 0-arg crashed every live tick with ``_on_tick() takes 1
         positional argument but 2 were given`` (operator open-bell run).
+
+        **Delta + per-minute keyframe (DEC-LIVE-DELTA-CAPTURE-001).**
+        :func:`~brutex.live.tick.prune_unchanged` drops every instrument whose
+        value equals the last WRITTEN value, so within a minute only the changed
+        instruments are persisted; an UNCHANGED callback prunes to empty and we
+        write NOTHING (no record, the counter does NOT advance, the baseline is
+        untouched — O(1), no redundant 779-instrument line). At each **minute
+        boundary** the baseline is CLEARED first, so the first callback of every
+        new minute re-writes a full keyframe for every instrument present. This is
+        what keeps the candles byte-identical to the full-snapshot stream: the
+        builder emits a bar for a minute only if a tick arrived in it, so an
+        instrument that stays quiet across a minute boundary still needs ONE
+        re-stamp that minute (the carry-forward bar) — the keyframe supplies it
+        while the within-minute prune still strips the ~140/sec redundancy.
+
+        The ns/ts stamps and ``seq`` semantics are otherwise identical to the
+        full-snapshot capture; ``seq`` advances only on a written record.
         """
         recv_ns = self._ns_clock()
         recv_ts = self._clock()
         snapshot = self._read_snapshot()
-        record = self._store.append(snapshot, recv_ts=recv_ts, recv_ns=recv_ns)
+        minute = recv_ts.replace(second=0, microsecond=0)
+        baseline = self._last_obs if minute == self._last_minute else {}
+        pruned, updated = prune_unchanged(snapshot, baseline)
+        if not pruned:
+            return
+        record = self._store.append(pruned, recv_ts=recv_ts, recv_ns=recv_ns)
+        self._last_obs = updated
+        self._last_minute = minute
         self._count += 1
         if self._on_record is not None:
             self._on_record(record)
