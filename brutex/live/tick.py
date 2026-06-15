@@ -32,13 +32,23 @@ _LOG = structlog.get_logger("brutex.live.tick")
 #: live leaf shape is a Phase-0 VERIFY-ON-RUN item; the raw snapshot is persisted
 #: verbatim by :class:`~brutex.live.store.TickStore`, so a wrong guess here is
 #: re-parseable offline from the same log (never a data-loss event).
+#:
+#: **LAST-TRADED-PRICE keys come FIRST, ``value`` later (DEC-LIVE-CANDLE-PRECISION-001).**
+#: A Groww LTP-feed EQUITY/option/future leaf carries the real price in ``ltp`` while
+#: its ``value`` field is ``0.0`` (that slot is the day's traded *value*, not a price);
+#: an INDEX leaf instead carries the price in ``value`` and has NO ``ltp``. Listing
+#: ``value`` first made :func:`_leaf_price` return ``0.0`` for every equity (the
+#: confirmed "equity OHLC reads 0" bug). With the LTP keys first an equity picks its
+#: true ``ltp`` and an index leaf (no ``ltp``) still falls through to ``value``
+#: correctly. An un-traded equity whose ``ltp`` is a legitimate ``0.0`` (no trade yet)
+#: still yields ``0`` — that is a real not-yet-traded price, NOT skipped.
 PRICE_LEAF_KEYS: Final[tuple[str, ...]] = (
-    "value",
     "ltp",
     "last_price",
     "last_traded_price",
-    "tp",
     "ltp_value",
+    "tp",
+    "value",
     "index_value",
     "price",
     "close",

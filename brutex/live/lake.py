@@ -21,14 +21,16 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 import polars as pl
 
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
+from brutex.live.candle_builder import build_minute_candles
 from brutex.live.store import TickRecord
-from brutex.live.tick import extract_quotes, flatten_index_snapshot
+from brutex.live.tick import LiveTick, extract_quotes, flatten_index_snapshot
 from brutex.money import round_money
 
 #: Top-level lake subtree for the live measurement surface.
@@ -195,12 +197,158 @@ def minute_tick_counts(records: Sequence[TickRecord]) -> dict[tuple[str, datetim
 def _merge_write(
     frame: pl.DataFrame, dest: Path, *, pk: Sequence[str], sort: Sequence[str]
 ) -> None:
-    """Union *frame* with any existing partition file, dedup on *pk*, write sorted."""
+    """Union *frame* with any existing partition file, dedup on *pk*, write sorted.
+
+    ``keep="first"`` is CORRECT for ``live_ticks`` (each ``(capture_run_id, seq,
+    instrument_key)`` tick is a unique immutable observation — a re-fold of the same
+    seq is a byte-identical duplicate, so keeping either copy is the same). It is
+    WRONG for candles, which are RE-AGGREGATED across folds — those use
+    :func:`_merge_candles` instead (DEC-LIVE-CANDLE-PRECISION-001).
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         frame = pl.concat([pl.read_parquet(dest), frame], how="vertical_relaxed")
     frame = frame.unique(subset=list(pk), keep="first").sort(list(sort))
     frame.write_parquet(dest)
+
+
+def _live_ticks_for_session(lake_root: str | Path, session_date: object) -> pl.DataFrame:
+    """Read the DEDUPED ``live_ticks`` partition for *session_date* (empty if none).
+
+    This is the single deduped source of truth a candle is rebuilt from
+    (DEC-LIVE-CANDLE-PRECISION-001): the ``live_ticks`` PK already collapsed every
+    re-folded segment to one row per ``(capture_run_id, seq, instrument_key)``, so the
+    minute's tick set read back here is identical no matter how many ~5s slices folded
+    it — the property that makes the candle rebuild idempotent under a double-fold.
+    """
+    dest = _partition_path(lake_root, _TICKS_DIR, session_date)
+    if not dest.exists():
+        return pl.DataFrame(schema=dict(TICK_SCHEMA))
+    return pl.read_parquet(dest)
+
+
+def _ticks_from_lake_frame(frame: pl.DataFrame) -> list[LiveTick]:
+    """Reconstruct :class:`LiveTick` rows from a deduped ``live_ticks`` lake frame.
+
+    Only the three fields the candle fold needs are read back — ``recv_ts`` (the
+    minute-bucketing / open-close ordering clock), ``instrument_key``, and the raw
+    ``value`` (FULL precision; the 2dp snap happens later at the candle-write
+    boundary). A ``null`` value (defensive — the lake column is nullable) is skipped.
+    """
+    ticks: list[LiveTick] = []
+    for row in frame.select("recv_ts", "instrument_key", "value").iter_rows(named=True):
+        value = row["value"]
+        if value is None:  # pragma: no cover - defensive: writer never emits a null value
+            continue
+        ticks.append(
+            LiveTick(
+                recv_ts=row["recv_ts"],
+                instrument_key=row["instrument_key"],
+                value=Decimal(str(value)),
+            )
+        )
+    return ticks
+
+
+def _rebuild_candles_from_ticks(
+    lake_root: str | Path,
+    session_date: object,
+    *,
+    affected: set[tuple[str, datetime]],
+    built_run_id: str,
+) -> pl.DataFrame:
+    """Rebuild the *affected* ``(instrument_key, minute)`` candles from the tick lake.
+
+    Reads the deduped ``live_ticks`` partition for *session_date*, folds it through
+    the SAME :func:`~brutex.live.candle_builder.build_minute_candles` the batch path
+    uses, keeps only the *affected* minutes (the ones this fold touched), and stamps
+    each with its TRUE full-minute ``tick_count`` (the deduped per-minute count). This
+    is the authoritative + idempotent candle: a double-fold of the same segment reads
+    back the SAME deduped tick set, so the rebuilt bar is byte-identical.
+    """
+    tick_frame = _live_ticks_for_session(lake_root, session_date)
+    if tick_frame.is_empty():
+        return pl.DataFrame(schema=dict(CANDLE_SCHEMA))
+    ticks = _ticks_from_lake_frame(tick_frame)
+    rebuilt = build_minute_candles(ticks)
+    counts = _minute_counts_from_ticks(ticks)
+    kept: dict[str, list[CandleBar]] = {}
+    for instrument_key, bars in rebuilt.items():
+        in_scope = [bar for bar in bars if (instrument_key, bar.timestamp) in affected]
+        if in_scope:
+            kept[instrument_key] = in_scope
+    return candles_to_frame(kept, built_run_id=built_run_id, tick_counts=counts)
+
+
+def _minute_counts_from_ticks(ticks: Sequence[LiveTick]) -> dict[tuple[str, datetime], int]:
+    """Count deduped ticks per ``(instrument_key, minute-start UTC)`` for the rebuild.
+
+    Mirrors :func:`minute_tick_counts` but over reconstructed :class:`LiveTick` rows
+    (the deduped lake) rather than raw :class:`TickRecord` snapshots, so the stamped
+    ``tick_count`` is the TRUE full-minute count — never one ~5s slice's partial count.
+    """
+    counts: dict[tuple[str, datetime], int] = {}
+    for tick in ticks:
+        key = (tick.instrument_key, _minute_label(tick.recv_ts))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _merge_candles(frame: pl.DataFrame, dest: Path, *, lake_root: str | Path) -> None:
+    """Re-aggregate candles on ``(instrument_key, timestamp)`` across folds, write sorted.
+
+    The real-time fold (#750) writes a candle for EACH ~5s slice of a minute, then
+    re-folds the same minute as more ticks arrive. The plain ``_merge_write`` with
+    ``keep="first"`` DROPPED those later slices, leaving a truncated 1-minute bar
+    (``tick_count=1``, partial OHLC) — the confirmed bug. Here each affected minute is
+    instead REBUILT from the deduped ``live_ticks`` lake (the authoritative,
+    fold-count-independent source), which is automatically correct AND idempotent: a
+    double-fold of the same segment reads the SAME deduped ticks and rebuilds the SAME
+    bar (no double tick_count). Minutes with NO ticks in the lake (e.g. the pure-candle
+    batch tests that never wrote ticks) fall back to the candle as passed in *frame*.
+    """
+    session_date = frame["session_date"].to_list()[0]
+    built_run_id = frame["built_run_id"].to_list()[-1]
+    affected = {
+        (row["instrument_key"], row["timestamp"])
+        for row in frame.select("instrument_key", "timestamp").iter_rows(named=True)
+    }
+    rebuilt = _rebuild_candles_from_ticks(
+        lake_root, session_date, affected=affected, built_run_id=built_run_id
+    )
+    # Minutes the tick lake could rebuild are authoritative; any affected minute it
+    # could NOT (no ticks persisted) keeps the passed-in candle (batch / test path).
+    rebuilt_keys = {
+        (row["instrument_key"], row["timestamp"])
+        for row in rebuilt.select("instrument_key", "timestamp").iter_rows(named=True)
+    }
+    fallback = frame.filter(
+        ~pl.struct("instrument_key", "timestamp").is_in(
+            [{"instrument_key": ik, "timestamp": ts} for ik, ts in rebuilt_keys]
+        )
+    )
+    fresh = pl.concat([rebuilt, fallback], how="vertical_relaxed")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        existing = pl.read_parquet(dest)
+        # Drop the existing rows for every affected minute — `fresh` supersedes them
+        # (keep=last semantics, but recomputed not merged, so a re-fold is a no-op).
+        existing = existing.filter(
+            ~pl.struct("instrument_key", "timestamp").is_in(
+                [{"instrument_key": ik, "timestamp": ts} for ik, ts in affected]
+            )
+        )
+        fresh = pl.concat([existing, fresh], how="vertical_relaxed")
+    # Every input frame (the tick rebuild, the passed-in fallback, the existing
+    # partition) is already in CANDLE_SCHEMA dtypes, so `vertical_relaxed` never upcast
+    # — `.select` only restores the canonical column order before the write.
+    fresh = (
+        fresh.unique(subset=list(_CANDLE_PK), keep="last")
+        .sort(["instrument_key", "timestamp"])
+        .select(list(CANDLE_SCHEMA))
+    )
+    fresh.write_parquet(dest)
 
 
 def _partition_path(lake_root: str | Path, table_dir: str, session_date: object) -> Path:
@@ -237,16 +385,22 @@ def write_live_candles(
     built_run_id: str,
     tick_counts: Mapping[tuple[str, datetime], int] | None = None,
 ) -> list[Path]:
-    """Persist 1-minute *candles* to ``live/candles_1m`` (one file per session date)."""
+    """Persist 1-minute *candles* to ``live/candles_1m`` (one file per session date).
+
+    Candles are RE-AGGREGATED on ``(instrument_key, timestamp)`` across folds via
+    :func:`_merge_candles` (NOT the tick path's ``keep="first"`` dedup): the real-time
+    fold writes a candle per ~5s slice and re-folds the same minute as more ticks
+    arrive, so each affected minute is rebuilt from the deduped ``live_ticks`` lake to
+    the FULL minute — idempotent under a double-fold (DEC-LIVE-CANDLE-PRECISION-001).
+    """
     frame = candles_to_frame(candles, built_run_id=built_run_id, tick_counts=tick_counts)
     written: list[Path] = []
     for session_date in frame["session_date"].unique().to_list():
         dest = _partition_path(lake_root, _CANDLES_DIR, session_date)
-        _merge_write(
+        _merge_candles(
             frame.filter(pl.col("session_date") == session_date),
             dest,
-            pk=_CANDLE_PK,
-            sort=("instrument_key", "timestamp"),
+            lake_root=lake_root,
         )
         written.append(dest)
     return written
