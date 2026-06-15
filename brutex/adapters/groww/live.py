@@ -25,11 +25,12 @@ from brutex.adapters.groww.auth import (
     get_access_token,
 )
 from brutex.adapters.groww.client import GrowwClient, GrowwSDK, _noop_hook, _noop_pace
+from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
 
 
 def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
     """Default SDK factory: ``GrowwAPI(token)`` (lazy import of the real SDK)."""
-    from growwapi import GrowwAPI  # type: ignore[import-not-found]
+    from growwapi import GrowwAPI  # type: ignore[import-not-found, unused-ignore]
 
     return GrowwAPI(token)  # type: ignore[no-any-return]
 
@@ -90,6 +91,10 @@ def build_live_client(
         pace=pace or _noop_pace,
         on_rate_limit=on_rate_limit or _noop_hook,
         on_success=on_success or _noop_hook,
+        # FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001): bound every historical
+        # SDK call so a stalled connection can never hang the pull — it raises a
+        # retryable timeout instead, which the client's bounded retry loop handles.
+        call_timeout_seconds=GROWW_PULL_CALL_TIMEOUT_S,
     )
 
 

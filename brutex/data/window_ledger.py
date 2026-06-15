@@ -104,11 +104,15 @@ class WindowLedgerRecord:
     last_error: str | None
     first_seen_at: str  # ISO-8601 timestamp
     last_attempt_at: str | None  # ISO-8601 timestamp, None until first attempt
-    #: CONSECUTIVE genuine-``EMPTY`` outcomes (DEC-WINDOW-LEDGER-001 R1). Bumped only
-    #: when :meth:`WindowLedger.record` classifies the window ``EMPTY``; RESET to 0 by
-    #: any ``SUCCESS`` / ``FAILED`` outcome. The EMPTY→``SKIPPED`` promotion fires on
-    #: this streak, NOT on total ``attempts`` (which FAILED retries inflate), so a
-    #: window that 429-failed twice then returned one transient ``EMPTY`` is NOT masked.
+    #: Genuine-``EMPTY`` observations counted toward the terminal promotion
+    #: (DEC-WINDOW-LEDGER-001 R1 + DEC-EMPTY-STREAK-RATELIMIT-001 R2). Bumped on an
+    #: ``EMPTY`` outcome; RESET to 0 only by a ``SUCCESS`` (the window has data);
+    #: PRESERVED across a ``FAILED`` (a 429 / timeout is NOT evidence of data, so it
+    #: must not sabotage convergence under a rate-limit storm — the old reset-on-FAILED
+    #: was why a pre-listing window never settled and the full pull hung "pending").
+    #: The EMPTY→``SKIPPED`` promotion fires on this count, NOT on total ``attempts``
+    #: (which FAILED retries inflate), so a real-data window is never masked before
+    #: ``_threshold`` genuine empties.
     empty_streak: int = 0
 
 
@@ -239,18 +243,31 @@ class WindowLedger:
         with self._lock:
             prior = self._by_window.get(wk)
             attempts = (prior.attempts if prior is not None else 0) + 1
-            # R1 (DEC-WINDOW-LEDGER-001): promote on the CONSECUTIVE genuine-EMPTY
-            # streak, NOT total ``attempts``. A SUCCESS / FAILED outcome RESETS the
-            # streak to 0, so a window that 429-failed twice then returned one
-            # transient EMPTY (attempts == 3 but streak == 1) is NOT masked — it
-            # keeps being fetched until it is genuinely EMPTY ``_threshold`` pulls
-            # running. The legacy DEC-EMPTY-TERMINAL-001 counted total attempts and
-            # would have wrongly settled it; this is the strictly-more-correct rule.
+            # R1 (DEC-WINDOW-LEDGER-001) + R2 (DEC-EMPTY-STREAK-RATELIMIT-001):
+            # promote on the genuine-EMPTY count, NOT total ``attempts``, with these
+            # per-outcome streak transitions:
+            #   * EMPTY   → bump (one more genuine no-data observation).
+            #   * SUCCESS → reset to 0 (the window HAS data — it is not empty).
+            #   * FAILED  → PRESERVE (a 429 / timeout / transport error is NOT
+            #     evidence the window has data, so it must not throw away the
+            #     genuine-empty progress). Resetting on FAILED was the convergence
+            #     BUG: under a sustained 429 storm a pre-listing window never strung
+            #     ``_threshold`` clean empties together, so it re-fetched FOREVER and
+            #     the full universe pull never settled (the operator-observed "stuck").
+            #     Preserving keeps the pull-until-success contract intact — a window
+            #     with real data is still re-fetched every pull (FAILED and
+            #     EMPTY-below-threshold are never skippable) until it returns bars; we
+            #     only ever settle a window seen genuinely EMPTY ``_threshold`` times.
             prior_streak = prior.empty_streak if prior is not None else 0
-            empty_streak = prior_streak + 1 if classified == EMPTY else 0
+            if classified == EMPTY:
+                empty_streak = prior_streak + 1
+            elif classified == FAILED:
+                empty_streak = prior_streak  # rate-limit/timeout — preserve, never reset
+            else:  # SUCCESS — the window has real data
+                empty_streak = 0
             status = classified
             if classified == EMPTY and empty_streak >= self._threshold:
-                status = SKIPPED  # genuinely empty _threshold pulls running → settle
+                status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
