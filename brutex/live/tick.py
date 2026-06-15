@@ -258,7 +258,7 @@ def flatten_index_snapshot(snapshot: Mapping[str, Any], *, prefix: str = "") -> 
 
 
 def prune_unchanged(
-    snapshot: Mapping[str, Any], last_obs: Mapping[str, Quote]
+    snapshot: Mapping[str, Any], last_obs: dict[str, Quote]
 ) -> tuple[Mapping[str, Any], dict[str, Quote]]:
     """Keep ONLY the instruments whose FULL observation CHANGED since *last_obs*.
 
@@ -288,28 +288,37 @@ def prune_unchanged(
     So the 1-minute candle rebuilt from the delta stream stays byte-identical to
     the one rebuilt from the full-snapshot stream (DEC-LIVE-DELTA-CAPTURE-001).
 
+    **O(1) space — mutated IN PLACE, no per-callback copy.** *last_obs* is
+    updated in place with every kept leaf's new :class:`Quote` and returned as the
+    second tuple element, so a ~140/sec callback over ~779 instruments costs only
+    O(number-of-kept-leaves) extra space, NOT an O(n) full-dict copy every
+    callback (Golden Rule #5 O(1) discipline; the prior `dict(last_obs)` copy was
+    pure overhead on the common idle path, where NOTHING is kept so NOTHING is
+    mutated). The caller owns *last_obs* and passes a fresh ``{}`` whenever it
+    wants a keyframe (the capture clears it at each minute boundary); on an
+    idle callback no leaf is kept, so the baseline is left byte-for-byte untouched.
+
     Parameters
     ----------
     snapshot
         The raw (possibly nested) feed snapshot, exactly as the SDK returned it.
     last_obs
         ``{instrument_key: Quote}`` — the FULL observation last WRITTEN per
-        instrument (the capture seeds ``{}`` for the first callback).
+        instrument, **mutated in place** (the capture seeds ``{}`` for the first
+        callback / each minute keyframe). The caller must pass a dict it owns.
 
     Returns
     -------
     tuple[Mapping[str, Any], dict[str, Quote]]
-        ``(pruned_snapshot, updated_last_obs)`` where *pruned_snapshot* is the
-        same nested shape holding only changed instruments' full raw leaves (an
-        EMPTY mapping when nothing changed), and *updated_last_obs* is
-        ``last_obs`` merged with every kept instrument's new :class:`Quote` (a
-        flat ``dict`` — the caller adopts it as the next-callback baseline).
-        Unchanged instruments keep their prior Quote; instruments absent from
-        *snapshot* are left untouched in the baseline.
+        ``(pruned_snapshot, last_obs)`` where *pruned_snapshot* is the same nested
+        shape holding only changed instruments' full raw leaves (an EMPTY mapping
+        when nothing changed), and the second element is the SAME *last_obs* dict,
+        now carrying every kept instrument's new :class:`Quote` (the caller adopts
+        it as the next-callback baseline). Unchanged instruments keep their prior
+        Quote; instruments absent from *snapshot* are left untouched.
     """
-    updated = dict(last_obs)
-    pruned = _prune_into(snapshot, updated, prefix="")
-    return pruned, updated
+    pruned = _prune_into(snapshot, last_obs, prefix="")
+    return pruned, last_obs
 
 
 def _prune_into(

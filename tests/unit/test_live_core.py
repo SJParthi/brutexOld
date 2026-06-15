@@ -268,13 +268,27 @@ def test_prune_skips_drift_and_non_numeric_leaves() -> None:
     assert updated == {"good": _bare("5.0")}
 
 
-def test_prune_does_not_mutate_caller_baseline() -> None:
-    """`prune_unchanged` returns a NEW baseline; the passed-in map is untouched."""
+def test_prune_updates_baseline_in_place_returns_same_object() -> None:
+    """`prune_unchanged` mutates *last_obs* IN PLACE and returns the SAME dict.
+
+    The O(1)-space contract (no per-callback full-dict copy, Golden Rule #5): a
+    changed leaf is written into the passed-in baseline and that very object is
+    returned, so the caller's `self._last_obs = updated` is a no-op adoption.
+    """
     baseline = {"NIFTY": _bare("100.0")}
     pruned, updated = prune_unchanged({"NIFTY": 101.0}, baseline)
-    assert baseline == {"NIFTY": _bare("100.0")}  # caller's copy unchanged
-    assert updated == {"NIFTY": _bare("101.0")}
+    assert updated is baseline  # SAME object — no copy was made
+    assert baseline == {"NIFTY": _bare("101.0")}  # mutated in place to the new price
     assert pruned == {"NIFTY": 101.0}
+
+
+def test_prune_idle_callback_leaves_baseline_byte_untouched() -> None:
+    """An all-unchanged callback keeps nothing → mutates nothing (idle path O(1))."""
+    baseline = {"NIFTY": _bare("100.0")}
+    before = dict(baseline)
+    pruned, updated = prune_unchanged({"NIFTY": 100.0}, baseline)
+    assert pruned == {}  # nothing changed → nothing written
+    assert updated is baseline and baseline == before  # baseline untouched
 
 
 # ─────────────────────────── store.py ───────────────────────────
