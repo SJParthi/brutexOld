@@ -8,7 +8,7 @@ process, no signals), and the lake is seeded via ``brutex.live.lake``. Covers th
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -20,6 +20,7 @@ from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.live_runner import LiveRunner
 from brutex.data.models import CandleBar
 from brutex.live.lake import write_live_candles, write_live_ticks
+from brutex.live.prevday import PrevDayOHLCV, write_prev_day
 from brutex.live.store import TickRecord
 from fastapi.testclient import TestClient
 
@@ -349,3 +350,126 @@ def test_live_page_renders_plan_and_flow_panels(tmp_path) -> None:
     assert 'id="planBand"' in text and 'id="planConns"' in text and 'id="planProbe"' in text
     assert 'id="flowGrid"' in text and 'id="flowCount"' in text and 'id="cFlow"' in text
     assert "/api/v1/live/plan" in text and "/api/v1/live/ticks-flowing" in text
+
+
+# ── /api/v1/live/movers (DEC-LIVE-DASH-MOVERS-PARITY-001) ──
+
+
+def _seed_movers_lake(lake) -> None:
+    """Seed a one-session live candle lake + a NIFTY prev-day reference row."""
+    ts = datetime(2026, 6, 15, 9, 45, tzinfo=UTC)
+    write_live_candles(
+        {
+            "NSE:IDX:NIFTY": [
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal("100"),
+                    high=Decimal("112"),
+                    low=Decimal("99"),
+                    close=Decimal("110"),
+                    volume=100,
+                    open_interest=None,
+                )
+            ]
+        },
+        lake_root=lake,
+        built_run_id="r1",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("100")},
+    )
+    write_prev_day(
+        lake,
+        [
+            PrevDayOHLCV(
+                instrument_key="NSE:IDX:NIFTY",
+                session_date=date(2026, 6, 14),
+                open=Decimal("99"),
+                high=Decimal("101"),
+                low=Decimal("98"),
+                close=Decimal("100"),
+                volume=1,
+                open_interest=None,
+            )
+        ],
+        as_of_date=date(2026, 6, 15),
+    )
+
+
+def test_live_movers_without_store_is_empty(tmp_path) -> None:
+    """No instrument store → an honest empty movers payload (never fabricated)."""
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    body = client.get("/api/v1/live/movers").json()
+    assert body["gainers"] == [] and body["losers"] == [] and body["note"]
+    assert body["total_instruments"] == 0 and body["top_n"] == 25
+
+
+def test_live_movers_reads_the_lake(tmp_path) -> None:
+    """With a store + seeded lake the movers payload reflects the ACTUAL lake state."""
+    lake = tmp_path / "lake"
+    (lake / "instruments").mkdir(parents=True)
+    _seed_movers_lake(lake)
+    store = _FakeStore(lake / "instruments")
+    client = TestClient(
+        build_app(DashboardState(), instrument_store=store, live_runner=_runner(tmp_path))
+    )
+    body = client.get("/api/v1/live/movers?top_n=10").json()
+    assert body["session_date"] == "2026-06-15" and body["ranked_instruments"] == 1
+    top = body["gainers"][0]
+    assert top["groww_symbol"] == "NSE-NIFTY" and top["pct_change"] == 10.0
+    assert top["prev_close"] == 100.0  # the prev-day reference, joined from live/prevday
+    assert "+05:30" not in top["timestamp"] and top["timestamp"].startswith("2026-06-15 ")
+
+
+def test_live_movers_reads_the_lake_without_prevday_partition(tmp_path) -> None:
+    """Candle lake but NO live/prevday partition → the route still 200s (no type error).
+
+    Guards the empty-reference-CTE branch end-to-end (a fresh session before the
+    prev-day backfill is a routine real state); prev_close is reconstructed from the
+    candle's own pct_change, never a 500.
+    """
+    lake = tmp_path / "lake"
+    (lake / "instruments").mkdir(parents=True)
+    ts = datetime(2026, 6, 15, 9, 45, tzinfo=UTC)
+    write_live_candles(
+        {
+            "NSE:IDX:NIFTY": [
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal("100"),
+                    high=Decimal("112"),
+                    low=Decimal("99"),
+                    close=Decimal("110"),
+                    volume=100,
+                    open_interest=None,
+                )
+            ]
+        },
+        lake_root=lake,
+        built_run_id="r1",
+        prev_closes={"NSE:IDX:NIFTY": Decimal("100")},
+    )
+    store = _FakeStore(lake / "instruments")
+    client = TestClient(
+        build_app(DashboardState(), instrument_store=store, live_runner=_runner(tmp_path))
+    )
+    response = client.get("/api/v1/live/movers?top_n=10")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ranked_instruments"] == 1
+    # 110 / (1 + 10/100) ≈ 100.0 — reconstructed (to float precision) with no prevday lake.
+    assert body["gainers"][0]["prev_close"] == pytest.approx(100.0)
+
+
+def test_live_movers_top_n_out_of_range_is_422(tmp_path) -> None:
+    """top_n above the 100 cap is rejected by the route's Query bound (never silent)."""
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    # Hoist the request out of the assert (no side-effecting call inside assert — #758).
+    response = client.get("/api/v1/live/movers?top_n=500")
+    assert response.status_code == 422
+
+
+def test_movers_page_ships_live_tab_and_route(tmp_path) -> None:
+    """The /movers page carries the Live tab + the live-movers fetch + its columns."""
+    client = TestClient(build_app(DashboardState(), live_runner=_runner(tmp_path)))
+    text = client.get("/movers").text
+    assert 'data-asset="live"' in text and "/api/v1/live/movers" in text
+    assert "Prev Close" in text and "From Open %" in text
