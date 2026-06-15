@@ -24,7 +24,7 @@ from typing import Any
 
 import structlog
 
-from brutex.live.store import TickRecord, TickStore
+from brutex.live.store import TickRecord, TickSink
 
 _LOG = structlog.get_logger("brutex.live.capture")
 
@@ -47,7 +47,7 @@ class TickCapture:
     def __init__(
         self,
         *,
-        store: TickStore,
+        store: TickSink,
         subscribe: SubscribeFn,
         read_snapshot: SnapshotFn,
         clock: Callable[[], datetime] = _utc_now,

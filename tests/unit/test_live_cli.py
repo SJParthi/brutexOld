@@ -452,3 +452,119 @@ def test_main_defaults_to_real_deps(monkeypatch, tmp_path) -> None:
 def test_main_requires_a_command() -> None:
     with pytest.raises(SystemExit):
         main([], deps=_noop_deps())
+
+
+# ───────────────────── rolling capture + auto-fold (DEC-LIVE-AUTOROLL-001) ──────
+
+
+def test_cmd_capture_rolling_ring(tmp_path) -> None:
+    """``--roll`` with no lake root rotates into a bounded raw segment ring."""
+    from brutex.live.rolling import list_segments, segment_dir_for
+
+    out = tmp_path / "live.jsonl"
+    feed = _FakeFeed([{"NSE:IDX:NIFTY": 22500.0}, {"NSE:IDX:NIFTY": 22501.0}])
+    deps = _deps_with(feed, monotonic_vals=[0.0, 0.4, 0.8, 1.2])
+    rc = main(
+        [
+            "capture",
+            "--out",
+            str(out),
+            "--seconds",
+            "1",
+            "--feed",
+            "index",
+            "--roll",
+            "--roll-max-lines",
+            "1",
+            "--roll-max-segments",
+            "1",
+        ],
+        deps=deps,
+    )
+    assert rc == 0
+    # Bounded ring kept at most 1 raw segment despite 2 captured ticks.
+    assert len(list_segments(segment_dir_for(out))) == 1
+
+
+def test_cmd_capture_rolling_folds_to_lake_and_prunes(tmp_path) -> None:
+    """``--roll --roll-lake-root`` folds each rotated + the tail segment to the lake."""
+    from brutex.live.lake import read_live_ticks
+    from brutex.live.rolling import list_segments, segment_dir_for
+
+    out = tmp_path / "live.jsonl"
+    lake = tmp_path / "lake"
+    feed = _FakeFeed([{"NSE:IDX:NIFTY": 22500.0}, {"NSE:IDX:NIFTY": 22501.0}])
+    deps = _deps_with(feed, monotonic_vals=[0.0, 0.4, 0.8, 1.2])
+    rc = main(
+        [
+            "capture",
+            "--out",
+            str(out),
+            "--seconds",
+            "1",
+            "--feed",
+            "both",
+            "--roll",
+            "--roll-max-lines",
+            "1",
+            "--roll-lake-root",
+            str(lake),
+            "--run-id",
+            "rollrun",
+        ],
+        deps=deps,
+    )
+    assert rc == 0
+    assert read_live_ticks(lake).shape[0] == 2  # both ticks reached the lake
+    assert list_segments(segment_dir_for(out)) == []  # every segment pruned
+
+
+def test_cmd_roll_fold_catches_up_orphan_segments(tmp_path) -> None:
+    """``roll-fold`` folds-then-prunes every leftover segment (crash recovery)."""
+    from brutex.live.lake import read_live_ticks
+    from brutex.live.rolling import RollingTickStore, list_segments, segment_dir_for
+
+    base = tmp_path / "live.jsonl"
+    store = RollingTickStore.open(base, max_lines=1, max_segments=99, resume=False)
+    for i in range(3):
+        store.append(
+            {"NSE:IDX:NIFTY": 22500.0 + i},
+            recv_ts=datetime(2026, 6, 15, 3, 45, 10 + i, tzinfo=UTC),
+            recv_ns=i + 1,
+        )
+    store.flush_active()
+    store.close()
+    lake = tmp_path / "lake"
+    rc = main(
+        ["roll-fold", "--in", str(base), "--lake-root", str(lake), "--run-id", "rf"],
+        deps=_noop_deps(),
+    )
+    assert rc == 0
+    assert read_live_ticks(lake).shape[0] == 3
+    assert list_segments(segment_dir_for(base)) == []
+
+
+def test_cmd_roll_fold_keep_retains_segments(tmp_path) -> None:
+    """``roll-fold --keep`` folds WITHOUT pruning the raw segments."""
+    from brutex.live.rolling import RollingTickStore, list_segments, segment_dir_for
+
+    base = tmp_path / "live.jsonl"
+    store = RollingTickStore.open(base, max_lines=10, resume=False)
+    store.append(
+        {"NSE:IDX:NIFTY": 22500.0},
+        recv_ts=datetime(2026, 6, 15, 3, 45, 10, tzinfo=UTC),
+        recv_ns=1,
+    )
+    store.flush_active()
+    store.close()
+    lake = tmp_path / "lake"
+    rc = main(
+        ["roll-fold", "--in", str(base), "--lake-root", str(lake), "--run-id", "rf", "--keep"],
+        deps=_noop_deps(),
+    )
+    assert rc == 0
+    assert len(list_segments(segment_dir_for(base))) == 1  # kept
+
+
+def test_fold_feed_is_identity() -> None:
+    assert cli._fold_feed("both") == "both"

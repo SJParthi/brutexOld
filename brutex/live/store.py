@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 import structlog
 
@@ -52,6 +52,25 @@ class TickRecord:
     recv_ts: datetime
     snapshot: Mapping[str, Any]
     recv_ns: int = 0
+
+
+class TickSink(Protocol):
+    """The append-only sink contract :class:`~brutex.live.capture.TickCapture` needs.
+
+    Both :class:`TickStore` (a single file) and
+    :class:`~brutex.live.rolling.RollingTickStore` (a rotating segment set) satisfy
+    it structurally, so the capture loop is agnostic to which sink it drives
+    (Golden Rule #11 COMMON — one interface, two implementations).
+    """
+
+    @property
+    def next_seq(self) -> int:
+        """The sequence number the next :meth:`append` will assign."""
+
+    def append(
+        self, snapshot: Mapping[str, Any], *, recv_ts: datetime, recv_ns: int | None = None
+    ) -> TickRecord:
+        """Persist one snapshot, returning the :class:`TickRecord` written."""
 
 
 def _json_default(obj: object) -> str:
@@ -210,4 +229,4 @@ class TickStore:
         return records
 
 
-__all__ = ["TickRecord", "TickStore"]
+__all__ = ["TickRecord", "TickSink", "TickStore"]

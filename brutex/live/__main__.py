@@ -43,6 +43,13 @@ from brutex.live.multiconn import (
 from brutex.live.parity import compare_candles
 from brutex.live.probe import analyze_cadence, probe_connections
 from brutex.live.report import render_parity_markdown
+from brutex.live.rolling import (
+    RollingTickStore,
+    fold_segment,
+    list_segments,
+    make_fold_on_rotate,
+    segment_dir_for,
+)
 from brutex.live.serde import read_candles, write_candles
 from brutex.live.store import TickStore
 from brutex.live.tick import iter_ticks
@@ -276,6 +283,56 @@ def _make_snapshot_reader(feed: Any, feed_kind: str) -> SnapshotFn:
     return feed.get_index_value  # type: ignore[no-any-return]
 
 
+def _capture_with_rolling(
+    args: argparse.Namespace,
+    deps: LiveDeps,
+    subscribe: SubscribeFn,
+    read_snapshot: SnapshotFn,
+) -> int:
+    """Capture into a ROTATING segment set, auto-folding each rotated segment.
+
+    The bounded/rolling sink (``DEC-LIVE-AUTOROLL-001``) keeps no single JSONL
+    file unbounded: it rotates at ``--roll-max-bytes`` / ``--roll-max-lines`` and,
+    when ``--roll-lake-root`` is given, folds-then-prunes each rotated segment to
+    the live Parquet lake (else a bounded raw ring of ``--roll-max-segments``).
+    The end-of-session ACTIVE tail is flushed + folded too.
+    """
+    on_rotate = (
+        make_fold_on_rotate(
+            lake_root=args.roll_lake_root,
+            capture_run_id=args.run_id,
+            feed_kind=_fold_feed(args.feed),
+        )
+        if args.roll_lake_root
+        else None
+    )
+    store = RollingTickStore.open(
+        args.out,
+        max_bytes=args.roll_max_bytes,
+        max_lines=args.roll_max_lines,
+        max_segments=args.roll_max_segments,
+        on_rotate=on_rotate,
+        resume=args.resume,
+    )
+    capture = TickCapture(
+        store=store, subscribe=subscribe, read_snapshot=read_snapshot, clock=deps.clock
+    )
+    captured = capture.run_for(
+        args.seconds, sleep=deps.sleep, monotonic=deps.monotonic, heartbeat_interval=args.heartbeat
+    )
+    tail = store.flush_active()
+    store.close()
+    _LOG.info(
+        "capture_rolling_complete",
+        captured=captured,
+        segment_dir=str(segment_dir_for(args.out)),
+        rotations=store.rotations,
+        tail_folded=tail is not None,
+        lake_root=str(args.roll_lake_root) if args.roll_lake_root else None,
+    )
+    return 0
+
+
 def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
     """Subscribe + capture every snapshot for ``--seconds`` to ``--out``."""
     deps.configure_logging(args.log_file)
@@ -286,6 +343,8 @@ def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
     )
     subscribe = _make_subscribe(feed, instruments, args.feed)
     read_snapshot = _make_snapshot_reader(feed, args.feed)
+    if args.roll:
+        return _capture_with_rolling(args, deps, subscribe, read_snapshot)
     with TickStore.open(args.out, resume=args.resume) as store:
         capture = TickCapture(
             store=store,
@@ -308,6 +367,16 @@ def _cmd_capture(args: argparse.Namespace, deps: LiveDeps) -> int:
         median_interval_ms=stats.median_interval_ms,
     )
     return 0
+
+
+def _fold_feed(feed_kind: str) -> str:
+    """Map a capture ``--feed`` (index/ltp/both) to the lake ``feed_kind`` tag.
+
+    The lake's ``feed_kind`` is a free-form provenance stamp; ``both`` carries
+    mixed instruments, so it is recorded as ``"both"`` (the writer does not
+    branch on it — it is purely descriptive).
+    """
+    return feed_kind
 
 
 def _cmd_cadence(args: argparse.Namespace, _deps: LiveDeps) -> int:
@@ -406,6 +475,44 @@ def _cmd_lake(args: argparse.Namespace, _deps: LiveDeps) -> int:
         tick_partitions=len(tick_paths),
         candle_partitions=len(candle_paths),
         instruments=len(candles),
+        lake_root=str(args.lake_root),
+    )
+    return 0
+
+
+def _cmd_roll_fold(args: argparse.Namespace, _deps: LiveDeps) -> int:
+    """Fold-then-prune EVERY segment under a rolling-capture directory into the lake.
+
+    The crash-recovery / catch-up path for ``DEC-LIVE-AUTOROLL-001``: after a
+    crash (or a capture run with no ``--roll-lake-root``) the segment directory
+    may hold un-folded ``seg-*.jsonl`` files. This folds each into the live lake
+    (REUSING the ``write_live_*`` writers via :func:`fold_segment`) and prunes it
+    after a verified write. Re-running is idempotent (the lake PK dedups a re-fold)
+    — already-pruned segments are simply absent. ``--keep`` retains the raw
+    segments (fold without prune).
+    """
+    directory = segment_dir_for(args.in_path)
+    segments = list_segments(directory)
+    folded = 0
+    pruned = 0
+    records = 0
+    for segment in segments:
+        result = fold_segment(
+            segment,
+            lake_root=args.lake_root,
+            capture_run_id=args.run_id,
+            feed_kind=args.feed,
+            prune=not args.keep,
+        )
+        folded += 1
+        records += result.records
+        pruned += int(result.pruned)
+    _LOG.info(
+        "roll_fold_complete",
+        segment_dir=str(directory),
+        segments=folded,
+        records=records,
+        pruned=pruned,
         lake_root=str(args.lake_root),
     )
     return 0
@@ -519,8 +626,46 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, LiveDeps], int]] = {
     "parity": _cmd_parity,
     "probe-connections": _cmd_probe_connections,
     "lake": _cmd_lake,
+    "roll-fold": _cmd_roll_fold,
     "verify": _cmd_verify,
 }
+
+
+def _add_roll_args(parser: argparse.ArgumentParser) -> None:
+    """Add the bounded/rolling capture flags (DEC-LIVE-AUTOROLL-001) to *parser*."""
+    parser.add_argument(
+        "--roll",
+        action="store_true",
+        help="bounded/rolling sink: rotate --out into seg-NNNNNN.jsonl segments "
+        "(no single GB file) + auto-fold each rotated segment to the lake",
+    )
+    parser.add_argument(
+        "--roll-max-bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+        help="rotate the active segment at this byte size (default 64 MiB)",
+    )
+    parser.add_argument(
+        "--roll-max-lines",
+        type=int,
+        default=1_000_000,
+        help="rotate the active segment at this line count (default 1,000,000)",
+    )
+    parser.add_argument(
+        "--roll-max-segments",
+        type=int,
+        default=8,
+        help="when NO --roll-lake-root, keep at most this many raw segments (ring)",
+    )
+    parser.add_argument(
+        "--roll-lake-root",
+        dest="roll_lake_root",
+        default=None,
+        help="fold-then-prune each rotated segment into this live lake root",
+    )
+    parser.add_argument(
+        "--run-id", dest="run_id", default="live", help="capture/fold run id (lake provenance)"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -551,6 +696,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cap.add_argument("--log-file", dest="log_file", type=Path, default=Path(DEFAULT_LOG_FILE))
     cap.add_argument("--resume", action="store_true", help="append to an existing log")
+    _add_roll_args(cap)
 
     cal = sub.add_parser(
         "capture-all", help="open N connections (spot on #0, legs on #1..N) + capture"
@@ -601,6 +747,17 @@ def _build_parser() -> argparse.ArgumentParser:
     lk.add_argument("--lake-root", dest="lake_root", required=True, help="lake root directory")
     lk.add_argument("--run-id", dest="run_id", required=True, help="capture/build run id")
     lk.add_argument("--feed", choices=("index", "ltp"), default="index")
+
+    rf = sub.add_parser(
+        "roll-fold", help="fold-then-prune every segment in a rolling-capture directory"
+    )
+    rf.add_argument(
+        "--in", dest="in_path", required=True, help="rolling-capture base path or segment dir"
+    )
+    rf.add_argument("--lake-root", dest="lake_root", required=True, help="lake root directory")
+    rf.add_argument("--run-id", dest="run_id", required=True, help="capture/fold run id")
+    rf.add_argument("--feed", choices=("index", "ltp", "both"), default="index")
+    rf.add_argument("--keep", action="store_true", help="fold WITHOUT pruning the raw segments")
 
     ver = sub.add_parser("verify", help="PROVE the feed subscribes + ticks (per instrument)")
     ver.add_argument(
