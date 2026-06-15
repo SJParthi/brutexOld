@@ -96,6 +96,60 @@ def test_leaf_price_branches() -> None:
     assert _leaf_price({"value": "junk"}) is None  # price key but unparseable
 
 
+def test_leaf_price_equity_uses_ltp_not_value_zero() -> None:
+    """A Groww LTP equity leaf reads `ltp`, NOT the `value:0.0` slot (Bug 1 fix).
+
+    The real growwapi equity leaf carries the traded price in `ltp` (e.g. 2396.7)
+    while `value` is 0.0 (that field is the day's traded VALUE, not a price). With
+    `ltp` before `value` in PRICE_LEAF_KEYS the equity now reads its true price
+    instead of 0.0 (DEC-LIVE-CANDLE-PRECISION-001).
+    """
+    equity = {
+        "avgPrice": 0.0,
+        "bidQty": 0.0,
+        "close": 0.0,
+        "high": 0.0,
+        "low": 0.0,
+        "ltp": 2396.7,
+        "open": 0.0,
+        "openInterest": 0.0,
+        "tsInMillis": 1718440510123.0,
+        "value": 0.0,
+        "volume": 0.0,
+    }
+    assert _leaf_price(equity) == Decimal("2396.7")  # NOT 0.0
+
+
+def test_leaf_price_index_falls_through_to_value() -> None:
+    """An INDEX leaf (carries `value`, NO `ltp`) still reads `value` (Bug 1 fix)."""
+    index = {"value": 76435.06, "tsInMillis": 1718440510123.0}
+    assert _leaf_price(index) == Decimal("76435.06")
+
+
+def test_leaf_price_untraded_equity_ltp_zero_is_kept() -> None:
+    """An un-traded equity with `ltp:0.0` legitimately yields 0 (no trade yet) — kept."""
+    untraded = {"ltp": 0.0, "value": 0.0, "tsInMillis": 1718440510123.0}
+    assert _leaf_price(untraded) == Decimal("0")  # a real not-yet-traded price, not skipped
+
+
+def test_flatten_equity_leaf_uses_ltp_for_ticks_and_candles() -> None:
+    """An equity leaf flattens to its `ltp` (2396.7), not the `value:0.0` (Bug 1)."""
+    from brutex.live.tick import extract_quotes
+
+    snap = {"NSE": {"CASH": {"RELIANCE": {"value": 0.0, "ltp": 2396.7, "tsInMillis": 1.0}}}}
+    assert flatten_index_snapshot(snap) == {"NSE:CASH:RELIANCE": Decimal("2396.7")}
+    assert extract_quotes(snap)["NSE:CASH:RELIANCE"].value == Decimal("2396.7")
+
+
+def test_flatten_index_leaf_uses_value_when_no_ltp() -> None:
+    """An index leaf (no `ltp`) still flattens to its `value` (76435.06) (Bug 1)."""
+    from brutex.live.tick import extract_quotes
+
+    snap = {"BSE": {"IDX": {"SENSEX": {"value": 76435.06, "tsInMillis": 1.0}}}}
+    assert flatten_index_snapshot(snap) == {"BSE:IDX:SENSEX": Decimal("76435.06")}
+    assert extract_quotes(snap)["BSE:IDX:SENSEX"].value == Decimal("76435.06")
+
+
 def test_flatten_flat_nested_and_leafdict() -> None:
     flat = flatten_index_snapshot({"NSE_NIFTY": 22500.5, "skip": "x"})
     assert flat == {"NSE_NIFTY": Decimal("22500.5")}
