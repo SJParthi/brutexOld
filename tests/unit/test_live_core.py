@@ -278,13 +278,29 @@ def test_exchange_ts_floor_boundary_is_plausible() -> None:
 
 
 def test_effective_clock_prefers_exchange_ts_else_recv_ts() -> None:
-    """effective_clock returns exchange_ts when present, recv_ts when None."""
+    """effective_clock returns exchange_ts when EARLIER, recv_ts when None."""
     with_exch = LiveTick(
         recv_ts=_utc(3, 46), instrument_key="N", value=Decimal("1"), exchange_ts=_utc(3, 45)
     )
-    assert effective_clock(with_exch) == _utc(3, 45)
+    assert effective_clock(with_exch) == _utc(3, 45)  # exchange earlier → kept
     without = LiveTick(recv_ts=_utc(3, 46), instrument_key="N", value=Decimal("1"))
     assert effective_clock(without) == _utc(3, 46)  # falls back to recv_ts
+
+
+def test_effective_clock_clamps_future_exchange_ts_to_recv_ts() -> None:
+    """A vendor exchange_ts skewed into OUR future is clamped to recv_ts (no look-ahead).
+
+    The +1-day plausibility slack admits a modestly-future vendor timestamp; bucketing
+    by it would push a tick into a minute we had not yet received (CLAUDE.md §4). The
+    ``min(exchange_ts, recv_ts)`` clamp keeps it at recv_ts.
+    """
+    future = LiveTick(
+        recv_ts=_utc(3, 45),
+        instrument_key="N",
+        value=Decimal("1"),
+        exchange_ts=_utc(3, 55),  # 10 minutes into OUR future — a clock glitch
+    )
+    assert effective_clock(future) == _utc(3, 45)  # clamped to recv_ts, NOT 03:55
 
 
 def test_livetick_rejects_naive_exchange_ts() -> None:
@@ -648,6 +664,24 @@ def test_build_falls_back_to_recv_ts_when_no_exchange_ts() -> None:
     ticks = [LiveTick(recv_ts=_utc(3, 45, 10), instrument_key="N", value=Decimal("7"))]
     bars = build_minute_candles(ticks)["N"]
     assert [b.timestamp for b in bars] == [_utc(3, 45)] and bars[0].close == Decimal("7")
+
+
+def test_build_future_skewed_exchange_ts_does_not_make_phantom_future_bar() -> None:
+    """A future-skewed exchange_ts is clamped to recv_ts → no phantom later bar.
+
+    Without the no-look-ahead clamp a vendor exchange_ts of 09:25 (10 min ahead of our
+    09:15 recv_ts) would mint a phantom 09:25 bar; clamping keeps the tick in 09:15.
+    """
+    ticks = [
+        LiveTick(
+            recv_ts=_utc(3, 45, 10),
+            instrument_key="N",
+            value=Decimal("100"),
+            exchange_ts=_utc(3, 55, 10),  # 09:25 IST — skewed into our future
+        )
+    ]
+    bars = build_minute_candles(ticks)["N"]
+    assert [b.timestamp for b in bars] == [_utc(3, 45)]  # NOT 03:55
 
 
 def test_build_mixed_clock_index_vs_no_ts_leaf() -> None:

@@ -116,8 +116,18 @@ def effective_clock(tick: LiveTick) -> datetime:
     ``tsInMillis``. Used by EVERY bucketing site (batch fold, micro-batch fold, and
     the lake rebuild) so all three agree minute-for-minute and the rebuild stays
     byte-identical (DEC-LIVE-CANDLE-BUCKET-IST-001).
+
+    **No-look-ahead clamp:** the result is never LATER than ``recv_ts`` — if a vendor
+    ``exchange_ts`` is skewed into OUR future (a clock glitch the +1-day plausibility
+    slack still admits), it is clamped to ``recv_ts`` so a tick can never be bucketed
+    into a minute we had not yet received (CLAUDE.md §4 look-ahead invariant). The
+    intended case — exchange time EARLIER than ``recv_ts`` (a 09:15:58-IST trade we
+    received in the 09:16 wall-clock minute) — is preserved (``min`` keeps the earlier
+    exchange instant), which is the whole point of exchange-minute bucketing.
     """
-    return tick.exchange_ts if tick.exchange_ts is not None else tick.recv_ts
+    if tick.exchange_ts is None:
+        return tick.recv_ts
+    return min(tick.exchange_ts, tick.recv_ts)
 
 
 def _coerce_number(raw: object) -> Decimal | None:
