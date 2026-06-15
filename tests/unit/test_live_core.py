@@ -32,6 +32,8 @@ from brutex.live.tick import (
     Quote,
     _coerce_number,
     _leaf_price,
+    effective_clock,
+    exchange_ts_from_vendor_ms,
     flatten_index_snapshot,
     iter_ticks,
     prune_unchanged,
@@ -215,6 +217,100 @@ def test_schema_drift_leaf_is_skipped_not_recursed() -> None:
     snap = {"NSE": {"IDX": {"NIFTY": {"tsInMillis": 1.0, "lastTradePrice": 22500.5, "x": 9}}}}
     assert flatten_index_snapshot(snap) == {}
     assert extract_quotes(snap) == {}
+
+
+# ─────────────── exchange_ts derivation (DEC-LIVE-EXCHANGE-TS-IST-001) ───────────────
+
+
+# 1718440510123 ms == 2024-06-15 08:35:10.123 UTC == 14:05:10.123 IST.
+_VENDOR_MS = 1718440510123.0
+_EXCHANGE_UTC = datetime(2024, 6, 15, 8, 35, 10, 123000, tzinfo=UTC)
+
+
+def test_exchange_ts_from_vendor_ms_is_millisecond_precise() -> None:
+    """tsInMillis → tz-aware UTC datetime preserving the .mmm (the us column keeps it)."""
+    dt = exchange_ts_from_vendor_ms(_VENDOR_MS)
+    assert dt == _EXCHANGE_UTC
+    assert dt.tzinfo is UTC
+    assert dt.microsecond == 123000  # the millisecond survived (no truncation)
+
+
+def test_exchange_ts_displays_as_ist_utc_plus_530() -> None:
+    """The derived exchange instant reads as IST = UTC+05:30 (CLAUDE.md §6, no DST)."""
+    from brutex.calendars.nse import IST
+
+    ist = exchange_ts_from_vendor_ms(_VENDOR_MS).astimezone(IST)
+    assert ist.isoformat() == "2024-06-15T14:05:10.123000+05:30"
+    assert (ist.utcoffset().total_seconds()) == 5.5 * 3600  # fixed +05:30
+
+
+def test_exchange_ts_none_when_vendor_ts_absent() -> None:
+    """A leaf without tsInMillis (None) derives no exchange_ts → recv_ts fallback."""
+    assert exchange_ts_from_vendor_ms(None) is None
+
+
+@pytest.mark.parametrize(
+    "bad_ms",
+    [
+        -1.0,  # negative — vendor sign-flip glitch
+        0.0,  # epoch 1970 — pre-2015 (a zero/uninitialised stamp)
+        1_400_000_000_000.0,  # 2014-05 — just before the 2015 floor
+        99_999_999_999_999.0,  # ~year 5138 — far future
+        float("nan"),  # _coerce_ms does NOT reject nan → must not crash fromtimestamp
+        float("inf"),  # +inf — far-future via the > now branch
+        float("-inf"),  # -inf — caught by the non-finite guard, never the < floor compare
+    ],
+)
+def test_exchange_ts_none_for_implausible_vendor_ms(bad_ms: float) -> None:
+    """Implausible tsInMillis (non-finite / negative / pre-2015 / far-future) → None.
+
+    Dropped, NEVER raised — a ``nan`` slips past both the ``<`` floor and ``>`` ceiling
+    comparisons (every nan comparison is False) and WOULD crash
+    ``datetime.fromtimestamp`` without the explicit finiteness guard.
+    """
+    assert exchange_ts_from_vendor_ms(bad_ms) is None
+
+
+def test_exchange_ts_floor_boundary_is_plausible() -> None:
+    """The exact 2015-01-01 floor instant is admitted (the >= boundary, not dropped)."""
+    floor_ms = datetime(2015, 1, 1, tzinfo=UTC).timestamp() * 1000.0
+    assert exchange_ts_from_vendor_ms(floor_ms) == datetime(2015, 1, 1, tzinfo=UTC)
+
+
+def test_effective_clock_prefers_exchange_ts_else_recv_ts() -> None:
+    """effective_clock returns exchange_ts when present, recv_ts when None."""
+    with_exch = LiveTick(
+        recv_ts=_utc(3, 46), instrument_key="N", value=Decimal("1"), exchange_ts=_utc(3, 45)
+    )
+    assert effective_clock(with_exch) == _utc(3, 45)
+    without = LiveTick(recv_ts=_utc(3, 46), instrument_key="N", value=Decimal("1"))
+    assert effective_clock(without) == _utc(3, 46)  # falls back to recv_ts
+
+
+def test_livetick_rejects_naive_exchange_ts() -> None:
+    """A naive exchange_ts is refused (mirrors the recv_ts tz-aware invariant)."""
+    with pytest.raises(ValueError, match="exchange_ts must be timezone-aware"):
+        LiveTick(
+            recv_ts=_OPEN_UTC,
+            instrument_key="N",
+            value=Decimal("1"),
+            exchange_ts=datetime(2026, 6, 15, 9, 15),  # naive
+        )
+
+
+def test_iter_ticks_carries_exchange_ts_from_tsinmillis() -> None:
+    """iter_ticks derives exchange_ts from a leaf's tsInMillis; a flat leaf has None."""
+    rec = TickRecord(
+        seq=0,
+        recv_ts=_utc(3, 46),
+        snapshot={
+            "NSE": {"IDX": {"NIFTY": {"value": 22500.5, "tsInMillis": _VENDOR_MS}}},
+            "FLAT": 100.0,  # flat numeric leaf — no tsInMillis
+        },
+    )
+    by_key = {t.instrument_key: t for t in iter_ticks([rec])}
+    assert by_key["NSE:IDX:NIFTY"].exchange_ts == _EXCHANGE_UTC
+    assert by_key["FLAT"].exchange_ts is None  # fallback path
 
 
 # ───────────────────── prune_unchanged (delta) ──────────────────
@@ -513,6 +609,64 @@ def test_build_session_date_filter() -> None:
     tick = LiveTick(recv_ts=_utc(3, 45, 10), instrument_key="N", value=Decimal("1"))
     assert build_minute_candles([tick], session_date=date(2026, 6, 15))["N"]
     assert build_minute_candles([tick], session_date=date(2020, 1, 1)) == {}
+
+
+def test_build_buckets_by_exchange_minute_even_when_recv_crosses_minute() -> None:
+    """A 09:15:30 and a 09:15:59 EXCHANGE tick land in the SAME 09:15 bar.
+
+    Both ticks are stamped by the exchange inside the 09:15 IST minute, but OUR
+    ``recv_ts`` for the second already crossed into the 09:16 wall-clock minute
+    (a snapshot-cadence / GC pause delay). Bucketing by ``exchange_ts`` keeps both
+    in the single 09:15 exchange minute — schema- AND semantics-identical to the
+    backtest bar (DEC-LIVE-CANDLE-BUCKET-IST-001).
+    """
+    # 09:15:30 IST == 03:45:30 UTC; 09:15:59 IST == 03:45:59 UTC.
+    exch_30 = datetime(2026, 6, 15, 3, 45, 30, tzinfo=UTC)
+    exch_59 = datetime(2026, 6, 15, 3, 45, 59, tzinfo=UTC)
+    ticks = [
+        LiveTick(
+            recv_ts=_utc(3, 45, 31),  # received still inside 09:15
+            instrument_key="N",
+            value=Decimal("100"),
+            exchange_ts=exch_30,
+        ),
+        LiveTick(
+            recv_ts=_utc(3, 46, 2),  # received in the NEXT wall-clock minute (09:16)
+            instrument_key="N",
+            value=Decimal("110"),
+            exchange_ts=exch_59,
+        ),
+    ]
+    candles = build_minute_candles(ticks)
+    bars = candles["N"]
+    assert [b.timestamp for b in bars] == [_utc(3, 45)]  # ONE bar at the 09:15 label
+    assert bars[0].open == Decimal("100") and bars[0].close == Decimal("110")
+
+
+def test_build_falls_back_to_recv_ts_when_no_exchange_ts() -> None:
+    """A tick without exchange_ts buckets by recv_ts (the per-tick fallback branch)."""
+    ticks = [LiveTick(recv_ts=_utc(3, 45, 10), instrument_key="N", value=Decimal("7"))]
+    bars = build_minute_candles(ticks)["N"]
+    assert [b.timestamp for b in bars] == [_utc(3, 45)] and bars[0].close == Decimal("7")
+
+
+def test_build_mixed_clock_index_vs_no_ts_leaf() -> None:
+    """An index leaf (tsInMillis) buckets by exchange minute; a leaf without it by recv_ts.
+
+    NIFTY's exchange clock says 09:15 even though we received it in the 09:16
+    wall-clock minute; a flat leaf with no tsInMillis falls back to its 09:16
+    recv_ts — proving the two clocks coexist per-tick in one fold.
+    """
+    nifty = LiveTick(
+        recv_ts=_utc(3, 46, 5),
+        instrument_key="NSE:IDX:NIFTY",
+        value=Decimal("22500"),
+        exchange_ts=datetime(2026, 6, 15, 3, 45, 40, tzinfo=UTC),  # 09:15:40 IST
+    )
+    flat = LiveTick(recv_ts=_utc(3, 46, 5), instrument_key="FLAT", value=Decimal("9"))
+    candles = build_minute_candles([nifty, flat])
+    assert [b.timestamp for b in candles["NSE:IDX:NIFTY"]] == [_utc(3, 45)]  # exchange minute
+    assert [b.timestamp for b in candles["FLAT"]] == [_utc(3, 46)]  # recv fallback
 
 
 # ───────────────────────────── parity.py ─────────────────────────

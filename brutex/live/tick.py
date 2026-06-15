@@ -15,9 +15,10 @@ Prices are kept as exact :class:`~decimal.Decimal` rupees (``str()`` parse, neve
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
@@ -26,6 +27,20 @@ import structlog
 from brutex.live.store import TickRecord
 
 _LOG = structlog.get_logger("brutex.live.tick")
+
+#: Lower plausibility bound for the vendor's ``tsInMillis`` epoch-millisecond
+#: timestamp: 2015-01-01T00:00:00 UTC. Groww's own historical depth starts in
+#: 2020 (CLAUDE.md §6 "available from 2020"); a value before 2015 is a vendor
+#: glitch (a zero, a seconds-not-ms value, a sign-flip), never a real exchange
+#: instant — its derived ``exchange_ts`` is dropped to ``None`` and the candle
+#: path falls back to ``recv_ts`` (mirrors the :func:`_coerce_price` skip-not-raise
+#: discipline; DEC-LIVE-EXCHANGE-TS-IST-001).
+_MIN_PLAUSIBLE_VENDOR_TS_MS: Final[float] = datetime(2015, 1, 1, tzinfo=UTC).timestamp() * 1000.0
+
+#: How far PAST "now" a vendor ``tsInMillis`` may be before it is rejected as a
+#: far-future glitch: +1 day of slack (covers clock skew without admitting a
+#: year-2099 garbage value). Evaluated against the wall clock at conversion time.
+_FUTURE_VENDOR_TS_SLACK: Final[timedelta] = timedelta(days=1)
 
 #: Leaf mapping keys (in priority order) that carry the numeric price/value of an
 #: instrument inside a nested Groww feed snapshot. Tolerant by design — the exact
@@ -69,17 +84,40 @@ class LiveTick:
         the dotted snapshot path the vendor returned).
     value
         The index value / LTP as exact :class:`~decimal.Decimal` rupees.
+    exchange_ts
+        The vendor's OWN exchange timestamp (tz-aware UTC, ms-precise), derived
+        from ``tsInMillis`` via :func:`exchange_ts_from_vendor_ms` — ``None`` when
+        the leaf omits ``tsInMillis`` or stamped an implausible one. The candle
+        path buckets by this when present and falls back to ``recv_ts`` when
+        ``None`` (see :func:`effective_clock`; DEC-LIVE-EXCHANGE-TS-IST-001).
     """
 
     recv_ts: datetime
     instrument_key: str
     value: Decimal
+    exchange_ts: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.recv_ts.tzinfo is None:
             raise ValueError(f"LiveTick.recv_ts must be timezone-aware, got naive {self.recv_ts!r}")
+        if self.exchange_ts is not None and self.exchange_ts.tzinfo is None:
+            raise ValueError(
+                f"LiveTick.exchange_ts must be timezone-aware, got naive {self.exchange_ts!r}"
+            )
         if not self.value.is_finite():
             raise ValueError(f"LiveTick.value must be finite, got {self.value!r}")
+
+
+def effective_clock(tick: LiveTick) -> datetime:
+    """The clock a candle buckets *tick* by: its exchange time, else OUR receive time.
+
+    Returns ``tick.exchange_ts`` (the vendor's own exchange instant) when present and
+    plausible, falling back to ``tick.recv_ts`` when the leaf carried no usable
+    ``tsInMillis``. Used by EVERY bucketing site (batch fold, micro-batch fold, and
+    the lake rebuild) so all three agree minute-for-minute and the rebuild stays
+    byte-identical (DEC-LIVE-CANDLE-BUCKET-IST-001).
+    """
+    return tick.exchange_ts if tick.exchange_ts is not None else tick.recv_ts
 
 
 def _coerce_number(raw: object) -> Decimal | None:
@@ -145,6 +183,32 @@ def _coerce_ms(raw: object) -> float | None:
     if isinstance(raw, (int, float)):
         return float(raw)
     return None
+
+
+def exchange_ts_from_vendor_ms(vendor_ts_ms: float | None) -> datetime | None:
+    """Derive the vendor's OWN exchange timestamp (tz-aware UTC) from ``tsInMillis``.
+
+    The vendor stamps each leaf with ``tsInMillis`` (epoch MILLISECONDS) — the
+    exchange's own clock for that observation. We convert it to a millisecond-precise
+    UTC :class:`~datetime.datetime` (the ``us`` lake column preserves the ``.mmm``),
+    so the operator can read the exact IST ``hh:mm:ss.mmm`` by displaying it at the
+    fixed +05:30 offset (CLAUDE.md §6 — IST is UTC+05:30, no DST). This is ADDITIVE
+    and DERIVED — ``vendor_ts_ms`` itself is kept UNTAMPERED.
+
+    Returns ``None`` (so the candle path falls back to OUR ``recv_ts`` for that tick)
+    when *vendor_ts_ms* is ``None`` or IMPLAUSIBLE — non-finite (``nan``/``inf``, which
+    the upstream ``_coerce_ms`` does NOT reject), negative, before 2015-01-01, or more
+    than a day past "now". One bad tick is dropped, never raised (the
+    :func:`_coerce_price` skip-not-raise discipline; DEC-LIVE-EXCHANGE-TS-IST-001).
+    """
+    if vendor_ts_ms is None or not math.isfinite(vendor_ts_ms):
+        return None
+    if vendor_ts_ms < _MIN_PLAUSIBLE_VENDOR_TS_MS:
+        return None
+    now_ms = (datetime.now(tz=UTC) + _FUTURE_VENDOR_TS_SLACK).timestamp() * 1000.0
+    if vendor_ts_ms > now_ms:
+        return None
+    return datetime.fromtimestamp(vendor_ts_ms / 1000.0, tz=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,8 +450,15 @@ def iter_ticks(records: Sequence[TickRecord]) -> Iterator[LiveTick]:
     """Expand captured :class:`TickRecord` snapshots into per-instrument ticks.
 
     One stored record (one feed callback) fans out into one :class:`LiveTick`
-    per instrument present in its flattened snapshot. Records whose snapshot
-    flattens to nothing (e.g. an empty heartbeat) yield no ticks.
+    per instrument present in its snapshot. Records whose snapshot flattens to
+    nothing (e.g. an empty heartbeat) yield no ticks.
+
+    Each tick carries the vendor's derived ``exchange_ts`` (from the leaf's
+    ``tsInMillis`` via :func:`exchange_ts_from_vendor_ms`) — ``None`` for a leaf
+    without a usable timestamp (e.g. a flat numeric snapshot or an index leaf with
+    an implausible ms) so the candle path falls back to ``recv_ts`` for that tick.
+    Built from :func:`extract_quotes` (NOT :func:`flatten_index_snapshot`) precisely
+    so the vendor timestamp survives into the bucketing clock (DEC-LIVE-CANDLE-BUCKET-IST-001).
 
     Parameters
     ----------
@@ -400,11 +471,12 @@ def iter_ticks(records: Sequence[TickRecord]) -> Iterator[LiveTick]:
         In capture order, then instrument order within each record.
     """
     for record in records:
-        for instrument_key, value in flatten_index_snapshot(record.snapshot).items():
+        for instrument_key, quote in extract_quotes(record.snapshot).items():
             yield LiveTick(
                 recv_ts=record.recv_ts,
                 instrument_key=instrument_key,
-                value=value,
+                value=quote.value,
+                exchange_ts=exchange_ts_from_vendor_ms(quote.vendor_ts_ms),
             )
 
 
@@ -413,6 +485,8 @@ __all__ = [
     "VENDOR_TS_MS_KEY",
     "LiveTick",
     "Quote",
+    "effective_clock",
+    "exchange_ts_from_vendor_ms",
     "extract_quotes",
     "flatten_index_snapshot",
     "iter_ticks",
