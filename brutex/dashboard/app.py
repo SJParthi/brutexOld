@@ -83,7 +83,10 @@ from brutex.dashboard.live_lake_view import (
     live_tables_summary,
     query_live_table,
 )
-from brutex.dashboard.live_manifest import make_store_manifest_writer
+from brutex.dashboard.live_manifest import (
+    make_master_feed_token_resolver,
+    make_store_manifest_writer,
+)
 from brutex.dashboard.live_runner import LiveRunner
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
 from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
@@ -3287,7 +3290,13 @@ def build_app(
     # (DEC-LIVE-DASHBOARD-WIRE-001); the writer stays in live_manifest (COMMON).
     _runner = live_runner or LiveRunner(
         state_path=Path(".brutex-logs") / "live-feed.json",
-        manifest_writer=make_store_manifest_writer(instrument_store),
+        # Resolve each F&O leg's NUMERIC feed token (subscribe_ltp wants the
+        # instrument-csv exchange_token, not the contract addressing string —
+        # 07-feed.md:54, CLAUDE.md §6; DEC-LIVE-LEG-FEED-TOKEN-FORMAT-001). The
+        # resolver degrades honestly to a skipped leg on a master miss.
+        manifest_writer=make_store_manifest_writer(
+            instrument_store, resolve_feed_token=make_master_feed_token_resolver()
+        ),
     )
 
     def _live_lake_root() -> Path | None:
