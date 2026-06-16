@@ -24,7 +24,8 @@ class TestClassifyPull:
         )
         assert v.kind == "auth_expired"
         assert v.needs_operator is True
-        assert v.pending_windows == 10  # still_failed (7) + failed_pairs (3)
+        assert v.pending_windows == 7  # WINDOWS a re-pull retries (NOT the 3 quarantined pairs)
+        assert v.failed_pairs == 3  # the quarantined pairs ride in their own field
         assert v.auth_cause == "HTTP 401 invalid TOTP"
         assert "Groww API key + TOTP secret" in v.action
 
@@ -75,13 +76,28 @@ class TestClassifyPull:
         assert v.pending_windows == 4
         assert v.auth_cause is None  # never carried off the auth path
 
-    def test_transient_residual_on_failed_pairs_only(self) -> None:
-        # Covers the second operand of the `still_failed or failed_pairs` branch.
+    def test_quarantined_symbols_when_only_failed_pairs(self) -> None:
+        # No retryable windows — the only "failures" are quarantined symbols (not on Groww).
+        # A re-pull can NEVER recover them, so it's a COMPLETE pull (grey), NOT "re-pull"
+        # (DEC-EMPTY-RESOLVED-REPORTING-001 — the BAJAJ-AUTO / NAM-INDIA headline case).
         v = classify_pull(
             auth_aborted=False, still_failed_windows=0, failed_pairs=2, no_data=0, completed=5
         )
+        assert v.kind == "quarantined_symbols"
+        assert v.needs_operator is False  # grey, not amber — no re-pull alarm
+        assert v.pending_windows == 0  # zero WINDOWS to retry
+        assert v.failed_pairs == 2
+        assert "not on Groww" in v.action and "No re-pull needed" in v.action
+
+    def test_transient_residual_outranks_quarantine_when_both(self) -> None:
+        # Both retryable windows AND quarantined pairs → the re-pull verdict wins (there IS
+        # retryable work); the quarantined pairs ride along in the failed_pairs field.
+        v = classify_pull(
+            auth_aborted=False, still_failed_windows=4, failed_pairs=2, no_data=0, completed=5
+        )
         assert v.kind == "transient_residual"
-        assert v.pending_windows == 2
+        assert v.pending_windows == 4
+        assert v.failed_pairs == 2
 
     def test_known_gap_only_when_nothing_completed_but_some_empty(self) -> None:
         v = classify_pull(

@@ -530,7 +530,16 @@ class TestProgressCounts:
 
     def test_empty_ledger_is_all_zero(self) -> None:
         p = WindowLedger().progress_counts()
-        assert p == LedgerProgress(total=0, settled=0, failed=0, bars=0, current="")
+        assert p == LedgerProgress(
+            total=0,
+            settled=0,
+            resolved=0,
+            no_data=0,
+            planned=0,
+            failed=0,
+            bars=0,
+            current="",
+        )
 
     def test_counts_settled_failed_bars_and_total(self) -> None:
         ledger = WindowLedger()
@@ -538,13 +547,19 @@ class TestProgressCounts:
         b = _k("BANKNIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29))
         c = _k("FINNIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29))
         d = _k("MIDCAP50", "1day", date(2020, 1, 1), date(2020, 6, 29))
-        ledger.plan(d, now=_NOW)  # PLANNED → pending (not settled, not failed)
+        e = _k("SENSEX", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.plan(d, now=_NOW)  # PLANNED → planned (re-pull WILL try it)
         ledger.record(a, raw_bars=120, error_type=None, bars_appended=120, now=_NOW)  # SUCCESS
         ledger.settle_known_gap(b, now=_NOW)  # SKIPPED → settled
         ledger.record(c, raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=_NOW)
+        ledger.record(e, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY (no data)
         p = ledger.progress_counts()
-        assert p.total == 4
-        assert p.settled == 2  # SUCCESS + SKIPPED (matches SETTLED_STATUSES)
+        assert p.total == 5
+        assert p.settled == 2  # SUCCESS + SKIPPED (the SKIP authority — SETTLED_STATUSES)
+        # RESOLVED is WIDER than settled — it includes the EMPTY (no-data, not "pending"):
+        assert p.resolved == 3  # SUCCESS + SKIPPED + EMPTY (DEC-EMPTY-RESOLVED-REPORTING-001)
+        assert p.no_data == 1  # the genuine EMPTY window — its own honest bucket
+        assert p.planned == 1  # the PLANNED window a re-pull WILL attempt
         assert p.failed == 1  # the FAILED (transient) window
         assert p.bars == 120
 

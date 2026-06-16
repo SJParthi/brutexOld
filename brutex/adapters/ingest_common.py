@@ -685,6 +685,7 @@ PullVerdictKind = Literal[
     "auth_expired",
     "quota_exhausted",
     "transient_residual",
+    "quarantined_symbols",
     "known_gap_only",
     "clean",
 ]
@@ -696,6 +697,7 @@ _HEADLINE: Final[dict[str, str]] = {
     "auth_expired": "🔑 Groww auth failed mid-pull — the pull aborted.",
     "quota_exhausted": "📊 Daily Groww quota reached — auto-resume paused for today.",
     "transient_residual": "⏳ Some windows are still pending after retries.",
+    "quarantined_symbols": "✅ Pull complete — some symbols were quarantined (not on Groww).",
     "known_gap_only": "ℹ️ No new bars — these symbols have no intraday on Groww.",
     "clean": "✅ Pull complete.",
 }
@@ -713,6 +715,11 @@ _ACTION: Final[dict[str, str]] = {
         "Re-pull to finish — already-pulled windows are skipped and only the "
         "still-pending windows are re-fetched (auto-retry mops up transient 429s)."
     ),
+    "quarantined_symbols": (
+        "No re-pull needed — these symbols are not on Groww (e.g. a renamed/delisted "
+        "ticker or a non-Groww constituent), so a retry can NEVER land a bar. Verify the "
+        "symbol list; every resolvable symbol completed."
+    ),
     "known_gap_only": (
         "No action needed — these are reference-only symbols Groww does not serve "
         "intraday (e.g. broad-market indices); they are not brute-force inputs."
@@ -726,9 +733,10 @@ class PullVerdict:
     """A finished pull's single, prioritised, actionable verdict.
 
     Immutable + JSON-serialisable. ``kind`` is the worst (highest-priority)
-    condition observed; ``pending_windows`` is the count of work that still has
-    to succeed (the still-failed windows + the quarantined pairs) so the
-    operator knows the pull is NOT done. ``auth_cause`` carries the originating
+    condition observed; ``pending_windows`` is the count of WINDOWS a re-pull will
+    retry (the still-failed windows ONLY — NOT the quarantined pairs, which a
+    re-pull can never recover; those are the separate ``failed_pairs`` field, per
+    DEC-EMPTY-RESOLVED-REPORTING-001). ``auth_cause`` carries the originating
     vendor error string ONLY for ``auth_expired`` (else ``None``).
     """
 
@@ -789,13 +797,17 @@ def classify_pull(
        IST-midnight reset (DEC-AUTO-RESUME-QUOTA-001). Ranked just under a dead
        token because, like it, NO amount of immediate retrying can land a bar
        today — only the reset can.
-    3. **transient_residual** — windows are still failing (``still_failed_windows``)
-       or pairs were quarantined (``failed_pairs``) but the token is alive: a
-       re-pull / the auto-retry layer will finish them.
-    4. **known_gap_only** — nothing completed and nothing failed, but the vendor
+    3. **transient_residual** — retryable WINDOWS are still failing
+       (``still_failed_windows`` > 0) but the token is alive: a re-pull / the
+       auto-retry layer will finish them. The loud "re-pull to finish" verdict.
+    4. **quarantined_symbols** — NO retryable windows remain; the only "failures"
+       are quarantined symbols (``failed_pairs`` > 0, e.g. a ticker not on Groww):
+       a re-pull can NEVER recover them, so this is a COMPLETE pull with a note,
+       NOT "re-pull to finish" (``needs_operator`` is False — grey, not amber).
+    5. **known_gap_only** — nothing completed and nothing failed, but the vendor
        returned empty for some symbols (``no_data``): the vendor genuinely has no
        intraday for them (reference-only). Expected, not an error.
-    5. **clean** — everything that could complete did.
+    6. **clean** — everything that could complete did.
 
     Pure + deterministic (no I/O / clock). ``auth_cause`` is preserved ONLY on
     the ``auth_expired`` verdict.
@@ -808,9 +820,18 @@ def classify_pull(
         return _make_verdict(
             "quota_exhausted", still_failed_windows, failed_pairs, no_data, completed, None
         )
-    if still_failed_windows > 0 or failed_pairs > 0:
+    if still_failed_windows > 0:
+        # Genuine retryable WINDOWS remain (transient 429/timeout): a re-pull / the
+        # auto-retry layer will land them. Quarantined pairs (if any) ride along as a note.
         return _make_verdict(
             "transient_residual", still_failed_windows, failed_pairs, no_data, completed, None
+        )
+    if failed_pairs > 0:
+        # No retryable windows — the ONLY "failures" are quarantined symbols (not on Groww,
+        # e.g. BAJAJ-AUTO / NAM-INDIA). A re-pull can NEVER recover them, so this is a
+        # COMPLETE pull with a note, NOT "re-pull to finish" (DEC-EMPTY-RESOLVED-REPORTING-001).
+        return _make_verdict(
+            "quarantined_symbols", still_failed_windows, failed_pairs, no_data, completed, None
         )
     if completed == 0 and no_data > 0:
         return _make_verdict(
@@ -832,7 +853,7 @@ def _make_verdict(
         kind=kind,
         headline=_HEADLINE[kind],
         action=_ACTION[kind],
-        pending_windows=still_failed_windows + failed_pairs,
+        pending_windows=still_failed_windows,  # WINDOWS a re-pull retries — NOT pairs
         failed_pairs=failed_pairs,
         no_data=no_data,
         completed=completed,

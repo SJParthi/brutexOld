@@ -42,6 +42,7 @@ _KIND_STYLE: Final[dict[str, tuple[str, str]]] = {
     "auth_expired": ("verdict--red", "red"),
     "quota_exhausted": ("verdict--amber", "amber"),
     "transient_residual": ("verdict--amber", "amber"),
+    "quarantined_symbols": ("verdict--grey", "grey"),
     "known_gap_only": ("verdict--grey", "grey"),
     "clean": ("verdict--green", "green"),
 }

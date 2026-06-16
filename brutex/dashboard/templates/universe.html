@@ -1446,12 +1446,13 @@ BULK_BTNS.forEach(btn => {
 const PROGRESS_MS = 600;
 let pollTimer = null;
 
-/* DEC-PROGRESS-WINDOW-UNITS-001: window-scale companion to the coarse unit
-   counter — reads the SAME /api/v1/coverage/windows counts the fetch-windows
-   page renders (mtime-cached server-side; cheap at a 5 s cadence). settled =
-   SUCCESS+SKIPPED (the ledger's own skip authority), pending = PLANNED+EMPTY
-   (work the next pass re-fetches), failed = FAILED. Bucket-global, not
-   per-pull — the honest scope of the counts API. */
+/* DEC-PROGRESS-WINDOW-UNITS-001 + DEC-EMPTY-RESOLVED-REPORTING-001: window-scale
+   companion to the coarse unit counter — reads the SAME /api/v1/coverage/windows
+   counts the fetch-windows page renders (mtime-cached server-side; cheap at a 5 s
+   cadence). resolved = SUCCESS+SKIPPED+EMPTY (a genuine no-data window IS resolved,
+   never "pending" — a wholly-PAST empty window can never gain data); no-data = EMPTY
+   surfaced on its own; pending = PLANNED only (work a re-pull WILL fetch); failed =
+   FAILED. Bucket-global, not per-pull — the honest scope of the counts API. */
 let windowsBucket = null;
 async function refreshWindowsLine() {
   if (!windowsBucket) return;
@@ -1459,13 +1460,15 @@ async function refreshWindowsLine() {
     const r = await fetch('/api/v1/coverage/windows');
     if (!r.ok) return;
     const c = ((await r.json()).counts || {})[windowsBucket] || {};
-    const settled = (c.SUCCESS || 0) + (c.SKIPPED || 0);
-    const pending = (c.PLANNED || 0) + (c.EMPTY || 0);
+    const noData = c.EMPTY || 0;
+    const resolved = (c.SUCCESS || 0) + (c.SKIPPED || 0) + noData;
+    const pending = c.PLANNED || 0;
     const failed = c.FAILED || 0;
-    const total = settled + pending + failed;
+    const total = resolved + pending + failed;
     document.getElementById('windowsline').textContent =
       'fetch windows (' + windowsBucket + ', all recorded): '
-      + settled.toLocaleString('en-IN') + ' settled · '
+      + resolved.toLocaleString('en-IN') + ' resolved · '
+      + noData.toLocaleString('en-IN') + ' no-data · '
       + pending.toLocaleString('en-IN') + ' pending · '
       + failed.toLocaleString('en-IN') + ' failed · '
       + total.toLocaleString('en-IN') + ' total';
