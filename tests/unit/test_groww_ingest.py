@@ -134,6 +134,27 @@ class _SeqAdapter:
         return list(self._bars)
 
 
+class _BarSeqAdapter:
+    """Fake adapter returning a SCRIPTED sequence of bar-lists per call (clamped to last).
+
+    Drives the in-pull EMPTY-retry (DEC-EMPTY-INPULL-RETRY-001): e.g. ``[[], [], [bar]]``
+    is a transient/hallucinated empty that recovers on the 3rd attempt; ``[[]]`` is a
+    genuinely-empty window re-tried up to the budget.
+    """
+
+    def __init__(self, responses: Sequence[Sequence[CandleBar]]) -> None:
+        self._responses = [list(r) for r in responses]
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        del symbol, exchange, interval, start, end
+        bars = self._responses[min(self.calls, len(self._responses) - 1)]
+        self.calls += 1
+        return list(bars)
+
+
 def _sync_run_parallel[ItemT, ResultT](
     fn: Callable[[ItemT], ResultT],
     items: Sequence[ItemT],
@@ -356,6 +377,65 @@ class TestIngestSpotLedger:
             ledger=ledger,
         )
         assert ledger.records()[0].status == EMPTY
+
+    def test_empty_then_data_recovers_to_success(self) -> None:
+        # DEC-EMPTY-INPULL-RETRY-001: a 0-bar response that is a TRANSIENT vendor glitch
+        # (data DOES exist) is recovered — the in-pull retry re-fetches and the attempt
+        # that returns bars WINS, so the window is recorded SUCCESS, not a false EMPTY.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[], [], [_bar()]])  # empty, empty, then DATA on attempt 3
+        report = ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),  # 1 window
+            ledger=ledger,
+            empty_retry_attempts=3,
+        )
+        assert adapter.calls == 3  # re-fetched until data appeared
+        assert report.bars_appended == 1
+        assert ledger.records()[0].status == SUCCESS  # recovered, NOT a false no-data
+
+    def test_genuine_empty_exhausts_attempts_then_records_empty(self) -> None:
+        # A window that is empty on EVERY attempt is recorded EMPTY with confidence — and
+        # the retry is BOUNDED (exactly empty_retry_attempts fetches, never infinite).
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[]])  # always empty
+        backoffs: list[int] = []
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            empty_retry_attempts=3,
+            empty_retry_backoff=backoffs.append,
+        )
+        assert adapter.calls == 3  # bounded — exactly the budget, no infinite loop
+        assert backoffs == [0, 1]  # paused between attempts 1→2 and 2→3, NOT after the last
+        assert ledger.records()[0].status == EMPTY
+
+    def test_data_on_first_attempt_does_not_retry(self) -> None:
+        # The happy path is unchanged: bars on the first fetch → one call, no retry.
+        adapter = _Adapter(bars=[_bar()])
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            empty_retry_attempts=3,
+        )
+        assert adapter.calls == 1  # broke on the first attempt — no wasted re-fetch
 
     def test_ledger_records_failed_on_rate_limit(self) -> None:
         from brutex.data.window_ledger import FAILED, WindowLedger

@@ -79,6 +79,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.models import CandleBar
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
@@ -137,6 +138,33 @@ def _default_retry_backoff(pass_index: int) -> None:
     network-recovery-scale gap between passes while tests pass a no-op recorder.
     """
     _time_sleep(min(_DEFAULT_RETRY_BACKOFF_S * (2.0**pass_index), _MAX_RETRY_BACKOFF_S))
+
+
+#: In-pull EMPTY-response retry budget (DEC-EMPTY-INPULL-RETRY-001). A clean 0-bar
+#: response on a Jan-2020+ historical range is AMBIGUOUS on a single call — it is EITHER
+#: a genuinely-empty window (pre-listing / holiday / no data) OR a transient vendor
+#: glitch ("hallucinated" empty under load) for a range that DOES have data. We cannot
+#: tell which from one fetch, so re-fetch the SAME window up to this many TOTAL attempts;
+#: the first attempt that returns bars WINS (the glitch is recovered — "pull until a
+#: successful response"), and only an all-empty run concludes genuine no-data WITH
+#: CONFIDENCE. ``3`` = the operator's "3 tries to be sure"; ``1`` reproduces the prior
+#: accept-the-first-empty behaviour. Bounded, so a truly-empty window can never loop
+#: forever. ORTHOGONAL to the transient-error retry (that handles 429/timeout) and to the
+#: ledger's across-pull EMPTY→SKIPPED threshold (that bounds re-fetches across pulls).
+_DEFAULT_EMPTY_RETRY_ATTEMPTS: int = 3
+
+
+def _noop_empty_backoff(attempt: int) -> None:
+    """Default pause between EMPTY retries: a **no-op**.
+
+    The shared rate bucket already spaces every physical call (~125 ms at the 8 r/s
+    ceiling), so the empty re-fetches are naturally spread without an extra sleep — and
+    on a bulk historical pull with thousands of genuinely-empty windows an added per-
+    window sleep would be a large, pointless wall-time cost. Kept as an INJECTABLE hook
+    (a recorder in tests, or a real pause at a live site) without making the default
+    behaviour sleep. O(1).
+    """
+    del attempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +251,8 @@ def ingest_spot(
     run_parallel: RunParallel | None = None,
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
+    empty_retry_attempts: int = _DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    empty_retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     on_window: WindowTick | None = None,
 ) -> IngestReport:
@@ -304,6 +334,7 @@ def ingest_spot(
     )
     pull_id = current_pull_id()
     series_fields = {"symbol": instrument.symbol_name, "interval": interval}
+    empty_backoff = empty_retry_backoff if empty_retry_backoff is not None else _noop_empty_backoff
 
     def _fetch_window(window: tuple[date, date]) -> _WindowOutcome:
         """Pull ONE window — runs inside a worker thread under the fan-out.
@@ -327,6 +358,8 @@ def ingest_spot(
                 on_success=on_success,
                 pull_id=pull_id,
                 series_fields=series_fields,
+                empty_retry_attempts=empty_retry_attempts,
+                empty_retry_backoff=empty_backoff,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -453,6 +486,8 @@ def _ingest_one_window(
     on_success: Callable[[], None] | None,
     pull_id: str,
     series_fields: dict[str, str],
+    empty_retry_attempts: int = _DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -460,6 +495,13 @@ def _ingest_one_window(
     sink) are thread-safe, so N windows of one series run it concurrently without
     a data race. A retryable Groww error is counted; a terminal :class:`GrowwError`
     (auth included) propagates to the outer quarantine.
+
+    A clean **0-bar (EMPTY) response is re-fetched** up to *empty_retry_attempts*
+    times (DEC-EMPTY-INPULL-RETRY-001): a Jan-2020+ historical range can return an
+    empty ``200`` EITHER because the window is genuinely empty OR because of a
+    transient vendor glitch on a range that DOES have data — the first attempt that
+    returns bars wins, and only an all-empty run records genuine no-data WITH
+    confidence. Bounded, so a truly-empty window can never loop forever.
     """
     window_start, window_end = window
     key = WindowKey(
@@ -483,52 +525,78 @@ def _ingest_one_window(
             **series_fields,
         )
         return _WindowOutcome(skipped=1)
-    if pace is not None:
-        pace()
-    try:
-        raw_bars = adapter.fetch_ohlcv(
-            symbol=instrument.symbol_name,
-            exchange=instrument.exch_id,
-            interval=interval,
-            start=window_start,
-            end=window_end,
-        )
-    except GrowwError as exc:
-        if is_retryable(exc):
-            # Feed the swallowed transient to the controller so it adapts: a
-            # rate-limit steps the rate down, a timeout drives the gentle timeout
-            # ladder. A one-off blip is ignored by the controller's threshold.
-            rate_limited = is_rate_limit(exc)
-            if rate_limited:
-                if on_rate_limit is not None:
-                    on_rate_limit()
-            elif on_timeout is not None:
-                on_timeout()
-            retry_window = window
-            _LOG.warning(
-                "ingest.window.transient",
+    # In-pull EMPTY retry (DEC-EMPTY-INPULL-RETRY-001): a clean 0-bar response is
+    # AMBIGUOUS on a single call — genuine no-data vs a transient vendor glitch on a range
+    # that DOES have data — so re-fetch the SAME window up to empty_retry_attempts times.
+    # The first attempt that returns bars WINS (the glitch is recovered — "pull until a
+    # successful response"); only an all-empty run falls through to record genuine no-data
+    # WITH confidence. A retryable error short-circuits to the transient path (its own
+    # multi-pass retry); a terminal one propagates. Bounded → a truly-empty window can
+    # never loop forever.
+    raw_bars: list[CandleBar] = []
+    for empty_attempt in range(empty_retry_attempts):
+        if pace is not None:
+            pace()
+        try:
+            raw_bars = adapter.fetch_ohlcv(
+                symbol=instrument.symbol_name,
+                exchange=instrument.exch_id,
+                interval=interval,
+                start=window_start,
+                end=window_end,
+            )
+        except GrowwError as exc:
+            if is_retryable(exc):
+                # Feed the swallowed transient to the controller so it adapts: a
+                # rate-limit steps the rate down, a timeout drives the gentle timeout
+                # ladder. A one-off blip is ignored by the controller's threshold.
+                rate_limited = is_rate_limit(exc)
+                if rate_limited:
+                    if on_rate_limit is not None:
+                        on_rate_limit()
+                elif on_timeout is not None:
+                    on_timeout()
+                retry_window = window
+                _LOG.warning(
+                    "ingest.window.transient",
+                    pull_id=pull_id,
+                    window_start=window_start.isoformat(),
+                    window_end=window_end.isoformat(),
+                    error_type=type(exc).__name__,
+                    in_run_retry=True,
+                    **series_fields,
+                )
+                # Record the FAILED outcome in the unified ledger so the operator SEES
+                # which windows errored + how often.
+                if ledger is not None:
+                    ledger.record(
+                        key,
+                        raw_bars=0,
+                        error_type=type(exc).__name__,
+                        bars_appended=0,
+                        now=datetime.now(UTC),
+                    )
+                return _WindowOutcome(
+                    transient=1, window=retry_window, error_type=type(exc).__name__
+                )
+            # A TERMINAL (non-retryable) Groww error — including auth, which has no
+            # fail-fast latch here (the documented divergence): it simply propagates to
+            # the outer run_groww_spot_ingest quarantine, never swallowed.
+            raise
+        if raw_bars:
+            break  # bars on this attempt — the (possibly glitched) empty is recovered
+        if empty_attempt + 1 < empty_retry_attempts:
+            # Still empty + a retry remains: pause briefly and re-fetch (the glitch may clear).
+            _LOG.debug(
+                "ingest.window.empty_retry",
                 pull_id=pull_id,
                 window_start=window_start.isoformat(),
                 window_end=window_end.isoformat(),
-                error_type=type(exc).__name__,
-                in_run_retry=True,
+                attempt=empty_attempt + 1,
+                of=empty_retry_attempts,
                 **series_fields,
             )
-            # Record the FAILED outcome in the unified ledger so the operator SEES
-            # which windows errored + how often.
-            if ledger is not None:
-                ledger.record(
-                    key,
-                    raw_bars=0,
-                    error_type=type(exc).__name__,
-                    bars_appended=0,
-                    now=datetime.now(UTC),
-                )
-            return _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__)
-        # A TERMINAL (non-retryable) Groww error — including auth, which has no
-        # fail-fast latch here (the documented divergence): it simply propagates to
-        # the outer run_groww_spot_ingest quarantine, never swallowed.
-        raise
+            empty_retry_backoff(empty_attempt)
     # Drop pre-open / post-close bars before they enter the lake — intraday only
     # (a daily bar has no intraday time). An exempt symbol (e.g. a ~21h instrument)
     # keeps its full-day series verbatim.
