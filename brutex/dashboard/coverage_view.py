@@ -250,8 +250,12 @@ def _classify_completeness(
     * a fetch interval with no ledger rows is ``no_ledger_record`` (e.g. a
       lake copied in externally) — an honest unknown, never implied-settled;
     * otherwise the ledger counts decide: any FAILED → ``failed``; else any
-      outstanding (PLANNED + below-threshold EMPTY) → ``pending``; else
-      ``settled``.
+      genuinely-unfetched ``PLANNED`` → ``pending``; else ``settled``. Per
+      DEC-EMPTY-RESOLVED-REPORTING-001 a no-data ``EMPTY`` window now counts
+      ``resolved`` (the ``settled`` slot here = the rollup's RESOLVED bucket =
+      SUCCESS+SKIPPED+EMPTY), NOT pending — so an all-empty pre-listing dataset is
+      ``settled``, never a false "pending / re-pull" chip (the skip authority is
+      unchanged; an EMPTY window is still re-fetched next pull).
     """
     cell = (str(row["symbol"]), str(row["interval"]))
     if cell[1] not in FETCH_INTERVALS:
