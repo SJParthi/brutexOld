@@ -21,6 +21,7 @@ from brutex.dashboard.live_lake_view import (
     MOVERS_EMPTY_NOTE,
     SCHEMA_ONLY_NOTE,
     TICKS_EMPTY_NOTE,
+    TICKS_PARTIAL_NOTE,
     _age_seconds,
     _jsonify,
     _jsonify_for_column,
@@ -420,6 +421,42 @@ def test_ticks_flowing_present_but_empty_partition_is_honest(tmp_path) -> None:
     assert payload["flowing"] is False and payload["instruments"] == []
     assert payload["total_ticks"] == 0 and payload["fresh_instruments"] == 0
     assert payload["session_date"] == "2026-06-15" and payload["note"] == TICKS_EMPTY_NOTE
+
+
+def test_ticks_flowing_partial_partition_degrades_not_crashes(tmp_path) -> None:
+    """A newest partition that EXISTS but is not a complete Parquet → honest empty, never a 500.
+
+    The operator-observed ``/live`` crash: the live capture had created today's
+    ``dt=<date>.parquet`` but not yet flushed a valid Parquet footer, so DuckDB raised
+    ``InvalidInputException: ... too small to be a Parquet file`` and the route 500'd.
+    ``ticks_flowing`` must degrade to the honest empty-state + ``TICKS_PARTIAL_NOTE`` (the
+    session date still surfaced from the partition name), NEVER propagate the read error.
+    """
+    ticks = tmp_path / "live" / "ticks"
+    ticks.mkdir(parents=True)
+    # A valid-ISO partition NAME (so it IS chosen as newest) but junk/too-small CONTENT
+    # (a partial write) — the exact reproduction of the DuckDB "too small to be a Parquet
+    # file" read failure.
+    (ticks / "dt=2026-06-16.parquet").write_bytes(b"not-a-parquet-yet")
+    payload = ticks_flowing(tmp_path, now=datetime(2026, 6, 16, 11, 0, 0, tzinfo=UTC))
+    assert payload == {
+        "flowing": False,
+        "total_ticks": 0,
+        "fresh_instruments": 0,
+        "instruments": [],
+        "session_date": "2026-06-16",
+        "note": TICKS_PARTIAL_NOTE,
+    }
+
+
+def test_ticks_flowing_zero_byte_partition_degrades(tmp_path) -> None:
+    """A 0-byte newest partition (the file just created, nothing written) also degrades."""
+    ticks = tmp_path / "live" / "ticks"
+    ticks.mkdir(parents=True)
+    (ticks / "dt=2026-06-16.parquet").write_bytes(b"")
+    payload = ticks_flowing(tmp_path, now=datetime(2026, 6, 16, 11, 0, 0, tzinfo=UTC))
+    assert payload["flowing"] is False and payload["instruments"] == []
+    assert payload["note"] == TICKS_PARTIAL_NOTE and payload["session_date"] == "2026-06-16"
 
 
 def test_ticks_flowing_reads_only_latest_partition(tmp_path) -> None:
