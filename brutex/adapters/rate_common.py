@@ -126,8 +126,20 @@ STORM_HITS: int = 30
 #: :meth:`on_success` once the storm clears, exactly like the 429 ladder.
 STEP_DOWN_TIMEOUT_HITS: int = 5
 
-#: "Recovered" = this many seconds of zero hits since the last step → step up 1 r/s.
-STEP_UP_WINDOW: float = 300.0
+#: "Recovered" = this many seconds without step-down-level pressure since the last step
+#: → step UP 1 r/s (the INCREMENTAL half of the AIMD ladder). Set to ONE
+#: :data:`STEP_DOWN_WINDOW` (60 s) — symmetric with the rolling window the step-DOWN
+#: ladder watches: after a single clean 60 s window the controller probes up one rung,
+#: so it climbs the soft floor (3) back to the operator-DIRECTED 8 r/s ceiling
+#: (``GROWW_RATE_LIMIT_RPS_CEILING``) in ~5 clean windows (~5 min) instead of the prior
+#: 300 s/rung (~25 min — longer than a whole pull, so a stepped-down pull never reached
+#: the ceiling; the operator-observed "stuck at ~3 r/s with 2.4x headroom",
+#: DEC-GROWW-RATE-RECOVER-8-001). SAFETY is unchanged: the DECREMENTAL ladder still steps
+#: DOWN immediately on a 429 / timeout storm, so a too-eager probe self-corrects (AIMD) —
+#: faster recovery can only REACH the sustainable rate sooner, never exceed it (the rate.*
+#: + the new rate.snapshot telemetry make the real trajectory visible, DEC-GROWW-RATE-
+#: SNAPSHOT-LOG-001). The soft/storm floors + every step-DOWN trigger are untouched.
+STEP_UP_WINDOW: float = STEP_DOWN_WINDOW
 
 #: Token-bucket burst allowance. EASE-IN (DEC-DHAN-EASE-IN-001): **1**, not 5, so
 #: a pull does NOT fire a multi-request spike at t=0. With burst 5 the bucket
@@ -148,6 +160,16 @@ BURST: int = 1
 #: the cap the governor fails OPEN (lets the call through) exactly as the bucket's
 #: acquire cap forces a token, keeping behaviour consistent (CLAUDE.md §11 COMMON).
 _GOVERNOR_LOOP_CAP: int = 64
+
+#: Minimum seconds between periodic ``rate.snapshot`` telemetry logs during active
+#: pacing (DEC-GROWW-RATE-SNAPSHOT-LOG-001). The existing rate.* events fire ONLY on a
+#: rung CHANGE (rate.429 / rate.stepdown / rate.stepup), so a pull HOLDING at a
+#: stepped-down rate (e.g. the soft floor) logs NOTHING and /logs cannot show WHY the
+#: achieved r/s sits below the ceiling. This periodic snapshot fills that visibility gap
+#: — 15 s is frequent enough to see the rate's trajectory across a multi-minute pull yet
+#: coarse enough (~one line / 15 s) to never flood /logs. Observability only; the
+#: throttle is O(1) and changes NO pacing decision.
+SNAPSHOT_LOG_INTERVAL_S: float = 15.0
 
 
 class RateController:
@@ -244,6 +266,11 @@ class RateController:
         #: floor at 1 (DEC-DHAN-RATE-STORM-FLOOR-001), so they cannot fight below it.
         self._timeouts: deque[float] = deque()
         self._last_step: float = clock()
+        #: Last ``rate.snapshot`` telemetry emit instant (DEC-GROWW-RATE-SNAPSHOT-LOG-001)
+        #: — the throttle baseline so the periodic log fires at most once per
+        #: :data:`SNAPSHOT_LOG_INTERVAL_S` of active pacing. Stamped ``now`` at
+        #: construction so the FIRST pace does not immediately log (warm-up grace).
+        self._last_snapshot_log: float = clock()
         self._bucket: AdaptiveTokenBucket = self._make_bucket()
         #: Guards the step-ladder state under concurrent worker access
         #: (DEC-DHAN-PARALLEL-INGEST-001). Held only for O(1) state reads/writes,
@@ -352,6 +379,31 @@ class RateController:
         if self._ceiling_per_min is not None:
             with self._lock:
                 self._issues.append(self._clock())
+        # ── Periodic telemetry: a throttled rate.snapshot so a HOLDING rate is visible
+        #    in /logs even with no rung change (DEC-GROWW-RATE-SNAPSHOT-LOG-001). ──
+        self._maybe_log_snapshot()
+
+    def _maybe_log_snapshot(self) -> None:
+        """Emit a THROTTLED ``rate.snapshot`` (≤ once per :data:`SNAPSHOT_LOG_INTERVAL_S`).
+
+        DEC-GROWW-RATE-SNAPSHOT-LOG-001 — the gap the existing rate.* events leave: they
+        fire ONLY on a rung CHANGE (rate.429 / rate.stepdown / rate.stepup), so a pull
+        HOLDING at a stepped-down rate (the operator's "stuck at ~3 r/s with 2.4× ceiling
+        headroom") logs nothing, leaving /logs unable to show WHY. This periodic line
+        carries the SAME fields :meth:`snapshot` exposes to the dashboard rate panel
+        (``current_rps`` + the recent 429 / timeout / per-minute gauges), so the operator
+        sees the live rate trajectory + the pressure holding it down. The throttle CLAIM
+        is O(1) under the lock; the (rare) :meth:`snapshot` read + log runs OUTSIDE the
+        lock (no nesting). Called from :meth:`pace`, so it ticks ONLY during active
+        pacing — no background thread, and it stops the instant the pull stops.
+        Observability only — it changes no pacing decision.
+        """
+        now = self._clock()
+        with self._lock:
+            if now - self._last_snapshot_log < SNAPSHOT_LOG_INTERVAL_S:
+                return
+            self._last_snapshot_log = now
+        _LOG.info("rate.snapshot", **self.snapshot())
 
     def on_rate_limit(self) -> None:
         """Record a rate-limit hit; step **down** 1 r/s on sustained pressure — O(1).
@@ -554,6 +606,7 @@ __all__ = [
     "FLOOR_RPS",
     "PER_MIN_WINDOW",
     "RATE_LIMIT_STORM_FLOOR_RPS",
+    "SNAPSHOT_LOG_INTERVAL_S",
     "STEP_DOWN_HITS",
     "STEP_DOWN_TIMEOUT_HITS",
     "STEP_DOWN_WINDOW",
