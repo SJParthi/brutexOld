@@ -32,8 +32,16 @@ from brutex.adapters.groww.run_ingest import (
     run_groww_spot_ingest_with_retry,
 )
 from brutex.data.candle_fields import CandleParseError
-from brutex.models import Exchange, Instrument, InstrumentType, OutOfScopeError, Segment
+from brutex.models import (
+    BruteXError,
+    Exchange,
+    Instrument,
+    InstrumentType,
+    OutOfScopeError,
+    Segment,
+)
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 from structlog.testing import capture_logs
 
 _START = date(2021, 1, 1)
@@ -707,7 +715,39 @@ def test_out_of_scope_error_quarantines_pair_not_crashes_pull(
     assert ("NIFTY", "1day") in report.pairs  # the other 778 still pull
     assert report.bars_appended == 5
     (quarantine,) = _events(logs, "ingest.quarantine")
-    assert "BAJAJ-AUTO" in quarantine["error"]
+    assert "BAJAJ-AUTO" in str(quarantine["error"])
+
+
+@pytest.mark.parametrize(
+    "quota_exc",
+    [
+        DailyQuotaExceeded("daily quota of 100000 calls spent"),
+        QuotaInvariantError("quota ledger invariant broke"),
+    ],
+)
+def test_global_stop_quota_error_propagates_not_quarantined(
+    monkeypatch: pytest.MonkeyPatch, quota_exc: BruteXError
+) -> None:
+    # DEC-GROWW-QUARANTINE-BRUTEX-001 carve-out: a quota signal is a GLOBAL stop, NOT one
+    # symbol's problem — every remaining symbol would fail the same way — so it must
+    # PROPAGATE out of run_groww_spot_ingest to the controller's quota handling
+    # (DEC-SPOT-QUOTA-MIDROUND-001 → the loud quota_exhausted verdict), NEVER be quarantined
+    # per-symbol like an OutOfScopeError. Without the carve-out the broad BruteXError
+    # quarantine swallowed DailyQuotaExceeded and the quota verdict never fired — the exact
+    # regression (TestQuotaDeathMidRound) this test locks shut.
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        raise quota_exc
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with pytest.raises(type(quota_exc)):
+        run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BANKNIFTY", token=77)],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )
 
 
 def test_on_window_is_threaded_into_each_pair(monkeypatch: pytest.MonkeyPatch) -> None:

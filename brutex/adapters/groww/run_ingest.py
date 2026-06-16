@@ -56,7 +56,20 @@ from brutex.data.window_ledger import WindowLedger
 from brutex.models import BruteXError, Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 from brutex.orchestrator.universe_phases import RunParallel
+
+#: Domain errors that are a GLOBAL stop, NOT one symbol's problem — they must
+#: PROPAGATE past the per-symbol quarantine so the whole pull aborts, never be
+#: isolated as a single pair's failure. A quota signal means the day's budget is
+#: spent (``DailyQuotaExceeded``) or a quota-ledger invariant broke
+#: (``QuotaInvariantError``), so every REMAINING symbol would fail identically;
+#: ``DailyQuotaExceeded`` in particular must reach the controller's
+#: ``except DailyQuotaExceeded`` to raise the loud ``quota_exhausted`` verdict +
+#: resume after the IST-midnight reset (DEC-SPOT-QUOTA-MIDROUND-001). This is the
+#: carve-out that keeps the broad ``BruteXError`` per-symbol quarantine
+#: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
+_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (DailyQuotaExceeded, QuotaInvariantError)
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
 #: + the terminal-failure cause at WARNING (``ingest.quarantine``), both carrying
@@ -348,6 +361,13 @@ def run_groww_spot_ingest(
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
             continue
+        if isinstance(exc, _GLOBAL_STOP_ERRORS):
+            # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT a
+            # per-symbol failure — re-raise so it propagates to the controller's
+            # quota handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being
+            # quarantined as one pair (the carve-out from the broad BruteXError
+            # quarantine — DEC-GROWW-QUARANTINE-BRUTEX-001).
+            raise exc
         if not isinstance(exc, BruteXError):
             # A genuine CODE bug (a Python builtin: ValueError / AttributeError /
             # KeyError / TypeError from a defect) escaped a worker — never swallow a real

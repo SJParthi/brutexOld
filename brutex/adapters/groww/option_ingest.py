@@ -82,6 +82,7 @@ from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
 #: Structured logger — per-contract DEBUG detail + the transient/quarantine
 #: WARNING, every event carrying the pull's ``pull_id`` (the per-underlying INFO
@@ -506,6 +507,14 @@ def run_groww_option_ingest(
                     now_ist=now_ist,
                     market=market,
                 )
+            except (DailyQuotaExceeded, QuotaInvariantError):
+                # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT one
+                # contract's problem — every remaining contract would fail identically, so
+                # it must PROPAGATE (the caller maps it to the quota_exhausted verdict,
+                # DEC-SPOT-QUOTA-MIDROUND-001), never be quarantined as a single pair. The
+                # carve-out from the broad per-contract BruteXError quarantine below
+                # (DEC-GROWW-QUARANTINE-BRUTEX-001).
+                raise
             except BruteXError as exc:
                 # Quarantine ANY brutex DOMAIN error per contract (a terminal GrowwError,
                 # a CandleParseError on un-storable option data, or an OutOfScopeError on an
