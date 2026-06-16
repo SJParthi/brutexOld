@@ -627,12 +627,15 @@ class TestPullAllSpot:
         )
         assert failed.total_failed == 2
         assert failed.dry_run is False
-        # Quarantined pairs (token alive) → transient-residual: re-pull/auto-retry
-        # finishes. needs_operator True drives the loud action-required WARNING.
-        assert failed.verdict.kind == "transient_residual"
-        assert failed.verdict.needs_operator is True
-        assert failed.verdict.pending_windows == 2
-        assert failed.to_dict()["verdict"]["needs_operator"] is True
+        # Quarantined pairs with NO retryable windows (token alive) → quarantined_symbols:
+        # a re-pull can NEVER recover a symbol that isn't on Groww, so it's a COMPLETE pull
+        # (grey, needs_operator False — no false "re-pull to finish"), DEC-EMPTY-RESOLVED-
+        # REPORTING-001. The 2 quarantined pairs ride in failed_pairs, NOT pending_windows.
+        assert failed.verdict.kind == "quarantined_symbols"
+        assert failed.verdict.needs_operator is False
+        assert failed.verdict.pending_windows == 0
+        assert failed.verdict.failed_pairs == 2
+        assert failed.to_dict()["verdict"]["needs_operator"] is False
 
     def test_empty_fetch_is_no_data_not_a_failure(self, tmp_path: Path) -> None:
         # Groww has NO DH-905 known-gap marker (Golden Rule #1: no invented twin):
@@ -1321,9 +1324,10 @@ class TestPullAllSpotLedgerSync:
         assert current.startswith("13 ")
 
     def test_final_sync_lands_even_on_partial_progress(self, tmp_path: Path) -> None:
-        # An EMPTY-returning adapter settles 0 windows as SUCCESS, but the final push must
-        # STILL fire (in the finally) so the operator sees how far the pull got — the
-        # honest partial-progress signal behind the crash screenshot's "5,819 settled".
+        # An EMPTY-returning adapter records every window as EMPTY (no data). The final push
+        # must STILL fire (in the finally) AND — per DEC-EMPTY-RESOLVED-REPORTING-001 — an
+        # EMPTY window is RESOLVED (no-data), NOT "pending": a wholly-empty historical pull
+        # reads 100% resolved, never the old misleading "0 settled / re-pull to finish".
         pushes: list[tuple[int, int, int, int, str]] = []
         pull_all_spot(
             [_index("13")],
@@ -1336,7 +1340,7 @@ class TestPullAllSpotLedgerSync:
         assert pushes
         completed, total, _bars, _failed, _current = pushes[-1]
         assert total > 0
-        assert completed == 0  # EMPTY windows are pending, not settled — honest
+        assert completed == total  # every EMPTY window is RESOLVED (no-data), not pending
 
     def test_dry_run_does_not_push(self, tmp_path: Path) -> None:
         # Dry-run has no ledger (begin_pull_ledger → None), so the live sync is a no-op.

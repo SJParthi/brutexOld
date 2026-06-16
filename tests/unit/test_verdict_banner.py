@@ -47,7 +47,7 @@ class TestBannerForEachKind:
         assert b.colour == "red"
         assert b.css_class == "verdict--red"
         assert b.show_retry_button is True  # needs_operator
-        assert b.pending_windows == 10  # 7 + 3 verbatim from the verdict
+        assert b.pending_windows == 7  # WINDOWS a re-pull retries (NOT the 3 quarantined pairs)
         assert "auth" in b.headline.lower()
         assert "TOTP secret" in b.action
 
@@ -69,6 +69,16 @@ class TestBannerForEachKind:
         assert b.show_retry_button is True  # needs_operator (resume after reset)
         assert b.pending_windows == 12
         assert "quota" in b.headline.lower()
+
+    def test_quarantined_symbols_is_grey_no_retry(self) -> None:
+        # DEC-EMPTY-RESOLVED-REPORTING-001: a pull whose only "failures" are quarantined
+        # symbols (not on Groww) is COMPLETE — grey, no re-pull alarm, no retry button.
+        b = banner_for(_verdict_dict(failed_pairs=2, completed=5))
+        assert b.kind == "quarantined_symbols"
+        assert b.colour == "grey"
+        assert b.css_class == "verdict--grey"
+        assert b.show_retry_button is False  # not needs_operator — re-pull can't help
+        assert b.pending_windows == 0  # zero WINDOWS to retry
 
     def test_known_gap_only_is_grey_no_retry(self) -> None:
         b = banner_for(_verdict_dict(no_data=5, completed=0))

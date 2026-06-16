@@ -33,7 +33,15 @@ _GOLDEN = {
         'A retry can NEVER succeed on bad credentials \\u2014 only valid credentials can.", '
         '"colour": "red", "css_class": "verdict--red", '
         '"headline": "\\ud83d\\udd11 Groww auth failed mid-pull \\u2014 the pull aborted.", '
-        '"kind": "auth_expired", "pending_windows": 10, "show_retry_button": true}'
+        '"kind": "auth_expired", "pending_windows": 7, "show_retry_button": true}'
+    ),
+    "quarantined_symbols": (
+        '{"action": "No re-pull needed \\u2014 these symbols are not on Groww (e.g. a '
+        "renamed/delisted ticker or a non-Groww constituent), so a retry can NEVER land a "
+        'bar. Verify the symbol list; every resolvable symbol completed.", '
+        '"colour": "grey", "css_class": "verdict--grey", '
+        '"headline": "\\u2705 Pull complete \\u2014 some symbols were quarantined (not on Groww).", '
+        '"kind": "quarantined_symbols", "pending_windows": 0, "show_retry_button": false}'
     ),
     "transient_residual": (
         '{"action": "Re-pull to finish \\u2014 already-pulled windows are skipped and only the '
@@ -81,6 +89,19 @@ def test_transient_residual_golden() -> None:
             completed=100,
         )
         == _GOLDEN["transient_residual"]
+    )
+
+
+def test_quarantined_symbols_golden() -> None:
+    assert (
+        _banner_json(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=2,
+            no_data=0,
+            completed=5,
+        )
+        == _GOLDEN["quarantined_symbols"]
     )
 
 

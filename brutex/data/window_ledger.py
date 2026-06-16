@@ -82,6 +82,18 @@ _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
 #: work the next pull re-fetches.
 SETTLED_STATUSES: frozenset[str] = _SKIPPABLE
 
+#: REPORTING projection (DEC-EMPTY-RESOLVED-REPORTING-001) — DELIBERATELY WIDER than
+#: the skip set :data:`SETTLED_STATUSES`. A window is RESOLVED for completion/progress
+#: reporting once it has a terminal answer: ``SUCCESS`` / ``SKIPPED`` OR a genuine
+#: ``EMPTY`` (no data this pull). EMPTY is added HERE but NOT to the skip set: a
+#: below-threshold EMPTY is still re-fetched next pull (no data is ever masked — the
+#: skip authority is unchanged), yet it must NOT count as "pending work" in the
+#: completion headline, because on a wholly-PAST date range an empty window can never
+#: gain data, so "re-pull to finish" would be dishonest. This asymmetry — the
+#: completion authority being wider than the skip authority — IS the fix; do not
+#: collapse the two sets.
+RESOLVED_STATUSES: frozenset[str] = frozenset({SUCCESS, SKIPPED, EMPTY})
+
 
 @dataclass(frozen=True, slots=True)
 class LedgerProgress:
@@ -104,9 +116,22 @@ class LedgerProgress:
 
     #: Distinct windows recorded so far (the bar's denominator — the full planned tiling).
     total: int
-    #: Windows in a SETTLED status (``SUCCESS`` / ``SKIPPED``) — the bar's numerator. Matches
-    #: the /coverage "settled" headline exactly (same :data:`SETTLED_STATUSES` authority).
+    #: Windows in a SETTLED+SKIP status (``SUCCESS`` / ``SKIPPED``) — the SKIP authority's
+    #: count (same :data:`SETTLED_STATUSES`). NOT the bar numerator anymore — that is
+    #: :attr:`resolved` (DEC-EMPTY-RESOLVED-REPORTING-001); kept for skip-authority readers.
     settled: int
+    #: Windows with a TERMINAL answer for REPORTING — ``SUCCESS`` / ``SKIPPED`` / ``EMPTY``
+    #: (:data:`RESOLVED_STATUSES`). The progress-bar NUMERATOR: a genuine EMPTY (no data
+    #: this pull) is resolved, not "pending" — so a complete historical pull reads ~100%
+    #: instead of crying "re-pull to finish" (DEC-EMPTY-RESOLVED-REPORTING-001).
+    resolved: int
+    #: Windows that returned a genuine ``EMPTY`` (no data) — surfaced as its OWN honest
+    #: bucket (a subset of :attr:`resolved`), never folded into "pending".
+    no_data: int
+    #: Windows still ``PLANNED`` (never fetched) — the genuinely-outstanding count a
+    #: re-pull WILL attempt. Together with :attr:`failed` this is the only "re-pull helps"
+    #: work; EMPTY is excluded.
+    planned: int
     #: Windows currently in the ``FAILED`` (transient) status — the live "failed" count.
     failed: int
     #: Sum of ``bars`` across every recorded window (the live lake-bar total for the pull's
@@ -443,14 +468,25 @@ class WindowLedger:
         with self._lock:
             records = list(self._by_window.values())
         total = len(records)
-        settled = failed = bars = 0
+        settled = resolved = no_data = planned = failed = bars = 0
         latest_attempt: str | None = None
         current = ""
         for record in records:
             bars += record.bars
+            # Independent folds (not an elif chain) — each bucket's status set is distinct,
+            # so every count is a clean True/False branch with no dead arc, and a future
+            # status can't be silently miscounted (DEC-EMPTY-RESOLVED-REPORTING-001). settled
+            # is the SKIP authority (SUCCESS/SKIPPED); resolved is the WIDER completion
+            # authority (+ EMPTY); no_data/planned/failed are their own honest buckets.
             if record.status in _SKIPPABLE:
                 settled += 1
-            elif record.status == FAILED:
+            if record.status in RESOLVED_STATUSES:
+                resolved += 1
+            if record.status == EMPTY:
+                no_data += 1  # a genuine no-data window — resolved, NOT pending
+            if record.status == PLANNED:
+                planned += 1
+            if record.status == FAILED:
                 failed += 1
             if record.last_attempt_at is not None and (
                 latest_attempt is None or record.last_attempt_at > latest_attempt
@@ -458,7 +494,14 @@ class WindowLedger:
                 latest_attempt = record.last_attempt_at
                 current = f"{record.security_id} {record.interval}"
         return LedgerProgress(
-            total=total, settled=settled, failed=failed, bars=bars, current=current
+            total=total,
+            settled=settled,
+            resolved=resolved,
+            no_data=no_data,
+            planned=planned,
+            failed=failed,
+            bars=bars,
+            current=current,
         )
 
     def records(self) -> list[WindowLedgerRecord]:

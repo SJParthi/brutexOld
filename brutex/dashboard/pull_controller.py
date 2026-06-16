@@ -935,8 +935,11 @@ def make_live_sync(
             last_sync[0] = now
             ledger_flush()
             progress = ledger.progress_counts()
+        # The bar numerator is RESOLVED (SUCCESS+SKIPPED+EMPTY), not just settled — a
+        # genuine no-data window is done, not "pending" (DEC-EMPTY-RESOLVED-REPORTING-001),
+        # so a complete historical pull reads ~100% instead of "stuck / re-pull".
         on_ledger_sync(
-            progress.settled, progress.total, progress.bars, progress.failed, progress.current
+            progress.resolved, progress.total, progress.bars, progress.failed, progress.current
         )
 
     return _sync
@@ -1290,7 +1293,7 @@ def pull_all_spot(
             # progress (the operator sees how far the pull got, e.g. "5,819/10,906").
             if on_ledger_sync is not None and ledger is not None:
                 final = ledger.progress_counts()
-                on_ledger_sync(final.settled, final.total, final.bars, final.failed, final.current)
+                on_ledger_sync(final.resolved, final.total, final.bars, final.failed, final.current)
         # Per-symbol rollup = the FIRST pass's report (the until-clean contract).
         # A quota death before ANY pass completed leaves no per-pair information —
         # the empty fallback rolls every symbol up as zeros (the quota verdict
