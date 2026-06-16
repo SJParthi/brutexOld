@@ -195,6 +195,8 @@ class GrowwClient:
             # in-flight, never as achieved throughput — that stays SUCCESSFUL calls).
             self.meter.start()
             started = self.clock()
+            elapsed_ms = 0.0
+            completed = False
             try:
                 # Bound EVERY physical call by the wall-clock deadline so a stalled
                 # connection can never freeze the pull (DEC-GROWW-PULL-CALL-DEADLINE-001);
@@ -205,9 +207,6 @@ class GrowwClient:
                     else run_with_deadline(fn, self.call_timeout_seconds)
                 )
             except Exception as exc:  # broad: any SDK error → neutral GrowwError
-                self.meter.stop(
-                    elapsed_ms=round((self.clock() - started) * 1000.0, 1), completed=False
-                )
                 err = from_groww_exception(exc)
                 if isinstance(err, GrowwRateLimitError):
                     self.on_rate_limit()  # decrement the shared bucket on EVERY 429
@@ -222,9 +221,7 @@ class GrowwClient:
                 raise err from exc
             else:
                 elapsed_ms = round((self.clock() - started) * 1000.0, 1)
-                # A clean call IS achieved throughput — record it (completed=True) so the
-                # meter's achieved-rate gauges count it (DEC-GROWW-RATE-ACHIEVED-METER-001).
-                self.meter.stop(elapsed_ms=elapsed_ms, completed=True)
+                completed = True  # a clean call IS achieved throughput (recorded below)
                 self.on_success()  # recover the rate up on a clean call
                 # Per-call latency observability (DEC-GROWW-CALL-LATENCY-LOG-001): the
                 # REAL response time of THIS Groww REST call, so the operator can SEE
@@ -236,6 +233,13 @@ class GrowwClient:
                     elapsed_ms=elapsed_ms,
                 )
                 return result
+            finally:
+                # ALWAYS release the in-flight slot (success, retry, terminal, OR a
+                # BaseException — KeyboardInterrupt / a futures cancellation — that
+                # `except Exception` would miss and leak the very gauge this DEC makes
+                # trustworthy, DEC-GROWW-RATE-ACHIEVED-METER-001); a clean call also
+                # records the completion (completed=True), a failed one does not.
+                self.meter.stop(elapsed_ms=elapsed_ms, completed=completed)
 
     def historical_candles(
         self,

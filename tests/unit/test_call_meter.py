@@ -11,6 +11,8 @@ emit_log=False). The meter is the honest achieved-rate instrument the dashboard 
 
 from __future__ import annotations
 
+import threading
+
 from brutex.adapters.call_meter import (
     ACHIEVED_WINDOW_S,
     LATENCY_SAMPLES,
@@ -163,3 +165,34 @@ def test_emit_log_false_never_logs() -> None:
     with capture_logs() as logs:
         _record(meter)
     assert not [e for e in logs if e["event"] == "rate.achieved"]
+
+
+def test_stop_without_start_floors_in_flight_at_zero() -> None:
+    # A stray stop (a double-stop / a defect) can never drive the concurrency gauge
+    # negative — it floors at 0 (DEC-GROWW-RATE-ACHIEVED-METER-001 hardening).
+    meter = CallMeter(clock=_Clock(), emit_log=False)
+    meter.stop(elapsed_ms=1.0, completed=False)
+    assert meter.snapshot()["in_flight"] == 0
+
+
+def test_in_flight_balances_under_concurrency() -> None:
+    # The meter is SHARED across the fetch pool — every start/stop must be lock-safe so
+    # ``in_flight`` returns to exactly 0 under interleaving (a lost ``+= 1``/``-= 1``
+    # update without the lock would leave it non-zero). This is the thread-safety proof
+    # the "thread-safe" headline claim needs.
+    meter = CallMeter(clock=_Clock(), emit_log=False)
+    workers, iterations = 8, 250
+
+    def _hammer() -> None:
+        for _ in range(iterations):
+            meter.start()
+            meter.stop(elapsed_ms=1.0, completed=True)
+
+    threads = [threading.Thread(target=_hammer) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    snap = meter.snapshot()
+    assert snap["in_flight"] == 0  # no lost update across 2000 interleaved brackets
+    assert snap["rps_1s_max"] <= workers * iterations  # the peak can never exceed issued

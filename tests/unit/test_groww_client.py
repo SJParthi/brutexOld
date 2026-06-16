@@ -67,6 +67,45 @@ def test_happy_path_returns_payload_one_call() -> None:
     assert sdk.calls == 1
 
 
+def test_base_exception_still_releases_the_in_flight_meter_slot() -> None:
+    # A BaseException (KeyboardInterrupt = Ctrl-C mid-call during a live pull) escapes
+    # the `except Exception` guard, but the try/finally bracket MUST still release the
+    # in-flight meter slot — else the shared concurrency gauge leaks forever, the very
+    # gauge DEC-GROWW-RATE-ACHIEVED-METER-001 exists to make trustworthy.
+    class _InterruptSDK:
+        def get_historical_candles(self, **_kw: object) -> Mapping[str, object]:
+            raise KeyboardInterrupt("operator hit Ctrl-C mid-call")
+
+        def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            return {}
+
+        def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            return {}
+
+    client = GrowwClient(sdk=_InterruptSDK(), sleep=lambda _s: None)
+    with pytest.raises(KeyboardInterrupt):
+        client.historical_candles(
+            exchange="NSE",
+            segment="INDEX",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start="2020-01-01 09:15:00",
+            end="2020-06-29 15:30:00",
+        )
+    assert client.meter.snapshot()["in_flight"] == 0  # slot released despite BaseException
+
+
+def test_replace_preserves_the_same_meter_instance() -> None:
+    # `_with_paced_client` rebuilds the client via dataclasses.replace to wire `pace`;
+    # the meter MUST stay the SAME instance so the live pull + the dashboard read ONE
+    # aggregate, never two fragmented per-client meters (the invisibility this fixes).
+    from dataclasses import replace
+
+    client = GrowwClient(sdk=_FakeSDK())
+    paced = replace(client, pace=lambda: None)
+    assert paced.meter is client.meter
+
+
 def test_call_logs_real_per_call_latency() -> None:
     """Every successful Groww call logs its REAL wall-clock latency (DEC-GROWW-CALL-LATENCY-LOG-001).
 

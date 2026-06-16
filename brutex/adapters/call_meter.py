@@ -32,8 +32,11 @@ import structlog
 _LOG = structlog.get_logger("brutex.adapters.call_meter")
 
 #: Rolling window (seconds) for the smoothed achieved-rate gauge (``effective_rps``).
-#: The gauge ramps from 0 over the first window then is an exact trailing average —
-#: it NEVER over-reads (the safe direction for an "are we hitting 8?" assurance).
+#: Computed as ``completions-in-window / window`` (a FIXED divisor), so the gauge is
+#: always ``<=`` the true rate — it ramps from 0 over the first window and reads the
+#: exact rate only once the window is saturated. It can NEVER over-read (the safe
+#: direction for an "are we hitting 8?" assurance — a low reading is honest, a high
+#: one would be the dangerous lie).
 ACHIEVED_WINDOW_S: Final[float] = 10.0
 
 #: Instantaneous gauge window — the trailing-1 s completion count (``rps_1s``) and its
@@ -115,7 +118,10 @@ class CallMeter:
         now = self._clock()
         payload: dict[str, Any] | None = None
         with self._lock:
-            self._in_flight -= 1
+            # Floor at 0 — a stray stop() (double-stop / a defect) can never drive the
+            # dashboard concurrency gauge negative (defensive; the GrowwClient try/finally
+            # bracket already pairs every start with exactly one stop).
+            self._in_flight = max(0, self._in_flight - 1)
             if completed:
                 self._completions.append(now)
                 self._latencies.append(elapsed_ms)
