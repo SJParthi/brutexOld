@@ -154,8 +154,8 @@ def _default_retry_backoff(pass_index: int) -> None:
 _DEFAULT_EMPTY_RETRY_ATTEMPTS: int = 3
 
 
-def _noop_empty_backoff(attempt: int) -> None:
-    """Default pause between EMPTY retries: a **no-op**.
+def _noop_empty_backoff(_attempt: int) -> None:
+    """Default pause between EMPTY retries: a **no-op** (``_attempt`` intentionally unused).
 
     The shared rate bucket already spaces every physical call (~125 ms at the 8 r/s
     ceiling), so the empty re-fetches are naturally spread without an extra sleep — and
@@ -164,7 +164,6 @@ def _noop_empty_backoff(attempt: int) -> None:
     (a recorder in tests, or a real pause at a live site) without making the default
     behaviour sleep. O(1).
     """
-    del attempt
 
 
 @dataclass(frozen=True, slots=True)
