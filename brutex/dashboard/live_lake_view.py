@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 import duckdb
+import structlog
 
 from brutex.dashboard.db_view import (
     _build_order_by,
@@ -43,6 +44,10 @@ from brutex.dashboard.db_view import (
     _select_list,
     format_clean_ist_millis,
 )
+
+#: Structured logger — a partial / unreadable newest live partition degrades LOUDLY to
+#: the honest empty-state (never a 500), so the operator SEES it in ``/logs``.
+_LOG = structlog.get_logger("brutex.dashboard.live_lake_view")
 
 #: The two browsable live tables and their on-disk subdirectory + stable sort key.
 _TABLES: Final[dict[str, tuple[str, str]]] = {
@@ -455,6 +460,15 @@ def live_tables_summary(lake_root: str | Path) -> list[dict[str, Any]]:
 #: The honest empty-state note when the live-tick lake has no partitions yet.
 TICKS_EMPTY_NOTE: Final[str] = "no ticks yet — turn the Live feed ON to start capturing"
 
+#: Honest note when the NEWEST live-tick partition EXISTS but is not yet a readable
+#: Parquet (a partial / zero-byte / still-being-written file → DuckDB "too small to be a
+#: Parquet file"). Distinct from :data:`TICKS_EMPTY_NOTE` so the operator can tell "no
+#: lake yet" from "the lake is mid-write" — the freshly-opened feed's first-second race.
+TICKS_PARTIAL_NOTE: Final[str] = (
+    "the live-tick lake is being written — the newest partition is not a complete "
+    "Parquet file yet; refresh in a moment"
+)
+
 #: A feed/instrument is "fresh" while its last tick is within this many seconds
 #: (``age <= FRESH_MAX_AGE_S``); once the gap EXCEEDS it the instrument reads "stale".
 #: The Groww live feed delivers ~1+ updates/sec per subscribed instrument
@@ -579,6 +593,29 @@ def ticks_flowing(lake_root: str | Path, *, now: _dt.datetime | None = None) -> 
             [partition.as_posix()],
         )
         raw = cursor.fetchall()
+    except (duckdb.InvalidInputException, duckdb.IOException) as exc:
+        # The newest partition EXISTS but is not yet a readable Parquet — a partial /
+        # zero-byte / still-being-written live-tick file (DuckDB raises "... too small to
+        # be a Parquet file"). This is the freshly-opened-feed race the operator hit on
+        # ``/live`` (the live capture had created today's ``dt=<date>.parquet`` but not yet
+        # flushed a valid footer). Degrade to the honest empty-state — NEVER a 500 — and
+        # log it LOUDLY (the SQL is static + the path is bound, so a DuckDB error here is
+        # only ever a bad/partial FILE, never a code bug; a schema-drift BinderException
+        # still surfaces). Mirrors the no-partition branch above + the
+        # harden-against-bad-DATA philosophy (DEC-INSTRUMENT-SKIP-NO-GSYM-001).
+        _LOG.warning(
+            "live.ticks_flowing.partition_unreadable",
+            partition=partition.as_posix(),
+            error=str(exc),
+        )
+        return {
+            "flowing": False,
+            "total_ticks": 0,
+            "fresh_instruments": 0,
+            "instruments": [],
+            "session_date": session_date,
+            "note": TICKS_PARTIAL_NOTE,
+        }
     finally:
         conn.close()
     instruments: list[dict[str, Any]] = []
@@ -842,6 +879,7 @@ __all__ = [
     "MOVERS_EMPTY_NOTE",
     "SCHEMA_ONLY_NOTE",
     "TICKS_EMPTY_NOTE",
+    "TICKS_PARTIAL_NOTE",
     "clamp_limit",
     "clamp_offset",
     "clamp_top_n",
