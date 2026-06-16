@@ -32,6 +32,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 
+import structlog
+
 from brutex.adapters.groww.constants import (
     EXCLUDED_SEGMENTS,
     GROWW_EXCHANGES,
@@ -46,7 +48,30 @@ from brutex.models import (
     Segment,
 )
 
+#: Parser logger — surfaces the count of in-scope rows Groww left WITHOUT a
+#: groww_symbol (DEC-INSTRUMENT-SKIP-NO-GSYM-001), so a junk vendor row is visible
+#: in /logs rather than silently dropped or (worse) aborting the whole master load.
+_LOG = structlog.get_logger("brutex.adapters.groww.instruments")
+
 _OPTION_TYPES = frozenset({InstrumentType.CE, InstrumentType.PE})
+
+#: Row-level DATA failures we isolate-and-skip per row (DEC-INSTRUMENT-SKIP-NO-GSYM-001).
+#: A single junk/stale vendor row must never abort the whole ~162k-row master, so
+#: BOTH families a malformed/stale *cell* can raise are caught:
+#:
+#: * :class:`InstrumentFormatError` — our explicit field guards (blank groww_symbol,
+#:   unparseable lot/tick/strike/date, unmappable segment);
+#: * :class:`ValueError` — enum coercion of a drifted ``exchange``/``instrument_type``
+#:   AND the :class:`~brutex.models.Instrument` ``__post_init__`` invariants (a FUT
+#:   with no underlying, an option with strike ≤ 0, an ``EQ`` whose ``lot_size`` cell
+#:   is blank → ``0`` → "must be positive"). ``ValueError`` is the documented stale-row
+#:   surface, so catching it is what makes the load survive future vendor drift.
+#:
+#: This is deliberately NOT ``except Exception``: a structural fault still fail-louds
+#: — the HEADER schema contract is checked once above the loop (Golden Rule #1), and a
+#: genuine CODE bug (``AttributeError``/``TypeError``) surfaces loudly instead of being
+#: silently swallowed row-by-row. We harden against bad DATA, never mask bad CODE.
+_ROW_PARSE_ERRORS: tuple[type[Exception], ...] = (InstrumentFormatError, ValueError)
 
 
 def _clean(value: str | None) -> str | None:
@@ -235,15 +260,45 @@ def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
     Validates the header against the verified 21-column schema (fail-loud on
     drift — Golden Rule #1), then parses each in-scope row. Out-of-scope rows
     (MCX / COMMODITY / unknown type) are skipped.
+
+    Resilience (DEC-INSTRUMENT-SKIP-NO-GSYM-001): a single malformed or stale
+    in-scope row (e.g. a blank ``groww_symbol`` or a blank ``lot_size``) is
+    isolated — caught (see :data:`_ROW_PARSE_ERRORS`), counted, logged at
+    WARNING, and skipped — so one junk vendor row can never abort the whole
+    master and leave the dashboard with an empty universe (the HTTP 502 the
+    operator hit). The HEADER schema contract above still fail-louds.
     """
     reader = csv.DictReader(StringIO(text))
     if tuple(reader.fieldnames or ()) != INSTRUMENT_CSV_COLUMNS:
         raise InstrumentFormatError(f"Groww instrument header drift: got {reader.fieldnames!r}")
     parsed: list[tuple[str, Instrument]] = []
+    skipped: list[str] = []
     for row in reader:
         if not is_in_scope_row(row):
             continue
-        parsed.append(parse_instrument_row(row))
+        # A SINGLE un-parseable in-scope row must NEVER abort the whole ~162k-row
+        # master (DEC-INSTRUMENT-SKIP-NO-GSYM-001). The observed real-world case is
+        # the BSE "BSE FOCUSED IT" IDX (exchange_token 93) with a BLANK groww_symbol
+        # + blank trading_symbol — un-pullable (every Groww call keys on the
+        # groww_symbol), so it cannot become a usable Instrument. We skip ANY row
+        # whose required fields don't parse OR whose Instrument invariants fail
+        # (blank groww_symbol, unparseable lot/tick/strike/date, unmappable segment,
+        # a stale EQ with a blank lot_size, …) — see _ROW_PARSE_ERRORS for the full
+        # caught surface — record it, and load every VALID row, so one junk/stale
+        # vendor row can never leave the operator with an empty universe. This is NOT
+        # silent data invention: the skip count + sample reasons are logged at
+        # WARNING, and the schema CONTRACT (header drift, checked above) still
+        # fail-louds (Golden Rule #1).
+        try:
+            parsed.append(parse_instrument_row(row))
+        except _ROW_PARSE_ERRORS as exc:
+            skipped.append(str(exc))
+    if skipped:
+        _LOG.warning(
+            "instrument_master.skipped_unparseable_rows",
+            count=len(skipped),
+            samples=skipped[:3],
+        )
     return parsed
 
 

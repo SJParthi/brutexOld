@@ -205,19 +205,71 @@ def test_missing_groww_symbol_raises() -> None:
         gi.parse_instrument_row(dict.fromkeys(INSTRUMENT_CSV_COLUMNS, ""))
 
 
-def test_malformed_lot_raises() -> None:
-    bad = _row(
+def test_malformed_lot_raises_at_the_row_level() -> None:
+    # The ROW-level contract still fail-louds (parse_instrument_csv catches this
+    # per-row — see the resilience tests below — but parse_instrument_row, the
+    # single-row API, must surface the malformed cell so callers can see why).
+    bad = {
+        **dict.fromkeys(INSTRUMENT_CSV_COLUMNS, ""),
+        "exchange": "NSE",
+        "exchange_token": "1",
+        "trading_symbol": "X",
+        "groww_symbol": "NSE-X",
+        "instrument_type": "EQ",
+        "segment": "CASH",
+        "lot_size": "abc",
+        "tick_size": "0.05",
+    }
+    with pytest.raises(InstrumentFormatError, match="unparseable lot_size"):
+        gi.parse_instrument_row(bad)
+
+
+# ── resilience: one junk/stale row never aborts the whole master ─────────────
+# DEC-INSTRUMENT-SKIP-NO-GSYM-001. The dashboard "Load instruments" route turned
+# a single un-parseable in-scope row into an HTTP 502 + an empty universe. The
+# parser now isolates+skips ANY malformed/stale in-scope row (the two DATA-error
+# families in gi._ROW_PARSE_ERRORS) while loading every valid row; the header
+# schema contract still fail-louds (see test_header_drift_raises above).
+def test_real_world_blank_groww_symbol_idx_is_skipped_not_fatal() -> None:
+    # The EXACT observed vendor row: "BSE FOCUSED IT", BSE/IDX/CASH, token 93,
+    # BLANK groww_symbol + BLANK trading_symbol — un-pullable (every Groww call
+    # keys on the groww_symbol). It must be skipped, and every valid row loads.
+    focused_it = _row(
+        exchange="BSE",
+        exchange_token="93",
+        name="BSE FOCUSED IT",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    pairs = gi.parse_instrument_csv(_csv(_NIFTY, focused_it, _WIPRO))
+    gsyms = {gsym for gsym, _ in pairs}
+    assert gsyms == {"NSE-NIFTY", "NSE-WIPRO"}  # junk row dropped, valid rows kept
+
+
+def test_stale_blank_lot_size_equity_is_skipped() -> None:
+    # A stale EQ row whose lot_size cell is blank parses to lot_size=0, which the
+    # Instrument invariant rejects with ValueError (NOT InstrumentFormatError) —
+    # the second arm of _ROW_PARSE_ERRORS. It must be skipped, not abort the load.
+    stale_eq = _row(
         exchange="NSE",
-        exchange_token="1",
-        trading_symbol="X",
-        groww_symbol="NSE-X",
+        exchange_token="404",
+        trading_symbol="STALE",
+        groww_symbol="NSE-STALE",
         instrument_type="EQ",
         segment="CASH",
-        lot_size="abc",
         tick_size="0.05",
+        # lot_size intentionally blank → 0 → ValueError("lot_size must be positive")
     )
-    with pytest.raises(InstrumentFormatError, match="unparseable lot_size"):
-        gi.parse_instrument_csv(_csv(bad))
+    pairs = gi.parse_instrument_csv(_csv(_WIPRO, stale_eq))
+    assert {gsym for gsym, _ in pairs} == {"NSE-WIPRO"}
+
+
+def test_all_in_scope_rows_malformed_yields_empty_not_raise() -> None:
+    # Out-of-box: a master where EVERY in-scope row is junk must NOT raise — it
+    # returns an empty list (the dashboard then surfaces "0 instruments", a
+    # recoverable state, never a 502). Header is still valid here.
+    focused_it = _row(exchange="BSE", exchange_token="93", instrument_type="IDX", segment="CASH")
+    assert gi.parse_instrument_csv(_csv(focused_it, _COMMODITY)) == []
 
 
 # ── is_in_scope_row branches ────────────────────────────────────────────────
