@@ -3,10 +3,12 @@
 Two layers, both against a REAL Parquet + DuckDB lake:
 
 1. The lake-reading core (:func:`~brutex.dashboard.movers_snapshot.run_movers_snapshot`
-   + ``_read_session_bars`` + ``_prev_day_close``) is exercised directly over a
-   ``tmp_path`` lake seeded with :class:`~brutex.data.parquet_writer.ParquetWriter`
-   — every branch (resample + cutoff slice, daily bucket, missing day, missing
-   1-minute dir, missing / prior-less 1-day baseline) reached deterministically.
+   + ``_read_session_bars`` + ``_read_daily_bars`` + ``_prev_day_close``) is exercised
+   directly over a ``tmp_path`` lake seeded with
+   :class:`~brutex.data.parquet_writer.ParquetWriter` — every branch (intraday
+   resample + cutoff slice, the daily-DIRECT 1-day read for the 1-day-only pull,
+   missing day, missing 1-minute dir, missing / prior-less 1-day baseline) reached
+   deterministically.
 2. The ``GET /api/v1/movers`` + ``GET /movers`` route wiring is proven end-to-end
    through FastAPI's :class:`TestClient` (the honest proof the production
    ``Catalog`` lake feeds the snapshot reader). Mirrors the
@@ -36,6 +38,7 @@ pytest.importorskip("pyarrow")
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
+    _read_daily_bars,
     _read_session_bars,
     run_movers_snapshot,
 )
@@ -91,7 +94,15 @@ def _write(tmp_path: Path, symbol: str, interval: str, bars: list[CandleBar]) ->
 
 
 def _seed_spot_lake(tmp_path: Path) -> None:
-    """NIFTY (+10% gainer) + BANKNIFTY (-10% loser): 1-minute session + prior 1-day close."""
+    """NIFTY (+10% gainer) + BANKNIFTY (-10% loser).
+
+    Both the **1-minute** session (for the intraday-timeframe path) AND the stored
+    **1-day** bars for the prior close (06-12) AND the snapshot day (06-13) — so the
+    DAILY timeframe reads the stored 1-day bar DIRECTLY (the 1-day-only pull case,
+    DEC-PULL-1DAY-FIRST-001), no 1-minute resample required. The 06-13 1-day close
+    equals the 1-minute session close, so both paths agree (NIFTY 22000 = +10% vs
+    20000; BANKNIFTY 40500 = -10% vs 45000).
+    """
     _write(
         tmp_path,
         "NIFTY",
@@ -106,7 +117,10 @@ def _seed_spot_lake(tmp_path: Path) -> None:
         tmp_path,
         "NIFTY",
         "1day",
-        [_day_bar(day=date(2024, 6, 12), open_="19900", close="20000", volume=300)],
+        [
+            _day_bar(day=date(2024, 6, 12), open_="19900", close="20000", volume=300),
+            _day_bar(day=_DAY, open_="20000", close="22000", volume=700),
+        ],
     )
     _write(
         tmp_path,
@@ -122,7 +136,10 @@ def _seed_spot_lake(tmp_path: Path) -> None:
         tmp_path,
         "BANKNIFTY",
         "1day",
-        [_day_bar(day=date(2024, 6, 12), open_="45000", close="45000", volume=200)],
+        [
+            _day_bar(day=date(2024, 6, 12), open_="45000", close="45000", volume=200),
+            _day_bar(day=_DAY, open_="45000", close="40500", volume=250),
+        ],
     )
 
 
@@ -230,6 +247,55 @@ class TestReadSessionBars:
         assert len(bars) == 1
         assert bars[0].close == Decimal("130")
         assert bars[0].volume == 50
+
+
+# ── _read_daily_bars (direct, every branch) ───────────────────────────────
+
+
+class TestReadDailyBars:
+    """The 1-day-only DIRECT reader (DEC-PULL-1DAY-FIRST-001) — no 1-minute resample."""
+
+    def test_missing_1day_dir_returns_empty(self, tmp_path: Path) -> None:
+        # No 1-day partition at all → _read_daily_partition is None → [].
+        assert (
+            _read_daily_bars(
+                tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="GHOST", day=_DAY
+            )
+            == []
+        )
+
+    def test_selected_day_bar_read_directly(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar(day=date(2024, 6, 12), open_="100", close="111", volume=3),
+                _day_bar(day=_DAY, open_="111", close="222", volume=7),
+            ],
+        )
+        bars = _read_daily_bars(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+        )
+        assert len(bars) == 1
+        assert bars[0].close == Decimal("222")
+        assert bars[0].volume == 7
+        assert bars[0].timestamp.tzinfo is not None  # stored UTC instant preserved
+
+    def test_no_bar_on_selected_day_returns_empty(self, tmp_path: Path) -> None:
+        # 1-day data exists, but only for a DIFFERENT day → sel.is_empty → [].
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="1", close="2", volume=1)],
+        )
+        assert (
+            _read_daily_bars(
+                tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+            )
+            == []
+        )
 
 
 # ── _prev_day_close (direct, every branch) ────────────────────────────────
@@ -351,6 +417,34 @@ class TestRunMoversSnapshot:
         nopr = next(r for r in payload["volume"] if r["symbol"] == "NOPREV")
         assert nopr["pct_change"] is None
         assert nopr["change"] is None
+
+    def test_daily_discovers_1day_and_skips_symbol_absent_on_the_day(self, tmp_path: Path) -> None:
+        # The DAILY timeframe discovers + reads the stored 1-day partitions DIRECTLY
+        # (the 1-day-only pull case — DEC-PULL-1DAY-FIRST-001), NOT the 1-minute series.
+        # HASDAY has a 1-day bar on the snapshot day (ranked); GAPDAY has 1-day data only
+        # on a different day → no bar on 06-13 → skipped (never fabricated).
+        _write(
+            tmp_path,
+            "HASDAY",
+            "1day",
+            [
+                _day_bar(day=date(2024, 6, 12), open_="100", close="100", volume=10),
+                _day_bar(day=_DAY, open_="100", close="110", volume=20),
+            ],
+        )
+        _write(
+            tmp_path,
+            "GAPDAY",
+            "1day",
+            [_day_bar(day=date(2024, 6, 10), open_="50", close="55", volume=5)],
+        )
+        payload = run_movers_snapshot(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, top_n=10
+        )
+        assert payload["instrument_count"] == 2  # HASDAY ranked + GAPDAY skipped
+        assert payload["skipped_count"] == 1
+        assert [r["symbol"] for r in payload["price_gainers"]] == ["HASDAY"]
+        assert Decimal(payload["price_gainers"][0]["pct_change"]) == Decimal("10")
 
 
 # ── route wiring (FastAPI TestClient) ─────────────────────────────────────
