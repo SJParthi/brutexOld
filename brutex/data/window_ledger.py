@@ -49,6 +49,7 @@ __all__ = [
     "SETTLED_STATUSES",
     "SKIPPED",
     "SUCCESS",
+    "LedgerProgress",
     "WindowLedger",
     "WindowLedgerRecord",
 ]
@@ -80,6 +81,41 @@ _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
 #: hand-typed status list — anything NOT in this set (and not FAILED) is pending
 #: work the next pull re-fetches.
 SETTLED_STATUSES: frozenset[str] = _SKIPPABLE
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerProgress:
+    """A live, O(N) progress snapshot of the ledger — the spot pull's per-window bar source.
+
+    DEC-SPOT-WINDOW-PROGRESS-001. The bulk spot pull used to advance the dashboard bar
+    + flush the /coverage view ONLY when a whole ``(symbol, interval)`` pair finished its
+    entire multi-year backfill (``run_ingest`` fires ``on_progress`` once per pair). With
+    a modest pool sharing one adaptively-stepped-down rate bucket a wave of symbols takes
+    minutes, so BOTH surfaces sat frozen for minutes mid-pull — the operator-observed
+    "stuck at 24/779" even though windows were landing the whole time. This snapshot lets
+    the dashboard drive the bar from the WINDOW-level ledger on a ~1 s cadence instead
+    (the spot twin of the metadata pull's per-call tick).
+
+    Every field is derived from the AUTHORITATIVE per-window records, so a repeated poll is
+    **idempotent** — it can never double-count a window a retry round re-touches (unlike a
+    naive per-fire increment): ``settled`` / ``failed`` / ``bars`` are absolute folds over
+    the live records, not running tallies.
+    """
+
+    #: Distinct windows recorded so far (the bar's denominator — the full planned tiling).
+    total: int
+    #: Windows in a SETTLED status (``SUCCESS`` / ``SKIPPED``) — the bar's numerator. Matches
+    #: the /coverage "settled" headline exactly (same :data:`SETTLED_STATUSES` authority).
+    settled: int
+    #: Windows currently in the ``FAILED`` (transient) status — the live "failed" count.
+    failed: int
+    #: Sum of ``bars`` across every recorded window (the live lake-bar total for the pull's
+    #: selection; on a re-pull this reflects the already-stored rows the skip authority keeps).
+    bars: int
+    #: ``"<symbol> <interval>"`` of the most-recently-ATTEMPTED window (max ``last_attempt_at``)
+    #: — the live "current" label, so the bar names the symbol being fetched RIGHT NOW even
+    #: while a long backfill is mid-flight. Empty string when nothing has been attempted yet.
+    current: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +425,41 @@ class WindowLedger:
         """Number of distinct windows recorded (thread-safe)."""
         with self._lock:
             return len(self._by_window)
+
+    def progress_counts(self) -> LedgerProgress:
+        """Return a live O(N) :class:`LedgerProgress` snapshot — thread-safe, idempotent.
+
+        Folds the per-window records into the dashboard bar's numbers
+        (DEC-SPOT-WINDOW-PROGRESS-001): ``total`` windows, ``settled`` (``SUCCESS`` /
+        ``SKIPPED`` — the SAME :data:`SETTLED_STATUSES` authority the skip rule + the
+        /coverage headline use), ``failed`` (transient), summed ``bars``, and the
+        ``"<symbol> <interval>"`` of the most-recently-attempted window (the live
+        "current" label). The lock is held ONLY for an O(N) copy of the (immutable,
+        frozen) record refs; the fold then runs lock-free, so a ~1 s-cadence poll never
+        blocks the O(1) per-window :meth:`plan` / :meth:`record` / :meth:`is_skippable`
+        on the hot path. Polling it is idempotent — every count is an absolute fold over
+        the live records, so re-touched windows are never double-counted.
+        """
+        with self._lock:
+            records = list(self._by_window.values())
+        total = len(records)
+        settled = failed = bars = 0
+        latest_attempt: str | None = None
+        current = ""
+        for record in records:
+            bars += record.bars
+            if record.status in _SKIPPABLE:
+                settled += 1
+            elif record.status == FAILED:
+                failed += 1
+            if record.last_attempt_at is not None and (
+                latest_attempt is None or record.last_attempt_at > latest_attempt
+            ):
+                latest_attempt = record.last_attempt_at
+                current = f"{record.security_id} {record.interval}"
+        return LedgerProgress(
+            total=total, settled=settled, failed=failed, bars=bars, current=current
+        )
 
     def records(self) -> list[WindowLedgerRecord]:
         """A deterministic, sorted snapshot of every recorded window (atomic)."""

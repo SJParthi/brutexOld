@@ -49,8 +49,9 @@ if TYPE_CHECKING:
     from brutex.orchestrator.audit import AuditWriter
 
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
-from brutex.adapters.groww.ingest import IngestReport, Pacer, ingest_spot
+from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.candle_fields import CandleParseError
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import Instrument
@@ -202,6 +203,7 @@ def run_groww_spot_ingest(
     on_progress: ProgressHook | None = None,
     run_parallel: RunParallel | None = None,
     audit: AuditWriter | None = None,
+    on_window: WindowTick | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -238,6 +240,12 @@ def run_groww_spot_ingest(
         ``None`` builds a bounded
         :class:`~brutex.orchestrator.parallel.PoolRunParallel`. Tests inject a
         synchronous fake.
+    on_window
+        Optional :data:`~brutex.adapters.groww.ingest.WindowTick` threaded into every
+        pair so the dashboard advances its bar + flushes /coverage per WINDOW
+        (DEC-SPOT-WINDOW-PROGRESS-001), not just once per finished pair. Fired on the
+        window worker threads; the caller owns throttle + thread-safety. ``None`` is a
+        no-op (CLI / tests).
 
     Returns
     -------
@@ -295,6 +303,7 @@ def run_groww_spot_ingest(
                 on_timeout=on_timeout,
                 on_success=on_success,
                 run_parallel=inner_runner,
+                on_window=on_window,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -338,14 +347,21 @@ def run_groww_spot_ingest(
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
             continue
-        if not isinstance(exc, GrowwError):
+        if not isinstance(exc, (GrowwError, CandleParseError)):
             # A genuine bug (e.g. ValueError) escaped a worker — never swallow a
-            # real error: re-raise so the orchestrator never hides a defect (only
-            # GrowwError is quarantined; every other error surfaces).
+            # real error: re-raise so the orchestrator never hides a defect. ONLY a
+            # vendor error is quarantined: a GrowwError, OR a CandleParseError on
+            # un-storable vendor data (DEC-CANDLE-PARTIAL-ABSENT-SKIP-001 Layer 2 — every
+            # other error surfaces).
             raise exc
-        # Terminal Groww error → isolate this pair, the run continues. The pair is
-        # NOT marked complete, so it is re-tried on the next pull (never masked).
-        auth_failed = is_auth_failure(exc)
+        # Terminal vendor error → isolate this pair, the run continues. A Groww
+        # CandleParseError (e.g. a price PRESENT but unparseable — the case the Layer-1
+        # partial-absent skip in `assemble_candle` does NOT cover) must NEVER crash the
+        # whole 779-symbol pull (the operator-observed "779 symbols spot failed:
+        # CandleParseError: unparseable open price: None"). Quarantine the ONE symbol —
+        # re-tried next pull, never masked — exactly like a terminal GrowwError. Only a
+        # GrowwError can be an auth failure (a parse error never is).
+        auth_failed = isinstance(exc, GrowwError) and is_auth_failure(exc)
         failures.append(
             PairFailure(
                 symbol=instrument.symbol_name,
@@ -458,6 +474,7 @@ def run_groww_spot_ingest_with_retry(
     max_retry_rounds: int = _DEFAULT_MAX_RETRY_ROUNDS,
     retry_backoff: Callable[[int], None] | None = None,
     audit: AuditWriter | None = None,
+    on_window: WindowTick | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -504,6 +521,7 @@ def run_groww_spot_ingest_with_retry(
             on_progress=on_progress,
             run_parallel=run_parallel,
             audit=audit,
+            on_window=on_window,
         )
 
     report = _one_pass()

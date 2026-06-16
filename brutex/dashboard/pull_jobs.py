@@ -104,17 +104,30 @@ class BackgroundPullJob:
         self._summary_cache = summary_cache
         self._lock = threading.Lock()
         self._running = False
+        #: When True the per-pair hook does NOT advance the bar — an authoritative
+        #: per-WINDOW ledger sync drives the counters instead (DEC-SPOT-WINDOW-PROGRESS-001).
+        self._ledger_synced = False
 
-    def start(self, work: PullWork, *, total: int, detail: str = "") -> bool:
+    def start(
+        self, work: PullWork, *, total: int, detail: str = "", ledger_synced: bool = False
+    ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
         Single-flight: returns ``True`` and starts the job when idle; returns
         ``False`` (a no-op) when a pull is already running. O(1).
+
+        When *ledger_synced* is True (the bulk spot pull, DEC-SPOT-WINDOW-PROGRESS-001)
+        the per-pair :meth:`_on_progress` hook only refreshes the "current" label + the
+        coverage counters — the bar's completed / total / bars / failed are driven
+        instead by :meth:`sync_from_ledger` off the live WindowLedger, so the bar advances
+        per WINDOW (~1 s cadence) rather than per finished symbol. Default ``False`` keeps
+        the per-pair advance (every other caller — options, per-symbol — is unchanged).
         """
         with self._lock:
             if self._running:
                 return False
             self._running = True
+        self._ledger_synced = ledger_synced
         self._progress.start(total=total, detail=detail)
         self._spawn(lambda: self._run(work))
         return True
@@ -146,8 +159,36 @@ class BackgroundPullJob:
         collapses a 200-symbol fan-out of these ticks into at most one rescan per
         window (so the funnel can't trigger a scan storm).
         """
-        self._progress.advance(current=label, bars=bars, failed=failed, gap=gap)
+        # Ledger-synced pulls (bulk spot) drive completed/total/bars/failed from the
+        # authoritative per-window ledger via sync_from_ledger (so the bar advances per
+        # WINDOW, not per finished symbol — DEC-SPOT-WINDOW-PROGRESS-001); here the
+        # per-pair hook only refreshes the "current" label. Every other caller keeps the
+        # per-pair advance (byte-unchanged).
+        if self._ledger_synced:
+            self._progress.set_current(label)
+        else:
+            self._progress.advance(current=label, bars=bars, failed=failed, gap=gap)
         self._counters.add(label, bars)
+        if self._summary_cache is not None:
+            self._summary_cache.mark_dirty()
+
+    def sync_from_ledger(
+        self, *, completed: int, total: int, bars: int, failed: int = 0, current: str = ""
+    ) -> None:
+        """Drive the live bar from an authoritative WindowLedger snapshot — O(1), idempotent.
+
+        DEC-SPOT-WINDOW-PROGRESS-001. The bulk spot pull's live-sync loop calls this on a
+        ~1 s cadence with the ledger's :class:`~brutex.data.window_ledger.LedgerProgress`
+        counts, so the units bar + percent advance per settled WINDOW (matching the
+        /coverage "settled" headline) instead of freezing between symbol completions. The
+        sync is absolute, so repeated calls never double-count; it also marks any wired
+        summary cache dirty so the coverage poll refreshes mid-pull even while a long
+        backfill is in flight (the per-pair tick that used to do that can stall for
+        minutes).
+        """
+        self._progress.sync(
+            completed=completed, total=total, bars=bars, failed=failed, current=current
+        )
         if self._summary_cache is not None:
             self._summary_cache.mark_dirty()
 

@@ -851,3 +851,67 @@ class TestParallelSeam:
         assert report.windows == 8
         assert report.bars_appended == 8
         assert adapter.calls == 8
+
+
+class TestOnWindowTick:
+    """DEC-SPOT-WINDOW-PROGRESS-001: ``on_window`` fires once per PROCESSED window."""
+
+    def test_fires_once_per_window(self) -> None:
+        # 1day tiles at 180d; ~212-day range → 2 windows → 2 ticks.
+        ticks: list[int] = []
+        ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            run_parallel=_sync_run_parallel,
+            on_window=lambda: ticks.append(1),
+        )
+        assert len(ticks) == 2
+
+    def test_fires_for_a_skipped_window_too(self) -> None:
+        # A window already settled in the ledger is SKIPPED (no fetch) but still ticks,
+        # so a re-pull's bar reflects the skips (re-pulls are mostly skips).
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        # Pre-settle both daily windows as SUCCESS so the pull skips them.
+        for ws, we in ((date(2021, 1, 1), date(2021, 6, 30)), (date(2021, 6, 30), date(2021, 8, 1))):
+            ledger.record(
+                WindowKey(market="groww", security_id="NIFTY", interval="1day", start=ws, end=we),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=5,
+                now=datetime(2026, 6, 8, tzinfo=UTC),
+            )
+        adapter = _Adapter()
+        ticks: list[int] = []
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+            run_parallel=_sync_run_parallel,
+            on_window=lambda: ticks.append(1),
+        )
+        assert adapter.calls == 0  # both windows skipped — no vendor hit
+        assert len(ticks) == 2  # but the tick still fired for each skipped window
+
+    def test_none_on_window_is_a_noop(self) -> None:
+        # The default (CLI / tests) path passes no hook — must run cleanly.
+        report = ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            run_parallel=_sync_run_parallel,
+        )
+        assert report.windows == 2

@@ -176,6 +176,46 @@ class PullProgress:
                 self._current = current
             self._updated_at = self._clock()
 
+    def sync(
+        self, *, completed: int, total: int, bars: int, failed: int = 0, current: str = ""
+    ) -> None:
+        """Set ABSOLUTE progress from an authoritative source (the WindowLedger) — O(1).
+
+        DEC-SPOT-WINDOW-PROGRESS-001. Unlike :meth:`advance` (which INCREMENTS, so it can
+        only tick once per finished unit), this SETS the counters to the values an
+        authoritative idempotent source already computed — the spot pull's live
+        :class:`~brutex.data.window_ledger.LedgerProgress`. Driving the bar this way lets
+        the units bar + percent track WINDOW-level progress on a ~1 s cadence (instead of
+        only when a whole symbol's backfill finishes), and a repeated sync never
+        double-counts: ``completed`` / ``total`` / ``bars`` / ``failed`` are absolute,
+        clamped non-negative with ``completed`` clamped to ``total``. ``current`` updates
+        the most-recent label only when non-empty (so a sync that has no live label keeps
+        the last one). ``gaps`` is untouched (Groww has no known-gap concept).
+        """
+        with self._lock:
+            self._total = max(0, total)
+            self._completed = max(0, min(self._total, completed))
+            self._bars = max(0, bars)
+            self._failed = max(0, failed)
+            if current:
+                self._current = current
+            self._updated_at = self._clock()
+
+    def set_current(self, current: str) -> None:
+        """Update only the most-recent unit label (no counter change) — O(1).
+
+        The light-touch companion to :meth:`sync` (DEC-SPOT-WINDOW-PROGRESS-001): a
+        ledger-synced pull drives its counters from :meth:`sync` and uses this to refresh
+        the "current symbol" label per finished pair WITHOUT the per-pair
+        :meth:`advance` that would fight the absolute ledger sync. An empty label is a
+        no-op.
+        """
+        if not current:
+            return
+        with self._lock:
+            self._current = current
+            self._updated_at = self._clock()
+
     def finish(self, *, detail: str = "") -> None:
         """Mark the job cleanly complete (``done``) — O(1)."""
         with self._lock:

@@ -19,6 +19,7 @@ from brutex.data.window_ledger import (
     SETTLED_STATUSES,
     SKIPPED,
     SUCCESS,
+    LedgerProgress,
     WindowLedger,
 )
 
@@ -517,3 +518,56 @@ def test_concurrent_plan_and_record_never_tears_the_map() -> None:
         t.join()
     assert ledger.count == 200
     assert all(ledger.is_skippable(k) for k in keys)
+
+
+def _k(symbol: str, interval: str, start: date, end: date) -> WindowKey:
+    return WindowKey(market="groww", security_id=symbol, interval=interval, start=start, end=end)
+
+
+class TestProgressCounts:
+    """`progress_counts` — the live, idempotent O(N) window-progress fold
+    (DEC-SPOT-WINDOW-PROGRESS-001) that drives the dashboard bar per WINDOW."""
+
+    def test_empty_ledger_is_all_zero(self) -> None:
+        p = WindowLedger().progress_counts()
+        assert p == LedgerProgress(total=0, settled=0, failed=0, bars=0, current="")
+
+    def test_counts_settled_failed_bars_and_total(self) -> None:
+        ledger = WindowLedger()
+        a = _k("NIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        b = _k("BANKNIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        c = _k("FINNIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        d = _k("MIDCAP50", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.plan(d, now=_NOW)  # PLANNED → pending (not settled, not failed)
+        ledger.record(a, raw_bars=120, error_type=None, bars_appended=120, now=_NOW)  # SUCCESS
+        ledger.settle_known_gap(b, now=_NOW)  # SKIPPED → settled
+        ledger.record(c, raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=_NOW)
+        p = ledger.progress_counts()
+        assert p.total == 4
+        assert p.settled == 2  # SUCCESS + SKIPPED (matches SETTLED_STATUSES)
+        assert p.failed == 1  # the FAILED (transient) window
+        assert p.bars == 120
+
+    def test_current_is_the_most_recently_attempted_window(self) -> None:
+        ledger = WindowLedger()
+        first = _k("AAA", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        last = _k("ZZZ", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.record(first, raw_bars=10, error_type=None, bars_appended=10, now=_NOW)
+        ledger.record(last, raw_bars=10, error_type=None, bars_appended=10, now=_LATER)
+        # The label is the LAST-attempted window's "<symbol> <interval>", regardless of the
+        # sort order of the keys — so the bar names the symbol fetched most recently.
+        assert ledger.progress_counts().current == "ZZZ 1day"
+
+    def test_planned_only_window_has_no_current(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_k("NIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29)), now=_NOW)
+        # A never-attempted (PLANNED) window has last_attempt_at None → no current label.
+        assert ledger.progress_counts().current == ""
+
+    def test_idempotent_repeated_poll_does_not_double_count(self) -> None:
+        ledger = WindowLedger()
+        key = _k("NIFTY", "1day", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.record(key, raw_bars=120, error_type=None, bars_appended=120, now=_NOW)
+        first = ledger.progress_counts()
+        second = ledger.progress_counts()
+        assert first == second  # absolute fold — re-polling never inflates the counts

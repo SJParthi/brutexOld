@@ -31,6 +31,7 @@ from brutex.adapters.groww.run_ingest import (
     run_groww_spot_ingest,
     run_groww_spot_ingest_with_retry,
 )
+from brutex.data.candle_fields import CandleParseError
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
 from structlog.testing import capture_logs
@@ -630,3 +631,90 @@ class TestRunGrowwSpotIngestWithRetry:
         wrapped = SpotIngestWithRetry(report=original, retry=retry)
         assert wrapped.still_failed_windows == 3
         assert SpotIngestWithRetry(report=original, retry=None).still_failed_windows == 84
+
+
+def test_candle_parse_error_quarantines_pair_not_crashes_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-CANDLE-PARTIAL-ABSENT-SKIP-001 Layer 2 (the operator-observed "779 symbols spot failed:
+    # CandleParseError: unparseable open price: None"): a CandleParseError on un-storable
+    # vendor data must quarantine the ONE symbol and let the run CONTINUE — NEVER crash the
+    # whole bulk pull the way a re-raised non-GrowwError did.
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        if instrument.symbol_name == "BADDATA":
+            raise CandleParseError("unparseable open price: None")
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with capture_logs() as logs:
+        report = run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BADDATA", token=77)],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )
+    assert report.failed_pairs == 1
+    assert report.failures == (
+        PairFailure(
+            symbol="BADDATA",
+            interval="1day",
+            error="unparseable open price: None",
+            auth_failure=False,  # a parse error is never an auth failure
+        ),
+    )
+    assert report.auth_aborted is False
+    assert ("NIFTY", "1day") in report.pairs  # the good symbol still landed
+    assert report.bars_appended == 5
+    (quarantine,) = _events(logs, "ingest.quarantine")
+    assert quarantine["error"] == "unparseable open price: None"
+
+
+def test_on_window_is_threaded_into_each_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEC-SPOT-WINDOW-PROGRESS-001: the per-window tick must reach ingest_spot for every
+    # pair so the dashboard advances per WINDOW.
+    seen: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, on_window=None, **_kw):
+        seen.append(on_window)
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+
+    def _tick() -> None: ...
+
+    run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY"), _index("BANKNIFTY", token=2)],
+        intervals=["1day"],
+        start=_START,
+        end=_END,
+        on_window=_tick,
+    )
+    assert seen == [_tick, _tick]  # the SAME hook threaded into both pairs
+
+
+def test_with_retry_threads_on_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, on_window=None, **_kw):
+        seen.append(on_window)
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+
+    def _tick() -> None: ...
+
+    run_groww_spot_ingest_with_retry(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY")],
+        intervals=["1day"],
+        start=_START,
+        end=_END,
+        auto_retry=False,
+        on_window=_tick,
+    )
+    assert seen == [_tick]

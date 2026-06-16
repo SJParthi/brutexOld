@@ -135,6 +135,29 @@ class TestAssembleCandle:
         with pytest.raises(CandleParseError, match="unparseable open price"):
             self._call(open_="abc")
 
+    @pytest.mark.parametrize("absent", [None, "", "   "])
+    @pytest.mark.parametrize("field", ["open_", "high", "low", "close"])
+    def test_partial_absent_price_is_skipped(self, field: str, absent: object) -> None:
+        # DEC-CANDLE-PARTIAL-ABSENT-SKIP-001: a bar that is NOT all-empty but
+        # has a REQUIRED OHLC price ABSENT (vendor null/empty — e.g. Groww's `open: None`)
+        # is an un-storable PARTIAL bar → a graceful EmptyCandleRow skip, never the crash
+        # `unparseable open price: None` that aborted the whole 779-symbol pull.
+        with pytest.raises(EmptyCandleRow, match="partial vendor bar"):
+            self._call(**{field: absent})
+
+    def test_partial_absent_skip_is_an_empty_candle_row(self) -> None:
+        # EmptyCandleRow IS-A CandleParseError, so callers catching either still work; the
+        # Groww parser's `except EmptyCandleRow: continue` is what makes it a graceful skip.
+        with pytest.raises(CandleParseError):
+            self._call(open_=None)
+
+    def test_present_but_unparseable_still_hard_errors(self) -> None:
+        # The partial-absent skip must NOT mask a genuine malformation: a price that is
+        # PRESENT but unparseable (a real shape / column problem) stays a hard error even
+        # when ANOTHER field is absent — so the strict guard still surfaces it.
+        with pytest.raises(CandleParseError, match="unparseable high price"):
+            self._call(open_="100", high="abc", low="90", close="95")
+
     def test_normalizes_open_above_vendor_high(self) -> None:
         """Vendor quirk: open above the reported high → high clamped to open.
 

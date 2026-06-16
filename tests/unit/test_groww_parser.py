@@ -112,3 +112,20 @@ def test_malformed_nonempty_row_raises() -> None:
     # Non-empty (has prices) but an unparseable price → CandleParseError (not skipped).
     with pytest.raises(CandleParseError):
         parser.parse_candle_rows({"candles": [["2025-09-24T10:30:00", "x", 2, 1, 2, 5, None]]})
+
+
+def test_partial_absent_open_row_is_skipped_not_fatal() -> None:
+    # DEC-CANDLE-PARTIAL-ABSENT-SKIP-001: Groww's observed `open: None` with a
+    # real high/low/close is an un-storable PARTIAL bar. It must be GRACEFULLY skipped (the
+    # crash `unparseable open price: None` previously aborted the whole 779-symbol pull) —
+    # the surrounding good rows survive, never lost to one bad neighbour.
+    bars = parser.parse_candle_rows(
+        {
+            "candles": [
+                _row(),
+                ["2025-09-24T10:31:00", None, 110.0, 90.0, 105.0, 1000, None],
+                _row("2025-09-24T10:32:00"),
+            ]
+        }
+    )
+    assert len(bars) == 2  # the partial bar is dropped; both good rows are kept

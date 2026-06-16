@@ -216,3 +216,67 @@ def test_snapshot_is_immutable() -> None:
         pass
     else:  # pragma: no cover - frozen dataclass must reject assignment
         raise AssertionError("ProgressSnapshot must be frozen")
+
+
+class TestSync:
+    """`sync` — absolute, idempotent WINDOW-level progress (DEC-SPOT-WINDOW-PROGRESS-001)."""
+
+    def test_sets_absolute_counters(self) -> None:
+        p = PullProgress(clock=_FakeClock())
+        p.start(total=779)  # initial symbol placeholder
+        p.sync(completed=118, total=10906, bars=12054, failed=0, current="NIFTYSMALL 1day")
+        snap = p.snapshot()
+        assert snap.total == 10906  # re-scaled from symbols to windows
+        assert snap.completed == 118
+        assert snap.bars == 12054
+        assert snap.failed == 0
+        assert snap.current == "NIFTYSMALL 1day"
+        assert snap.percent == round(118 / 10906 * 100.0, 1)
+
+    def test_is_idempotent_not_cumulative(self) -> None:
+        # Unlike advance(), a repeated sync SETS rather than adds — so the per-window live
+        # poll can never double-count windows the retry rounds re-touch.
+        p = PullProgress(clock=_FakeClock())
+        p.start(total=10)
+        p.sync(completed=5, total=10, bars=50)
+        p.sync(completed=5, total=10, bars=50)
+        assert p.snapshot().completed == 5
+        assert p.snapshot().bars == 50
+
+    def test_clamps_completed_to_total_and_non_negative(self) -> None:
+        p = PullProgress(clock=_FakeClock())
+        p.start(total=10)
+        p.sync(completed=999, total=10, bars=-3, failed=-1)
+        snap = p.snapshot()
+        assert snap.completed == 10  # clamped to total
+        assert snap.bars == 0  # clamped non-negative
+        assert snap.failed == 0
+
+    def test_empty_current_keeps_prior_label(self) -> None:
+        p = PullProgress(clock=_FakeClock())
+        p.start(total=10)
+        p.sync(completed=1, total=10, bars=1, current="NIFTY 1day")
+        p.sync(completed=2, total=10, bars=2, current="")  # no live label this tick
+        assert p.snapshot().current == "NIFTY 1day"
+
+
+class TestSetCurrent:
+    """`set_current` — refresh only the label, no counter change."""
+
+    def test_updates_label_only(self) -> None:
+        p = PullProgress(clock=_FakeClock())
+        p.start(total=10)
+        p.sync(completed=3, total=10, bars=30)
+        p.set_current("BANKNIFTY 1day")
+        snap = p.snapshot()
+        assert snap.current == "BANKNIFTY 1day"
+        assert snap.completed == 3  # untouched
+        assert snap.bars == 30  # untouched
+
+    def test_empty_label_is_a_noop(self) -> None:
+        clock = _FakeClock()
+        p = PullProgress(clock=clock)
+        p.start(total=10)
+        before = p.snapshot().updated_at
+        p.set_current("")  # no-op — does not even stamp the clock
+        assert p.snapshot().updated_at == before
