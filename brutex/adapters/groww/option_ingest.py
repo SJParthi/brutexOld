@@ -80,6 +80,7 @@ from brutex.data.models import CandleBar
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id
 
 #: Structured logger — per-contract DEBUG detail + the transient/quarantine
@@ -505,8 +506,14 @@ def run_groww_option_ingest(
                     now_ist=now_ist,
                     market=market,
                 )
-            except GrowwError as exc:
-                auth_failed = is_auth_failure(exc)
+            except BruteXError as exc:
+                # Quarantine ANY brutex DOMAIN error per contract (a terminal GrowwError,
+                # a CandleParseError on un-storable option data, or an OutOfScopeError on an
+                # unresolvable symbol) so one bad contract never crashes the whole bulk
+                # option pull — the same per-symbol resilience the spot spine has
+                # (DEC-GROWW-QUARANTINE-BRUTEX-001); a genuine code bug (a Python builtin)
+                # still surfaces. Only a GrowwError can be an auth failure.
+                auth_failed = isinstance(exc, GrowwError) and is_auth_failure(exc)
                 failures.append(
                     OptionPairFailure(
                         symbol=contract.symbol,

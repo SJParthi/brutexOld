@@ -46,6 +46,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
+from brutex.models import OutOfScopeError
 from structlog.testing import capture_logs
 
 
@@ -509,9 +510,10 @@ def test_run_auth_failure_sets_auth_aborted() -> None:
     assert report.failures[0].auth_failure is True
 
 
-def test_run_non_groww_error_propagates() -> None:
-    # The sink raising a non-Groww error proves run_groww_option_ingest never
-    # swallows a genuine bug (only GrowwError is quarantined).
+def test_run_non_brutex_error_propagates() -> None:
+    # The sink raising a non-BruteXError (a RuntimeError = a genuine CODE bug, not a
+    # brutex DOMAIN error) proves run_groww_option_ingest never swallows a defect
+    # (only a BruteXError is quarantined — DEC-GROWW-QUARANTINE-BRUTEX-001).
     sdk = _FakeSDK(payload=_candles())
     with pytest.raises(RuntimeError, match="genuine bug"):
         run_groww_option_ingest(
@@ -523,6 +525,37 @@ def test_run_non_groww_error_propagates() -> None:
             end=date(2024, 1, 2),
             now_ist=_now,
         )
+
+
+def test_run_out_of_scope_error_quarantines_contract_not_crashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-GROWW-QUARANTINE-BRUTEX-001: a non-GrowwError BruteXError (an OutOfScopeError —
+    # an unresolvable contract symbol) on ONE contract quarantines just that contract and
+    # the bulk option pull CONTINUES, exactly like the spot spine — never a crash.
+    ok, bad = _ce(), _ce2()
+
+    def _fake_fetch(client, *, contract, interval, start, end):
+        del client, interval, start, end
+        if contract.symbol == bad.symbol:
+            raise OutOfScopeError(f"symbol not in Groww universe: {contract.symbol}")
+        return []  # the good contract fetches cleanly (0 bars — a settled empty window)
+
+    monkeypatch.setattr(_oi, "fetch_option_candles", _fake_fetch)
+    report = run_groww_option_ingest(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contracts=[ok, bad],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+    )
+    assert report.failed_pairs == 1
+    assert (ok.symbol, "1day") in report.pairs  # the good contract still landed
+    assert report.failures[0].symbol == bad.symbol
+    assert report.failures[0].auth_failure is False  # a scope error is never auth
+    assert not report.auth_aborted
 
 
 def test_run_report_property_sums() -> None:

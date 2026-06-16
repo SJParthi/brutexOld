@@ -32,7 +32,7 @@ from brutex.adapters.groww.run_ingest import (
     run_groww_spot_ingest_with_retry,
 )
 from brutex.data.candle_fields import CandleParseError
-from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.models import Exchange, Instrument, InstrumentType, OutOfScopeError, Segment
 from brutex.observability.correlation import pull_id_scope
 from structlog.testing import capture_logs
 
@@ -669,6 +669,45 @@ def test_candle_parse_error_quarantines_pair_not_crashes_pull(
     assert report.bars_appended == 5
     (quarantine,) = _events(logs, "ingest.quarantine")
     assert quarantine["error"] == "unparseable open price: None"
+
+
+def test_out_of_scope_error_quarantines_pair_not_crashes_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-GROWW-QUARANTINE-BRUTEX-001 (the operator-observed "779 symbols spot failed:
+    # OutOfScopeError: symbol not in Groww universe: BAJAJ-AUTO"): an OutOfScopeError — a
+    # constituent the niftyindices→Groww match produced that the Groww adapter can't
+    # resolve — is a BruteXError, so it quarantines the ONE symbol and the run CONTINUES,
+    # never crashing the whole 779-symbol bulk pull (the 8,019/10,906 abort in the operator
+    # screenshot).
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        if instrument.symbol_name == "BAJAJ-AUTO":
+            raise OutOfScopeError("symbol not in Groww universe: BAJAJ-AUTO")
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with capture_logs() as logs:
+        report = run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BAJAJ-AUTO", token=88)],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )
+    assert report.failed_pairs == 1
+    assert report.failures == (
+        PairFailure(
+            symbol="BAJAJ-AUTO",
+            interval="1day",
+            error="symbol not in Groww universe: BAJAJ-AUTO",
+            auth_failure=False,  # a scope error is never an auth failure
+        ),
+    )
+    assert ("NIFTY", "1day") in report.pairs  # the other 778 still pull
+    assert report.bars_appended == 5
+    (quarantine,) = _events(logs, "ingest.quarantine")
+    assert "BAJAJ-AUTO" in quarantine["error"]
 
 
 def test_on_window_is_threaded_into_each_pair(monkeypatch: pytest.MonkeyPatch) -> None:
