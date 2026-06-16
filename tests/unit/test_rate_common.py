@@ -21,6 +21,7 @@ from brutex.adapters.rate_common import (
     FLOOR_RPS,
     PER_MIN_WINDOW,
     RATE_LIMIT_STORM_FLOOR_RPS,
+    SNAPSHOT_LOG_INTERVAL_S,
     STEP_DOWN_HITS,
     STEP_DOWN_TIMEOUT_HITS,
     STEP_DOWN_WINDOW,
@@ -691,3 +692,93 @@ class TestPerMinuteGovernor:
             ctl.pace()
             recent = ctl.snapshot()["recent_minute"]
             assert isinstance(recent, int) and recent <= 3
+
+
+# ── DEC-GROWW-RATE-SNAPSHOT-LOG-001 — periodic rate.snapshot telemetry ───────────
+def test_pace_emits_throttled_rate_snapshot() -> None:
+    """`pace` logs a `rate.snapshot` at most once per SNAPSHOT_LOG_INTERVAL_S.
+
+    The visibility gap (DEC-GROWW-RATE-SNAPSHOT-LOG-001): rate.* events fire only on a
+    rung change, so a HOLDING rate logs nothing. The first pace (warm-up grace, < the
+    interval since construction) emits no snapshot; after the interval elapses the next
+    pace emits exactly one, carrying the dashboard-panel gauges.
+    """
+    clock = _Clock()
+    ctl = _controller(clock)
+    with capture_logs() as logs1:
+        ctl.pace()  # t == construction time → within the interval → no snapshot
+    assert [e for e in logs1 if e["event"] == "rate.snapshot"] == []
+    clock.advance(SNAPSHOT_LOG_INTERVAL_S)  # bucket refills + the throttle window elapses
+    with capture_logs() as logs2:
+        ctl.pace()
+    snaps = [e for e in logs2 if e["event"] == "rate.snapshot"]
+    assert len(snaps) == 1
+    assert snaps[0]["current_rps"] == CEILING_RPS
+    assert snaps[0]["recent_hits"] == 0
+    assert snaps[0]["recent_timeouts"] == 0
+    assert snaps[0]["recent_minute"] == 0
+    assert snaps[0]["ceiling_per_min"] is None
+
+
+def test_rate_snapshot_throttles_after_a_log() -> None:
+    """A second call inside the interval after a log is suppressed (the throttle resets)."""
+    clock = _Clock()
+    ctl = _controller(clock)
+    clock.advance(SNAPSHOT_LOG_INTERVAL_S)
+    with capture_logs() as first:
+        ctl._maybe_log_snapshot()
+    assert len([e for e in first if e["event"] == "rate.snapshot"]) == 1
+    clock.advance(SNAPSHOT_LOG_INTERVAL_S - 0.1)  # just under the interval
+    with capture_logs() as second:
+        ctl._maybe_log_snapshot()
+    assert [e for e in second if e["event"] == "rate.snapshot"] == []
+
+
+def test_rate_snapshot_reflects_a_stepped_down_holding_rate() -> None:
+    """The whole point: a stepped-down, HOLDING rate is now visible in the snapshot.
+
+    Drive the controller to the soft floor (the operator's ~3 r/s), let the clock cross
+    the interval with NO rung change, and assert the snapshot reports the floored rate +
+    the recent-429 pressure — the exact data the live log was missing.
+    """
+    clock = _Clock()
+    ctl = _controller(clock)
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # 5→4→3 (the soft floor)
+    assert ctl.current_rps == FLOOR_RPS
+    ctl.on_rate_limit()  # one fresh hit at the floor (no further step) → visible pressure
+    assert ctl.current_rps == FLOOR_RPS
+    clock.advance(SNAPSHOT_LOG_INTERVAL_S)
+    with capture_logs() as logs:
+        ctl._maybe_log_snapshot()
+    snap = next(e for e in logs if e["event"] == "rate.snapshot")
+    assert snap["current_rps"] == FLOOR_RPS  # the HOLDING floored rate, now in /logs
+    assert snap["recent_hits"] >= 1  # the pressure keeping it there is visible
+
+
+def test_recovers_from_floor_up_to_the_injected_8_ceiling() -> None:
+    """DEC-GROWW-RATE-RECOVER-8-001: the INCREMENTAL ladder climbs the soft floor back to
+    the injected 8 r/s ceiling — one rung per clean STEP_UP_WINDOW — and clamps at 8.
+
+    The operator-DIRECTED ceiling is 8 r/s; before this change the 300 s/rung recovery
+    meant a stepped-down pull never reached it within its wall time (stuck at ~3). With
+    STEP_UP_WINDOW == STEP_DOWN_WINDOW (60 s) the climb 3→8 takes ~5 clean windows.
+    """
+    clock = _Clock()
+    ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_rps=8.0)
+    assert ctl.current_rps == 8.0  # starts at the injected ceiling
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 5)  # 8→7→6→5→4→3 (the soft floor)
+    assert ctl.current_rps == FLOOR_RPS
+    # Five clean windows recover 3→4→5→6→7→8 (the DECREMENTAL ladder is untouched).
+    for expected in (4.0, 5.0, 6.0, 7.0, 8.0):
+        clock.advance(STEP_UP_WINDOW)
+        ctl.on_success()
+        assert ctl.current_rps == expected
+    # At the ceiling a further clean window must NOT exceed 8 (clamped).
+    clock.advance(STEP_UP_WINDOW)
+    ctl.on_success()
+    assert ctl.current_rps == 8.0
+
+
+def test_step_up_window_matches_the_step_down_window() -> None:
+    """The incremental window is symmetric with the rolling step-down window (60 s)."""
+    assert STEP_UP_WINDOW == STEP_DOWN_WINDOW == 60.0
