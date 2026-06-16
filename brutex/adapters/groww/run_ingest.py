@@ -51,13 +51,25 @@ if TYPE_CHECKING:
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.candle_fields import CandleParseError
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
-from brutex.models import Instrument
+from brutex.models import BruteXError, Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 from brutex.orchestrator.universe_phases import RunParallel
+
+#: Domain errors that are a GLOBAL stop, NOT one symbol's problem — they must
+#: PROPAGATE past the per-symbol quarantine so the whole pull aborts, never be
+#: isolated as a single pair's failure. A quota signal means the day's budget is
+#: spent (``DailyQuotaExceeded``) or a quota-ledger invariant broke
+#: (``QuotaInvariantError``), so every REMAINING symbol would fail identically;
+#: ``DailyQuotaExceeded`` in particular must reach the controller's
+#: ``except DailyQuotaExceeded`` to raise the loud ``quota_exhausted`` verdict +
+#: resume after the IST-midnight reset (DEC-SPOT-QUOTA-MIDROUND-001). This is the
+#: carve-out that keeps the broad ``BruteXError`` per-symbol quarantine
+#: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
+_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (DailyQuotaExceeded, QuotaInvariantError)
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
 #: + the terminal-failure cause at WARNING (``ingest.quarantine``), both carrying
@@ -210,9 +222,11 @@ def run_groww_spot_ingest(
     The OUTER loop is mapped through *run_parallel* so many windows are in flight
     at once and the pull targets UP TO the rate ceiling when Groww is healthy,
     governed by the shared rate bucket the *pace* hook drives. Each pair writes a
-    DISTINCT lake partition. **Never raises** on a Groww error — a terminal
-    failure on one pair is recorded and the run continues. A non-Groww exception
-    (a genuine bug) is NOT swallowed.
+    DISTINCT lake partition. **Never raises** on a brutex DOMAIN error
+    (:class:`~brutex.models.BruteXError` — incl. ``GrowwError`` / ``CandleParseError`` /
+    ``OutOfScopeError``): a terminal failure on one pair is recorded and the run
+    continues. A genuine CODE bug (a Python builtin like ``ValueError``) is NOT swallowed
+    (DEC-GROWW-QUARANTINE-BRUTEX-001).
 
     Parameters
     ----------
@@ -321,7 +335,7 @@ def run_groww_spot_ingest(
         },
     )
     # Drain the fan-out on the controller thread. on_progress + the quarantine
-    # WARNING fire here (single-threaded). A captured non-GrowwError surfaces.
+    # WARNING fire here (single-threaded). A captured non-BruteXError (a code bug) surfaces.
     for outcome in runner(_run_pair, jobs):
         instrument, interval = outcome.item
         label = f"{instrument.symbol_name} {interval}"
@@ -347,20 +361,30 @@ def run_groww_spot_ingest(
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
             continue
-        if not isinstance(exc, (GrowwError, CandleParseError)):
-            # A genuine bug (e.g. ValueError) escaped a worker — never swallow a
-            # real error: re-raise so the orchestrator never hides a defect. ONLY a
-            # vendor error is quarantined: a GrowwError, OR a CandleParseError on
-            # un-storable vendor data (DEC-CANDLE-PARTIAL-ABSENT-SKIP-001 Layer 2 — every
-            # other error surfaces).
+        if isinstance(exc, _GLOBAL_STOP_ERRORS):
+            # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT a
+            # per-symbol failure — re-raise so it propagates to the controller's
+            # quota handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being
+            # quarantined as one pair (the carve-out from the broad BruteXError
+            # quarantine — DEC-GROWW-QUARANTINE-BRUTEX-001).
             raise exc
-        # Terminal vendor error → isolate this pair, the run continues. A Groww
-        # CandleParseError (e.g. a price PRESENT but unparseable — the case the Layer-1
-        # partial-absent skip in `assemble_candle` does NOT cover) must NEVER crash the
-        # whole 779-symbol pull (the operator-observed "779 symbols spot failed:
-        # CandleParseError: unparseable open price: None"). Quarantine the ONE symbol —
-        # re-tried next pull, never masked — exactly like a terminal GrowwError. Only a
-        # GrowwError can be an auth failure (a parse error never is).
+        if not isinstance(exc, BruteXError):
+            # A genuine CODE bug (a Python builtin: ValueError / AttributeError /
+            # KeyError / TypeError from a defect) escaped a worker — never swallow a real
+            # error: re-raise so the orchestrator never hides a bug. ONLY a brutex DOMAIN
+            # error (every explicit `raise` in the spine subclasses `BruteXError`) is
+            # quarantined — the harden-against-bad-DATA-never-mask-bad-CODE line
+            # (DEC-INSTRUMENT-SKIP-NO-GSYM-001's philosophy, DEC-GROWW-QUARANTINE-BRUTEX-001).
+            raise exc
+        # Terminal DOMAIN error → isolate this pair, the run continues. The base
+        # `BruteXError` covers EVERY "this one symbol can't be pulled" cause that must
+        # NEVER crash the whole 779-symbol bulk pull — the operator hit three of them in
+        # turn: a `GrowwError` (vendor API), a `CandleParseError` (un-storable candle, e.g.
+        # "unparseable open price: None"), and now an `OutOfScopeError` ("symbol not in
+        # Groww universe: BAJAJ-AUTO", a constituent the niftyindices→Groww match produced
+        # that the Groww adapter can't resolve). Quarantine the ONE symbol — re-tried next
+        # pull, never masked — and the pull finishes for the other 778. Only a `GrowwError`
+        # can be an auth failure (a parse / scope error never is).
         auth_failed = isinstance(exc, GrowwError) and is_auth_failure(exc)
         failures.append(
             PairFailure(

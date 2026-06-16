@@ -32,8 +32,16 @@ from brutex.adapters.groww.run_ingest import (
     run_groww_spot_ingest_with_retry,
 )
 from brutex.data.candle_fields import CandleParseError
-from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.models import (
+    BruteXError,
+    Exchange,
+    Instrument,
+    InstrumentType,
+    OutOfScopeError,
+    Segment,
+)
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 from structlog.testing import capture_logs
 
 _START = date(2021, 1, 1)
@@ -669,6 +677,77 @@ def test_candle_parse_error_quarantines_pair_not_crashes_pull(
     assert report.bars_appended == 5
     (quarantine,) = _events(logs, "ingest.quarantine")
     assert quarantine["error"] == "unparseable open price: None"
+
+
+def test_out_of_scope_error_quarantines_pair_not_crashes_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-GROWW-QUARANTINE-BRUTEX-001 (the operator-observed "779 symbols spot failed:
+    # OutOfScopeError: symbol not in Groww universe: BAJAJ-AUTO"): an OutOfScopeError — a
+    # constituent the niftyindices→Groww match produced that the Groww adapter can't
+    # resolve — is a BruteXError, so it quarantines the ONE symbol and the run CONTINUES,
+    # never crashing the whole 779-symbol bulk pull (the 8,019/10,906 abort in the operator
+    # screenshot).
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        if instrument.symbol_name == "BAJAJ-AUTO":
+            raise OutOfScopeError("symbol not in Groww universe: BAJAJ-AUTO")
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with capture_logs() as logs:
+        report = run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BAJAJ-AUTO", token=88)],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )
+    assert report.failed_pairs == 1
+    assert report.failures == (
+        PairFailure(
+            symbol="BAJAJ-AUTO",
+            interval="1day",
+            error="symbol not in Groww universe: BAJAJ-AUTO",
+            auth_failure=False,  # a scope error is never an auth failure
+        ),
+    )
+    assert ("NIFTY", "1day") in report.pairs  # the other 778 still pull
+    assert report.bars_appended == 5
+    (quarantine,) = _events(logs, "ingest.quarantine")
+    assert "BAJAJ-AUTO" in str(quarantine["error"])
+
+
+@pytest.mark.parametrize(
+    "quota_exc",
+    [
+        DailyQuotaExceeded("daily quota of 100000 calls spent"),
+        QuotaInvariantError("quota ledger invariant broke"),
+    ],
+)
+def test_global_stop_quota_error_propagates_not_quarantined(
+    monkeypatch: pytest.MonkeyPatch, quota_exc: BruteXError
+) -> None:
+    # DEC-GROWW-QUARANTINE-BRUTEX-001 carve-out: a quota signal is a GLOBAL stop, NOT one
+    # symbol's problem — every remaining symbol would fail the same way — so it must
+    # PROPAGATE out of run_groww_spot_ingest to the controller's quota handling
+    # (DEC-SPOT-QUOTA-MIDROUND-001 → the loud quota_exhausted verdict), NEVER be quarantined
+    # per-symbol like an OutOfScopeError. Without the carve-out the broad BruteXError
+    # quarantine swallowed DailyQuotaExceeded and the quota verdict never fired — the exact
+    # regression (TestQuotaDeathMidRound) this test locks shut.
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        raise quota_exc
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with pytest.raises(type(quota_exc)):
+        run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BANKNIFTY", token=77)],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )
 
 
 def test_on_window_is_threaded_into_each_pair(monkeypatch: pytest.MonkeyPatch) -> None:
