@@ -34,6 +34,7 @@ from typing import Protocol, runtime_checkable
 
 import structlog
 
+from brutex.adapters.call_meter import CallMeter
 from brutex.adapters.groww.errors import (
     GrowwRateLimitError,
     from_groww_exception,
@@ -159,6 +160,13 @@ class GrowwClient:
     #: Wall-clock source for the per-call latency log (DEC-GROWW-CALL-LATENCY-LOG-001);
     #: injected in tests for deterministic ``elapsed_ms`` assertions.
     clock: Callable[[], float] = time.perf_counter
+    #: ACHIEVED-throughput meter (DEC-GROWW-RATE-ACHIEVED-METER-001) — records every
+    #: physical call's start/stop so the dashboard + ``/logs`` show the REAL calls/s
+    #: (not the controller's target). Defaults to a private per-client meter; the live
+    #: pull injects ONE shared meter so a multi-connection pool reports an aggregate.
+    #: Excluded from eq/repr — it is mutable observability state, not client identity
+    #: (two clients differing only by meter instance stay equal; ``replace`` keeps it).
+    meter: CallMeter = field(default_factory=CallMeter, compare=False, repr=False)
 
     def _call(
         self, fn: Callable[[], Mapping[str, object]], *, label: str = ""
@@ -180,6 +188,12 @@ class GrowwClient:
         while True:
             attempt += 1
             self.pace()
+            # Bracket the physical call for the achieved-throughput meter
+            # (DEC-GROWW-RATE-ACHIEVED-METER-001): start AFTER pace() so in-flight
+            # measures the call itself, not the token wait; stop on BOTH outcomes so the
+            # in-flight slot is always released (a failed attempt counts only its
+            # in-flight, never as achieved throughput — that stays SUCCESSFUL calls).
+            self.meter.start()
             started = self.clock()
             try:
                 # Bound EVERY physical call by the wall-clock deadline so a stalled
@@ -191,6 +205,9 @@ class GrowwClient:
                     else run_with_deadline(fn, self.call_timeout_seconds)
                 )
             except Exception as exc:  # broad: any SDK error → neutral GrowwError
+                self.meter.stop(
+                    elapsed_ms=round((self.clock() - started) * 1000.0, 1), completed=False
+                )
                 err = from_groww_exception(exc)
                 if isinstance(err, GrowwRateLimitError):
                     self.on_rate_limit()  # decrement the shared bucket on EVERY 429
@@ -204,6 +221,10 @@ class GrowwClient:
                     continue
                 raise err from exc
             else:
+                elapsed_ms = round((self.clock() - started) * 1000.0, 1)
+                # A clean call IS achieved throughput — record it (completed=True) so the
+                # meter's achieved-rate gauges count it (DEC-GROWW-RATE-ACHIEVED-METER-001).
+                self.meter.stop(elapsed_ms=elapsed_ms, completed=True)
                 self.on_success()  # recover the rate up on a clean call
                 # Per-call latency observability (DEC-GROWW-CALL-LATENCY-LOG-001): the
                 # REAL response time of THIS Groww REST call, so the operator can SEE
@@ -212,7 +233,7 @@ class GrowwClient:
                     "groww.call",
                     method=label,
                     attempt=attempt,
-                    elapsed_ms=round((self.clock() - started) * 1000.0, 1),
+                    elapsed_ms=elapsed_ms,
                 )
                 return result
 
