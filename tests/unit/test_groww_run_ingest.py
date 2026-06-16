@@ -682,7 +682,8 @@ def test_on_window_is_threaded_into_each_pair(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
 
-    def _tick() -> None: ...
+    def _tick() -> None:
+        pass
 
     run_groww_spot_ingest(
         object(),  # type: ignore[arg-type]
@@ -705,7 +706,8 @@ def test_with_retry_threads_on_window(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
 
-    def _tick() -> None: ...
+    def _tick() -> None:
+        pass
 
     run_groww_spot_ingest_with_retry(
         object(),  # type: ignore[arg-type]
