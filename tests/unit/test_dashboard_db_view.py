@@ -637,11 +637,12 @@ class TestSpotWindowRollup:
 
         assert spot_window_rollup(tmp_path) == {}
 
-    def test_groups_settled_pending_failed_and_excludes_options(self, tmp_path: Path) -> None:
+    def test_groups_resolved_pending_failed_and_excludes_options(self, tmp_path: Path) -> None:
         from brutex.dashboard.db_view import spot_window_rollup
 
         ledger = WindowLedger()
-        # SUCCESS + SKIPPED → settled; PLANNED + EMPTY → pending; FAILED → failed.
+        # SUCCESS + SKIPPED + EMPTY → resolved; PLANNED → pending; FAILED → failed
+        # (DEC-EMPTY-RESOLVED-REPORTING-001 — EMPTY is no-data-RESOLVED, not pending).
         ledger.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
         )
@@ -674,7 +675,7 @@ class TestSpotWindowRollup:
                 end=date(2022, 1, 1),
             ),
             raw_bars=0,
-            error_type=None,  # clean EMPTY (below threshold) — outstanding work
+            error_type=None,  # clean EMPTY (no data) — RESOLVED, NOT pending
             bars_appended=0,
             now=_WINDOW_NOW,
         )
@@ -697,7 +698,8 @@ class TestSpotWindowRollup:
 
         rollup = spot_window_rollup(tmp_path)
         assert rollup == {
-            ("NIFTY", "1minute"): (2, 2, 0),
+            # resolved=3 (SUCCESS+SKIPPED+EMPTY), pending=1 (PLANNED only), failed=0
+            ("NIFTY", "1minute"): (3, 1, 0),
             ("NIFTY", "1day"): (0, 0, 1),
         }
 

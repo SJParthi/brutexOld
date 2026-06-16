@@ -1841,14 +1841,19 @@ _SPOT_ROLLUP_CACHE: dict[str, tuple[int, dict[tuple[str, str], tuple[int, int, i
 
 
 def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int, int]]:
-    """Group the spot fetch-window ledger into ``(symbol, interval) → (settled, pending, failed)``.
+    """Group the spot fetch-window ledger into ``(symbol, interval) → (resolved, pending, failed)``.
 
     The completeness source for the /coverage spot chips
-    (DEC-SPOT-COVERAGE-COMPLETENESS-001): counts come ONLY from the unified
-    window ledger — settled is the ledger's OWN skip authority
-    (:data:`~brutex.data.window_ledger.SETTLED_STATUSES` = SUCCESS+SKIPPED),
-    failed is ``FAILED``, and everything else (PLANNED + below-threshold EMPTY)
-    is pending work the next pull re-fetches. Option rows
+    (DEC-SPOT-COVERAGE-COMPLETENESS-001 + DEC-EMPTY-RESOLVED-REPORTING-001): counts come
+    ONLY from the unified window ledger — ``resolved`` is the ledger's COMPLETION
+    authority (:data:`~brutex.data.window_ledger.RESOLVED_STATUSES` =
+    SUCCESS+SKIPPED+**EMPTY**: a genuine no-data window is RESOLVED, never "pending",
+    because a wholly-past empty window can never gain data), ``failed`` is ``FAILED``,
+    and ``pending`` is ``PLANNED`` ONLY — genuinely-unfetched work a re-pull WILL attempt.
+    (EMPTY moved OUT of "pending" into "resolved", so the chip no longer marks an
+    all-empty pre-listing dataset "pending / re-pull".) The SKIP authority
+    (``SETTLED_STATUSES`` = SUCCESS+SKIPPED) is UNCHANGED — a below-threshold EMPTY is
+    still re-fetched next pull; only what the CHIP counts changed. Option rows
     (``market == _OPTION_WINDOW_MARKET``) are excluded by the EXACT spot-market filter.
 
     A lake with NO ledger Parquet returns ``{}`` (every fetch-interval chip
@@ -1859,7 +1864,7 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
 
     O(rows) once per ledger flush (mtime-keyed cache); O(1) per cached call.
     """
-    from brutex.data.window_ledger import FAILED, SETTLED_STATUSES
+    from brutex.data.window_ledger import FAILED, RESOLVED_STATUSES
     from brutex.data.window_ledger_store import ledger_path
 
     path = ledger_path(lake_root)
@@ -1876,11 +1881,11 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
         if record.market != _SPOT_WINDOW_MARKET:
             continue
         cell = counts.setdefault((record.security_id, record.interval), [0, 0, 0])
-        if record.status in SETTLED_STATUSES:
-            cell[0] += 1
+        if record.status in RESOLVED_STATUSES:
+            cell[0] += 1  # SUCCESS + SKIPPED + EMPTY — resolved (a no-data window IS done)
         elif record.status == FAILED:
             cell[2] += 1
-        else:  # PLANNED + below-threshold EMPTY — outstanding work
+        else:  # PLANNED only — genuinely-unfetched work a re-pull WILL attempt
             cell[1] += 1
     rollup = {k: (v[0], v[1], v[2]) for k, v in counts.items()}
     with _WINDOW_CACHE_LOCK:
