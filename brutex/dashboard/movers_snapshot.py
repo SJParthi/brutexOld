@@ -43,12 +43,15 @@ from datetime import UTC, datetime
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from brutex.data.models import CandleBar
 from brutex.data.spot_features import pct_change
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.money import format_inr, round_money, rupees_to_paisa
+
+if TYPE_CHECKING:
+    import polars as pl
 
 __all__ = [
     "DEFAULT_INTERVAL",
@@ -455,6 +458,56 @@ def _read_session_bars(
     return [_row_to_bar(row) for row in res.iter_rows(named=True)]
 
 
+def _read_daily_partition(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str
+) -> pl.DataFrame | None:
+    """Return the symbol's full stored ``1day`` frame, or ``None`` when absent.
+
+    The one place that opens the ``<lake>/bars/.../1day`` partitions — both the
+    prior-day-close lookup and the daily-snapshot reader go through it, so the
+    path + the parquet-existence guard live in exactly one spot (CLAUDE.md §11
+    COMMON). ``None`` when the directory is missing or holds no parquet (a
+    never-pulled symbol), so every caller degrades honestly (Golden Rule #1).
+    """
+    import polars as pl
+
+    base = lake_root / "bars" / exchange / segment / symbol / "1day"
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return None
+    return pl.read_parquet(base.as_posix() + "/**/*.parquet")
+
+
+def _read_daily_bars(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> list[CandleBar]:
+    """Read *day*'s stored ``1day`` bar(s) directly — NO 1-minute resample.
+
+    The VERIFY-FIRST **1-day-only** default pull (``DEC-PULL-1DAY-FIRST-001``,
+    MIGRATION.md #723) populates ONLY the ``1day`` partitions, so the daily
+    movers timeframe reads them straight off disk (the same partitions
+    :func:`_prev_day_close` reads) instead of resampling the absent ``1minute``
+    series — that absence is exactly why a 1-day-only pull showed "no spot data"
+    before. For a daily timeframe "the bar IS the day": there is no intraday
+    cutoff. Returns the (≤1) bar whose IST trading date equals *day*, or ``[]``
+    when the symbol has no 1-day bar on *day* (the caller reports it skipped,
+    never fabricated — Golden Rule #1).
+    """
+    import polars as pl
+
+    df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
+    if df is None:
+        return []
+    sel = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() == day).sort(
+        "timestamp"
+    )
+    if sel.is_empty():
+        return []
+    # The 1-day partition stores the lake instant in `timestamp`; the shared
+    # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
+    # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
+    return [_row_to_bar(row) for row in sel.rename({"timestamp": "ts_utc"}).iter_rows(named=True)]
+
+
 def _prev_day_close(
     lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
 ) -> Decimal | None:
@@ -467,10 +520,9 @@ def _prev_day_close(
     """
     import polars as pl
 
-    base = lake_root / "bars" / exchange / segment / symbol / "1day"
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+    df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
+    if df is None:
         return None
-    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
     prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
         "timestamp"
     )
@@ -490,13 +542,24 @@ def run_movers_snapshot(
 ) -> dict[str, Any]:
     """Compute the spot movers snapshot over the lake → the ``/api/v1/movers`` payload.
 
-    Discovers every spot instrument with 1-minute data
-    (:func:`~brutex.dashboard.db_view.list_candle_datasets`), reads each one's
-    selected-day session bars at *interval* up to *time*, takes the previous
+    Discovers every spot instrument that has data at the timeframe being asked
+    for (:func:`~brutex.dashboard.db_view.list_candle_datasets`), reads each
+    one's selected-day bar(s) at *interval* up to *time*, takes the previous
     day's 1-day close, computes the per-instrument :class:`MoverSnapshot`, and
-    ranks them into the per-category payload. An empty lake (or an unknown
-    interval) yields an honest "pull spot first" payload — never a 500, never a
-    fabricated mover (Golden Rule #1).
+    ranks them into the per-category payload.
+
+    The discovery + read path depends on the timeframe (so the page works for
+    EITHER pull granularity — ``DEC-PULL-1DAY-FIRST-001``):
+
+    * **Daily** (``1day``, the page default) → discover + read the stored
+      ``1day`` partitions DIRECTLY (:func:`_read_daily_bars`). The VERIFY-FIRST
+      1-day-only pull populates only these, so a daily snapshot must NOT require
+      1-minute data (the bug this fixes: a 1-day-only lake showed "no spot data").
+    * **Intraday** (``1minute`` … ``4hour``) → discover the ``1minute``
+      partitions and resample to *interval* up to *time* (:func:`_read_session_bars`).
+
+    An empty lake (or an unknown interval) yields an honest "pull spot first"
+    payload — never a 500, never a fabricated mover (Golden Rule #1).
 
     Raises
     ------
@@ -508,26 +571,45 @@ def run_movers_snapshot(
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
-    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    if minutes is None:
+        return build_snapshot_payload(
+            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
+        )
+
+    is_daily = minutes >= _DAILY_MIN_FLOOR
+    cutoff_min = None if is_daily else _cutoff_minute(time)
     resolved_names = names or {}
-    one_minute = [d for d in list_candle_datasets(lake_root) if d["interval"] == "1minute"]
-    if minutes is None or not one_minute:
+    # A daily snapshot reads the `1day` partitions directly (the VERIFY-FIRST
+    # 1-day-only pull populates ONLY those — DEC-PULL-1DAY-FIRST-001); an
+    # intraday snapshot resamples the `1minute` partitions.
+    discovery_interval = "1day" if is_daily else "1minute"
+    datasets = [d for d in list_candle_datasets(lake_root) if d["interval"] == discovery_interval]
+    if not datasets:
         return build_snapshot_payload(
             [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
         )
 
     snapshots: list[MoverSnapshot] = []
     skipped = 0
-    for dataset in one_minute:
-        bars = _read_session_bars(
-            lake_root,
-            exchange=dataset["exchange"],
-            segment=dataset["segment"],
-            symbol=dataset["symbol"],
-            day=day,
-            minutes=minutes,
-            cutoff_min=cutoff_min,
-        )
+    for dataset in datasets:
+        if is_daily:
+            bars = _read_daily_bars(
+                lake_root,
+                exchange=dataset["exchange"],
+                segment=dataset["segment"],
+                symbol=dataset["symbol"],
+                day=day,
+            )
+        else:
+            bars = _read_session_bars(
+                lake_root,
+                exchange=dataset["exchange"],
+                segment=dataset["segment"],
+                symbol=dataset["symbol"],
+                day=day,
+                minutes=minutes,
+                cutoff_min=cutoff_min,
+            )
         # Skip the prior-day 1-day read entirely when the symbol had no bars on
         # the selected day (no point computing a baseline for nothing).
         prev_close = (
