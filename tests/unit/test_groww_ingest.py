@@ -879,7 +879,10 @@ class TestOnWindowTick:
 
         ledger = WindowLedger()
         # Pre-settle both daily windows as SUCCESS so the pull skips them.
-        for ws, we in ((date(2021, 1, 1), date(2021, 6, 30)), (date(2021, 6, 30), date(2021, 8, 1))):
+        for ws, we in (
+            (date(2021, 1, 1), date(2021, 6, 30)),
+            (date(2021, 6, 30), date(2021, 8, 1)),
+        ):
             ledger.record(
                 WindowKey(market="groww", security_id="NIFTY", interval="1day", start=ws, end=we),
                 raw_bars=5,
