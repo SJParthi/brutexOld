@@ -96,6 +96,16 @@ _LOG = structlog.get_logger("brutex.adapters.groww.ingest")
 #: Pacing hook invoked once before each window fetch (e.g. token-bucket acquire).
 Pacer = Callable[[], None]
 
+#: Per-window live-sync PING fired once per PROCESSED window (skipped / clean / empty /
+#: transient), on the window worker thread (DEC-SPOT-WINDOW-PROGRESS-001). It lets the
+#: dashboard advance its progress bar + flush /coverage per WINDOW — the missing piece
+#: behind the operator-observed "stuck at N/779": ``on_progress`` only fires once a whole
+#: symbol's multi-year backfill finishes, so both surfaces froze for minutes between
+#: symbol completions even while windows kept landing. A no-arg ping keeps the hot path
+#: O(1); ALL throttling + thread-safety is the CALLER's contract (the dashboard's
+#: ``make_live_sync`` guards it). ``None`` (CLI / tests) is a no-op.
+WindowTick = Callable[[], None]
+
 #: Canonical daily interval — the only interval not session-filtered.
 _DAILY: str = "1day"
 
@@ -214,6 +224,7 @@ def ingest_spot(
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    on_window: WindowTick | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -254,6 +265,12 @@ def ingest_spot(
         :func:`_default_retry_backoff`). Tests pass a no-op recorder.
     now_ist
         Injected IST clock for the current-day clamp (``None`` → :func:`_now_ist`).
+    on_window
+        Optional :data:`WindowTick` fired once per PROCESSED window (DEC-SPOT-WINDOW-
+        PROGRESS-001) so the dashboard can advance its bar + flush /coverage per WINDOW
+        instead of only when the whole series finishes. Fired on the window worker thread
+        AFTER the window's ledger outcome is recorded; the caller owns throttle +
+        thread-safety. ``None`` (CLI / tests) is a no-op.
 
     Returns
     -------
@@ -327,6 +344,13 @@ def ingest_spot(
         b = t = s = c = 0
         failed: list[tuple[date, date]] = []
         for outcome in runner(_fetch_window, pending):
+            # Per-window live-sync ping (DEC-SPOT-WINDOW-PROGRESS-001): the window's ledger
+            # outcome is already recorded by the time its result is yielded, so a ping here
+            # lets the dashboard reflect THIS window (throttled by the caller). Fired for
+            # every processed window — skip / clean / empty / transient AND the terminal
+            # case below (the window WAS attempted) — before the terminal re-raise.
+            if on_window is not None:
+                on_window()
             if outcome.ok:
                 result = outcome.result
                 if result is None:  # pragma: no cover — ok=True always carries a result
@@ -583,6 +607,7 @@ def _ingest_one_window(
 __all__ = [
     "IngestReport",
     "Pacer",
+    "WindowTick",
     "clamp_window_end",
     "ingest_spot",
 ]

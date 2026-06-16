@@ -76,6 +76,7 @@ from brutex.adapters.ingest_common import (
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.tf_autoderive import autoderive_enabled
+from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
     end_pull_ledger,
@@ -873,6 +874,74 @@ def _live_rate_runtime(
     return hooks, _spot_run_parallel(controller), controller  # pragma: no cover — live only
 
 
+#: Push the bulk spot pull's live WINDOW-level progress to the dashboard bar:
+#: ``(completed, total, bars, failed, current)`` — the settled / total / bars / failed
+#: window counts + the most-recently-attempted ``"<symbol> <interval>"`` label
+#: (DEC-SPOT-WINDOW-PROGRESS-001).
+OnLedgerSync = Callable[[int, int, int, int, str], None]
+
+#: Minimum seconds between WINDOW-level live-sync pushes (DEC-SPOT-WINDOW-PROGRESS-001).
+#: ~1 s feels live to the operator yet is far coarser than the per-window fetch, so the
+#: O(N) ledger fold + the (separately throttled) Parquet flush never run per window and
+#: never dominate wall time. Mirrors the live-ledger-flush cadence floor.
+LIVE_SYNC_INTERVAL_S: Final[float] = 1.0
+
+
+def make_live_sync(
+    ledger: WindowLedger | None,
+    ledger_flush: Callable[[], None],
+    on_ledger_sync: OnLedgerSync | None,
+    *,
+    min_interval_s: float = LIVE_SYNC_INTERVAL_S,
+    clock: Callable[[], float] | None = None,
+) -> Callable[[], None]:
+    """Build a THROTTLED, thread-safe per-window live-sync callback (DEC-SPOT-WINDOW-PROGRESS-001).
+
+    The bulk spot pull advanced its dashboard bar + flushed /coverage ONLY when a whole
+    ``(symbol, interval)`` pair finished its multi-year backfill (``on_progress`` fires once
+    per pair). With a modest pool sharing one adaptively-stepped-down rate bucket, a wave of
+    symbols takes minutes — so BOTH surfaces sat frozen for minutes mid-pull (the
+    operator-observed "stuck at 24/779") even though windows kept landing. This returns the
+    callback the ingest fires once per WINDOW (:data:`~brutex.adapters.groww.ingest.WindowTick`):
+    at most once per *min_interval_s* it flushes the ledger (so /coverage/windows ticks live)
+    and folds the ledger's O(N) :class:`~brutex.data.window_ledger.LedgerProgress`, pushing
+    it to *on_ledger_sync* (so the units bar advances per settled WINDOW — the spot twin of
+    the metadata pull's per-call tick).
+
+    Driven by REAL fetch activity (not a timer), the bar moves whenever windows land and
+    stops moving exactly when the pull stalls — an honest live signal. The fold is absolute,
+    so a repeated fire never double-counts a window the retry rounds re-touch.
+
+    Thread-safe (``on_window`` fires from the ingest worker threads): one lock guards the
+    throttle claim + the (non-thread-safe) ``ledger_flush`` + the O(N) fold, so the flush is
+    single-flight and the ledger Parquet is never written by two threads at once; the O(1)
+    *on_ledger_sync* push runs lock-free. A ``None`` *ledger* / *on_ledger_sync* (dry-run /
+    non-dashboard) yields a no-op (the CLI / synthetic paths pay nothing). *clock* /
+    *min_interval_s* are injectable for deterministic tests.
+    """
+    if ledger is None or on_ledger_sync is None:
+        return lambda: None
+    from time import monotonic
+
+    tick = clock if clock is not None else monotonic
+    lock = threading.Lock()
+    last_sync: list[float | None] = [None]
+
+    def _sync() -> None:
+        now = tick()
+        with lock:
+            if last_sync[0] is not None and now - last_sync[0] < min_interval_s:
+                return
+            last_sync[0] = now
+            ledger_flush()
+            progress = ledger.progress_counts()
+        on_ledger_sync(
+            progress.settled, progress.total, progress.bars, progress.failed, progress.current
+        )
+
+    return _sync
+
+
 def pull_all_spot(
     instruments: Sequence[Instrument],
     *,
@@ -891,6 +960,7 @@ def pull_all_spot(
     auto_retry: bool = False,
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
+    on_ledger_sync: OnLedgerSync | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
 
@@ -953,6 +1023,15 @@ def pull_all_spot(
         auto-resume budget, DEC-AUTO-RESUME-QUOTA-001). Never infinite (Golden
         Rule #10): the loop self-terminates on clean / token-dead / quota-spent /
         no-progress well before this cap, which is only the final backstop.
+    on_ledger_sync
+        Optional :data:`OnLedgerSync` (the dashboard wires it; CLI / tests pass ``None``).
+        When set, the pull advances the dashboard bar + flushes /coverage per WINDOW via a
+        throttled, thread-safe :func:`make_live_sync` callback fired once per fetched window
+        (DEC-SPOT-WINDOW-PROGRESS-001), instead of only when a whole symbol's backfill
+        finishes — so a long backfill never LOOKS frozen. When set, the live-sync owns the
+        ledger flush (the per-pair flush is suppressed so there is one writer); a final
+        unthrottled push lands the exact end state. ``None`` keeps the prior per-pair flush
+        + no window sync (byte-unchanged for every non-dashboard caller).
 
     Returns
     -------
@@ -1056,11 +1135,20 @@ def pull_all_spot(
         # 0 until pull end. The legacy status-sidecar flush was write-retired
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001).
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
+        # WINDOW-level live sync (DEC-SPOT-WINDOW-PROGRESS-001): when the dashboard wires
+        # ``on_ledger_sync`` the pull advances the bar + flushes /coverage per fetched
+        # WINDOW (so a long backfill never LOOKS frozen between minutes-apart symbol
+        # completions). The throttled, thread-safe callback OWNS the ledger flush in that
+        # mode (single writer, no race), so the per-pair flush below is suppressed;
+        # otherwise the per-pair flush is byte-unchanged.
+        live_sync = make_live_sync(ledger, ledger_flush, on_ledger_sync)
+        live_sync_active = on_ledger_sync is not None and ledger is not None
 
         def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
                 on_progress(label, bars, failed)
-            ledger_flush()
+            if not live_sync_active:
+                ledger_flush()
 
         # The "Retry failed windows" button passes ``auto_retry=True`` so leftover
         # failed windows are auto-re-pulled in bounded rounds AFTER the pull (only
@@ -1095,6 +1183,7 @@ def pull_all_spot(
                 ledger=ledger,
                 run_parallel=run_parallel,
                 auto_retry=do_retry,
+                on_window=live_sync,
             )
             passes.append(res)
             return res
@@ -1194,6 +1283,14 @@ def pull_all_spot(
             # nest here was write-retired (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) —
             # the ledger is the skip authority (DEC-WINDOW-LEDGER-001).
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+            # Final authoritative window-progress push (DEC-SPOT-WINDOW-PROGRESS-001): the
+            # throttled live-sync may have suppressed the last tick, so land the EXACT end
+            # state on the dashboard bar. Runs single-threaded here (the pull is done — no
+            # worker can race it), in the finally so even a crash/abort lands the partial
+            # progress (the operator sees how far the pull got, e.g. "5,819/10,906").
+            if on_ledger_sync is not None and ledger is not None:
+                final = ledger.progress_counts()
+                on_ledger_sync(final.settled, final.total, final.bars, final.failed, final.current)
         # Per-symbol rollup = the FIRST pass's report (the until-clean contract).
         # A quota death before ANY pass completed leaves no per-pair information —
         # the empty fallback rolls every symbol up as zeros (the quota verdict

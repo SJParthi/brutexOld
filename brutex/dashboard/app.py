@@ -1485,9 +1485,27 @@ def build_app(
 
             # Adapt the job's 4-arg hook (label, bars, failed, gap) onto the
             # Groww spot ProgressHook (label, bars, failed) — Groww has no
-            # known-gap concept, so ``gap`` is always ``False`` here (PR-J4b).
+            # known-gap concept, so ``gap`` is always ``False`` here (PR-J4b). In
+            # ledger-synced mode this only refreshes the "current symbol" label —
+            # the bar's counters come from _ledger_sync (DEC-SPOT-WINDOW-PROGRESS-001).
             def _spot_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
+
+            # WINDOW-level live progress (DEC-SPOT-WINDOW-PROGRESS-001): the pull pushes
+            # the live WindowLedger counts (settled / total / bars / failed + the
+            # currently-fetching symbol) here on a ~1 s cadence, so the units bar +
+            # /coverage advance per WINDOW instead of freezing for minutes between symbol
+            # completions (the operator-observed "stuck at 24/779").
+            def _ledger_sync(
+                completed: int, total: int, bars: int, failed: int, current: str
+            ) -> None:
+                _pull_job.sync_from_ledger(
+                    completed=completed,
+                    total=total,
+                    bars=bars,
+                    failed=failed,
+                    current=current,
+                )
 
             report = pull_all_spot(
                 instruments,
@@ -1502,14 +1520,21 @@ def build_app(
                 session_rate=_session_rate,
                 auto_retry=True,
                 until_clean=True,
+                on_ledger_sync=_ledger_sync,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
-        # total = symbols × the chosen fetch intervals (1d / 1m / both) — the unit
-        # the progress hook fires on (DEC-PULL-1DAY-FIRST-001).
+        # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
+        # placeholder the first per-WINDOW ledger sync re-scales to the planned window
+        # count within ~1 s (DEC-SPOT-WINDOW-PROGRESS-001; the bar then tracks settled
+        # WINDOWS, matching the /coverage "settled" headline).
         unit_total = len(instruments) * len(fetch_intervals)
-        started = _pull_job.start(_work, total=unit_total, detail=detail)
+        # ledger_synced=True: the per-pair hook only refreshes the "current" label; the
+        # bar's completed / total / bars / failed are driven per-WINDOW from the live
+        # WindowLedger via _ledger_sync, so it advances continuously instead of ticking
+        # once per finished symbol (DEC-SPOT-WINDOW-PROGRESS-001).
+        started = _pull_job.start(_work, total=unit_total, detail=detail, ledger_synced=True)
         return JSONResponse(
             {
                 "started": started,

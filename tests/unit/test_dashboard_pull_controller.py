@@ -37,6 +37,7 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     TimeframeResult,
     default_date_range,
+    make_live_sync,
     parse_symbol_list,
     pull_all_spot,
     pull_candles,
@@ -1223,3 +1224,128 @@ class TestStatusSidecarWriteRetired:
         legacy = [r for r in load_window_ledger(tmp_path).records() if r.security_id == "LEGACY"]
         assert len(legacy) == 1
         assert legacy[0].status == "SUCCESS"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-SPOT-WINDOW-PROGRESS-001 — per-WINDOW live sync
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _ListClock:
+    """A clock returning a fixed sequence of monotonic values (deterministic throttle)."""
+
+    def __init__(self, times: Sequence[float]) -> None:
+        self._times = list(times)
+        self._i = 0
+
+    def __call__(self) -> float:
+        value = self._times[self._i]
+        self._i += 1
+        return value
+
+
+class TestMakeLiveSync:
+    """The throttled, idempotent per-window live-sync callback."""
+
+    def test_none_ledger_is_a_noop(self) -> None:
+        calls: list[int] = []
+        sync = make_live_sync(None, lambda: calls.append(1), lambda *_a: calls.append(2))
+        sync()
+        assert calls == []  # nothing flushed, nothing pushed
+
+    def test_none_on_ledger_sync_is_a_noop(self) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        calls: list[int] = []
+        sync = make_live_sync(WindowLedger(), lambda: calls.append(1), None)
+        sync()
+        assert calls == []
+
+    def test_throttles_flush_and_push(self) -> None:
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        ledger.record(
+            WindowKey(
+                market="groww",
+                security_id="NIFTY",
+                interval="1day",
+                start=date(2020, 1, 1),
+                end=date(2020, 6, 29),
+            ),
+            raw_bars=120,
+            error_type=None,
+            bars_appended=120,
+            now=_BULK_NOW,
+        )
+        flushes: list[int] = []
+        pushes: list[tuple[int, int, int, int, str]] = []
+        sync = make_live_sync(
+            ledger,
+            lambda: flushes.append(1),
+            lambda c, t, b, f, cur: pushes.append((c, t, b, f, cur)),
+            min_interval_s=1.0,
+            clock=_ListClock([0.0, 0.5, 1.5]),
+        )
+        sync()  # t=0.0 → first fire (no prior)
+        sync()  # t=0.5 → within interval → throttled
+        sync()  # t=1.5 → interval elapsed → fires again
+        assert len(flushes) == 2
+        assert pushes == [(1, 1, 120, 0, "NIFTY 1day"), (1, 1, 120, 0, "NIFTY 1day")]
+
+
+class TestPullAllSpotLedgerSync:
+    """`pull_all_spot(on_ledger_sync=...)` drives the bar from the live ledger."""
+
+    def test_final_sync_reports_complete_ledger(self, tmp_path: Path) -> None:
+        pushes: list[tuple[int, int, int, int, str]] = []
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+            on_ledger_sync=lambda c, t, b, f, cur: pushes.append((c, t, b, f, cur)),
+        )
+        assert report.dry_run is False
+        # The FINAL authoritative push (in the finally) lands the complete end state: every
+        # planned window settled (completed == total), zero failed, bars accrued, and the
+        # current label names the symbol — so the bar reaches 100% honestly.
+        assert pushes, "on_ledger_sync must receive at least the final push"
+        completed, total, bars, failed, current = pushes[-1]
+        assert total > 0
+        assert completed == total  # all windows settled SUCCESS
+        assert failed == 0
+        assert bars > 0
+        assert current.startswith("13 ")
+
+    def test_final_sync_lands_even_on_partial_progress(self, tmp_path: Path) -> None:
+        # An EMPTY-returning adapter settles 0 windows as SUCCESS, but the final push must
+        # STILL fire (in the finally) so the operator sees how far the pull got — the
+        # honest partial-progress signal behind the crash screenshot's "5,819 settled".
+        pushes: list[tuple[int, int, int, int, str]] = []
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+            on_ledger_sync=lambda c, t, b, f, cur: pushes.append((c, t, b, f, cur)),
+        )
+        assert pushes
+        completed, total, _bars, _failed, _current = pushes[-1]
+        assert total > 0
+        assert completed == 0  # EMPTY windows are pending, not settled — honest
+
+    def test_dry_run_does_not_push(self, tmp_path: Path) -> None:
+        # Dry-run has no ledger (begin_pull_ledger → None), so the live sync is a no-op.
+        pushes: list[object] = []
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            on_ledger_sync=lambda *a: pushes.append(a),
+        )
+        assert pushes == []

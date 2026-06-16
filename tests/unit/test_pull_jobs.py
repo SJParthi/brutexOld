@@ -226,3 +226,68 @@ def test_no_summary_cache_means_no_invalidation_branch() -> None:
     job = _job()
     job.start(lambda on_progress: on_progress("X 1minute", 1, False, False), total=1)
     assert job.snapshot().state == STATE_DONE
+
+
+class _Cache:
+    """A minimal mark_dirty-able double (CLAUDE.md §4 — behaviour not concrete type)."""
+
+    def __init__(self) -> None:
+        self.dirty = 0
+
+    def mark_dirty(self) -> None:
+        self.dirty += 1
+
+
+class TestLedgerSynced:
+    """DEC-SPOT-WINDOW-PROGRESS-001: ledger-synced mode drives the bar per WINDOW."""
+
+    def test_sync_from_ledger_sets_absolute_bar(self) -> None:
+        cache = _Cache()
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, summary_cache=cache
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            job.sync_from_ledger(
+                completed=118, total=10906, bars=12054, failed=0, current="NIFTYSMALL 1day"
+            )
+
+        job.start(work, total=779, ledger_synced=True)
+        snap = job.snapshot()
+        assert snap.total == 10906
+        assert snap.completed == 118
+        assert snap.bars == 12054
+        assert snap.current == "NIFTYSMALL 1day"
+        assert cache.dirty >= 1  # the sync refreshes the coverage summary mid-pull
+
+    def test_synced_mode_per_pair_hook_only_sets_label_not_completed(self) -> None:
+        # In ledger-synced mode the per-pair hook must NOT advance completed (the bar
+        # comes from the ledger sync); it only refreshes the "current" label + counters.
+        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+
+        def work(on_progress: ProgressHook) -> None:
+            on_progress("NIFTY 1day", 500, False, False)  # a finished pair
+            on_progress("BANKNIFTY 1day", 700, False, False)
+
+        job.start(work, total=10, ledger_synced=True)
+        snap = job.snapshot()
+        assert snap.completed == 0  # NOT advanced per pair (ledger drives it)
+        assert snap.bars == 0  # bars come from the ledger sync, not the per-pair hook
+        assert snap.current == "BANKNIFTY 1day"  # label still refreshed
+        assert job.counters.snapshot().total_bars == 1200  # counters still fed (500 + 700)
+
+    def test_default_mode_still_advances_per_pair(self) -> None:
+        # ledger_synced defaults to False → the per-pair advance is byte-unchanged.
+        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job.start(lambda h: h("NIFTY 1day", 5, False, False), total=2)
+        assert job.snapshot().completed == 1
+
+    def test_sync_from_ledger_without_cache_is_a_noop_on_dirty(self) -> None:
+        # No summary cache wired → sync still updates the bar, just no mark_dirty.
+        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job.start(
+            lambda _h: job.sync_from_ledger(completed=3, total=10, bars=30),
+            total=10,
+            ledger_synced=True,
+        )
+        assert job.snapshot().completed == 3
