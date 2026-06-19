@@ -31,7 +31,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.protocol import DerivativeContract
 
 #: The Groww symbol-token suffix → contract type. ``FUT`` carries no strike;
@@ -133,7 +133,7 @@ def _expiries_array(payload: Mapping[str, object]) -> list[object]:
 
 
 def resolve_expiries(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     *,
     exchange: str,
     underlying_symbol: str,
@@ -167,7 +167,7 @@ def resolve_expiries(
 
 
 def resolve_contracts(
-    client: GrowwClient, *, exchange: str, underlying_symbol: str, expiry: date
+    client: GrowwClientProtocol, *, exchange: str, underlying_symbol: str, expiry: date
 ) -> list[DerivativeContract]:
     """Resolve every listed contract for an ``(underlying, expiry)`` (parsed, deduped).
 
@@ -225,7 +225,7 @@ def future_contracts(contracts: Iterable[DerivativeContract]) -> list[Derivative
 
 
 def enumerate_contracts(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     *,
     exchange: str,
     underlying_symbol: str,
