@@ -460,6 +460,41 @@ def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
     assert detail and detail[0][1] == "NSE-A,B"
 
 
+def test_csv_safe_neutralises_formula_leaders() -> None:
+    """DEC-CSV-FORMULA-INJECTION-001: a STRING cell starting with a spreadsheet formula
+    lead-in (= + - @ TAB CR) is prefixed with a single quote; non-string / empty / non-leading
+    cells pass through UNCHANGED (numeric columns + dates stay numeric/plain)."""
+    from brutex.dashboard import completeness as c
+
+    for leader in ("=", "+", "-", "@", "\t", "\r"):
+        payload = f"{leader}cmd|'/c calc'!A1"
+        assert c._csv_safe(payload) == "'" + payload
+    # Passthrough cases: plain string, ISO date, int, None, empty string.
+    assert c._csv_safe("NSE-NIFTY") == "NSE-NIFTY"
+    assert c._csv_safe("2026-06-19") == "2026-06-19"
+    assert c._csv_safe(42) == 42
+    assert c._csv_safe(None) is None
+    assert c._csv_safe("") == ""
+
+
+def test_scoreboard_csv_prefixes_formula_injection_symbol() -> None:
+    """A symbol whose text starts with '=' is quoted (') in the rendered CSV so a spreadsheet
+    app renders it as literal text, never executes it as a formula (DEC-CSV-FORMULA-INJECTION-001)."""
+    evil = "=HYPERLINK(0)"  # no comma → a single cell; starts with a formula lead-in
+    rows = [_spot_row(evil, "1day", COMPLETENESS_SETTLED)]
+    board = build_completeness_scoreboard(rows, {evil: CATEGORY_EQUITY}, [], {})
+    csv_text = scoreboard_to_csv(board)
+    assert "'=HYPERLINK(0)" in csv_text  # neutralised — prefixed, never bare "=HYPERLINK(0)"
+
+    import csv as _csv
+    from io import StringIO
+
+    detail = [
+        r for r in _csv.reader(StringIO(csv_text)) if len(r) == 6 and r[1].endswith("HYPERLINK(0)")
+    ]
+    assert detail and detail[0][1] == "'=HYPERLINK(0)"  # the safe (quoted) value round-trips
+
+
 def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> None:
     """DEC-COMPLETENESS-CSV-READABLE-001: a per_symbol map enriches the spot detail with the
     explicit first→last bar dates + from_2020 flag per dimension (the SAME rich info the

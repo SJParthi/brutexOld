@@ -469,6 +469,48 @@ def _csv_yes_no(flag: object) -> str:
     return "yes" if flag else "no"
 
 
+#: Leading characters a spreadsheet app (Excel / Sheets / LibreOffice) treats as the start
+#: of a FORMULA when it opens a CSV cell — the CSV/formula-injection vector (OWASP "CSV
+#: injection"). ``= + - @`` plus a leading TAB / CR. A cell whose text starts with one of
+#: these is prefixed with a single quote so the app renders it as literal text, never
+#: evaluates it (DEC-CSV-FORMULA-INJECTION-001).
+_CSV_INJECTION_LEADERS: Final[frozenset[str]] = frozenset("=+-@\t\r")
+
+
+def _csv_safe(cell: object) -> object:
+    """Neutralise CSV/formula injection on ONE cell.
+
+    A STRING cell whose first character is a formula lead-in (``= + - @`` or a leading
+    TAB / CR) is prefixed with a single quote (``'``) so a spreadsheet app shows the literal
+    text instead of evaluating it as a formula. Non-string cells (ints, ``None``) and
+    empty / non-leading strings pass through UNCHANGED, so numeric columns and dates stay
+    numeric/plain. O(1) — one membership test on the first char.
+    """
+    if isinstance(cell, str) and cell and cell[0] in _CSV_INJECTION_LEADERS:
+        return "'" + cell
+    return cell
+
+
+class _FormulaSafeWriter:
+    """A :func:`csv.writer` wrapper that runs every cell through :func:`_csv_safe`.
+
+    Wrapping the writer ONCE neutralises formula-injection on EVERY ``writerow`` call
+    (DEC-CSV-FORMULA-INJECTION-001) without sprinkling the guard across each of the
+    ~15 call sites — one source of truth, so a future row can never bypass it
+    (CLAUDE.md §11 COMMON). The CSV-quoting of commas/quotes is still the underlying
+    :mod:`csv` writer's job; this only adds the formula-lead-in defusal on top.
+    """
+
+    __slots__ = ("_writer",)
+
+    def __init__(self, writer: Any) -> None:
+        self._writer = writer
+
+    def writerow(self, row: Iterable[object]) -> None:
+        """Write *row* with every cell formula-injection-sanitised via :func:`_csv_safe`."""
+        self._writer.writerow([_csv_safe(cell) for cell in row])
+
+
 def scoreboard_to_csv(
     board: Mapping[str, Any],
     per_symbol: Mapping[str, Mapping[str, Any]] | None = None,
@@ -499,10 +541,13 @@ def scoreboard_to_csv(
     4. ``DETAIL — options`` — one row per underlying with status + pulled counts + the years.
 
     Uses :mod:`csv` so any symbol with a comma / quote is escaped correctly (an extreme-input
-    guard); ``\\n`` line terminator for deterministic, platform-stable output.
+    guard); ``\\n`` line terminator for deterministic, platform-stable output. Every cell is
+    additionally run through :class:`_FormulaSafeWriter` so a value starting with ``= + - @``
+    (or a leading TAB / CR) can never execute as a spreadsheet formula when the report is
+    opened in Excel / Sheets (DEC-CSV-FORMULA-INJECTION-001).
     """
     buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
+    writer = _FormulaSafeWriter(csv.writer(buf, lineterminator="\n"))
 
     writer.writerow(["BruteX — Data Completeness Scoreboard"])
     writer.writerow(
