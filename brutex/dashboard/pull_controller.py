@@ -1708,6 +1708,9 @@ def _resample_daily_after_pull(  # pragma: no cover — raw lake I/O glue; recon
 
     try:
         by_symbol = {inst.symbol_name: inst for inst in instruments}
+        # ``before`` is today's IST *date* (the forming-session cutoff). The canonical
+        # ``calendars.nse.IST`` (ZoneInfo) and the module's fixed +05:30 agree exactly
+        # for the 2020+ no-DST scope, so the cutoff date is representation-independent.
         before = now.astimezone(IST).date()
 
         def _build_read(window: DailyResampleWindow) -> Callable[[], pl.DataFrame]:

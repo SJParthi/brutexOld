@@ -28,9 +28,15 @@ ONLY for the OHLCV aggregation (open=first / high=max / low=min / close=last /
 volume=sum — CLAUDE.md §11 COMMON, never re-implemented) and then **re-stamps**
 every derived bar to midnight IST using the SAME fixed +05:30 offset the Groww
 parser uses (:data:`brutex.adapters.groww.parser`), so a resampled daily bar's UTC
-instant is byte-identical to a vendor-parsed ``00:00:00 IST`` bar. That identity is
-what makes the keep-first merge-on-write dedup a later real vendor fetch
-(Golden Rule #7) and keeps the daily series uniform.
+instant is byte-identical IN STAMP/SCHEMA/OI to a vendor-parsed ``00:00:00 IST``
+bar — the **timestamp** identity that makes the keep-first merge-on-write dedup a
+later real vendor fetch (Golden Rule #7) and keeps the daily series uniform. The
+OHLC **values** are a 1-minute aggregation (first-minute open / summed volume /
+last-minute close), so they need NOT equal a vendor OFFICIAL daily (call-auction
+open / block-deal volume / settlement close can differ); since the reconcile only
+ever fills windows the vendor returned EMPTY there is no vendor bar to compete
+with, and any future divergence surfaces as a logged keep-first ``BarConflict``
+(visible, never a silent overwrite), NOT corruption.
 
 Honest envelope (Golden Rule #1 / #10)
 --------------------------------------
@@ -458,11 +464,15 @@ def make_lake_write_1day(  # pragma: no cover — raw lake write, integration-te
     Returns a ``(bars) -> bars_written`` callable appending the resampled daily bars
     to the lake's ``1day`` partition via a
     :class:`~brutex.data.sink.ParquetBarSink` (the SAME sink the vendor spot spine
-    writes through — CLAUDE.md §11 COMMON), so a resampled daily bar is
-    byte-indistinguishable from a vendor-fetched one. The sink snaps prices to the
-    2-dp tick grid + merges keep-first by ``(year, month)`` (DEC-SPOT-PRICE-2DP-001 /
-    Golden Rule #7), so a re-run writes ``0`` and a later real vendor fetch dedups.
-    Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
+    writes through — CLAUDE.md §11 COMMON), so a resampled daily bar shares the
+    vendor stamp/schema/OI (see the module docstring on value-vs-stamp identity). The
+    sink snaps prices to the 2-dp tick grid + merges keep-first by ``(year, month)``
+    (DEC-SPOT-PRICE-2DP-001 / Golden Rule #7), so a re-run leaves the partition
+    byte-identical (the keep-first merge adds zero NEW rows) and a later real vendor
+    fetch dedups. The returned ``bars_appended`` is the INPUT bar count (the sink's
+    contract), NOT the net-new merged count — functional idempotence rests on the
+    SUCCESS status gate (a filled window is excluded from the next plan), not on this
+    return value. Raw lake I/O — ``# pragma: no cover``; integration-tested.
     """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
