@@ -154,11 +154,14 @@ def test_build_live_pool_token_issuance_failure_is_redacted() -> None:
 def test_build_live_pool_wires_same_hooks_on_every_leaf() -> None:
     """Every leaf carries the SAME injected pace + decrement/recover hook objects (not just one)."""
 
-    def _pace() -> None: ...
+    def _pace() -> None:
+        pass
 
-    def _rl() -> None: ...
+    def _rl() -> None:
+        pass
 
-    def _ok() -> None: ...
+    def _ok() -> None:
+        pass
 
     pool = build_live_pool(
         _CREDS,
