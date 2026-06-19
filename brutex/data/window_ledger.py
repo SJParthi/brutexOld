@@ -569,6 +569,21 @@ class WindowLedger:
                 ),
             )
 
+    def streak_total(self) -> int:
+        """Sum of ``empty_streak`` across every recorded window — **O(N)**, one lock, no sort.
+
+        The secondary progress signal for the outstanding-windows until-clean loop
+        (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001): an EMPTY window stepping toward its
+        SKIPPED threshold advances this fold BEFORE :attr:`LedgerProgress.settled`
+        rises, so a round that only progressed empty streaks still counts as
+        progress. A dedicated single-locked O(N) fold over the live values — NOT a
+        sorted :meth:`records` snapshot (which would be O(N log N) + a second lock) —
+        called once per OUTER round (≤ ``AUTO_RESUME_MAX_ROUNDS``), never on the
+        per-bar hot path; the bound is O(N) per round, NOT an O(1)-total claim.
+        """
+        with self._lock:
+            return sum(record.empty_streak for record in self._by_window.values())
+
     def to_rows(
         self,
     ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:

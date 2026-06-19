@@ -938,6 +938,25 @@ class UntilCleanRound:
     auth_aborted: bool
     #: The dead-token cause string (only set when ``auth_aborted``), for the verdict.
     auth_cause: str | None = None
+    #: Genuinely-outstanding windows after this round (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001)
+    #: — ``total - settled`` from the unified ledger: PLANNED (never fetched) + FAILED
+    #: (transient) + EMPTY (below the SKIPPED threshold). The "pull until successful"
+    #: signal: a round is CLEAN only when this is 0 (every window SUCCESS / SKIPPED), NOT
+    #: merely when the transient ``still_failed_windows`` reaches 0 (which ignored
+    #: PLANNED + EMPTY). ``None`` (the default) keeps every legacy caller — the CLI, the
+    #: options path, ``historical_pull`` — on the prior ``still_failed_windows``-only
+    #: behaviour (byte-identical); only the ledger-backed ``pull_all_spot`` round
+    #: populates it.
+    outstanding_windows: int | None = None
+    #: Settled windows (SUCCESS + SKIPPED) after this round — the MONOTONIC progress
+    #: measure for the outstanding path (it only ever rises). ``None`` for legacy rounds.
+    settled_windows: int | None = None
+    #: Sum of ``empty_streak`` across the ledger after this round — the SECONDARY progress
+    #: measure: an EMPTY window stepping toward its SKIPPED threshold advances this WITHOUT
+    #: yet raising ``settled_windows``, so a round that only progressed empty streaks still
+    #: counts as progress (else the loop would ``stop_no_progress`` before a recent EMPTY
+    #: window settles in ``EMPTY_TERMINAL_THRESHOLD`` rounds). ``None`` for legacy rounds.
+    streak_total: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1045,6 +1064,7 @@ def decide_until_clean(
     max_rounds: int,
     quota_exhausted: bool = False,
     made_progress: bool = True,
+    outstanding_windows: int | None = None,
 ) -> LoopVerdict:
     """Decide what the until-clean loop does after a round — the pure 6-way controller.
 
@@ -1071,14 +1091,26 @@ def decide_until_clean(
        backstop).
     6. **continue** — residual remains, progress is being made, budget is left.
 
-    Pure + O(1) (a constant number of comparisons). No I/O, no clock. The two new
-    keyword args default to the pre-DEC-AUTO-RESUME-QUOTA-001 behaviour
-    (``quota_exhausted=False`` + ``made_progress=True``), so every existing caller is
-    byte-unchanged.
+    Pure + O(1) (a constant number of comparisons). No I/O, no clock. The
+    ``quota_exhausted`` + ``made_progress`` args default to the
+    pre-DEC-AUTO-RESUME-QUOTA-001 behaviour; ``outstanding_windows`` defaults to
+    ``None`` (the pre-DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 behaviour), so every
+    existing caller is byte-unchanged.
+
+    *outstanding_windows* (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001) is the ledger-derived
+    ``total - settled`` count — PLANNED + FAILED + EMPTY-below-threshold. When
+    provided (the ``pull_all_spot`` ledger path), the ``stop_clean`` test keys on it
+    instead of ``still_failed_windows``, so the loop keeps re-pulling until EVERY
+    window is SUCCESS / SKIPPED (the "pull until successful" guarantee), not merely
+    until the transient failures clear (which left PLANNED + EMPTY windows behind).
+    ``None`` falls back to the ``still_failed_windows == 0`` test (byte-identical).
     """
     if auth_aborted:
         return "stop_dead"
-    if still_failed_windows == 0:
+    clean = (
+        outstanding_windows == 0 if outstanding_windows is not None else still_failed_windows == 0
+    )
+    if clean:
         return "stop_clean"
     if quota_exhausted:
         return "stop_quota"
@@ -1171,6 +1203,12 @@ def run_until_clean(
     #: ``stop_no_progress`` guard (what makes the large auto-resume budget safe).
     #: ``None`` before round 1 ⇒ round 1 always counts as progress (no baseline).
     prev_failed: int | None = None
+    #: The previous round's (settled, streak_total) — the MONOTONIC progress measure for
+    #: the outstanding path (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001). ``settled`` only ever
+    #: rises; a round that left it flat but advanced an EMPTY window's streak still made
+    #: progress (the window is stepping toward SKIPPED). ``None`` before round 1.
+    prev_settled: int | None = None
+    prev_streak: int = 0
     while True:
         round_index += 1
         if round_index > 1:
@@ -1182,9 +1220,26 @@ def run_until_clean(
         # No-progress is only consulted when the caller opts in (auto-resume); the
         # default path keeps ``made_progress=True`` so its behaviour is byte-
         # unchanged (a constant-residual run still ends on ``stop_budget``).
-        made_progress = (not stop_when_stuck) or (
-            prev_failed is None or outcome.still_failed_windows < prev_failed
-        )
+        if outcome.outstanding_windows is not None:
+            # DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 ledger path: progress = ``settled``
+            # strictly rose, OR ``settled`` held flat but the empty-streak advanced (an
+            # EMPTY window stepping toward its SKIPPED threshold) — so a round that only
+            # progressed EMPTY streaks is NOT mistaken for a stall (which would stop the
+            # loop before a recent EMPTY window settles in EMPTY_TERMINAL_THRESHOLD
+            # rounds). ``settled`` is monotonic, so it never falsely flags progress.
+            cur_settled = outcome.settled_windows or 0
+            cur_streak = outcome.streak_total or 0
+            made_progress = (not stop_when_stuck) or (
+                prev_settled is None
+                or cur_settled > prev_settled
+                or (cur_settled == prev_settled and cur_streak > prev_streak)
+            )
+            prev_settled = cur_settled
+            prev_streak = cur_streak
+        else:
+            made_progress = (not stop_when_stuck) or (
+                prev_failed is None or outcome.still_failed_windows < prev_failed
+            )
         verdict = decide(
             still_failed_windows=outcome.still_failed_windows,
             auth_aborted=outcome.auth_aborted,
@@ -1192,6 +1247,7 @@ def run_until_clean(
             max_rounds=max_rounds,
             quota_exhausted=quota_exhausted() if quota_exhausted is not None else False,
             made_progress=made_progress,
+            outstanding_windows=outcome.outstanding_windows,
         )
         prev_failed = outcome.still_failed_windows
         if verdict != "continue":

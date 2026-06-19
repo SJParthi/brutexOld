@@ -426,3 +426,132 @@ def test_outcome_and_round_are_frozen() -> None:
 def test_default_max_rounds_is_bounded() -> None:
     """The default outer budget is small + finite (Golden Rule #10 — never infinite)."""
     assert DEFAULT_MAX_ROUNDS == 5
+
+
+# ── DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 — the outstanding-windows path ────────
+
+
+def test_decide_outstanding_continues_when_planned_remain() -> None:
+    """outstanding>0 with NO transient failures → continue (the core Fix #2 change).
+
+    The old behaviour stopped CLEAN here (still_failed_windows==0), leaving PLANNED +
+    EMPTY windows unfetched. With ``outstanding_windows`` provided, the clean test keys
+    on it, so the loop keeps re-pulling.
+    """
+    assert (
+        decide_until_clean(
+            still_failed_windows=0,
+            auth_aborted=False,
+            rounds_used=1,
+            max_rounds=10,
+            outstanding_windows=2,
+        )
+        == "continue"
+    )
+
+
+def test_decide_outstanding_zero_is_clean_regardless_of_transient() -> None:
+    """outstanding==0 → stop_clean even if the stale transient count is non-zero."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=5,
+            auth_aborted=False,
+            rounds_used=1,
+            max_rounds=10,
+            outstanding_windows=0,
+        )
+        == "stop_clean"
+    )
+
+
+def test_decide_outstanding_none_falls_back_to_transient() -> None:
+    """``outstanding_windows=None`` keeps the legacy still_failed_windows clean test."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=0,
+            auth_aborted=False,
+            rounds_used=1,
+            max_rounds=10,
+            outstanding_windows=None,
+        )
+        == "stop_clean"
+    )
+
+
+def _outstanding_round(
+    *, outstanding: int, settled: int, streak: int, failed: int = 0
+) -> UntilCleanRound:
+    return UntilCleanRound(
+        still_failed_windows=failed,
+        auth_aborted=False,
+        outstanding_windows=outstanding,
+        settled_windows=settled,
+        streak_total=streak,
+    )
+
+
+def test_run_until_clean_drives_planned_to_clean() -> None:
+    """PLANNED/EMPTY windows are driven across rounds until outstanding hits 0."""
+    sleep, _seen = _no_sleep()
+    runner, calls = _scripted_runner(
+        [
+            _outstanding_round(outstanding=3, settled=0, streak=0),
+            _outstanding_round(outstanding=1, settled=2, streak=0),  # settled rose → progress
+            _outstanding_round(outstanding=0, settled=3, streak=0),  # clean
+        ]
+    )
+    out = run_until_clean(runner, max_rounds=10, sleep=sleep, stop_when_stuck=True)
+    assert out.verdict == "stop_clean"
+    assert len(calls) == 3
+
+
+def test_run_until_clean_empty_streak_counts_as_progress() -> None:
+    """A round that only advanced an EMPTY window's streak is NOT a stall.
+
+    Without the streak signal the loop would ``stop_no_progress`` at round 2 (settled
+    flat), BEFORE the recent EMPTY window settles to SKIPPED on round 3.
+    """
+    sleep, _seen = _no_sleep()
+    runner, calls = _scripted_runner(
+        [
+            _outstanding_round(outstanding=1, settled=0, streak=1),
+            _outstanding_round(outstanding=1, settled=0, streak=2),  # settled flat, streak rose
+            _outstanding_round(outstanding=0, settled=1, streak=0),  # EMPTY→SKIPPED, clean
+        ]
+    )
+    out = run_until_clean(runner, max_rounds=10, sleep=sleep, stop_when_stuck=True)
+    assert out.verdict == "stop_clean"
+    assert len(calls) == 3
+
+
+def test_run_until_clean_stops_when_settled_and_streak_flat() -> None:
+    """A genuinely-stuck window (e.g. a quarantined symbol's PLANNED) self-terminates.
+
+    settled flat AND streak flat with outstanding>0 → stop_no_progress (bounded, never
+    churning to the budget cap — the futile-loop guarantee Fix #3 then excludes at
+    resolution time).
+    """
+    sleep, _seen = _no_sleep()
+    runner, calls = _scripted_runner(
+        [
+            _outstanding_round(outstanding=2, settled=1, streak=0),
+            _outstanding_round(outstanding=2, settled=1, streak=0),  # flat → no progress
+        ]
+    )
+    out = run_until_clean(runner, max_rounds=50, sleep=sleep, stop_when_stuck=True)
+    assert out.verdict == "stop_no_progress"
+    assert len(calls) == 2  # stopped at round 2, NOT 50 rounds of budget churn
+
+
+def test_run_until_clean_outstanding_runs_to_budget_when_not_stuck_opted_in() -> None:
+    """stop_when_stuck=False keeps the budget bound even on the outstanding path."""
+    sleep, _seen = _no_sleep()
+    runner, calls = _scripted_runner(
+        [
+            _outstanding_round(outstanding=2, settled=1, streak=0),
+            _outstanding_round(outstanding=2, settled=1, streak=0),
+        ]
+    )
+    out = run_until_clean(runner, max_rounds=2, sleep=sleep, stop_when_stuck=False)
+    assert out.verdict == "stop_budget"
+    assert len(calls) == 2

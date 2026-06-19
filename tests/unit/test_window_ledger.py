@@ -709,3 +709,28 @@ class TestProgressCounts:
         first = ledger.progress_counts()
         second = ledger.progress_counts()
         assert first == second  # absolute fold — re-polling never inflates the counts
+
+
+class TestStreakTotal:
+    """`streak_total` — the O(N) summed empty_streak fold (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001)."""
+
+    def test_empty_ledger_is_zero(self) -> None:
+        assert WindowLedger().streak_total() == 0
+
+    def test_sums_empty_streaks_across_windows(self) -> None:
+        ledger = WindowLedger()
+        # One window seen EMPTY twice → empty_streak 2; another EMPTY once → 1.
+        a = _key("NIFTY", "1day")
+        b = _key("BANKNIFTY", "1day")
+        ledger.record(a, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(a, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(b, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total() == 3
+
+    def test_success_resets_a_windows_contribution(self) -> None:
+        ledger = WindowLedger()
+        k = _key("NIFTY", "1day")
+        ledger.record(k, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total() == 1
+        ledger.record(k, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)  # SUCCESS
+        assert ledger.streak_total() == 0
