@@ -16,7 +16,8 @@ fires — the ingest-level retry is what the tests exercise.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -47,7 +48,9 @@ from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import BruteXError, OutOfScopeError
+from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+from brutex.orchestrator.universe_phases import ItemResult
 from structlog.testing import capture_logs
 
 
@@ -158,11 +161,15 @@ class _Sink:
     def __init__(self, *, with_conflict: bool = False) -> None:
         self.appends: list[tuple[str, str, str, str, int]] = []
         self._with_conflict = with_conflict
+        # Recorded from POOL worker threads under the parallel fan-out (DEC-GROWW-OPTION-POOL-001),
+        # so guard the recording list — keeps a future order-assertion race-free.
+        self._lock = threading.Lock()
 
     def append(
         self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
     ) -> SinkAppendResult:
-        self.appends.append((exchange, segment, symbol, interval, len(bars)))
+        with self._lock:
+            self.appends.append((exchange, segment, symbol, interval, len(bars)))
         write_results: tuple[WriteResult, ...] = ()
         if self._with_conflict and bars:
             stored = bars[0]
@@ -755,6 +762,155 @@ def test_run_report_property_sums() -> None:
     )
     assert report.transient_failures == 0 and report.skipped_windows == 0
     assert report.retried_windows == 0 and report.still_failed_windows == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# run_groww_option_ingest — parallel cross-contract fan-out (DEC-GROWW-OPTION-POOL-001)
+# ─────────────────────────────────────────────────────────────────────────
+class _RecordingRunner:
+    """A deterministic ``RunParallel`` that RECORDS the worklist, then delegates serial.
+
+    Proves the driver hands ``run_parallel`` the right ``(contract, interval)`` jobs and
+    actually drains the INJECTED runner (the ``run_parallel is not None`` branch), while
+    staying byte-for-byte deterministic (it runs through :class:`SerialRunParallel`).
+    """
+
+    def __init__(self) -> None:
+        self.jobs: Sequence[object] = ()
+        self._inner = SerialRunParallel()
+
+    def __call__[ItemT, ResultT](
+        self,
+        fn: Callable[[ItemT], ResultT],
+        items: Sequence[ItemT],
+    ) -> Iterable[ItemResult[ItemT, ResultT]]:
+        self.jobs = tuple(items)
+        yield from self._inner(fn, items)
+
+
+def test_run_uses_injected_run_parallel_with_contract_major_worklist() -> None:
+    # The injected runner is USED (the run_parallel is-not-None branch) and fed the
+    # deterministic contract-major × interval worklist (DEC-GROWW-OPTION-POOL-001).
+    ok1, ok2 = _ce(), _ce2()
+    runner: _RecordingRunner = _RecordingRunner()
+    report = run_groww_option_ingest(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contracts=[ok1, ok2],
+        intervals=["1day", "5minute"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+        run_parallel=runner,
+    )
+    assert list(runner.jobs) == [
+        (ok1, "1day"),
+        (ok1, "5minute"),
+        (ok2, "1day"),
+        (ok2, "5minute"),
+    ]
+    assert set(report.pairs) == {
+        (ok1.symbol, "1day"),
+        (ok1.symbol, "5minute"),
+        (ok2.symbol, "1day"),
+        (ok2.symbol, "5minute"),
+    }
+    assert report.bars_appended == 4
+
+
+def test_run_parallel_pool_quarantines_one_keeps_others() -> None:
+    # Through a REAL thread pool: the per-contract quarantine + report aggregation run on
+    # the single controller thread, so the report is order-independent + thread-safe — the
+    # pool only changes COMPLETION order, never the result.
+    ok1, ok2, bad = _ce(), _ce2(), _ce("NSE-NIFTY-02Jan25-99999-PE")
+    sdk = _FakeSDK(payload=_candles(), raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
+    progress: list[tuple[str, int, bool]] = []
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[ok1, ok2, bad],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+        on_progress=lambda label, bars, failed: progress.append((label, bars, failed)),
+        run_parallel=PoolRunParallel(),
+    )
+    assert set(report.pairs) == {(ok1.symbol, "1day"), (ok2.symbol, "1day")}
+    assert report.failed_pairs == 1 and report.bars_appended == 2
+    assert (f"{bad.symbol} 1day", 0, True) in progress
+
+
+def test_run_parallel_pool_global_stop_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A GLOBAL stop raised inside a pool worker must still PROPAGATE through the drain
+    # (re-raised, never quarantined) AND the pool must shut down cleanly — the test
+    # COMPLETING proves the generator-close → ThreadPoolExecutor teardown never hangs.
+    def _fake_fetch(client, *, contract, interval, start, end):
+        del client, contract, interval, start, end
+        raise DailyQuotaExceeded("daily quota spent")
+
+    monkeypatch.setattr(_oi, "fetch_option_candles", _fake_fetch)
+    with pytest.raises(DailyQuotaExceeded):
+        run_groww_option_ingest(
+            _client(_FakeSDK(payload=_candles())),
+            _Sink(),
+            contracts=[_ce(), _ce2()],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            run_parallel=PoolRunParallel(),
+        )
+
+
+def test_ingest_underlying_options_forwards_run_parallel() -> None:
+    # ``ingest_underlying_options`` forwards run_parallel verbatim: the resolved CE leg
+    # reaches the INJECTED runner (if it were ignored, runner.jobs would stay empty —
+    # the default SerialRunParallel would run instead).
+    sym = "NSE-NIFTY-25Jan24-100-CE"
+    sdk = _FakeSDK(
+        payload=_candles(),
+        expiries=lambda **kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
+        contracts=lambda **_kw: {"contracts": [sym]},
+    )
+    runner: _RecordingRunner = _RecordingRunner()
+    report = ingest_underlying_options(
+        _client(sdk),
+        _Sink(),
+        exchange="NSE",
+        underlying_symbol="NIFTY",
+        years=[2024],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 26),
+        now_ist=_now,
+        run_parallel=runner,
+    )
+    assert len(runner.jobs) == 1 and report.bars_appended == 1
+
+
+def test_ingest_underlying_futures_forwards_run_parallel() -> None:
+    # The futures mirror — ``ingest_underlying_futures`` forwards run_parallel too.
+    sym = "NSE-NIFTY-25Jan24-FUT"
+    sdk = _FakeSDK(
+        payload=_candles(),
+        expiries=lambda **kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
+        contracts=lambda **_kw: {"contracts": [sym]},
+    )
+    runner: _RecordingRunner = _RecordingRunner()
+    report = ingest_underlying_futures(
+        _client(sdk),
+        _Sink(),
+        exchange="NSE",
+        underlying_symbol="NIFTY",
+        years=[2024],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 26),
+        now_ist=_now,
+        run_parallel=runner,
+    )
+    assert len(runner.jobs) == 1 and report.bars_appended == 1
 
 
 def test_report_dataclasses_are_frozen() -> None:
