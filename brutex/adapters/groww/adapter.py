@@ -137,18 +137,44 @@ class GrowwMarketAdapter:
     ) -> list[CandleBar]:
         """Fetch OHLCV bars for *symbol* over ``[start, end]`` at *interval*.
 
-        Resolves the instrument via the O(1) index (reconstructing the spot
-        ``EXCHANGE-SYMBOL`` groww_symbol when a bare trading symbol is passed),
-        then delegates the tile → fetch → parse loop to the shared
+        Resolves the instrument MASTER-AUTHORITATIVELY via the O(1) index
+        (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001), then delegates the tile → fetch →
+        parse loop to the shared
         :func:`~brutex.adapters.groww.candles.fetch_candle_windows` (CLAUDE.md §11
         COMMON). Index bars drop volume (no traded volume). Raises
         :class:`~brutex.models.OutOfScopeError` for an unknown symbol and
         ``ValueError`` for an unsupported interval (fail-loud, Golden Rule #1).
+
+        **Resolution (the BAJAJ-AUTO fix):** a BARE spot/index trading symbol —
+        INCLUDING a HYPHENATED single-stock ticker like ``BAJAJ-AUTO`` — resolves via
+        the vendor's own ``(exchange, trading_symbol)`` index, and the groww_symbol
+        handed to the vendor is the master's REAL ``groww_symbol_by_pair`` value (NOT
+        a reconstructed ``EXCH-symbol``) — so a VERBOSE-symbol index like
+        ``MIDCPNIFTY`` (``trading_symbol`` ``"NIFTY MID SELECT"`` ≠ the ``MIDCPNIFTY``
+        component of ``NSE-MIDCPNIFTY``) sends the correct ``NSE-MIDCPNIFTY``, never a
+        garbage ``NSE-NIFTY MID SELECT``. An ALREADY-PREFIXED groww_symbol (a
+        ``FUT``/``CE``/``PE`` contract, e.g. ``NSE-NIFTY-25Aug26-FUT``, whose
+        ``trading_symbol`` is ``NIFTY25Aug26FUT``) misses the ``(exchange, symbol)``
+        index and resolves via ``by_groww_symbol``, used AS-IS. The prior
+        ``"-" in symbol`` heuristic mistook the hyphen in ``BAJAJ-AUTO`` for an
+        already-prefixed symbol, looked the bare ticker up in ``by_groww_symbol``,
+        missed, and raised — leaving every hyphenated F&O stock perpetually
+        quarantined (the futile case DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 #844
+        deferred). Resolving + sending by the vendor's own keys never reconstructs off
+        a guess (Golden Rule #1).
         """
-        groww_symbol = symbol if "-" in symbol else f"{exchange.value}-{symbol}"
-        instrument = self.index.by_groww_symbol.get(groww_symbol)
+        instrument = self.index.by_exchange_symbol.get((exchange, symbol))
+        if instrument is not None:
+            # A bare spot/index trading symbol (incl. a hyphenated stock) — send the
+            # master's REAL groww_symbol (in lockstep with by_exchange_symbol), NEVER
+            # a reconstructed EXCH-symbol (wrong for a verbose-symbol index).
+            groww_symbol = self.index.groww_symbol_by_pair[(exchange, symbol)]
+        else:
+            # An already-prefixed groww_symbol (a FUT/CE/PE contract) — used as-is.
+            instrument = self.index.by_groww_symbol.get(symbol)
+            groww_symbol = symbol
         if instrument is None:
-            raise OutOfScopeError(f"symbol not in Groww universe: {groww_symbol}")
+            raise OutOfScopeError(f"symbol not in Groww universe: {symbol}")
         return fetch_candle_windows(
             self.client,
             exchange=exchange.value,
