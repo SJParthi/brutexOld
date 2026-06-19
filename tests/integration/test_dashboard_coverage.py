@@ -462,6 +462,31 @@ class TestCompletenessScoreboard:
         assert csv_resp.status_code == 200
         assert "SUMMARY — spot" in csv_resp.text  # section skeleton still renders
 
+    def test_universe_completeness_map_has_seeded_underlying(self, store: InstrumentStore) -> None:
+        # DEC-COMPLETENESS-UNIVERSE-001: the per-symbol map (for the /universe strip) carries
+        # the seeded NIFTY underlying with its option status + the honest no-spot defaults.
+        years = _coverage_years()
+        store.upsert_coverage(_cov(years[0]))
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/universe/completeness").json()
+        assert "NIFTY" in body
+        entry = body["NIFTY"]
+        assert set(entry["spot"]) == {"1day", "1minute", "overall"}
+        assert entry["spot"]["1day"]["status"] == "none"  # no spot lake data in this fixture
+        assert entry["options"]["status"] in {"stable", "growing", "partial", "failed"}
+        assert entry["options"]["first_year"] == years[0]
+
+    def test_universe_completeness_empty_when_no_lake_root(self) -> None:
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        assert client.get("/api/v1/universe/completeness").json() == {}
+
+    def test_universe_completeness_503_when_store_unwired(self) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=None))
+        assert client.get("/api/v1/universe/completeness").status_code == 503
+
     def test_completeness_page_renders(self, store: InstrumentStore) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/completeness")

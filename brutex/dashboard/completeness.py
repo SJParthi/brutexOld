@@ -74,6 +74,13 @@ _CELL_EXPIRIES_ONLY: Final[str] = "expiries_only"
 _CELL_PENDING: Final[str] = "pending"
 _CELL_FAILED: Final[str] = "failed"
 
+#: Exclusive upper bound for the "data begins in 2020" test (DEC-COMPLETENESS-UNIVERSE-001).
+#: A dimension's earliest bar date ``< 2021-01-01`` ⇒ its first bar falls in calendar 2020
+#: (the ``GROWW_HISTORY_FLOOR`` year per CLAUDE.md §3 / DEC-PULL-FLOOR-2020-001), so the symbol
+#: HAS data starting 2020 on that dimension. Year-granular on purpose: robust to which exact
+#: first-trading-day of Jan-2020 the vendor serves (holidays vary), never a magic threshold.
+_FROM_2020_EXCLUSIVE_UPPER: Final[str] = "2021-01-01"
+
 
 def _spot_dimension_verdict(completeness: str | None) -> str:
     """Map a spot row's ``completeness`` chip to the scoreboard's per-dimension verdict.
@@ -197,6 +204,140 @@ def _per_underlying_options(
         cell["status"] = _option_verdict(statuses)
         out.append(cell)
     return sorted(out, key=lambda e: (e["underlying"], e["exchange"]))
+
+
+def _from_2020(first_date: str | None) -> bool:
+    """True iff *first_date* (an ISO ``YYYY-MM-DD`` or ``None``) falls in calendar 2020.
+
+    The honest "has data starting 2020" flag for the per-symbol view — a symbol whose earliest
+    bar is in 2020 has data from the GROWW_HISTORY_FLOOR year; one whose earliest bar is later
+    (a late listing OR a gap) is flagged so the operator SEES it (the explicit dates disambiguate).
+    """
+    return first_date is not None and first_date < _FROM_2020_EXCLUSIVE_UPPER
+
+
+def _spot_dimension_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One spot dimension's verdict + EXPLICIT first/last bar dates + the ``from_2020`` flag."""
+    first = row.get("first_date")
+    last = row.get("last_date")
+    first_s = str(first) if first else None
+    return {
+        "status": _spot_dimension_verdict(row.get("completeness")),
+        "first_date": first_s,
+        "last_date": str(last) if last else None,
+        "from_2020": _from_2020(first_s),
+    }
+
+
+def _new_per_symbol_entry(symbol: str, exchange: str, category: str) -> dict[str, Any]:
+    """A per-symbol completeness entry pre-seeded to the honest "no data" defaults."""
+    none_dim: dict[str, Any] = {
+        "status": DIM_NONE,
+        "first_date": None,
+        "last_date": None,
+        "from_2020": False,
+    }
+    return {
+        "symbol": symbol,
+        "exchange": exchange,
+        "category": category,
+        "spot": {"1day": dict(none_dim), "1minute": dict(none_dim), "overall": DIM_NONE},
+        "options": {
+            "status": OPT_NONE,
+            "expiries_pulled": 0,
+            "contracts_pulled": 0,
+            "years": [],
+            "first_year": None,
+            "last_year": None,
+        },
+    }
+
+
+def per_symbol_completeness(
+    spot_rows: Iterable[Mapping[str, Any]],
+    spot_categories: Mapping[str, str],
+    option_records: Iterable[Any],
+    option_categories: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    """Per-symbol completeness map (``symbol_name → detail``) WITH explicit first/last dates.
+
+    DEC-COMPLETENESS-UNIVERSE-001 — the data behind the ``/universe`` per-row completeness strip
+    that answers, at pull time, *does THIS symbol have the entire 2020→today set?* For each
+    symbol it carries, per spot dimension (``1day`` / ``1minute``), the verdict + the REAL
+    earliest/latest bar date + the ``from_2020`` flag; and per option underlying the honest
+    ``stable``/``growing``/``partial``/``failed`` status + pulled counts + the year span. Keyed
+    by ``symbol_name`` — the SAME key the ``/universe`` rows carry (``i.symbol``), the spot
+    datasets carry (``symbol``), and the option records carry (``underlying_symbol``) — so the
+    page joins it O(1) per row.
+
+    Pure re-aggregation over the route-supplied inputs (no lake/store/network), so 100%
+    unit-testable offline; reuses the shared verdict helpers (no re-derivation, CLAUDE.md §11
+    COMMON). A symbol with only spot OR only option data gets the absent side's honest defaults;
+    an unmapped symbol / a derived intraday TF is skipped. O(spot_rows + option_records).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for row in spot_rows:
+        symbol = str(row["symbol"])
+        category = spot_categories.get(symbol)
+        if category is None:
+            continue  # not a scored universe symbol
+        interval = str(row["interval"])
+        if interval not in SPOT_DIMENSIONS:
+            continue  # a derived intraday TF — not a separately-pulled dimension
+        entry = out.setdefault(
+            symbol, _new_per_symbol_entry(symbol, str(row.get("exchange", "")), category)
+        )
+        entry["spot"][interval] = _spot_dimension_detail(row)
+    for entry in out.values():
+        entry["spot"]["overall"] = _overall_spot(
+            entry["spot"]["1day"]["status"], entry["spot"]["1minute"]["status"]
+        )
+    _fold_per_symbol_options(out, option_records, option_categories)
+    return out
+
+
+def _fold_per_symbol_options(
+    out: dict[str, dict[str, Any]],
+    option_records: Iterable[Any],
+    option_categories: Mapping[str, str],
+) -> None:
+    """Fold option coverage records into the per-symbol map (status + counts + year span)."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for rec in option_records:
+        underlying = str(rec.underlying_symbol)
+        category = option_categories.get(underlying)
+        if category is None:
+            continue
+        acc = grouped.setdefault(
+            underlying,
+            {
+                "exchange": str(rec.exch_id),
+                "category": category,
+                "expiries": 0,
+                "contracts": 0,
+                "years": [],
+                "statuses": [],
+            },
+        )
+        acc["expiries"] += int(rec.expiries_pulled)
+        acc["contracts"] += int(rec.contracts_pulled)
+        acc["years"].append(int(rec.year))
+        acc["statuses"].append(str(rec.status))
+    for underlying, acc in grouped.items():
+        # ``years`` is always non-empty here: a grouped entry exists ONLY because a record was
+        # folded into it, and each fold appends its year — so years[0]/years[-1] are safe.
+        years = sorted(acc["years"])
+        entry = out.setdefault(
+            underlying, _new_per_symbol_entry(underlying, acc["exchange"], acc["category"])
+        )
+        entry["options"] = {
+            "status": _option_verdict(acc["statuses"]),
+            "expiries_pulled": acc["expiries"],
+            "contracts_pulled": acc["contracts"],
+            "years": years,
+            "first_year": years[0],
+            "last_year": years[-1],
+        }
 
 
 def _aggregate_spot(per_symbol: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -426,5 +567,6 @@ __all__ = [
     "SPOT_DIMENSIONS",
     "build_completeness_scoreboard",
     "categorize_instruments",
+    "per_symbol_completeness",
     "scoreboard_to_csv",
 ]

@@ -53,6 +53,7 @@ from brutex.config.credentials import groww_credentials_present
 from brutex.dashboard.completeness import (
     build_completeness_scoreboard,
     categorize_instruments,
+    per_symbol_completeness,
     scoreboard_to_csv,
 )
 from brutex.dashboard.coverage_view import (
@@ -2233,13 +2234,15 @@ def build_app(
         """
         return JSONResponse(await _completeness_board())
 
-    def _build_completeness_board(store: Any, lake: Path) -> dict[str, Any]:
-        """Compose the scoreboard from the lake + ledger + instrument categories.
+    def _completeness_inputs(
+        store: Any, lake: Path
+    ) -> tuple[list[dict[str, Any]], dict[str, str], list[Any]]:
+        """Gather the (annotated spot rows, symbol→category map, option coverage records).
 
-        Shared by the JSON ``/api/v1/completeness/scoreboard`` route + the
-        ``.csv`` download (CLAUDE.md §11 COMMON — one builder, two encodings).
-        Runs on a threadpool worker, building ``store.connection`` here so the
-        store RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001).
+        The ONE lake+ledger read shared by the scoreboard, the CSV report, AND the per-symbol
+        ``/universe`` map (CLAUDE.md §11 COMMON — one source, three projections). Runs on a
+        threadpool worker, building ``store.connection`` here so the store RLock stays on one
+        thread (DEC-DASHBOARD-FASTREAD-001).
         """
         categories = categorize_instruments(
             store.list_index_equity_instruments(),
@@ -2249,9 +2252,17 @@ def build_app(
         spot_rows = build_spot_coverage_payload(
             summarize_spot_datasets(store.connection, lake), spot_window_rollup(lake)
         )["rows"]
-        return build_completeness_scoreboard(
-            spot_rows, categories, store.list_coverage(), categories
-        )
+        return spot_rows, categories, store.list_coverage()
+
+    def _build_completeness_board(store: Any, lake: Path) -> dict[str, Any]:
+        """Compose the aggregate + per-symbol scoreboard from the shared inputs."""
+        spot_rows, categories, records = _completeness_inputs(store, lake)
+        return build_completeness_scoreboard(spot_rows, categories, records, categories)
+
+    def _build_per_symbol_completeness(store: Any, lake: Path) -> dict[str, dict[str, Any]]:
+        """Compose the per-symbol completeness map (with dates) from the shared inputs."""
+        spot_rows, categories, records = _completeness_inputs(store, lake)
+        return per_symbol_completeness(spot_rows, categories, records, categories)
 
     async def _completeness_board() -> dict[str, Any]:
         """Resolve the store + lake and build the scoreboard (empty + well-shaped if no lake)."""
@@ -2277,6 +2288,28 @@ def build_app(
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="completeness-scoreboard.csv"'},
         )
+
+    @app.get("/api/v1/universe/completeness")
+    async def api_universe_completeness() -> JSONResponse:
+        """GET /api/v1/universe/completeness — per-symbol completeness map for the pull page.
+
+        DEC-COMPLETENESS-UNIVERSE-001. Returns ``{symbol_name: {category, exchange, spot:{1day,
+        1minute,overall}, options:{...}}}`` so the ``/universe`` page overlays, on EACH symbol
+        row, whether that symbol has the entire 2020→today set — the EXPLICIT earliest/latest
+        bar date + a ``from_2020`` flag per spot dimension (1-day / 1-minute) and the honest
+        ``stable``/``growing``/``partial``/``failed`` option status + pulled counts + year span.
+        Pure-engine delegation (:func:`brutex.dashboard.completeness.per_symbol_completeness`)
+        over the SAME lake+ledger read the scoreboard uses; READ-ONLY, no pull logic. No lake
+        root wired → an empty ``{}`` map (the page degrades to "not yet pulled"), never a 500.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({})
+        per_symbol = await run_in_threadpool(
+            _build_per_symbol_completeness, store, lake_root.parent
+        )
+        return JSONResponse(per_symbol)
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
