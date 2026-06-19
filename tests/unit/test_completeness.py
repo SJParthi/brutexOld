@@ -29,6 +29,7 @@ from brutex.dashboard.completeness import (
     _overall_spot,
     build_completeness_scoreboard,
     categorize_instruments,
+    scoreboard_to_csv,
 )
 from brutex.dashboard.coverage_view import (
     COMPLETENESS_DERIVED,
@@ -251,3 +252,68 @@ def test_categorize_instruments_all_three_buckets() -> None:
         "NSE-INDIAVIX": CATEGORY_REFERENCE,
         "NSE-RELIANCE": CATEGORY_EQUITY,
     }
+
+
+# ── CSV report export (DEC-COMPLETENESS-PAGE-001) ─────────────────────────────────────────
+
+
+def test_scoreboard_csv_full_board_has_all_sections_and_rows() -> None:
+    """A populated board renders the four labelled sections + summary + per-row detail."""
+    spot_rows = [
+        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED),
+        _spot_row("NSE-RELIANCE", "1day", COMPLETENESS_SETTLED),
+        _spot_row("NSE-RELIANCE", "1minute", COMPLETENESS_PENDING),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX, "NSE-RELIANCE": CATEGORY_EQUITY}
+    records = [_cov("NSE-NIFTY", 2024, STATUS_COMPLETE, expiries=50, contracts=10_000)]
+    board = build_completeness_scoreboard(spot_rows, cats, records, cats)
+
+    csv_text = scoreboard_to_csv(board)
+    lines = csv_text.splitlines()
+
+    # The four self-describing section titles are all present.
+    assert "BruteX — Data Completeness Scoreboard" in lines[0]
+    assert any(line.startswith("SUMMARY — spot") for line in lines)
+    assert any(line.startswith("SUMMARY — options") for line in lines)
+    assert any(line.startswith("DETAIL — spot") for line in lines)
+    assert any(line.startswith("DETAIL — options") for line in lines)
+    # The spot summary carries the exact per-category FULL counts (index: both full).
+    assert f"{CATEGORY_INDEX},1,1,1,1" in lines
+    # equity: 1-day full, 1-minute pending → full_1minute=0, full_both=0.
+    assert f"{CATEGORY_EQUITY},1,1,0,0" in lines
+    # The per-symbol detail rows are present with their verdicts.
+    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},{DIM_FULL},{DIM_FULL}" in lines
+    assert f"{CATEGORY_EQUITY},NSE-RELIANCE,NSE,{DIM_FULL},{DIM_PARTIAL},{DIM_PARTIAL}" in lines
+    # The per-underlying option detail row carries status + summed counts + the years.
+    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{OPT_STABLE},50,10000,2024" in lines
+
+
+def test_scoreboard_csv_empty_board_keeps_section_skeleton() -> None:
+    """An empty board still renders every section header + a zeroed per-category summary."""
+    csv_text = scoreboard_to_csv(build_completeness_scoreboard([], {}, [], {}))
+    lines = csv_text.splitlines()
+    assert any(line.startswith("DETAIL — spot") for line in lines)
+    assert any(line.startswith("DETAIL — options") for line in lines)
+    # Each category still gets a zeroed summary row (the loops over CATEGORIES always run).
+    for cat in (CATEGORY_INDEX, CATEGORY_EQUITY, CATEGORY_REFERENCE):
+        assert f"{cat},0,0,0,0" in lines  # both spot + options zero rows share this shape
+
+
+def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
+    """A symbol carrying a comma is RFC-4180 quoted, never splitting the row (extreme input)."""
+    rows = [_spot_row("NSE-A,B", "1day", COMPLETENESS_SETTLED)]
+    board = build_completeness_scoreboard(rows, {"NSE-A,B": CATEGORY_EQUITY}, [], {})
+    csv_text = scoreboard_to_csv(board)
+    assert '"NSE-A,B"' in csv_text  # the comma-bearing symbol is quoted, not field-split
+
+    # And it round-trips through a strict CSV reader back to the original symbol.
+    import csv as _csv
+    from io import StringIO
+
+    detail = [
+        r
+        for r in _csv.reader(StringIO(csv_text))
+        if len(r) == 6 and r[1] == "NSE-A,B"  # the per-symbol detail row
+    ]
+    assert detail and detail[0][1] == "NSE-A,B"

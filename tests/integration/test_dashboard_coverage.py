@@ -25,6 +25,7 @@ from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.app import (
     DashboardState,
     _coverage_years,
+    _render_completeness_html,
     _render_coverage_html,
     _render_expired_options_html,
     _render_fetch_windows_html,
@@ -137,6 +138,7 @@ class TestCoverageApi:
         assert 'href="/coverage/options"' in resp.text
         assert 'href="/coverage/spot"' in resp.text
         assert 'href="/coverage/windows"' in resp.text
+        assert 'href="/completeness"' in resp.text  # DEC-COMPLETENESS-PAGE-001 card
 
     def test_coverage_subpages_render_html(self, store: InstrumentStore) -> None:
         # Each focused sub-page (DEC-DASHBOARD-COVERAGE-SPLIT-001) renders 200 + a
@@ -370,6 +372,7 @@ class TestCoverageHelpers:
             'href="/coverage/options"',
             'href="/coverage/spot"',
             'href="/coverage/windows"',
+            'href="/completeness"',  # DEC-COMPLETENESS-PAGE-001
         ):
             assert href in html, f"hub missing sub-page link {href}"
 
@@ -398,11 +401,64 @@ class TestCoverageHelpers:
             _render_expired_options_html,
             _render_spot_coverage_html,
             _render_fetch_windows_html,
+            _render_completeness_html,
         ):
             html = render()
             assert ":focus-visible" in html
             assert "prefers-reduced-motion" in html
             assert "outline: 2px solid var(--blue)" in html
+
+
+class TestCompletenessScoreboard:
+    """GET /api/v1/completeness/scoreboard{,.csv} + /completeness page
+    (DEC-COMPLETENESS-SCOREBOARD-001 / DEC-COMPLETENESS-PAGE-001)."""
+
+    def test_json_scoreboard_has_shape_and_option_rows(self, store: InstrumentStore) -> None:
+        years = _coverage_years()
+        store.upsert_coverage(_cov(years[0]))  # one complete option-coverage cell for NIFTY
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/completeness/scoreboard").json()
+        # The well-shaped payload: spot + options each with a per-category table + drill-down.
+        assert set(body) == {"spot", "options"}
+        for cat in ("index", "equity", "reference"):
+            assert cat in body["spot"]["by_category"]
+            assert cat in body["options"]["by_category"]
+        # The seeded NIFTY option-coverage row is rolled up into the per-underlying list.
+        underlyings = {r["underlying"] for r in body["options"]["per_underlying"]}
+        assert "NIFTY" in underlyings
+
+    def test_csv_scoreboard_is_attachment_with_sections(self, store: InstrumentStore) -> None:
+        years = _coverage_years()
+        store.upsert_coverage(_cov(years[0]))
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/completeness/scoreboard.csv")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert "attachment" in resp.headers["content-disposition"]
+        assert "completeness-scoreboard.csv" in resp.headers["content-disposition"]
+        # The four self-describing report sections are present + the seeded underlying.
+        assert "SUMMARY — spot" in resp.text
+        assert "SUMMARY — options" in resp.text
+        assert "DETAIL — spot" in resp.text
+        assert "DETAIL — options" in resp.text
+        assert "NIFTY" in resp.text
+
+    def test_scoreboard_503_when_store_unwired(self) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=None))
+        assert client.get("/api/v1/completeness/scoreboard").status_code == 503
+        assert client.get("/api/v1/completeness/scoreboard.csv").status_code == 503
+
+    def test_completeness_page_renders(self, store: InstrumentStore) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/completeness")
+        assert resp.status_code == 200
+        # The page polls the JSON API + links the CSV report + cross-links the hub.
+        assert "/api/v1/completeness/scoreboard" in resp.text
+        assert "/api/v1/completeness/scoreboard.csv" in resp.text
+        assert 'href="/coverage"' in resp.text
+        # Indices vs equities are surfaced SEPARATELY (the operator requirement).
+        assert "Indices" in resp.text
+        assert "Equities" in resp.text
 
 
 _LEDGER_COLS = [

@@ -31,6 +31,8 @@ real lifetime), so it reads complete-up-to-lifetime, not penalised.
 
 from __future__ import annotations
 
+import csv
+import io
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Final
 
@@ -302,6 +304,111 @@ def build_completeness_scoreboard(
     }
 
 
+def scoreboard_to_csv(board: Mapping[str, Any]) -> str:
+    """Render a :func:`build_completeness_scoreboard` payload as a downloadable CSV report.
+
+    DEC-COMPLETENESS-PAGE-001 — the "even a human can understand it in Excel" report
+    behind the ``/api/v1/completeness/scoreboard.csv`` download. A single pure
+    string-builder over the already-composed scoreboard (no lake / store / network), so it
+    is 100% unit-testable offline and adds no new derivation (CLAUDE.md §11 COMMON — it only
+    re-serialises the engine's own output).
+
+    The file is a **four-section human report** (each section a self-describing title row +
+    its own header, blank-line separated) that answers the operator's question directly —
+    *how many symbols from indices vs equities-cash, SEPARATELY, have the full dataset* — and
+    then the per-symbol / per-underlying drill-down:
+
+    1. ``SUMMARY — spot`` — per category: ``total``, and how many symbols are FULL on 1-day /
+       1-minute / both (EXACT, window-ledger backed).
+    2. ``SUMMARY — options`` — per category: ``total``, ``stable`` (the honest "complete"),
+       ``growing_or_partial``, ``failed`` (NO fabricated %, per CLAUDE.md §6).
+    3. ``DETAIL — spot`` — one row per symbol with its 1-day / 1-minute / overall verdict.
+    4. ``DETAIL — options`` — one row per underlying with status + pulled counts + the years.
+
+    Uses :mod:`csv` so any symbol with a comma / quote is escaped correctly (an extreme-input
+    guard); ``\\n`` line terminator for deterministic, platform-stable output.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+
+    writer.writerow(["BruteX — Data Completeness Scoreboard"])
+    writer.writerow(
+        [
+            "spot completeness is EXACT (window-ledger); option status is "
+            "stable/growing/partial/failed — no fabricated % (vendor exposes no expected total)"
+        ]
+    )
+
+    spot_by_cat = board["spot"]["by_category"]
+    writer.writerow([])
+    writer.writerow(["SUMMARY — spot (count of symbols FULL per dimension — per category)"])
+    writer.writerow(["category", "total", "full_1day", "full_1minute", "full_both"])
+    for cat in CATEGORIES:
+        bucket = spot_by_cat[cat]
+        writer.writerow(
+            [
+                cat,
+                bucket["total"],
+                bucket["full_1day"],
+                bucket["full_1minute"],
+                bucket["full_both"],
+            ]
+        )
+
+    opt_by_cat = board["options"]["by_category"]
+    writer.writerow([])
+    writer.writerow(["SUMMARY — options (count of underlyings per status — per category)"])
+    writer.writerow(["category", "total", "stable", "growing_or_partial", "failed"])
+    for cat in CATEGORIES:
+        bucket = opt_by_cat[cat]
+        writer.writerow(
+            [cat, bucket["total"], bucket["stable"], bucket["growing_or_partial"], bucket["failed"]]
+        )
+
+    writer.writerow([])
+    writer.writerow(["DETAIL — spot (per symbol)"])
+    writer.writerow(["category", "symbol", "exchange", "1day", "1minute", "overall"])
+    for row in board["spot"]["per_symbol"]:
+        writer.writerow(
+            [
+                row["category"],
+                row["symbol"],
+                row["exchange"],
+                row["1day"],
+                row["1minute"],
+                row["overall"],
+            ]
+        )
+
+    writer.writerow([])
+    writer.writerow(["DETAIL — options (per underlying)"])
+    writer.writerow(
+        [
+            "category",
+            "underlying",
+            "exchange",
+            "status",
+            "expiries_pulled",
+            "contracts_pulled",
+            "years",
+        ]
+    )
+    for row in board["options"]["per_underlying"]:
+        writer.writerow(
+            [
+                row["category"],
+                row["underlying"],
+                row["exchange"],
+                row["status"],
+                row["expiries_pulled"],
+                row["contracts_pulled"],
+                " ".join(str(year) for year in row["years"]),
+            ]
+        )
+
+    return buf.getvalue()
+
+
 __all__ = [
     "CATEGORIES",
     "CATEGORY_EQUITY",
@@ -319,4 +426,5 @@ __all__ = [
     "SPOT_DIMENSIONS",
     "build_completeness_scoreboard",
     "categorize_instruments",
+    "scoreboard_to_csv",
 ]

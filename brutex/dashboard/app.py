@@ -53,6 +53,7 @@ from brutex.config.credentials import groww_credentials_present
 from brutex.dashboard.completeness import (
     build_completeness_scoreboard,
     categorize_instruments,
+    scoreboard_to_csv,
 )
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
@@ -2230,26 +2231,54 @@ def build_app(
         pulled-counts + stability, never an invented percentage. No lake root wired → an
         empty (well-shaped) scoreboard, never a 500.
         """
+        return JSONResponse(await _completeness_board())
+
+    def _build_completeness_board(  # pragma: no cover - live store+lake
+        store: Any, lake: Path
+    ) -> dict[str, Any]:
+        """Compose the scoreboard from the lake + ledger + instrument categories.
+
+        Shared by the JSON ``/api/v1/completeness/scoreboard`` route + the
+        ``.csv`` download (CLAUDE.md §11 COMMON — one builder, two encodings).
+        Runs on a threadpool worker, building ``store.connection`` here so the
+        store RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001).
+        """
+        categories = categorize_instruments(
+            store.list_index_equity_instruments(),
+            is_index=is_in_brute_force_scope,
+            is_reference=is_reference_only,
+        )
+        spot_rows = build_spot_coverage_payload(
+            summarize_spot_datasets(store.connection, lake), spot_window_rollup(lake)
+        )["rows"]
+        return build_completeness_scoreboard(
+            spot_rows, categories, store.list_coverage(), categories
+        )
+
+    async def _completeness_board() -> dict[str, Any]:  # pragma: no cover - live store+lake
+        """Resolve the store + lake and build the scoreboard (empty + well-shaped if no lake)."""
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse(build_completeness_scoreboard([], {}, [], {}))
-        lake = lake_root.parent
+            return build_completeness_scoreboard([], {}, [], {})
+        return await run_in_threadpool(_build_completeness_board, store, lake_root.parent)
 
-        def _build() -> dict[str, Any]:
-            """Compose the scoreboard from the lake + ledger + instrument categories."""
-            instruments = store.list_index_equity_instruments()
-            categories = categorize_instruments(
-                instruments, is_index=is_in_brute_force_scope, is_reference=is_reference_only
-            )
-            spot_rows = build_spot_coverage_payload(
-                summarize_spot_datasets(store.connection, lake), spot_window_rollup(lake)
-            )["rows"]
-            return build_completeness_scoreboard(
-                spot_rows, categories, store.list_coverage(), categories
-            )
+    @app.get("/api/v1/completeness/scoreboard.csv")
+    async def api_completeness_scoreboard_csv() -> Response:  # pragma: no cover - live store+lake
+        """GET /api/v1/completeness/scoreboard.csv — the scoreboard as a downloadable report.
 
-        return JSONResponse(await run_in_threadpool(_build))
+        DEC-COMPLETENESS-PAGE-001. The exact same data as ``/api/v1/completeness/scoreboard``,
+        serialised by :func:`brutex.dashboard.completeness.scoreboard_to_csv` into a four-section
+        human-readable CSV (spot + option SUMMARY per category, then the per-symbol + per
+        -underlying DETAIL) so the operator can answer "how many indices vs equities have the
+        full set?" in Excel. READ-ONLY; an empty (well-shaped) report when no lake is wired.
+        """
+        board = await _completeness_board()
+        return Response(
+            content=scoreboard_to_csv(board),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="completeness-scoreboard.csv"'},
+        )
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
@@ -2499,6 +2528,16 @@ def build_app(
         """GET /coverage/windows — the focused fetch-windows page
         (DEC-DASHBOARD-COVERAGE-SPLIT-001 / DEC-WINDOW-STATUS-001)."""
         return _render_fetch_windows_html()
+
+    @app.get("/completeness", response_class=HTMLResponse)
+    async def completeness_page() -> str:
+        """GET /completeness — the Data Completeness Scoreboard page.
+
+        Renders the per-category summary (indices vs equities-cash, SEPARATELY) +
+        the per-symbol spot and per-underlying option drill-downs from
+        ``/api/v1/completeness/scoreboard``, with a CSV download
+        (DEC-COMPLETENESS-SCOREBOARD-001 / DEC-COMPLETENESS-PAGE-001)."""
+        return _render_completeness_html()
 
     # ── Pre-open report (DEC-PREOPEN-REPORT-001) ────────────────────────
 
@@ -4197,6 +4236,29 @@ def _load_fetch_windows_template() -> str:
 def _render_fetch_windows_html() -> str:
     """Return the focused fetch-windows page HTML (DEC-DASHBOARD-COVERAGE-SPLIT-001)."""
     return _load_fetch_windows_template()
+
+
+_COMPLETENESS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "completeness.html"
+_COMPLETENESS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_completeness_template() -> str:
+    """Load + cache the Data Completeness Scoreboard page template.
+
+    Ships as ``brutex/dashboard/templates/completeness.html``. The page polls
+    ``/api/v1/completeness/scoreboard`` for the per-category summary + per-symbol /
+    per-underlying drill-downs and links ``/api/v1/completeness/scoreboard.csv`` for
+    the report download (DEC-COMPLETENESS-PAGE-001). Loaded once, then served verbatim.
+    """
+    global _COMPLETENESS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _COMPLETENESS_TEMPLATE_CACHE is None:
+        _COMPLETENESS_TEMPLATE_CACHE = _COMPLETENESS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _COMPLETENESS_TEMPLATE_CACHE
+
+
+def _render_completeness_html() -> str:
+    """Return the Data Completeness Scoreboard page HTML (DEC-COMPLETENESS-PAGE-001)."""
+    return _load_completeness_template()
 
 
 _REPORTS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "reports.html"
