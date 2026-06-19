@@ -94,7 +94,7 @@ class _FakeSDK:
         *,
         payload: Mapping[str, object] | None = None,
         payloads: Sequence[Mapping[str, object]] | None = None,
-        script: Sequence[Exception | None] | None = None,
+        script: Sequence[Exception | Mapping[str, object] | None] | None = None,
         raise_for: Mapping[str, Exception] | None = None,
         expiries: Callable[..., Mapping[str, object]] | None = None,
         contracts: Callable[..., Mapping[str, object]] | None = None,
@@ -119,8 +119,10 @@ class _FakeSDK:
             return self._payloads[min(len(self.symbols) - 1, len(self._payloads) - 1)]
         if self._script is not None:
             item = self._script[min(len(self.symbols) - 1, len(self._script) - 1)]
-            if item is not None:
+            if isinstance(item, BaseException):
                 raise item
+            if item is not None:
+                return item  # a scripted payload (e.g. an empty 200 mid-sequence)
             return self._payload
         exc = self._raise_for.get(str(kw["groww_symbol"]))
         if exc is not None:
@@ -520,7 +522,9 @@ def test_ingest_genuine_empty_bounded_to_attempts() -> None:
     )
     assert report.windows == 1 and report.bars_appended == 0  # confidently empty
     assert sdk.calls == 3  # bounded to exactly attempts — never an infinite loop
-    assert backoffs == [1, 2]  # backoff fires before re-fetch on rounds 2+3, not the last
+    # backoff fires before re-fetch on rounds 2+3 (not the last); 0-based arg mirrors the
+    # spot spine (ingest._ingest_one_window passes empty_attempt, not empty_attempt + 1).
+    assert backoffs == [0, 1]
     key = WindowKey(
         market=GROWW_OPTION_COVERAGE_MARKET,
         security_id="NSE-NIFTY-02Jan25-28500-CE",
@@ -549,6 +553,54 @@ def test_ingest_empty_attempts_one_disables_retry() -> None:
         now_ist=_now,
     )
     assert sdk.calls == 1 and report.bars_appended == 0  # one call, confidently empty
+
+
+def test_ingest_empty_attempts_zero_clamps_to_single_fetch() -> None:
+    """``empty_retry_attempts=0`` is degenerate — the ``max(1, …)`` guard still fetches ONCE.
+
+    Hardens over the spot mirror's bare ``range(N)``: a 0 must never silently record an empty
+    window WITHOUT calling the vendor (the out-of-box guard the hostile review flagged).
+    """
+    sdk = _FakeSDK(payload=_EMPTY)
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        empty_retry_attempts=0,
+        now_ist=_now,
+    )
+    assert sdk.calls == 1 and report.windows == 1  # clamped to one real fetch, never zero
+
+
+def test_ingest_empty_then_transient_then_data() -> None:
+    """empty → transient → data: the shared transient counter spans empty rounds correctly.
+
+    Round 1 returns empty (counter still 0), round 2 hits a timeout (consumes 1 transient
+    attempt) then re-fetches data on the SAME round — proving an empty round does not steal
+    the transient budget and the glitch is fully recovered.
+    """
+    sdk = _FakeSDK(script=[_EMPTY, GrowwAPITimeoutException("stall"), _candles()])
+    sink = _Sink()
+    slept: list[int] = []
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        max_attempts=2,
+        backoff=slept.append,
+        empty_retry_attempts=3,
+        empty_retry_backoff=lambda _a: None,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1 and report.retried_windows == 1  # data recovered
+    assert sdk.calls == 3  # empty, timeout, data
+    assert slept == [0]  # exactly one transient backoff consumed (not doubled by the empty)
 
 
 def test_ingest_empty_retry_default_is_three_with_noop_backoff() -> None:

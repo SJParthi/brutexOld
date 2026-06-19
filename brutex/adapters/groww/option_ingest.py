@@ -260,7 +260,10 @@ def ingest_option_contract(
     # transient-retry fetch; a 0-bar SUCCESS is re-fetched up to empty_retry_attempts times.
     # The first attempt with bars WINS (a glitched empty is recovered); only an all-empty run
     # falls through to record genuine no-data. Bounded — a truly-empty window never loops.
-    for empty_attempt in range(empty_retry_attempts):
+    # ``max(1, …)`` HARDENS over the spot mirror's bare ``range(N)``: a degenerate
+    # ``empty_retry_attempts<1`` still fetches exactly once, never silently records an empty
+    # window WITHOUT calling the vendor (the out-of-box guard; default is 3, never <1).
+    for empty_attempt in range(max(1, empty_retry_attempts)):
         while True:
             if pace is not None:
                 pace()
@@ -309,13 +312,17 @@ def ingest_option_contract(
             break  # bars on this attempt — the (possibly glitched) empty is recovered
         if empty_attempt + 1 < empty_retry_attempts:
             # Still empty + a retry remains: log + (default no-op) backoff, then re-fetch.
+            # The backoff arg is 0-based (``empty_attempt``) to TRULY mirror the spot spine
+            # (ingest._ingest_one_window: ``empty_retry_backoff(empty_attempt)``); the log
+            # shows the 1-based round + total, same keys as spot, for readability.
             _LOG.debug(
                 "option.ingest.window.empty_retry",
                 pull_id=pull_id,
-                empty_attempt=empty_attempt + 1,
+                attempt=empty_attempt + 1,
+                of=empty_retry_attempts,
                 **fields,
             )
-            empty_backoff(empty_attempt + 1)
+            empty_backoff(empty_attempt)
 
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
     result = sink.append(
