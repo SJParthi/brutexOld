@@ -1341,11 +1341,33 @@ def pull_all_spot(
                         latch — the documented divergence; it DERIVES ``auth_aborted``
                         from the quarantined failures), so the round leaves
                         ``auth_cause`` at its ``None`` default (mirrors the CLI).
+
+                        DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 — the round also reports the
+                        ledger-derived ``outstanding`` (``total - settled``: PLANNED +
+                        FAILED + EMPTY-below-threshold) + the progress measures
+                        (``settled`` and the summed ``empty_streak``), so the loop
+                        re-pulls until EVERY window is SUCCESS / SKIPPED ("pull until
+                        successful"), not merely until the transient failures clear. A
+                        dry-run (``ledger is None``) leaves them ``None`` → the legacy
+                        ``still_failed_windows`` behaviour (byte-identical).
                         """
                         res = _one_pass(True)
+                        outstanding = settled = streak = None
+                        if ledger is not None:
+                            prog = ledger.progress_counts()
+                            outstanding = prog.total - prog.settled
+                            settled = prog.settled
+                            # Summed empty_streak — the secondary progress signal (an
+                            # EMPTY window stepping toward SKIPPED advances this before
+                            # ``settled`` rises). One O(N) fold per round, NOT the hot
+                            # path (mirrors progress_counts's envelope).
+                            streak = sum(r.empty_streak for r in ledger.records())
                         return UntilCleanRound(
                             still_failed_windows=res.report.still_failed_windows,
                             auth_aborted=res.report.auth_aborted,
+                            outstanding_windows=outstanding,
+                            settled_windows=settled,
+                            streak_total=streak,
                         )
 
                     # Auto-resume (DEC-AUTO-RESUME-QUOTA-001): keep re-firing batches
