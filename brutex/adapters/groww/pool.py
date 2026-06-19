@@ -105,8 +105,11 @@ class ClientPool:
         leaf: GrowwClient | None = getattr(self._local, "leaf", None)
         if leaf is None:
             with self._lock:
-                leaf = self._clients[self._next % len(self._clients)]
-                self._next += 1
+                leaf = self._clients[self._next]
+                # Advance the round-robin cursor, kept BOUNDED in ``[0, len)`` (never an
+                # ever-growing int over a long-lived process — same dispatch, no unbounded
+                # counter; per the concurrency hostile review).
+                self._next = (self._next + 1) % len(self._clients)
             self._local.leaf = leaf
         return leaf
 

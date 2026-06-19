@@ -383,3 +383,24 @@ class TestCallDeadline:
         from brutex.adapters.groww.client import run_with_deadline
 
         assert run_with_deadline(lambda: {"candles": []}, 5.0) == {"candles": []}
+
+
+def test_with_pace_rebinds_pace_and_preserves_meter() -> None:
+    """`with_pace` returns a NEW client with pace rebound, sharing the SAME meter (immutable).
+
+    The GrowwClientProtocol seam `_with_paced_client` uses to wire the shared rate bucket
+    after the adapter is built (DEC-GROWW-CLIENT-POOL-001) — a `dataclasses.replace`, so the
+    original is untouched and the achieved-rate meter (compare=False) carries through.
+    """
+    sdk = _FakeSDK()
+    client = GrowwClient(sdk=sdk)
+
+    def _pace() -> None:
+        pass
+
+    repaced = client.with_pace(_pace)
+    assert repaced is not client  # immutable copy, not a mutation
+    assert repaced.pace is _pace  # the new bucket hook is wired
+    assert client.pace is not _pace  # the original is untouched
+    assert repaced.meter is client.meter  # the shared aggregate meter carries through
+    assert repaced.sdk is sdk  # same SDK connection

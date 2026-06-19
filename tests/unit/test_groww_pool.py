@@ -264,3 +264,122 @@ def test_mismatched_meters_rejected() -> None:
     b = GrowwClient(sdk=_RecordingSDK(), meter=CallMeter(emit_log=False))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="share ONE CallMeter"):
         ClientPool([a, b])
+
+
+# ── G1: exception transparency — a raising leaf propagates, releases the meter, keeps affinity ──
+
+
+class _RaisingSDK:
+    """A connection whose historical_candles ALWAYS raises a terminal error."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_historical_candles(self, **_kw: object) -> Mapping[str, object]:
+        self.calls += 1
+        raise ValueError("vendor said no")  # unknown → terminal GrowwError (not retryable)
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover - unused
+        return {"expiries": []}
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover - unused
+        return {"contracts": []}
+
+
+def test_pool_propagates_leaf_error_releases_meter_keeps_affinity() -> None:
+    """A leaf error propagates through the pool, the in-flight slot is released, affinity holds."""
+    from brutex.adapters.groww.errors import GrowwError
+
+    meter = CallMeter(emit_log=False)
+    sdk = _RaisingSDK()
+    pool = _pool_of(sdk, meter=meter)
+    with pytest.raises(GrowwError):
+        pool.historical_candles(**_HIST_KW)
+    # The failed call released its in-flight slot (the gauge can't leak on an exception).
+    assert meter.snapshot()["in_flight"] == 0
+    # Affinity survives the raise: the SAME thread still routes to the SAME (only) leaf.
+    with pytest.raises(GrowwError):
+        pool.historical_candles(**_HIST_KW)
+    assert sdk.calls == 2 and meter.snapshot()["in_flight"] == 0
+
+
+# ── G2: the aggregate rate gate is SHARED across every connection (Rule 6, proven not prose) ──
+
+
+def test_every_connection_paces_through_the_one_shared_gate() -> None:
+    """Every physical call on EVERY leaf goes through the ONE shared pace hook (no bypass)."""
+    lock = threading.Lock()
+    paced: list[int] = []
+
+    def _pace() -> None:
+        with lock:
+            paced.append(threading.get_ident())
+
+    pool = _pool_of(_RecordingSDK(), _RecordingSDK()).with_pace(_pace)
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for f in [ex.submit(lambda: pool.historical_candles(**_HIST_KW)) for _ in range(9)]:
+            f.result(timeout=10.0)
+    # All 9 calls across the 2 connections were gated by the single shared bucket — K
+    # connections add concurrency, never extra rate (CLAUDE.md §2 Rule 6).
+    assert len(paced) == 9
+
+
+# ── G3: the PRODUCTION default size (K=2) runs two calls in parallel ─────────────────────
+
+
+def test_two_connections_run_in_parallel() -> None:
+    """K=2 (the default pool size) → two calls truly simultaneously in-flight."""
+    barrier = threading.Barrier(2)
+    pool = _pool_of(_BarrierSDK(barrier), _BarrierSDK(barrier))
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        results = [
+            f.result(timeout=10.0)
+            for f in [ex.submit(lambda: pool.historical_candles(**_HIST_KW)) for _ in range(2)]
+        ]
+    assert results == [{"candles": []}, {"candles": []}] and not barrier.broken
+
+
+# ── G4: oversubscription (N threads > K connections) spreads evenly (round-robin wrap) ───
+
+
+def test_oversubscription_spreads_evenly_across_connections() -> None:
+    """6 threads on a 2-connection pool → round-robin wraps to an even 3/3 spread."""
+    sdks = [_RecordingSDK(), _RecordingSDK()]
+    pool = _pool_of(*sdks)
+    barrier = threading.Barrier(6)
+
+    def _one() -> None:
+        barrier.wait(timeout=5.0)  # hold all 6 in flight so each claims a round-robin slot
+        pool.historical_candles(**_HIST_KW)
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for f in [ex.submit(_one) for _ in range(6)]:
+            f.result(timeout=10.0)
+    # 6 distinct threads round-robin'd 0,1,0,1,0,1 across 2 leaves → exactly 3 calls each
+    # (the bounded cursor wraps; no leaf re-serialises more than its fair share).
+    assert sorted(s.candle_calls for s in sdks) == [3, 3]
+
+
+# ── G6/G7: with_pace chained twice rebinds (not stacks) and keeps every leaf's shared meter ──
+
+
+def test_with_pace_twice_rebinds_and_keeps_shared_meter() -> None:
+    """Chained `with_pace` rebinds the latest pace on every leaf; the meter stays shared."""
+    meter = CallMeter(emit_log=False)
+    pool = _pool_of(_RecordingSDK(), _RecordingSDK(), meter=meter)
+    first: list[str] = []
+    second: list[str] = []
+    repaced = pool.with_pace(lambda: first.append("a")).with_pace(lambda: second.append("b"))
+    assert repaced.meter is meter
+    # Every leaf of the twice-rebuilt pool still shares the ONE aggregate meter.
+    assert all(leaf.meter is meter for leaf in repaced._clients)
+    barrier = threading.Barrier(2)
+
+    def _one() -> None:
+        barrier.wait(timeout=5.0)
+        repaced.historical_candles(**_HIST_KW)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for f in [ex.submit(_one) for _ in range(2)]:
+            f.result(timeout=10.0)
+    assert len(second) == 2 and first == []  # the LATEST pace fired; the first was rebound away

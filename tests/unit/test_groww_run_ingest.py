@@ -279,7 +279,11 @@ def test_with_paced_client_three_branches() -> None:
 
     paced = mod._with_paced_client(adapter, _pace)
     assert paced is not adapter
-    assert isinstance(paced, GrowwMarketAdapter) and paced.client.pace is _pace
+    # `adapter.client` is now typed GrowwClientProtocol (accepts a single client OR a pool),
+    # which exposes `with_pace` not the private `pace` attribute — narrow to the concrete
+    # GrowwClient to assert the pace was actually rebound (DEC-GROWW-CLIENT-POOL-001).
+    assert isinstance(paced, GrowwMarketAdapter)
+    assert isinstance(paced.client, GrowwClient) and paced.client.pace is _pace
 
     assert mod._with_paced_client(adapter, None) is adapter  # pace None → unchanged
     sentinel = object()

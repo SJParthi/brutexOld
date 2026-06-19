@@ -125,3 +125,15 @@ def test_resolve_pool_size_strips_whitespace(monkeypatch) -> None:
 def test_pool_size_constants_are_sane() -> None:
     assert 1 <= c.GROWW_CLIENT_POOL_SIZE <= c.GROWW_CLIENT_POOL_MAX
     assert c.GROWW_CLIENT_POOL_MAX >= 1
+
+
+def test_resolve_pool_size_accepts_exact_max(monkeypatch) -> None:
+    """The exact MAX is ACCEPTED (off-by-one guard on the `> MAX` clamp)."""
+    monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, str(c.GROWW_CLIENT_POOL_MAX))
+    assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_MAX
+
+
+def test_resolve_pool_size_rejects_one_above_max(monkeypatch) -> None:
+    """MAX+1 is rejected → fall back to the audited default (the boundary, not MAX+5)."""
+    monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, str(c.GROWW_CLIENT_POOL_MAX + 1))
+    assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE

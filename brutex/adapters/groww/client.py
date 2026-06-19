@@ -335,7 +335,7 @@ class GrowwClientProtocol(Protocol):
         :class:`GrowwClient` (a dataclass field) and a :class:`~brutex.adapters.groww.pool.\
 ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
         """
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def historical_candles(
         self,
@@ -348,7 +348,7 @@ ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
         end: str,
     ) -> Mapping[str, object]:
         """Fetch one historical-candle window (the row-of-arrays payload)."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def expiries(
         self,
@@ -359,17 +359,17 @@ ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
         month: int | None = None,
     ) -> Mapping[str, object]:
         """List FNO expiries for an underlying."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def contracts(
         self, *, exchange: str, underlying_symbol: str, expiry_date: str
     ) -> Mapping[str, object]:
         """List contract symbols for an underlying + expiry."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def with_pace(self, pace: Callable[[], None]) -> Self:
         """Return a copy with the rate-bucket ``pace`` hook rebound (re-fanned to leaves)."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
 
 __all__ = ["GrowwClient", "GrowwClientProtocol", "GrowwSDK"]
