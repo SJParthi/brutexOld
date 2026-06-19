@@ -125,6 +125,13 @@ def plan_windows(start: datetime, end: datetime, *, window_days: int) -> list[Da
 #: Canonical daily interval — the only interval not tiled/session-filtered.
 _DAILY: str = "1day"
 
+#: Public alias of :data:`_DAILY` for cross-module consumers (the vendor-neutral
+#: "this is the daily interval" constant). The 1-day-first window bounding
+#: (DEC-SPOT-1DAY-FIRST-001) must NEVER bound the daily interval, so
+#: :mod:`brutex.data.window_ledger_store` imports THIS public name rather than the
+#: private ``_DAILY`` (one source of truth, no ``reportPrivateUsage``).
+DAILY_INTERVAL: str = _DAILY
+
 #: IST clock pieces for the settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001). The
 #: NSE/BSE market is the same for every vendor, so the clamp reality is shared.
 _IST_ZONE = ZoneInfo("Asia/Kolkata")
@@ -1253,6 +1260,7 @@ def fetch_until_nonempty[T](
 __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
     "COVERAGE_MARKET",
+    "DAILY_INTERVAL",
     "DEFAULT_EMPTY_RETRY_ATTEMPTS",
     "DEFAULT_MAX_ROUNDS",
     "GROWW_COVERAGE_MARKET",

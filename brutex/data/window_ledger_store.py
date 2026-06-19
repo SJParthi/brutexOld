@@ -381,10 +381,8 @@ def plan_windows(
     # Imported locally to avoid an import cycle (this module is in brutex.data, which
     # the ingest spines depend on).
     from brutex.adapters.ingest_common import (
-        _DAILY as DAILY_INTERVAL,
-    )
-    from brutex.adapters.ingest_common import (
         COVERAGE_MARKET,
+        DAILY_INTERVAL,
         clamp_window_end,
         tile_windows,
     )
@@ -514,10 +512,8 @@ def reconcile_ledger_windows(
     # out of the vendor package in PR-J4a — _MARKET's value unchanged). Local import
     # avoids the brutex.data ↔ ingest spine import cycle.
     from brutex.adapters.ingest_common import (
-        _DAILY as DAILY_INTERVAL,
-    )
-    from brutex.adapters.ingest_common import (
         COVERAGE_MARKET,
+        DAILY_INTERVAL,
         tile_windows,
     )
     from brutex.adapters.ingest_common import (

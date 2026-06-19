@@ -58,11 +58,17 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
+from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
+from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.run_ingest import (
     GrowwIngestReport,
     ProgressHook,
     run_groww_spot_ingest,
     run_groww_spot_ingest_with_retry,
+)
+from brutex.adapters.groww.spot_bounds import (
+    SpotWindows,
+    discover_spot_minute_windows,
 )
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
@@ -74,6 +80,8 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.catalog import Catalog
+from brutex.data.errors import CatalogError
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.tf_autoderive import autoderive_enabled
 from brutex.data.window_ledger import WindowLedger
@@ -953,6 +961,78 @@ def make_live_sync(
     return _sync
 
 
+def _discover_minute_windows(
+    instruments: Sequence[Instrument],
+    *,
+    lake_root: Path,
+    start: date,
+    end: date,
+    dry_run: bool,
+) -> SpotWindows:
+    """Read each spot symbol's discovered 1-day start → its 1-minute pull window (Phase 1→2).
+
+    DEC-SPOT-1DAY-FIRST-001, the SPOT twin of
+    :func:`~brutex.dashboard.historical_pull._discover_start_dates`. After the cheap
+    1-day phase lands, the lake holds each symbol's REAL 1-day coverage, so its
+    earliest 1-day bar date PINS where the heavy 1-minute fill must begin (never
+    blindly from the 2020 floor). Opens the lake
+    :class:`~brutex.data.catalog.Catalog` and delegates to
+    :func:`~brutex.adapters.groww.spot_bounds.discover_spot_minute_windows`, which
+    reconciles ONCE per spot segment, reads each symbol's coverage, and OMITS a
+    symbol with no 1-day data (the 3c skip — the caller EXCLUDES it from the minute
+    pull + reports it). The ``with catalog:`` context closes the handle on any exit
+    (CodeQL prefers this over a ``finally``).
+
+    A **dry-run** has no live lake to read (its synthetic 1-day pull writes nothing —
+    :class:`~brutex.data.sink.NullBarSink`), so it returns ``{}`` (the caller then
+    skips the minute pull, honest — never a fabricated start). A missing / locked /
+    deps-absent catalog degrades to ``{}`` too — both LOUD, never silent
+    (Golden Rule #10).
+
+    Parameters
+    ----------
+    instruments
+        The resolved spot instruments whose minute pull to bound.
+    lake_root
+        Lake root (the parent of ``bars/``) — the catalog + reconcile read it.
+    start, end
+        The half-open ``[start, end)`` range the unbounded minute pull would use.
+    dry_run
+        When ``True`` no lake is read (the synthetic pull wrote nothing) → ``{}``.
+
+    Returns
+    -------
+    SpotWindows
+        ``{symbol_name: (start, end)}`` for every symbol with 1-day coverage; empty
+        on a dry-run or a catalog degrade (the caller skips the minute pull).
+    """
+    if dry_run:
+        # The dry-run 1-day pull wrote nothing (NullBarSink), so there is no coverage
+        # to read — skip the minute pull entirely (honest, never a blind 2020 pull).
+        return {}
+    try:
+        with Catalog.open(lake_root / "catalog.duckdb") as catalog:
+            return discover_spot_minute_windows(
+                catalog,
+                lake_root=lake_root,
+                instruments=instruments,
+                full_start=start,
+                full_end=end,
+            )
+    except (CatalogError, OSError):
+        # The data-lake deps are missing / the catalog file is unopenable / the
+        # lake_root is not accessible (PermissionError is an OSError) — degrade to an
+        # EMPTY map (the caller skips the whole minute pull), loud, never silent.
+        _LOG.warning("universe.pull_all.minute_discovery_unavailable", lake_root=str(lake_root))
+        return {}
+
+
+#: The Phase-1 daily interval (``"1day"``) — the cheap pull that PINS each symbol's
+#: 1-day start before the heavy 1-minute fill (DEC-SPOT-1DAY-FIRST-001). One source
+#: of truth shared with :func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`.
+_PHASE1_DAILY: Final[str] = TRACK1_DAILY_INTERVAL
+
+
 def pull_all_spot(
     instruments: Sequence[Instrument],
     *,
@@ -1084,17 +1164,30 @@ def pull_all_spot(
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): the ledger below is the page's
         # primary source; the sidecar stays on disk read-only (db_view fallback
         # + the one-shot ledger migration) until the Stage-6 deletion.
+        # 1-DAY-FIRST phase split (DEC-SPOT-1DAY-FIRST-001, the spot twin of the
+        # option/future DEC-HISTORICAL-1DAY-FIRST-001). For the SPOT pull the cheap
+        # ``1day`` phase runs FIRST (over EVERY symbol) so the lake holds each
+        # symbol's REAL 1-day coverage; the heavy ``1minute`` fill (Phase 2) then
+        # STARTS from each symbol's discovered 1-day date, NOT blindly from the 2020
+        # floor — and a symbol with NO 1-day data is SKIPPED + reported (the 3c rule).
+        # ``intervals=("1day",)`` (the verify-first default) runs ONLY Phase 1 with
+        # ``symbol_windows=None`` — byte-identical to the pre-feature behaviour.
+        daily_requested = _PHASE1_DAILY in intervals
+        minute_intervals: tuple[str, ...] = tuple(i for i in intervals if i != _PHASE1_DAILY)
+        minute_requested = bool(minute_intervals)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load (one-shot
-        # migrate) the durable Parquet ledger + PLAN every window the pull will
-        # touch as PLANNED, so EVERY spot window has a DB row BEFORE any fetch.
-        # The ingest then records each outcome into it. Persisted to
+        # migrate) the durable Parquet ledger ONCE for the whole pull, shared by
+        # BOTH phases so the live progress (on_ledger_sync) spans them. Phase 1's
+        # 1-day windows are PLANNED upfront here; Phase 2's 1-minute windows are
+        # PLANNED after the derive (so the planned keys equal the bounded fetched
+        # keys, with no phantom pre-listing rows). Persisted to
         # <lake>/window_ledger/ — the single source /coverage/windows surfaces.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
-        if ledger is not None:
+        if ledger is not None and daily_requested:
             plan_windows(
                 ledger,
                 instruments=instruments,
-                intervals=intervals,
+                intervals=(_PHASE1_DAILY,),
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1113,7 +1206,7 @@ def pull_all_spot(
                 ledger,
                 lake_root,
                 instruments=instruments,
-                intervals=intervals,
+                intervals=(_PHASE1_DAILY,),
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1167,52 +1260,74 @@ def pull_all_spot(
         # idempotent; DEC-INGEST-AUTO-RETRY-001). The default one-click Pull-ALL
         # keeps ``auto_retry=False`` (a single pass) — byte-for-byte the prior
         # behaviour. BOTH paths share the same ingest spine (CLAUDE.md §11 COMMON);
-        # ``report`` is always the ORIGINAL pass's report for the per-symbol rollup.
-        passes: list[SpotIngestWithRetry] = []
-
-        def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
-            """Run ONE full pull-pass-with-auto-retry over the SHARED window ledger.
-
-            The single ingest call site (CLAUDE.md §11 COMMON) — the one-shot path,
-            every until-clean round, and the auto-retry inner loop all go through
-            here, so the args can never drift between them. Every COMPLETED pass is
-            recorded in ``passes`` so a mid-round quota death can still report the
-            last finished round's state (DEC-SPOT-QUOTA-MIDROUND-001).
-            """
-            res = run_groww_spot_ingest_with_retry(
-                adapter,
-                sink,
-                instruments=instruments,
-                intervals=intervals,
-                start=start.date(),
-                end=end.date(),
-                pace=pace,
-                on_rate_limit=on_rate_limit,
-                on_timeout=on_timeout,
-                on_success=on_success,
-                on_progress=_progress_then_flush,
-                ledger=ledger,
-                run_parallel=run_parallel,
-                auto_retry=do_retry,
-                on_window=live_sync,
-            )
-            passes.append(res)
-            return res
-
+        # the per-symbol rollup is the FIRST pass's report of EACH phase.
         final_still_failed = 0
         final_auth_aborted = False
         final_auth_cause: str | None = None
         final_quota_exhausted = False
-        try:
+        # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
+        # each interval's 1-day/1-minute outcome from its own phase's report (a symbol
+        # skipped from Phase 2 simply has no 1-minute pair → contributes nothing).
+        phase_reports: list[GrowwIngestReport] = []
+        # The 3c skip set: symbols EXCLUDED from the minute pull (no 1-day coverage).
+        minute_skipped_symbols: list[str] = []
+
+        def _run_phase(
+            phase_intervals: tuple[str, ...],
+            phase_instruments: Sequence[Instrument],
+            phase_windows: SpotWindows | None,
+        ) -> None:
+            """Run ONE phase (1-day or 1-minute) over the SHARED ledger; fold its outcome.
+
+            The single ingest call site (CLAUDE.md §11 COMMON) — both phases funnel
+            through here, differing only by *phase_intervals*, the filtered
+            *phase_instruments*, and the per-symbol *phase_windows* 1-day-first bounds
+            (None for Phase 1; the discovered map for Phase 2). Preserves EXACTLY the
+            existing until-clean / auto-retry / mid-round ``DailyQuotaExceeded`` /
+            verdict behaviour — it just runs once per phase over the shared ledger.
+            Aggregates into the ``final_*`` outer state: ``still_failed`` SUMS across
+            phases; ``auth_aborted`` / ``quota_exhausted`` are ANY phase's; the FIRST
+            pass of each phase is appended to ``phase_reports`` for the rollup.
+            """
+            nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
+            passes: list[SpotIngestWithRetry] = []
+
+            def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
+                """Run ONE full pull-pass-with-auto-retry over the SHARED window ledger.
+
+                The one-shot path, every until-clean round, and the auto-retry inner
+                loop all go through here, so the args can never drift between them.
+                Every COMPLETED pass is recorded in ``passes`` so a mid-round quota
+                death can still report the last finished round's state.
+                """
+                res = run_groww_spot_ingest_with_retry(
+                    adapter,
+                    sink,
+                    instruments=phase_instruments,
+                    intervals=phase_intervals,
+                    start=start.date(),
+                    end=end.date(),
+                    pace=pace,
+                    on_rate_limit=on_rate_limit,
+                    on_timeout=on_timeout,
+                    on_success=on_success,
+                    on_progress=_progress_then_flush,
+                    ledger=ledger,
+                    run_parallel=run_parallel,
+                    auto_retry=do_retry,
+                    on_window=live_sync,
+                    symbol_windows=phase_windows,
+                )
+                passes.append(res)
+                return res
+
             try:
                 # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
                 # rounds — each a full pass over the SHARED window ledger (so it
                 # re-fetches ONLY the still-failed windows; rate-safe + idempotent) —
                 # until clean / token dead / outer budget spent. Reuses
                 # ``run_until_clean`` over the SAME ``retry_failed_windows`` engine;
-                # the round COUNT is bounded (never an O(1)-total claim). The
-                # per-symbol rollup uses the FIRST pass's report; the aggregate
-                # residual / auth state reflect the FINAL round.
+                # the round COUNT is bounded (never an O(1)-total claim).
                 if until_clean:
 
                     def _round_runner() -> UntilCleanRound:
@@ -1246,35 +1361,32 @@ def pull_all_spot(
                         quota_exhausted=quota_hook,
                         stop_when_stuck=True,
                     )
-                    final_still_failed = until_outcome.final_still_failed
-                    final_auth_aborted = until_outcome.auth_aborted or (
-                        bool(passes) and passes[0].report.auth_aborted
+                    final_still_failed += until_outcome.final_still_failed
+                    final_auth_aborted = (
+                        final_auth_aborted
+                        or until_outcome.auth_aborted
+                        or (bool(passes) and passes[0].report.auth_aborted)
                     )
-                    # Groww has no auth_cause string (the documented divergence) — the
-                    # cause stays None; auth_aborted alone drives the loud verdict.
-                    final_auth_cause = None
-                    final_quota_exhausted = until_outcome.stopped_on_quota
+                    final_quota_exhausted = final_quota_exhausted or until_outcome.stopped_on_quota
                 else:
                     res = _one_pass(auto_retry)
-                    final_still_failed = res.report.still_failed_windows
-                    final_auth_aborted = res.report.auth_aborted
-                    final_auth_cause = None
+                    final_still_failed += res.report.still_failed_windows
+                    final_auth_aborted = final_auth_aborted or res.report.auth_aborted
             except DailyQuotaExceeded as exc:
-                # The 100k daily quota died MID-round (DEC-SPOT-QUOTA-MIDROUND-001,
-                # the spot arm of the options DEC-OPTIONS-UNTIL-CLEAN-001 mapping):
-                # the until-clean loop's quota hook can only brake at round
-                # boundaries, so a worker's pace bucket raises this mid-pass — and
-                # it previously escaped as a generic job error BEFORE the ledger /
-                # status persist. Everything already committed survives: bars per
-                # pair via the sink, window records via the throttled flush + the
-                # finally below. Map to the loud quota verdict instead of a generic
-                # job error; the next pull (after IST midnight) resumes
-                # incrementally over the SAME ledger.
+                # The daily quota died MID-round (DEC-SPOT-QUOTA-MIDROUND-001, the
+                # spot arm of the options DEC-OPTIONS-UNTIL-CLEAN-001 mapping): the
+                # until-clean loop's quota hook can only brake at round boundaries, so
+                # a worker's pace bucket raises this mid-pass — and it previously
+                # escaped as a generic job error BEFORE the ledger / status persist.
+                # Everything already committed survives: bars per pair via the sink,
+                # window records via the throttled flush + the finally below. Map to
+                # the loud quota verdict instead of a generic job error; the next pull
+                # (after IST midnight) resumes incrementally over the SAME ledger.
                 final_quota_exhausted = True
-                final_still_failed = passes[-1].report.still_failed_windows if passes else 0
-                final_auth_aborted = passes[-1].report.auth_aborted if passes else False
-                # Groww has no auth_cause string (the documented divergence) — None.
-                final_auth_cause = None
+                final_still_failed += passes[-1].report.still_failed_windows if passes else 0
+                final_auth_aborted = final_auth_aborted or (
+                    bool(passes) and passes[-1].report.auth_aborted
+                )
                 _LOG.warning(
                     "universe.pull_all.quota_exhausted",
                     pull_id=pid,
@@ -1285,6 +1397,88 @@ def pull_all_spot(
                         "resume after IST midnight"
                     ),
                 )
+            # The per-symbol rollup reads each phase's FIRST pass; an absent (no pass
+            # completed) phase contributes an empty report.
+            phase_reports.append(
+                passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
+            )
+
+        try:
+            # ── Phase 1 — 1-day ONLY first (over EVERY symbol; never per-symbol bounded) ──
+            if daily_requested:
+                _run_phase((_PHASE1_DAILY,), instruments, None)
+            # ── DERIVE → Phase 2 — 1-minute, each symbol from its discovered 1-day date ──
+            if minute_requested:
+                # GLOBAL-STOP GUARD (DEC-SPOT-1DAY-FIRST-001): if Phase 1 ended with a
+                # dead token or a spent quota, the minute pull would fail identically —
+                # SKIP it honestly (the verdict already carries the actionable state).
+                if final_auth_aborted or final_quota_exhausted:
+                    _LOG.warning(
+                        "universe.pull_all.minute_skipped_global_stop",
+                        pull_id=pid,
+                        auth_aborted=final_auth_aborted,
+                        quota_exhausted=final_quota_exhausted,
+                    )
+                else:
+                    # Read each symbol's discovered 1-day start (after Phase 1 wrote the
+                    # 1-day lake; a 1-minute-only request reads pre-existing 1-day). A
+                    # symbol with NO 1-day coverage is OMITTED → the 3c skip.
+                    symbol_windows = _discover_minute_windows(
+                        instruments,
+                        lake_root=lake_root,
+                        start=start.date(),
+                        end=end.date(),
+                        dry_run=dry_run,
+                    )
+                    minute_instruments = [
+                        inst for inst in instruments if inst.symbol_name in symbol_windows
+                    ]
+                    minute_skipped_symbols = [
+                        inst.symbol_name
+                        for inst in instruments
+                        if inst.symbol_name not in symbol_windows
+                    ]
+                    if minute_skipped_symbols:
+                        # LOUD 3c report — these symbols have no 1-day anchor, so their
+                        # 1-minute fill is skipped (pull 1-day first), never silent.
+                        _LOG.warning(
+                            "universe.pull_all.minute_skipped_no_1day",
+                            pull_id=pid,
+                            symbols=minute_skipped_symbols,
+                        )
+                    if minute_instruments:
+                        # PLAN Phase 2's bounded minute windows now (AFTER the derive) so
+                        # the planned keys EQUAL the bounded fetched keys (no phantom
+                        # pre-listing rows). The DAILY interval is never in this phase.
+                        # ``ledger`` is non-None here by invariant: a non-empty
+                        # ``minute_instruments`` requires ``_discover_minute_windows`` to
+                        # have returned a non-empty map, which only happens for a LIVE
+                        # (``dry_run=False``) pull — and ``begin_pull_ledger`` returns a
+                        # real ledger for every live pull. The ``assert`` documents +
+                        # narrows that for the type checker (never the dry-run path).
+                        assert ledger is not None  # noqa: S101 — live-pull invariant
+                        plan_windows(
+                            ledger,
+                            instruments=minute_instruments,
+                            intervals=minute_intervals,
+                            start=start.date(),
+                            end=end.date(),
+                            market=GROWW_COVERAGE_MARKET,
+                            window_days_for=groww_window_days_for,
+                            symbol_windows=symbol_windows,
+                        )
+                        reconcile_ledger_with_lake(
+                            ledger,
+                            lake_root,
+                            instruments=minute_instruments,
+                            intervals=minute_intervals,
+                            start=start.date(),
+                            end=end.date(),
+                            market=GROWW_COVERAGE_MARKET,
+                            window_days_for=groww_window_days_for,
+                            symbol_windows=symbol_windows,
+                        )
+                        _run_phase(minute_intervals, minute_instruments, symbol_windows)
         finally:
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
@@ -1302,12 +1496,19 @@ def pull_all_spot(
             if on_ledger_sync is not None and ledger is not None:
                 final = ledger.progress_counts()
                 on_ledger_sync(final.resolved, final.total, final.bars, final.failed, final.current)
-        # Per-symbol rollup = the FIRST pass's report (the until-clean contract).
-        # A quota death before ANY pass completed leaves no per-pair information —
-        # the empty fallback rolls every symbol up as zeros (the quota verdict
-        # carries the actionable state). Also fixes the latent ``passes[0]``
-        # IndexError an ``until_clean_rounds=0`` no-op drive used to hit.
-        report = passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
+        # Per-symbol rollup combines BOTH phases (DEC-SPOT-1DAY-FIRST-001): a symbol's
+        # 1-day result comes from Phase 1's report + its 1-minute result from Phase 2's;
+        # a symbol SKIPPED from Phase 2 (no 1-day coverage) simply has no 1-minute pair
+        # → it contributes nothing for that interval. Each phase's report is the FIRST
+        # pass (the until-clean contract); a quota death before ANY pass completed leaves
+        # an empty report → that interval's outcome is UNKNOWN (claim nothing — the quota
+        # verdict carries the actionable state). The merged pair/failure maps fold across
+        # phases so the lookup below is one O(1) dict get per (symbol, interval).
+        merged_pairs: dict[tuple[str, str], IngestReport] = {}
+        failure_keys: set[tuple[str, str]] = set()
+        for phase_report in phase_reports:
+            merged_pairs.update(phase_report.pairs)
+            failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
         _observe_rate(rate_observer, _rate_controller, adapter)
         # Groww has NO no-data marker — unlike the previous vendor's no-data 400
         # marker, which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we
@@ -1316,7 +1517,6 @@ def pull_all_spot(
         # still surfaced as `no_data` below when a pair ran cleanly but returned zero
         # bars; there is no known-gap split (no_data from a terminal failure has no
         # Groww source).
-        failure_keys = {(f.symbol, f.interval) for f in report.failures}
         results: list[SymbolPullResult] = []
         for instrument in instruments:
             symbol = instrument.symbol_name
@@ -1326,11 +1526,12 @@ def pull_all_spot(
                 if key in failure_keys:
                     failed += 1
                 else:
-                    pair = report.pairs.get(key)
+                    pair = merged_pairs.get(key)
                     if pair is None:
-                        # The quota died before this pair ran (the empty-report
-                        # fallback above) — its outcome is UNKNOWN, so claim
-                        # nothing (DEC-SPOT-QUOTA-MIDROUND-001).
+                        # The interval was never run for this symbol (a 3c-skipped
+                        # minute, or a quota death before the pair ran) — its outcome
+                        # is UNKNOWN, so claim nothing (DEC-SPOT-1DAY-FIRST-001 /
+                        # DEC-SPOT-QUOTA-MIDROUND-001).
                         continue
                     if pair.bars_appended > 0:
                         completed += 1
@@ -1556,14 +1757,25 @@ def pull_candles(
         # FetchCoverage set was deleted in Stage e). The legacy window_status.json
         # sidecar is WRITE-RETIRED (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) — kept on
         # disk read-only for the db_view fallback + one-shot ledger migration.
-        # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate + PLAN
-        # this symbol's windows, then record each outcome into it.
+        # 1-DAY-FIRST phase split (DEC-SPOT-1DAY-FIRST-001): the SPOT pull runs the
+        # cheap ``1day`` phase FIRST so the lake holds this symbol's REAL 1-day
+        # coverage, then the heavy ``1minute`` fill STARTS from its discovered 1-day
+        # date (never blindly from 2020). A symbol with NO 1-day coverage is SKIPPED
+        # from the minute phase + reported (the 3c rule). ``intervals=("1day",)`` (the
+        # verify-first default) runs ONLY Phase 1 with ``symbol_windows=None`` —
+        # byte-identical to the pre-feature behaviour.
+        daily_requested = _PHASE1_DAILY in intervals
+        minute_intervals: tuple[str, ...] = tuple(i for i in intervals if i != _PHASE1_DAILY)
+        minute_requested = bool(minute_intervals)
+        # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate ONCE for the
+        # whole pull, shared by BOTH phases. Phase 1's 1-day windows are PLANNED
+        # upfront; Phase 2's bounded 1-minute windows after the derive.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
-        if ledger is not None:
+        if ledger is not None and daily_requested:
             plan_windows(
                 ledger,
                 instruments=[instrument],
-                intervals=intervals,
+                intervals=(_PHASE1_DAILY,),
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1579,7 +1791,7 @@ def pull_candles(
                 ledger,
                 lake_root,
                 instruments=[instrument],
-                intervals=intervals,
+                intervals=(_PHASE1_DAILY,),
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1617,40 +1829,114 @@ def pull_candles(
                 on_progress(label, bars, failed)
             ledger_flush()
 
-        report = run_groww_spot_ingest(
-            adapter,
-            sink,
-            instruments=[instrument],
-            intervals=intervals,
-            start=start.date(),
-            end=end.date(),
-            pace=pace,
-            on_rate_limit=on_rate_limit,
-            on_timeout=on_timeout,
-            on_success=on_success,
-            on_progress=_progress_then_flush,
-            ledger=ledger,
-            run_parallel=run_parallel,
-        )
-        end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+        # Per-phase reports merged for the timeframe rollup below (a symbol skipped
+        # from Phase 2 simply has no 1-minute pair → that interval is absent).
+        merged_pairs: dict[tuple[str, str], IngestReport] = {}
+        failure_keys: set[tuple[str, str]] = set()
+        phase_auth_aborted = False
+
+        def _run_phase(
+            phase_intervals: tuple[str, ...], phase_windows: SpotWindows | None
+        ) -> GrowwIngestReport:
+            """Run ONE phase's single ingest pass over the shared ledger; fold its report."""
+            nonlocal phase_auth_aborted
+            phase_report = run_groww_spot_ingest(
+                adapter,
+                sink,
+                instruments=[instrument],
+                intervals=phase_intervals,
+                start=start.date(),
+                end=end.date(),
+                pace=pace,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
+                on_progress=_progress_then_flush,
+                ledger=ledger,
+                run_parallel=run_parallel,
+                symbol_windows=phase_windows,
+            )
+            merged_pairs.update(phase_report.pairs)
+            failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
+            phase_auth_aborted = phase_auth_aborted or phase_report.auth_aborted
+            return phase_report
+
+        try:
+            # ── Phase 1 — 1-day ONLY first (never per-symbol bounded) ──
+            if daily_requested:
+                _run_phase((_PHASE1_DAILY,), None)
+            # ── DERIVE → Phase 2 — 1-minute from the discovered 1-day date ──
+            if minute_requested:
+                # GLOBAL-STOP GUARD: a dead token in Phase 1 means the minute pull
+                # would fail identically — skip it honestly (the timeframes already
+                # carry Phase 1's quarantine).
+                if phase_auth_aborted:
+                    _LOG.warning("universe.pull.minute_skipped_global_stop", pull_id=pid)
+                else:
+                    symbol_windows = _discover_minute_windows(
+                        [instrument],
+                        lake_root=lake_root,
+                        start=start.date(),
+                        end=end.date(),
+                        dry_run=dry_run,
+                    )
+                    if symbol in symbol_windows:
+                        # ``ledger`` is non-None by invariant: ``symbol`` is in the
+                        # discovered map only for a LIVE pull (``_discover_minute_windows``
+                        # returns ``{}`` for a dry-run), and a live pull always has a real
+                        # ledger. The ``assert`` documents + narrows it (never dry-run).
+                        assert ledger is not None  # noqa: S101 — live-pull invariant
+                        plan_windows(
+                            ledger,
+                            instruments=[instrument],
+                            intervals=minute_intervals,
+                            start=start.date(),
+                            end=end.date(),
+                            market=GROWW_COVERAGE_MARKET,
+                            window_days_for=groww_window_days_for,
+                            symbol_windows=symbol_windows,
+                        )
+                        reconcile_ledger_with_lake(
+                            ledger,
+                            lake_root,
+                            instruments=[instrument],
+                            intervals=minute_intervals,
+                            start=start.date(),
+                            end=end.date(),
+                            market=GROWW_COVERAGE_MARKET,
+                            window_days_for=groww_window_days_for,
+                            symbol_windows=symbol_windows,
+                        )
+                        _run_phase(minute_intervals, symbol_windows)
+                    else:
+                        # The 3c skip — no 1-day anchor, so the minute fill is omitted
+                        # + reported (pull 1-day first), never a blind 2020 pull.
+                        _LOG.warning(
+                            "universe.pull.minute_skipped_no_1day", pull_id=pid, symbol=symbol
+                        )
+        finally:
+            end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
 
-        failure_keys = {(f.symbol, f.interval) for f in report.failures}
-        # Build one result per ACTUALLY-fetched interval (the injected *intervals*,
-        # 1day-only during the verify-first phase, DEC-PULL-1DAY-FIRST-001) — NOT a
-        # hardcoded 1m+1d pair, which KeyError'd on report.pairs when 1-minute was
-        # gated off. The label map gives the dashboard's ``1m``/``1d`` display label.
-        # Explicit ``dict[str, str]`` so the keys are plain ``str`` (not the literal
-        # union pyright would infer from the tuple), matching the ``str`` *intervals*.
+        # Build one result per REQUESTED interval (the injected *intervals*, 1day-only
+        # during the verify-first phase, DEC-PULL-1DAY-FIRST-001). The label map gives
+        # the dashboard's ``1m``/``1d`` display label. Explicit ``dict[str, str]`` so
+        # the keys are plain ``str`` (matching the ``str`` *intervals*).
         label_for: dict[str, str] = dict(_FETCH_INTERVAL_LABELS)
         timeframes: list[TimeframeResult] = []
         for fetch_interval in intervals:
             label = label_for.get(fetch_interval, fetch_interval)
             key = (symbol, fetch_interval)
+            pair = merged_pairs.get(key)
             if key in failure_keys:
-                # Terminal Groww error — quarantined, never in report.pairs.
+                # Terminal Groww error — quarantined, never in merged_pairs.
                 timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
-            elif report.pairs[key].bars_appended > 0:
+            elif pair is None:
+                # The interval was never run for this symbol (a 3c-skipped minute, or a
+                # 1-minute phase skipped by the global-stop guard) — report it as a
+                # settled no-data cell (its 1-minute would be empty without the anchor).
+                timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, no_data=1))
+            elif pair.bars_appended > 0:
                 timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
             else:
                 # Ran cleanly but the vendor returned no bars for the window.

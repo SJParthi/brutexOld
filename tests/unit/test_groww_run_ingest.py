@@ -803,3 +803,97 @@ def test_with_retry_threads_on_window(monkeypatch: pytest.MonkeyPatch) -> None:
         on_window=_tick,
     )
     assert seen == [_tick]
+
+
+# ── _resolve_spot_window — the 1-day-first per-symbol window hook (DEC-SPOT-1DAY-FIRST-001) ──
+
+
+class TestResolveSpotWindow:
+    """The pure ``(start, end)`` resolver behind the 1-day-first minute bounds."""
+
+    def test_none_map_is_global_range(self) -> None:
+        # ``symbol_windows is None`` (the opt-in param's default) → the global range,
+        # byte-identical to the pre-feature behaviour.
+        assert mod._resolve_spot_window(
+            None, symbol="NIFTY", interval="1minute", start=_START, end=_END
+        ) == (_START, _END)
+
+    def test_daily_interval_is_never_bounded(self) -> None:
+        # The DAILY interval PRODUCES the bounds, so it must NEVER be bounded by them —
+        # even when the symbol is present in the map.
+        windows = {"NIFTY": (date(2022, 4, 5), date(2022, 5, 5))}
+        assert mod._resolve_spot_window(
+            windows, symbol="NIFTY", interval="1day", start=_START, end=_END
+        ) == (_START, _END)
+
+    def test_symbol_present_sub_daily_uses_bounded_window(self) -> None:
+        # A SUB-DAILY interval of a symbol in the map → its discovered bounded window
+        # (the line-152 branch the leaf coverage was missing).
+        bound = (date(2022, 4, 5), date(2022, 5, 5))
+        assert (
+            mod._resolve_spot_window(
+                {"NIFTY": bound}, symbol="NIFTY", interval="1minute", start=_START, end=_END
+            )
+            == bound
+        )
+
+    def test_symbol_absent_falls_back_to_global(self) -> None:
+        # A symbol the caller did NOT bound → the never-narrow global fallback.
+        windows = {"NIFTY": (date(2022, 4, 5), date(2022, 5, 5))}
+        assert mod._resolve_spot_window(
+            windows, symbol="BANKNIFTY", interval="1minute", start=_START, end=_END
+        ) == (_START, _END)
+
+
+def test_symbol_windows_threaded_into_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``symbol_windows`` bounds each sub-daily pair's ``(start, end)`` end-to-end.
+
+    The bounded symbol's 1-minute pull STARTS at its discovered listing date; its 1-day
+    pull stays the global range; an unbounded symbol's 1-minute stays global too.
+    """
+    seen: dict[tuple[str, str], tuple[date, date]] = {}
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        seen[instrument.symbol_name, interval] = (start, end)
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    bound = (date(2022, 4, 5), _END)
+    run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY"), _index("BANKNIFTY", token=2)],
+        intervals=["1minute", "1day"],
+        start=_START,
+        end=_END,
+        symbol_windows={"NIFTY": bound},
+    )
+    # NIFTY 1-minute is bounded; NIFTY 1-day is NOT (daily produces the bound).
+    assert seen["NIFTY", "1minute"] == bound
+    assert seen["NIFTY", "1day"] == (_START, _END)
+    # BANKNIFTY is absent from the map → global for both intervals.
+    assert seen["BANKNIFTY", "1minute"] == (_START, _END)
+    assert seen["BANKNIFTY", "1day"] == (_START, _END)
+
+
+def test_with_retry_threads_symbol_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_groww_spot_ingest_with_retry`` forwards ``symbol_windows`` to every pass."""
+    seen: list[tuple[date, date]] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        seen.append((start, end))
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    bound = (date(2022, 4, 5), _END)
+    run_groww_spot_ingest_with_retry(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY")],
+        intervals=["1minute"],
+        start=_START,
+        end=_END,
+        auto_retry=False,
+        symbol_windows={"NIFTY": bound},
+    )
+    assert seen == [bound]
