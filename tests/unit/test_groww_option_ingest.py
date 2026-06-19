@@ -528,7 +528,11 @@ def test_ingest_genuine_empty_bounded_to_attempts() -> None:
         empty_retry_attempts=3,
         empty_retry_backoff=backoffs.append,
         ledger=ledger,
-        now_ist=_now,
+        # A RECENT clock (just after the window) so the old-gap fast-settle
+        # (DEC-OLD-GAP-FAST-SETTLE-001) does NOT fire — this test pins the conservative
+        # across-pull EMPTY-streak (an old expired-contract gap is fast-settled by its
+        # own dedicated test below).
+        now_ist=lambda: datetime(2024, 1, 10, 8, 0, tzinfo=UTC),
     )
     assert report.windows == 1 and report.bars_appended == 0  # confidently empty
     assert sdk.calls == 3  # bounded to exactly attempts — never an infinite loop
@@ -586,6 +590,61 @@ def test_ingest_empty_attempts_zero_clamps_to_single_fetch() -> None:
         now_ist=_now,
     )
     assert sdk.calls == 1 and report.windows == 1  # clamped to one real fetch, never zero
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ingest_option_contract — OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001)
+# An expired/old contract window confirmed empty across the in-pull retry can
+# never gain vendor data, so it settles SKIPPED in ONE pull instead of needing the
+# conservative 3-pull EMPTY streak; a RECENT window keeps the conservative streak.
+# ─────────────────────────────────────────────────────────────────────────
+def test_old_empty_contract_window_fast_settles_in_one_pull() -> None:
+    """An OLD expired-contract empty window settles SKIPPED in ONE pull (a permanent gap)."""
+    from brutex.data.window_ledger import SKIPPED
+
+    sdk = _FakeSDK(payload=_EMPTY)  # always empty
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),  # > 60 days before the injected 2026 clock
+        empty_retry_attempts=3,
+        empty_retry_backoff=lambda _a: None,
+        ledger=ledger,
+        now_ist=_now,  # 2026-06-13 → the 2024 window is OLD
+    )
+    rec = ledger.records()[0]
+    assert rec.status == SKIPPED  # terminal in this single pull
+    assert rec.empty_streak == 3  # forced to the threshold (a normal settle's shape)
+    assert rec.attempts == 1  # ONE pull
+    assert rec.in_pull_fetches == 3  # re-hit the full in-pull budget, all empty
+
+
+def test_recent_empty_contract_window_keeps_conservative_streak() -> None:
+    """A RECENT empty contract window is NOT fast-settled — it stays EMPTY 1/3."""
+    from brutex.data.window_ledger import EMPTY
+
+    sdk = _FakeSDK(payload=_EMPTY)  # always empty
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2026, 5, 1),
+        end=date(2026, 6, 1),  # within 60 days of the injected now
+        empty_retry_attempts=3,
+        empty_retry_backoff=lambda _a: None,
+        ledger=ledger,
+        now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+    )
+    rec = ledger.records()[0]
+    assert rec.status == EMPTY  # recent gap may still fill → conservative streak
+    assert rec.empty_streak == 1
+    assert rec.in_pull_fetches == 3
 
 
 def test_ingest_empty_then_transient_then_data() -> None:

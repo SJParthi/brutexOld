@@ -375,6 +375,11 @@ class TestIngestSpotLedger:
             start=date(2021, 1, 1),
             end=date(2021, 3, 1),  # 1 window (<180d)
             ledger=ledger,
+            # A RECENT clock (just after the window) so the old-gap fast-settle
+            # (DEC-OLD-GAP-FAST-SETTLE-001) does NOT fire — this test pins the
+            # conservative across-pull EMPTY classification, which is unchanged for
+            # recent windows.
+            now_ist=lambda: datetime(2021, 3, 10, 12, 0, tzinfo=UTC),
         )
         assert ledger.records()[0].status == EMPTY
 
@@ -423,6 +428,9 @@ class TestIngestSpotLedger:
             ledger=ledger,
             empty_retry_attempts=3,
             empty_retry_backoff=backoffs.append,
+            # RECENT clock (just after the window) → conservative EMPTY, NOT the old-gap
+            # fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 is exercised by its own test below).
+            now_ist=lambda: datetime(2021, 3, 10, 12, 0, tzinfo=UTC),
         )
         assert adapter.calls == 3  # bounded — exactly the budget, no infinite loop
         assert backoffs == [0, 1]  # paused between attempts 1→2 and 2→3, NOT after the last
@@ -508,6 +516,80 @@ class TestIngestSpotLedger:
         )
         assert adapter.calls == 1  # broke on the first attempt — no wasted re-fetch
         assert ledger.records()[0].in_pull_fetches == 1  # first-try win → 1 fetch
+
+    def test_old_genuine_empty_fast_settles_in_one_pull(self) -> None:
+        # DEC-OLD-GAP-FAST-SETTLE-001: an OLD genuinely-empty window (end in 2021, with
+        # an injected 2026 clock) that exhausts the in-pull retry settles SKIPPED in ONE
+        # pull — vendor data can never appear for a gap that old, so the conservative
+        # 3-pull streak is wasted re-fetching.
+        from brutex.data.window_ledger import SKIPPED, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[]])  # always empty
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),  # > 60 days before the injected now
+            ledger=ledger,
+            empty_retry_attempts=3,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+        )
+        rec = ledger.records()[0]
+        assert rec.status == SKIPPED  # settled terminal in this single pull
+        assert rec.empty_streak == 3  # forced to the threshold (a normal settle's shape)
+        assert rec.attempts == 1  # ONE pull
+        assert rec.in_pull_fetches == 3  # re-hit the full in-pull budget, all empty
+
+    def test_recent_genuine_empty_keeps_conservative_streak(self) -> None:
+        # DEC-OLD-GAP-FAST-SETTLE-001: a RECENT empty window (within OLD_GAP_HORIZON_DAYS
+        # of the injected now) is NOT fast-settled — it might still be a just-missed
+        # backfill, so it stays EMPTY 1/3, re-checked on a later pull.
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[]])  # always empty
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2026, 5, 1),
+            end=date(2026, 6, 1),  # within 60 days of the injected now
+            ledger=ledger,
+            empty_retry_attempts=3,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+        )
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY  # NOT fast-settled — recent gap may still fill
+        assert rec.empty_streak == 1  # conservative across-pull streak
+        assert rec.in_pull_fetches == 3
+
+    def test_old_empty_without_inpull_retry_is_not_fast_settled(self) -> None:
+        # DEC-OLD-GAP-FAST-SETTLE-001: confirmed_empty_after_retry requires fetch_count>=2.
+        # An OLD empty window with empty_retry_attempts=1 (no real retry → ONE fetch) is a
+        # single glitch-prone read, NOT in-pull-confirmed, so it stays EMPTY (the degenerate
+        # single-fetch case is explicitly excluded).
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[]])  # always empty
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),  # OLD window
+            ledger=ledger,
+            empty_retry_attempts=1,  # no in-pull retry → one fetch only
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+        )
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY  # one fetch is not enough to fast-settle
+        assert rec.in_pull_fetches == 1
 
     def test_ledger_records_failed_on_rate_limit(self) -> None:
         from brutex.data.window_ledger import FAILED, WindowLedger

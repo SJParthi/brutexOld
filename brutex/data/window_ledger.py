@@ -302,6 +302,7 @@ class WindowLedger:
         bars_appended: int,
         now: datetime,
         in_pull_fetches: int = 1,
+        settle_empty: bool = False,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -322,6 +323,20 @@ class WindowLedger:
         counts *pulls*; this exposes the *network fetches inside* one — the count that
         was previously DEBUG-only, so the operator now SEES that ``attempts 1`` already
         meant up to 3 fetches.
+
+        *settle_empty* (DEC-OLD-GAP-FAST-SETTLE-001) is the OLD-gap fast-settle hint:
+        when the classified status is ``EMPTY`` and this is ``True``, the window is
+        settled ``SKIPPED`` in ONE pull (status ``SKIPPED`` + ``empty_streak`` forced to
+        ``_threshold``, exactly as a normal across-pull threshold settle leaves it),
+        instead of needing ``_threshold`` separate EMPTY pulls. The spine passes ``True``
+        ONLY for a window that is both in-pull-confirmed empty (re-hit ≥2× this pull) AND
+        OLD enough that vendor data can never appear (``window_end`` older than
+        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`). When *settle_empty*
+        is ``True`` but the classification is ``SUCCESS`` or ``FAILED`` it is IGNORED (a
+        no-op — a success has data and is never an empty; a 429/timeout is NOT evidence
+        the window is empty). The default ``False`` is byte-identical to the prior
+        behaviour. It is a TRANSIENT per-call decision — NOT a stored field; the resulting
+        ``SKIPPED`` status + ``empty_streak`` persist through the existing columns.
         """
         classified = classify_window_status(raw_bars, error_type)
         wk = self._key(key)
@@ -351,7 +366,17 @@ class WindowLedger:
             else:  # SUCCESS — the window has real data
                 empty_streak = 0
             status = classified
-            if classified == EMPTY and empty_streak >= self._threshold:
+            if classified == EMPTY and settle_empty:
+                # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
+                # empty window OLD enough that vendor data can never appear is a PERMANENT
+                # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold
+                # so the persisted row is identical to a normal across-pull settle. Only
+                # ever reached for EMPTY (a SUCCESS/FAILED ignores the hint), so it can
+                # never mask a window with data. RECENT windows (settle_empty False) keep
+                # the conservative across-pull streak below.
+                empty_streak = self._threshold
+                status = SKIPPED
+            elif classified == EMPTY and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             self._by_window[wk] = WindowLedgerRecord(

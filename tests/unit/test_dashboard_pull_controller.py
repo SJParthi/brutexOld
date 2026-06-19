@@ -19,7 +19,7 @@ settled ``SKIPPED``). The token-lifecycle + options seams stay on ``dhan`` (J4c)
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -990,13 +990,24 @@ class TestPullPopulatesLedger:
         # and the recorded SUCCESS rows, so they reconcile (PR-J4b).
         assert all(r.market == "groww" and r.security_id == "13" for r in ledger.records())
 
-    def test_empty_windows_are_recorded_empty(self, tmp_path: Path) -> None:
-        # Groww has no DH-905 known-gap → no SKIPPED settling (Golden Rule #1). A
-        # clean 0-bar fetch is recorded EMPTY in the ledger so every window is
-        # captured in the DB (nothing silently missing) with its true outcome, not
-        # a perpetual "pending" PLANNED row. (An EMPTY seen EMPTY_TERMINAL_THRESHOLD
-        # separate pulls later promotes to SKIPPED — out of scope for one pull.)
+    def test_empty_windows_are_recorded_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A clean 0-bar fetch is recorded with its true outcome (never a perpetual
+        # "pending" PLANNED row), so every window is captured in the DB.
+        # DEC-OLD-GAP-FAST-SETTLE-001: this 2020→2026 backfill yields BOTH outcomes —
+        # OLD genuine-gap windows (end > 60 days before now) settle SKIPPED in ONE pull
+        # (vendor data can never appear), while RECENT empty windows (within the 60-day
+        # horizon) stay EMPTY and are re-checked on a later pull. So the statuses are
+        # exactly {EMPTY, SKIPPED} — never a stuck PLANNED, never a FAILED.
+        # The spot age-gate reads the REAL wall clock in production (a window's "old"-ness
+        # is judged against the real today, by design — there is no production reason to
+        # inject a fake now into the age decision). Freeze that clock to _BULK_NOW here so
+        # the boundary assertion is DETERMINISTIC and can NEVER become a wall-clock
+        # time-bomb (Golden Rule #7) — hostile-review fix.
         from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+
+        monkeypatch.setattr("brutex.adapters.groww.ingest._now_ist", lambda: _BULK_NOW)
 
         pull_all_spot(
             [_index("13")],
@@ -1008,7 +1019,18 @@ class TestPullPopulatesLedger:
         assert ledger_path(tmp_path).is_file()
         ledger = load_window_ledger(tmp_path)
         assert ledger.count > 0
-        assert {r.status for r in ledger.records()} == {"EMPTY"}  # settled empty, never SKIPPED
+        statuses = {r.status for r in ledger.records()}
+        # OLD windows fast-settled SKIPPED, recent ones stayed EMPTY — both present, and
+        # nothing else (no stuck PLANNED / no FAILED on a clean empty fetch).
+        assert statuses == {"EMPTY", "SKIPPED"}
+        # Every SKIPPED row is an OLD window (end strictly > 60 days before the clock);
+        # every EMPTY row is RECENT (within the horizon) — the fast-settle is age-gated.
+        cutoff = (_BULK_NOW.date() - timedelta(days=60)).isoformat()
+        for record in ledger.records():
+            if record.status == "SKIPPED":
+                assert record.window_end < cutoff  # only old gaps fast-settle
+            else:
+                assert record.window_end >= cutoff  # recent empties stay EMPTY
 
     def test_dry_run_writes_no_ledger(self, tmp_path: Path) -> None:
         from brutex.data.window_ledger_store import ledger_path

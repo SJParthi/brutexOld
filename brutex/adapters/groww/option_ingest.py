@@ -59,7 +59,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from time import sleep as _time_sleep
 
 import structlog
@@ -80,7 +80,9 @@ from brutex.adapters.groww.contracts import (
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure, is_rate_limit, is_retryable
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.ingest_common import (
+    CONFIRMED_EMPTY_MIN_FETCHES,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    OLD_GAP_HORIZON_DAYS,
     clamp_window_end,
     summarize_conflicts,
 )
@@ -266,9 +268,16 @@ def ingest_option_contract(
         has no fail-fast latch — the same divergence as the spot spine).
     """
     exchange = contract_exchange(contract)
-    clamped_end = clamp_window_end(interval, end, now_ist=(now_ist or _now_ist)())
+    now_for_clamp = (now_ist or _now_ist)()
+    clamped_end = clamp_window_end(interval, end, now_ist=now_for_clamp)
     if start >= clamped_end:
         return IngestReport(windows=0, bars_appended=0, transient_failures=0)
+    # OLD-gap fast-settle cutoff (DEC-OLD-GAP-FAST-SETTLE-001): an expired contract's window
+    # whose ``end`` is strictly before this date can never gain vendor data, so an in-pull-
+    # confirmed-empty old window settles SKIPPED in ONE pull (the spot-spine twin). Computed
+    # off the SAME injected clock the current-day clamp uses, so an injected ``now_ist`` makes
+    # the decision deterministic.
+    old_cutoff = now_for_clamp.date() - timedelta(days=OLD_GAP_HORIZON_DAYS)
     pull_id = current_pull_id()
     fields = {"symbol": contract.symbol, "interval": interval}
     key = WindowKey(
@@ -376,14 +385,24 @@ def ingest_option_contract(
             **summarize_conflicts(conflicts),
             **fields,
         )
+    # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 — the spot-spine twin): an EMPTY
+    # window confirmed empty ACROSS an in-pull retry (``fetch_count >= 2``) AND OLD enough
+    # that vendor data can never appear (``clamped_end`` strictly before ``old_cutoff``) is a
+    # PERMANENT gap (an expired contract's dead period) → settle SKIPPED in ONE pull. A RECENT
+    # empty window (or one not re-hit) keeps the conservative across-pull EMPTY streak.
+    confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
+    is_old = clamped_end < old_cutoff
+    settle_empty = confirmed_empty_after_retry and is_old
     # Mirror the spot spine's INFO surface (DEC-WINDOW-INPULL-FETCHES-001): when the
     # in-pull retry fired AND the window stayed empty, one INFO line makes the retry
-    # visible in the log (the per-attempt event above is DEBUG).
+    # visible in the log (the per-attempt event above is DEBUG). ``settled`` flags an
+    # old-gap fast-settle so the log is honest about whether it became terminal SKIPPED.
     if not raw_bars and fetch_count > 1:
         _LOG.info(
             "option.ingest.window.empty_after_retries",
             pull_id=pull_id,
             fetches=fetch_count,
+            settled=settle_empty,
             **fields,
         )
     if ledger is not None:
@@ -394,6 +413,7 @@ def ingest_option_contract(
             bars_appended=result.bars_appended,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
+            settle_empty=settle_empty,
         )
     if on_success is not None:
         on_success()
