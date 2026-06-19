@@ -468,10 +468,28 @@ def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> Non
     from io import StringIO
 
     spot_rows = [
-        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01", last_date="2026-06-18"),
-        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01", last_date="2026-06-18"),
+        _spot_row(
+            "NSE-NIFTY",
+            "1day",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2026-06-18",
+        ),
+        _spot_row(
+            "NSE-NIFTY",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2026-06-18",
+        ),
         # FINNIFTY: 1-day starts 2025 (from_2020 = no); 1-minute NEVER pulled (no dates → empty cells).
-        _spot_row("NSE-FINNIFTY", "1day", COMPLETENESS_SETTLED, first_date="2025-01-01", last_date="2026-06-18"),
+        _spot_row(
+            "NSE-FINNIFTY",
+            "1day",
+            COMPLETENESS_SETTLED,
+            first_date="2025-01-01",
+            last_date="2026-06-18",
+        ),
         _spot_row("NSE-FINNIFTY", "1minute", COMPLETENESS_NO_RECORD),
     ]
     cats = {"NSE-NIFTY": CATEGORY_INDEX, "NSE-FINNIFTY": CATEGORY_INDEX}
