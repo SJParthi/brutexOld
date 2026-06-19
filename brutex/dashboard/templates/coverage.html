@@ -146,6 +146,13 @@
       <span class="stat" id="c_win">—</span>
       <span class="arr">Open fetch windows →</span>
     </a>
+    <a class="card" href="/completeness">
+      <div class="ic">🎯</div>
+      <h2>Completeness scoreboard</h2>
+      <p>How many symbols — indices vs equities-cash, separately — have the FULL 2020→today set across 1-day + 1-minute spot + option expiries/contracts. Per-symbol drill-down + CSV report.</p>
+      <span class="stat" id="c_cmp">—</span>
+      <span class="arr">Open completeness →</span>
+    </a>
   </div>
 
 <script>
@@ -161,6 +168,7 @@ const wincEl = document.getElementById("winc");
 const cOpt = document.getElementById("c_opt");
 const cSpot = document.getElementById("c_spot");
 const cWin = document.getElementById("c_win");
+const cCmp = document.getElementById("c_cmp");
 const liveTxt = document.getElementById("livetxt");
 
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
@@ -195,7 +203,18 @@ async function poll() {
       ok++;
     }
   } catch (e) { cWin.textContent = "offline"; }
-  liveTxt.textContent = ok === 3 ? "live · 3 surfaces" : "partial · " + ok + "/3";
+  try {
+    const r = await fetch("/api/v1/completeness/scoreboard");
+    if (r.ok) {
+      const b = await r.json();
+      const idx = (b.spot && b.spot.by_category && b.spot.by_category.index) || {};
+      const eq = (b.spot && b.spot.by_category && b.spot.by_category.equity) || {};
+      cCmp.textContent = num(idx.full_both) + "/" + num(idx.total) + " indices · "
+        + num(eq.full_both) + "/" + num(eq.total) + " equities full";
+      ok++;
+    }
+  } catch (e) { cCmp.textContent = "offline"; }
+  liveTxt.textContent = ok === 4 ? "live · 4 surfaces" : "partial · " + ok + "/4";
 }
 
 poll();

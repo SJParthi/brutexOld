@@ -36,6 +36,7 @@ _TOPNAV_PAGES = {
     "/coverage/spot": dashboard_app._render_spot_coverage_html,
     "/coverage/windows": dashboard_app._render_fetch_windows_html,
     "/coverage/options": dashboard_app._render_expired_options_html,
+    "/completeness": dashboard_app._render_completeness_html,
 }
 
 #: Render helpers that intentionally do NOT carry the canonical top-nav — listed
