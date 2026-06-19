@@ -263,6 +263,25 @@ def test_categorize_instruments_all_three_buckets() -> None:
     }
 
 
+def test_categorize_instruments_reference_wins_over_by_type_index() -> None:
+    # DEC-COMPLETENESS-INDEX-CATEGORY-001: with the by-TYPE is_index predicate a reference-only
+    # index (India VIX) satisfies BOTH is_index AND is_reference — reference is checked FIRST so
+    # VIX stays REFERENCE, never INDEX. A non-brute-forced index (FINNIFTY) that is is_index but
+    # NOT reference correctly lands in INDEX (the exact bug this fixes: it was bucketed "equity").
+    instruments = [_Inst("NSE-FINNIFTY"), _Inst("NSE-INDIAVIX"), _Inst("NSE-RELIANCE")]
+    cats = categorize_instruments(
+        instruments,
+        # by-type: FINNIFTY + INDIAVIX are both IDX; RELIANCE is EQ.
+        is_index=lambda i: i.symbol_name in {"NSE-FINNIFTY", "NSE-INDIAVIX"},
+        is_reference=lambda i: i.symbol_name == "NSE-INDIAVIX",
+    )
+    assert cats == {
+        "NSE-FINNIFTY": CATEGORY_INDEX,  # real index, not reference → INDEX (was wrongly equity)
+        "NSE-INDIAVIX": CATEGORY_REFERENCE,  # reference precedence beats the by-type index test
+        "NSE-RELIANCE": CATEGORY_EQUITY,
+    }
+
+
 # ── per-symbol completeness WITH dates (DEC-COMPLETENESS-UNIVERSE-001) ─────────────────────
 
 

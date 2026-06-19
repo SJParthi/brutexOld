@@ -156,7 +156,7 @@ from brutex.orchestrator.pipeline import (
 from brutex.orchestrator.state import IngestPhase
 from brutex.universe import (
     derive_lake_underlyings,
-    is_in_brute_force_scope,
+    is_index_instrument,
     is_reference_only,
 )
 
@@ -2246,7 +2246,11 @@ def build_app(
         """
         categories = categorize_instruments(
             store.list_index_equity_instruments(),
-            is_index=is_in_brute_force_scope,
+            # By-TYPE index test (DEC-COMPLETENESS-INDEX-CATEGORY-001): a real index that
+            # is not brute-forced (e.g. FINNIFTY) is still an INDEX for the asset-class
+            # split — NOT "equity (cash)". Reference-only (India VIX) wins first inside
+            # categorize_instruments, so VIX stays REFERENCE.
+            is_index=is_index_instrument,
             is_reference=is_reference_only,
         )
         spot_rows = build_spot_coverage_payload(
