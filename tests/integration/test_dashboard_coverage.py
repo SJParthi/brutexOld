@@ -164,6 +164,11 @@ class TestCoverageApi:
         assert "Fetch windows" in win.text
         assert "/api/v1/coverage/windows" in win.text
         assert 'href="/coverage/options"' in win.text
+        # DEC-WINDOW-RETRY-LEGEND-001: the visible legend explaining attempts (pulls, not
+        # fetches), the in-pull 3x empty-retry, and EMPTY x/3 — so the operator can read a
+        # row without the raw code comments (the operator-reported confusion).
+        assert "How to read a row" in win.text
+        assert "in-pull" in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
