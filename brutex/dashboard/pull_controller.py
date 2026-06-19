@@ -1937,10 +1937,14 @@ def pull_candles(
                 # Terminal Groww error — quarantined, never in merged_pairs.
                 timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
             elif pair is None:
-                # The interval was never run for this symbol (a 3c-skipped minute, or a
-                # 1-minute phase skipped by the global-stop guard) — report it as a
-                # settled no-data cell (its 1-minute would be empty without the anchor).
-                timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, no_data=1))
+                # The interval was never RUN for this symbol (a 3c-skipped minute with no
+                # 1-day anchor, or a 1-minute phase skipped by the global-stop guard) —
+                # report it as SKIPPED, NOT no_data: we deliberately refused to query the
+                # vendor (no anchor), which is honestly distinct from "vendor queried,
+                # returned empty" (the no_data cell below). Mirrors pull_all_spot, which
+                # likewise never labels a never-queried interval vendor-empty (Golden
+                # Rule #1 — no illusion).
+                timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, skipped=1))
             elif pair.bars_appended > 0:
                 timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
             else:

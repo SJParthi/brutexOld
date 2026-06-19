@@ -284,10 +284,13 @@ class TestPullCandlesDryRun:
         )
         assert report.total_completed == 0
         assert report.total_failed == 0
-        assert report.total_no_data == 2  # both fetched intervals empty
+        # 1day runs + returns empty (a genuine vendor no_data cell); the 1minute phase
+        # is the 3c skip (dry-run derives {} → never queried → SKIPPED, NOT vendor-empty).
+        assert report.total_no_data == 1  # the 1day fetch ran + returned empty
+        assert report.total_skipped == 1  # the 1minute was skipped (no anchor)
         d = report.to_dict()
         assert d["total_no_data"] == report.total_no_data
-        assert d["total_skipped"] == 0
+        assert d["total_skipped"] == 1
 
     def test_on_progress_forwarded_per_pair(self, tmp_path: Path) -> None:
         """pull_candles threads on_progress → fires once per (symbol, interval) pair.
@@ -349,8 +352,9 @@ class TestPullCandlesInjectedFactory:
         # DEC-SPOT-1DAY-FIRST-001: Phase 1 (1day) quarantines (a terminal BadRequest,
         # not an auth death) → the 1-minute phase still attempts to derive, but the
         # failing adapter wrote NO 1-day lake → no anchor → the 1-minute fill is
-        # SKIPPED + reported as a settled no-data cell (its 1-minute would be empty
-        # without the discovered start). So 1 failed (1day) + 1 no-data (1minute).
+        # SKIPPED (we refused to query — no anchor), reported as a SKIPPED cell, NOT
+        # no_data (which means "vendor queried, returned empty"). So 1 failed (1day) +
+        # 1 skipped (1minute), 0 no_data — the honest distinction (Golden Rule #1).
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -361,7 +365,8 @@ class TestPullCandlesInjectedFactory:
         )
         assert report.total_completed == 0
         assert report.total_failed == 1  # the 1day phase quarantined
-        assert report.total_no_data == 1  # the 1minute phase skipped (no 1-day anchor)
+        assert report.total_skipped == 1  # the 1minute phase skipped (no 1-day anchor)
+        assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1671,8 +1676,8 @@ class TestPullCandlesOneDayFirst:
 
     def test_minute_only_no_one_day_lake_is_3c_skip(self, tmp_path: Path) -> None:
         # A 1-minute-only request with NO pre-existing 1-day lake → the 3c skip: the
-        # 1-minute cell is a settled no-data (its 1-minute is empty without the anchor),
-        # reported loudly, never a blind 2020 pull.
+        # 1-minute cell is SKIPPED (we refused to query — no anchor), reported loudly,
+        # never a blind 2020 pull and never labeled vendor-empty (Golden Rule #1).
         with capture_logs() as logs:
             report = pull_candles(
                 _index(),
@@ -1685,7 +1690,8 @@ class TestPullCandlesOneDayFirst:
             )
         assert [tf.interval for tf in report.timeframes] == ["1m"]
         assert report.total_completed == 0
-        assert report.total_no_data == 1  # the 1-minute skip is a settled no-data cell
+        assert report.total_skipped == 1  # the 1-minute is a SKIPPED cell (no anchor)
+        assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
         skip = _events(logs, "universe.pull.minute_skipped_no_1day")
         assert skip and skip[0]["symbol"] == "13"
 
@@ -1714,7 +1720,8 @@ class TestPullCandlesOneDayFirst:
 
     def test_global_stop_auth_skips_minute_phase(self, tmp_path: Path) -> None:
         # Phase 1's 1-day pull dies on auth → the global-stop guard skips the 1-minute
-        # phase; the 1day cell is the quarantine, the 1minute cell a settled no-data.
+        # phase; the 1day cell is the quarantine, the 1minute cell a SKIPPED cell (we
+        # refused to query — token dead), NOT vendor-empty.
         with capture_logs() as logs:
             report = pull_candles(
                 _index(),
@@ -1727,11 +1734,12 @@ class TestPullCandlesOneDayFirst:
             )
         assert _events(logs, "universe.pull.minute_skipped_global_stop")
         assert report.total_failed == 1  # the 1day auth quarantine
-        assert report.total_no_data == 1  # the 1minute phase skipped → no-data cell
+        assert report.total_skipped == 1  # the 1minute phase skipped → SKIPPED cell
+        assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
 
     def test_dry_run_minute_request_skips_minute_honestly(self, tmp_path: Path) -> None:
         # A dry-run 1-minute request: Phase 1 (dry, NullBarSink) writes no lake, so the
-        # minute phase derives {} and is the 3c skip — an honest no-data cell, 0 bars.
+        # minute phase derives {} and is the 3c skip — an honest SKIPPED cell, 0 bars.
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -1743,6 +1751,8 @@ class TestPullCandlesOneDayFirst:
         assert report.dry_run is True
         labels = {tf.interval for tf in report.timeframes}
         assert labels == {"1m", "1d"}
-        # 1day completes (synthetic), 1minute is the 3c skip (no-data) — no failures.
+        # 1day completes (synthetic), 1minute is the 3c skip (SKIPPED, not vendor-empty)
+        # — no failures.
         assert report.total_failed == 0
-        assert report.total_no_data == 1
+        assert report.total_skipped == 1  # the 1minute is a SKIPPED cell (no anchor)
+        assert report.total_no_data == 0
