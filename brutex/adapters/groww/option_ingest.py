@@ -68,6 +68,7 @@ from brutex.adapters.groww.contracts import (
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure, is_rate_limit, is_retryable
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.ingest_common import (
+    DEFAULT_EMPTY_RETRY_ATTEMPTS,
     clamp_window_end,
     summarize_conflicts,
 )
@@ -122,6 +123,15 @@ def _default_backoff(attempt_index: int) -> None:
     network-recovery-scale gap between attempts while tests pass a no-op recorder.
     """
     _time_sleep(min(_DEFAULT_BACKOFF_S * (2.0**attempt_index), _MAX_BACKOFF_S))
+
+
+def _noop_empty_backoff(_attempt: int) -> None:
+    """Default no-op backoff between EMPTY re-fetches (the token bucket already paces).
+
+    Mirrors the spot spine's empty-retry default (``ingest._noop_empty_backoff``): a clean
+    0-bar response is re-fetched immediately — the per-call ``pace()`` token-bucket acquire
+    already spaces the calls, so no extra sleep is needed by default. Tests inject a recorder.
+    """
 
 
 def contract_exchange(contract: DerivativeContract) -> str:
@@ -187,6 +197,8 @@ def ingest_option_contract(
     on_success: Callable[[], None] | None = None,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     backoff: Callable[[int], None] | None = None,
+    empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    empty_retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
 ) -> IngestReport:
@@ -202,6 +214,15 @@ def ingest_option_contract(
     vendor call; a transient error records ``FAILED`` and is retried up to
     *max_attempts* times, then left UNMARKED (deferred to the next pull — the
     no-skip guarantee). A clean fetch records ``SUCCESS`` / ``EMPTY``.
+
+    In-pull EMPTY retry (DEC-OPTION-EMPTY-RETRY-001 — the option-candle twin of the spot
+    spine's DEC-EMPTY-INPULL-RETRY-001 / DEC-EMPTY-RETRY-EVERYWHERE-001): a clean **0-bar
+    response is re-fetched** up to *empty_retry_attempts* times — a listed strike chain can
+    return an empty ``200`` EITHER because the window is genuinely empty OR because of a
+    transient vendor glitch on a window that DOES have data; the first attempt that returns
+    bars WINS, and only an all-empty run records genuine no-data WITH confidence. Bounded, so
+    a truly-empty window can never loop forever. This closes the last "pull until a successful
+    response" gap (spot candles + ``get_expiries`` + ``get_contracts`` already had it).
 
     Reuses :class:`~brutex.adapters.groww.ingest.IngestReport` (CLAUDE.md §11
     COMMON): ``windows`` is 1 when the range is non-empty (0 when ``start >= end``
@@ -232,51 +253,69 @@ def ingest_option_contract(
         return IngestReport(windows=1, bars_appended=0, transient_failures=0, skipped_windows=1)
 
     sleep = backoff if backoff is not None else _default_backoff
+    empty_backoff = empty_retry_backoff if empty_retry_backoff is not None else _noop_empty_backoff
     attempt = 0
-    while True:
-        if pace is not None:
-            pace()
-        try:
-            raw_bars = fetch_option_candles(
-                client, contract=contract, interval=interval, start=start, end=clamped_end
-            )
-            break
-        except GrowwError as exc:
-            if not is_retryable(exc):
-                raise  # terminal (auth included) → outer quarantine, never swallowed
-            # Transient: feed the controller (a 429 steps the rate down, a timeout
-            # drives the timeout ladder) and record FAILED so the operator SEES it.
-            if is_rate_limit(exc):
-                if on_rate_limit is not None:
-                    on_rate_limit()
-            elif on_timeout is not None:
-                on_timeout()
-            if ledger is not None:
-                ledger.record(
-                    key,
-                    raw_bars=0,
-                    error_type=type(exc).__name__,
-                    bars_appended=0,
-                    now=datetime.now(UTC),
+    raw_bars: list[CandleBar] = []
+    # Outer EMPTY-retry loop (DEC-OPTION-EMPTY-RETRY-001): each pass runs the inner
+    # transient-retry fetch; a 0-bar SUCCESS is re-fetched up to empty_retry_attempts times.
+    # The first attempt with bars WINS (a glitched empty is recovered); only an all-empty run
+    # falls through to record genuine no-data. Bounded — a truly-empty window never loops.
+    for empty_attempt in range(empty_retry_attempts):
+        while True:
+            if pace is not None:
+                pace()
+            try:
+                raw_bars = fetch_option_candles(
+                    client, contract=contract, interval=interval, start=start, end=clamped_end
                 )
-            _LOG.warning(
-                "option.ingest.window.transient",
+                break
+            except GrowwError as exc:
+                if not is_retryable(exc):
+                    raise  # terminal (auth included) → outer quarantine, never swallowed
+                # Transient: feed the controller (a 429 steps the rate down, a timeout
+                # drives the timeout ladder) and record FAILED so the operator SEES it.
+                if is_rate_limit(exc):
+                    if on_rate_limit is not None:
+                        on_rate_limit()
+                elif on_timeout is not None:
+                    on_timeout()
+                if ledger is not None:
+                    ledger.record(
+                        key,
+                        raw_bars=0,
+                        error_type=type(exc).__name__,
+                        bars_appended=0,
+                        now=datetime.now(UTC),
+                    )
+                _LOG.warning(
+                    "option.ingest.window.transient",
+                    pull_id=pull_id,
+                    error_type=type(exc).__name__,
+                    attempt=attempt,
+                    **fields,
+                )
+                if attempt >= max_attempts:
+                    # Budget spent — leave the window UNMARKED-as-success (deferred).
+                    return IngestReport(
+                        windows=1,
+                        bars_appended=0,
+                        transient_failures=1,
+                        retried_windows=1 if attempt > 0 else 0,
+                        still_failed_windows=1,
+                    )
+                attempt += 1
+                sleep(attempt - 1)
+        if raw_bars:
+            break  # bars on this attempt — the (possibly glitched) empty is recovered
+        if empty_attempt + 1 < empty_retry_attempts:
+            # Still empty + a retry remains: log + (default no-op) backoff, then re-fetch.
+            _LOG.debug(
+                "option.ingest.window.empty_retry",
                 pull_id=pull_id,
-                error_type=type(exc).__name__,
-                attempt=attempt,
+                empty_attempt=empty_attempt + 1,
                 **fields,
             )
-            if attempt >= max_attempts:
-                # Budget spent — leave the window UNMARKED-as-success (deferred).
-                return IngestReport(
-                    windows=1,
-                    bars_appended=0,
-                    transient_failures=1,
-                    retried_windows=1 if attempt > 0 else 0,
-                    still_failed_windows=1,
-                )
-            attempt += 1
-            sleep(attempt - 1)
+            empty_backoff(empty_attempt + 1)
 
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
     result = sink.append(

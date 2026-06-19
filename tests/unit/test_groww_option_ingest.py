@@ -93,12 +93,16 @@ class _FakeSDK:
         self,
         *,
         payload: Mapping[str, object] | None = None,
+        payloads: Sequence[Mapping[str, object]] | None = None,
         script: Sequence[Exception | None] | None = None,
         raise_for: Mapping[str, Exception] | None = None,
         expiries: Callable[..., Mapping[str, object]] | None = None,
         contracts: Callable[..., Mapping[str, object]] | None = None,
     ) -> None:
         self._payload = payload if payload is not None else _candles()
+        # ``payloads`` scripts a per-call payload sequence (clamped to its last entry) so a
+        # test can return e.g. an empty 200 then real data — the empty-retry recovery case.
+        self._payloads = list(payloads) if payloads is not None else None
         self._script = list(script) if script is not None else None
         self._raise_for = dict(raise_for or {})
         self._expiries = expiries or (lambda **_kw: {"expiries": []})
@@ -111,6 +115,8 @@ class _FakeSDK:
 
     def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
         self.symbols.append(str(kw["groww_symbol"]))
+        if self._payloads is not None:
+            return self._payloads[min(len(self.symbols) - 1, len(self._payloads) - 1)]
         if self._script is not None:
             item = self._script[min(len(self.symbols) - 1, len(self._script) - 1)]
             if item is not None:
@@ -464,6 +470,100 @@ def test_ingest_terminal_error_propagates() -> None:
             end=date(2024, 1, 2),
             now_ist=_now,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ingest_option_contract — in-pull EMPTY retry (DEC-OPTION-EMPTY-RETRY-001)
+# The option-candle twin of the spot spine's empty-retry: a clean 0-bar 200 is
+# re-fetched up to empty_retry_attempts times — closing the last "pull until a
+# successful response" gap (spot candles + expiries + contracts already had it).
+# ─────────────────────────────────────────────────────────────────────────
+_EMPTY: Mapping[str, object] = {"candles": []}
+
+
+def test_ingest_empty_recovers_on_second_attempt() -> None:
+    """A glitched empty 200 then real data → the empty is recovered (bars land, 2 fetches)."""
+    sdk = _FakeSDK(payloads=[_EMPTY, _candles()])  # empty glitch, then data
+    sink = _Sink()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        empty_retry_attempts=3,
+        empty_retry_backoff=lambda _a: None,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1  # the 2nd fetch's data won
+    assert sdk.calls == 2  # stopped as soon as data arrived — not all 3 attempts
+
+
+def test_ingest_genuine_empty_bounded_to_attempts() -> None:
+    """A persistently-empty window is re-fetched EXACTLY attempts times, then recorded empty."""
+    sdk = _FakeSDK(payload=_EMPTY)  # always empty
+    sink = _Sink()
+    backoffs: list[int] = []
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        empty_retry_attempts=3,
+        empty_retry_backoff=backoffs.append,
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.windows == 1 and report.bars_appended == 0  # confidently empty
+    assert sdk.calls == 3  # bounded to exactly attempts — never an infinite loop
+    assert backoffs == [1, 2]  # backoff fires before re-fetch on rounds 2+3, not the last
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    # The in-pull empty-retry confirms "empty right now" within ONE pull, but the ledger's
+    # CROSS-pull empty-streak threshold (3) is separate: a single empty (empty_streak=1) is
+    # recorded yet NOT yet skippable — it is re-checked on future pulls until the streak
+    # confirms a genuine, durable empty. Two complementary guards, not one.
+    assert not ledger.is_skippable(key)
+
+
+def test_ingest_empty_attempts_one_disables_retry() -> None:
+    """``empty_retry_attempts=1`` → a single fetch, no empty-retry (the opt-out)."""
+    sdk = _FakeSDK(payload=_EMPTY)
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        empty_retry_attempts=1,
+        now_ist=_now,
+    )
+    assert sdk.calls == 1 and report.bars_appended == 0  # one call, confidently empty
+
+
+def test_ingest_empty_retry_default_is_three_with_noop_backoff() -> None:
+    """The default attempts is 3 and the default (no-op) backoff is used when none is injected."""
+    sdk = _FakeSDK(payload=_EMPTY)
+    ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,  # no empty_retry_attempts / backoff → defaults (3 + _noop_empty_backoff)
+    )
+    assert sdk.calls == _oi.DEFAULT_EMPTY_RETRY_ATTEMPTS == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────
