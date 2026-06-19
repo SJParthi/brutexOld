@@ -63,9 +63,11 @@ OPT_GROWING: Final[str] = "growing"  # a year still PENDING — chain still fill
 OPT_FAILED: Final[str] = "failed"  # a year FAILED — needs a re-pull
 OPT_NONE: Final[str] = "none"  # no coverage record (no options / never attempted)
 
-#: The coverage-ledger cell statuses (mirror of ``coverage_ledger.COVERAGE_STATUSES``,
-#: duplicated here to keep this pure module import-light — a drift test pins them equal).
-_CELL_COMPLETE: Final[str] = "complete"
+#: The coverage-ledger cell statuses this module BRANCHES on (mirror of the
+#: ``coverage_ledger.STATUS_*`` strings, duplicated here to keep this pure module
+#: import-light — a drift test pins them equal). ``complete`` is intentionally NOT
+#: duplicated: it is the fall-through of :func:`_option_verdict` (every year complete →
+#: ``stable``), so naming a constant for it would be dead.
 _CELL_EXPIRIES_ONLY: Final[str] = "expiries_only"
 _CELL_PENDING: Final[str] = "pending"
 _CELL_FAILED: Final[str] = "failed"

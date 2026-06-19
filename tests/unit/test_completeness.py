@@ -198,7 +198,7 @@ def test_option_aggregate_counts_each_status() -> None:
         _cov("C", 2025, STATUS_EXPIRIES_ONLY),  # partial
         _cov("D", 2025, STATUS_FAILED),  # failed
     ]
-    cats = dict.fromkeys(("A", "B", "C", "D"), CATEGORY_EQUITY)
+    cats: dict[str, str] = dict.fromkeys(("A", "B", "C", "D"), CATEGORY_EQUITY)
     board = build_completeness_scoreboard([], {}, records, cats)
     agg = board["options"]["by_category"][CATEGORY_EQUITY]
     assert agg == {"total": 4, "stable": 1, "growing_or_partial": 2, "failed": 1}
@@ -227,7 +227,6 @@ def test_cell_status_constants_do_not_drift_from_coverage_ledger() -> None:
     """The duplicated _CELL_* strings must equal the real coverage_ledger statuses."""
     from brutex.dashboard import completeness as c
 
-    assert c._CELL_COMPLETE == STATUS_COMPLETE
     assert c._CELL_EXPIRIES_ONLY == STATUS_EXPIRIES_ONLY
     assert c._CELL_PENDING == STATUS_PENDING
     assert c._CELL_FAILED == STATUS_FAILED
