@@ -251,14 +251,25 @@ class GrowwClient:
         start: str,
         end: str,
     ) -> Mapping[str, object]:
-        """Fetch one historical-candle window (the row-of-arrays payload)."""
+        """Fetch one historical-candle window (the row-of-arrays payload).
+
+        The ``start`` / ``end`` bounds are normalized to Groww's DOCUMENTED
+        ``yyyy-MM-dd HH:mm:ss`` SPACE-separated format (DEC-GROWW-CANDLE-TS-SPACE-001):
+        the windows are tiled with :meth:`datetime.isoformat` which emits the ``T``
+        separator (``2025-11-30T00:00:00``), but the API reference
+        (``docs/groww/api-reference/03-backtesting.md``) specifies a space. Our OWN
+        parser already accepts both (:func:`~brutex.adapters.groww.parser.parse_timestamp_ist`
+        strips the ``T``), but the request side is aligned to the documented contract
+        at this single funnel (spot + options share it — CLAUDE.md §11 COMMON). The
+        replace is a no-op for an epoch-seconds bound (no ``T``), so it is always safe.
+        """
         return self._call(
             lambda: self.sdk.get_historical_candles(
                 exchange=exchange,
                 segment=segment,
                 groww_symbol=groww_symbol,
-                start_time=start,
-                end_time=end,
+                start_time=start.replace("T", " "),
+                end_time=end.replace("T", " "),
                 candle_interval=interval,
             ),
             label="historical_candles",

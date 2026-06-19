@@ -404,3 +404,70 @@ def test_with_pace_rebinds_pace_and_preserves_meter() -> None:
     assert client.pace is not _pace  # the original is untouched
     assert repaced.meter is client.meter  # the shared aggregate meter carries through
     assert repaced.sdk is sdk  # same SDK connection
+
+
+def test_historical_candles_normalizes_iso_t_to_space() -> None:
+    """DEC-GROWW-CANDLE-TS-SPACE-001 — the SDK receives Groww's documented SPACE format.
+
+    Windows are tiled with ``datetime.isoformat`` (``T`` separator), but the API
+    reference specifies ``yyyy-MM-dd HH:mm:ss`` with a space. The client normalizes
+    at this single funnel; the replace is a no-op for an epoch-seconds bound.
+    """
+
+    class _CapturingSDK:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+            self.kwargs = kw
+            return {"candles": []}
+
+        def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            return {}
+
+        def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            return {}
+
+    sdk = _CapturingSDK()
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None)
+    client.historical_candles(
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-RELIANCE",
+        interval="1day",
+        start="2025-11-30T00:00:00",
+        end="2026-05-29T00:00:00",
+    )
+    assert sdk.kwargs["start_time"] == "2025-11-30 00:00:00"
+    assert sdk.kwargs["end_time"] == "2026-05-29 00:00:00"
+
+
+def test_historical_candles_epoch_bound_unchanged_by_normalize() -> None:
+    """An epoch-seconds bound has no ``T`` — the normalize is a safe no-op."""
+
+    class _CapturingSDK:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+            self.kwargs = kw
+            return {"candles": []}
+
+        def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            return {}
+
+        def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            return {}
+
+    sdk = _CapturingSDK()
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None)
+    client.historical_candles(
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-RELIANCE",
+        interval="1day",
+        start="1700000000",
+        end="1710000000",
+    )
+    assert sdk.kwargs["start_time"] == "1700000000"
+    assert sdk.kwargs["end_time"] == "1710000000"
