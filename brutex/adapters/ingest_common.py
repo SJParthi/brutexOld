@@ -1205,6 +1205,27 @@ def run_until_clean(
 #: empty-retry of DEC-EMPTY-INPULL-RETRY-001). 3 mirrors the spot candle default.
 DEFAULT_EMPTY_RETRY_ATTEMPTS: Final[int] = 3
 
+#: Minimum in-pull vendor fetches an empty window must have made before its empty is trusted
+#: as "confirmed" for the OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001). ``2`` means the
+#: window was re-hit by the in-pull empty retry at least once and STAYED empty — a single
+#: glitch-prone fetch (``1``) is NOT enough, which also excludes the degenerate
+#: ``empty_retry_attempts <= 1`` single-fetch case. Both spines compare ``fetch_count`` to
+#: this (CLAUDE.md §11 COMMON — one source of truth).
+CONFIRMED_EMPTY_MIN_FETCHES: int = 2
+
+#: Old-gap fast-settle horizon (days) — DEC-OLD-GAP-FAST-SETTLE-001. A fetch window whose
+#: ``window_end`` is more than this many days in the PAST can never gain vendor data: Groww
+#: serves a stable 2020+ history and any backfill lag is DAYS, not months (CLAUDE.md §6 —
+#: historical depth "available from 2020"). So an in-pull-confirmed-empty OLD window is a
+#: PERMANENT gap, not a transient one, and the spines settle it ``SKIPPED`` after ONE pull
+#: (via ``WindowLedger.record(settle_empty=True)``) instead of needing the conservative
+#: 3-pull EMPTY-streak. A RECENT window (within this horizon) keeps the 3-pull streak — a
+#: just-missed-backfill or still-settling edge MUST be allowed to fill on a later pull. The
+#: 60-day floor is comfortably wider than any observed Groww backfill lag, so it never
+#: fast-settles a gap that could still legitimately fill. Idempotent + monotonic: a window
+#: only ages INTO "old", never back, so re-runs are stable (Golden Rule #7).
+OLD_GAP_HORIZON_DAYS: int = 60
+
 
 def _noop_empty_backoff(_attempt: int) -> None:
     """Default empty-retry backoff — a no-op (each *fetch* already paces itself)."""
@@ -1259,11 +1280,13 @@ def fetch_until_nonempty[T](
 
 __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
+    "CONFIRMED_EMPTY_MIN_FETCHES",
     "COVERAGE_MARKET",
     "DAILY_INTERVAL",
     "DEFAULT_EMPTY_RETRY_ATTEMPTS",
     "DEFAULT_MAX_ROUNDS",
     "GROWW_COVERAGE_MARKET",
+    "OLD_GAP_HORIZON_DAYS",
     "DateWindow",
     "LoopVerdict",
     "PullVerdict",

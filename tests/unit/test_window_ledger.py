@@ -14,7 +14,9 @@ from datetime import UTC, date, datetime
 
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
+    EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
+    FAILED,
     PLANNED,
     SETTLED_STATUSES,
     SKIPPED,
@@ -563,6 +565,63 @@ class TestInPullFetches:
         restored = WindowLedger.from_rows(rows)
         assert restored.to_rows() == rows  # fixed point
         assert restored.records()[0].in_pull_fetches == 3
+
+
+class TestSettleEmpty:
+    """DEC-OLD-GAP-FAST-SETTLE-001: ``record(settle_empty=True)`` settles an OLD empty in ONE pull.
+
+    The fast-settle hint is honoured ONLY for an EMPTY classification: an empty window
+    becomes terminal ``SKIPPED`` (streak forced to the threshold) in a single record;
+    a SUCCESS / FAILED ignores it (a success has data; an error is not evidence of
+    empty). The default ``False`` is byte-identical to the prior behaviour (covered by
+    the existing :class:`TestRecord` / :class:`TestEmptyStreakR1` suites).
+    """
+
+    def test_settle_empty_settles_an_empty_in_one_record(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, settle_empty=True
+        )
+        assert status == SKIPPED  # terminal in ONE pull, no 3-pull streak needed
+        record = ledger.records()[0]
+        assert record.status == SKIPPED
+        assert record.empty_streak == EMPTY_TERMINAL_THRESHOLD  # forced to the threshold
+        assert record.attempts == 1  # ONE pull
+        assert ledger.is_skippable(_key()) is True
+
+    def test_settle_empty_on_success_is_a_noop(self) -> None:
+        # A window WITH data is never settled-as-empty — settle_empty is ignored.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(), raw_bars=9, error_type=None, bars_appended=9, now=_NOW, settle_empty=True
+        )
+        assert status == SUCCESS  # untouched — settle_empty never masks real data
+        record = ledger.records()[0]
+        assert record.status == SUCCESS
+        assert record.empty_streak == 0
+
+    def test_settle_empty_on_failed_is_a_noop(self) -> None:
+        # A 429/timeout is NOT evidence the window is empty — settle_empty is ignored.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        assert status == FAILED  # never settled on an error
+        assert ledger.is_skippable(_key()) is False
+
+    def test_settle_empty_default_false_keeps_conservative_streak(self) -> None:
+        # The default (no settle_empty) keeps the across-pull EMPTY streak: a single
+        # empty stays EMPTY 1/3, NOT skippable — byte-identical to the prior behaviour.
+        ledger = WindowLedger()
+        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == EMPTY
+        assert ledger.records()[0].empty_streak == 1
+        assert ledger.is_skippable(_key()) is False
 
 
 def test_concurrent_plan_and_record_never_tears_the_map() -> None:

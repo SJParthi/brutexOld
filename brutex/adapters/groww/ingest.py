@@ -61,7 +61,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from time import sleep as _time_sleep
 
 import structlog
@@ -69,7 +69,9 @@ import structlog
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
 from brutex.adapters.ingest_common import (
+    CONFIRMED_EMPTY_MIN_FETCHES,
     GROWW_COVERAGE_MARKET,
+    OLD_GAP_HORIZON_DAYS,
     clamp_window_end,
     summarize_conflicts,
     tile_windows,
@@ -315,7 +317,14 @@ def ingest_spot(
         so the outer :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest`
         quarantine sees it (auth failures included — Groww has no fail-fast latch).
     """
-    clamped_end = clamp_window_end(interval, end, now_ist=(now_ist or _now_ist)())
+    now_for_clamp = (now_ist or _now_ist)()
+    clamped_end = clamp_window_end(interval, end, now_ist=now_for_clamp)
+    # OLD-gap fast-settle cutoff (DEC-OLD-GAP-FAST-SETTLE-001): a window whose ``end`` is
+    # strictly before this date is OLD enough that vendor data can never appear (Groww serves
+    # a stable 2020+ history; backfill lag is days, not months). Computed ONCE off the SAME
+    # injected clock the current-day clamp uses, so a test's injected ``now_ist`` makes the
+    # decision deterministic. Passed down to ``_ingest_one_window``.
+    old_cutoff = now_for_clamp.date() - timedelta(days=OLD_GAP_HORIZON_DAYS)
     if clamped_end != end:
         _LOG.info(
             "ingest.window.clamped",
@@ -359,6 +368,7 @@ def ingest_spot(
                 series_fields=series_fields,
                 empty_retry_attempts=empty_retry_attempts,
                 empty_retry_backoff=empty_backoff,
+                old_cutoff=old_cutoff,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -487,6 +497,7 @@ def _ingest_one_window(
     series_fields: dict[str, str],
     empty_retry_attempts: int = _DEFAULT_EMPTY_RETRY_ATTEMPTS,
     empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
+    old_cutoff: date | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -501,6 +512,15 @@ def _ingest_one_window(
     transient vendor glitch on a range that DOES have data — the first attempt that
     returns bars wins, and only an all-empty run records genuine no-data WITH
     confidence. Bounded, so a truly-empty window can never loop forever.
+
+    *old_cutoff* (DEC-OLD-GAP-FAST-SETTLE-001) drives the OLD-gap fast-settle: when the
+    window stayed empty across an in-pull retry (``fetch_count >= 2`` — a single
+    glitch-prone fetch is NOT enough) AND its ``window_end`` is strictly before
+    *old_cutoff* (older than :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`,
+    so vendor data can never appear), the success/empty ``record`` is told to settle the
+    window ``SKIPPED`` in ONE pull instead of needing the 3-pull EMPTY streak. ``None``
+    (no clock threaded) disables the fast-settle — RECENT windows always keep the
+    conservative across-pull streak.
     """
     window_start, window_end = window
     key = WindowKey(
@@ -670,11 +690,23 @@ def _ingest_one_window(
     # ``result.bars_appended``) is the signal — a re-pull whose bars are all
     # already in the lake dedups to ``bars_appended == 0`` yet the window IS
     # complete, so it must stay marked.
+    # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an EMPTY window confirmed empty
+    # ACROSS an in-pull retry (``fetch_count >= 2`` — one glitch-prone fetch is not enough;
+    # this also excludes the degenerate ``empty_retry_attempts <= 1`` single-fetch case) AND
+    # OLD enough that vendor data can never appear (``window_end`` strictly before
+    # ``old_cutoff``) is a PERMANENT gap → settle SKIPPED in ONE pull. A RECENT empty window
+    # (or one not re-hit) keeps the conservative across-pull EMPTY streak. ``old_cutoff is
+    # None`` (no clock threaded) disables the fast-settle.
+    confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
+    is_old = old_cutoff is not None and window_end < old_cutoff
+    settle_empty = confirmed_empty_after_retry and is_old
     # Surface the in-pull retry at INFO when it fired AND stayed empty
     # (DEC-WINDOW-INPULL-FETCHES-001): the per-attempt log above is DEBUG, so a pull
     # at the operator's INFO level showed NO sign the 3× retry ran — this one line
     # makes "re-fetched N×, still empty" visible in the log, mirroring the new ledger
     # column on /coverage/windows. A first-try outcome (fetch_count == 1) stays quiet.
+    # ``settled`` flags an old-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001) so the log is
+    # honest about whether this empty window became terminal SKIPPED in this one pull.
     if not raw_bars and fetch_count > 1:
         _LOG.info(
             "ingest.window.empty_after_retries",
@@ -682,6 +714,7 @@ def _ingest_one_window(
             window_start=window_start.isoformat(),
             window_end=window_end.isoformat(),
             fetches=fetch_count,
+            settled=settle_empty,
             **series_fields,
         )
     if ledger is not None:
@@ -692,6 +725,7 @@ def _ingest_one_window(
             bars_appended=result.bars_appended,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
+            settle_empty=settle_empty,
         )
     if on_success is not None:
         on_success()
