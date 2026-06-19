@@ -458,3 +458,58 @@ def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
         if len(r) == 6 and r[1] == "NSE-A,B"  # the per-symbol detail row
     ]
     assert detail and detail[0][1] == "NSE-A,B"
+
+
+def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> None:
+    """DEC-COMPLETENESS-CSV-READABLE-001: a per_symbol map enriches the spot detail with the
+    explicit first→last bar dates + from_2020 flag per dimension (the SAME rich info the
+    /universe strip shows), so the CSV is never less informative than the page."""
+    import csv as _csv
+    from io import StringIO
+
+    spot_rows = [
+        _spot_row(
+            "NSE-NIFTY",
+            "1day",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2026-06-18",
+        ),
+        _spot_row(
+            "NSE-NIFTY",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2026-06-18",
+        ),
+        # FINNIFTY: 1-day starts 2025 (from_2020 = no); 1-minute NEVER pulled (no dates → empty cells).
+        _spot_row(
+            "NSE-FINNIFTY",
+            "1day",
+            COMPLETENESS_SETTLED,
+            first_date="2025-01-01",
+            last_date="2026-06-18",
+        ),
+        _spot_row("NSE-FINNIFTY", "1minute", COMPLETENESS_NO_RECORD),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX, "NSE-FINNIFTY": CATEGORY_INDEX}
+    board = build_completeness_scoreboard(spot_rows, cats, [], {})
+    psmap = per_symbol_completeness(spot_rows, cats, [], {})
+
+    csv_text = scoreboard_to_csv(board, per_symbol=psmap)
+    lines = csv_text.splitlines()
+    # The enriched section title + the new date / from-2020 column headers are present.
+    assert any(line.startswith("DETAIL — spot (per symbol with first") for line in lines)
+    assert "1-day first bar" in csv_text and "1-day from 2020?" in csv_text
+
+    rows = [r for r in _csv.reader(StringIO(csv_text)) if len(r) == 12]
+    by_symbol = {r[1]: r for r in rows}
+    # NIFTY: dated 2020→2026 on BOTH dimensions, from_2020 = yes (covers _csv_date truthy + _csv_yes_no True).
+    nifty = by_symbol["NSE-NIFTY"]
+    assert nifty[4] == "2020-01-01" and nifty[5] == "2026-06-18" and nifty[6] == "yes"
+    assert nifty[8] == "2020-01-01" and nifty[9] == "2026-06-18" and nifty[10] == "yes"
+    # FINNIFTY: 1-day starts 2025 → from_2020 = no; 1-minute no-record → EMPTY date cells + no
+    # (covers _csv_date falsy + _csv_yes_no False).
+    finnifty = by_symbol["NSE-FINNIFTY"]
+    assert finnifty[4] == "2025-01-01" and finnifty[6] == "no"
+    assert finnifty[8] == "" and finnifty[9] == "" and finnifty[10] == "no"

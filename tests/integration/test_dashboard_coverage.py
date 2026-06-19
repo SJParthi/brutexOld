@@ -447,6 +447,9 @@ class TestCompletenessScoreboard:
         assert "DETAIL — spot" in resp.text
         assert "DETAIL — options" in resp.text
         assert "NIFTY" in resp.text
+        # DEC-COMPLETENESS-CSV-READABLE-001: the live download takes the date-ENRICHED path
+        # (per_symbol map wired), so the spot detail carries the first→last bar date columns.
+        assert "1-day first bar" in resp.text and "1-day from 2020?" in resp.text
 
     def test_scoreboard_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))
