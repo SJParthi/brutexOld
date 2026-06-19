@@ -45,9 +45,11 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
+    from brutex.adapters.groww.spot_bounds import SpotWindows
     from brutex.adapters.ingest_common import RetryOutcome
     from brutex.orchestrator.audit import AuditWriter
 
+from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
@@ -116,6 +118,38 @@ def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdap
     # shared bucket. (Was ``replace(adapter.client, pace=pace)`` — which only worked for a
     # bare dataclass client and would have skipped the pool's leaves.)
     return replace(adapter, client=adapter.client.with_pace(pace))
+
+
+def _resolve_spot_window(
+    symbol_windows: SpotWindows | None,
+    *,
+    symbol: str,
+    interval: str,
+    start: date,
+    end: date,
+) -> tuple[date, date]:
+    """Resolve one ``(instrument, interval)`` pair's ``(start, end)`` — the 1-day-first hook.
+
+    DEC-SPOT-1DAY-FIRST-001 — the SPOT twin of the option/future
+    :func:`~brutex.adapters.groww.option_ingest._resolve_window`. Returns the
+    per-symbol bounded minute window from *symbol_windows* ONLY for sub-daily
+    intervals and only when *symbol* is in the map; every other case falls back to
+    the global ``(start, end)``:
+
+    * ``symbol_windows is None`` → ``(start, end)`` — byte-identical to the
+      pre-feature behaviour (the param is opt-in).
+    * ``interval == TRACK1_DAILY_INTERVAL`` → ``(start, end)`` — the DAILY interval
+      is the coverage that PRODUCES the bounds, so it must NEVER be bounded by them
+      (and a spot index's daily series must keep advancing to the requested end).
+    * *symbol* absent from the map → ``(start, end)`` — a symbol the caller did NOT
+      bound (the caller normally excludes a no-coverage symbol from the minute pull
+      entirely; this is the never-narrow fallback if one slips through).
+
+    Pure + **O(1)** (one dict lookup).
+    """
+    if symbol_windows is None or interval == TRACK1_DAILY_INTERVAL:
+        return (start, end)
+    return symbol_windows.get(symbol, (start, end))
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +255,7 @@ def run_groww_spot_ingest(
     run_parallel: RunParallel | None = None,
     audit: AuditWriter | None = None,
     on_window: WindowTick | None = None,
+    symbol_windows: SpotWindows | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -265,6 +300,15 @@ def run_groww_spot_ingest(
         (DEC-SPOT-WINDOW-PROGRESS-001), not just once per finished pair. Fired on the
         window worker threads; the caller owns throttle + thread-safety. ``None`` is a
         no-op (CLI / tests).
+    symbol_windows
+        Optional per-symbol ``{symbol_name: (start, end)}`` map (DEC-SPOT-1DAY-FIRST-001,
+        the spot twin of options' ``contract_windows``) — typically built by
+        :func:`~brutex.adapters.groww.spot_bounds.discover_spot_minute_windows` from each
+        symbol's 1-day lake coverage. When supplied, a SUB-DAILY pull of a symbol present
+        in the map STARTS from its discovered 1-day listing date instead of the blind 2020
+        floor (see :func:`_resolve_spot_window`); the DAILY interval is never bounded and a
+        symbol absent from the map is pulled over the full ``[start, end)``. ``None`` (the
+        default) is byte-identical to the pre-feature behaviour.
 
     Returns
     -------
@@ -308,14 +352,21 @@ def run_groww_spot_ingest(
         the full pool for a single-pair pull) — see the concurrency-model note above.
         """
         instrument, interval = job
+        window_start, window_end = _resolve_spot_window(
+            symbol_windows,
+            symbol=instrument.symbol_name,
+            interval=interval,
+            start=start,
+            end=end,
+        )
         with pull_id_scope(pull_id):
             return ingest_spot(
                 adapter,
                 sink,
                 instrument=instrument,
                 interval=interval,
-                start=start,
-                end=end,
+                start=window_start,
+                end=window_end,
                 pace=pace,
                 ledger=ledger,
                 on_rate_limit=on_rate_limit,
@@ -504,6 +555,7 @@ def run_groww_spot_ingest_with_retry(
     retry_backoff: Callable[[int], None] | None = None,
     audit: AuditWriter | None = None,
     on_window: WindowTick | None = None,
+    symbol_windows: SpotWindows | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -520,6 +572,11 @@ def run_groww_spot_ingest_with_retry(
     **Honest envelope (Golden Rule #10):** the retry is O(failed_windows), NOT
     O(1)-total; the round count is bounded by *max_retry_rounds* (never infinite);
     every round is rate-safe; and a Groww auth death halts the loop (re-auth needed).
+
+    *symbol_windows* (DEC-SPOT-1DAY-FIRST-001) is forwarded verbatim to every
+    :func:`run_groww_spot_ingest` pass (each retry round honours the SAME per-symbol
+    1-day-first minute bounds), so the recovery rounds never re-pull a symbol's dead
+    pre-listing periods.
 
     Returns
     -------
@@ -551,6 +608,7 @@ def run_groww_spot_ingest_with_retry(
             run_parallel=run_parallel,
             audit=audit,
             on_window=on_window,
+            symbol_windows=symbol_windows,
         )
 
     report = _one_pass()

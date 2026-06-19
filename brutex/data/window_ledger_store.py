@@ -330,6 +330,7 @@ def plan_windows(
     now_ist: datetime | None = None,
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
+    symbol_windows: Mapping[str, tuple[date, date]] | None = None,
 ) -> int:
     """Upsert every planned window for the pull as ``PLANNED`` — returns the count.
 
@@ -359,12 +360,29 @@ def plan_windows(
     ``now_ist`` injects the clock for tests; the boundary race (the clamp
     moving between this plan and a fetch crossing 15:30 IST) self-heals on the
     next pull's plan→prune cycle.
+
+    1-DAY-FIRST per-symbol bounds (DEC-SPOT-1DAY-FIRST-001): *symbol_windows* is an
+    OPTIONAL ``{symbol_name: (start, end)}`` map (the spot twin of the option
+    ``contract_windows``, built by
+    :func:`~brutex.adapters.groww.spot_bounds.discover_spot_minute_windows`). When
+    supplied, a SUB-DAILY interval of a symbol in the map is tiled from its discovered
+    1-day-first ``(start, end)`` instead of the global range — so the PLANNED rows
+    match EXACTLY the windows the spine (:func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`)
+    actually fetches, with NO phantom pre-listing rows (the 2020→listing-day windows
+    that otherwise sit permanently PLANNED). The DAILY interval is NEVER bounded (it
+    produces the coverage + must advance to the requested end) and a symbol absent from
+    the map uses the global range (the never-narrow fallback). ``None`` (the default) is
+    byte-identical to the pre-feature behaviour — the planned/fetched-key parity invariant
+    holds in BOTH modes.
     """
     # Vendor-neutral tiling/clamp helpers + the (relocated-to-neutral) interval→width
     # policy + coverage market namespace all live in ingest_common (CLAUDE.md §11
     # COMMON; relocated out of the vendor package in PR-J4a — _MARKET's value unchanged).
     # Imported locally to avoid an import cycle (this module is in brutex.data, which
     # the ingest spines depend on).
+    from brutex.adapters.ingest_common import (
+        _DAILY as DAILY_INTERVAL,
+    )
     from brutex.adapters.ingest_common import (
         COVERAGE_MARKET,
         clamp_window_end,
@@ -394,7 +412,11 @@ def plan_windows(
     clamped_ends: dict[str, date] = {
         interval: clamp_window_end(interval, end, now_ist=ist) for interval in intervals
     }
-    tiles_by_interval: dict[str, list[tuple[date, date]]] = {
+    # GLOBAL (unbounded) tiles per interval — the common case AND the fallback for any
+    # symbol the caller did not bound. The tiler is pure in (interval, start, end), so
+    # these are computed ONCE and shared by every unbounded (symbol, interval); the iso
+    # form (the prune index's value) is shared by-reference too, unchanged from before.
+    global_tiles: dict[str, list[tuple[date, date]]] = {
         interval: (
             tile_windows(interval, start, clamped, window_days_for=width_for)
             if start < clamped
@@ -402,20 +424,44 @@ def plan_windows(
         )
         for interval, clamped in clamped_ends.items()
     }
-    tiles_iso: dict[str, dict[str, str]] = {
+    global_tiles_iso: dict[str, dict[str, str]] = {
         interval: {ws.isoformat(): we.isoformat() for ws, we in tiles}
-        for interval, tiles in tiles_by_interval.items()
+        for interval, tiles in global_tiles.items()
     }
+
+    def _tiles_for(symbol: str, interval: str) -> tuple[list[tuple[date, date]], Mapping[str, str]]:
+        """Return (tiles, iso) for one (symbol, interval) — bounded for a 1-day-first symbol.
+
+        DEC-SPOT-1DAY-FIRST-001: when *symbol_windows* bounds this symbol's SUB-DAILY
+        pull, tile from its discovered ``(start, end)`` — clamped IDENTICALLY to the
+        spine (:func:`clamp_window_end`) so the planned keys equal the fetched keys — and
+        build a FRESH iso map for it. The DAILY interval + any unbounded symbol reuse the
+        shared global tiles + their shared iso object (O(1) memory, byte-identical to the
+        pre-feature path).
+        """
+        if symbol_windows is not None and interval != DAILY_INTERVAL and symbol in symbol_windows:
+            sym_start, sym_end = symbol_windows[symbol]
+            clamped = clamp_window_end(interval, sym_end, now_ist=ist)
+            tiles = (
+                tile_windows(interval, sym_start, clamped, window_days_for=width_for)
+                if sym_start < clamped
+                else []
+            )
+            return tiles, {ws.isoformat(): we.isoformat() for ws, we in tiles}
+        return global_tiles[interval], global_tiles_iso[interval]
+
     planned_tiles: dict[tuple[str, str, str], Mapping[str, str]] = {}
     planned = 0
     for instrument in instruments:
+        symbol = instrument.symbol_name
         for interval in intervals:
-            planned_tiles[(coverage_market, instrument.symbol_name, interval)] = tiles_iso[interval]
-            for window_start, window_end in tiles_by_interval[interval]:
+            tiles, tiles_iso = _tiles_for(symbol, interval)
+            planned_tiles[(coverage_market, symbol, interval)] = tiles_iso
+            for window_start, window_end in tiles:
                 ledger.plan(
                     WindowKey(
                         market=coverage_market,
-                        security_id=instrument.symbol_name,
+                        security_id=symbol,
                         interval=interval,
                         start=window_start,
                         end=window_end,
@@ -440,6 +486,7 @@ def reconcile_ledger_windows(
     now: datetime | None = None,
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
+    symbol_windows: Mapping[str, tuple[date, date]] | None = None,
 ) -> int:
     """Seed ``SUCCESS`` for every lake-enclosed window with no ledger row — **pure** (cold-start).
 
@@ -453,11 +500,22 @@ def reconcile_ledger_windows(
     overwrites a ``FAILED`` / ``PLANNED`` / settled row, so it can't mask a re-pull).
     *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
     shape. O(windows) once at pull start. Returns the number of windows seeded.
+
+    1-DAY-FIRST per-symbol bounds (DEC-SPOT-1DAY-FIRST-001): *symbol_windows* mirrors
+    :func:`plan_windows` — a SUB-DAILY interval of a bounded symbol is tiled from its
+    discovered 1-day-first ``(start, end)`` so the cold-start seed keys EQUAL the
+    bounded planned keys. Without this, a global-tiled seed (anchored at the 2020 floor)
+    would land a SUCCESS row at a window boundary the bounded plan never created — an
+    ORPHAN row the completeness page would miscount. ``None`` (the default) tiles the
+    global range, byte-identical to the pre-feature behaviour.
     """
     # Shared vendor-neutral tiler + the (relocated-to-neutral) width policy +
     # coverage market namespace, all in ingest_common (CLAUDE.md §11 COMMON; moved
     # out of the vendor package in PR-J4a — _MARKET's value unchanged). Local import
     # avoids the brutex.data ↔ ingest spine import cycle.
+    from brutex.adapters.ingest_common import (
+        _DAILY as DAILY_INTERVAL,
+    )
     from brutex.adapters.ingest_common import (
         COVERAGE_MARKET,
         tile_windows,
@@ -477,6 +535,20 @@ def reconcile_ledger_windows(
         (str(s["exchange"]), str(s["segment"]), str(s["symbol"]), str(s["interval"])): s
         for s in spans
     }
+
+    def _reconcile_tiles(symbol: str, interval: str) -> list[tuple[date, date]]:
+        """Tile one (symbol, interval) — bounded to the symbol's 1-day-first window.
+
+        DEC-SPOT-1DAY-FIRST-001: a bounded SUB-DAILY symbol tiles from its discovered
+        ``(start, end)`` (the SAME anchor :func:`plan_windows` uses), so a seeded SUCCESS
+        key matches a planned key exactly; every other (symbol, interval) tiles the global
+        range (unchanged).
+        """
+        if symbol_windows is not None and interval != DAILY_INTERVAL and symbol in symbol_windows:
+            sym_start, sym_end = symbol_windows[symbol]
+            return tile_windows(interval, sym_start, sym_end, window_days_for=width_for)
+        return tile_windows(interval, start, end, window_days_for=width_for)
+
     seeded = 0
     for instrument in instruments:
         for interval in intervals:
@@ -497,9 +569,7 @@ def reconcile_ledger_windows(
                 continue
             first_date = date.fromisoformat(str(entry["first_date"]))
             last_date = date.fromisoformat(str(entry["last_date"]))
-            for window_start, window_end in tile_windows(
-                interval, start, end, window_days_for=width_for
-            ):
+            for window_start, window_end in _reconcile_tiles(instrument.symbol_name, interval):
                 if not (first_date <= window_start and window_end <= last_date):
                     continue
                 if ledger.seed_lake_success(
@@ -528,6 +598,7 @@ def reconcile_ledger_with_lake(
     now: datetime | None = None,
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
+    symbol_windows: Mapping[str, tuple[date, date]] | None = None,
 ) -> int:
     """Load the lake spans + seed the ledger cold-start (the wired entry point).
 
@@ -550,6 +621,7 @@ def reconcile_ledger_with_lake(
         now=now,
         market=market,
         window_days_for=window_days_for,
+        symbol_windows=symbol_windows,
     )
 
 
