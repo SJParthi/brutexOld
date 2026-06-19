@@ -2214,7 +2214,7 @@ def build_app(
         return JSONResponse(await run_in_threadpool(_rows_and_rollup))
 
     @app.get("/api/v1/completeness/scoreboard")
-    async def api_completeness_scoreboard() -> JSONResponse:  # pragma: no cover - live store+lake
+    async def api_completeness_scoreboard() -> JSONResponse:
         """GET /api/v1/completeness/scoreboard — per-symbol + aggregate data completeness.
 
         The Data Completeness Scoreboard (DEC-COMPLETENESS-SCOREBOARD-001): for every spot
@@ -2233,9 +2233,7 @@ def build_app(
         """
         return JSONResponse(await _completeness_board())
 
-    def _build_completeness_board(  # pragma: no cover - live store+lake
-        store: Any, lake: Path
-    ) -> dict[str, Any]:
+    def _build_completeness_board(store: Any, lake: Path) -> dict[str, Any]:
         """Compose the scoreboard from the lake + ledger + instrument categories.
 
         Shared by the JSON ``/api/v1/completeness/scoreboard`` route + the
@@ -2255,7 +2253,7 @@ def build_app(
             spot_rows, categories, store.list_coverage(), categories
         )
 
-    async def _completeness_board() -> dict[str, Any]:  # pragma: no cover - live store+lake
+    async def _completeness_board() -> dict[str, Any]:
         """Resolve the store + lake and build the scoreboard (empty + well-shaped if no lake)."""
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -2264,7 +2262,7 @@ def build_app(
         return await run_in_threadpool(_build_completeness_board, store, lake_root.parent)
 
     @app.get("/api/v1/completeness/scoreboard.csv")
-    async def api_completeness_scoreboard_csv() -> Response:  # pragma: no cover - live store+lake
+    async def api_completeness_scoreboard_csv() -> Response:
         """GET /api/v1/completeness/scoreboard.csv — the scoreboard as a downloadable report.
 
         DEC-COMPLETENESS-PAGE-001. The exact same data as ``/api/v1/completeness/scoreboard``,

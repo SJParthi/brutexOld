@@ -448,6 +448,20 @@ class TestCompletenessScoreboard:
         assert client.get("/api/v1/completeness/scoreboard").status_code == 503
         assert client.get("/api/v1/completeness/scoreboard.csv").status_code == 503
 
+    def test_scoreboard_empty_payload_when_no_lake_root(self) -> None:
+        # A store whose `path` is not a filesystem Path → empty (well-shaped) board +
+        # CSV report, never a 500 (mirrors the /coverage/spot no-lake-root path).
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        body = client.get("/api/v1/completeness/scoreboard").json()
+        assert set(body) == {"spot", "options"}
+        assert body["spot"]["per_symbol"] == [] and body["options"]["per_underlying"] == []
+        csv_resp = client.get("/api/v1/completeness/scoreboard.csv")
+        assert csv_resp.status_code == 200
+        assert "SUMMARY — spot" in csv_resp.text  # section skeleton still renders
+
     def test_completeness_page_renders(self, store: InstrumentStore) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/completeness")
