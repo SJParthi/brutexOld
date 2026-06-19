@@ -34,13 +34,25 @@ NOT reinvent pacing.
 **Scope (CLAUDE.md §3):** option bars are **LAKE / REFERENCE_ONLY** (DEC-P0-063)
 — never the brute-force engine or the 52-condition vocabulary.
 
+**Parallel outer fan-out (DEC-GROWW-OPTION-POOL-001):** the multi-contract driver
+maps one job per ``(contract, interval)`` pair through an injected
+:class:`~brutex.orchestrator.universe_phases.RunParallel` — the SAME concurrency seam
+the spot spine uses. Production injects a
+:class:`~brutex.orchestrator.parallel.PoolRunParallel` over a multi-connection
+:class:`~brutex.adapters.groww.pool.ClientPool` so the per-contract fetches fan across
+K SDK connections (8-RPS parity with spot) instead of serialising on one socket; the
+DEFAULT is a LAZY :class:`~brutex.orchestrator.parallel.SerialRunParallel` that is
+byte-identical to the prior sequential loop. This was the deferred "K2 wiring concern"
+the spot path resolved first; it is now wired here too (the LAKE reference pull is
+still not the brute-force hot path).
+
 **Honest envelope (Golden Rule #10):** the per-contract fetch tiles the contract's
-range (network-bound, NOT O(1)-total); the multi-contract driver is a SEQUENTIAL,
-paced outer loop (rate-safe — the bucket is the governor, not the worker count).
-Parallel outer fan-out (the spot path's :class:`~brutex.orchestrator.parallel.PoolRunParallel`)
-is a K2 wiring concern; the LAKE reference pull is not the brute-force hot path.
-The LIVE pull needs real Groww credentials + network (operator-run); the code +
-injected fakes reach 100% offline — full contract validation needs real expiries.
+range (network-bound, NOT O(1)-total); concurrency is purely CROSS-contract (one
+in-flight call per contract — no nested window pool), and the SHARED rate bucket the
+``pace`` hook drives is still the sole issue governor (CLAUDE.md §2 Rule 6 — the pool
+adds concurrency, NEVER extra rate). The LIVE pull needs real Groww credentials +
+network (operator-run); the code + injected fakes reach 100% offline — full contract
+validation needs real expiries.
 """
 
 from __future__ import annotations
@@ -53,7 +65,7 @@ from time import sleep as _time_sleep
 import structlog
 
 from brutex.adapters.groww.candles import fetch_candle_windows
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
@@ -82,8 +94,10 @@ from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import BruteXError
-from brutex.observability.correlation import current_pull_id
+from brutex.observability.correlation import current_pull_id, pull_id_scope
+from brutex.orchestrator.parallel import SerialRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+from brutex.orchestrator.universe_phases import RunParallel
 
 #: Structured logger — per-contract DEBUG detail + the transient/quarantine
 #: WARNING, every event carrying the pull's ``pull_id`` (the per-underlying INFO
@@ -114,6 +128,22 @@ _DEFAULT_MAX_ATTEMPTS: int = 2
 #: clamped to :data:`_MAX_BACKOFF_S`.
 _DEFAULT_BACKOFF_S: float = 1.0
 _MAX_BACKOFF_S: float = 8.0
+
+#: Domain errors that are a GLOBAL stop, NOT one contract's problem — they must
+#: PROPAGATE past the per-contract quarantine so the whole pull aborts, never be
+#: isolated as a single pair's failure. Mirrors the spot spine's carve-out
+#: (:data:`~brutex.adapters.groww.run_ingest._GLOBAL_STOP_ERRORS`): a quota signal
+#: means the day's budget is spent (``DailyQuotaExceeded``) or a quota-ledger
+#: invariant broke (``QuotaInvariantError``), so every REMAINING contract would
+#: fail identically. This keeps the broad ``BruteXError`` per-contract quarantine
+#: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
+_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (DailyQuotaExceeded, QuotaInvariantError)
+
+#: One unit of OUTER-loop work for the parallel fan-out: a derivative
+#: ``(contract, interval)`` pair. Each maps to a DISTINCT lake partition (the
+#: contract ``groww_symbol``), so the per-pair writes are path-isolated and a
+#: worker pool can fan across them safely (DEC-GROWW-OPTION-POOL-001).
+OptionJob = tuple[DerivativeContract, str]
 
 
 def _default_backoff(attempt_index: int) -> None:
@@ -149,7 +179,7 @@ def contract_exchange(contract: DerivativeContract) -> str:
 
 
 def fetch_option_candles(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     *,
     contract: DerivativeContract,
     interval: str,
@@ -183,7 +213,7 @@ def fetch_option_candles(
 
 
 def ingest_option_contract(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     sink: BarSink,
     *,
     contract: DerivativeContract,
@@ -463,7 +493,7 @@ def _resolve_window(
 
 
 def run_groww_option_ingest(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     sink: BarSink,
     *,
     contracts: Iterable[DerivativeContract],
@@ -481,6 +511,7 @@ def run_groww_option_ingest(
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     contract_windows: ContractWindows | None = None,
+    run_parallel: RunParallel | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -488,12 +519,32 @@ def run_groww_option_ingest(
     contracts — only *market* differs (the lake-ledger namespace:
     ``"groww-option"`` vs ``"groww-future"``, DEC-GROWW-FUTURE-INGEST-001).
 
-    A SEQUENTIAL, paced outer loop (the shared rate bucket the *pace* hook drives
-    is the governor — not the worker count). **Never raises** on a Groww error: a
-    TERMINAL failure on one pair is quarantined (recorded as an
-    :class:`OptionPairFailure`) and the run continues to the next pair — one bad
-    contract never kills the whole pull. A non-Groww exception (a genuine bug) is
-    NOT swallowed.
+    The OUTER loop — one job per ``(contract, interval)`` pair — is mapped through
+    *run_parallel* (DEC-GROWW-OPTION-POOL-001), the SAME concurrency seam the spot
+    spine uses (:func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest`):
+    pass a :class:`~brutex.orchestrator.parallel.PoolRunParallel` (over a
+    multi-connection :class:`~brutex.adapters.groww.pool.ClientPool`) and the
+    per-contract fetches fan across K SDK connections so the pull reaches UP TO the
+    rate ceiling instead of serialising on one socket. The DEFAULT
+    (``run_parallel=None``) is a :class:`~brutex.orchestrator.parallel.SerialRunParallel`
+    — a LAZY in-thread map that is **byte-identical** to the prior sequential loop
+    (same contract-major order, same early-stop-on-quota), so every non-wired caller
+    + test keeps the exact prior behaviour. Each contract fetches its own windows
+    SERIALLY (``fetch_candle_windows`` tiles internally), so concurrency is purely
+    CROSS-contract — one in-flight call per contract, ``len(jobs)`` contracts at once
+    (no nested window pool, unlike spot). The SHARED rate bucket the *pace* hook
+    drives is still the sole issue governor (CLAUDE.md §2 Rule 6 — the pool adds
+    concurrency, NEVER extra rate).
+
+    **Never raises** on a brutex DOMAIN error (:class:`~brutex.models.BruteXError` —
+    incl. ``GrowwError`` / ``CandleParseError`` / ``OutOfScopeError``): a TERMINAL
+    failure on one pair is quarantined (recorded as an :class:`OptionPairFailure`)
+    and the run continues — one bad contract never kills the whole pull. A GLOBAL
+    stop (:data:`_GLOBAL_STOP_ERRORS` — quota) PROPAGATES (it is every contract's
+    problem), and a genuine CODE bug (a Python builtin) is NOT swallowed
+    (DEC-GROWW-QUARANTINE-BRUTEX-001). The quarantine WARNING + *on_progress* fire on
+    the CONTROLLER thread (the single-threaded drain), so the hook need not be
+    thread-safe.
 
     Each pair writes a DISTINCT lake partition (the contract symbol), so the
     appends are path-isolated; idempotent re-pulls are absorbed by the keep-first
@@ -501,7 +552,10 @@ def run_groww_option_ingest(
 
     Parameters mirror :func:`ingest_option_contract`; *contracts* is the resolved
     (typically CE/PE — see :func:`~brutex.adapters.groww.contracts.option_contracts`)
-    chain, *intervals* the canonical intervals to pull per contract.
+    chain, *intervals* the canonical intervals to pull per contract. *run_parallel*
+    is the outer concurrency primitive (``None`` → the byte-identical serial default;
+    production injects a rate-sized ``PoolRunParallel``; tests inject a synchronous
+    fake).
 
     *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is an OPTIONAL per-contract
     ``{symbol: (start, end)}`` map (typically built by
@@ -523,78 +577,108 @@ def run_groww_option_ingest(
         the quarantined failures.
     """
     pull_id = current_pull_id()
+    runner: RunParallel = run_parallel if run_parallel is not None else SerialRunParallel()
+    # Deterministic worklist: one job per (contract, interval) pair, in the caller's
+    # contract order × interval order — the OUTER fan-out unit (each a distinct lake
+    # partition). ``contracts`` is materialised ONCE (it may be a one-shot iterator).
+    jobs: list[OptionJob] = [
+        (contract, interval) for contract in contracts for interval in intervals
+    ]
+
+    def _run_pair(job: OptionJob) -> IngestReport:
+        """Pull one ``(contract, interval)`` pair — runs inside a worker thread.
+
+        Re-binds *pull_id* into THIS thread's structlog context-vars (they do not cross
+        the pool boundary). A raised :class:`~brutex.models.BruteXError` is captured by
+        *run_parallel* and quarantined on the controller thread below; any other
+        exception is captured too and re-raised there.
+        """
+        contract, interval = job
+        window_start, window_end = _resolve_window(
+            contract_windows,
+            symbol=contract.symbol,
+            interval=interval,
+            start=start,
+            end=end,
+        )
+        with pull_id_scope(pull_id):
+            return ingest_option_contract(
+                client,
+                sink,
+                contract=contract,
+                interval=interval,
+                start=window_start,
+                end=window_end,
+                pace=pace,
+                ledger=ledger,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
+                max_attempts=max_attempts,
+                backoff=backoff,
+                now_ist=now_ist,
+                market=market,
+            )
+
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[OptionPairFailure] = []
-    for contract in contracts:
-        for interval in intervals:
-            label = f"{contract.symbol} {interval}"
-            window_start, window_end = _resolve_window(
-                contract_windows,
-                symbol=contract.symbol,
-                interval=interval,
-                start=start,
-                end=end,
-            )
-            try:
-                report = ingest_option_contract(
-                    client,
-                    sink,
-                    contract=contract,
-                    interval=interval,
-                    start=window_start,
-                    end=window_end,
-                    pace=pace,
-                    ledger=ledger,
-                    on_rate_limit=on_rate_limit,
-                    on_timeout=on_timeout,
-                    on_success=on_success,
-                    max_attempts=max_attempts,
-                    backoff=backoff,
-                    now_ist=now_ist,
-                    market=market,
-                )
-            except (DailyQuotaExceeded, QuotaInvariantError):
-                # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT one
-                # contract's problem — every remaining contract would fail identically, so
-                # it must PROPAGATE (the caller maps it to the quota_exhausted verdict,
-                # DEC-SPOT-QUOTA-MIDROUND-001), never be quarantined as a single pair. The
-                # carve-out from the broad per-contract BruteXError quarantine below
-                # (DEC-GROWW-QUARANTINE-BRUTEX-001).
-                raise
-            except BruteXError as exc:
-                # Quarantine ANY brutex DOMAIN error per contract (a terminal GrowwError,
-                # a CandleParseError on un-storable option data, or an OutOfScopeError on an
-                # unresolvable symbol) so one bad contract never crashes the whole bulk
-                # option pull — the same per-symbol resilience the spot spine has
-                # (DEC-GROWW-QUARANTINE-BRUTEX-001); a genuine code bug (a Python builtin)
-                # still surfaces. Only a GrowwError can be an auth failure.
-                auth_failed = isinstance(exc, GrowwError) and is_auth_failure(exc)
-                failures.append(
-                    OptionPairFailure(
-                        symbol=contract.symbol,
-                        interval=interval,
-                        error=str(exc),
-                        auth_failure=auth_failed,
-                    )
-                )
-                _LOG.warning(
-                    "option.ingest.quarantine",
-                    pull_id=pull_id,
-                    symbol=contract.symbol,
-                    interval=interval,
-                    error=str(exc),
-                )
-                if on_progress is not None:
-                    on_progress(label, 0, True)
+    # Drain the fan-out on the controller thread: on_progress + the quarantine WARNING
+    # fire here (single-threaded), so the hook need not be thread-safe. A global-stop or
+    # a captured code bug surfaces; a terminal DOMAIN error is quarantined.
+    for outcome in runner(_run_pair, jobs):
+        contract, interval = outcome.item
+        label = f"{contract.symbol} {interval}"
+        if outcome.ok:
+            report = outcome.result
+            if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[contract.symbol, interval] = report
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
+            continue
+        # A failed ItemResult always carries the captured worker exception.
+        exc = outcome.exc
+        if exc is None:  # pragma: no cover — a failed outcome always carries exc
+            continue
+        if isinstance(exc, _GLOBAL_STOP_ERRORS):
+            # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT one
+            # contract's problem — re-raise so it propagates to the caller's quota
+            # handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being quarantined as a
+            # single pair (the carve-out from the broad BruteXError quarantine below).
+            raise exc
+        if not isinstance(exc, BruteXError):
+            # A genuine CODE bug (a Python builtin: ValueError / KeyError / TypeError
+            # from a defect) escaped a worker — never swallow a real error: re-raise so
+            # the orchestrator never hides a bug. ONLY a brutex DOMAIN error is
+            # quarantined (DEC-GROWW-QUARANTINE-BRUTEX-001).
+            raise exc
+        # Terminal DOMAIN error → quarantine THIS pair, the run continues. The base
+        # BruteXError covers every "this one contract can't be pulled" cause (a terminal
+        # GrowwError, a CandleParseError on un-storable option data, an OutOfScopeError);
+        # only a GrowwError can be an auth failure (a parse / scope error never is).
+        auth_failed = isinstance(exc, GrowwError) and is_auth_failure(exc)
+        failures.append(
+            OptionPairFailure(
+                symbol=contract.symbol,
+                interval=interval,
+                error=str(exc),
+                auth_failure=auth_failed,
+            )
+        )
+        _LOG.warning(
+            "option.ingest.quarantine",
+            pull_id=pull_id,
+            symbol=contract.symbol,
+            interval=interval,
+            error=str(exc),
+        )
+        if on_progress is not None:
+            on_progress(label, 0, True)
     return GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
 
 
 def ingest_underlying_options(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     sink: BarSink,
     *,
     exchange: str,
@@ -613,6 +697,7 @@ def ingest_underlying_options(
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     contract_windows: ContractWindows | None = None,
+    run_parallel: RunParallel | None = None,
 ) -> GrowwOptionIngestReport:
     """Full path for ONE underlying: expiries → contracts → CE/PE candles → lake.
 
@@ -631,7 +716,9 @@ def ingest_underlying_options(
     *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is forwarded verbatim to
     :func:`run_groww_option_ingest` — an OPTIONAL ``{symbol: (start, end)}`` map
     bounding each contract's heavy sub-daily pull to its real listing→expiry window
-    (``None`` = the full-range, pre-feature behaviour).
+    (``None`` = the full-range, pre-feature behaviour). *run_parallel*
+    (DEC-GROWW-OPTION-POOL-001) is forwarded verbatim too — the outer cross-contract
+    concurrency primitive (``None`` = the byte-identical serial default).
 
     **Scope (CLAUDE.md §3):** REFERENCE_ONLY lake — never the brute-force engine.
     """
@@ -657,11 +744,12 @@ def ingest_underlying_options(
         backoff=backoff,
         now_ist=now_ist,
         contract_windows=contract_windows,
+        run_parallel=run_parallel,
     )
 
 
 def ingest_underlying_futures(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     sink: BarSink,
     *,
     exchange: str,
@@ -680,6 +768,7 @@ def ingest_underlying_futures(
     backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     contract_windows: ContractWindows | None = None,
+    run_parallel: RunParallel | None = None,
 ) -> GrowwOptionIngestReport:
     """Full path for ONE underlying: expiries → FUTURE contracts → candles → lake.
 
@@ -700,6 +789,8 @@ def ingest_underlying_futures(
     *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is forwarded verbatim to
     :func:`run_groww_option_ingest` — the same OPTIONAL per-contract minute-bounds
     map :func:`ingest_underlying_options` accepts (``None`` = full-range behaviour).
+    *run_parallel* (DEC-GROWW-OPTION-POOL-001) is forwarded verbatim too — the outer
+    cross-contract concurrency primitive (``None`` = the byte-identical serial default).
 
     **Scope (CLAUDE.md §3):** REFERENCE_ONLY lake — never the brute-force engine.
     """
@@ -726,12 +817,14 @@ def ingest_underlying_futures(
         now_ist=now_ist,
         market=GROWW_FUTURE_COVERAGE_MARKET,
         contract_windows=contract_windows,
+        run_parallel=run_parallel,
     )
 
 
 __all__ = [
     "ContractWindows",
     "GrowwOptionIngestReport",
+    "OptionJob",
     "OptionPairFailure",
     "Pacer",
     "ProgressHook",

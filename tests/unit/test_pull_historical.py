@@ -25,7 +25,7 @@ invariants are asserted directly:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -47,6 +47,8 @@ from brutex.data.registry_store import (
     RegistryStore,
 )
 from brutex.data.sink import BarSink, SinkAppendResult
+from brutex.orchestrator.parallel import SerialRunParallel
+from brutex.orchestrator.universe_phases import ItemResult
 
 pytest.importorskip("duckdb", reason="RegistryStore needs duckdb")
 
@@ -580,6 +582,94 @@ def test_rate_hooks_live_returns_controller_hooks() -> None:
     assert on_rl == controller.on_rate_limit
     assert on_to == controller.on_timeout
     assert on_ok == controller.on_success
+
+
+class _CountingRunner:
+    """A ``RunParallel`` that COUNTS its uses, delegating to a deterministic serial runner.
+
+    Proves an explicit ``run_parallel`` is forwarded all the way to
+    ``run_groww_option_ingest`` (used once per market bucket) without changing behaviour.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._inner = SerialRunParallel()
+
+    def __call__[ItemT, ResultT](
+        self,
+        fn: Callable[[ItemT], ResultT],
+        items: Sequence[ItemT],
+    ) -> Iterable[ItemResult[ItemT, ResultT]]:
+        self.calls += 1
+        yield from self._inner(fn, items)
+
+
+def test_option_run_parallel_offline_is_none() -> None:
+    """Dry-run / no controller → None (the option ingest keeps its serial default)."""
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    assert hp._option_run_parallel(dry_run=True, session_rate=None) is None
+    # A dry-run WITH a controller is still None (no network → deterministic serial).
+    assert hp._option_run_parallel(dry_run=True, session_rate=SessionRateController()) is None
+    # Live but NO session controller → None too.
+    assert hp._option_run_parallel(dry_run=False, session_rate=None) is None
+
+
+def test_option_run_parallel_live_is_pool() -> None:
+    """Live (a session controller present, not a dry-run) → a bounded PoolRunParallel."""
+    from brutex.dashboard.pull_controller import SessionRateController
+    from brutex.orchestrator.parallel import PoolRunParallel
+
+    runner = hp._option_run_parallel(dry_run=False, session_rate=SessionRateController())
+    assert isinstance(runner, PoolRunParallel)
+
+
+def test_pull_contract_candles_forwards_explicit_run_parallel(registry: RegistryStore) -> None:
+    """An explicit *run_parallel* WINS and is forwarded to the option ingest per bucket."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    runner = _CountingRunner()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+        run_parallel=runner,
+    )
+    # NIFTY spans 2 market buckets (option CE/PE + future FUT); the INJECTED runner drained
+    # each bucket's phase-1 pass — never the auto-derived default.
+    assert runner.calls >= 1
+    assert report.contracts_completed == 3
+
+
+def test_pull_contract_candles_live_derives_pool(registry: RegistryStore, tmp_lake: Path) -> None:
+    """Live (session controller, not dry-run, no explicit runner) → derives + uses the pool."""
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+        session_rate=SessionRateController(),
+    )
+    # The run_parallel-is-None live branch built a PoolRunParallel; the pull still completes
+    # correctly through the real thread pool (offline fakes), all 3 NIFTY legs landed.
+    assert report.contracts_completed == 3
 
 
 def test_contract_market_split() -> None:

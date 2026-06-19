@@ -73,7 +73,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
@@ -112,6 +112,8 @@ from brutex.data.window_ledger_store import (
     end_pull_ledger,
     make_live_ledger_flush,
 )
+from brutex.orchestrator.parallel import PoolRunParallel
+from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
     from brutex.dashboard.pull_controller import SessionRateController
@@ -148,7 +150,7 @@ _FUTURE_SIDE: Final[str] = "FUT"
 #: Factory: ``(lake_root) -> (client, sink)`` — injected in tests; the default picks the
 #: honest dry-run pair or the live ``(GrowwClient, ParquetBarSink)``. Re-uses the SAME
 #: shape the bulk derivatives pull declares (CLAUDE.md §11 COMMON).
-HistoricalClientFactory = Callable[[Path], tuple[GrowwClient, BarSink]]
+HistoricalClientFactory = Callable[[Path], tuple[GrowwClientProtocol, BarSink]]
 
 #: A rebuilt selection entry: the authoritative registry row + its parsed contract.
 _RebuiltContract = tuple[ContractRow, DerivativeContract]
@@ -237,8 +239,14 @@ class _EmptyCandleSDK:
         return {"candles": []}
 
 
-def _build_dry_run_client(_lake_root: Path) -> tuple[GrowwClient, BarSink]:
-    """Honest dry-run pair: an empty-candle client + a :class:`NullBarSink`."""
+def _build_dry_run_client(_lake_root: Path) -> tuple[GrowwClientProtocol, BarSink]:
+    """Honest dry-run pair: an empty-candle client + a :class:`NullBarSink`.
+
+    A SINGLE client (not a pool): a dry-run does no network, so cross-contract
+    concurrency buys nothing — and ``run_groww_option_ingest`` keeps its serial
+    default for the dry-run (no ``run_parallel`` wired), so the path stays
+    deterministic offline.
+    """
     return GrowwClient(sdk=_EmptyCandleSDK()), NullBarSink()
 
 
@@ -248,23 +256,33 @@ def _build_live_client(  # pragma: no cover - live Groww TOTP token + SDK + netw
     pace: Callable[[], None] | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
-) -> tuple[GrowwClient, BarSink]:
-    """Build the LIVE ``(GrowwClient, ParquetBarSink)`` from stored TOTP credentials.
+) -> tuple[GrowwClientProtocol, BarSink]:
+    """Build the LIVE ``(ClientPool, ParquetBarSink)`` from stored TOTP credentials.
 
-    LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. The same creds
-    chain the spot/metadata pulls use — the Path-A candle lake sink + the rate hooks at
-    the one choke point so EVERY candle call is paced + retried + decrement/recover
-    (DEC-GROWW-RATELIMIT-RETRY-001).
+    LIVE ONLY (network + TOTP); tests inject a fake ``client_factory``. Builds a
+    multi-connection :class:`~brutex.adapters.groww.pool.ClientPool`
+    (DEC-GROWW-CLIENT-POOL-001 / DEC-GROWW-OPTION-POOL-001) — K independent SDK
+    connections so the cross-contract :class:`~brutex.orchestrator.parallel.PoolRunParallel`
+    fan-out stops serialising on ONE socket (the measured ~0.49-in-flight starve), giving
+    the option candle pull 8-RPS parity with the spot pull. The SHARED session
+    RateController still caps the AGGREGATE rate (the rate hooks at the one choke point so
+    EVERY candle call is paced + retried + decrement/recover, DEC-GROWW-RATELIMIT-RETRY-001);
+    pool size is env-tunable (``BRUTEX_GROWW_POOL_SIZE``) with a safe default + hard clamp.
     """
     from brutex.adapters.groww.auth import GrowwCredentials
-    from brutex.adapters.groww.live import build_live_client
+    from brutex.adapters.groww.constants import resolve_pool_size
+    from brutex.adapters.groww.live import build_live_pool
     from brutex.config.credentials import resolve_groww_file_credentials
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
     file_creds = resolve_groww_file_credentials()
     creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
-    client = build_live_client(creds, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success)
+    pool_size = resolve_pool_size()
+    client = build_live_pool(
+        creds, size=pool_size, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
+    )
+    _LOG.info("historical.client_pool", connections=pool_size)
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     return client, sink
 
@@ -286,7 +304,9 @@ def _resolve_client_factory(
     if dry_run:
         return _build_dry_run_client
 
-    def _live(lake_root: Path) -> tuple[GrowwClient, BarSink]:  # pragma: no cover - live network
+    def _live(  # pragma: no cover - live network
+        lake_root: Path,
+    ) -> tuple[GrowwClientProtocol, BarSink]:
         return _build_live_client(
             lake_root, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
         )
@@ -318,6 +338,26 @@ def _rate_hooks(
         controller.on_timeout,
         controller.on_success,
     )
+
+
+def _option_run_parallel(
+    *, dry_run: bool, session_rate: SessionRateController | None
+) -> RunParallel | None:
+    """Give the option candle pull its rate-sized cross-contract pool, or the serial default.
+
+    DEC-GROWW-OPTION-POOL-001, the option twin of
+    :func:`~brutex.dashboard.pull_controller._spot_run_parallel`: a LIVE pull (a session
+    controller present, not a dry-run) fans contracts across a bounded
+    :class:`~brutex.orchestrator.parallel.PoolRunParallel` over the multi-connection
+    :class:`~brutex.adapters.groww.pool.ClientPool` the live factory builds, so the pull
+    reaches UP TO the rate ceiling. A dry-run / no-controller pull returns ``None`` so
+    :func:`~brutex.adapters.groww.option_ingest.run_groww_option_ingest` keeps its
+    byte-identical serial default (deterministic offline). The SHARED token bucket is the
+    sole issue governor either way (CLAUDE.md §2 Rule 6 — no ceiling is raised). Pure + O(1).
+    """
+    if dry_run or session_rate is None:
+        return None
+    return PoolRunParallel()
 
 
 def _contract_market(row: ContractRow) -> str:
@@ -513,7 +553,7 @@ def _run_phase(
     interval: str,
     by_market: dict[str, list[_RebuiltContract]],
     selected_symbols: frozenset[str],
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     sink: BarSink,
     lake_root: Path,
     dry_run: bool,
@@ -528,6 +568,7 @@ def _run_phase(
     until_clean: bool,
     until_clean_rounds: int,
     contract_windows: ContractWindows | None,
+    run_parallel: RunParallel | None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -580,6 +621,7 @@ def _run_phase(
                 on_progress=_progress,
                 market=market,
                 contract_windows=contract_windows,
+                run_parallel=run_parallel,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows
@@ -751,6 +793,7 @@ def pull_contract_candles(
     session_rate: SessionRateController | None = None,
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
+    run_parallel: RunParallel | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -835,6 +878,13 @@ def pull_contract_candles(
         The OUTER round budget for ``until_clean`` (default
         :data:`~brutex.adapters.ingest_common.AUTO_RESUME_MAX_ROUNDS`); ``<= 0`` runs
         zero rounds (a safe no-op).
+    run_parallel
+        The cross-contract concurrency primitive forwarded to
+        :func:`~brutex.adapters.groww.option_ingest.run_groww_option_ingest`
+        (DEC-GROWW-OPTION-POOL-001). ``None`` (the default) derives the live
+        :class:`~brutex.orchestrator.parallel.PoolRunParallel` from the session
+        controller (:func:`_option_run_parallel`) — a dry-run / no-controller pull then
+        keeps the byte-identical serial default; tests inject a synchronous fake.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -843,6 +893,12 @@ def pull_contract_candles(
         client_factory = _resolve_client_factory(
             dry_run=dry_run, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
         )
+    # The LIVE pull fans contracts across the rate-sized PoolRunParallel over the
+    # ClientPool the live factory builds (8-RPS parity, DEC-GROWW-OPTION-POOL-001); a
+    # dry-run / no-controller pull leaves it serial (deterministic). An explicit
+    # *run_parallel* (a test fake) always wins.
+    if run_parallel is None:
+        run_parallel = _option_run_parallel(dry_run=dry_run, session_rate=session_rate)
     client, sink = client_factory(lake_root)
     rebuilt = _rebuild_contracts(contracts)
     selected_symbols = frozenset(row.contract_symbol for row, _contract in rebuilt)
@@ -878,6 +934,7 @@ def pull_contract_candles(
             until_clean=until_clean,
             until_clean_rounds=until_clean_rounds,
             contract_windows=contract_windows,
+            run_parallel=run_parallel,
         )
 
     # ── Phase 1 — 1-day ONLY first, ALWAYS (even for a 1-minute-only request) ──────────
@@ -920,6 +977,7 @@ def pull_contract_candles(
                 until_clean=until_clean,
                 until_clean_rounds=until_clean_rounds,
                 contract_windows=start_dates,
+                run_parallel=run_parallel,
             )
         else:
             # Barrier FAILED — 1-minute is SKIPPED entirely, reported (which contracts failed).
