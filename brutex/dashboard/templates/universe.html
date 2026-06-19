@@ -204,6 +204,16 @@
   .inst .nm { font-size:11px; color:var(--muted); }
   /* Contract economics line — lot · tick · freeze (DEC-DASHBOARD-ECON-COLUMNS-001). */
   .inst .econ { font-size:10px; color:var(--muted); opacity:.8; letter-spacing:.2px; margin-top:1px; }
+  /* Per-symbol completeness strip — does THIS symbol have the entire 2020→today set?
+     (DEC-COMPLETENESS-UNIVERSE-001). Explicit first→last dates + a from-2020 flag per
+     dimension so the operator identifies gaps right where they pull. */
+  .inst .cov { font-size:10px; margin-top:2px; letter-spacing:.2px; display:flex; flex-wrap:wrap; gap:8px; }
+  .inst .cov .seg { white-space:nowrap; }
+  .inst .cov .k { color:var(--muted); text-transform:uppercase; font-weight:700; opacity:.8; }
+  .inst .cov .ok { color:#34d399; }
+  .inst .cov .warn { color:#FFB74D; }
+  .inst .cov .bad { color:#f87171; }
+  .inst .cov .dim { color:var(--muted); opacity:.7; }
   .inst .cc { margin-left:auto; font-size:11px; color:var(--muted); }
 
   .pill { display:inline-flex; align-items:center; gap:8px; margin:4px; padding:9px 14px;
@@ -593,6 +603,8 @@
    option-chain cell pulls THAT contract via the same /pull endpoint. */
 let filter = "index";          // active tab kind
 let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange,lot_size,tick_size,freeze_quantity,option_pullable}]
+let COV = {};                  // symbol → per-symbol completeness (DEC-COMPLETENESS-UNIVERSE-001)
+let covSig = "";               // last COV signature — re-render only when it actually changes
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
 let selPullSymbol = null;      // selected instrument's vendor symbol (Groww SECURITY_ID)
 let selExp = null;             // selected expiry ISO date
@@ -804,6 +816,56 @@ function econLine(i) {
   return bits.join(" · ");
 }
 
+/* Per-symbol completeness strip (DEC-COMPLETENESS-UNIVERSE-001): for ONE spot
+   dimension, the EXPLICIT first→last bar dates + a from-2020 flag so the operator
+   sees, right where they pull, whether the symbol has the entire 2020→today set.
+   green ✓ = full AND starts 2020 · amber ⚠ = partial OR starts later · red ✕ =
+   failed windows · dim — = never pulled / no record. */
+function spotSeg(label, dim) {
+  if (!dim || dim.status === "none" || !dim.first_date) {
+    return '<span class="seg"><span class="k">' + label + '</span> <span class="dim">—</span></span>';
+  }
+  let cls = "warn", flag = "⚠";
+  if (dim.status === "failed") { cls = "bad"; flag = "✕"; }
+  else if (dim.status === "full" && dim.from_2020) { cls = "ok"; flag = "✓"; }
+  const span = esc(dim.first_date) + "→" + esc(dim.last_date || "?");
+  return '<span class="seg"><span class="k">' + label + '</span> <span class="' + cls + '">'
+    + span + " " + flag + "</span></span>";
+}
+function optSeg(opt) {
+  if (!opt || opt.status === "none") {
+    return '<span class="seg"><span class="k">opt</span> <span class="dim">—</span></span>';
+  }
+  let cls = "warn";
+  if (opt.status === "failed") cls = "bad";
+  else if (opt.status === "stable") cls = "ok";
+  const span = (opt.first_year != null) ? (opt.first_year + "–" + opt.last_year) : "";
+  return '<span class="seg"><span class="k">opt</span> <span class="' + cls + '">'
+    + esc(span) + " " + esc(opt.status) + "</span></span>";
+}
+function covStrip(i) {
+  const c = COV[i.symbol];
+  if (!c) return '<div class="cov"><span class="dim">completeness: not pulled yet</span></div>';
+  const s = c.spot || {};
+  return '<div class="cov">'
+    + spotSeg("1d", s["1day"]) + spotSeg("1m", s["1minute"]) + optSeg(c.options)
+    + "</div>";
+}
+
+async function loadCompleteness() {
+  /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
+     actually changed (a pull landed) — keeps the strip live without churning 750 rows. */
+  try {
+    const r = await fetch("/api/v1/universe/completeness");
+    if (!r.ok) return;
+    const map = await r.json();
+    const sig = JSON.stringify(map);
+    if (sig === covSig) return;   // unchanged — no needless re-render
+    COV = map; covSig = sig;
+    renderInstruments();
+  } catch (e) { /* transient — keep the last shown strip */ }
+}
+
 function renderInstruments() {
   const list = visibleInstruments();
   const el = document.getElementById("instruments");
@@ -821,6 +883,11 @@ function renderInstruments() {
     return;
   }
   el.innerHTML = "";
+  // Preserve scroll across the rebuild (DEC-COMPLETENESS-UNIVERSE-001 follow-up): the
+  // live 15s completeness poll re-renders on every COV change — during a multi-minute
+  // pull the dates/status shift as windows land, so without this the ~750-row list
+  // would snap back to the top each cycle, right while the operator watches the pull.
+  const prevScroll = el.scrollTop;
   list.forEach((i, ix) => {
     const d = document.createElement("div");
     // reference-only rows (no option chain — DEC-OPTIONS-PULL-GUARD-001) get a
@@ -843,6 +910,7 @@ function renderInstruments() {
           : '<span class="chip opt" title="Option-pullable — this underlying has a listed option chain, so &quot;Pull options chain&quot; is allowed (DEC-OPTIONS-ELIGIBLE-GUARD-001)">OPT</span>')
       + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div>`
       + ((econ) => econ ? `<div class="econ">${esc(econ)}</div>` : "")(econLine(i))
+      + covStrip(i)
       + `</div>`
       + `<span class="cc">${esc(i.exchange)}</span>`;
     const cb = d.querySelector(".msel");
@@ -862,6 +930,7 @@ function renderInstruments() {
     };
     el.appendChild(d);
   });
+  el.scrollTop = prevScroll;   // restore scroll so the live re-render never jumps the list
   listAnimated = true;   // subsequent re-renders (filter/select) skip the cascade
 }
 
@@ -1668,6 +1737,10 @@ async function bootstrap() {
   await maybeAutoLoad(summary || {index_count: 0, stock_count: 0});
   pollQuota();
   setInterval(pollQuota, 3000);
+  // Per-symbol completeness strip (DEC-COMPLETENESS-UNIVERSE-001): load now + keep it
+  // live so the "has the entire 2020→today set?" answer updates as pulls land.
+  loadCompleteness();
+  setInterval(loadCompleteness, 15000);
 }
 bootstrap();
 </script>

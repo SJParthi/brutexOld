@@ -89,3 +89,27 @@ def test_instrument_rows_render_contract_economics() -> None:
     assert "i.lot_size" in html
     assert "i.tick_size" in html
     assert "i.freeze_quantity" in html
+
+
+def test_universe_wires_per_symbol_completeness_strip() -> None:
+    """The /universe page renders the per-symbol completeness strip (DEC-COMPLETENESS-UNIVERSE-001).
+
+    Guards that the page fetches the per-symbol map, renders the explicit first→last date strip
+    with the from-2020 flag per dimension, and keeps it live — so the operator can identify,
+    right where they pull, whether a symbol has the entire 2020→today set.
+    """
+    from brutex.dashboard.app import _render_universe_html
+
+    html = _render_universe_html()
+    # fetches the per-symbol completeness endpoint + keeps it live.
+    assert "/api/v1/universe/completeness" in html
+    assert "function loadCompleteness(" in html
+    assert "setInterval(loadCompleteness" in html
+    # renders the strip per row (the three helpers + the row insertion + the CSS).
+    assert "function covStrip(" in html
+    assert "function spotSeg(" in html and "function optSeg(" in html
+    assert "covStrip(i)" in html
+    assert ".inst .cov" in html
+    # the honest from-2020 flag drives the green ✓ vs amber ⚠ vs red ✕ states.
+    assert "dim.from_2020" in html
+    assert "first_date" in html and "last_date" in html
