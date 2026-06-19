@@ -533,9 +533,15 @@ def _ingest_one_window(
     # multi-pass retry); a terminal one propagates. Bounded → a truly-empty window can
     # never loop forever.
     raw_bars: list[CandleBar] = []
+    # Count the vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001):
+    # ``1`` on a first-try win, up to ``empty_retry_attempts`` when the in-pull retry fires.
+    # Recorded on the ledger row so the operator SEES the 3× retry that was previously
+    # DEBUG-only (the "attempts 1 but no sign of the retry" gap).
+    fetch_count = 0
     for empty_attempt in range(empty_retry_attempts):
         if pace is not None:
             pace()
+        fetch_count += 1
         try:
             raw_bars = adapter.fetch_ohlcv(
                 symbol=instrument.symbol_name,
@@ -574,6 +580,7 @@ def _ingest_one_window(
                         error_type=type(exc).__name__,
                         bars_appended=0,
                         now=datetime.now(UTC),
+                        in_pull_fetches=fetch_count,
                     )
                 return _WindowOutcome(
                     transient=1, window=retry_window, error_type=type(exc).__name__
@@ -658,6 +665,20 @@ def _ingest_one_window(
     # ``result.bars_appended``) is the signal — a re-pull whose bars are all
     # already in the lake dedups to ``bars_appended == 0`` yet the window IS
     # complete, so it must stay marked.
+    # Surface the in-pull retry at INFO when it fired AND stayed empty
+    # (DEC-WINDOW-INPULL-FETCHES-001): the per-attempt log above is DEBUG, so a pull
+    # at the operator's INFO level showed NO sign the 3× retry ran — this one line
+    # makes "re-fetched N×, still empty" visible in the log, mirroring the new ledger
+    # column on /coverage/windows. A first-try outcome (fetch_count == 1) stays quiet.
+    if not raw_bars and fetch_count > 1:
+        _LOG.info(
+            "ingest.window.empty_after_retries",
+            pull_id=pull_id,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            fetches=fetch_count,
+            **series_fields,
+        )
     if ledger is not None:
         ledger.record(
             key,
@@ -665,6 +686,7 @@ def _ingest_one_window(
             error_type=None,
             bars_appended=result.bars_appended,
             now=datetime.now(UTC),
+            in_pull_fetches=fetch_count,
         )
     if on_success is not None:
         on_success()

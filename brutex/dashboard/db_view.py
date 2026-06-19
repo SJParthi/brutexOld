@@ -1766,6 +1766,11 @@ def _window_row(
         # (DEC-EMPTY-STREAK-VISIBLE-001). The legacy status log has no streak —
         # getattr keeps ONE row shape.
         "empty_streak": getattr(record, "empty_streak", 0),
+        # Vendor fetches in the LAST pull (DEC-WINDOW-INPULL-FETCHES-001): >1 means the
+        # in-pull empty/transient retry fired — the count that was previously DEBUG-only,
+        # so the page now SHOWS that "attempts 1" already meant up to 3 fetches. The
+        # legacy status log has no such field — getattr keeps ONE row shape (CLAUDE.md §11).
+        "in_pull_fetches": getattr(record, "in_pull_fetches", 0),
         "last_error": record.last_error,
         # Display the stored UTC stamps as clean IST (CLAUDE.md §6 store-UTC /
         # display-IST; §11 COMMON via `format_ist_clock`) so /coverage/windows

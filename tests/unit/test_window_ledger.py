@@ -404,6 +404,7 @@ class TestPruneSuperseded:
                     _NOW.isoformat(),
                     _NOW.isoformat(),
                     0,
+                    0,
                 )
             ]
         )
@@ -499,6 +500,69 @@ def test_from_rows_honours_threshold() -> None:
     ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
     status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
     assert status == SKIPPED  # the injected threshold of 2 took effect
+
+
+class TestInPullFetches:
+    """DEC-WINDOW-INPULL-FETCHES-001: the per-window in-pull vendor-fetch count.
+
+    ``attempts`` counts PULLS; ``in_pull_fetches`` counts the network fetches WITHIN
+    one pull (the in-pull empty/transient retry, previously DEBUG-only), so the
+    operator finally SEES that "attempts 1" already meant up to 3 fetches.
+    """
+
+    def test_record_stores_the_given_fetch_count(self) -> None:
+        # A 3× in-pull empty retry: ONE pull, THREE fetches.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, in_pull_fetches=3
+        )
+        record = ledger.records()[0]
+        assert record.attempts == 1  # ONE pull
+        assert record.in_pull_fetches == 3  # THREE network fetches inside it
+
+    def test_record_defaults_to_one_fetch(self) -> None:
+        # The default keeps every legacy single-fetch caller honest.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.records()[0].in_pull_fetches == 1
+
+    def test_record_overwrites_not_accumulates(self) -> None:
+        # OVERWRITE (not sum): re-running the SAME pull is bit-identical (Golden Rule #7).
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, in_pull_fetches=3
+        )
+        ledger.record(
+            _key(), raw_bars=7, error_type=None, bars_appended=7, now=_NOW, in_pull_fetches=1
+        )
+        record = ledger.records()[0]
+        assert record.attempts == 2  # two pulls
+        assert record.in_pull_fetches == 1  # the LAST pull's count, not 3+1
+
+    def test_plan_records_zero_fetches(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        assert ledger.records()[0].in_pull_fetches == 0  # never fetched
+
+    def test_seed_lake_success_records_one_fetch(self) -> None:
+        ledger = WindowLedger()
+        ledger.seed_lake_success(_key(), bars=42, now=_NOW)
+        assert ledger.records()[0].in_pull_fetches == 1  # one fetch's worth of data
+
+    def test_settle_known_gap_records_one_fetch(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert ledger.records()[0].in_pull_fetches == 1  # the fetch that returned the gap
+
+    def test_round_trip_preserves_a_multi_fetch_count(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, in_pull_fetches=3
+        )
+        rows = ledger.to_rows()
+        restored = WindowLedger.from_rows(rows)
+        assert restored.to_rows() == rows  # fixed point
+        assert restored.records()[0].in_pull_fetches == 3
 
 
 def test_concurrent_plan_and_record_never_tears_the_map() -> None:

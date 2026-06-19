@@ -45,6 +45,7 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
+    PLANNED,
     SKIPPED,
     WindowLedger,
     WindowLedgerRecord,
@@ -79,11 +80,12 @@ _CORE_COLUMNS: tuple[str, ...] = (
 )
 
 #: The full on-disk column order — fixed so the Parquet schema is stable + the row
-#: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` was
-#: appended LAST (DEC-WINDOW-LEDGER-001 R1), so a legacy file written before it
-#: existed loads cleanly: the core columns are read and ``empty_streak`` is derived
-#: per-row (see :func:`_rows_to_records`). Backward-compatible, never a re-pull.
-_COLUMNS: tuple[str, ...] = (*_CORE_COLUMNS, "empty_streak")
+#: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` then
+#: ``in_pull_fetches`` were each appended LAST (DEC-WINDOW-LEDGER-001 R1 /
+#: DEC-WINDOW-INPULL-FETCHES-001), so a legacy file written before either column
+#: existed loads cleanly: the core columns are read and each optional column is
+#: derived per-row (see :func:`_rows_to_records`). Backward-compatible, never a re-pull.
+_COLUMNS: tuple[str, ...] = (*_CORE_COLUMNS, "empty_streak", "in_pull_fetches")
 
 
 def ledger_dir(lake_root: Path) -> Path:
@@ -113,14 +115,29 @@ def _derive_empty_streak(status: str, attempts: int) -> int:
     return 0
 
 
-def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 12-field tuple :meth:`WindowLedger.from_rows` expects.
+def _derive_in_pull_fetches(status: str) -> int:
+    """Best-effort ``in_pull_fetches`` for a LEGACY row that predates the column.
 
-    Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1);
-    a ``None`` ``empty_streak`` (a legacy file written before the column) is derived
-    from ``(status, attempts)`` via :func:`_derive_empty_streak`. A wrong arity /
-    non-coercible element raises here (``ValueError`` / ``TypeError``) and is caught
-    by the caller, degrading to an empty ledger.
+    DEC-WINDOW-INPULL-FETCHES-001. A pre-column Parquet has no in-pull fetch count;
+    reconstruct the honest FLOOR from the row's status: a ``PLANNED`` row was never
+    fetched (``0``); every other status (``SUCCESS`` / ``EMPTY`` / ``FAILED`` /
+    ``SKIPPED``) was fetched at least once (``1``). The true in-pull retry count of a
+    pre-feature pull is unrecorded, so we never overstate it — the next pull's
+    :meth:`WindowLedger.record` stamps the exact count.
+    """
+    return 0 if status == PLANNED else 1
+
+
+def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
+    """Coerce raw rows to the exact 13-field tuple :meth:`WindowLedger.from_rows` expects.
+
+    Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
+    plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001). A ``None`` optional column
+    (a legacy file written before that column) is derived: ``empty_streak`` from
+    ``(status, attempts)`` via :func:`_derive_empty_streak`; ``in_pull_fetches`` from
+    ``status`` via :func:`_derive_in_pull_fetches`. A wrong arity / non-coercible element
+    raises here (``ValueError`` / ``TypeError``) and is caught by the caller, degrading
+    to an empty ledger.
     """
     coerced: list[tuple[Any, ...]] = []
     for (
@@ -136,6 +153,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         first_seen_at,
         last_attempt_at,
         empty_streak,
+        in_pull_fetches,
     ) in rows:
         status_s = str(status)
         attempts_i = int(attempts)
@@ -143,6 +161,9 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
             _derive_empty_streak(status_s, attempts_i)
             if empty_streak is None
             else int(empty_streak)
+        )
+        fetches = (
+            _derive_in_pull_fetches(status_s) if in_pull_fetches is None else int(in_pull_fetches)
         )
         coerced.append(
             (
@@ -158,6 +179,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 str(first_seen_at),
                 (None if last_attempt_at is None else str(last_attempt_at)),
                 streak,
+                fetches,
             )
         )
     return coerced
@@ -181,14 +203,20 @@ def load_window_ledger(
         table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
         present = set(table.schema.names)
         # The core 11 columns are REQUIRED — a missing one raises KeyError below and
-        # degrades to empty (the wrong-shape guard). ``empty_streak`` is OPTIONAL: a
-        # legacy file lacks it, so fill ``None`` and let `_rows_to_records` derive it.
+        # degrades to empty (the wrong-shape guard). ``empty_streak`` + ``in_pull_fetches``
+        # are OPTIONAL: a legacy file lacks one (or both), so fill ``None`` for the missing
+        # column(s) and let `_rows_to_records` derive each per-row.
         columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
         n = len(columns[_CORE_COLUMNS[0]])
         streaks = (
             table.column("empty_streak").to_pylist() if "empty_streak" in present else [None] * n
         )
-        rows = zip(*(columns[name] for name in _CORE_COLUMNS), streaks, strict=True)
+        fetches = (
+            table.column("in_pull_fetches").to_pylist()
+            if "in_pull_fetches" in present
+            else [None] * n
+        )
+        rows = zip(*(columns[name] for name in _CORE_COLUMNS), streaks, fetches, strict=True)
         return WindowLedger.from_rows(_rows_to_records(rows), threshold=threshold)
     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
         _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
@@ -228,6 +256,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
             ("first_seen_at", pa.string()),
             ("last_attempt_at", pa.string()),
             ("empty_streak", pa.int64()),
+            ("in_pull_fetches", pa.int64()),
         ]
     )
     table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
@@ -272,6 +301,9 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # migrated ledger keeps the EMPTY-terminal behaviour the old
                 # reconcile_empty_terminal gave (status-log attempts == EMPTY count).
                 empty_streak=_derive_empty_streak(status, r.attempts),
+                # The legacy status log has no in-pull fetch count either; derive the
+                # honest floor from the (settled) status (DEC-WINDOW-INPULL-FETCHES-001).
+                in_pull_fetches=_derive_in_pull_fetches(status),
             )
         )
 
@@ -290,6 +322,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.first_seen_at,
                 r.last_attempt_at,
                 r.empty_streak,
+                r.in_pull_fetches,
             )
             for r in by_window.values()
         ),

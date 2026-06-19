@@ -175,6 +175,17 @@ class WindowLedgerRecord:
     #: (which FAILED retries inflate), so a real-data window is never masked before
     #: ``_threshold`` genuine empties.
     empty_streak: int = 0
+    #: Vendor fetch calls made for this window during its MOST-RECENT pull
+    #: (DEC-WINDOW-INPULL-FETCHES-001). ``attempts`` counts *pulls* (one per
+    #: :meth:`record`); this counts the *network fetches inside one pull* — the
+    #: in-pull empty/transient retry (DEC-EMPTY-INPULL-RETRY-001) re-fetches a clean
+    #: 0-bar window up to 3× WITHIN a single pull, and that count was previously only
+    #: logged at DEBUG, so the operator saw ``attempts 1`` with NO sign the 3× retry
+    #: fired. ``1`` = a first-try win; ``>1`` = the retry fired (up to
+    #: ``empty_retry_attempts``); ``0`` = a never-fetched ``PLANNED`` row. OVERWRITTEN
+    #: each pull (the last pull's count, like ``last_error`` / ``last_attempt_at``) —
+    #: NOT cumulative, so a re-run of the SAME pull is bit-identical (Golden Rule #7).
+    in_pull_fetches: int = 0
 
 
 @dataclass(slots=True)
@@ -233,6 +244,7 @@ class WindowLedger:
                 first_seen_at=now.isoformat(),
                 last_attempt_at=None,
                 empty_streak=0,
+                in_pull_fetches=0,  # never fetched — a pure PLANNED row
             )
 
     def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
@@ -264,6 +276,7 @@ class WindowLedger:
                 first_seen_at=now.isoformat(),
                 last_attempt_at=now.isoformat(),
                 empty_streak=0,
+                in_pull_fetches=1,  # the lake proves one successful fetch's data
             )
             return True
 
@@ -288,6 +301,7 @@ class WindowLedger:
         error_type: str | None,
         bars_appended: int,
         now: datetime,
+        in_pull_fetches: int = 1,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -298,6 +312,16 @@ class WindowLedger:
         ``SKIPPED`` so it stops re-fetching forever. ``first_seen_at`` is preserved
         from the prior row (or stamped ``now`` for a never-planned window).
         Returns the final stored status.
+
+        *in_pull_fetches* (DEC-WINDOW-INPULL-FETCHES-001) is the number of vendor
+        fetch calls the spine made for this window WITHIN this single pull — ``1`` for
+        a first-try outcome, ``>1`` when the in-pull empty/transient retry fired (up to
+        ``empty_retry_attempts``). It is STORED as-is (the last pull's count), not
+        accumulated, so re-running the same pull is bit-identical (Golden Rule #7). The
+        default ``1`` keeps every existing single-fetch caller honest. ``attempts`` still
+        counts *pulls*; this exposes the *network fetches inside* one — the count that
+        was previously DEBUG-only, so the operator now SEES that ``attempts 1`` already
+        meant up to 3 fetches.
         """
         classified = classify_window_status(raw_bars, error_type)
         wk = self._key(key)
@@ -343,6 +367,7 @@ class WindowLedger:
                 first_seen_at=first_seen,
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
+                in_pull_fetches=in_pull_fetches,
             )
             return status
 
@@ -377,6 +402,7 @@ class WindowLedger:
                 first_seen_at=first_seen,
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
+                in_pull_fetches=1,  # the one fetch that returned the known-gap
             )
             return SKIPPED
 
@@ -520,8 +546,13 @@ class WindowLedger:
 
     def to_rows(
         self,
-    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int]]:
-        """Serialise to a deterministic list of plain tuples (for the durable store)."""
+    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:
+        """Serialise to a deterministic list of plain tuples (for the durable store).
+
+        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) is the LAST tuple element —
+        appended after ``empty_streak`` exactly as that column was, so a legacy 12-tuple
+        Parquet (written before it existed) still loads (the store fills it per-row).
+        """
         return [
             (
                 r.market,
@@ -536,6 +567,7 @@ class WindowLedger:
                 r.first_seen_at,
                 r.last_attempt_at,
                 r.empty_streak,
+                r.in_pull_fetches,
             )
             for r in self.records()
         ]
@@ -544,7 +576,7 @@ class WindowLedger:
     def from_rows(
         cls,
         rows: Iterable[
-            tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int]
+            tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]
         ],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
@@ -564,6 +596,7 @@ class WindowLedger:
             first_seen_at,
             last_attempt_at,
             empty_streak,
+            in_pull_fetches,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -579,6 +612,7 @@ class WindowLedger:
                     first_seen_at=first_seen_at,
                     last_attempt_at=last_attempt_at,
                     empty_streak=empty_streak,
+                    in_pull_fetches=in_pull_fetches,
                 )
             )
         return ledger

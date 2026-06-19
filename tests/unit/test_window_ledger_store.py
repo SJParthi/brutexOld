@@ -130,6 +130,10 @@ class TestMigration:
         assert by_symbol["NIFTY"].status == SUCCESS
         assert by_symbol["NIFTY"].bars == 9  # status-log row folded
         assert by_symbol["SENSEX"].status == SKIPPED  # EMPTY-at-threshold → SKIPPED
+        # The legacy status log carries no in-pull fetch count — each migrated row
+        # derives the honest floor of 1 (DEC-WINDOW-INPULL-FETCHES-001).
+        assert by_symbol["NIFTY"].in_pull_fetches == 1
+        assert by_symbol["SENSEX"].in_pull_fetches == 1
 
     def test_migrate_empty_sidecars_is_empty_ledger(self, tmp_path: Path) -> None:
         assert load_or_migrate_window_ledger(tmp_path, now=_NOW).count == 0
@@ -678,6 +682,58 @@ class TestLegacyBackwardCompat:
         # A legacy EMPTY-below-threshold row is still fetched (not masked).
         assert ledger.is_skippable(_key("SENSEX")) is False
         assert ledger.is_skippable(_key("BANKNIFTY")) is True
+        # The pre-feature file ALSO lacks ``in_pull_fetches`` — each non-PLANNED row
+        # derives the honest floor of 1 (DEC-WINDOW-INPULL-FETCHES-001).
+        assert by_symbol["NIFTY"].in_pull_fetches == 1
+        assert by_symbol["SENSEX"].in_pull_fetches == 1
+        assert by_symbol["BANKNIFTY"].in_pull_fetches == 1
+
+    def test_legacy_rows_derive_in_pull_fetches_both_branches(self, tmp_path: Path) -> None:
+        # Both _derive_in_pull_fetches branches: PLANNED→0 (never fetched), SUCCESS→1.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan", "dhan"],
+                "security_id": ["NIFTY", "SENSEX"],
+                "interval": ["1minute", "1minute"],
+                "window_start": ["2021-01-01", "2021-01-01"],
+                "window_end": ["2021-04-01", "2021-04-01"],
+                "status": [SUCCESS, "PLANNED"],
+                "bars": [5, 0],
+                "attempts": [1, 0],
+                "last_error": [None, None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"] * 2,
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00", None],
+            },
+        )
+        by_symbol = {r.security_id: r for r in load_window_ledger(tmp_path).records()}
+        assert by_symbol["NIFTY"].in_pull_fetches == 1  # SUCCESS → fetched at least once
+        assert by_symbol["SENSEX"].in_pull_fetches == 0  # PLANNED → never fetched
+
+    def test_partial_legacy_streak_present_fetches_absent(self, tmp_path: Path) -> None:
+        # A post-R1, pre-in_pull_fetches file: empty_streak IS a column, in_pull_fetches
+        # is NOT — the two optional columns are read independently (streak from the
+        # column, fetches derived).
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["NIFTY"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": ["EMPTY"],
+                "bars": [0],
+                "attempts": [2],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                "empty_streak": [2],
+            },
+        )
+        record = load_window_ledger(tmp_path).records()[0]
+        assert record.empty_streak == 2  # read from the present column
+        assert record.in_pull_fetches == 1  # derived (EMPTY → fetched)
 
     def test_empty_streak_round_trips(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
@@ -688,6 +744,17 @@ class TestLegacyBackwardCompat:
         restored = load_window_ledger(tmp_path)
         assert restored.to_rows() == ledger.to_rows()
         assert restored.records()[0].empty_streak == 2
+
+    def test_in_pull_fetches_round_trips(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        # A 3× in-pull empty retry must survive save→load on the real Parquet column.
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, in_pull_fetches=3
+        )
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()
+        assert restored.records()[0].in_pull_fetches == 3
 
 
 def _inst(symbol: str = "NIFTY", *, exchange: str = "NSE", segment: str = "CASH") -> object:
