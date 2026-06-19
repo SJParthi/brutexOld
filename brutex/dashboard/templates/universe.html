@@ -1250,21 +1250,36 @@ document.getElementById("pullDerivBtn").onclick = () => {
     `${items.length} metadata`);
 };
 
-/* ── "⤓ Pull historical" (DEC-DERIV-PULL-HISTORICAL-001): the SEPARATE heavy-pull
-   button — download OHLC candles for the operator-SELECTED cached contracts (single /
-   an expiry's chain / a whole underlying / all). The metadata (every expiry + contract
-   SYMBOL) must already be cached by the ⛓ button; this route resolves the SELECTION to
-   those registry rows and pulls THEIR candles into the verified candle lake (PATH A) —
-   no chain re-enumeration. Defaults until_clean=true (auto-retry every failed window).
-   The button pulls the WHOLE highlighted underlying's cached chain (?underlying=…); a
-   picked expiry that is a real ISO date narrows it to that expiry's CHAIN
-   (?underlying=…&expiry=…) — only when ISO, so a non-ISO display code never 400s. The
-   interval comes from the same granularity knob the spot pull uses. ── */
+/* ── "⤓ Pull historical" (DEC-DERIV-PULL-HISTORICAL-001 + DEC-FNO-ONECLICK-HISTORICAL-001):
+   the SEPARATE heavy-pull button. TWO modes off the SAME button:
+   • MULTI-select (≥1 ticked rows) → the ONE-CLICK COMPOSITE: POST
+     ?symbols=a,b,c&enumerate=true, which for EACH F&O-eligible selected underlying
+     refreshes its chain metadata (the guarded enumerator — index / VIX / non-F&O are
+     skipped, a zero-call no-op) THEN pulls its contracts' candles (FUT + CE/PE) over the
+     freshly-cached registry rows. The candle engine never re-enumerates.
+   • SINGLE highlight (no ticks) → the original single-underlying pull: ?underlying=… (a
+     picked ISO expiry narrows it to that CHAIN, ?underlying=…&expiry=…). Requires the
+     metadata already cached by the ⛓ button.
+   Both default until_clean=true (auto-retry every failed window); both candle paths land
+   on the verified candle lake (PATH A). The interval comes from the same granularity knob
+   the spot pull uses. ── */
 const _ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function histInterval() {
   return (document.getElementById("spotInterval") || {}).value || "1day";
 }
 function pullHistorical(underlying, expiryDate) {
+  /* Multi-select wins: the ONE-CLICK composite over the SAME selection the spot /
+     metadata buttons use (enumerate + pull each F&O-eligible name; reference-only
+     names are skipped server-side). */
+  const items = spotSelection();
+  if (items.length > 1 || (items.length && selMulti.size > 0)) {
+    const ids = items.map(it => it.pull_symbol).join(",");
+    startAndPoll(
+      "/api/v1/universe/pull-historical?enumerate=true&symbols=" + encodeURIComponent(ids)
+        + "&interval=" + encodeURIComponent(histInterval()),
+      `${items.length} historical (enumerate + pull)`);
+    return;
+  }
   if (!underlying) return;
   let qs = "/api/v1/universe/pull-historical?underlying=" + encodeURIComponent(underlying)
     + "&interval=" + encodeURIComponent(histInterval());
@@ -1312,11 +1327,16 @@ function updateMultiBtn() {
     d.textContent = n > 0 ? `⛓ Pull expiries + contracts · ${n} selected` : "⛓ Pull expiries + contracts";
     d.disabled = n === 0 && !selPullSymbol;
   }
-  // "⤓ Pull historical" is single-underlying: enabled whenever ONE underlying row is
-  // highlighted (it pulls that underlying's cached chain history — a picked expiry
-  // narrows it to that chain). The metadata must already be cached (the ⛓ button).
+  // "⤓ Pull historical" drives BOTH modes (DEC-FNO-ONECLICK-HISTORICAL-001): a
+  // MULTI-select runs the one-click enumerate+pull COMPOSITE over every ticked name;
+  // a single highlight runs the original single-underlying cached-chain pull. Enabled
+  // whenever ANY rows are ticked OR one underlying row is highlighted (same rule as the
+  // spot / metadata buttons); the label reflects the selection count.
   const h = document.getElementById("pullHistBtn");
-  if (h) h.disabled = !selInst;
+  if (h) {
+    h.textContent = n > 0 ? `⤓ Pull historical · ${n} selected` : "⤓ Pull historical";
+    h.disabled = n === 0 && !selInst;
+  }
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed
