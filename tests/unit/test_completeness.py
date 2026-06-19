@@ -308,6 +308,21 @@ def test_per_symbol_from_2020_false_when_data_starts_2021() -> None:
     assert spot["overall"] == DIM_PARTIAL  # one full, one pending
 
 
+def test_per_symbol_first_date_present_but_last_date_missing() -> None:
+    """A dimension with a first bar but no last_date keeps first_date + leaves last_date None.
+
+    Mirrors the page's ``first→?`` render path: the strip shows the known start even when the
+    last bar date is absent — first_date drives the from_2020 flag, last_date stays None.
+    """
+    rows = [
+        _spot_row("NSE-Z", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01", last_date=None)
+    ]
+    out = per_symbol_completeness(rows, {"NSE-Z": CATEGORY_EQUITY}, [], {})
+    day = out["NSE-Z"]["spot"]["1day"]
+    assert day["first_date"] == "2020-01-01" and day["last_date"] is None
+    assert day["from_2020"] is True and day["status"] == DIM_FULL
+
+
 def test_per_symbol_missing_dates_and_no_record_default_none() -> None:
     """A no-record row → status none, dates None, from_2020 False; 1-minute defaults to none."""
     rows = [_spot_row("NSE-Y", "1day", COMPLETENESS_NO_RECORD)]  # first_date/last_date None

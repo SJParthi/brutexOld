@@ -883,6 +883,11 @@ function renderInstruments() {
     return;
   }
   el.innerHTML = "";
+  // Preserve scroll across the rebuild (DEC-COMPLETENESS-UNIVERSE-001 follow-up): the
+  // live 15s completeness poll re-renders on every COV change — during a multi-minute
+  // pull the dates/status shift as windows land, so without this the ~750-row list
+  // would snap back to the top each cycle, right while the operator watches the pull.
+  const prevScroll = el.scrollTop;
   list.forEach((i, ix) => {
     const d = document.createElement("div");
     // reference-only rows (no option chain — DEC-OPTIONS-PULL-GUARD-001) get a
@@ -925,6 +930,7 @@ function renderInstruments() {
     };
     el.appendChild(d);
   });
+  el.scrollTop = prevScroll;   // restore scroll so the live re-render never jumps the list
   listAnimated = true;   // subsequent re-renders (filter/select) skip the cascade
 }
 

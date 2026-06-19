@@ -302,6 +302,11 @@ def _fold_per_symbol_options(
     option_categories: Mapping[str, str],
 ) -> None:
     """Fold option coverage records into the per-symbol map (status + counts + year span)."""
+    # Grouped by ``underlying`` ALONE (intentionally NOT ``(underlying, exch)`` like the
+    # scoreboard's :func:`_per_underlying_options`): the ``/universe`` strip joins one row per
+    # ``symbol_name`` (``COV[i.symbol]``), so a per-symbol rollup is the right granularity here.
+    # If an underlying ever lists options on two exchanges, the counts sum across both and the
+    # first record's ``exch_id`` is kept (exchange is display-only on the strip) — harmless.
     grouped: dict[str, dict[str, Any]] = {}
     for rec in option_records:
         underlying = str(rec.underlying_symbol)
