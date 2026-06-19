@@ -443,3 +443,192 @@ def test_resolve_historical_contracts_grammar(store: InstrumentStore) -> None:
             select_kind=_select_kind,
         )
         assert none == []
+
+
+# ── one-click multi-select COMPOSITE (DEC-FNO-ONECLICK-HISTORICAL-001) ─────────
+
+
+from brutex.dashboard.composite_pull import CompositePullReport  # noqa: E402
+from brutex.dashboard.historical_pull import HistoricalPullReport as _HistReport  # noqa: E402
+from brutex.dashboard.metadata_pull import MetadataPullReport as _MetaReport  # noqa: E402
+
+
+@pytest.fixture
+def ref_store(tmp_path: Path) -> Iterator[InstrumentStore]:
+    """Store seeding a TRADABLE NIFTY + a REFERENCE_ONLY INDIAVIX (security_id 26000)."""
+    instrument_store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    instrument_store.upsert_many(
+        [_index("NIFTY", 13), _index("INDIAVIX", 26000)],
+        snapshot_date=date(2024, 1, 2),
+        run_id="r1",
+        csv_source_sha256="0" * 64,
+        reference_only_of=lambda inst: inst.security_id == 26000,
+    )
+    yield instrument_store
+    instrument_store.close()
+
+
+@pytest.fixture
+def ref_client(
+    ref_store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[TestClient]:
+    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+    with TestClient(build_app(DashboardState(), instrument_store=ref_store)) as c:
+        yield c
+
+
+def _composite_report(
+    *, names: list[str], skipped: list[str], dry_run: bool
+) -> CompositePullReport:
+    """An honest-shaped offline composite report echoing the selection (NO network)."""
+    return CompositePullReport(
+        dry_run=dry_run,
+        requested=tuple(names + skipped),
+        tradable=tuple(names),
+        skipped_reference_only=tuple(skipped),
+        metadata=_MetaReport(
+            dry_run=dry_run,
+            years=(2024,),
+            underlyings=tuple(names),
+            expiry_cells=0,
+            cells_skipped=0,
+            expiry_failures=0,
+            expiries_persisted=0,
+            contract_jobs=0,
+            contract_failures=0,
+            contracts_persisted=0,
+            note="offline fake metadata",
+        ),
+        historical=_HistReport(
+            dry_run=dry_run,
+            intervals=("1day",),
+            contracts_selected=len(names),
+            contracts_completed=len(names),
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="offline fake candles",
+            phase1_clean=True,
+            phase1_complete=tuple(names),
+            start_dates={},
+            minute_requested=False,
+            minute_skipped=False,
+        ),
+        note="offline fake composite",
+    )
+
+
+def _patch_composite(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:
+    """Wire the offline composite fake that records its tradable + reference-only split."""
+
+    def _fake(instruments: Sequence[Any], **kwargs: Any) -> CompositePullReport:
+        ref_ids = kwargs["reference_only_ids"]
+        names = [i.symbol_name for i in instruments if i.security_id not in ref_ids]
+        skipped = [i.symbol_name for i in instruments if i.security_id in ref_ids]
+        captured["names"] = names
+        captured["skipped"] = skipped
+        captured["intervals"] = kwargs["intervals"]
+        captured["until_clean"] = kwargs["until_clean"]
+        return _composite_report(names=names, skipped=skipped, dry_run=kwargs["dry_run"])
+
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake)
+
+
+def test_composite_symbols_starts_job(
+    ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``?symbols=`` routes to the composite: tradable pulled, REF skipped + reported."""
+    _force_dry_run(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_composite(monkeypatch, captured)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY,INDIAVIX"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["enumerate"] is True
+    assert body["symbols"] == "NIFTY,INDIAVIX"
+    assert body["skipped_reference_only"] == ["INDIAVIX"]
+    assert body["skipped_count"] == 1
+    assert body["tradable"] == 1
+    assert _wait_for_job(ref_client)["state"] == "done"
+    # only NIFTY reached the composite; INDIAVIX was partitioned out.
+    assert captured["names"] == ["NIFTY"]
+    assert captured["skipped"] == ["INDIAVIX"]
+
+
+def test_composite_enumerate_flag_without_symbols_400(
+    ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``enumerate=true`` with no ``?symbols=`` is an honest 400."""
+    _force_dry_run(monkeypatch)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"enumerate": "true"})
+    assert resp.status_code == 400
+    assert "enumerate=true requires ?symbols" in resp.json()["detail"]
+
+
+def test_composite_unknown_symbol_400(
+    ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown symbol in ``?symbols=`` is a 400 (never a fabricated underlying)."""
+    _force_dry_run(monkeypatch)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY,NOPE"})
+    assert resp.status_code == 400
+    assert "NOPE" in resp.json()["detail"]
+
+
+def test_composite_all_reference_only_is_honest_no_op(
+    ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ALL-REF ``?symbols=`` selection is an honest no-op (started: False, not a 400)."""
+    _force_dry_run(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_composite(monkeypatch, captured)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "INDIAVIX"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is False
+    assert body["skipped_reference_only"] == ["INDIAVIX"]
+    assert body["skipped_count"] == 1
+    assert body["note"] == ("all 1 selected are reference-only (no F&O chain) — nothing to pull")
+    # the composite fake was NEVER invoked (zero-call no-op before the job starts)
+    assert captured == {}
+
+
+def test_composite_bad_from_date_400(
+    ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ISO ``from_date`` with ``?symbols=`` is a 400 (the metadata-year parse)."""
+    _force_dry_run(monkeypatch)
+    resp = ref_client.post(
+        "/api/v1/universe/pull-historical",
+        params={"symbols": "NIFTY", "from_date": "not-a-date"},
+    )
+    assert resp.status_code == 400
+    assert "from_date must be an ISO date" in resp.json()["detail"]
+
+
+def test_single_underlying_back_compat_preserved(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``?symbols=`` / ``enumerate`` → the ORIGINAL single-underlying path is unchanged."""
+    _force_dry_run(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert "enumerate" not in body  # the single-underlying payload (not the composite shape)
+    assert body["selected"] == 3
+    assert _wait_for_job(client)["state"] == "done"
+
+
+def test_universe_page_pull_historical_sends_multiselect(client: TestClient) -> None:
+    """The /universe page wires the ⤓ Pull historical button to the composite multi-select."""
+    resp = client.get("/universe")
+    assert resp.status_code == 200
+    # the one-click composite query the button now sends for a multi-select
+    assert "pull-historical?enumerate=true&symbols=" in resp.text

@@ -38,7 +38,7 @@ import json
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -56,6 +56,7 @@ from brutex.dashboard.completeness import (
     per_symbol_completeness,
     scoreboard_to_csv,
 )
+from brutex.dashboard.composite_pull import pull_historical_for_underlyings
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -1707,6 +1708,114 @@ def build_app(
             }
         )
 
+    def _start_composite_historical_pull(
+        *,
+        symbols: str | None,
+        interval: str,
+        intervals: Sequence[str],
+        from_date: str | None,
+        to_date: str | None,
+        from_date_arg: date | None,
+        to_date_arg: date | None,
+        until_clean: bool,
+        dry_run: bool,
+        lake_root: Path,
+    ) -> JSONResponse:
+        """Start the one-click multi-select metadata→candle COMPOSITE on the pull job.
+
+        DEC-FNO-ONECLICK-HISTORICAL-001: resolve ``?symbols=`` to instruments (an
+        unknown / empty selection is an honest 400), partition + REPORT the
+        reference-only skip set (the SAME guard the metadata route uses), then run
+        :func:`brutex.dashboard.composite_pull.pull_historical_for_underlyings` on the
+        single-flight background job (poll ``/pull-progress``). An ALL-reference-only
+        selection is an honest no-op (``started: False``, never a 400).
+        """
+        if symbols is None:
+            raise HTTPException(
+                status_code=400,
+                detail="enumerate=true requires ?symbols=a,b,c (the multi-select)",
+            )
+        try:
+            instruments = resolve_pull_symbols(symbols, _require_store().get)
+            years = _resolve_metadata_years(from_date, to_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reference_only_ids = _require_store().reference_only_security_ids()
+        skipped_reference_only = [
+            inst.symbol_name for inst in instruments if inst.security_id in reference_only_ids
+        ]
+        tradable_count = len(instruments) - len(skipped_reference_only)
+        registry_path = lake_root / "registry.duckdb"
+        _LOG.info(
+            "universe.pull_historical.composite_requested",
+            symbols=symbols,
+            count=len(instruments),
+            tradable=tradable_count,
+            skipped_reference_only=skipped_reference_only,
+            skipped_count=len(skipped_reference_only),
+            interval=interval,
+            until_clean=until_clean,
+            dry_run=dry_run,
+        )
+        if tradable_count == 0:
+            note = (
+                f"all {len(skipped_reference_only)} selected are reference-only "
+                "(no F&O chain) — nothing to pull"
+            )
+            return JSONResponse(
+                {
+                    "started": False,
+                    "enumerate": True,
+                    "symbols": symbols,
+                    "interval": interval,
+                    "intervals": list(intervals),
+                    "skipped_reference_only": skipped_reference_only,
+                    "skipped_count": len(skipped_reference_only),
+                    "dry_run": dry_run,
+                    "note": note,
+                }
+            )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: metadata refresh THEN candle pull over the cached rows."""
+
+            def _hist_progress(label: str, bars: int, failed: bool) -> None:
+                on_progress(label, bars, failed, False)
+
+            with RegistryStore.open(registry_path) as registry:
+                report = pull_historical_for_underlyings(
+                    instruments,
+                    reference_only_ids=reference_only_ids,
+                    registry=registry,
+                    coverage_store=instrument_store,
+                    lake_root=lake_root,
+                    dry_run=dry_run,
+                    intervals=intervals,
+                    years=years,
+                    from_date=from_date_arg,
+                    to_date=to_date_arg,
+                    on_progress=_hist_progress,
+                    session_rate=_session_rate,
+                    until_clean=until_clean,
+                )
+            return report.to_dict()
+
+        started = _pull_job.start(_work, total=tradable_count, detail=f"{tradable_count} composite")
+        return JSONResponse(
+            {
+                "started": started,
+                "enumerate": True,
+                "symbols": symbols,
+                "interval": interval,
+                "intervals": list(intervals),
+                "skipped_reference_only": skipped_reference_only,
+                "skipped_count": len(skipped_reference_only),
+                "tradable": tradable_count,
+                "until_clean": until_clean,
+                "dry_run": dry_run,
+            }
+        )
+
     @app.post("/api/v1/universe/pull-historical")
     async def api_universe_pull_historical(
         contract: str | None = Query(default=None),
@@ -1715,6 +1824,8 @@ def build_app(
         expiry: str | None = Query(default=None),
         kind: str | None = Query(default=None),
         all: bool = Query(default=False),  # noqa: A002 — the public ?all=true query name
+        symbols: str | None = Query(default=None),
+        enumerate: bool = Query(default=False),  # noqa: A002 — the public ?enumerate flag name
         interval: str = Query(default="1day"),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
@@ -1732,7 +1843,8 @@ def build_app(
         :func:`brutex.dashboard.historical_pull.pull_contract_candles` on the single-flight
         background job (poll ``/pull-progress``), WITHOUT re-enumerating the chain.
 
-        Selection grammar (first non-empty wins): ``?contract=NSE-NIFTY-02Jan20-12100-CE``
+        Selection grammar (first non-empty wins): ``?symbols=a,b,c`` (the ONE-CLICK
+        multi-select COMPOSITE — see below) · ``?contract=NSE-NIFTY-02Jan20-12100-CE``
         (single) · ``?contracts=a,b,c`` (multi) · ``?underlying=NIFTY[&expiry=2020-01-02]``
         (one expiry's chain or a whole underlying) · ``?kind=index|stock`` (every cached
         contract of that kind's admitted underlyings) · ``?all=true`` (every cached
@@ -1743,14 +1855,48 @@ def build_app(
         auto-retry every failed window until the selection drains clean). ``dry_run`` is
         forced when Groww creds are absent (the empty-candle client appends 0 bars — an
         expired contract's OHLC is real vendor data, never fabricated offline).
+
+        **One-click multi-select COMPOSITE (DEC-FNO-ONECLICK-HISTORICAL-001).** When
+        ``?symbols=`` is supplied (the multi-select the spot / metadata buttons send),
+        the route dispatches to
+        :func:`brutex.dashboard.composite_pull.pull_historical_for_underlyings`, which
+        for EACH F&O-eligible selected underlying runs (a) the GUARDED metadata refresh
+        (the SAME reference-only partition the metadata route uses — index / India VIX /
+        non-F&O NTM are SKIPPED, a true zero-call no-op, reported never dropped) THEN
+        (b) the contract candle pull over the FRESHLY-cached registry rows (both FUT and
+        CE/PE legs — superseding the stale never-futures decree #602 for the lake pull).
+        The two existing spines are COMPOSED, not fused (the candle engine never
+        re-enumerates). ``enumerate=true`` is the explicit composite flag (the route
+        also infers the composite whenever ``?symbols=`` is present). An unknown symbol
+        in ``?symbols=`` is a 400; an ALL-reference-only selection is an honest no-op.
         """
         dry_run = not groww_credentials_present()
         try:
             intervals = resolve_pull_intervals(interval)
             expiry_date = _parse_iso_date_arg(expiry, "expiry") if expiry is not None else None
+            from_date_arg = _parse_iso_date_arg(from_date, "from_date") if from_date else None
+            to_date_arg = _parse_iso_date_arg(to_date, "to_date") if to_date else None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        # ── One-click multi-select COMPOSITE (DEC-FNO-ONECLICK-HISTORICAL-001) ──────
+        # ``?symbols=`` (or an explicit ``enumerate=true``) routes to the metadata→candle
+        # composite: refresh each F&O-eligible underlying's chain THEN pull its contracts'
+        # candles, reusing BOTH existing spines + the reference-only guard. The single-
+        # underlying / contract / kind / all grammar below is byte-unchanged.
+        if symbols is not None or enumerate:
+            return _start_composite_historical_pull(
+                symbols=symbols,
+                interval=interval,
+                intervals=intervals,
+                from_date=from_date,
+                to_date=to_date,
+                from_date_arg=from_date_arg,
+                to_date_arg=to_date_arg,
+                until_clean=until_clean,
+                dry_run=dry_run,
+                lake_root=lake_root,
+            )
         registry_path = lake_root / "registry.duckdb"
         # Resolve the selection to concrete registry rows BEFORE the job starts, so an
         # empty/no-match selection is an immediate honest 400 (never a fabricated contract).
@@ -1803,8 +1949,8 @@ def build_app(
                     dry_run=dry_run,
                     intervals=intervals,
                     registry=registry,
-                    from_date=_parse_iso_date_arg(from_date, "from_date") if from_date else None,
-                    to_date=_parse_iso_date_arg(to_date, "to_date") if to_date else None,
+                    from_date=from_date_arg,
+                    to_date=to_date_arg,
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
