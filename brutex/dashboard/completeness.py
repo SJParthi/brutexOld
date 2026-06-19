@@ -459,7 +459,20 @@ def build_completeness_scoreboard(
     }
 
 
-def scoreboard_to_csv(board: Mapping[str, Any]) -> str:
+def _csv_date(value: object) -> str:
+    """An ISO date string, or ``''`` for a missing/None bar date (a clean empty Excel cell)."""
+    return str(value) if value else ""
+
+
+def _csv_yes_no(flag: object) -> str:
+    """Human ``yes``/``no`` for a ``from_2020`` boolean (``no`` for a falsy/absent dimension)."""
+    return "yes" if flag else "no"
+
+
+def scoreboard_to_csv(
+    board: Mapping[str, Any],
+    per_symbol: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str:
     """Render a :func:`build_completeness_scoreboard` payload as a downloadable CSV report.
 
     DEC-COMPLETENESS-PAGE-001 — the "even a human can understand it in Excel" report
@@ -477,7 +490,12 @@ def scoreboard_to_csv(board: Mapping[str, Any]) -> str:
        1-minute / both (EXACT, window-ledger backed).
     2. ``SUMMARY — options`` — per category: ``total``, ``stable`` (the honest "complete"),
        ``growing_or_partial``, ``failed`` (NO fabricated %, per CLAUDE.md §6).
-    3. ``DETAIL — spot`` — one row per symbol with its 1-day / 1-minute / overall verdict.
+    3. ``DETAIL — spot`` — one row per symbol with its 1-day / 1-minute / overall verdict;
+       when *per_symbol* (a :func:`per_symbol_completeness` map) is supplied the row is
+       ENRICHED with the explicit first→last bar date + ``from_2020`` flag per dimension
+       (DEC-COMPLETENESS-CSV-READABLE-001 — the SAME rich info the ``/universe`` strip shows,
+       so the CSV is never less informative than the page); ``None`` keeps the compact
+       verdict-only columns (backward-compatible).
     4. ``DETAIL — options`` — one row per underlying with status + pulled counts + the years.
 
     Uses :mod:`csv` so any symbol with a comma / quote is escaped correctly (an extreme-input
@@ -496,8 +514,10 @@ def scoreboard_to_csv(board: Mapping[str, Any]) -> str:
 
     spot_by_cat = board["spot"]["by_category"]
     writer.writerow([])
-    writer.writerow(["SUMMARY — spot (count of symbols FULL per dimension — per category)"])
-    writer.writerow(["category", "total", "full_1day", "full_1minute", "full_both"])
+    writer.writerow(["SUMMARY — spot: how many symbols have the FULL dataset per asset class"])
+    writer.writerow(
+        ["Asset class", "Symbols", "Full 1-day", "Full 1-minute", "Full 1-day AND 1-minute"]
+    )
     for cat in CATEGORIES:
         bucket = spot_by_cat[cat]
         writer.writerow(
@@ -512,8 +532,10 @@ def scoreboard_to_csv(board: Mapping[str, Any]) -> str:
 
     opt_by_cat = board["options"]["by_category"]
     writer.writerow([])
-    writer.writerow(["SUMMARY — options (count of underlyings per status — per category)"])
-    writer.writerow(["category", "total", "stable", "growing_or_partial", "failed"])
+    writer.writerow(["SUMMARY — options: underlyings per chain status per asset class"])
+    writer.writerow(
+        ["Asset class", "Underlyings", "Stable (complete)", "Growing or partial", "Failed"]
+    )
     for cat in CATEGORIES:
         bucket = opt_by_cat[cat]
         writer.writerow(
@@ -521,31 +543,72 @@ def scoreboard_to_csv(board: Mapping[str, Any]) -> str:
         )
 
     writer.writerow([])
-    writer.writerow(["DETAIL — spot (per symbol)"])
-    writer.writerow(["category", "symbol", "exchange", "1day", "1minute", "overall"])
-    for row in board["spot"]["per_symbol"]:
+    if per_symbol is None:
+        writer.writerow(["DETAIL — spot (per symbol)"])
+        writer.writerow(
+            ["Asset class", "Symbol", "Exchange", "1-day complete?", "1-minute complete?", "Overall"]
+        )
+        for row in board["spot"]["per_symbol"]:
+            writer.writerow(
+                [
+                    row["category"],
+                    row["symbol"],
+                    row["exchange"],
+                    row["1day"],
+                    row["1minute"],
+                    row["overall"],
+                ]
+            )
+    else:
+        writer.writerow(["DETAIL — spot (per symbol with first→last bar dates)"])
         writer.writerow(
             [
-                row["category"],
-                row["symbol"],
-                row["exchange"],
-                row["1day"],
-                row["1minute"],
-                row["overall"],
+                "Asset class",
+                "Symbol",
+                "Exchange",
+                "1-day complete?",
+                "1-day first bar",
+                "1-day last bar",
+                "1-day from 2020?",
+                "1-minute complete?",
+                "1-minute first bar",
+                "1-minute last bar",
+                "1-minute from 2020?",
+                "Overall",
             ]
         )
+        for row in board["spot"]["per_symbol"]:
+            spot = per_symbol.get(row["symbol"], {}).get("spot", {})
+            one_day = spot.get("1day", {})
+            one_min = spot.get("1minute", {})
+            writer.writerow(
+                [
+                    row["category"],
+                    row["symbol"],
+                    row["exchange"],
+                    row["1day"],
+                    _csv_date(one_day.get("first_date")),
+                    _csv_date(one_day.get("last_date")),
+                    _csv_yes_no(one_day.get("from_2020")),
+                    row["1minute"],
+                    _csv_date(one_min.get("first_date")),
+                    _csv_date(one_min.get("last_date")),
+                    _csv_yes_no(one_min.get("from_2020")),
+                    row["overall"],
+                ]
+            )
 
     writer.writerow([])
     writer.writerow(["DETAIL — options (per underlying)"])
     writer.writerow(
         [
-            "category",
-            "underlying",
-            "exchange",
-            "status",
-            "expiries_pulled",
-            "contracts_pulled",
-            "years",
+            "Asset class",
+            "Underlying",
+            "Exchange",
+            "Chain status",
+            "Expiries pulled",
+            "Contracts pulled",
+            "Years",
         ]
     )
     for row in board["options"]["per_underlying"]:

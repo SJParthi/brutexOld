@@ -2270,6 +2270,19 @@ def build_app(
         spot_rows, categories, records = _completeness_inputs(store, lake)
         return per_symbol_completeness(spot_rows, categories, records, categories)
 
+    def _build_completeness_csv(store: Any, lake: Path) -> str:
+        """Compose the downloadable CSV — board + per-symbol DATES — from ONE shared lake read.
+
+        DEC-COMPLETENESS-CSV-READABLE-001: the CSV's spot detail is ENRICHED with the same
+        explicit first→last bar dates + from-2020 flag the ``/universe`` strip shows, so the
+        report is never less informative than the page. One ``_completeness_inputs`` read feeds
+        BOTH projections (CLAUDE.md §11 COMMON — no second lake read).
+        """
+        spot_rows, categories, records = _completeness_inputs(store, lake)
+        board = build_completeness_scoreboard(spot_rows, categories, records, categories)
+        per_symbol = per_symbol_completeness(spot_rows, categories, records, categories)
+        return scoreboard_to_csv(board, per_symbol=per_symbol)
+
     async def _completeness_board() -> dict[str, Any]:
         """Resolve the store + lake and build the scoreboard (empty + well-shaped if no lake)."""
         store = _require_store()
@@ -2277,6 +2290,14 @@ def build_app(
         if not isinstance(lake_root, Path):
             return build_completeness_scoreboard([], {}, [], {})
         return await run_in_threadpool(_build_completeness_board, store, lake_root.parent)
+
+    async def _completeness_csv() -> str:
+        """Resolve the store + lake and build the downloadable CSV (empty + well-shaped if no lake)."""
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return scoreboard_to_csv(build_completeness_scoreboard([], {}, [], {}))
+        return await run_in_threadpool(_build_completeness_csv, store, lake_root.parent)
 
     @app.get("/api/v1/completeness/scoreboard.csv")
     async def api_completeness_scoreboard_csv() -> Response:
@@ -2288,9 +2309,9 @@ def build_app(
         -underlying DETAIL) so the operator can answer "how many indices vs equities have the
         full set?" in Excel. READ-ONLY; an empty (well-shaped) report when no lake is wired.
         """
-        board = await _completeness_board()
+        content = await _completeness_csv()
         return Response(
-            content=scoreboard_to_csv(board),
+            content=content,
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="completeness-scoreboard.csv"'},
         )
