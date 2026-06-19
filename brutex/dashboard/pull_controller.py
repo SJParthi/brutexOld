@@ -53,7 +53,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 
@@ -1456,9 +1456,13 @@ def pull_all_spot(
                         # (``dry_run=False``) pull — and ``begin_pull_ledger`` returns a
                         # real ledger for every live pull. The ``assert`` documents +
                         # narrows that for the type checker (never the dry-run path).
-                        assert ledger is not None  # noqa: S101 — live-pull invariant
+                        # ``ledger`` is non-None here by invariant (a non-empty
+                        # ``minute_instruments`` implies a LIVE pull — see above). cast
+                        # narrows for the type checker WITHOUT an assert (bandit B101 +
+                        # ``-O`` strips asserts) — a runtime no-op identity.
+                        live_ledger = cast(WindowLedger, ledger)
                         plan_windows(
-                            ledger,
+                            live_ledger,
                             instruments=minute_instruments,
                             intervals=minute_intervals,
                             start=start.date(),
@@ -1468,7 +1472,7 @@ def pull_all_spot(
                             symbol_windows=symbol_windows,
                         )
                         reconcile_ledger_with_lake(
-                            ledger,
+                            live_ledger,
                             lake_root,
                             instruments=minute_instruments,
                             intervals=minute_intervals,
@@ -1884,10 +1888,11 @@ def pull_candles(
                         # ``ledger`` is non-None by invariant: ``symbol`` is in the
                         # discovered map only for a LIVE pull (``_discover_minute_windows``
                         # returns ``{}`` for a dry-run), and a live pull always has a real
-                        # ledger. The ``assert`` documents + narrows it (never dry-run).
-                        assert ledger is not None  # noqa: S101 — live-pull invariant
+                        # ledger. cast narrows it for the type checker WITHOUT an assert
+                        # (bandit B101 + ``-O`` strips asserts) — a runtime no-op identity.
+                        live_ledger = cast(WindowLedger, ledger)
                         plan_windows(
-                            ledger,
+                            live_ledger,
                             instruments=[instrument],
                             intervals=minute_intervals,
                             start=start.date(),
@@ -1897,7 +1902,7 @@ def pull_candles(
                             symbol_windows=symbol_windows,
                         )
                         reconcile_ledger_with_lake(
-                            ledger,
+                            live_ledger,
                             lake_root,
                             instruments=[instrument],
                             intervals=minute_intervals,

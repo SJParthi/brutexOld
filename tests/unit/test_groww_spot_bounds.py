@@ -234,7 +234,7 @@ def test_discover_bounds_multi_segment_reconciles_each_once(tmp_path: Path) -> N
         reconciled.append(str(kwargs["segment"]))
         real_reconcile(**kwargs)  # type: ignore[arg-type]
 
-    import brutex.data.catalog_reconcile as cr
+    from brutex.data import catalog_reconcile as cr
 
     with Catalog.open(tmp_path / "catalog.duckdb") as catalog:
         # Patch the symbol the driver imports locally.
@@ -328,7 +328,7 @@ def test_discover_bounds_degenerate_listing_after_end_uses_full_range(tmp_path: 
 
 def test_module_exports() -> None:
     """The public surface is exactly the documented four names + the SpotWindows alias."""
-    import brutex.adapters.groww.spot_bounds as mod
+    from brutex.adapters.groww import spot_bounds as mod
 
     assert set(mod.__all__) == {
         "SpotWindows",

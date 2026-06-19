@@ -1584,8 +1584,10 @@ class TestPullAllSpotOneDayFirst:
 
     def test_3c_skip_reported_for_symbol_without_one_day(self, tmp_path: Path) -> None:
         # A symbol with NO 1-day coverage (its 1day fetch returns empty → no lake bars)
-        # is EXCLUDED from the 1-minute pull, LOUDLY reported (the 3c rule).
-        report = pull_all_spot(
+        # is EXCLUDED from the 1-minute pull, LOUDLY reported (the 3c rule). A first
+        # pass primes the (still-empty) lake; its result is intentionally discarded —
+        # the asserted ``report`` is the second, log-captured pass.
+        pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
