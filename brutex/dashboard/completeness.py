@@ -546,7 +546,14 @@ def scoreboard_to_csv(
     if per_symbol is None:
         writer.writerow(["DETAIL — spot (per symbol)"])
         writer.writerow(
-            ["Asset class", "Symbol", "Exchange", "1-day complete?", "1-minute complete?", "Overall"]
+            [
+                "Asset class",
+                "Symbol",
+                "Exchange",
+                "1-day complete?",
+                "1-minute complete?",
+                "Overall",
+            ]
         )
         for row in board["spot"]["per_symbol"]:
             writer.writerow(
