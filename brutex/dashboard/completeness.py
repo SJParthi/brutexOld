@@ -393,16 +393,25 @@ def categorize_instruments(
     so one map serves both. The classification predicates are INJECTED (the route passes
     :func:`~brutex.universe.is_in_brute_force_scope` + :func:`~brutex.universe.is_reference_only`)
     so this stays pure + 100% unit-testable without constructing a full
-    :class:`~brutex.models.Instrument`. A brute-force index → :data:`CATEGORY_INDEX`; a
-    reference-only row (India VIX / NTM constituent / spot-only index) → :data:`CATEGORY_REFERENCE`;
-    otherwise (an F&O-eligible or cash equity) → :data:`CATEGORY_EQUITY`. O(instruments).
+    :class:`~brutex.models.Instrument`. Classification is checked in PRECEDENCE order
+    (DEC-COMPLETENESS-INDEX-CATEGORY-001): a **reference-only** row (India VIX / NTM
+    constituent / spot-only index) → :data:`CATEGORY_REFERENCE` FIRST; else an **index**
+    (the injected *is_index* — now the by-TYPE :func:`~brutex.universe.is_index_instrument`,
+    so FINNIFTY and every non-brute-forced index is correctly an index, not a cash equity)
+    → :data:`CATEGORY_INDEX`; otherwise (an F&O-eligible or cash equity) →
+    :data:`CATEGORY_EQUITY`. O(instruments).
+
+    Reference is checked BEFORE index because a reference-only index (India VIX) satisfies
+    BOTH predicates by type — reference must win so VIX stays REFERENCE, never INDEX. For
+    the legacy brute-force *is_index* the two sets are disjoint (the engine-isolation
+    invariant), so this precedence is a behaviour-preserving no-op there.
     """
     out: dict[str, str] = {}
     for inst in instruments:
-        if is_index(inst):
-            out[inst.symbol_name] = CATEGORY_INDEX
-        elif is_reference(inst):
+        if is_reference(inst):
             out[inst.symbol_name] = CATEGORY_REFERENCE
+        elif is_index(inst):
+            out[inst.symbol_name] = CATEGORY_INDEX
         else:
             out[inst.symbol_name] = CATEGORY_EQUITY
     return out

@@ -32,6 +32,7 @@ from brutex.universe import (
     is_in_brute_force_scope,
     is_in_fetch_scope,
     is_in_scope,
+    is_index_instrument,
     is_index_underlying,
     is_option_pullable,
     is_reference_only,
@@ -255,6 +256,35 @@ def _make_equity(exchange: Exchange, symbol: str) -> Instrument:
         strike_price=None,
         asm_gsm_flag=False,
     )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# is_index_instrument (DEC-COMPLETENESS-INDEX-CATEGORY-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIsIndexInstrument:
+    """The by-TYPE index predicate — every ``IDX`` is an index, brute-forced or not."""
+
+    def test_non_brute_forced_index_is_still_an_index(self) -> None:
+        # FINNIFTY: a real NSE index that is NOT brute-forced. It must read as an index
+        # (the bug fix — /completeness used to bucket it "equity (cash)").
+        finnifty = _make_idx(Exchange.NSE, "FINNIFTY")
+        assert is_index_instrument(finnifty) is True
+        assert is_in_brute_force_scope(finnifty) is False  # not swept, but still an index
+
+    def test_brute_forced_index_is_an_index(self) -> None:
+        exch, sym = next(iter(BRUTE_FORCE_INDEX_UNDERLYINGS))
+        assert is_index_instrument(_make_idx(exch, sym)) is True
+
+    def test_reference_index_is_an_index_by_type(self) -> None:
+        # India VIX is an index BY TYPE; the route classifies reference FIRST, so it still
+        # displays REFERENCE — this predicate only tests the type.
+        exch, sym = next(iter(REFERENCE_ONLY_INDEX_UNDERLYINGS))
+        assert is_index_instrument(_make_idx(exch, sym)) is True
+
+    def test_equity_is_not_an_index(self) -> None:
+        assert is_index_instrument(_make_equity(Exchange.NSE, "RELIANCE")) is False
 
 
 # ────────────────────────────────────────────────────────────────────────

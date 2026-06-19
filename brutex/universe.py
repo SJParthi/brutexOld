@@ -236,6 +236,25 @@ def is_in_brute_force_scope(instrument: Instrument) -> bool:
     )
 
 
+def is_index_instrument(instrument: Instrument) -> bool:
+    """Return True if *instrument* is a spot INDEX by TYPE (``instrument_type == IDX``).
+
+    The asset-class / DISPLAY predicate (DEC-COMPLETENESS-INDEX-CATEGORY-001) — distinct
+    from :func:`is_in_brute_force_scope`, which is the ENGINE-tier test (only the 3
+    brute-forced indexes). For the coverage/completeness "indices vs equities" split EVERY
+    index is an index, whether or not it is swept: NIFTY / BANKNIFTY / SENSEX (brute-forced)
+    AND e.g. FINNIFTY / India VIX (NOT brute-forced) are all ``IDX``. The completeness route
+    classifies reference-only first (:func:`is_reference_only` takes precedence), so India
+    VIX still lands in REFERENCE — this predicate never mislabels it. O(1) — one enum compare.
+
+    Why it exists: the prior /completeness mapping used :func:`is_in_brute_force_scope` as
+    the index test, so a real index that is not brute-forced (FINNIFTY) was wrongly bucketed
+    "equity (cash)" — inconsistent with the /universe page (which uses the true type). This
+    is the single by-type index predicate both surfaces now share (CLAUDE.md §11 COMMON).
+    """
+    return instrument.instrument == InstrumentType.IDX
+
+
 #: ``(exchange, symbol)`` pairs for the reference-only indexes (today: India
 #: VIX). Fetched + stamped on trades, but NEVER brute-forced.
 REFERENCE_ONLY_INDEX_UNDERLYINGS: Final[frozenset[tuple[Exchange, str]]] = frozenset(
@@ -788,6 +807,7 @@ __all__ = [
     "is_in_brute_force_scope",
     "is_in_fetch_scope",
     "is_in_scope",
+    "is_index_instrument",
     "is_index_underlying",
     "is_option_pullable",
     "is_reference_only",
