@@ -475,18 +475,29 @@ def _csv_yes_no(flag: object) -> str:
 #: these is prefixed with a single quote so the app renders it as literal text, never
 #: evaluates it (DEC-CSV-FORMULA-INJECTION-001).
 _CSV_INJECTION_LEADERS: Final[frozenset[str]] = frozenset("=+-@\t\r")
+#: The formula lead-in characters that stay dangerous even behind LEADING WHITESPACE —
+#: some spreadsheet apps strip a leading space then evaluate ``" =cmd"`` as a formula. So a
+#: cell whose FIRST NON-WHITESPACE char is one of these is also neutralised (the
+#: belt-and-suspenders "out-of-box" edge, even though every in-scope cell here is a digit /
+#: status word / EXCH-prefixed symbol that never leads with whitespace+formula).
+_CSV_FORMULA_FIRST_CHARS: Final[frozenset[str]] = frozenset("=+-@")
 
 
 def _csv_safe(cell: object) -> object:
     """Neutralise CSV/formula injection on ONE cell.
 
-    A STRING cell whose first character is a formula lead-in (``= + - @`` or a leading
-    TAB / CR) is prefixed with a single quote (``'``) so a spreadsheet app shows the literal
-    text instead of evaluating it as a formula. Non-string cells (ints, ``None``) and
-    empty / non-leading strings pass through UNCHANGED, so numeric columns and dates stay
-    numeric/plain. O(1) — one membership test on the first char.
+    A STRING cell is prefixed with a single quote (``'``) — so a spreadsheet app shows the
+    literal text instead of evaluating it as a formula — when EITHER its first character is
+    a formula lead-in (``= + - @`` or a leading TAB / CR) OR its first NON-whitespace
+    character is one of ``= + - @`` (the leading-whitespace bypass). Non-string cells (ints,
+    ``None``) and empty / genuinely-plain strings pass through UNCHANGED, so numeric columns
+    and ISO dates stay numeric/plain. O(1) — a first-char test plus one ``lstrip`` probe.
     """
-    if isinstance(cell, str) and cell and cell[0] in _CSV_INJECTION_LEADERS:
+    if (
+        isinstance(cell, str)
+        and cell
+        and (cell[0] in _CSV_INJECTION_LEADERS or cell.lstrip()[:1] in _CSV_FORMULA_FIRST_CHARS)
+    ):
         return "'" + cell
     return cell
 
