@@ -50,6 +50,10 @@ import structlog
 from pydantic import BaseModel
 
 from brutex.config.credentials import groww_credentials_present
+from brutex.dashboard.completeness import (
+    build_completeness_scoreboard,
+    categorize_instruments,
+)
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -148,7 +152,11 @@ from brutex.orchestrator.pipeline import (
     PipelineEventKind,
 )
 from brutex.orchestrator.state import IngestPhase
-from brutex.universe import derive_lake_underlyings
+from brutex.universe import (
+    derive_lake_underlyings,
+    is_in_brute_force_scope,
+    is_reference_only,
+)
 
 #: Module logger — every material dashboard action (especially a pull that
 #: fails) lands in the same ``.brutex-logs/brutex.log`` JSONL the operator
@@ -2203,6 +2211,45 @@ def build_app(
             return build_spot_coverage_payload(rows, spot_window_rollup(lake))
 
         return JSONResponse(await run_in_threadpool(_rows_and_rollup))
+
+    @app.get("/api/v1/completeness/scoreboard")
+    async def api_completeness_scoreboard() -> JSONResponse:  # pragma: no cover - live store+lake
+        """GET /api/v1/completeness/scoreboard — per-symbol + aggregate data completeness.
+
+        The Data Completeness Scoreboard (DEC-COMPLETENESS-SCOREBOARD-001): for every spot
+        symbol — indices vs equities-cash, **separately** — its 1-day + 1-minute spot
+        completeness (EXACT, ledger-backed) and overall verdict, PLUS for every option
+        underlying its expiries/contracts pulled + the honest ``stable``/``growing``/
+        ``partial``/``failed`` verdict (NO fabricated % — the vendor exposes no expected
+        total, so "stable" = all currently-listed expiries pulled + nothing new outstanding).
+        Pure-engine delegation
+        (:func:`brutex.dashboard.completeness.build_completeness_scoreboard` over the same
+        ledger rollup the ``/coverage`` chips use); READ-ONLY, no pull logic.
+
+        **Honest envelope (Golden Rule #10):** spot is exact (window-ledger); options report
+        pulled-counts + stability, never an invented percentage. No lake root wired → an
+        empty (well-shaped) scoreboard, never a 500.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse(build_completeness_scoreboard([], {}, [], {}))
+        lake = lake_root.parent
+
+        def _build() -> dict[str, Any]:
+            """Compose the scoreboard from the lake + ledger + instrument categories."""
+            instruments = store.list_index_equity_instruments()
+            categories = categorize_instruments(
+                instruments, is_index=is_in_brute_force_scope, is_reference=is_reference_only
+            )
+            spot_rows = build_spot_coverage_payload(
+                summarize_spot_datasets(store.connection, lake), spot_window_rollup(lake)
+            )["rows"]
+            return build_completeness_scoreboard(
+                spot_rows, categories, store.list_coverage(), categories
+            )
+
+        return JSONResponse(await run_in_threadpool(_build))
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
