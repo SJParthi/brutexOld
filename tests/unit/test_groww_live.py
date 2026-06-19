@@ -149,3 +149,49 @@ def test_build_live_pool_token_issuance_failure_is_redacted() -> None:
             sdk_factory=_FakeSDK,
         )
     assert "fake_secret" not in str(exc.value)
+
+
+def test_build_live_pool_wires_same_hooks_on_every_leaf() -> None:
+    """Every leaf carries the SAME injected pace + decrement/recover hook objects (not just one)."""
+
+    def _pace() -> None: ...
+
+    def _rl() -> None: ...
+
+    def _ok() -> None: ...
+
+    pool = build_live_pool(
+        _CREDS,
+        size=3,
+        token_factory=lambda _k, _t: "T",
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+        pace=_pace,
+        on_rate_limit=_rl,
+        on_success=_ok,
+    )
+    for leaf in pool._clients:
+        assert leaf.pace is _pace
+        assert leaf.on_rate_limit is _rl
+        assert leaf.on_success is _ok
+
+
+def test_build_live_pool_size_one_fetches_through_its_single_leaf() -> None:
+    """A size-1 pool still fetches through its one leaf — behaviourally a single client."""
+    pool = build_live_pool(
+        _CREDS,
+        size=1,
+        token_factory=lambda _k, _t: "T",
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+    )
+    assert pool.size == 1
+    out = pool.historical_candles(
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-NIFTY",
+        interval="1day",
+        start="2024-01-01T00:00:00",
+        end="2024-02-01T00:00:00",
+    )
+    assert out == {"candles": []}
