@@ -25,8 +25,10 @@ from itertools import pairwise
 
 import pytest
 from brutex.adapters.ingest_common import (
+    DEFAULT_EMPTY_RETRY_ATTEMPTS,
     DateWindow,
     clamp_window_end,
+    fetch_until_nonempty,
     now_ist,
     plan_windows,
     summarize_conflicts,
@@ -200,3 +202,69 @@ class TestWindowDaysForInterval:
         """Every intraday interval tiles at the flat 90-day per-call cap."""
         assert window_days_for_interval("1minute") == 90
         assert window_days_for_interval("5minute") == 90
+
+
+class TestFetchUntilNonempty:
+    """The COMMON pull-until-successful primitive (DEC-EMPTY-RETRY-EVERYWHERE-001)."""
+
+    def test_non_empty_on_first_call_no_retry(self) -> None:
+        calls: list[int] = []
+
+        def _fetch() -> list[int]:
+            calls.append(1)
+            return [42]
+
+        assert fetch_until_nonempty(_fetch, is_empty=lambda r: not r) == [42]
+        assert len(calls) == 1  # happy path → exactly one call
+
+    def test_glitchy_empty_recovers_on_second_call(self) -> None:
+        seq: list[list[int]] = [[], [7]]  # empty glitch, then real data
+
+        def _fetch() -> list[int]:
+            return seq.pop(0)
+
+        result = fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=3)
+        assert result == [7]  # the glitch was recovered — "pull until successful"
+
+    def test_genuine_empty_bounded_to_attempts(self) -> None:
+        calls: list[int] = []
+
+        def _fetch() -> list[int]:
+            calls.append(1)
+            return []  # always empty
+
+        result = fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=3)
+        assert result == []  # confidently empty
+        assert len(calls) == 3  # bounded — exactly `attempts`, never loops forever
+
+    def test_default_attempts_is_three(self) -> None:
+        calls: list[int] = []
+
+        def _fetch() -> list[int]:
+            calls.append(1)
+            return []
+
+        fetch_until_nonempty(_fetch, is_empty=lambda r: not r)
+        assert len(calls) == DEFAULT_EMPTY_RETRY_ATTEMPTS == 3
+
+    def test_attempts_one_disables_retry(self) -> None:
+        calls: list[int] = []
+
+        def _fetch() -> list[int]:
+            calls.append(1)
+            return []
+
+        assert fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=1) == []
+        assert len(calls) == 1  # a single call, no retry
+
+    def test_backoff_fires_before_each_refetch(self) -> None:
+        backoffs: list[int] = []
+
+        def _fetch() -> list[int]:
+            return []
+
+        fetch_until_nonempty(
+            _fetch, is_empty=lambda r: not r, attempts=3, backoff=backoffs.append
+        )
+        # backoff runs before re-fetch on attempts 2 and 3 (not before the first call)
+        assert backoffs == [2, 3]

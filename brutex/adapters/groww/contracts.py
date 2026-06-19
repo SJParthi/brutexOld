@@ -32,6 +32,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from brutex.adapters.groww.client import GrowwClientProtocol
+from brutex.adapters.ingest_common import DEFAULT_EMPTY_RETRY_ATTEMPTS, fetch_until_nonempty
 from brutex.adapters.protocol import DerivativeContract
 
 #: The Groww symbol-token suffix → contract type. ``FUT`` carries no strike;
@@ -139,6 +140,7 @@ def resolve_expiries(
     underlying_symbol: str,
     year: int | None = None,
     month: int | None = None,
+    empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
 ) -> list[date]:
     """Resolve an underlying's FNO expiry dates for *year*/*month* (sorted, deduped).
 
@@ -146,28 +148,46 @@ def resolve_expiries(
     ``None`` — the documented "current year / whole year" defaults) and parses the
     ``YYYY-MM-DD`` strings to :class:`datetime.date`.
 
+    **Pull-until-successful (DEC-EMPTY-RETRY-EVERYWHERE-001):** a clean-but-EMPTY
+    ``get_expiries`` is AMBIGUOUS — genuine "no expiries this query" vs a transient vendor
+    glitch — and trusting an empty on the FIRST call would make a re-pull silently MISS a
+    newly-listed weekly/monthly expiry. So the call is re-fetched up to *empty_retry_attempts*
+    times via :func:`~brutex.adapters.ingest_common.fetch_until_nonempty` (first non-empty
+    wins; bounded). A real empty (e.g. a pre-listing year) is recorded only after the budget.
+
     Raises
     ------
     ValueError
         If the ``"expiries"`` value is not an array or any entry is not a parseable
         ISO date string (fail-loud — Golden Rule #1).
     """
-    payload = client.expiries(
-        exchange=exchange, underlying_symbol=underlying_symbol, year=year, month=month
-    )
-    out: set[date] = set()
-    for item in _expiries_array(payload):
-        if not isinstance(item, str):
-            raise ValueError(f"Groww expiry must be a string, got {type(item).__name__}: {item!r}")
-        try:
-            out.add(date.fromisoformat(item))
-        except ValueError as exc:
-            raise ValueError(f"unparseable Groww expiry: {item!r}") from exc
-    return sorted(out)
+
+    def _fetch() -> list[date]:
+        payload = client.expiries(
+            exchange=exchange, underlying_symbol=underlying_symbol, year=year, month=month
+        )
+        out: set[date] = set()
+        for item in _expiries_array(payload):
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"Groww expiry must be a string, got {type(item).__name__}: {item!r}"
+                )
+            try:
+                out.add(date.fromisoformat(item))
+            except ValueError as exc:
+                raise ValueError(f"unparseable Groww expiry: {item!r}") from exc
+        return sorted(out)
+
+    return fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=empty_retry_attempts)
 
 
 def resolve_contracts(
-    client: GrowwClientProtocol, *, exchange: str, underlying_symbol: str, expiry: date
+    client: GrowwClientProtocol,
+    *,
+    exchange: str,
+    underlying_symbol: str,
+    expiry: date,
+    empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
 ) -> list[DerivativeContract]:
     """Resolve every listed contract for an ``(underlying, expiry)`` (parsed, deduped).
 
@@ -176,32 +196,44 @@ def resolve_contracts(
     symbols (first-wins) are dropped via an O(1) ``set`` membership — never a
     nested scan.
 
+    **Pull-until-successful (DEC-EMPTY-RETRY-EVERYWHERE-001):** a clean-but-EMPTY
+    ``get_contracts`` for a freshly-discovered expiry is re-fetched up to
+    *empty_retry_attempts* times (:func:`~brutex.adapters.ingest_common.fetch_until_nonempty`,
+    first non-empty wins, bounded) so a transient vendor glitch can't drop a newly-listed
+    expiry's whole strike chain.
+
     Raises
     ------
     ValueError
         If the ``"contracts"`` value is not an array, an entry is not a string, or
         a symbol fails :func:`parse_contract_symbol` (fail-loud).
     """
-    payload = client.contracts(
-        exchange=exchange, underlying_symbol=underlying_symbol, expiry_date=expiry.isoformat()
-    )
-    raw = payload.get("contracts", [])
-    if not isinstance(raw, (list, tuple)):
-        raise ValueError(f"Groww 'contracts' must be an array, got {type(raw).__name__}: {raw!r}")
-    seen: set[str] = set()
-    contracts: list[DerivativeContract] = []
-    for item in raw:
-        if not isinstance(item, str):
-            raise ValueError(
-                f"Groww contract must be a string, got {type(item).__name__}: {item!r}"
-            )
-        if item in seen:
-            continue
-        seen.add(item)
-        contracts.append(
-            parse_contract_symbol(item, underlying_symbol=underlying_symbol, expiry=expiry)
+
+    def _fetch() -> list[DerivativeContract]:
+        payload = client.contracts(
+            exchange=exchange, underlying_symbol=underlying_symbol, expiry_date=expiry.isoformat()
         )
-    return contracts
+        raw = payload.get("contracts", [])
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError(
+                f"Groww 'contracts' must be an array, got {type(raw).__name__}: {raw!r}"
+            )
+        seen: set[str] = set()
+        contracts: list[DerivativeContract] = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"Groww contract must be a string, got {type(item).__name__}: {item!r}"
+                )
+            if item in seen:
+                continue
+            seen.add(item)
+            contracts.append(
+                parse_contract_symbol(item, underlying_symbol=underlying_symbol, expiry=expiry)
+            )
+        return contracts
+
+    return fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=empty_retry_attempts)
 
 
 def option_contracts(contracts: Iterable[DerivativeContract]) -> list[DerivativeContract]:

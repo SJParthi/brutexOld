@@ -296,3 +296,48 @@ class TestEnumerateContracts:
             == []
         )
         assert sdk.expiry_calls == []
+
+
+class TestEmptyRetryEverywhere:
+    """DEC-EMPTY-RETRY-EVERYWHERE-001 — a glitchy empty expiries/contracts is re-fetched.
+
+    The reliability spine for new-expiry discovery: a transient empty ``get_expiries`` on a
+    re-pull would otherwise silently MISS a newly-listed weekly/monthly expiry.
+    """
+
+    def test_expiries_glitchy_empty_recovers_in_two_calls(self) -> None:
+        seq = [{"expiries": []}, {"expiries": ["2024-01-25"]}]  # empty glitch, then the new expiry
+        sdk = _FakeSDK(expiries=lambda _kw: seq.pop(0))
+        out = resolve_expiries(_client(sdk), exchange="NSE", underlying_symbol="NIFTY", year=2024)
+        assert out == [date(2024, 1, 25)]
+        assert len(sdk.expiry_calls) == 2  # the glitch was re-fetched → new expiry not missed
+
+    def test_expiries_genuine_empty_bounded_to_default(self) -> None:
+        sdk = _FakeSDK(expiries=lambda _kw: {"expiries": []})
+        out = resolve_expiries(_client(sdk), exchange="NSE", underlying_symbol="X", year=2020)
+        assert out == []
+        assert len(sdk.expiry_calls) == 3  # bounded — exactly DEFAULT_EMPTY_RETRY_ATTEMPTS
+
+    def test_expiries_attempts_one_disables_retry(self) -> None:
+        sdk = _FakeSDK(expiries=lambda _kw: {"expiries": []})
+        resolve_expiries(
+            _client(sdk), exchange="NSE", underlying_symbol="X", empty_retry_attempts=1
+        )
+        assert len(sdk.expiry_calls) == 1  # opt-out → single call
+
+    def test_contracts_glitchy_empty_recovers_in_two_calls(self) -> None:
+        seq = [{"contracts": []}, {"contracts": ["NSE-NIFTY-30Sep25-24650-CE"]}]
+        sdk = _FakeSDK(contracts=lambda _kw: seq.pop(0))
+        out = resolve_contracts(
+            _client(sdk), exchange="NSE", underlying_symbol="NIFTY", expiry=_EXPIRY
+        )
+        assert [c.symbol for c in out] == ["NSE-NIFTY-30Sep25-24650-CE"]
+        assert len(sdk.contract_calls) == 2
+
+    def test_contracts_genuine_empty_bounded_to_default(self) -> None:
+        sdk = _FakeSDK(contracts=lambda _kw: {"contracts": []})
+        out = resolve_contracts(
+            _client(sdk), exchange="NSE", underlying_symbol="NIFTY", expiry=_EXPIRY
+        )
+        assert out == []
+        assert len(sdk.contract_calls) == 3

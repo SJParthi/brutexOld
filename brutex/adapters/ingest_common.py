@@ -1192,9 +1192,68 @@ def run_until_clean(
     return UntilCleanOutcome(verdict=verdict, rounds_run=round_index, rounds=tuple(rounds))
 
 
+#: Shared default "pull until a non-empty response" budget — the number of TOTAL attempts an
+#: empty-prone Groww call (candles / expiries / contracts) is re-fetched before its empty is
+#: trusted as genuine no-data (DEC-EMPTY-RETRY-EVERYWHERE-001 — generalises the spot candle
+#: empty-retry of DEC-EMPTY-INPULL-RETRY-001). 3 mirrors the spot candle default.
+DEFAULT_EMPTY_RETRY_ATTEMPTS: Final[int] = 3
+
+
+def _noop_empty_backoff(_attempt: int) -> None:
+    """Default empty-retry backoff — a no-op (each *fetch* already paces itself)."""
+
+
+def fetch_until_nonempty[T](
+    fetch: Callable[[], T],
+    *,
+    is_empty: Callable[[T], bool],
+    attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    backoff: Callable[[int], None] = _noop_empty_backoff,
+) -> T:
+    """Call *fetch*; if the result is EMPTY, re-fetch up to *attempts* total — first non-empty wins.
+
+    The COMMON "pull until a successful (non-empty) response" primitive
+    (``DEC-EMPTY-RETRY-EVERYWHERE-001``) — generalises the spot candle empty-retry
+    (``DEC-EMPTY-INPULL-RETRY-001``) to EVERY empty-prone Groww call: historical candles,
+    ``get_expiries``, and ``get_contracts``. A clean-but-empty vendor reply is AMBIGUOUS on a
+    single call — genuine no-data vs a transient glitch on data that DOES exist (the exact case
+    that would make a re-pull silently MISS a newly-listed weekly/monthly expiry) — so re-fetch
+    up to *attempts* times; the FIRST non-empty result wins (the glitch is recovered), and only
+    an all-empty run returns the (now confidently) empty result. BOUNDED: a truly-empty call
+    fires exactly *attempts* times, never loops forever. *backoff(attempt)* runs BEFORE each
+    re-fetch (attempts 2..N); the default is a no-op because each *fetch* already paces itself
+    through the shared rate bucket. O(1) state — a fixed attempt budget, no accumulation.
+
+    Parameters
+    ----------
+    fetch
+        The (self-pacing) call producing a result; invoked ``1..attempts`` times.
+    is_empty
+        Predicate marking a result as the ambiguous empty to retry (e.g. ``not result``).
+    attempts
+        Total call budget. ``<= 1`` disables the retry (a single call); the default is
+        :data:`DEFAULT_EMPTY_RETRY_ATTEMPTS`.
+    backoff
+        Invoked with the upcoming attempt index before each re-fetch (default no-op).
+
+    Returns
+    -------
+    T
+        The first non-empty result, or the last (empty) result once the budget is spent.
+    """
+    result = fetch()
+    for attempt in range(2, attempts + 1):
+        if not is_empty(result):
+            return result
+        backoff(attempt)
+        result = fetch()
+    return result
+
+
 __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
     "COVERAGE_MARKET",
+    "DEFAULT_EMPTY_RETRY_ATTEMPTS",
     "DEFAULT_MAX_ROUNDS",
     "GROWW_COVERAGE_MARKET",
     "DateWindow",
@@ -1210,6 +1269,7 @@ __all__ = [
     "clamp_window_end",
     "classify_pull",
     "decide_until_clean",
+    "fetch_until_nonempty",
     "now_ist",
     "plan_windows",
     "retry_failed_windows",
