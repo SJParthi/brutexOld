@@ -529,7 +529,11 @@ def run_groww_option_ingest(
     (``run_parallel=None``) is a :class:`~brutex.orchestrator.parallel.SerialRunParallel`
     — a LAZY in-thread map that is **byte-identical** to the prior sequential loop
     (same contract-major order, same early-stop-on-quota), so every non-wired caller
-    + test keeps the exact prior behaviour. Each contract fetches its own windows
+    + test keeps the exact prior behaviour. (Under the live ``PoolRunParallel`` the
+    early-stop is best-effort: a GLOBAL stop re-raised mid-drain aborts the pull, but
+    already-in-flight sibling contracts finish first — the pool submits eagerly and
+    its teardown waits on them; harmless since writes are idempotent + each call is
+    deadline-bounded, the established spot-pool semantics.) Each contract fetches its own windows
     SERIALLY (``fetch_candle_windows`` tiles internally), so concurrency is purely
     CROSS-contract — one in-flight call per contract, ``len(jobs)`` contracts at once
     (no nested window pool, unlike spot). The SHARED rate bucket the *pace* hook

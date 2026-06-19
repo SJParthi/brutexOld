@@ -16,6 +16,7 @@ fires — the ingest-level retry is what the tests exercise.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -160,11 +161,15 @@ class _Sink:
     def __init__(self, *, with_conflict: bool = False) -> None:
         self.appends: list[tuple[str, str, str, str, int]] = []
         self._with_conflict = with_conflict
+        # Recorded from POOL worker threads under the parallel fan-out (DEC-GROWW-OPTION-POOL-001),
+        # so guard the recording list — keeps a future order-assertion race-free.
+        self._lock = threading.Lock()
 
     def append(
         self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
     ) -> SinkAppendResult:
-        self.appends.append((exchange, segment, symbol, interval, len(bars)))
+        with self._lock:
+            self.appends.append((exchange, segment, symbol, interval, len(bars)))
         write_results: tuple[WriteResult, ...] = ()
         if self._with_conflict and bars:
             stored = bars[0]
