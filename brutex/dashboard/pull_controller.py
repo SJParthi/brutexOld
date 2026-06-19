@@ -1359,9 +1359,9 @@ def pull_all_spot(
                             settled = prog.settled
                             # Summed empty_streak — the secondary progress signal (an
                             # EMPTY window stepping toward SKIPPED advances this before
-                            # ``settled`` rises). One O(N) fold per round, NOT the hot
-                            # path (mirrors progress_counts's envelope).
-                            streak = sum(r.empty_streak for r in ledger.records())
+                            # ``settled`` rises). A dedicated single-lock O(N) fold (no
+                            # sort), once per OUTER round, NOT the per-bar hot path.
+                            streak = ledger.streak_total()
                         return UntilCleanRound(
                             still_failed_windows=res.report.still_failed_windows,
                             auth_aborted=res.report.auth_aborted,
