@@ -263,8 +263,6 @@ class TestFetchUntilNonempty:
         def _fetch() -> list[int]:
             return []
 
-        fetch_until_nonempty(
-            _fetch, is_empty=lambda r: not r, attempts=3, backoff=backoffs.append
-        )
+        fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=3, backoff=backoffs.append)
         # backoff runs before re-fetch on attempts 2 and 3 (not before the first call)
         assert backoffs == [2, 3]
