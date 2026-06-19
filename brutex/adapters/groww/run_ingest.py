@@ -436,10 +436,12 @@ def run_groww_spot_ingest(
         # `BruteXError` covers EVERY "this one symbol can't be pulled" cause that must
         # NEVER crash the whole 779-symbol bulk pull — the operator hit three of them in
         # turn: a `GrowwError` (vendor API), a `CandleParseError` (un-storable candle, e.g.
-        # "unparseable open price: None"), and now an `OutOfScopeError` ("symbol not in
-        # Groww universe: BAJAJ-AUTO", a constituent the niftyindices→Groww match produced
-        # that the Groww adapter can't resolve). Quarantine the ONE symbol — re-tried next
-        # pull, never masked — and the pull finishes for the other 778. Only a `GrowwError`
+        # "unparseable open price: None"), and an `OutOfScopeError` ("symbol not in Groww
+        # universe: …") for a constituent the niftyindices→Groww match produced that is
+        # genuinely absent from the master (a HYPHENATED ticker like BAJAJ-AUTO now resolves
+        # correctly, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001 #845 — this guard remains the
+        # backstop for a symbol in NO master spelling). Quarantine the ONE symbol — re-tried
+        # next pull, never masked — and the pull finishes for the others. Only a `GrowwError`
         # can be an auth failure (a parse / scope error never is).
         auth_failed = isinstance(exc, GrowwError) and is_auth_failure(exc)
         failures.append(

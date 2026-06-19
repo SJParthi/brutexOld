@@ -126,7 +126,7 @@ def test_list_derivatives_enumerates_lake_chain() -> None:
     assert 2024 in sdk.expiry_years and len(sdk.expiry_years) >= 5
 
 
-def test_fetch_ohlcv_index_reconstructs_symbol_and_drops_volume() -> None:
+def test_fetch_ohlcv_index_sends_master_groww_symbol_and_drops_volume() -> None:
     adapter, sdk = _adapter()
     bars = adapter.fetch_ohlcv(
         symbol="NIFTY",
@@ -137,7 +137,9 @@ def test_fetch_ohlcv_index_reconstructs_symbol_and_drops_volume() -> None:
     )
     assert len(bars) == 1
     assert bars[0].volume == 0  # index → volume dropped
-    assert sdk.last_kwargs["groww_symbol"] == "NSE-NIFTY"  # reconstructed from bare symbol
+    # The master groww_symbol resolved from the bare ticker (DEC-GROWW-HYPHEN-SYMBOL-
+    # RESOLVE-001 — sent verbatim, NOT reconstructed; == "NSE-NIFTY" here).
+    assert sdk.last_kwargs["groww_symbol"] == "NSE-NIFTY"
     assert sdk.last_kwargs["segment"] == "CASH"
     assert sdk.last_kwargs["candle_interval"] == "1minute"
 
@@ -191,3 +193,136 @@ def test_fetch_ohlcv_bad_interval_raises() -> None:
             start=date(2024, 1, 1),
             end=date(2024, 1, 2),
         )
+
+
+# ── DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001 — hyphenated single-stock resolution ──
+
+_BAJAJ = _row(
+    exchange="NSE",
+    exchange_token="16669",
+    trading_symbol="BAJAJ-AUTO",
+    groww_symbol="NSE-BAJAJ-AUTO",
+    name="Bajaj Auto Ltd",
+    instrument_type="EQ",
+    segment="CASH",
+    lot_size="1",
+    tick_size="0.05",
+)
+_MM = _row(
+    exchange="NSE",
+    exchange_token="2031",
+    trading_symbol="M&M",
+    groww_symbol="NSE-M&M",
+    name="Mahindra & Mahindra Ltd",
+    instrument_type="EQ",
+    segment="CASH",
+    lot_size="1",
+    tick_size="0.05",
+)
+# A VERBOSE-symbol index: trading_symbol ("NIFTY MID SELECT") ≠ the MIDCPNIFTY
+# component of its groww_symbol (NSE-MIDCPNIFTY). Reconstructing EXCH-trading_symbol
+# would send the garbage "NSE-NIFTY MID SELECT"; the master groww_symbol is correct.
+_MIDCP = _row(
+    exchange="NSE",
+    exchange_token="26074",
+    trading_symbol="NIFTY MID SELECT",
+    groww_symbol="NSE-MIDCPNIFTY",
+    name="Nifty Midcap Select",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_HYPHEN_INDEX = load_index_from_csv("\n".join([_HEADER, _NIFTY, _FUT, _BAJAJ, _MM, _MIDCP]) + "\n")
+
+
+def _hyphen_adapter() -> tuple[GrowwMarketAdapter, _FakeSDK]:
+    sdk = _FakeSDK()
+    return (
+        GrowwMarketAdapter(client=GrowwClient(sdk=sdk, sleep=lambda _s: None), index=_HYPHEN_INDEX),
+        sdk,
+    )
+
+
+def test_fetch_ohlcv_hyphenated_stock_resolves_to_prefixed_groww_symbol() -> None:
+    """``BAJAJ-AUTO`` (bare, hyphenated) resolves to ``NSE-BAJAJ-AUTO`` — the regression.
+
+    The prior ``"-" in symbol`` heuristic looked the bare ticker up in
+    ``by_groww_symbol``, missed, and raised; the master-authoritative
+    ``(exchange, trading_symbol)`` lookup resolves it and sends the master's REAL
+    groww_symbol.
+    """
+    adapter, sdk = _hyphen_adapter()
+    bars = adapter.fetch_ohlcv(
+        symbol="BAJAJ-AUTO",
+        exchange=Exchange.NSE,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert bars  # data came back (no OutOfScopeError)
+    assert sdk.last_kwargs["groww_symbol"] == "NSE-BAJAJ-AUTO"
+    assert sdk.last_kwargs["segment"] == "CASH"  # EQ → CASH, volume kept
+
+
+def test_fetch_ohlcv_ampersand_stock_resolves() -> None:
+    """``M&M`` (ampersand) resolves to ``NSE-M&M`` — guards the already-working & path."""
+    adapter, sdk = _hyphen_adapter()
+    adapter.fetch_ohlcv(
+        symbol="M&M",
+        exchange=Exchange.NSE,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert sdk.last_kwargs["groww_symbol"] == "NSE-M&M"
+
+
+def test_fetch_ohlcv_prefixed_contract_still_used_as_is() -> None:
+    """An already-prefixed contract groww_symbol resolves via by_groww_symbol, AS-IS.
+
+    The future's trading_symbol is ``NIFTY25Aug26FUT`` (no hyphens), so the full
+    ``NSE-NIFTY-25Aug26-FUT`` misses the (exchange, trading_symbol) index and falls
+    through to by_groww_symbol — used verbatim (the FNO segment, volume kept).
+    """
+    adapter, sdk = _hyphen_adapter()
+    adapter.fetch_ohlcv(
+        symbol="NSE-NIFTY-25Aug26-FUT",
+        exchange=Exchange.NSE,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert sdk.last_kwargs["groww_symbol"] == "NSE-NIFTY-25Aug26-FUT"
+    assert sdk.last_kwargs["segment"] == "FNO"
+
+
+def test_fetch_ohlcv_genuinely_unknown_hyphenated_symbol_raises() -> None:
+    """A hyphenated ticker NOT in the master raises OutOfScopeError naming the symbol."""
+    adapter, _sdk = _hyphen_adapter()
+    with pytest.raises(OutOfScopeError, match="not in Groww universe: NOPE-X"):
+        adapter.fetch_ohlcv(
+            symbol="NOPE-X",
+            exchange=Exchange.NSE,
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+        )
+
+
+def test_fetch_ohlcv_verbose_symbol_index_sends_master_groww_symbol() -> None:
+    """A verbose-symbol index sends the master's REAL groww_symbol, NOT a reconstruction.
+
+    ``MIDCPNIFTY``'s trading_symbol is ``"NIFTY MID SELECT"`` but its groww_symbol is
+    ``NSE-MIDCPNIFTY``. Reconstructing ``f"{exchange}-{symbol}"`` would send the garbage
+    ``"NSE-NIFTY MID SELECT"`` (a silent wrong fetch); the master ``groww_symbol_by_pair``
+    sends ``NSE-MIDCPNIFTY``. This is the hostile-review BLOCKER regression.
+    """
+    adapter, sdk = _hyphen_adapter()
+    adapter.fetch_ohlcv(
+        symbol="NIFTY MID SELECT",
+        exchange=Exchange.NSE,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert sdk.last_kwargs["groww_symbol"] == "NSE-MIDCPNIFTY"
+    assert sdk.last_kwargs["segment"] == "CASH"  # IDX → CASH

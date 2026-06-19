@@ -77,7 +77,17 @@ def _bar(
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("reliance", "RELIANCE"), ("NSE-RELIANCE", "RELIANCE"), ("  infy  ", "INFY")],
+    [
+        ("reliance", "RELIANCE"),
+        ("NSE-RELIANCE", "RELIANCE"),
+        ("  infy  ", "INFY"),
+        # DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001 — a hyphenated ticker is kept whole; only
+        # a leading exchange prefix is stripped (the prior split-on-first-hyphen mangled
+        # BAJAJ-AUTO → AUTO).
+        ("BAJAJ-AUTO", "BAJAJ-AUTO"),
+        ("NSE-BAJAJ-AUTO", "BAJAJ-AUTO"),
+        ("bse-m&m", "M&M"),
+    ],
 )
 def test_normalize_equity_symbol(raw: str, expected: str) -> None:
     assert normalize_equity_symbol(raw) == expected

@@ -356,10 +356,19 @@ def _override_str(value: object, default: str) -> str:
 
 
 def normalize_equity_symbol(symbol: str) -> str:
-    """Normalize a stock symbol to its bare upper form (``"NSE-RELIANCE"`` → ``"RELIANCE"``)."""
+    """Normalize a stock symbol to its bare upper form (``"NSE-RELIANCE"`` → ``"RELIANCE"``).
+
+    Strips ONLY a leading exchange prefix (``NSE-`` / ``BSE-``), NOT every hyphen
+    (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001): the prior ``split("-", 1)[1]`` assumed the
+    first hyphen always separated an exchange prefix, so a HYPHENATED ticker like
+    ``BAJAJ-AUTO`` was mangled to ``AUTO`` — breaking the bhavcopy match + the verify
+    fetch for every hyphenated F&O stock. ``NSE-BAJAJ-AUTO`` → ``BAJAJ-AUTO``,
+    ``BAJAJ-AUTO`` → ``BAJAJ-AUTO`` (no exchange prefix, kept whole).
+    """
     key = symbol.strip().upper()
-    if "-" in key:
-        key = key.split("-", 1)[1]
+    for prefix in ("NSE-", "BSE-"):
+        if key.startswith(prefix):
+            return key[len(prefix) :]
     return key
 
 

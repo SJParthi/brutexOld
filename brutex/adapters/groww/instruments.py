@@ -27,7 +27,7 @@ from __future__ import annotations
 import csv
 import hashlib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from io import StringIO
@@ -224,11 +224,21 @@ class InstrumentIndex:
     ``by_groww_symbol`` keys on the Groww-native ``"EXCH-SYMBOL[-…]"`` string;
     ``by_exchange_symbol`` keys on ``(Exchange, trading_symbol)``. Both resolve
     in O(1); ``universe`` is the immutable in-scope page.
+
+    ``groww_symbol_by_pair`` (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001) is the master's
+    REAL groww_symbol for each ``(Exchange, trading_symbol)`` pair — the authoritative
+    string to hand the vendor when a BARE trading symbol is resolved, so the adapter
+    never RECONSTRUCTS ``EXCH-symbol`` (which is wrong for a verbose-symbol index like
+    ``MIDCPNIFTY`` whose ``trading_symbol`` ``"NIFTY MID SELECT"`` ≠ the ``MIDCPNIFTY``
+    component of its ``NSE-MIDCPNIFTY`` groww_symbol). Same keys as
+    ``by_exchange_symbol`` (built in the one pass); defaulted so a hand-built test
+    index (empty pair map) stays valid.
     """
 
     by_groww_symbol: dict[str, Instrument]
     by_exchange_symbol: dict[tuple[Exchange, str], Instrument]
     universe: tuple[Instrument, ...]
+    groww_symbol_by_pair: dict[tuple[Exchange, str], str] = field(default_factory=dict)
 
 
 def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
@@ -240,17 +250,26 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
     """
     by_groww: dict[str, Instrument] = {}
     by_pair: dict[tuple[Exchange, str], Instrument] = {}
+    gsym_by_pair: dict[tuple[Exchange, str], str] = {}
     universe: list[Instrument] = []
     for gsym, instrument in pairs:
         if gsym in by_groww:
             continue  # first-wins dedup, O(1)
         by_groww[gsym] = instrument
-        by_pair[(instrument.exch_id, instrument.symbol_name)] = instrument
+        pair_key = (instrument.exch_id, instrument.symbol_name)
+        by_pair[pair_key] = instrument
+        # The master's REAL groww_symbol for this pair — used verbatim at fetch time
+        # so a verbose-symbol index (NIFTY MID SELECT → NSE-MIDCPNIFTY) is never
+        # mis-reconstructed (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). Kept in lockstep
+        # with ``by_pair`` (same key, same last-wins assignment) so the resolved
+        # instrument and the sent groww_symbol can never diverge.
+        gsym_by_pair[pair_key] = gsym
         universe.append(instrument)
     return InstrumentIndex(
         by_groww_symbol=by_groww,
         by_exchange_symbol=by_pair,
         universe=tuple(universe),
+        groww_symbol_by_pair=gsym_by_pair,
     )
 
 
