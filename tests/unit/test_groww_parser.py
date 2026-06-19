@@ -88,6 +88,59 @@ def test_fno_open_interest_preserved() -> None:
     assert bars[0].open_interest == 42
 
 
+def test_current_session_six_element_row_parsed_not_quarantined() -> None:
+    """DEC-GROWW-FORMING-BAR-PARSE-001: the current not-yet-finalised day's intraday
+    bars arrive as a 6-element row (no trailing open_interest slot) — parse them with
+    ``open_interest=None`` instead of quarantining the whole series."""
+    # The EXACT row from the operator's brutex.log that quarantined all 4 indices'
+    # 1-minute series — 6 elements, trailing volume is literally ``None`` (no OI slot).
+    bars = parser.parse_candle_rows(
+        {"candles": [["2026-06-19T09:15:00", 26466.25, 26480.9, 26422.2, 26457.85, None]]}
+    )
+    assert len(bars) == 1
+    assert bars[0].open == Decimal("26466.25")
+    assert bars[0].close == Decimal("26457.85")
+    assert bars[0].open_interest is None  # padded — OI slot absent on the live edge
+
+
+def test_mixed_seven_then_six_element_rows() -> None:
+    """A settled 7-element bar followed by the live-edge 6-element bar both parse."""
+    bars = parser.parse_candle_rows(
+        {
+            "candles": [
+                ["2026-06-18T15:29:00", 100.0, 110.0, 90.0, 105.0, 1000, None],  # settled
+                ["2026-06-19T09:15:00", 105.0, 106.0, 104.0, 105.5, 0],  # current session (6)
+            ]
+        }
+    )
+    assert len(bars) == 2
+    assert bars[1].open_interest is None
+
+
+def test_five_element_row_still_raises() -> None:
+    """A row shorter than 6 (a genuinely malformed row) is STILL rejected — the
+    tolerance is exactly the 6-element current-session shape, nothing shorter.
+
+    The single error message names BOTH accepted shapes, so we anchor on the
+    rejected ROW repr (length-discriminating) rather than the shape names — the
+    test would otherwise pass even if the 5/8 cases were swapped (hostile-review NIT).
+    """
+    with pytest.raises(CandleParseError) as exc:
+        parser.parse_candle_rows({"candles": [["2026-06-19T09:15:00", 1, 2, 3, 4]]})
+    assert "1, 2, 3, 4]" in str(exc.value)  # the rejected 5-element row, discriminating
+    assert "1, 2, 3, 4, 5" not in str(exc.value)
+
+
+def test_eight_element_row_still_raises() -> None:
+    """A row longer than 7 is STILL rejected (an unexpected vendor shape, fail-loud).
+
+    Anchored on the rejected ROW repr (length-discriminating), not the shape names.
+    """
+    with pytest.raises(CandleParseError) as exc:
+        parser.parse_candle_rows({"candles": [["2026-06-19T09:15:00", 1, 2, 3, 4, 5, 6, 7]]})
+    assert "1, 2, 3, 4, 5, 6, 7]" in str(exc.value)  # the rejected 8-element row, discriminating
+
+
 def test_missing_candles_key_raises() -> None:
     with pytest.raises(CandleParseError, match="missing required 'candles'"):
         parser.parse_candle_rows({})
