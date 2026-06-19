@@ -99,8 +99,12 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
     from brutex.adapters.rate_common import RateController
+    from brutex.data.models import CandleBar
+    from brutex.data.spot_daily_resample import DailyResampleWindow
 
 _LOG = structlog.get_logger(__name__)
 
@@ -1483,6 +1487,24 @@ def pull_all_spot(
                             symbol_windows=symbol_windows,
                         )
                         _run_phase(minute_intervals, minute_instruments, symbol_windows)
+            # ── 1-DAY RESAMPLE-ON-EMPTY (DEC-SPOT-1DAY-RESAMPLE-ON-EMPTY-001) ──
+            # Groww does not serve the recent ``1day`` for cash equities though it
+            # serves ``1minute``; derive the missing daily bars from the 1-minute
+            # already in the lake (midnight-IST stamped to match the vendor
+            # convention) so a confirmed-empty daily window is FILLED, not settled
+            # SKIPPED forever. Runs AFTER both phases but BEFORE the ``finally``'s
+            # ``end_pull_ledger`` so a fill's ``SUCCESS`` record persists with the
+            # ledger; quarantined end-to-end (can NEVER fail the pull) and a no-op
+            # when no 1-minute backs an empty daily window (the verify-first
+            # ``1day``-only default self-heals nothing — surfaced, never invented).
+            if ledger is not None and not dry_run:  # pragma: no cover — raw lake I/O glue
+                _resample_daily_after_pull(
+                    instruments=instruments,
+                    ledger=ledger,
+                    lake_root=lake_root,
+                    now=now if now is not None else datetime.now(UTC),
+                    pull_id=pid,
+                )
         finally:
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
@@ -1652,6 +1674,86 @@ def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner c
             pull_id=pull_id,
             symbols=[o.symbol for o in report.outcomes if not o.ok],
             note="auto-derive quarantined these symbols; the pull itself is unaffected",
+        )
+
+
+def _resample_daily_after_pull(  # pragma: no cover — raw lake I/O glue; reconcile core is 100%-unit-tested
+    *,
+    instruments: Sequence[Instrument],
+    ledger: WindowLedger,
+    lake_root: Path,
+    now: datetime,
+    pull_id: str,
+) -> None:
+    """Fill EMPTY ``1day`` windows from stored 1-minute (DEC-SPOT-1DAY-RESAMPLE-ON-EMPTY-001).
+
+    The 1-day reconcile arm: Groww does not serve the recent ``1day`` for cash
+    equities though it serves ``1minute``, so any daily window the ledger settled
+    EMPTY/SKIPPED-via-empty is re-derived from the 1-minute already in the lake
+    (midnight-IST stamped to match the vendor convention — see
+    :mod:`brutex.data.spot_daily_resample`). Binds the SHARED window-bounded lake
+    read + ``1day`` write builders per candidate window and runs the quarantining
+    :func:`~brutex.data.spot_daily_resample.reconcile_daily_from_minute` over the
+    SHARED ledger. Wrapped so NO failure here can ever surface as a pull error and a
+    no-op (no 1-minute backs the window) is honest, never an invented bar. Runs
+    BEFORE the ``finally``'s ``end_pull_ledger`` so a fill's ``SUCCESS`` record is
+    persisted with the rest of the ledger.
+    """
+    from brutex.calendars.nse import IST
+    from brutex.data.spot_daily_resample import (
+        make_lake_read_1m_window,
+        make_lake_write_1day,
+        reconcile_daily_from_minute,
+    )
+
+    try:
+        by_symbol = {inst.symbol_name: inst for inst in instruments}
+        # ``before`` is today's IST *date* (the forming-session cutoff). The canonical
+        # ``calendars.nse.IST`` (ZoneInfo) and the module's fixed +05:30 agree exactly
+        # for the 2020+ no-DST scope, so the cutoff date is representation-independent.
+        before = now.astimezone(IST).date()
+
+        def _build_read(window: DailyResampleWindow) -> Callable[[], pl.DataFrame]:
+            inst = by_symbol[window.security_id]
+            return make_lake_read_1m_window(
+                lake_root=lake_root,
+                exchange=inst.exch_id.value,
+                segment=inst.segment.value,
+                symbol=window.security_id,
+                start=window.start,
+                end=window.end,
+            )
+
+        def _build_write(
+            window: DailyResampleWindow,
+        ) -> Callable[[Sequence[CandleBar]], int]:
+            inst = by_symbol[window.security_id]
+            return make_lake_write_1day(
+                lake_root=lake_root,
+                exchange=inst.exch_id.value,
+                segment=inst.segment.value,
+                symbol=window.security_id,
+            )
+
+        report = reconcile_daily_from_minute(
+            records=ledger.records(),
+            ledger=ledger,
+            build_read_1m=_build_read,
+            build_write_1day=_build_write,
+            before=before,
+            now=now,
+        )
+    except Exception as exc:
+        _LOG.warning("universe.daily_resample.error", pull_id=pull_id, error=str(exc))
+        return
+    if report.windows:
+        _LOG.info(
+            "universe.daily_resample.done",
+            pull_id=pull_id,
+            filled=report.filled,
+            no_minute=report.no_minute,
+            errored=report.errored,
+            bars=report.bars,
         )
 
 
