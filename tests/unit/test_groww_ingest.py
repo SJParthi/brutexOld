@@ -432,6 +432,29 @@ class TestIngestSpotLedger:
         # the operator asked to SEE (a SENSEX/FINNIFTY early-year EMPTY row, ↻ 3).
         assert rec.in_pull_fetches == 3
 
+    def test_empty_attempts_zero_clamps_to_single_fetch(self) -> None:
+        # Out-of-box guard (hostile-review NIT, DEC-WINDOW-INPULL-FETCHES-001): a degenerate
+        # empty_retry_attempts=0 must still fetch ONCE — never record EMPTY without calling
+        # the vendor. Mirrors the option spine's max(1, …) clamp; in_pull_fetches stays ≥1.
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[]])  # always empty
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            empty_retry_attempts=0,
+        )
+        assert adapter.calls == 1  # clamped to one real fetch, never zero
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY
+        assert rec.in_pull_fetches == 1  # one fetch happened — not a misleading 0/"—"
+
     def test_empty_after_retries_logs_an_info_summary(self) -> None:
         # DEC-WINDOW-INPULL-FETCHES-001: the per-attempt empty_retry log is DEBUG, so a
         # pull at INFO showed NO sign the 3× retry ran. One INFO summary now surfaces it.

@@ -538,7 +538,12 @@ def _ingest_one_window(
     # Recorded on the ledger row so the operator SEES the 3× retry that was previously
     # DEBUG-only (the "attempts 1 but no sign of the retry" gap).
     fetch_count = 0
-    for empty_attempt in range(empty_retry_attempts):
+    # ``max(1, …)`` mirrors the option spine's guard (option_ingest.py): a degenerate
+    # ``empty_retry_attempts < 1`` must still fetch EXACTLY once — never silently record an
+    # EMPTY window WITHOUT calling the vendor (the out-of-box guard; the production default
+    # is 3, never < 1). This also keeps ``in_pull_fetches`` honest (≥1 for any recorded
+    # outcome, 0 only for a never-fetched PLANNED row).
+    for empty_attempt in range(max(1, empty_retry_attempts)):
         if pace is not None:
             pace()
         fetch_count += 1
