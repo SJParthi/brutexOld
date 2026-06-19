@@ -32,8 +32,19 @@ from brutex.data.models import CandleBar
 
 #: India Standard Time — a FIXED +05:30 offset (no DST), so no tzdata needed.
 _IST = timezone(timedelta(hours=5, minutes=30))
-#: Number of fields in a Groww candle row.
+#: Field count of a FULL Groww candle row
+#: ``[ts, open, high, low, close, volume, open_interest]`` (settled historical bars).
 _CANDLE_ROW_LEN = 7
+#: Field count of the SHORTER row Groww returns for the **current, not-yet-finalised
+#: trading day's intraday bars**: ``[ts, open, high, low, close, volume]`` — the
+#: trailing ``open_interest`` slot is DROPPED (and ``volume`` is typically ``None``)
+#: until the vendor's end-of-day settlement fills them in. Index/spot rows carry null
+#: volume/OI regardless, so accepting this shorter shape never loses data — it only
+#: stops the still-settling live edge from quarantining the WHOLE symbol's series
+#: (DEC-GROWW-FORMING-BAR-PARSE-001).
+_CANDLE_ROW_LEN_NO_OI = 6
+#: The row lengths the parser accepts: full settled (7) OR current-session-without-OI (6).
+_ACCEPTED_ROW_LENS = frozenset({_CANDLE_ROW_LEN_NO_OI, _CANDLE_ROW_LEN})
 
 
 def parse_timestamp_ist(raw: object) -> datetime:
@@ -76,7 +87,11 @@ def parse_candle_rows(
     ----------
     payload
         A mapping carrying a ``"candles"`` key whose value is a list of
-        7-element ``[ts, open, high, low, close, volume, open_interest]`` rows.
+        7-element ``[ts, open, high, low, close, volume, open_interest]`` rows
+        (settled bars). The current, not-yet-finalised trading day's intraday rows
+        may arrive as a 6-element ``[ts, open, high, low, close, volume]`` (no
+        ``open_interest`` slot yet) — these are accepted with ``open_interest=None``
+        (DEC-GROWW-FORMING-BAR-PARSE-001), never quarantined.
     drop_volume
         When ``True`` the per-row volume is ignored outright (every bar's volume
         → 0). An **index** (NIFTY / BANKNIFTY / SENSEX / INDIA VIX) carries no
@@ -91,8 +106,8 @@ def parse_candle_rows(
     Raises
     ------
     CandleParseError
-        If ``"candles"`` is missing/non-array, a row is not a 7-element array, or
-        any non-empty field is unparseable.
+        If ``"candles"`` is missing/non-array, a row is neither a 7-element nor a
+        6-element array, or any non-empty field is unparseable.
     """
     if "candles" not in payload:
         raise CandleParseError("missing required 'candles' key in Groww payload")
@@ -102,11 +117,22 @@ def parse_candle_rows(
 
     bars: list[CandleBar] = []
     for index, row in enumerate(candles):
-        if not isinstance(row, (list, tuple)) or len(row) != _CANDLE_ROW_LEN:
+        if not isinstance(row, (list, tuple)) or len(row) not in _ACCEPTED_ROW_LENS:
             raise CandleParseError(
-                f"candle row {index} must be a {_CANDLE_ROW_LEN}-element array, got {row!r}"
+                f"candle row {index} must be a 7-element array "
+                f"[ts, open, high, low, close, volume, open_interest] (settled bars) "
+                f"or a 6-element array [ts, open, high, low, close, volume] (the current "
+                f"not-yet-finalised session, no open_interest), got {row!r}"
             )
-        ts_raw, open_, high, low, close, volume, open_interest = row
+        # The current trading day's intraday bars come back WITHOUT the trailing
+        # open_interest slot until the vendor's EOD settlement (DEC-GROWW-FORMING-BAR-
+        # PARSE-001) — pad it to None so the live edge parses instead of quarantining
+        # the whole series. OI is null for index/spot rows anyway, so no data is lost.
+        if len(row) == _CANDLE_ROW_LEN_NO_OI:
+            ts_raw, open_, high, low, close, volume = row
+            open_interest = None
+        else:
+            ts_raw, open_, high, low, close, volume, open_interest = row
         try:
             bar = assemble_candle(
                 ts_raw=ts_raw,

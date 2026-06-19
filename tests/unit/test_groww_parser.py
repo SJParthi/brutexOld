@@ -88,6 +88,48 @@ def test_fno_open_interest_preserved() -> None:
     assert bars[0].open_interest == 42
 
 
+def test_current_session_six_element_row_parsed_not_quarantined() -> None:
+    """DEC-GROWW-FORMING-BAR-PARSE-001: the current not-yet-finalised day's intraday
+    bars arrive as a 6-element row (no trailing open_interest slot) — parse them with
+    ``open_interest=None`` instead of quarantining the whole series."""
+    # The EXACT shape from the operator's brutex.log that quarantined all 4 indices'
+    # 1-minute series: [ts, open, high, low, close, volume] — 6 elements, no OI.
+    bars = parser.parse_candle_rows(
+        {"candles": [["2026-06-19T09:15:00", 26466.25, 26480.9, 26422.2, 26457.85, 0]]}
+    )
+    assert len(bars) == 1
+    assert bars[0].open == Decimal("26466.25")
+    assert bars[0].close == Decimal("26457.85")
+    assert bars[0].open_interest is None  # padded — OI slot absent on the live edge
+
+
+def test_mixed_seven_then_six_element_rows() -> None:
+    """A settled 7-element bar followed by the live-edge 6-element bar both parse."""
+    bars = parser.parse_candle_rows(
+        {
+            "candles": [
+                ["2026-06-18T15:29:00", 100.0, 110.0, 90.0, 105.0, 1000, None],  # settled
+                ["2026-06-19T09:15:00", 105.0, 106.0, 104.0, 105.5, 0],  # current session (6)
+            ]
+        }
+    )
+    assert len(bars) == 2
+    assert bars[1].open_interest is None
+
+
+def test_five_element_row_still_raises() -> None:
+    """A row shorter than 6 (a genuinely malformed row) is STILL rejected — the
+    tolerance is exactly the 6-element current-session shape, nothing shorter."""
+    with pytest.raises(CandleParseError, match="6-element array"):
+        parser.parse_candle_rows({"candles": [["2026-06-19T09:15:00", 1, 2, 3, 4]]})
+
+
+def test_eight_element_row_still_raises() -> None:
+    """A row longer than 7 is STILL rejected (an unexpected vendor shape, fail-loud)."""
+    with pytest.raises(CandleParseError, match="7-element array"):
+        parser.parse_candle_rows({"candles": [["2026-06-19T09:15:00", 1, 2, 3, 4, 5, 6, 7]]})
+
+
 def test_missing_candles_key_raises() -> None:
     with pytest.raises(CandleParseError, match="missing required 'candles'"):
         parser.parse_candle_rows({})
