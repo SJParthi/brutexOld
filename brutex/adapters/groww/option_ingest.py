@@ -285,6 +285,10 @@ def ingest_option_contract(
     sleep = backoff if backoff is not None else _default_backoff
     empty_backoff = empty_retry_backoff if empty_retry_backoff is not None else _noop_empty_backoff
     attempt = 0
+    # Vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001) —
+    # counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
+    # ``in_pull_fetches`` exposes the in-pull retry the per-attempt DEBUG log hid.
+    fetch_count = 0
     raw_bars: list[CandleBar] = []
     # Outer EMPTY-retry loop (DEC-OPTION-EMPTY-RETRY-001): each pass runs the inner
     # transient-retry fetch; a 0-bar SUCCESS is re-fetched up to empty_retry_attempts times.
@@ -297,6 +301,7 @@ def ingest_option_contract(
         while True:
             if pace is not None:
                 pace()
+            fetch_count += 1
             try:
                 raw_bars = fetch_option_candles(
                     client, contract=contract, interval=interval, start=start, end=clamped_end
@@ -319,6 +324,7 @@ def ingest_option_contract(
                         error_type=type(exc).__name__,
                         bars_appended=0,
                         now=datetime.now(UTC),
+                        in_pull_fetches=fetch_count,
                     )
                 _LOG.warning(
                     "option.ingest.window.transient",
@@ -370,6 +376,16 @@ def ingest_option_contract(
             **summarize_conflicts(conflicts),
             **fields,
         )
+    # Mirror the spot spine's INFO surface (DEC-WINDOW-INPULL-FETCHES-001): when the
+    # in-pull retry fired AND the window stayed empty, one INFO line makes the retry
+    # visible in the log (the per-attempt event above is DEBUG).
+    if not raw_bars and fetch_count > 1:
+        _LOG.info(
+            "option.ingest.window.empty_after_retries",
+            pull_id=pull_id,
+            fetches=fetch_count,
+            **fields,
+        )
     if ledger is not None:
         ledger.record(
             key,
@@ -377,6 +393,7 @@ def ingest_option_contract(
             error_type=None,
             bars_appended=result.bars_appended,
             now=datetime.now(UTC),
+            in_pull_fetches=fetch_count,
         )
     if on_success is not None:
         on_success()

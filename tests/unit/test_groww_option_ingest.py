@@ -432,6 +432,9 @@ def test_ingest_ratelimit_exhausted_records_failed() -> None:
         end=date(2024, 1, 2),
     )
     assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull
+    # The transient FAILED row carries the in-pull fetch count (1 — 429'd on the first
+    # fetch this pull; DEC-WINDOW-INPULL-FETCHES-001, the option spine's twin).
+    assert ledger.records()[0].in_pull_fetches == 1
 
 
 def test_ingest_transient_no_hooks_no_ledger() -> None:
@@ -544,6 +547,9 @@ def test_ingest_genuine_empty_bounded_to_attempts() -> None:
     # recorded yet NOT yet skippable — it is re-checked on future pulls until the streak
     # confirms a genuine, durable empty. Two complementary guards, not one.
     assert not ledger.is_skippable(key)
+    # The option spine records the in-pull fetch count too: 3 fetches this pull, all
+    # empty (the ↻ 3 the operator sees on /coverage/windows; DEC-WINDOW-INPULL-FETCHES-001).
+    assert ledger.records()[0].in_pull_fetches == 3
 
 
 def test_ingest_empty_attempts_one_disables_retry() -> None:
@@ -608,6 +614,36 @@ def test_ingest_empty_then_transient_then_data() -> None:
     assert report.bars_appended == 1 and report.retried_windows == 1  # data recovered
     assert sdk.calls == 3  # empty, timeout, data
     assert slept == [0]  # exactly one transient backoff consumed (not doubled by the empty)
+
+
+def test_ingest_empty_then_ratelimit_exhausts_records_failed_with_fetch_count() -> None:
+    """empty → 429 (budget spent) → FAILED carrying the MULTI-fetch in-pull count.
+
+    Hostile-review NIT (DEC-WINDOW-INPULL-FETCHES-001): the transient-FAILED in_pull_fetches
+    was only asserted for the count==1 case. Here the empty round (fetch 1) then a 429 that
+    exhausts the transient budget (fetch 2) records FAILED with in_pull_fetches == 2 — the
+    in-pull counter spans BOTH the empty re-fetch and the transient fetch.
+    """
+    sdk = _FakeSDK(script=[_EMPTY, GrowwAPIRateLimitException("429")])
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        max_attempts=0,  # 429 → immediate budget exhaustion
+        empty_retry_attempts=3,
+        empty_retry_backoff=lambda _a: None,
+        now_ist=_now,
+    )
+    assert report.still_failed_windows == 1
+    assert sdk.calls == 2  # the empty fetch + the 429 fetch
+    rec = ledger.records()[0]
+    assert rec.status == "FAILED"
+    assert rec.in_pull_fetches == 2  # spans the empty re-fetch AND the transient
 
 
 def test_ingest_empty_retry_default_is_three_with_noop_backoff() -> None:

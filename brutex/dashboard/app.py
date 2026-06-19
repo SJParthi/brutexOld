@@ -3289,7 +3289,8 @@ def build_app(
         tiling (superseded trailing keys are pruned at plan time,
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
-        window dates / status / bars / attempts / last_error / streak). READ-ONLY:
+        window dates / status / bars / attempts / last_error / streak / in-pull
+        fetches). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -3309,6 +3310,7 @@ def build_app(
             "first_seen_at",
             "last_attempt_at",
             "empty_streak",
+            "in_pull_fetches",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)

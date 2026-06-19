@@ -398,7 +398,12 @@ class TestIngestSpotLedger:
         )
         assert adapter.calls == 3  # re-fetched until data appeared
         assert report.bars_appended == 1
-        assert ledger.records()[0].status == SUCCESS  # recovered, NOT a false no-data
+        rec = ledger.records()[0]
+        assert rec.status == SUCCESS  # recovered, NOT a false no-data
+        # DEC-WINDOW-INPULL-FETCHES-001: ONE pull, but 3 network fetches — the count
+        # the page now shows so the 3× retry is no longer invisible behind "attempts 1".
+        assert rec.attempts == 1
+        assert rec.in_pull_fetches == 3
 
     def test_genuine_empty_exhausts_attempts_then_records_empty(self) -> None:
         # A window that is empty on EVERY attempt is recorded EMPTY with confidence — and
@@ -421,10 +426,75 @@ class TestIngestSpotLedger:
         )
         assert adapter.calls == 3  # bounded — exactly the budget, no infinite loop
         assert backoffs == [0, 1]  # paused between attempts 1→2 and 2→3, NOT after the last
-        assert ledger.records()[0].status == EMPTY
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY
+        # The genuine-gap window was re-fetched the full budget this pull — the count
+        # the operator asked to SEE (a SENSEX/FINNIFTY early-year EMPTY row, ↻ 3).
+        assert rec.in_pull_fetches == 3
+
+    def test_empty_attempts_zero_clamps_to_single_fetch(self) -> None:
+        # Out-of-box guard (hostile-review NIT, DEC-WINDOW-INPULL-FETCHES-001): a degenerate
+        # empty_retry_attempts=0 must still fetch ONCE — never record EMPTY without calling
+        # the vendor. Mirrors the option spine's max(1, …) clamp; in_pull_fetches stays ≥1.
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        adapter = _BarSeqAdapter([[]])  # always empty
+        ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            empty_retry_attempts=0,
+        )
+        assert adapter.calls == 1  # clamped to one real fetch, never zero
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY
+        assert rec.in_pull_fetches == 1  # one fetch happened — not a misleading 0/"—"
+
+    def test_empty_after_retries_logs_an_info_summary(self) -> None:
+        # DEC-WINDOW-INPULL-FETCHES-001: the per-attempt empty_retry log is DEBUG, so a
+        # pull at INFO showed NO sign the 3× retry ran. One INFO summary now surfaces it.
+        adapter = _BarSeqAdapter([[]])  # always empty → exhausts the 3 fetches
+        with capture_logs() as logs, pull_id_scope("emptypull01"):
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 3, 1),
+                empty_retry_attempts=3,
+            )
+        summary = [r for r in logs if r["event"] == "ingest.window.empty_after_retries"]
+        assert len(summary) == 1
+        assert summary[0]["fetches"] == 3  # the count the operator can finally SEE
+        assert summary[0]["log_level"] == "info"
+
+    def test_first_try_win_logs_no_empty_summary(self) -> None:
+        # A clean first-try fetch stays quiet — the INFO summary fires ONLY on a
+        # retry-then-still-empty window (the False side of the guard).
+        adapter = _Adapter(bars=[_bar()])
+        with capture_logs() as logs:
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 3, 1),
+                empty_retry_attempts=3,
+            )
+        assert not [r for r in logs if r["event"] == "ingest.window.empty_after_retries"]
 
     def test_data_on_first_attempt_does_not_retry(self) -> None:
         # The happy path is unchanged: bars on the first fetch → one call, no retry.
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
         adapter = _Adapter(bars=[_bar()])
         ingest_spot(
             adapter,  # type: ignore[arg-type]
@@ -434,8 +504,10 @@ class TestIngestSpotLedger:
             start=date(2021, 1, 1),
             end=date(2021, 3, 1),
             empty_retry_attempts=3,
+            ledger=ledger,
         )
         assert adapter.calls == 1  # broke on the first attempt — no wasted re-fetch
+        assert ledger.records()[0].in_pull_fetches == 1  # first-try win → 1 fetch
 
     def test_ledger_records_failed_on_rate_limit(self) -> None:
         from brutex.data.window_ledger import FAILED, WindowLedger
@@ -454,6 +526,9 @@ class TestIngestSpotLedger:
         rec = ledger.records()[0]
         assert rec.status == FAILED
         assert rec.last_error == "GrowwRateLimitError"
+        # The transient FAILED row carries the in-pull fetch count too (1 — it 429'd on
+        # the first fetch this pull; DEC-WINDOW-INPULL-FETCHES-001).
+        assert rec.in_pull_fetches == 1
 
 
 class TestIngestSpotInRunRetry:

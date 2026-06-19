@@ -521,6 +521,7 @@ _LEDGER_COLS = [
     "first_seen_at",
     "last_attempt_at",
     "empty_streak",
+    "in_pull_fetches",
 ]
 
 
@@ -563,6 +564,9 @@ class TestWindowLedgerApi:
         assert row[1] == "NIFTY"  # security_id
         assert row[5] == "SUCCESS"  # status
         assert row[6] == 5  # bars
+        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): the last column,
+        # 1 for this first-try SUCCESS — the /db grid surfaces the in-pull retry too.
+        assert row[12] == 1
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone
