@@ -78,3 +78,50 @@ def test_operator_directed_per_second_ceiling_stays_under_the_per_minute_governo
 def test_instrument_master_url_matches_allowlist_host() -> None:
     assert c.GROWW_CSV_ALLOWED_HOST in c.GROWW_INSTRUMENT_CSV_URL
     assert c.GROWW_INSTRUMENT_CSV_URL.startswith("https://")
+
+
+# ── resolve_pool_size — env override, default, clamp, fail-safe (DEC-GROWW-CLIENT-POOL-001) ──
+
+
+def test_resolve_pool_size_default_when_env_unset(monkeypatch) -> None:
+    monkeypatch.delenv(c.GROWW_POOL_SIZE_ENV, raising=False)
+    assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE
+
+
+def test_resolve_pool_size_honours_valid_env(monkeypatch) -> None:
+    monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, "3")
+    assert c.resolve_pool_size() == 3
+
+
+def test_resolve_pool_size_allows_explicit_one(monkeypatch) -> None:
+    """Setting 1 disables the pool (single connection) — the safe escape hatch."""
+    monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, "1")
+    assert c.resolve_pool_size() == 1
+
+
+def test_resolve_pool_size_clamps_above_max(monkeypatch) -> None:
+    """A value above the hard MAX falls back to the audited default (never overshoots)."""
+    monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, str(c.GROWW_CLIENT_POOL_MAX + 5))
+    assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE
+
+
+def test_resolve_pool_size_rejects_zero_and_negative(monkeypatch) -> None:
+    for bad in ("0", "-2"):
+        monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, bad)
+        assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE
+
+
+def test_resolve_pool_size_fails_safe_on_non_integer(monkeypatch) -> None:
+    for bad in ("abc", "2.5", ""):
+        monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, bad)
+        assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE
+
+
+def test_resolve_pool_size_strips_whitespace(monkeypatch) -> None:
+    monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, "  ")
+    assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE
+
+
+def test_pool_size_constants_are_sane() -> None:
+    assert 1 <= c.GROWW_CLIENT_POOL_SIZE <= c.GROWW_CLIENT_POOL_MAX
+    assert c.GROWW_CLIENT_POOL_MAX >= 1

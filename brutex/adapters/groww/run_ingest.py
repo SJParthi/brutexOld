@@ -110,7 +110,12 @@ def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdap
 
     if pace is None or not isinstance(adapter, GrowwMarketAdapter):
         return adapter
-    return replace(adapter, client=replace(adapter.client, pace=pace))
+    # ``with_pace`` (the GrowwClientProtocol seam) re-binds pace immutably — for a single
+    # client it is a ``dataclasses.replace``; for a multi-connection ClientPool it re-fans
+    # the pace into EVERY leaf (DEC-GROWW-CLIENT-POOL-001), so no connection bypasses the
+    # shared bucket. (Was ``replace(adapter.client, pace=pace)`` — which only worked for a
+    # bare dataclass client and would have skipped the pool's leaves.)
+    return replace(adapter, client=adapter.client.with_pace(pace))
 
 
 @dataclass(frozen=True, slots=True)

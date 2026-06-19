@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from brutex.adapters.call_meter import CallMeter
 from brutex.adapters.groww.auth import (
     GrowwCredentials,
     _real_token_factory,
@@ -26,6 +27,7 @@ from brutex.adapters.groww.auth import (
 )
 from brutex.adapters.groww.client import GrowwClient, GrowwSDK, _noop_hook, _noop_pace
 from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
+from brutex.adapters.groww.pool import ClientPool
 
 
 def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
@@ -98,4 +100,62 @@ def build_live_client(
     )
 
 
-__all__ = ["build_live_client"]
+def build_live_pool(
+    creds: GrowwCredentials,
+    *,
+    size: int = 1,
+    token_factory: Callable[[str, str], str] = _real_token_factory,
+    totp_minter: Callable[[str], str] = _real_totp,
+    sdk_factory: Callable[[str], GrowwSDK] = _real_sdk_factory,
+    pace: Callable[[], None] | None = None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
+) -> ClientPool:
+    """Build a live multi-connection :class:`ClientPool` of *size* leaves from *creds*.
+
+    DEC-GROWW-CLIENT-POOL-001. Mints the TOTP access token **ONCE**
+    (:func:`get_access_token`) and hands the SAME token to *sdk_factory* *size* times to
+    build *size* INDEPENDENT SDK connections, each wrapped in a :class:`GrowwClient` that
+    shares ONE rate-limiter pace + decrement/recover hooks AND ONE
+    :class:`~brutex.adapters.call_meter.CallMeter` (the aggregate the dashboard reads). The
+    worker threads then fan across the leaves (thread-affinity) so they stop serialising on
+    a single socket — while the shared controller still caps the AGGREGATE rate (CLAUDE.md
+    §2 Rule 6) and the meter proves the achieved number (Rule 1 / Rule 10).
+
+    *size* is clamped to ``>= 1``; ``size=1`` is behaviour-identical to
+    :func:`build_live_client` (one connection) but wrapped in a 1-leaf pool, so the live
+    build sites take ONE code path regardless of the configured size. Concurrent use of one
+    TOTP token across K connections is vendor-UNVERIFIED (ADR-0009 §3); the AIMD ladder +
+    bounded retry absorb any vendor pushback (429 → step down → recover), and the operator
+    can fall straight back to ``size=1`` via ``BRUTEX_GROWW_POOL_SIZE`` (no code change).
+
+    Parameters mirror :func:`build_live_client` (every side-effecting step is an injected
+    callable, so the whole composition is unit-tested with fakes — no ``growwapi`` / network)
+    plus *size* (the number of independent connections).
+
+    Returns
+    -------
+    ClientPool
+        A pool of *size* leaf clients sharing one limiter + one meter.
+    """
+    safe_size = max(1, size)
+    token_info = get_access_token(creds, token_factory=token_factory, totp_minter=totp_minter)
+    token = token_info.access_token
+    # ONE shared meter across all leaves → the dashboard's achieved-rate gauge aggregates
+    # across every connection (in_flight rises toward `size`, not split per-connection).
+    meter = CallMeter()
+    leaves = [
+        GrowwClient(
+            sdk=sdk_factory(token),
+            pace=pace or _noop_pace,
+            on_rate_limit=on_rate_limit or _noop_hook,
+            on_success=on_success or _noop_hook,
+            call_timeout_seconds=GROWW_PULL_CALL_TIMEOUT_S,
+            meter=meter,
+        )
+        for _ in range(safe_size)
+    ]
+    return ClientPool(leaves)
+
+
+__all__ = ["build_live_client", "build_live_pool"]

@@ -27,14 +27,14 @@ from __future__ import annotations
 from datetime import date, datetime, time
 
 from brutex.adapters.groww.chunks import plan_candle_windows
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import INTERVAL_TO_GROWW
 from brutex.adapters.groww.parser import parse_candle_rows
 from brutex.data.models import CandleBar
 
 
 def fetch_candle_windows(
-    client: GrowwClient,
+    client: GrowwClientProtocol,
     *,
     exchange: str,
     segment: str,

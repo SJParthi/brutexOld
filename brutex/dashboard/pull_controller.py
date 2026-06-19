@@ -542,8 +542,9 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
+    from brutex.adapters.groww.constants import resolve_pool_size
     from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
-    from brutex.adapters.groww.live import build_live_client
+    from brutex.adapters.groww.live import build_live_pool
     from brutex.config.credentials import resolve_groww_file_credentials
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
@@ -551,7 +552,14 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     del instruments  # the Groww adapter carries the whole master index (O(1) resolve)
     file_creds = resolve_groww_file_credentials()
     creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
-    client = build_live_client(creds)
+    # Multi-connection pool (DEC-GROWW-CLIENT-POOL-001): K independent SDK connections so the
+    # fan-out worker threads stop serialising on ONE socket (the measured avg-0.49-in-flight
+    # → ~3.4 r/s starve). The SHARED session RateController still caps the AGGREGATE rate; the
+    # shared CallMeter proves the real achieved number on the dashboard rate panel. Pool size
+    # is env-tunable (BRUTEX_GROWW_POOL_SIZE) with a safe default + hard clamp.
+    pool_size = resolve_pool_size()
+    client = build_live_pool(creds, size=pool_size)
+    _LOG.info("groww.spot.client_pool", connections=pool_size)
     index = load_index(urllib_http_get)
     adapter = GrowwMarketAdapter(client=client, index=index)
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))

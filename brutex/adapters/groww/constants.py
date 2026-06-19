@@ -15,6 +15,7 @@ gate and MUST NOT be mistaken for a verified fact.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from datetime import date
 from typing import Final
@@ -175,6 +176,48 @@ GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
 #: dead socket to seconds, not forever. NOT a vendor-documented limit.
 GROWW_PULL_CALL_TIMEOUT_S: Final[float] = 45.0
 
+#: Default number of INDEPENDENT Groww SDK connections the live spot pull fans its worker
+#: threads across (DEC-GROWW-CLIENT-POOL-001 — the multi-connection
+#: :class:`~brutex.adapters.groww.pool.ClientPool`). 1 = today's exact single-connection
+#: behaviour; 2 lets the worker threads stop serialising on one socket (the measured
+#: avg-0.49-in-flight starve) so the achieved rate can approach the rate-controller ceiling.
+#: Little's Law says ~1.2 concurrent calls reach 8 r/s at the ~150 ms observed latency, so 2
+#: is sufficient AND gentle. The SHARED rate controller still caps the AGGREGATE issue rate
+#: (CLAUDE.md §2 Rule 6 untouched — K connections add concurrency, never extra rate); the
+#: achieved-rate meter proves the real number. Override per environment via
+#: ``BRUTEX_GROWW_POOL_SIZE`` (clamped to ``[1, GROWW_CLIENT_POOL_MAX]``).
+GROWW_CLIENT_POOL_SIZE: Final[int] = 2
+
+#: Hard upper bound on the connection-pool size (a safety clamp on
+#: ``BRUTEX_GROWW_POOL_SIZE``). Concurrent use of one TOTP token across many SDK connections
+#: is vendor-UNVERIFIED (ADR-0009 §3) and the vendor 429s above ~5 r/s anyway (live logs),
+#: so more than 4 connections only manufactures 429s — never raise this without ADR sign-off.
+GROWW_CLIENT_POOL_MAX: Final[int] = 4
+
+#: Environment override for the pool size (operator escape hatch, no code change).
+GROWW_POOL_SIZE_ENV: Final[str] = "BRUTEX_GROWW_POOL_SIZE"
+
+
+def resolve_pool_size() -> int:
+    """Resolve the live-pull connection-pool size: env override clamped to ``[1, MAX]``.
+
+    Reads ``BRUTEX_GROWW_POOL_SIZE`` (:data:`GROWW_POOL_SIZE_ENV`); falls back to
+    :data:`GROWW_CLIENT_POOL_SIZE` when unset, blank, non-integer, or out of range — a
+    bad value can never crash a pull or silently exceed the :data:`GROWW_CLIENT_POOL_MAX`
+    safety clamp (fail-safe to the audited default, CLAUDE.md §2 Rule 1 / Rule 6). O(1).
+    """
+    raw = os.environ.get(GROWW_POOL_SIZE_ENV)
+    if raw is None or not raw.strip():
+        return GROWW_CLIENT_POOL_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        return GROWW_CLIENT_POOL_SIZE
+    if value < 1 or value > GROWW_CLIENT_POOL_MAX:
+        return GROWW_CLIENT_POOL_SIZE
+    return value
+
+
 __all__ = [
     "BRUTE_FORCE_INDEX_SYMBOLS",
     "CHUNK_WINDOW_30D_INTERVALS",
@@ -183,6 +226,8 @@ __all__ = [
     "EARLIEST_HISTORY",
     "EXCLUDED_SEGMENTS",
     "EXPECTED_FNO_STOCK_COUNT",
+    "GROWW_CLIENT_POOL_MAX",
+    "GROWW_CLIENT_POOL_SIZE",
     "GROWW_CSV_ALLOWED_HOST",
     "GROWW_DAILY_QUOTA_UNVERIFIED",
     "GROWW_EXCHANGES",
@@ -190,6 +235,7 @@ __all__ = [
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
     "GROWW_OPTION_COVERAGE_MARKET",
+    "GROWW_POOL_SIZE_ENV",
     "GROWW_PULL_CALL_TIMEOUT_S",
     "GROWW_RATE_LIMIT_PER_MIN",
     "GROWW_RATE_LIMIT_RPS_CEILING",
@@ -205,4 +251,5 @@ __all__ = [
     "WINDOW_DAYS_30",
     "WINDOW_DAYS_90",
     "WINDOW_DAYS_180",
+    "resolve_pool_size",
 ]

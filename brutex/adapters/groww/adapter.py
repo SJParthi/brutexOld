@@ -34,7 +34,7 @@ from datetime import date
 from typing import Final
 
 from brutex.adapters.groww.candles import fetch_candle_windows
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     EARLIEST_HISTORY,
     GROWW_RATE_LIMIT_RPS_UNVERIFIED,
@@ -69,9 +69,16 @@ GROWW_CAPABILITIES: Final[MarketCapabilities] = MarketCapabilities(
 
 @dataclass(frozen=True, slots=True)
 class GrowwMarketAdapter:
-    """MarketAdapter over an injected Groww client + prebuilt instrument index."""
+    """MarketAdapter over an injected Groww client + prebuilt instrument index.
 
-    client: GrowwClient
+    ``client`` is the :class:`~brutex.adapters.groww.client.GrowwClientProtocol` — EITHER a
+    single :class:`~brutex.adapters.groww.client.GrowwClient` OR a multi-connection
+    :class:`~brutex.adapters.groww.pool.ClientPool` (DEC-GROWW-CLIENT-POOL-001); the adapter
+    is identical for both (it only calls ``historical_candles`` / ``expiries`` / ``contracts``
+    and exposes ``client.meter`` for the rate panel).
+    """
+
+    client: GrowwClientProtocol
     index: InstrumentIndex
 
     @property

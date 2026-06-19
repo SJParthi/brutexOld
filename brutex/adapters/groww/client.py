@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field, replace
+from typing import Protocol, Self, runtime_checkable
 
 import structlog
 
@@ -299,5 +299,77 @@ class GrowwClient:
             label="get_contracts",
         )
 
+    def with_pace(self, pace: Callable[[], None]) -> GrowwClient:
+        """Return a copy of this client with its ``pace`` hook rebound (O(1), immutable).
 
-__all__ = ["GrowwClient", "GrowwSDK"]
+        The :class:`GrowwClientProtocol` seam the ingest spine uses
+        (:func:`~brutex.adapters.groww.run_ingest._with_paced_client`) to wire the shared
+        rate bucket into the client's internal fast-retry AFTER the adapter is built —
+        replacing the prior raw :func:`dataclasses.replace`, so the SAME call also re-fans
+        the pace into every leaf of a multi-connection :class:`~brutex.adapters.groww.pool.\
+ClientPool` (DEC-GROWW-CLIENT-POOL-001). Frozen dataclass → :func:`replace`, never a
+        mutation; the shared :attr:`meter` is carried through unchanged (``compare=False``).
+        """
+        return replace(self, pace=pace)
+
+
+@runtime_checkable
+class GrowwClientProtocol(Protocol):
+    """The neutral client surface the spot adapter + option enumerator depend on.
+
+    BOTH the single :class:`GrowwClient` AND the multi-connection
+    :class:`~brutex.adapters.groww.pool.ClientPool` satisfy this structurally, so the
+    adapter's ``client`` slot (and the shared candle / contract fetchers) accept EITHER
+    without change (DEC-GROWW-CLIENT-POOL-001). In both cases ONE shared
+    :class:`~brutex.adapters.rate_common.RateController` caps the AGGREGATE issue rate and
+    ONE shared :class:`~brutex.adapters.call_meter.CallMeter` reports the achieved rate;
+    the pool merely fans physical calls across K independent SDK connections so the worker
+    threads stop serialising on a single shared socket (the measured 0.49-in-flight starve).
+    """
+
+    @property
+    def meter(self) -> CallMeter:
+        """The shared achieved-throughput meter the dashboard rate panel reads.
+
+        Read-only (``_observe_rate`` → ``adapter.client.meter.snapshot()``); both a frozen
+        :class:`GrowwClient` (a dataclass field) and a :class:`~brutex.adapters.groww.pool.\
+ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
+        """
+        ...
+
+    def historical_candles(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        groww_symbol: str,
+        interval: str,
+        start: str,
+        end: str,
+    ) -> Mapping[str, object]:
+        """Fetch one historical-candle window (the row-of-arrays payload)."""
+        ...
+
+    def expiries(
+        self,
+        *,
+        exchange: str,
+        underlying_symbol: str,
+        year: int | None = None,
+        month: int | None = None,
+    ) -> Mapping[str, object]:
+        """List FNO expiries for an underlying."""
+        ...
+
+    def contracts(
+        self, *, exchange: str, underlying_symbol: str, expiry_date: str
+    ) -> Mapping[str, object]:
+        """List contract symbols for an underlying + expiry."""
+        ...
+
+    def with_pace(self, pace: Callable[[], None]) -> Self:
+        """Return a copy with the rate-bucket ``pace`` hook rebound (re-fanned to leaves)."""
+        ...
+
+
+__all__ = ["GrowwClient", "GrowwClientProtocol", "GrowwSDK"]
