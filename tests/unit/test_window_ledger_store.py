@@ -190,6 +190,108 @@ class TestPlanWindows:
         assert ledger.count >= 1
 
 
+class TestPlanWindowsSymbolWindows:
+    """DEC-SPOT-1DAY-FIRST-001 — per-symbol bounded sub-daily planning (plan_windows)."""
+
+    def _minute_tiles(self, start: date, end: date) -> list[tuple[date, date]]:
+        from brutex.adapters.ingest_common import tile_windows
+        from brutex.adapters.ingest_common import window_days_for_interval as _wdf
+
+        return tile_windows("1minute", start, end, window_days_for=_wdf)
+
+    def test_bounded_sub_daily_symbol_tiles_from_its_window(self) -> None:
+        # A symbol in the map → its SUB-DAILY (1minute) windows are tiled from the
+        # discovered ``(start, end)``, NOT the global range (lines 443-450).
+        bound = (date(2026, 4, 1), date(2026, 6, 1))
+        ledger = WindowLedger()
+        # ``now_ist`` past the bound's end so the daily/intraday clamp is inert.
+        plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            now_ist=datetime(2026, 6, 8, tzinfo=ZoneInfo("Asia/Kolkata")),
+            symbol_windows={"NIFTY": bound},
+        )
+        starts = {date.fromisoformat(r.window_start) for r in ledger.records()}
+        # Every planned window starts at/after the BOUNDED start — never the 2021 floor.
+        assert min(starts) == bound[0]
+        assert all(s >= bound[0] for s in starts)
+        # The count matches the bounded tiling, not the (far larger) global one.
+        clamped_end = min(bound[1], date(2026, 6, 8) + timedelta(days=1))
+        assert ledger.count == len(self._minute_tiles(bound[0], clamped_end))
+
+    def test_daily_interval_is_never_bounded(self) -> None:
+        # Even with the symbol in the map, the DAILY interval tiles the GLOBAL range
+        # (it produces the coverage + must advance to the requested end).
+        bound = (date(2026, 4, 1), date(2026, 6, 1))
+        bounded = WindowLedger()
+        plan_windows(
+            bounded,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            symbol_windows={"NIFTY": bound},
+        )
+        unbounded = WindowLedger()
+        plan_windows(
+            unbounded,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        # The bounded map made NO difference to the daily plan.
+        assert bounded.to_rows() == unbounded.to_rows()
+
+    def test_unbounded_symbol_falls_back_to_global_tiles(self) -> None:
+        # A symbol ABSENT from the map (BANKNIFTY) uses the shared global tiles, while
+        # the bounded NIFTY uses its narrow window — both in one plan.
+        bound = (date(2026, 4, 1), date(2026, 6, 1))
+        ledger = WindowLedger()
+        plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY"), _FakeInstrument("BANKNIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            symbol_windows={"NIFTY": bound},
+        )
+        nifty_starts = {
+            date.fromisoformat(r.window_start) for r in ledger.records() if r.security_id == "NIFTY"
+        }
+        bank_starts = {
+            date.fromisoformat(r.window_start)
+            for r in ledger.records()
+            if r.security_id == "BANKNIFTY"
+        }
+        assert min(nifty_starts) == bound[0]  # NIFTY bounded
+        assert min(bank_starts) == _START  # BANKNIFTY global (the 2021 floor)
+
+    def test_empty_bounded_window_plans_nothing_for_that_symbol(self) -> None:
+        # A degenerate bound where ``sym_start >= clamped_end`` → ZERO tiles for that
+        # symbol's sub-daily interval (the ``else []`` arm of _tiles_for).
+        bound = (date(2026, 6, 5), date(2026, 6, 5))  # start == end → empty tiling
+        ledger = WindowLedger()
+        planned = plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            symbol_windows={"NIFTY": bound},
+        )
+        assert planned == 0
+        assert ledger.count == 0
+
+
 class TestPruneOnPlan:
     """DEC-WINDOW-TRAILING-GC-001 — plan_windows prunes superseded trailing rows.
 
@@ -730,3 +832,91 @@ class TestReconcileLedgerWithLake:
         )  # now=None → datetime.now
         assert seeded == 1
         assert ledger.records()[0].status == "SUCCESS"
+
+
+class TestReconcileSymbolWindows:
+    """DEC-SPOT-1DAY-FIRST-001 — per-symbol bounded sub-daily cold-start seeding."""
+
+    def _minute_tiles(self, start: date, end: date) -> list[tuple[date, date]]:
+        from brutex.adapters.ingest_common import tile_windows
+        from brutex.adapters.ingest_common import window_days_for_interval as _wdf
+
+        return tile_windows("1minute", start, end, window_days_for=_wdf)
+
+    def test_bounded_sub_daily_seeds_from_its_window(self) -> None:
+        # The bounded SUB-DAILY tiling (lines 547-549): a 1minute symbol in the map is
+        # tiled from its discovered ``(start, end)`` so a seeded SUCCESS key matches a
+        # bounded planned key exactly (no orphan). A span enclosing the bound seeds it.
+        bound = (date(2026, 4, 1), date(2026, 6, 1))
+        ledger = WindowLedger()
+        seeded = reconcile_ledger_windows(
+            ledger,
+            [_span(interval="1minute", first="2026-03-01", last="2026-07-01", bars=500)],
+            instruments=[_inst()],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            symbol_windows={"NIFTY": bound},
+        )
+        # Every seeded window lies WITHIN the bounded range — never the 2021 floor.
+        starts = {date.fromisoformat(r.window_start) for r in ledger.records()}
+        assert seeded == ledger.count == len(self._minute_tiles(*bound))
+        assert min(starts) == bound[0]
+
+    def test_daily_interval_is_never_bounded_on_reconcile(self) -> None:
+        # The DAILY interval tiles the GLOBAL range even with the symbol in the map —
+        # the bounded/None reconcile must agree for daily (the never-bound guard).
+        bound = (date(2026, 4, 1), date(2026, 6, 1))
+        span = _span(interval="1day", first="2020-12-01", last="2026-06-30", bars=900)
+        bounded = WindowLedger()
+        b_seeded = reconcile_ledger_windows(
+            bounded,
+            [span],
+            instruments=[_inst()],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            symbol_windows={"NIFTY": bound},
+        )
+        unbounded = WindowLedger()
+        u_seeded = reconcile_ledger_windows(
+            unbounded,
+            [span],
+            instruments=[_inst()],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert b_seeded == u_seeded
+        assert bounded.to_rows() == unbounded.to_rows()
+
+    def test_unbounded_symbol_uses_global_reconcile_tiles(self) -> None:
+        # A symbol ABSENT from the map tiles the global range (the never-narrow
+        # fallback) — proven by an identical seed vs the None-map call.
+        span = _span(interval="1minute", first="2020-12-01", last="2026-07-01", bars=500)
+        with_map = WindowLedger()
+        m_seeded = reconcile_ledger_windows(
+            with_map,
+            [span],
+            instruments=[_inst()],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+            symbol_windows={"OTHER": (date(2026, 4, 1), date(2026, 6, 1))},
+        )
+        without_map = WindowLedger()
+        n_seeded = reconcile_ledger_windows(
+            without_map,
+            [span],
+            instruments=[_inst()],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert m_seeded == n_seeded
+        assert with_map.to_rows() == without_map.to_rows()
