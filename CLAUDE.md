@@ -18,7 +18,20 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864 —
+_Last updated: 2026-06-20 (DEC-FNO-MONEYNESS-001, MIGRATION.md #865 — per-option
+**moneyness (ITM/ATM/OTM) + a signed ATM±N strike offset** are now DERIVED at read
+time (never stored — time-varying: the strike is fixed but the spot moves) for the
+ENTIRE F&O universe (all ~212 stocks + indices), from the NEW shared engine
+`brutex/data/moneyness.py` (`classify` / `derive_strike_step` [the **DYNAMIC** grid =
+the min positive strike gap, never a hardcoded NSE rule] / `atm_offset` / `moneyness_view`).
+Surfaced on BOTH the options-movers screen (as-of snapshot — `OptionMover` +
+`compute_option_mover(strike_step=)` + two `movers.html` columns) AND the `/db` F&O
+candle viewer (PER-BAR — `db_view.query_candles` appends `moneyness`+`atm_offset` to every
+`segment="FNO"` page, classifying each bar against the underlying spot joined by timestamp;
+a future reads `NA`, an option with no spot reads `UNKNOWN`). `fno_candle_lake.py`'s
+`FNO_CANDLE_COLUMNS` advertises the two as `source="derived"`. Read-only — the brute-force
+ENGINE stays NIFTY/BANKNIFTY/SENSEX; NO storage/scope/vocab/rate change. Earlier: 2026-06-20
+(DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864 —
 EVERY `/db` tab is now O(page): the last two whole-table reads — the F&O registry
 (expiries/contracts) + the window-ledger sidecar — are SQL-`LIMIT`/`OFFSET` paginated,
 completing the candle/option/F&O/DuckDB-table pages already bounded. The registry is
@@ -169,23 +182,21 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-registry-pagination` (EVERY `/db` tab is now O(page) —
-  DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864: the last two whole-table reads — the
-  F&O registry expiries/contracts (`RegistryStore.list_*` gain `LIMIT`/`OFFSET` + FILTERED
-  `count_*`; `db_view.list_registry_*` thread them + return the filtered `COUNT(*)`) and the
-  window-ledger sidecar (route slices one page BEFORE IST-formatting) — are paginated,
-  completing the candle/option/F&O/DuckDB-table pages already SQL-bounded; `db.html` pages
-  both in place via the COMMON `gridAndPager` + grid-split. Honest envelope: registry fully
-  O(page) (bench 1.04× for 10× legs), window-ledger O(page) render/serialize + O(windows)
-  bounded read (small sidecar, deliberately not SQL-rewritten). `registry_store.py` +
-  `db_view.py` at 100% line+branch; read-only viewer, ENGINE UNCHANGED. Prior merged:
-  DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817, /db+/universe instant) +
-  DEC-LIVE-REMOVE-001 #862 (PR #816, entire LIVE feed removed) +
-  DEC-FNO-CANDLE-LAKE-001 #861 (PR #814, F&O candle lake first-class `/db` table + schema_meta) +
-  DEC-MOVERS-O1-LATENCY-001 #860 (PR #815, /movers near-O(1) snapshot cache + month-bounded
-  reads) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows
-  real expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
-  (PR #812))
+- **Active branch:** `claude/relaxed-keller-6b7pzx` (per-option **moneyness
+  (ITM/ATM/OTM) + signed ATM±N strike offset** for the ENTIRE F&O universe —
+  DEC-FNO-MONEYNESS-001, MIGRATION.md #865: NEW shared engine `brutex/data/moneyness.py`
+  (`classify`/`derive_strike_step` [DYNAMIC grid = min positive strike gap, all ~212
+  stocks + indices, never hardcoded]/`atm_offset`/`moneyness_view`), DERIVED at read time
+  (never stored — time-varying). Surfaced on the options-movers screen (`OptionMover` +
+  `compute_option_mover(strike_step=)` + `movers.html` columns) AND the `/db` F&O candle
+  viewer (`db_view.query_candles` appends `moneyness`+`atm_offset` per bar for
+  `segment="FNO"`, classifying each bar vs the underlying spot joined by timestamp;
+  FUT→`NA`, no-spot→`UNKNOWN`); `fno_candle_lake.FNO_CANDLE_COLUMNS` advertises both as
+  `source="derived"`. Read-only — NO storage/scope/vocab/rate change, ENGINE unchanged.
+  Prior merged: DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818) + DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817) + DEC-LIVE-REMOVE-001 #862 (live feed removed) + DEC-FNO-CANDLE-LAKE-001 #861
+  (PR #814) + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815)
+  + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
+  + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812))
 
 ---
 

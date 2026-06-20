@@ -68,6 +68,7 @@ from brutex.dashboard.movers_snapshot import (
     interval_minutes,
     parse_snapshot_date,
 )
+from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
 
@@ -96,9 +97,11 @@ DEFAULT_FUTURES_TOP_N: Final[int] = 50
 _FNO_SEGMENT: Final[str] = "FNO"
 
 #: The two spot segments an underlying's cash/index series can live under — an
-#: index future's underlying rides ``INDEX``; a stock future's rides ``CASH``.
-#: Tried in this order when resolving the underlying spot LTP for premium.
-_SPOT_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH")
+#: index future's underlying rides ``INDEX``; a stock future's rides ``CASH``. Tried in
+#: this order when resolving the underlying spot LTP for premium. The shared
+#: :data:`brutex.data.partition.SPOT_PROBE_SEGMENTS` is the ONE source of truth for the
+#: order (the ``/db`` per-bar moneyness join uses the same; CLAUDE.md §11 COMMON).
+_SPOT_SEGMENTS: Final[tuple[str, ...]] = SPOT_PROBE_SEGMENTS
 
 #: A FUT contract groww_symbol ends with this suffix (``EXCH-UNDERLYING-DDMmmYY-FUT``).
 #: Options share the FNO segment but their symbol carries a strike + ``-CE`` /
