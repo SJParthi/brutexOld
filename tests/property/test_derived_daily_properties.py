@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 import pytest
 from brutex.data.spot_daily_resample import resample_1m_to_daily
@@ -78,7 +79,7 @@ def _minute_bars(draw: st.DrawFn) -> list[dict[str, object]]:
     return bars
 
 
-@given(rows=_minute_bars())
+@given(rows=_minute_bars())  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
 @settings(max_examples=200, deadline=None)
 def test_derived_daily_is_exact_ohlcv_aggregation(rows: list[dict[str, object]]) -> None:
     """The derived daily bar exactly aggregates its 1-minute series (open/high/low/close/vol)."""
@@ -102,9 +103,9 @@ def test_derived_daily_is_exact_ohlcv_aggregation(rows: list[dict[str, object]])
     last = rows[-1]
     assert bar.open == Decimal(str(first["open"]))  # open = first minute's open
     assert bar.close == Decimal(str(last["close"]))  # close = last minute's close
-    assert bar.high == Decimal(str(max(float(r["high"]) for r in rows)))  # high = max
-    assert bar.low == Decimal(str(min(float(r["low"]) for r in rows)))  # low = min
-    assert bar.volume == sum(int(r["volume"]) for r in rows)  # volume = sum
+    assert bar.high == Decimal(str(max(cast(float, r["high"]) for r in rows)))  # high = max
+    assert bar.low == Decimal(str(min(cast(float, r["low"]) for r in rows)))  # low = min
+    assert bar.volume == sum(cast(int, r["volume"]) for r in rows)  # volume = sum
     # The derived bar is internally consistent.
     assert bar.low <= bar.open <= bar.high
     assert bar.low <= bar.close <= bar.high
