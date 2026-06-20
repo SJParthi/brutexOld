@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from brutex.data.tf_resampler import resample_all_21_tfs
@@ -34,7 +35,10 @@ from brutex.data.timeframes import DAILY_TF_MINUTES
 
 from tests.bench._o1_tiers import ratio_ceiling
 
-pl = pytest.importorskip("polars")  # the frame construction needs the [data] extra
+if TYPE_CHECKING:
+    import polars as pl  # type-only: real module so `pl.X` annotations resolve
+else:
+    pl = pytest.importorskip("polars")  # runtime: frame construction needs the [data] extra
 
 #: 09:15 IST == 03:45 UTC — the fixed session anchor.
 _SESSION_OPEN_UTC = datetime(2024, 1, 2, 3, 45)

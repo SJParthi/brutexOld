@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from brutex.data.tf_resampler import resample_1m_to_tf
@@ -35,7 +36,10 @@ from brutex.data.timeframes import ALL_TF_MINUTES, DAILY_TF_MINUTES
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-pl = pytest.importorskip("polars")  # the frame construction needs the [data] extra
+if TYPE_CHECKING:
+    import polars as pl  # type-only: real module so `pl.X` annotations resolve
+else:
+    pl = pytest.importorskip("polars")  # runtime: frame construction needs the [data] extra
 
 #: 09:15 IST == 03:45 UTC — the fixed session anchor the resampler buckets against.
 _SESSION_OPEN_UTC = datetime(2024, 1, 2, 3, 45)
@@ -156,7 +160,7 @@ def _oracle_resample(
     return out
 
 
-@given(df=_multiday_1m())
+@given(df=_multiday_1m())  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
 @settings(max_examples=150, deadline=None)
 def test_every_1m_bar_tiles_into_exactly_one_bucket_per_tf(df: pl.DataFrame) -> None:
     """P-TILE: each 1m bar lands in EXACTLY ONE bucket of every TF; buckets cover all bars.
@@ -181,7 +185,7 @@ def test_every_1m_bar_tiles_into_exactly_one_bucket_per_tf(df: pl.DataFrame) -> 
         assert set(out["ts_utc"].to_list()) == set(counts), f"tf={tf}: label set mismatch"
 
 
-@given(df=_multiday_1m())
+@given(df=_multiday_1m())  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
 @settings(max_examples=120, deadline=None)
 def test_resample_is_associative_over_all_divisor_pairs(df: pl.DataFrame) -> None:
     """P-ASSOC: 1m→T == (1m→T')→T for EVERY divisor pair (T' | T, T' < T), byte-for-byte.
@@ -195,7 +199,10 @@ def test_resample_is_associative_over_all_divisor_pairs(df: pl.DataFrame) -> Non
         assert direct.equals(composed), f"associativity broke for ({tp} -> {t})"
 
 
-@given(df=_multiday_1m(), tf=st.sampled_from(sorted(ALL_TF_MINUTES)))
+@given(
+    df=_multiday_1m(),  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
+    tf=st.sampled_from(sorted(ALL_TF_MINUTES)),
+)
 @settings(max_examples=200, deadline=None)
 def test_independent_oracle_matches_production_resampler(df: pl.DataFrame, tf: int) -> None:
     """P-ORACLE: the pure-Python reference resampler equals the production one, bit-for-bit.
