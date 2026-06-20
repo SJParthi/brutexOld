@@ -174,22 +174,57 @@ def _per_symbol_spot(
     return sorted(by_symbol.values(), key=lambda e: (e["symbol"], e["exchange"]))
 
 
-def _option_verdict(statuses: list[str]) -> str:
-    """Fold one underlying's per-year coverage-cell statuses into the honest option verdict.
+def _option_verdict(cells: list[tuple[str, int]]) -> str:
+    """Fold one underlying's per-year ``(status, expiries_pulled)`` cells into the honest verdict.
 
-    Any ``failed`` year → ``failed`` (a re-pull should retry); else any ``pending`` year →
-    ``growing`` (the chain is still filling — a new expiry could still arrive); else any
-    ``expiries_only`` year → ``partial`` (expiries captured, contracts not yet); else (every
-    year ``complete``) → ``stable`` — the only honest "complete" for options (all currently
-    -listed expiries + contracts pulled, nothing new outstanding). No cells → ``none``.
+    DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 — a requested year that returned ZERO expiries (a
+    pre-listing year of a late-listed underlying — e.g. JIOFIN before 2023, ETERNAL before 2024 —
+    or a gap) is NOT a "still-filling chain": it must NOT force ``growing`` (the prior bug left
+    such an underlying perpetually ``growing`` because its empty pre-listing years stayed
+    ``pending``). The verdict, in order:
+
+    * any ``failed`` year → ``failed`` (a re-pull should retry);
+    * else NO year has ANY expiries → ``none`` (the underlying has no option history in the grid);
+    * else any year that HAS expiries but is still ``pending`` → ``growing`` (DEFENSIVE /
+      forward-compat — see the honesty note below);
+    * else any requested year with ZERO expiries → ``partial`` (the option history does NOT span
+      the full requested range — a late-listed start or a gap; HONEST, never a fabricated %);
+    * else any ``expiries_only`` year → ``partial`` (expiries captured, contracts not yet);
+    * else (every requested year ``complete`` AND non-empty) → ``stable`` — the honest "complete".
+
+    Only years with ``expiries_pulled > 0`` count as real option-history; empty years are weighed
+    here for the ``partial`` signal but are EXCLUDED from the displayed ``years`` span (the caller
+    appends a year only when it has expiries), so a late-listed underlying shows only its real
+    expiry years, never the full requested 2020→now range.
+
+    Honesty note (Golden Rule #10, hostile-review #859): the ``growing`` arm is currently
+    UNREACHABLE in production — the ledger's :func:`brutex.data.coverage_ledger.classify_cell`
+    invariant is ``pending ⟺ expiries_pulled == 0`` (a year with discovered expiries is
+    ``expiries_only`` or ``complete``, never ``pending``), so a ``(pending, n>0)`` cell cannot
+    be emitted by the real pull. Under today's pipeline a still-being-filled current year reads
+    ``expiries_only`` → ``partial`` until it completes; ``growing`` therefore never fires. The
+    arm (and its synthetic ``(pending, n>0)`` unit fixtures) is retained as a DEFENSIVE /
+    forward-compat fold in case the ledger ever gains a true "chain still filling" status —
+    mirroring the existing defensive ``OPT_NONE`` aggregate case. It is NOT claimed as a live
+    verdict. (Consequently the ``growing_or_partial`` aggregate bucket is, in real data,
+    effectively partial-only.)
     """
-    if not statuses:
+    if not cells:
         return OPT_NONE
-    if _CELL_FAILED in statuses:
+    with_expiries = [(status, n) for (status, n) in cells if n > 0]
+    if any(status == _CELL_FAILED for status, _n in cells):
         return OPT_FAILED
-    if _CELL_PENDING in statuses:
+    if not with_expiries:
+        return OPT_NONE
+    if any(status == _CELL_PENDING for status, _n in with_expiries):
+        # DEFENSIVE / forward-compat (UNREACHABLE in production): the ledger invariant is
+        # ``pending ⟺ expiries_pulled == 0`` (classify_cell), so no real cell is (pending, n>0).
+        # Retained in case a true "chain still filling" status is ever added (see the docstring
+        # honesty note + hostile-review #859); exercised only by synthetic unit fixtures.
         return OPT_GROWING
-    if _CELL_EXPIRIES_ONLY in statuses:
+    if any(n == 0 for _status, n in cells):
+        return OPT_PARTIAL
+    if any(status == _CELL_EXPIRIES_ONLY for status, _n in with_expiries):
         return OPT_PARTIAL
     return OPT_STABLE  # every attempted year is COMPLETE
 
@@ -234,18 +269,23 @@ def _per_underlying_options(
                 "expiries_pulled": 0,
                 "contracts_pulled": 0,
                 "years": [],
-                "_statuses": [],
+                "_cells": [],
             },
         )
-        cell["expiries_pulled"] += int(rec.expiries_pulled)
+        expiries = int(rec.expiries_pulled)
+        cell["expiries_pulled"] += expiries
         cell["contracts_pulled"] += int(rec.contracts_pulled)
-        cell["years"].append(int(rec.year))
-        cell["_statuses"].append(str(rec.status))
+        cell["_cells"].append((str(rec.status), expiries))
+        # Only a year with REAL expiries enters the displayed span — a 0-expiry pre-listing
+        # year (e.g. JIOFIN before 2023) is NEVER shown as covered (DEC-OPTIONS-COMPLETENESS
+        # -REAL-YEARS-001); it is still weighed by _option_verdict for the partial signal.
+        if expiries > 0:
+            cell["years"].append(int(rec.year))
     out: list[dict[str, Any]] = []
     for cell in grouped.values():
-        statuses = cell.pop("_statuses")
+        cells = cell.pop("_cells")
         cell["years"] = sorted(cell["years"])
-        cell["status"] = _option_verdict(statuses)
+        cell["status"] = _option_verdict(cells)
         # Honest annotation: a 0-contract expiries_only row is metadata-only BY DESIGN
         # (legs discarded), not broken (DEC-METADATA-LIVE-PROGRESS-001).
         cell["contracts_note"] = _contracts_note(cell["status"], cell["contracts_pulled"])
@@ -368,21 +408,27 @@ def _fold_per_symbol_options(
                 "expiries": 0,
                 "contracts": 0,
                 "years": [],
-                "statuses": [],
+                "cells": [],
             },
         )
-        acc["expiries"] += int(rec.expiries_pulled)
+        expiries = int(rec.expiries_pulled)
+        acc["expiries"] += expiries
         acc["contracts"] += int(rec.contracts_pulled)
-        acc["years"].append(int(rec.year))
-        acc["statuses"].append(str(rec.status))
+        acc["cells"].append((str(rec.status), expiries))
+        # Only REAL-expiry years enter the displayed span (DEC-OPTIONS-COMPLETENESS-REAL-YEARS
+        # -001) — a 0-expiry pre-listing year is excluded, so a late-listed underlying shows
+        # only its real years, never the full requested range.
+        if expiries > 0:
+            acc["years"].append(int(rec.year))
     for underlying, acc in grouped.items():
-        # ``years`` is always non-empty here: a grouped entry exists ONLY because a record was
-        # folded into it, and each fold appends its year — so years[0]/years[-1] are safe.
+        # ``years`` may be EMPTY when every requested year returned zero expiries (an underlying
+        # with no option history in the grid) — first/last_year then stay None (the verdict is
+        # OPT_NONE), mirroring the absent-options default.
         years = sorted(acc["years"])
         entry = out.setdefault(
             underlying, _new_per_symbol_entry(underlying, acc["exchange"], acc["category"])
         )
-        status = _option_verdict(acc["statuses"])
+        status = _option_verdict(acc["cells"])
         entry["options"] = {
             "status": status,
             "expiries_pulled": acc["expiries"],
@@ -391,8 +437,8 @@ def _fold_per_symbol_options(
             # BY DESIGN (legs discarded), not broken (DEC-METADATA-LIVE-PROGRESS-001).
             "contracts_note": _contracts_note(status, acc["contracts"]),
             "years": years,
-            "first_year": years[0],
-            "last_year": years[-1],
+            "first_year": years[0] if years else None,
+            "last_year": years[-1] if years else None,
         }
 
 
