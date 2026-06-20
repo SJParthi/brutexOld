@@ -609,6 +609,38 @@ class TestIsUniverseUnderlying:
             is False
         )
 
+    def test_token_join_security_id_admits_symbol_mismatched_fno_equity(self) -> None:
+        # DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001: a symbol-mismatched F&O stock (its spot
+        # symbol is NOT the leg's underlying_symbol, so the ticker key misses it) is
+        # admitted when its SECURITY_ID is in the id-keyed token-join set.
+        eligible = frozenset({(Exchange.NSE, "BAJAJAUTO")})  # the LEG spelling
+        bajaj = _make_equity(Exchange.NSE, "BAJAJ-AUTO")  # the SPOT spelling — misses ticker key
+        assert is_universe_underlying(bajaj, eligible) is False
+        assert (
+            is_universe_underlying(bajaj, eligible, frozenset(), frozenset({bajaj.security_id}))
+            is True
+        )
+
+    def test_token_join_set_does_not_admit_bse_equity(self) -> None:
+        # The token-join arm is NSE-only, same as the F&O + reference clauses.
+        bse = _make_equity(Exchange.BSE, "BAJAJ-AUTO")
+        assert (
+            is_universe_underlying(
+                bse, self._NO_EQUITIES, frozenset(), frozenset({bse.security_id})
+            )
+            is False
+        )
+
+    def test_token_join_set_does_not_admit_derivative(self) -> None:
+        # A derivative leg is rejected even if its id is in the token-join set.
+        deriv = _make_derivative(Exchange.NSE, InstrumentType.CE, "BAJAJAUTO")
+        assert (
+            is_universe_underlying(
+                deriv, self._NO_EQUITIES, frozenset(), frozenset({deriv.security_id})
+            )
+            is False
+        )
+
     def test_bse_equity_rejected(self) -> None:
         eligible = frozenset({(Exchange.BSE, "RELIANCE")})
         assert is_universe_underlying(_make_equity(Exchange.BSE, "RELIANCE"), eligible) is False

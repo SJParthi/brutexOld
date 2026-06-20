@@ -209,6 +209,7 @@ def _ntm_admission(
     index: InstrumentIndex,
     *,
     fno_eligible: frozenset[tuple[Exchange, str]],
+    fno_eligible_security_ids: frozenset[int],
     constituent_opener: Callable[[str], str] | None,
     cache_dir: Path,
 ) -> tuple[frozenset[int], dict[str, Any]]:
@@ -248,6 +249,9 @@ def _ntm_admission(
     # F&O-eligible NSE-equity SECURITY_IDs stay reference_only=FALSE even when they
     # are ALSO NTM constituents — they keep their real F&O option chain
     # (DEC-OPTIONS-PULL-GUARD-001). Only the NON-F&O matches become reference rows.
+    # This ticker key misses a SYMBOL-MISMATCHED F&O stock (spot symbol ≠ leg
+    # underlying_symbol); *fno_eligible_security_ids* (the id-keyed token-join set)
+    # catches those so they too stay tradable (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
     fno_security_ids = frozenset(
         inst.security_id
         for inst in nse_equities
@@ -280,7 +284,12 @@ def _ntm_admission(
     # ticker/trading_symbol fallback) via the COMMON vendor-neutral resolver, then
     # keep ONLY the non-F&O matches as the new REFERENCE_ONLY admissions.
     report = resolve_constituents(parse_constituents(csv_text), index.universe)
-    reference_security_ids = frozenset(report.security_ids) - fno_security_ids
+    # F&O-tradable WINS over NTM-reference: subtract BOTH the ticker-keyed F&O set
+    # AND the id-keyed token-join F&O set, so a symbol-mismatched F&O stock that is
+    # ALSO an NTM constituent is never tagged reference_only (it keeps its options).
+    reference_security_ids = (
+        frozenset(report.security_ids) - fno_security_ids - fno_eligible_security_ids
+    )
 
     note.update(
         admitted=bool(reference_security_ids),
@@ -437,7 +446,12 @@ def _has_genuine_numeric_token(instrument: Instrument) -> bool:
 def _classify_option_pullable(
     index: InstrumentIndex,
     options_eligible: frozenset[tuple[Exchange, str]],
-) -> tuple[frozenset[tuple[Exchange, str]], frozenset[tuple[Exchange, str]], dict[str, list[str]]]:
+) -> tuple[
+    frozenset[tuple[Exchange, str]],
+    frozenset[tuple[Exchange, str]],
+    dict[str, list[str]],
+    frozenset[int],
+]:
     """Fold ALL three OPT-vs-REF bridges into one comprehensive classification.
 
     DEC-FNO-INDEX-ALIAS-001 — the union of three evidence sources that each rescue
@@ -456,16 +470,20 @@ def _classify_option_pullable(
        bridged set). An NSE index carries a non-numeric token (surrogate
        ``security_id``) so it is correctly NOT token-joined.
 
-       **EQ token-join is DIAGNOSTIC ONLY (honesty, DEC-FNO-INDEX-EQ-TOKEN-JOIN-
-       AUDIT-001).** An ``EQ`` row whose numeric token matches a leg is surfaced in
-       the SEPARATE ``token_join_diagnostic`` bucket — it does NOT change the
-       stock's ``reference_only`` (a stock's pullability is decided by
-       ``fno_eligible`` membership, NOT this index-only bridge:
-       :func:`~brutex.universe.is_spot_only_index` returns ``False`` for any non-
-       ``IDX`` row, so adding an ``EQ`` pair here is inert). The operator still SEES
-       every symbol-mismatched stock (the audit value asked for), but is not told
-       its flag changed when it did not; a symbol-keyed ``is_universe_underlying``
-       change is the out-of-scope follow-up.
+       **EQ token-join drives PERSISTENCE, not the index bridge (DEC-FNO-EQ-TOKEN-
+       JOIN-PERSIST-001, the follow-up to the DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001
+       diagnostic split).** An ``EQ`` row whose GENUINE numeric token matches a leg
+       is a genuinely F&O-eligible stock whose spot ``symbol_name`` ≠ its option
+       leg's ``underlying_symbol`` (e.g. spot ``BAJAJ-AUTO`` vs leg ``BAJAJAUTO``).
+       It is NOT added to ``options_eligible_bridged`` (that set feeds the index-only
+       :func:`~brutex.universe.is_spot_only_index`, which returns ``False`` for any
+       non-``IDX`` row — adding an ``EQ`` pair there would be inert). Instead its
+       ``security_id`` is collected into the returned ``eq_token_join_security_ids``
+       set, which :func:`~brutex.universe.is_universe_underlying` uses to PERSIST it
+       as a TRADABLE (``reference_only=FALSE``) universe underlying — closing the
+       prior gap where the stock was surfaced for audit only and dropped from the
+       lean store. It is STILL listed in ``token_join_diagnostic`` for the operator
+       audit but EXCLUDED from the reclassification ``count`` (no index flag flips).
     2. ``alias`` (5b) — a spot ``IDX`` whose ``symbol_name`` is a key in the
        sourced+override alias map (:func:`_resolve_fno_index_aliases`) whose
        ALIASED F&O symbol is options-eligible (the 2 NSE indices ``NIFTYJR`` /
@@ -480,7 +498,8 @@ def _classify_option_pullable(
     order above and the FIRST that fires labels the row, so the audit attributes
     each rescue to ONE mechanism deterministically.
 
-    Returns ``(options_eligible_bridged, index_alias_symbols, rescued)``:
+    Returns ``(options_eligible_bridged, index_alias_symbols, rescued,
+    eq_token_join_security_ids)``:
 
     * ``options_eligible_bridged`` — *options_eligible* UNION every rescued row's
       ``(exchange, symbol_name)``, fed to :func:`_reference_only_of`.
@@ -494,7 +513,11 @@ def _classify_option_pullable(
     * ``rescued`` — ``{mechanism: sorted [exch:symbol_name, …]}`` for the
       reconciliation audit (5c), ``mechanism`` ∈ ``token_join`` (real IDX rescues)
       / ``alias`` / ``symbol_bridge`` / ``token_join_diagnostic`` (EQ rows surfaced
-      for audit — OPT/REF classification UNCHANGED, never a real rescue).
+      for audit — index OPT/REF classification UNCHANGED, never a real index rescue).
+    * ``eq_token_join_security_ids`` — the ``SECURITY_ID``s of the symbol-mismatched
+      F&O STOCKS in ``token_join_diagnostic``, fed to
+      :func:`~brutex.universe.is_universe_underlying` so they are PERSISTED as
+      tradable universe underlyings (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
     """
     bridged_pairs, symbol_alias_symbols = _groww_symbol_index_bridge(index, options_eligible)
     symbol_bridged = bridged_pairs - options_eligible  # rows the groww_symbol bridge added
@@ -509,6 +532,10 @@ def _classify_option_pullable(
         "token_join_diagnostic": [],
     }
     rescued_pairs: set[tuple[Exchange, str]] = set()
+    # SECURITY_IDs of the symbol-mismatched F&O STOCKS surfaced by the EQ token-join
+    # — now PERSISTED as tradable universe underlyings (DEC-FNO-EQ-TOKEN-JOIN-PERSIST
+    # -001); previously these were diagnostic-only and dropped from the lean store.
+    eq_token_join_security_ids: set[int] = set()
     # Aliased F&O symbols of the rows rescued via the alias map — fed to the
     # diagnostic so the now-resolved underlying (e.g. NIFTYNXT50) stops reporting.
     alias_resolved_symbols: set[tuple[Exchange, str]] = set()
@@ -532,6 +559,7 @@ def _classify_option_pullable(
                 # honestly-labelled bucket and do NOT pretend it was rescued
                 # (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001 — the honest split).
                 rescued["token_join_diagnostic"].append(f"{inst.exch_id.value}:{inst.symbol_name}")
+                eq_token_join_security_ids.add(inst.security_id)
                 continue
         # 2. sourced / override alias (the 2 NSE indices the symbol bridge misses).
         elif inst.instrument is InstrumentType.IDX and aliased in options_eligible:
@@ -548,7 +576,12 @@ def _classify_option_pullable(
     options_eligible_bridged = frozenset(options_eligible | rescued_pairs)
     index_alias_symbols = symbol_alias_symbols | frozenset(alias_resolved_symbols)
     rescued = {mechanism: sorted(names) for mechanism, names in rescued.items()}
-    return options_eligible_bridged, index_alias_symbols, rescued
+    return (
+        options_eligible_bridged,
+        index_alias_symbols,
+        rescued,
+        frozenset(eq_token_join_security_ids),
+    )
 
 
 def _log_opt_reclassified(rescued: dict[str, list[str]], *, still_unmatched: int) -> None:
@@ -733,14 +766,17 @@ def _lean_universe(
     *,
     fno_eligible: frozenset[tuple[Exchange, str]],
     reference_security_ids: frozenset[int],
+    fno_eligible_security_ids: frozenset[int],
 ) -> tuple[list[Instrument], int]:
     """Select the LEAN universe to persist + count the dropped derivative legs.
 
     The Groww :class:`InstrumentIndex` carries every in-scope row INCLUDING the
     FUT / CE / PE legs. The lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001)
     persists ONLY the universe underlyings — every admitted IDX, every
-    F&O-eligible EQ, and every admitted REFERENCE_ONLY NTM constituent (an EQ
-    whose ``security_id`` is in *reference_security_ids*) — and discards the legs
+    F&O-eligible EQ (by ticker OR by token-join ``security_id`` in
+    *fno_eligible_security_ids*, DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001), and every
+    admitted REFERENCE_ONLY NTM constituent (an EQ whose ``security_id`` is in
+    *reference_security_ids*) — and discards the legs
     (they are parsed only to discover which equities are F&O-eligible). Returns
     ``(lean_rows, legs_dropped)`` where ``legs_dropped`` is the count of in-scope
     rows NOT persisted (the legs + any non-admitted non-F&O equity), so the caller
@@ -750,7 +786,9 @@ def _lean_universe(
     lean = [
         inst
         for inst in index.universe
-        if is_universe_underlying(inst, fno_eligible, reference_security_ids)
+        if is_universe_underlying(
+            inst, fno_eligible, reference_security_ids, fno_eligible_security_ids
+        )
     ]
     legs_dropped = len(index.universe) - len(lean)
     return lean, legs_dropped
@@ -855,8 +893,8 @@ def load_instrument_master(
         # dropped to REFERENCE_ONLY by symbol-spelling drift. ``rescued`` is the
         # REF→OPT audit (5c); ``index_alias_symbols`` suppresses every resolved
         # underlying from the residual gap diagnostic.
-        options_eligible_bridged, index_alias_symbols, rescued = _classify_option_pullable(
-            index, options_eligible
+        options_eligible_bridged, index_alias_symbols, rescued, fno_eligible_security_ids = (
+            _classify_option_pullable(index, options_eligible)
         )
 
         # OBSERVE-ONLY diagnostic (DEC-FNO-INDEX-MATCH-DIAG-001): surface any
@@ -878,6 +916,7 @@ def load_instrument_master(
         reference_security_ids, ntm_note = _ntm_admission(
             index,
             fno_eligible=fno_eligible,
+            fno_eligible_security_ids=fno_eligible_security_ids,
             constituent_opener=constituent_opener,
             cache_dir=(
                 constituent_cache_dir if constituent_cache_dir is not None else default_cache_dir()
@@ -894,7 +933,10 @@ def load_instrument_master(
         # dropped. Full-snapshot replace so the day's rows are EXACTLY the lean
         # set (idempotent on re-pull).
         lean, legs_dropped = _lean_universe(
-            index, fno_eligible=fno_eligible, reference_security_ids=reference_security_ids
+            index,
+            fno_eligible=fno_eligible,
+            reference_security_ids=reference_security_ids,
+            fno_eligible_security_ids=fno_eligible_security_ids,
         )
         # Stamp each underlying with its TRADABLE F&O lot + freeze from its legs
         # (DEC-GROWW-LEG-ECONOMICS-001) — the legs carry the real economics; the

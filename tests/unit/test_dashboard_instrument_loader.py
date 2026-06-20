@@ -702,35 +702,84 @@ def test_alias_rescues_niftyjr_and_niftymidselect_to_opt(
     assert audit["still_unmatched"] == 0
 
 
-def test_eq_token_join_surfaced_as_diagnostic_not_reclassified(tmp_path: Path) -> None:
-    """A symbol-mismatched STOCK token-join is surfaced for audit but NOT reclassified.
+def test_eq_token_join_persisted_tradable_and_surfaced_in_diagnostic(tmp_path: Path) -> None:
+    """A symbol-mismatched F&O STOCK is now PERSISTED as tradable AND audited.
 
-    DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001 (the honesty split of 5a): BAJAJ-AUTO's spot
-    trading_symbol differs from its option leg's underlying_symbol (BAJAJAUTO), but its
-    GENUINE numeric vendor token equals the leg's underlying_exchange_token. The
-    token-join does NOT change a STOCK's OPT/REF classification (is_spot_only_index is
-    False for non-IDX; a stock's pullability is fno_eligible membership, a symbol-keyed
-    gate that is the out-of-scope follow-up). So the audit must surface BAJAJ-AUTO in the
-    SEPARATE token_join_diagnostic field — NOT the real token_join rescue bucket — and
-    must NOT inflate ``count`` (no flag flipped).
+    DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 (the follow-up to the audit-only split
+    DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001): BAJAJ-AUTO's spot trading_symbol differs
+    from its option leg's underlying_symbol (BAJAJAUTO), so the ticker key
+    ``fno_eligible`` misses it — but its GENUINE numeric vendor token equals the leg's
+    underlying_exchange_token (the token-join). The stock is now:
+
+    * **persisted** as a universe underlying (``is_universe_underlying`` admits it via
+      the id-keyed token-join set), counted as a STOCK; and
+    * **tradable** (``reference_only=FALSE`` → ``is_option_pullable`` True), keeping its
+      real option chain — closing the prior gap where it was dropped from the lean store.
+
+    It is STILL surfaced in the honest ``token_join_diagnostic`` audit bucket and STILL
+    excluded from the index reclassification ``count`` (no INDEX flag flipped).
     """
     store = _store(tmp_path)
     rows = [_NIFTY, _BANKNIFTY, _BAJAJ, _BAJAJ_CE]
     with capture_logs() as logs:
-        load_instrument_master(
+        result = load_instrument_master(
             store,
             http_get=lambda _url: _csv(rows),
             constituent_opener=_empty_opener,
             constituent_cache_dir=tmp_path / "cache",
         )
+    # PERSISTED: 2 indices + BAJAJ-AUTO (the symbol-mismatched F&O stock); CE leg dropped.
+    assert result["persisted"] == 3
+    assert result["legs_dropped"] == 1
+    assert result["index_count"] == 2
+    assert result["stock_count"] == 1  # self-heal: counted as a stock at query time
+    # TRADABLE: not reference_only, so its option chain is pullable.
+    bajaj = store.get("BAJAJ-AUTO")
+    assert bajaj is not None
+    refs = store.reference_only_security_ids()
+    assert bajaj.security_id not in refs
+    assert is_option_pullable(bajaj, reference_only_ids=refs) is True
+    # STILL surfaced in the honest diagnostic bucket; index reclass count unchanged.
     (audit,) = _events(logs, "universe.load.opt_reclassified")
-    # Surfaced for audit in the honest diagnostic bucket — never claimed as a rescue.
     assert audit["token_join_diagnostic"] == ["NSE:BAJAJ-AUTO"]
     assert audit["token_join"] == []
     assert audit["alias"] == []
     assert audit["symbol_bridge"] == []
-    # No flag flipped, so the reclassified count stays 0 (honesty — Golden Rule #10).
     assert audit["count"] == 0
+
+
+def test_token_join_fno_stock_tradable_even_when_also_ntm_constituent(tmp_path: Path) -> None:
+    """Precedence: a symbol-mismatched F&O stock that is ALSO an NTM constituent stays tradable.
+
+    DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 — the precedence rule (F&O-tradable WINS over
+    NTM-reference). BAJAJ-AUTO is token-join F&O-eligible AND matches an NTM constituent
+    by ISIN. The ``_ntm_admission`` subtraction removes its ``security_id`` from the
+    reference set, so it is persisted ``reference_only=FALSE`` (keeps its option chain),
+    NOT tagged a reference constituent — even though the NTM basket matched it.
+    """
+    store = _store(tmp_path)
+    rows = [_NIFTY, _BANKNIFTY, _BAJAJ, _BAJAJ_CE]
+    constituents = _constituents_csv([("BAJAJ-AUTO", "INE917I01010")])  # == _BAJAJ's ISIN
+    result = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=lambda _url: constituents,
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    assert result["persisted"] == 3
+    assert result["stock_count"] == 1
+    bajaj = store.get("BAJAJ-AUTO")
+    assert bajaj is not None
+    refs = store.reference_only_security_ids()
+    # Tradable wins: the NTM match did NOT tag it reference_only.
+    assert refs == frozenset()
+    assert bajaj.security_id not in refs
+    assert is_option_pullable(bajaj, reference_only_ids=refs) is True
+    # The NTM basket matched it but admitted ZERO reference rows (the F&O stock is excluded).
+    ntm = result["ntm"]
+    assert ntm["matched"] == 1
+    assert ntm["reference"] == 0
+    assert ntm["admitted"] is False
 
 
 def test_env_override_adds_a_new_index_alias(

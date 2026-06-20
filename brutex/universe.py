@@ -300,8 +300,9 @@ def is_option_pullable(instrument: Instrument, *, reference_only_ids: frozenset[
     (``instrument_refresh._is_reference`` excludes the F&O-eligible set,
     DEC-OPTIONS-PULL-GUARD-001), so such a stock keeps its options. Every persisted
     non-reference equity is therefore F&O-eligible (the lean store only admits EQ
-    rows that are F&O-eligible OR reference), so ``not reference_only`` is exactly
-    "has an option chain" for stocks. For an INDEX the same holds because the load
+    rows that are F&O-eligible — by ticker OR by token-join,
+    DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 — OR reference), so ``not reference_only`` is
+    exactly "has an option chain" for stocks. For an INDEX the same holds because the load
     now also tags every **spot-only index** (one with no listed options of its own
     that is not a brute-force index — :func:`is_spot_only_index`) reference_only
     (DEC-NON-OPTION-INDEX-REFTAG-001), so a sectoral / broad-market index (NIFTY IT
@@ -685,6 +686,7 @@ def is_universe_underlying(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
     reference_security_ids: frozenset[int] = frozenset(),
+    fno_eligible_security_ids: frozenset[int] = frozenset(),
 ) -> bool:
     """Return True if *instrument* is a UNIVERSE underlying worth persisting.
 
@@ -708,9 +710,14 @@ def is_universe_underlying(
       (``(exchange, trading_symbol)`` in *fno_eligible_underlyings*) **OR** an
       admitted REFERENCE_ONLY constituent (``security_id`` in
       *reference_security_ids* — matched by id because a non-F&O equity's
-      ``symbol_name`` is the long company name, DEC-NIFTY-TOTAL-MARKET-ADMIT-001).
-      *reference_security_ids* defaults empty → identical to the prior
-      F&O-only equity clause.
+      ``symbol_name`` is the long company name, DEC-NIFTY-TOTAL-MARKET-ADMIT-001)
+      **OR** a TOKEN-JOIN F&O stock (``security_id`` in
+      *fno_eligible_security_ids*) — a genuinely F&O-eligible stock whose SPOT
+      ``symbol_name`` is spelled differently from its option leg's
+      ``underlying_symbol`` (e.g. spot ``BAJAJ-AUTO`` vs leg ``BAJAJAUTO``), so
+      the ticker key misses it, but whose GENUINE numeric vendor token matches an
+      option leg's ``underlying_security_id`` (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
+      Both id-keyed sets default empty → identical to the prior F&O-only clause.
 
     Every derivative leg (FUT / CE / PE) returns ``False`` here — that is
     the whole point of the lean ingest — even though it is in the broad
@@ -723,12 +730,23 @@ def is_universe_underlying(
     fno_eligible_underlyings
         The set of NSE F&O-eligible ``(exchange, symbol)`` pairs, typically
         built once via :func:`build_fno_eligible_underlyings`.
+    reference_security_ids
+        ``SECURITY_ID``s of admitted REFERENCE_ONLY NTM constituents (defaults
+        empty). Matched by id because a non-F&O equity's ``symbol_name`` is the
+        long company name, not the ticker (DEC-NIFTY-TOTAL-MARKET-ADMIT-001).
+    fno_eligible_security_ids
+        ``SECURITY_ID``s of TOKEN-JOIN F&O stocks — genuinely F&O-eligible
+        equities whose spot ``symbol_name`` ≠ their option leg's
+        ``underlying_symbol`` so the ticker key misses them, but whose genuine
+        numeric vendor token matches an option leg's ``underlying_security_id``
+        (defaults empty; DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
 
     Returns
     -------
     bool
-        ``True`` iff *instrument* is an admitted index or an F&O-eligible
-        equity; ``False`` for every derivative leg or out-of-universe row.
+        ``True`` iff *instrument* is an admitted index, an F&O-eligible equity
+        (by ticker or token-join), or an admitted reference constituent;
+        ``False`` for every derivative leg or out-of-universe row.
     """
     instrument_type = instrument.instrument
     if instrument_type == InstrumentType.IDX:
@@ -737,14 +755,18 @@ def is_universe_underlying(
             instrument.exch_id == Exchange.NSE or instrument.symbol_name == _BSE_FETCH_INDEX_SYMBOL
         )
     if instrument_type == InstrumentType.EQ:
-        # An NSE equity is a universe underlying if it is EITHER F&O-eligible
-        # (by ticker) OR an admitted REFERENCE_ONLY constituent (by SECURITY_ID
-        # — its SYMBOL_NAME is the long company name, not the ticker, so the
-        # ticker key cannot match; DEC-NIFTY-TOTAL-MARKET-ADMIT-001). The
-        # reference set defaults empty → byte-identical to the F&O-only rule.
+        # An NSE equity is a universe underlying if it is F&O-eligible by TICKER,
+        # OR an admitted REFERENCE_ONLY constituent (by SECURITY_ID — its
+        # SYMBOL_NAME is the long company name, not the ticker, so the ticker key
+        # cannot match; DEC-NIFTY-TOTAL-MARKET-ADMIT-001), OR a TOKEN-JOIN F&O
+        # stock (by SECURITY_ID — its spot symbol is spelled differently from its
+        # option leg's underlying_symbol so the ticker key misses it, but its
+        # genuine numeric token matches a leg; DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
+        # Both id-keyed sets default empty → byte-identical to the F&O-only rule.
         return instrument.exch_id == Exchange.NSE and (
             (instrument.exch_id, instrument.symbol_name) in fno_eligible_underlyings
             or instrument.security_id in reference_security_ids
+            or instrument.security_id in fno_eligible_security_ids
         )
     # Every derivative leg (FUT / CE / PE) — parsed for eligibility, never stored.
     return False
