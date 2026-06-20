@@ -74,8 +74,10 @@ from brutex.money import format_inr, round_money, rupees_to_paisa
 __all__ = [
     "DEFAULT_FUTURES_INTERVAL",
     "DEFAULT_FUTURES_TOP_N",
+    "FuturesCandidates",
     "FuturesMover",
     "build_futures_payload",
+    "compute_futures_candidates",
     "compute_futures_mover",
     "parse_future_symbol",
     "run_futures_snapshot",
@@ -544,10 +546,17 @@ def _read_future_session(
     """
     import polars as pl
 
+    from brutex.data.lake_day_glob import read_day_month_frame
+
+    # Read ONLY the day's month Parquet (1minute/<yyyy>/<mm>.parquet) — an IST
+    # trading day's 1-minute bars all live in that one file (the session never
+    # crosses a UTC month boundary, brutex.data.lake_day_glob), so this is
+    # byte-equivalent to the prior whole-partition read but O(one month) not
+    # O(all-bars) (DEC-MOVERS-O1-LATENCY-001).
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+    df = read_day_month_frame(base, day)
+    if df is None:
         return None
-    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
     ist = pl.col("timestamp").dt.convert_time_zone(_IST)
     day_df = df.filter(ist.dt.date() == day).sort("timestamp")
     if cutoff_min is not None:
@@ -631,20 +640,25 @@ def _underlying_spot_ltp(
     return None
 
 
-def _discover_futures(lake_root: Path) -> dict[str, list[tuple[str, str, date_cls]]]:
+def _discover_futures(
+    lake_root: Path, *, exchange: str | None = None
+) -> dict[str, list[tuple[str, str, date_cls]]]:
     """Group the lake's FUT datasets by underlying → ``[(symbol, exchange, expiry)]``.
 
     Walks :func:`~brutex.dashboard.db_view.list_candle_datasets`, keeps ONLY the
     ``FNO`` ``1minute`` datasets whose symbol ends ``-FUT`` (options share the
     FNO segment but carry a strike + ``-CE`` / ``-PE`` suffix), parses each into
     ``(underlying, expiry)`` (a non-parsing symbol is skipped), and buckets by
-    underlying. Returns ``{}`` when no futures are present.
+    underlying. When *exchange* is given only that exchange's contracts are kept
+    (an exact per-exchange ranking). Returns ``{}`` when no futures are present.
     """
     from brutex.dashboard.db_view import list_candle_datasets
 
     by_underlying: dict[str, list[tuple[str, str, date_cls]]] = {}
     for dataset in list_candle_datasets(lake_root):
         if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
+            continue
+        if exchange is not None and dataset["exchange"] != exchange:
             continue
         symbol = dataset["symbol"]
         if not symbol.endswith(_FUT_SUFFIX):
@@ -657,39 +671,63 @@ def _discover_futures(lake_root: Path) -> dict[str, list[tuple[str, str, date_cl
     return by_underlying
 
 
-def run_futures_snapshot(
+@dataclass(frozen=True, slots=True)
+class FuturesCandidates:
+    """The cacheable futures candidate set for one snapshot coordinate (pre-ranking).
+
+    The expensive, ``top_n``-independent product of one lake scan — the near-month
+    :class:`FuturesMover` per live underlying + the skipped count + the normalised
+    snapshot date. Caching THIS (keyed by ``(exchange, interval, date, time)``)
+    makes a sub-filter / ``top_n`` change an O(1) hit + a cheap re-rank
+    (:func:`build_futures_payload`), never a re-scan (DEC-MOVERS-O1-LATENCY-001).
+
+    Attributes
+    ----------
+    movers
+        The computed near-month future rows (one per live underlying).
+    skipped
+        Count of underlyings/contracts dropped (all-expired, no session bars).
+    date
+        The normalised ISO ``YYYY-MM-DD`` snapshot day.
+    """
+
+    movers: tuple[FuturesMover, ...]
+    skipped: int
+    date: str
+
+
+def compute_futures_candidates(
     *,
     lake_root: Path,
     interval: str,
     date: str | None,
     time: str | None,
-    top_n: int,
+    exchange: str | None = None,
     names: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """Compute the futures movers snapshot over the lake → the ``/api/v1/movers`` payload.
+) -> FuturesCandidates:
+    """Scan the lake → the :class:`FuturesCandidates` for one snapshot coordinate.
 
-    Discovers every near-month FUT contract (one per underlying — the front-month
-    selected as-of *date*), reads each future's selected-day session (raw 1-minute,
-    OI preserved) up to *time*, takes the future's prior 1-day close + OI and the
-    underlying spot's LTP, computes the per-underlying :class:`FuturesMover`, and
-    ranks them into the per-category payload. An empty / futures-less lake (or an
-    unknown interval) yields an honest "pull the F&O futures first" payload —
-    never a 500, never a fabricated mover (Golden Rule #1).
+    The expensive, cacheable core extracted from :func:`run_futures_snapshot`:
+    discovers every near-month FUT contract (one per underlying — the front-month
+    selected as-of *date*, optionally scoped to *exchange*), reads each future's
+    selected-day session (raw 1-minute, OI preserved) up to *time*, takes the
+    future's prior 1-day close + OI and the underlying spot's LTP, and computes
+    the per-underlying :class:`FuturesMover`. Ranking is the cheap, ``top_n``-dependent
+    step done by :func:`build_futures_payload`. An empty / futures-less lake (or an
+    unknown interval) yields an empty :class:`FuturesCandidates` (Golden Rule #1).
 
     Parameters
     ----------
-    lake_root
-        Top-level lake directory (the parent of ``bars/``).
-    interval, date, time, top_n
-        The snapshot coordinates (mirrors :func:`run_movers_snapshot`).
-    names
-        Optional ``underlying → display name`` map; defaults to the underlying
-        symbol itself when absent.
+    lake_root, interval, date, time, names
+        See :func:`run_futures_snapshot`.
+    exchange
+        Restrict the screened futures to one exchange (``NSE`` / ``BSE``) for an
+        exact per-exchange ranking; ``None`` screens every exchange.
 
     Returns
     -------
-    dict[str, Any]
-        The Futures-tab ``/api/v1/movers`` payload.
+    FuturesCandidates
+        The near-month future rows + skipped count + normalised date.
 
     Raises
     ------
@@ -701,11 +739,9 @@ def run_futures_snapshot(
     date_str = day.isoformat()
     cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
     resolved_names = names or {}
-    by_underlying = _discover_futures(lake_root)
+    by_underlying = _discover_futures(lake_root, exchange=exchange)
     if minutes is None or not by_underlying:
-        return build_futures_payload(
-            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
-        )
+        return FuturesCandidates(movers=(), skipped=0, date=date_str)
 
     movers: list[FuturesMover] = []
     skipped = 0
@@ -750,6 +786,50 @@ def run_futures_snapshot(
             )
         )
 
+    return FuturesCandidates(movers=tuple(movers), skipped=skipped, date=date_str)
+
+
+def run_futures_snapshot(
+    *,
+    lake_root: Path,
+    interval: str,
+    date: str | None,
+    time: str | None,
+    top_n: int,
+    exchange: str | None = None,
+    names: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compute the futures movers snapshot over the lake → the ``/api/v1/movers`` payload.
+
+    The thin compose of :func:`compute_futures_candidates` (the expensive, cacheable
+    scan) + :func:`build_futures_payload` (the cheap, ``top_n``-dependent rank).
+    Behaviour is unchanged from the pre-split version — an empty / futures-less lake
+    (or an unknown interval) yields an honest "pull the F&O futures first" payload,
+    never a 500 (Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root, interval, date, time, top_n, exchange, names
+        See :func:`compute_futures_candidates` (plus *top_n*, the ranking depth).
+
+    Raises
+    ------
+    ValueError
+        On a malformed *date* / *time* (the route maps it to a 400).
+    """
+    candidates = compute_futures_candidates(
+        lake_root=lake_root,
+        interval=interval,
+        date=date,
+        time=time,
+        exchange=exchange,
+        names=names,
+    )
     return build_futures_payload(
-        movers, interval=interval, date=date_str, time=time, top_n=top_n, skipped=skipped
+        candidates.movers,
+        interval=interval,
+        date=candidates.date,
+        time=time,
+        top_n=top_n,
+        skipped=candidates.skipped,
     )

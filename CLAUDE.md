@@ -118,7 +118,7 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/universe-tick-inplace-jlzt1n` (`/universe` "⊕ tick its constituents" selects the mapped stocks IN PLACE — no navigation to the Stocks screen — DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001, MIGRATION.md #858: the handler background-fetches `?kind=stock` into a LOCAL list and ticks into `selMulti` without re-assigning `filter`/switching tab; frontend-only template JS, no backend change. Prior merged: DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811, symbol-mismatched F&O stocks persisted tradable) + DEC-TF-PRECISION-PROOF-001 #856 (PR #810). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show only the years that actually have expiries, not the requested 2020-2026 span)
+- **Active branch:** `claude/elegant-pascal-ovr7nb` (`/movers` per-interaction LATENCY → near-O(1) — DEC-MOVERS-O1-LATENCY-001, MIGRATION.md #859: the `top_n`-independent lake scan is split from the cheap rank and cached per `(asset, exchange, interval, date, time[, tier, track])` coordinate in `brutex/dashboard/movers_cache.py` `MoversSnapshotCache` [LRU, generation-invalidated via the existing coverage `SummaryCache.generation`], so a sub-filter / `top_n` / re-selection is an **O(1) hit + cheap re-rank**; the cold per-symbol intraday read is bounded to the day's `1minute/<yyyy>/<mm>.parquet` month file via `brutex/data/lake_day_glob.py` [byte-equivalent — an IST session never crosses a UTC month boundary; the derived `1day` reader stays whole-partition]; `?exchange=NSE|BSE` now scopes discovery exactly; the sub-filter pill is a **zero-round-trip** client re-render. READ-only, lake/dashboard — the brute-force ENGINE is UNCHANGED. Honest: the FIRST view of a coordinate still pays the real O(N_instruments × N_bars-read) scan [NOT "O(1) total"]; Futures/Options ride whatever F&O `1minute` store exists today, Spot is fast unconditionally; the Live tab [being removed in a separate PR] was not touched. Prior merged: DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show only the years that actually have expiries, not the requested 2020-2026 span)
 
 ---
 
@@ -346,7 +346,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/universe-symbol-persist-jlzt1n`
+- **Active feature branch:** `claude/elegant-pascal-ovr7nb`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
