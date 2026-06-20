@@ -538,7 +538,10 @@ async function runLedgerQuery(gridOnly) {
     }
     if (partial) updateLedgerGrid(body); else renderLedgerView(body);
   } catch (e) {
-    if (partial) updateLedgerGrid({}); else dataEl.innerHTML = '<div class="empty">offline</div>';
+    /* Honest "offline" on a mid-page network drop, not a "no data" empty state. */
+    const off = '<div class="empty">offline</div>';
+    if (partial) { const g = document.getElementById("dbgrid"); if (g) { g.classList.remove("is-loading"); g.innerHTML = off; } }
+    else dataEl.innerHTML = off;
   }
 }
 
@@ -630,7 +633,11 @@ async function runRegistryQuery(gridOnly) {
     updateRegistryBadges(body.counts || {});
     if (partial) updateRegistryGrid(body); else renderRegistryView(body);
   } catch (e) {
-    if (partial) updateRegistryGrid({}); else dataEl.innerHTML = '<div class="empty">offline</div>';
+    /* A mid-page network drop is an HONEST "offline", NOT a "no data" empty state
+       (hostile-review MINOR-1/2) — mirror the candle path. */
+    const off = '<div class="empty">offline</div>';
+    if (partial) { const g = document.getElementById("dbgrid"); if (g) { g.classList.remove("is-loading"); g.innerHTML = off; } }
+    else dataEl.innerHTML = off;
   }
 }
 

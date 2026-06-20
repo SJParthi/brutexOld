@@ -159,6 +159,23 @@ def test_registry_contracts_malformed_expiry_is_400(client: TestClient, tmp_path
     assert "expiry_date" in r.json()["detail"]
 
 
+def test_registry_routes_above_int64_offset_is_200_empty_not_500(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A hostile ``?offset=10000000000000000000`` (above int64) is a clean empty
+    page, NOT an HTTP 500 (DEC-DB-VIEWER-PAGINATE-ALL-001 hostile-review MINOR-1):
+    ``clamp_offset`` caps it before the DuckDB ``OFFSET`` bind, honouring the
+    routes' "never a 500" promise."""
+    _seed_registry(tmp_path)
+    huge = 10_000_000_000_000_000_000  # > 2**63 - 1
+    for route in ("/api/v1/db/registry/expiries", "/api/v1/db/registry/contracts"):
+        r = client.get(f"{route}?offset={huge}")
+        assert r.status_code == 200, route
+        body = r.json()
+        assert body["rows"] == []  # past the end → empty page
+        assert body["total"] >= 1  # but the real (filtered) total is intact
+
+
 def test_registry_routes_pathless_store_return_no_store_note(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

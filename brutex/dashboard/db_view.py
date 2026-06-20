@@ -411,14 +411,25 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
     return summary
 
 
-def clamp_offset(n: int) -> int:
-    """Clamp a requested row offset to a non-negative integer.
+#: DuckDB binds ``OFFSET`` as a signed 64-bit integer; a value above this throws
+#: ``ConversionException`` ("value out of range for INT64"). FastAPI's ``Query(ge=0)``
+#: caps nothing above, so this is the upper guard (DEC-DB-VIEWER-PAGINATE-ALL-001
+#: hostile-review MINOR-1).
+_OFFSET_MAX: Final = (1 << 63) - 1
 
-    A hostile / malformed ``?offset=-5`` (or a Python ``int`` from a query
-    string) must never produce a negative ``OFFSET`` (DuckDB would error).
-    Returns ``max(0, n)``.
+
+def clamp_offset(n: int) -> int:
+    """Clamp a requested row offset into DuckDB's bindable ``[0, 2**63 - 1]`` range.
+
+    A hostile / malformed ``?offset=-5`` must never produce a negative ``OFFSET``
+    (DuckDB errors); a hostile ``?offset=10000000000000000000`` (above int64) must
+    never reach the ``LIMIT ? OFFSET ?`` bind, where DuckDB raises a
+    ``ConversionException`` that would surface as an HTTP 500 (the routes promise
+    "never a 500"). Both clamp here — a too-large offset becomes the max, which
+    DuckDB returns as a clean empty page. This is the COMMON guard for every paged
+    reader (tables / candles / options / registry).
     """
-    return max(0, n)
+    return max(0, min(n, _OFFSET_MAX))
 
 
 def sample_rows(conn: Any, table: str, *, limit: int, offset: int = 0) -> dict[str, Any]:
