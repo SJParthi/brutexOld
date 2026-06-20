@@ -98,7 +98,7 @@ def _build_partition(root: Path, days: int) -> None:
         )
 
 
-def _query(conn: object, root: Path) -> None:
+def _query(conn: object, root: Path, offset: int = 0) -> None:
     query_candles(
         conn,
         root,
@@ -107,8 +107,14 @@ def _query(conn: object, root: Path) -> None:
         symbol="NSE-NIFTY",
         interval="1minute",
         limit=_LIMIT,
-        offset=0,
+        offset=offset,
     )
+
+
+def _last_page_offset(days: int) -> int:
+    """Offset of the LAST ascending page — the deep-page worst case for the
+    predecessor scan (its ``lo`` date sits behind the partition's whole history)."""
+    return max(0, days * _BARS_PER_DAY - _LIMIT)
 
 
 class TestCandlePageLatencyIsFlatAsLakeGrows:
@@ -144,5 +150,37 @@ class TestCandlePageLatencyIsFlatAsLakeGrows:
             f"query_candles page latency ratio {ratio:.2f}× ({_LARGE_DAYS} vs "
             f"{_SMALL_DAYS} trading days) exceeds 8× — the derived-column baseline "
             f"may have regressed to a full-partition scan (O(stored rows)). "
+            f"t_small={t_small:.0f}ns, t_large={t_large:.0f}ns."
+        )
+
+    def test_deep_page_latency_ratio_below_8x(self, tmp_path: Path) -> None:
+        """The DEEP (last) page stays flat too — the predecessor scan does NOT walk
+        the whole history before ``lo`` (hostile-review MINOR-2 worst case).
+
+        At the last ascending page ``lo`` is the final trading day, so the
+        predecessor query (``WHERE timestamp < lo ORDER BY timestamp DESC LIMIT 1``)
+        sits behind the partition's ENTIRE history. Year/month partition pruning +
+        row-group stats keep it bounded, so a 12× deeper partition must not blow the
+        ratio.
+        """
+
+        def _time(root: Path, days: int) -> float:
+            _build_partition(root, days)
+            conn = duckdb.connect()
+            off = _last_page_offset(days)
+            for _ in range(5):  # warm DuckDB + the OS page cache
+                _query(conn, root, off)
+            t0 = time.perf_counter_ns()
+            for _ in range(_QUERIES):
+                _query(conn, root, off)
+            return (time.perf_counter_ns() - t0) / _QUERIES
+
+        t_small = _time(tmp_path / "ds", _SMALL_DAYS)
+        t_large = _time(tmp_path / "dl", _LARGE_DAYS)
+        ratio = t_large / max(t_small, 1.0)
+        assert ratio < ratio_ceiling(8.0), (
+            f"deep-page latency ratio {ratio:.2f}× ({_LARGE_DAYS} vs {_SMALL_DAYS} "
+            f"trading days) exceeds 8× — the predecessor scan may be walking the "
+            f"whole pre-page history (O(stored rows)). "
             f"t_small={t_small:.0f}ns, t_large={t_large:.0f}ns."
         )

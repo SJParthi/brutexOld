@@ -2164,10 +2164,13 @@ def test_intraday_prev_close_page_bounded_matches_full_scan(
 ) -> None:
     """The page-bounded baseline equals the full-partition scan for EVERY window.
 
-    A page's distinct dates always form a CONTIGUOUS run of trading days (a page is
-    a LIMIT/OFFSET slice of timestamp-sorted bars). This asserts that for every
-    such contiguous window, the bounded helper returns the SAME prev-close for each
-    date as the full-partition reference — exhaustive byte-for-byte proof.
+    In production a page's distinct dates form a CONTIGUOUS run of trading days (a
+    page is a LIMIT/OFFSET slice of timestamp-sorted bars), so this exhausts every
+    contiguous window. The helper is in fact robust to NON-contiguous page_dates too
+    — the span query fills the intervening days, so the predecessor chain is complete
+    regardless — which the endpoints-only ``{lo, hi}`` check below pins. Either way
+    the bounded helper returns the SAME prev-close for each page date as the
+    full-partition reference: exhaustive byte-for-byte proof.
     """
     _write_session_minutes(tmp_path, days=days, bars_per_day=bars_per_day)
     coords = {"exchange": "NSE", "segment": "CASH", "symbol": "NSE-NIFTY"}
@@ -2177,12 +2180,17 @@ def test_intraday_prev_close_page_bounded_matches_full_scan(
     all_dates = sorted(_intraday_last_close_by_date(store.connection, tmp_path, **coords))
     for i in range(len(all_dates)):
         for j in range(i, len(all_dates)):
+            # The contiguous window a real page produces …
             window = set(all_dates[i : j + 1])
-            bounded = _intraday_prev_close_by_page_date(
-                store.connection, tmp_path, **coords, page_dates=window
-            )
-            for d in window:
-                assert bounded.get(d) == reference.get(d), (d, sorted(window))
+            # … AND the NON-contiguous endpoints-only subset (proves the span query
+            # fills the gap — the helper does not rely on the page being dense).
+            sparse = {all_dates[i], all_dates[j]}
+            for page in (window, sparse):
+                bounded = _intraday_prev_close_by_page_date(
+                    store.connection, tmp_path, **coords, page_dates=page
+                )
+                for d in page:
+                    assert bounded.get(d) == reference.get(d), (d, sorted(page))
 
 
 @pytest.mark.parametrize("descending", [False, True])

@@ -69,6 +69,12 @@ def test_universe_instruments_cached_per_tab() -> None:
         "a master reload must invalidate the per-tab cache"
     )
     assert "loadInstruments(true)" in html, "a master reload must force a refetch"
+    # an in-flight pre-reload fetch must abort instead of re-pinning stale data
+    # (the reload bumps the epoch; the fetch captured the old one) — MINOR-1.
+    assert "const epoch = reloadEpoch;" in html, "loadInstruments must capture the reload epoch"
+    assert "if (epoch !== reloadEpoch) return;" in html, (
+        "a fetch that predates a master reload must abort, not re-pin stale data"
+    )
 
 
 def test_universe_search_is_debounced() -> None:

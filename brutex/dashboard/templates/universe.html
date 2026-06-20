@@ -597,6 +597,7 @@ let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange,lot_si
 // /universe/instruments call recomputes 3 latest-snapshot self-joins + serialises
 // ~750 rows). Only the FIRST visit (or an explicit master reload) fetches.
 const UNIV_CACHE = {};         // kind → instruments[]  (only successful, non-empty sets are pinned)
+let reloadEpoch = 0;           // bumped on a master reload — invalidates in-flight fetches that predate it
 let searchTimer = null;        // debounce handle for the search box (coalesce keystrokes)
 let COV = {};                  // symbol → per-symbol completeness (DEC-COMPLETENESS-UNIVERSE-001)
 let covSig = "";               // last COV signature — re-render only when it actually changes
@@ -747,7 +748,10 @@ async function loadInstrumentMaster(msgId) {
       msg.textContent = `Loaded ${body.total} instruments `
         + `(${body.index_count} indices · ${body.stock_count} stocks).`;
     }
-    // The master changed → every tab's cache is stale; drop it and force a refetch.
+    // The master changed → every tab's cache is stale; bump the epoch (so any
+    // in-flight pre-reload fetch aborts instead of re-pinning stale data) and drop
+    // the cache, then force a refetch.
+    reloadEpoch++;
     Object.keys(UNIV_CACHE).forEach(k => delete UNIV_CACHE[k]);
     await loadSummary();
     await loadInstruments(true);
@@ -784,7 +788,8 @@ async function loadSummary() {
 
 async function loadInstruments(forceReload) {
   const el = document.getElementById("instruments");
-  const kind = filter;   // pin the kind for this call (the tab may change mid-fetch)
+  const kind = filter;          // pin the kind for this call (the tab may change mid-fetch)
+  const epoch = reloadEpoch;    // pin the reload epoch — a master reload mid-fetch supersedes us
   // Cache hit: re-render the already-fetched set for this tab with ZERO network /
   // SQL cost (DEC-DB-UNIVERSE-O1-LATENCY-001). The instrument set only changes on
   // a master reload (forceReload), so a tab the operator flips back to is instant.
@@ -803,6 +808,11 @@ async function loadInstruments(forceReload) {
     const body = await r.json();
     fetched = body.instruments || [];
   } catch (e) { fetched = []; }
+  // A master reload landed WHILE we were fetching → this result predates the new
+  // master; abort without pinning or rendering it (the reload's own forced load
+  // renders the fresh set). Closes the stale-repin race a slow fetch + a master
+  // reload could otherwise open (hostile-review MINOR-1).
+  if (epoch !== reloadEpoch) return;
   // Pin only a successful, non-empty set — an offline / empty fetch must stay
   // retryable on the next visit, never pinned as the answer.
   if (fetched.length) UNIV_CACHE[kind] = fetched;
