@@ -111,12 +111,11 @@ def test_groww_credentials_nav_is_canonical(client: TestClient) -> None:
     html = client.get("/groww-credentials").text
     # The full canonical nav is present, with "Credentials" as the current page
     # (the order matches every other dashboard page: Universe . Credentials .
-    # Database . Live . Coverage . Movers . Reports).
+    # Database . Coverage . Movers . Reports).
     for href in (
         '"/universe"',
         '"/groww-credentials"',
         '"/db"',
-        '"/live"',
         '"/coverage"',
         '"/movers"',
         '"/reports"',

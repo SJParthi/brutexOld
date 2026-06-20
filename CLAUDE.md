@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #862 —
+_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863 —
 the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
 correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
 1-minute partition to baseline the derived %-change columns on every paging click —
@@ -29,7 +29,15 @@ bench), and the `/db` + `/universe` FRONTENDS update in place (grid-only `#dbgri
 refresh on paging instead of a full control-bar+datepicker teardown; a per-tab
 instrument cache + debounced search + in-place completeness patch). Honest envelope:
 O(page date-span) / O(visible), NOT a literal O(1)-total. Engine + 52-vocab + scope
-UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-FNO-CANDLE-LAKE-001,
+UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-LIVE-REMOVE-001,
+MIGRATION.md #862 — the **entire LIVE feed feature is REMOVED in full**: the
+`brutex/live/` capture package + `python -m brutex.live` CLI, the dashboard `/live`
+page + `/api/v1/live/*` + `/api/v1/db/live/*` routes + the `dashboard/live_*` surface,
+the `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab + the /db "Live
+lake" section + the nav `/live` link (44 files). The production historical/backtest
+PULL + `rate_common` + the brute-force ENGINE are UNTOUCHED — `adapters/groww/live.py`
+`build_live_client` + `pull_controller._build_live_controller` are the PRODUCTION pull
+client/rate-controller, NOT the feed, deliberately kept). Earlier: 2026-06-20 (DEC-FNO-CANDLE-LAKE-001,
 MIGRATION.md #861 — the F&O (futures + options) historical-candle lake is now a
 FIRST-CLASS documented `/db` table (a "📊 F&O candles" row, decoded per contract) +
 registered in the master `schema_meta` (`fno_candle_lake.*`), FORMALIZING data ALREADY
@@ -144,10 +152,18 @@ hostile-review pass._
 - **Out of scope (Track 1 engine):** Live feed, WebSocket, order
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
-  the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
+  the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.) The dashboard
+  + lake **LIVE-feed SURFACE that once existed** (`brutex/live/`, the `/live`
+  page + `/api/v1/live/*` routes, the `live_ticks`/`live_candles_1m` tables, the
+  Movers "Live" tab + /db "Live lake" section) was **REMOVED in full —
+  DEC-LIVE-REMOVE-001 (MIGRATION.md #862)** — bringing the codebase in line with
+  this out-of-scope rule. (The `live` = real/production naming-trap survivors —
+  `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
+  `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
+  rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/intelligent-shannon-s8qea3` (`/db` + `/universe` dashboard
   pages made INSTANT per interaction with ZERO correctness change —
-  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #862: `db_view.py::query_candles` now
+  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863: `db_view.py::query_candles` now
   page-bounds the intraday %-change baseline — reading the prior-day last-1-minute close
   for ONLY the page's date span + the single bar before it
   (`_intraday_prev_close_by_page_date`, byte-for-byte identical to the old whole-partition
@@ -155,14 +171,15 @@ hostile-review pass._
   multi-year 1-minute partition on every paging click; the FRONTENDS update in place
   (grid-only `#dbgrid` refresh; per-tab instrument cache + debounced search + in-place
   completeness patch). Honest envelope: O(page date-span)/O(visible), NOT O(1)-total.
-  Engine/52-vocab/scope UNCHANGED — read-only viewer only; Live + the movers route
-  deliberately untouched (separate sessions own those). Prior merged:
+  Engine/52-vocab/scope UNCHANGED — read-only viewer only; this PR did NOT touch Live
+  (removed by DEC-LIVE-REMOVE-001) or the movers route (DEC-MOVERS-O1-LATENCY-001) —
+  both owned by now-merged parallel sessions. Prior merged:
+  DEC-LIVE-REMOVE-001 #862 (PR #816, entire LIVE feed removed) +
   DEC-FNO-CANDLE-LAKE-001 #861 (PR #814, F&O candle lake first-class `/db` table + schema_meta) +
   DEC-MOVERS-O1-LATENCY-001 #860 (PR #815, /movers near-O(1) snapshot cache + month-bounded
   reads) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows
   real expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
-  (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811). Running in parallel sessions:
-  Remove-Live — see those PRs)
+  (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811))
 
 ---
 
