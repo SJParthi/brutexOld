@@ -18,18 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #861 — §6 +
-active-branch facts: the F&O (futures + options) historical-candle lake is now a
-FIRST-CLASS, documented logical table — surfaced in `/db`'s Candle-lake section as a
-dedicated "📊 F&O candles" row (decoded per contract: underlying / expiry / strike /
-CE-PE-FUT) AND registered in the master `schema_meta` (the `fno_candle_lake.*` keys),
-driven by the new shared parser `brutex/data/fno_symbol.py` + descriptor
-`brutex/data/fno_candle_lake.py`. This FORMALIZES + SURFACES data ALREADY stored by the
-existing Groww pull at `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet`
-(the shared `ParquetBarSink`, OI first-class, 2-dp grid) — it is NOT a new store
-(Golden Rule #1: a 4-agent pass proved the "F&O candles are discarded" premise false),
-and the spot candle list is now honestly spot-only (an F&O bar is not spot). The
-brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX (lake-view only). Earlier: 2026-06-20
+_Last updated: 2026-06-20 (DEC-LIVE-REMOVE-001, MIGRATION.md #862 — the **entire
+LIVE feed feature is REMOVED / retired in full**: the `brutex/live/` capture package
++ its `python -m brutex.live` CLI, the dashboard `/live` page + `/api/v1/live/*` +
+`/api/v1/db/live/*` routes + the `brutex/dashboard/live_*` surface, the
+`live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
+lake" section, the nav `/live` link, and the now-orphaned live leg-resolution
+`adapters/groww/contract_pull.py` (44 files). This aligns with §1 which already lists
+"Live feed, WebSocket" as OUT OF SCOPE; the §1 out-of-scope note + active-branch line
+are updated. DELIBERATELY KEPT (the `live` = real/production naming trap, NOT the
+feed): `adapters/groww/live.py` `build_live_client`/`build_live_pool` (the historical
+fetch / metadata / historical pull client builder), `cli.py::_build_live_groww_spot`,
+and `pull_controller.py::_build_live_controller`/`SessionRateController` (the
+PRODUCTION dashboard-pull rate controller — the §6 rate-controller rows are UNCHANGED,
+they describe the production pull, not the feed) — so the historical/backtest pull +
+`rate_common` + the brute-force ENGINE are UNTOUCHED. Earlier: 2026-06-20
+(DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #861 — the F&O (futures+options) historical-candle
+lake is now a FIRST-CLASS documented logical table, surfaced in `/db`'s Candle-lake
+section (the "📊 F&O candles" row) + registered in the master `schema_meta`; it
+FORMALIZES + SURFACES data ALREADY stored by the existing Groww pull (NOT a new store),
+the brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX). Earlier: 2026-06-20
+(DEC-MOVERS-O1-LATENCY-001, MIGRATION.md #860 — every `/movers` interaction made
+near-O(1): the `top_n`-independent lake scan split from the cheap rank + cached per
+coordinate (`movers_cache.py`, generation-invalidated), the cold per-symbol read
+month-bounded (`lake_day_glob.py`), and the sub-filter pill a zero-round-trip client
+re-render; READ-only lake/dashboard, the brute-force ENGINE UNCHANGED). Earlier: 2026-06-20
+(DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001, MIGRATION.md #859 — the `/completeness`
+OPTIONS table shows only the years that ACTUALLY have expiries + an honest
+`partial` for late-listed underlyings (no fake 2020→2026 span, no perpetual
+`growing`); read/rollup-side only, no pull/engine change). Earlier: 2026-06-20
 (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853 —
 §1/§3/§6 facts: **1-minute is now the ONLY granularity fetched from Groww** (spot
 + futures + options); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED
@@ -129,8 +146,27 @@ hostile-review pass._
 - **Out of scope (Track 1 engine):** Live feed, WebSocket, order
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
-  the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/relaxed-keller-6b7pzx` (the F&O futures+options candle lake is FORMALIZED + SURFACED as a first-class `/db` logical table + registered in `schema_meta` — DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #861: NEW shared parser `data/fno_symbol.py` + descriptor `data/fno_candle_lake.py`; `db_view.list_fno_candle_datasets`/`fno_candle_lake_schema`; the `/db` "📊 F&O candles" row; `instrument_store.open()` registers `fno_candle_lake.*` in `schema_meta`; `movers_options.parse_option_symbol` delegates to the shared parser (§11 COMMON). NO new storage / write-path / scope change — formalizes data already stored by the existing pull; ENGINE unchanged. Prior merged: DEC-MOVERS-O1-LATENCY-001 #860, DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859, DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812). Running in parallel sessions: Remove-Live, /db+/universe O(1) — see those PRs)
+  the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.) The dashboard
+  + lake **LIVE-feed SURFACE that once existed** (`brutex/live/`, the `/live`
+  page + `/api/v1/live/*` routes, the `live_ticks`/`live_candles_1m` tables, the
+  Movers "Live" tab + /db "Live lake" section) was **REMOVED in full —
+  DEC-LIVE-REMOVE-001 (MIGRATION.md #862)** — bringing the codebase in line with
+  this out-of-scope rule. (The `live` = real/production naming-trap survivors —
+  `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
+  `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
+  rate controller, NOT the feed, and stay.)
+- **Active branch:** `claude/relaxed-mccarthy-qacssf` (REMOVE the entire LIVE feed
+  feature — DEC-LIVE-REMOVE-001, MIGRATION.md #862: deletes the `brutex/live/`
+  capture package + its CLI, the dashboard `/live` + `/api/v1/live/*` +
+  `/api/v1/db/live/*` routes + `brutex/dashboard/live_*` surface, the
+  `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
+  lake" section, the nav `/live` link, and the now-orphaned live leg-resolution
+  `adapters/groww/contract_pull.py` + `db_view.format_clean_ist_millis`; 44 files.
+  The historical/backtest pull + `rate_common` + the brute-force ENGINE are
+  UNTOUCHED — `_build_live_controller`/`build_live_client` are the production pull's
+  rate controller + client, KEPT. Prior merged: DEC-FNO-CANDLE-LAKE-001 #861 (PR #814)
+  + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
+  + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812))
 
 ---
 
@@ -358,7 +394,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/relaxed-keller-6b7pzx`
+- **Active feature branch:** `claude/relaxed-mccarthy-qacssf`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

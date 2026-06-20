@@ -20,12 +20,21 @@ from brutex.dashboard.verdict_banner import banner_for
 from hypothesis import given
 from hypothesis import strategies as st
 
-_KINDS = ("auth_expired", "transient_residual", "known_gap_only", "clean")
+_KINDS = (
+    "auth_expired",
+    "transient_residual",
+    "known_gap_only",
+    "clean",
+    "quota_exhausted",
+    "quarantined_symbols",
+)
 _EXPECTED = {
     "auth_expired": ("verdict--red", "red"),
     "transient_residual": ("verdict--amber", "amber"),
     "known_gap_only": ("verdict--grey", "grey"),
     "clean": ("verdict--green", "green"),
+    "quota_exhausted": ("verdict--amber", "amber"),
+    "quarantined_symbols": ("verdict--grey", "grey"),
 }
 _NEEDS_OPERATOR = {"auth_expired", "transient_residual"}
 
