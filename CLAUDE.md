@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-LIVE-REMOVE-001, MIGRATION.md #860 — the **entire
+_Last updated: 2026-06-20 (DEC-LIVE-REMOVE-001, MIGRATION.md #861 — the **entire
 LIVE feed feature is REMOVED / retired in full**: the `brutex/live/` capture package
 + its `python -m brutex.live` CLI, the dashboard `/live` page + `/api/v1/live/*` +
 `/api/v1/db/live/*` routes + the `brutex/dashboard/live_*` surface, the
@@ -33,6 +33,11 @@ and `pull_controller.py::_build_live_controller`/`SessionRateController` (the
 PRODUCTION dashboard-pull rate controller — the §6 rate-controller rows are UNCHANGED,
 they describe the production pull, not the feed) — so the historical/backtest pull +
 `rate_common` + the brute-force ENGINE are UNTOUCHED. Earlier: 2026-06-20
+(DEC-MOVERS-O1-LATENCY-001, MIGRATION.md #860 — every `/movers` interaction made
+near-O(1): the `top_n`-independent lake scan split from the cheap rank + cached per
+coordinate (`movers_cache.py`, generation-invalidated), the cold per-symbol read
+month-bounded (`lake_day_glob.py`), and the sub-filter pill a zero-round-trip client
+re-render; READ-only lake/dashboard, the brute-force ENGINE UNCHANGED). Earlier: 2026-06-20
 (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001, MIGRATION.md #859 — the `/completeness`
 OPTIONS table shows only the years that ACTUALLY have expiries + an honest
 `partial` for late-listed underlyings (no fake 2020→2026 span, no perpetual
@@ -140,13 +145,13 @@ hostile-review pass._
   + lake **LIVE-feed SURFACE that once existed** (`brutex/live/`, the `/live`
   page + `/api/v1/live/*` routes, the `live_ticks`/`live_candles_1m` tables, the
   Movers "Live" tab + /db "Live lake" section) was **REMOVED in full —
-  DEC-LIVE-REMOVE-001 (MIGRATION.md #860)** — bringing the codebase in line with
+  DEC-LIVE-REMOVE-001 (MIGRATION.md #861)** — bringing the codebase in line with
   this out-of-scope rule. (The `live` = real/production naming-trap survivors —
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/relaxed-mccarthy-qacssf` (REMOVE the entire LIVE feed
-  feature — DEC-LIVE-REMOVE-001, MIGRATION.md #860: deletes the `brutex/live/`
+  feature — DEC-LIVE-REMOVE-001, MIGRATION.md #861: deletes the `brutex/live/`
   capture package + its CLI, the dashboard `/live` + `/api/v1/live/*` +
   `/api/v1/db/live/*` routes + `brutex/dashboard/live_*` surface, the
   `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
@@ -154,9 +159,10 @@ hostile-review pass._
   `adapters/groww/contract_pull.py` + `db_view.format_clean_ist_millis`; 44 files.
   The historical/backtest pull + `rate_common` + the brute-force ENGINE are
   UNTOUCHED — `_build_live_controller`/`build_live_client` are the production pull's
-  rate controller + client, KEPT. Prior merged: DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001
-  #859 (PR #813) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812) +
-  DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811) + DEC-TF-PRECISION-PROOF-001 #856 (PR #810))
+  rate controller + client, KEPT. Prior merged: DEC-MOVERS-O1-LATENCY-001 #860 (PR #815)
+  + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813) +
+  DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812) +
+  DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811))
 
 ---
 

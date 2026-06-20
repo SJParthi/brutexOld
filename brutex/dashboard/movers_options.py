@@ -120,8 +120,11 @@ __all__ = [
     "DEFAULT_OPTIONS_INTERVAL",
     "DEFAULT_OPTIONS_TOP_N",
     "OptionMover",
+    "OptionsCandidates",
     "build_options_payload",
     "compute_option_mover",
+    "compute_options_candidates",
+    "normalize_options_selectors",
     "parse_option_symbol",
     "rank_highest_oi",
     "rank_oi_gainers",
@@ -618,10 +621,18 @@ def _session_value_paisa(
     """
     import polars as pl
 
+    from brutex.data.lake_day_glob import read_day_intraday_frame
+
+    # Read the day's bars via the symbol-aware reader — see
+    # movers_futures._read_future_session: an option CONTRACT symbol is
+    # session-filtered unconditionally at ingest, so it takes the fast month-bound
+    # path (O(one month) not O(all-bars), DEC-MOVERS-O1-LATENCY-001); the
+    # session-exempt fallback exists for consistency but never triggers for a
+    # full contract groww_symbol.
     base = lake_root / "bars" / exchange / _FNO_SEGMENT / symbol / "1minute"
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+    df = read_day_intraday_frame(base, day, symbol=symbol)
+    if df is None:
         return 0
-    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
     ist = pl.col("timestamp").dt.convert_time_zone(_IST)
     day_df = df.filter(ist.dt.date() == day).sort("timestamp")
     if cutoff_min is not None:
@@ -640,19 +651,25 @@ def _session_value_paisa(
     return rupees_to_paisa(value_rupees)
 
 
-def _discover_options(lake_root: Path) -> list[tuple[str, str, str, date_cls, Decimal, str]]:
+def _discover_options(
+    lake_root: Path, *, exchange: str | None = None
+) -> list[tuple[str, str, str, date_cls, Decimal, str]]:
     """List the lake's option contracts as ``(symbol, exchange, underlying, expiry, strike, type)``.
 
     Walks :func:`~brutex.dashboard.db_view.list_candle_datasets`, keeps ONLY the
     ``FNO`` ``1minute`` datasets whose symbol ends ``-CE`` / ``-PE`` (a future
     ends ``-FUT`` and is excluded), parses each into its contract coordinates (a
     non-parsing symbol is skipped), and returns one tuple per contract — every
-    strike × CE/PE × expiry. Returns ``[]`` when no options are present.
+    strike × CE/PE × expiry. When *exchange* is given only that exchange's
+    contracts are kept (an exact per-exchange ranking). Returns ``[]`` when no
+    options are present.
 
     Parameters
     ----------
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    exchange
+        Restrict to one exchange (``NSE`` / ``BSE``), or ``None`` for all.
 
     Returns
     -------
@@ -665,6 +682,8 @@ def _discover_options(lake_root: Path) -> list[tuple[str, str, str, date_cls, De
     contracts: list[tuple[str, str, str, date_cls, Decimal, str]] = []
     for dataset in list_candle_datasets(lake_root):
         if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
+            continue
+        if exchange is not None and dataset["exchange"] != exchange:
             continue
         symbol = dataset["symbol"]
         parsed = parse_option_symbol(symbol)
@@ -772,6 +791,179 @@ def _tier_expiry_by_underlying(
     return target
 
 
+def normalize_options_selectors(
+    expiry_tier: str | None, expiry_track: str | None
+) -> tuple[str, str]:
+    """Normalise the raw ``?expiry=`` / ``?track=`` selectors to canonical tokens.
+
+    Lower-cases both; a blank / ``None`` tier ⇒ ``near``; a blank / ``None`` /
+    unknown track ⇒ ``all`` (the structural-cadence default). The single source of
+    truth for the normalisation so the cache key and the computed candidate set
+    agree on the canonical tier/track (CLAUDE.md §11 COMMON) — an unknown track
+    such as ``"foo"`` keys identically to ``all``, never a stale split.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(tier, track)`` — canonical lower-case tokens.
+    """
+    tier = (expiry_tier or "near").lower()
+    track = (expiry_track or "all").lower()
+    if track not in _EXPIRY_TRACKS:
+        track = "all"
+    return tier, track
+
+
+@dataclass(frozen=True, slots=True)
+class OptionsCandidates:
+    """The cacheable options candidate set for one snapshot coordinate (pre-ranking).
+
+    The expensive, ``top_n``-independent product of one lake scan — the per-contract
+    :class:`OptionMover` list + the skipped count + the normalised snapshot date +
+    the canonical expiry tier/track the set was computed for. Caching THIS (keyed by
+    ``(exchange, interval, date, time, tier, track)``) makes a sub-filter / ``top_n``
+    change an O(1) hit + a cheap re-rank (:func:`build_options_payload`), never a
+    re-scan (DEC-MOVERS-O1-LATENCY-001).
+
+    Attributes
+    ----------
+    movers
+        The computed option-contract rows (one per strike × CE/PE on the tier expiry).
+    skipped
+        Count of contracts dropped (no session bar on the selected day/time).
+    date
+        The normalised ISO ``YYYY-MM-DD`` snapshot day.
+    expiry_tier, expiry_track
+        The canonical tier / cadence the set was computed for (echoed to the payload).
+    """
+
+    movers: tuple[OptionMover, ...]
+    skipped: int
+    date: str
+    expiry_tier: str
+    expiry_track: str
+
+
+def compute_options_candidates(
+    *,
+    lake_root: Path,
+    interval: str,
+    date: str | None,
+    time: str | None,
+    expiry_tier: str = "near",
+    expiry_track: str = "all",
+    exchange: str | None = None,
+    names: Mapping[str, str] | None = None,
+) -> OptionsCandidates:
+    """Scan the lake → the :class:`OptionsCandidates` for one snapshot coordinate.
+
+    The expensive, cacheable core extracted from :func:`run_options_snapshot`:
+    discovers EVERY option contract in the lake (every strike × CE/PE × expiry —
+    NOT collapsed per underlying; optionally scoped to *exchange*), keeps only the
+    contracts on the selected Near/Next/Far expiry within the chosen cadence track,
+    reads each contract's selected-day session (raw 1-minute, OI + cumulative value
+    preserved) up to *time*, takes the contract's prior 1-day close + OI and its
+    underlying spot's LTP, and computes the per-contract :class:`OptionMover`.
+    Ranking is the cheap, ``top_n``-dependent step done by
+    :func:`build_options_payload`. An empty / options-less lake (or an unknown
+    interval) yields an empty :class:`OptionsCandidates` (Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root, interval, date, time, expiry_tier, expiry_track, names
+        See :func:`run_options_snapshot`.
+    exchange
+        Restrict the screened contracts to one exchange (``NSE`` / ``BSE``) for an
+        exact per-exchange ranking; ``None`` screens every exchange.
+
+    Returns
+    -------
+    OptionsCandidates
+        The contract rows + skipped count + normalised date + canonical tier/track.
+
+    Raises
+    ------
+    ValueError
+        On a malformed *date* / *time* (the route maps it to a 400).
+    """
+    minutes = interval_minutes(interval)
+    day = parse_snapshot_date(date)
+    date_str = day.isoformat()
+    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    resolved_names = names or {}
+    tier, track = normalize_options_selectors(expiry_tier, expiry_track)
+    contracts = _discover_options(lake_root, exchange=exchange)
+    # Keep ONLY the contracts on the selected Near/Next/Far expiry (resolved per
+    # underlying as-of the snapshot day) WITHIN the chosen cadence track; an
+    # underlying without that serial expiry on the track drops out honestly.
+    target_expiry = _tier_expiry_by_underlying(contracts, on_date=day, tier=tier, track=track)
+    contracts = [c for c in contracts if target_expiry.get(c[2]) == c[3]]
+    if minutes is None or not contracts:
+        return OptionsCandidates(
+            movers=(), skipped=0, date=date_str, expiry_tier=tier, expiry_track=track
+        )
+
+    movers: list[OptionMover] = []
+    skipped = 0
+    for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
+        read = _read_future_session(
+            lake_root,
+            exchange=contract_exchange,
+            segment=_FNO_SEGMENT,
+            symbol=symbol,
+            day=day,
+            cutoff_min=cutoff_min,
+        )
+        if read is None:  # no session bar on the selected day/time → skip, never faked.
+            skipped += 1
+            continue
+        ltp, volume, oi = read
+        value_paisa = _session_value_paisa(
+            lake_root, exchange=contract_exchange, symbol=symbol, day=day, cutoff_min=cutoff_min
+        )
+        prev_close = _prev_day_close(
+            lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
+        )
+        prev_oi = _prev_day_oi(
+            lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
+        )
+        # The underlying spot is probed under the PARSED underlying (NIFTY); the
+        # row's display name keeps the parsed underlying (the strike/type are in
+        # `OptionMover.name`), optionally renamed via `names`.
+        spot_ltp = _underlying_spot_ltp(
+            lake_root,
+            exchange=contract_exchange,
+            underlying=underlying,
+            day=day,
+            cutoff_min=cutoff_min,
+        )
+        movers.append(
+            compute_option_mover(
+                underlying=resolved_names.get(underlying, underlying),
+                expiry=expiry,
+                strike=strike,
+                opt_type=opt_type,
+                symbol=symbol,
+                exchange=contract_exchange,
+                ltp=ltp,
+                volume=volume,
+                value_paisa=value_paisa,
+                oi=oi,
+                prev_close=prev_close,
+                spot_ltp=spot_ltp,
+                prev_oi=prev_oi,
+            )
+        )
+
+    return OptionsCandidates(
+        movers=tuple(movers),
+        skipped=skipped,
+        date=date_str,
+        expiry_tier=tier,
+        expiry_track=track,
+    )
+
+
 def run_options_snapshot(
     *,
     lake_root: Path,
@@ -781,18 +973,14 @@ def run_options_snapshot(
     top_n: int,
     expiry_tier: str = "near",
     expiry_track: str = "all",
+    exchange: str | None = None,
     names: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compute the options movers snapshot over the lake → the ``/api/v1/movers`` payload.
 
-    Discovers EVERY option contract in the lake (every strike × CE/PE × expiry —
-    NOT collapsed per underlying; an options screen lists individual contracts),
-    reads each contract's selected-day session (raw 1-minute, OI + cumulative
-    value preserved) up to *time*, takes the contract's prior 1-day close + OI and
-    its underlying spot's LTP, computes the per-contract :class:`OptionMover`, and
-    ranks them into the per-category payload. An empty / options-less lake (or an
-    unknown interval) yields an honest "pull the F&O options first" payload —
-    never a 500, never a fabricated mover (Golden Rule #1).
+    The thin compose of :func:`compute_options_candidates` (the expensive, cacheable
+    scan) + :func:`build_options_payload` (the cheap, ``top_n``-dependent rank).
+    Behaviour is unchanged from the pre-split version.
 
     The ``expiry_tier`` (``near`` / ``next`` / ``far``) keeps ONLY the contracts on
     the selected expiry — resolved PER underlying as the 1st / 2nd / 3rd distinct
@@ -815,6 +1003,9 @@ def run_options_snapshot(
         unknown ⇒ ``all``) — the cadence the Near/Next/Far tier ranks within. The
         classification is structural (last-in-month = monthly), so it needs no NSE
         weekday rule (Golden Rule #1).
+    exchange
+        Restrict the screened contracts to one exchange (``NSE`` / ``BSE``); ``None``
+        screens every exchange.
     names
         Optional ``underlying → display name`` map; defaults to the underlying
         symbol itself when absent (the contract name keeps the strike + type).
@@ -829,90 +1020,23 @@ def run_options_snapshot(
     ValueError
         On a malformed *date* / *time* (the route maps it to a 400).
     """
-    minutes = interval_minutes(interval)
-    day = parse_snapshot_date(date)
-    date_str = day.isoformat()
-    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
-    resolved_names = names or {}
-    tier = expiry_tier.lower()
-    # Normalise the cadence track up-front so the resolver AND the note label agree
-    # (an unknown / blank selector ⇒ the default ``all`` — never a misleading label).
-    track = expiry_track.lower()
-    if track not in _EXPIRY_TRACKS:
-        track = "all"
-    contracts = _discover_options(lake_root)
-    # Keep ONLY the contracts on the selected Near/Next/Far expiry (resolved per
-    # underlying as-of the snapshot day) WITHIN the chosen cadence track; an
-    # underlying without that serial expiry on the track drops out honestly.
-    target_expiry = _tier_expiry_by_underlying(contracts, on_date=day, tier=tier, track=track)
-    contracts = [c for c in contracts if target_expiry.get(c[2]) == c[3]]
-    if minutes is None or not contracts:
-        return build_options_payload(
-            [],
-            interval=interval,
-            date=date_str,
-            time=time,
-            top_n=top_n,
-            skipped=0,
-            expiry_tier=tier,
-            expiry_track=track,
-        )
-
-    movers: list[OptionMover] = []
-    skipped = 0
-    for symbol, exchange, underlying, expiry, strike, opt_type in contracts:
-        read = _read_future_session(
-            lake_root,
-            exchange=exchange,
-            segment=_FNO_SEGMENT,
-            symbol=symbol,
-            day=day,
-            cutoff_min=cutoff_min,
-        )
-        if read is None:  # no session bar on the selected day/time → skip, never faked.
-            skipped += 1
-            continue
-        ltp, volume, oi = read
-        value_paisa = _session_value_paisa(
-            lake_root, exchange=exchange, symbol=symbol, day=day, cutoff_min=cutoff_min
-        )
-        prev_close = _prev_day_close(
-            lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
-        )
-        prev_oi = _prev_day_oi(
-            lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
-        )
-        # The underlying spot is probed under the PARSED underlying (NIFTY); the
-        # row's display name keeps the parsed underlying (the strike/type are in
-        # `OptionMover.name`), optionally renamed via `names`.
-        spot_ltp = _underlying_spot_ltp(
-            lake_root, exchange=exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
-        )
-        movers.append(
-            compute_option_mover(
-                underlying=resolved_names.get(underlying, underlying),
-                expiry=expiry,
-                strike=strike,
-                opt_type=opt_type,
-                symbol=symbol,
-                exchange=exchange,
-                ltp=ltp,
-                volume=volume,
-                value_paisa=value_paisa,
-                oi=oi,
-                prev_close=prev_close,
-                spot_ltp=spot_ltp,
-                prev_oi=prev_oi,
-            )
-        )
-
-    return build_options_payload(
-        movers,
+    candidates = compute_options_candidates(
+        lake_root=lake_root,
         interval=interval,
-        date=date_str,
+        date=date,
+        time=time,
+        expiry_tier=expiry_tier,
+        expiry_track=expiry_track,
+        exchange=exchange,
+        names=names,
+    )
+    return build_options_payload(
+        candidates.movers,
+        interval=interval,
+        date=candidates.date,
         time=time,
         top_n=top_n,
-        skipped=skipped,
-        expiry_tier=tier,
-        expiry_track=track,
+        skipped=candidates.skipped,
+        expiry_tier=candidates.expiry_tier,
+        expiry_track=candidates.expiry_track,
     )

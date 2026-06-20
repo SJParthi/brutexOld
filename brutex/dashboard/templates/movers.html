@@ -164,6 +164,12 @@ const ASSETS = {
 const TF_MIN = {"1minute":1,"5minute":5,"15minute":15,"30minute":30,"1hour":60,"1day":375};
 const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
 let rowsData = [];
+/* The full payload from the last successful fetch — it holds EVERY category list
+   for the current coordinate (date/timeframe/time/exchange/top_n/expiry/track), so
+   switching the sub-filter pill is a pure client-side re-render with NO server
+   round-trip (DEC-MOVERS-O1-LATENCY-001). Reset to null on a failed/preview fetch
+   so a pill switch then falls back to a real fetch. */
+let lastPayload = null;
 
 /* Clearly-labelled SAMPLE rows so the page shows the layout standalone (no backend). NOT real data. */
 const SAMPLE = {
@@ -190,9 +196,17 @@ function fillTimes() {
   while (t < 15*60+30) { opts += `<option>${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}</option>`; t += m; }
   sel.innerHTML = opts; state.time = sel.value;
 }
+/* Sub-filter (pill) switch: re-render the already-fetched payload's other category
+   list IN THE BROWSER — the server returned every category for this coordinate, so
+   no round-trip is needed (DEC-MOVERS-O1-LATENCY-001). Only falls back to a fetch
+   when no payload is cached yet (first paint, or after a failed/preview fetch). */
+function applyCategory() {
+  if (lastPayload) { rowsData = lastPayload[state.category] || lastPayload.gainers || []; renderRows(); }
+  else { load(); }
+}
 function renderPills() {
   $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
-  $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); load(); });
+  $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); applyCategory(); });
   /* Expiry applies to futures/options only — hidden for spot. */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
   $("expiry").style.display = derivAsset ? "" : "none";
@@ -259,17 +273,20 @@ async function load() {
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"50" });
   if ($("date").value) p.set("date", $("date").value);
   if (state.time) p.set("time", state.time);
+  if ($("exchange").value) p.set("exchange", $("exchange").value);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
     if (!r.ok) throw new Error("HTTP "+r.status);
     const j = await r.json();
+    lastPayload = j;  /* cache: sub-filter switches now re-render from this, no refetch. */
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
     $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
     $("note").innerHTML = "<b>Note:</b> "+(j.note||"");
   } catch (e) {
+    lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     rowsData = SAMPLE[state.asset] || SAMPLE.spot;
     renderHead(); renderRows();
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
