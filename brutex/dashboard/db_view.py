@@ -50,6 +50,11 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+from brutex.data.fno_candle_lake import (
+    FNO_CANDLE_COLUMNS,
+    FNO_CANDLE_LAKE_SEGMENT,
+)
+from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.partition import (
     VALID_EXCHANGES,
     VALID_INTERVALS,
@@ -773,6 +778,85 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
                             }
                         )
     return found
+
+
+def list_fno_candle_datasets(lake_root: Path) -> list[dict[str, Any]]:
+    """Discover the F&O candle datasets, each decoded to its contract coordinates.
+
+    The F&O analog of :func:`list_candle_datasets`: keeps ONLY the ``segment="FNO"``
+    partition sets — the futures + options the Groww historical pull writes to
+    ``bars/<exch>/FNO/<groww_symbol>/<interval>/…`` (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) —
+    and enriches each with the contract identity decoded from its ``groww_symbol`` via
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol` (underlying / expiry / strike /
+    instrument_type / option_type). This is the first-class "F&O candle lake" surface
+    the ``/db`` browser renders, distinct from (and no longer conflated with) the spot
+    candle list — the honesty fix of DEC-FNO-CANDLE-LAKE-001: an F&O contract bar is
+    NOT spot.
+
+    A dataset whose directory name does NOT decode as a contract symbol is STILL listed
+    (with ``None`` identity fields) rather than hidden — the lake is the single source
+    of truth and a present-but-undecodable partition is surfaced honestly, never dropped
+    (Golden Rule #1). The ``(exchange, segment, symbol, interval)`` coordinates are the
+    SAME keys :func:`query_candles` takes, so the viewer queries an F&O contract through
+    the identical ``segment="FNO"`` candle path — zero new query surface.
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One entry per ``(exchange, FNO, groww_symbol, interval)`` set, in
+        :func:`list_candle_datasets` order, each shaped::
+
+            {"kind": "fno", "exchange", "segment", "symbol", "interval",
+             "underlying": str|None, "expiry": "YYYY-MM-DD"|None,
+             "strike": str|None, "instrument_type": str|None, "option_type": str|None}
+    """
+    out: list[dict[str, Any]] = []
+    for dataset in list_candle_datasets(lake_root):
+        if dataset["segment"] != FNO_CANDLE_LAKE_SEGMENT:
+            continue
+        parts = parse_fno_symbol(dataset["symbol"])
+        out.append(
+            {
+                "kind": "fno",
+                "exchange": dataset["exchange"],
+                "segment": dataset["segment"],
+                "symbol": dataset["symbol"],
+                "interval": dataset["interval"],
+                "underlying": parts.underlying if parts else None,
+                "expiry": parts.expiry.isoformat() if parts else None,
+                "strike": str(parts.strike) if parts and parts.strike is not None else None,
+                "instrument_type": parts.instrument_type if parts else None,
+                "option_type": parts.option_type if parts else None,
+            }
+        )
+    return out
+
+
+def fno_candle_lake_schema() -> list[dict[str, Any]]:
+    """Return the F&O candle logical-table schema for the ``/db`` browser.
+
+    A JSON-friendly projection of
+    :data:`brutex.data.fno_candle_lake.FNO_CANDLE_COLUMNS` — the documented columns
+    (the 7 physical OHLCV columns + the partition / symbol identity columns) the
+    ``/db`` F&O candle section lists so an operator sees the table's exact shape, the
+    twin of the ``schema_meta`` registration written at store-open
+    (DEC-FNO-CANDLE-LAKE-001). Pure projection — no disk access.
+    """
+    return [
+        {
+            "name": c.name,
+            "dtype": c.dtype,
+            "source": c.source,
+            "nullable": c.nullable,
+            "doc": c.doc,
+        }
+        for c in FNO_CANDLE_COLUMNS
+    ]
 
 
 def _aggregate_parquet_resilient(
@@ -2250,8 +2334,10 @@ __all__ = [
     "build_window_payload",
     "clamp_limit",
     "clamp_offset",
+    "fno_candle_lake_schema",
     "list_candle_datasets",
     "list_columns",
+    "list_fno_candle_datasets",
     "list_option_datasets",
     "list_option_series",
     "list_registry_contracts",

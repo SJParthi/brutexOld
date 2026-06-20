@@ -149,7 +149,26 @@ class TestDbCandleDatasetsApi:
 
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
-        assert client.get("/api/v1/db/candles/datasets").json() == {
-            "datasets": [],
-            "options": [],
-        }
+        body = client.get("/api/v1/db/candles/datasets").json()
+        assert body["datasets"] == []
+        assert body["fno"] == []
+        assert body["options"] == []
+        # The F&O candle logical-table schema is ALWAYS present (the /db twin of the
+        # schema_meta registration, DEC-FNO-CANDLE-LAKE-001), even with no lake root.
+        assert [c["name"] for c in body["fno_schema"]] == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+            "exchange",
+            "segment",
+            "underlying",
+            "expiry_date",
+            "instrument_type",
+            "strike",
+            "option_type",
+            "interval",
+        ]

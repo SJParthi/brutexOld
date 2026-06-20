@@ -18,7 +18,19 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853 —
+_Last updated: 2026-06-20 (DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #859 — §6 +
+active-branch facts: the F&O (futures + options) historical-candle lake is now a
+FIRST-CLASS, documented logical table — surfaced in `/db`'s Candle-lake section as a
+dedicated "📊 F&O candles" row (decoded per contract: underlying / expiry / strike /
+CE-PE-FUT) AND registered in the master `schema_meta` (the `fno_candle_lake.*` keys),
+driven by the new shared parser `brutex/data/fno_symbol.py` + descriptor
+`brutex/data/fno_candle_lake.py`. This FORMALIZES + SURFACES data ALREADY stored by the
+existing Groww pull at `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet`
+(the shared `ParquetBarSink`, OI first-class, 2-dp grid) — it is NOT a new store
+(Golden Rule #1: a 4-agent pass proved the "F&O candles are discarded" premise false),
+and the spot candle list is now honestly spot-only (an F&O bar is not spot). The
+brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX (lake-view only). Earlier: 2026-06-20
+(DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853 —
 §1/§3/§6 facts: **1-minute is now the ONLY granularity fetched from Groww** (spot
 + futures + options); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED
 from the stored 1-minute and written to the lake (`spot_daily_resample`), never
@@ -118,7 +130,7 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/universe-tick-inplace-jlzt1n` (`/universe` "⊕ tick its constituents" selects the mapped stocks IN PLACE — no navigation to the Stocks screen — DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001, MIGRATION.md #858: the handler background-fetches `?kind=stock` into a LOCAL list and ticks into `selMulti` without re-assigning `filter`/switching tab; frontend-only template JS, no backend change. Prior merged: DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811, symbol-mismatched F&O stocks persisted tradable) + DEC-TF-PRECISION-PROOF-001 #856 (PR #810). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show only the years that actually have expiries, not the requested 2020-2026 span)
+- **Active branch:** `claude/relaxed-keller-6b7pzx` (the F&O futures+options candle lake is FORMALIZED + SURFACED as a first-class `/db` logical table + registered in `schema_meta` — DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #859: NEW shared parser `data/fno_symbol.py` + descriptor `data/fno_candle_lake.py`; `db_view.list_fno_candle_datasets`/`fno_candle_lake_schema`; the `/db` "📊 F&O candles" row; `instrument_store.open()` registers `fno_candle_lake.*` in `schema_meta`; `movers_options.parse_option_symbol` delegates to the shared parser (§11 COMMON). NO new storage / write-path / scope change — formalizes data already stored by the existing pull; ENGINE unchanged. Prior merged: DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811) + DEC-TF-PRECISION-PROOF-001 #856 (PR #810). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show only the years that actually have expiries, not the requested 2020-2026 span)
 
 ---
 
@@ -346,7 +358,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/universe-symbol-persist-jlzt1n`
+- **Active feature branch:** `claude/relaxed-keller-6b7pzx`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -495,6 +507,7 @@ bruteX/
 |------|-------|--------|
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
+| F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #859 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
 | Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window of per-contract `expiry − 3 calendar months → expiry` (explicit operator dates override; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`); `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
