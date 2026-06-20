@@ -53,7 +53,9 @@ _DAY = date(2024, 6, 13)
 # ── seeding helpers (exchange is a parameter — multi-exchange lakes) ───────
 
 
-def _min_bar(*, hour: int, minute: int, close: str, volume: int, oi: int | None = None) -> CandleBar:
+def _min_bar(
+    *, hour: int, minute: int, close: str, volume: int, oi: int | None = None
+) -> CandleBar:
     """A flat 1-minute bar at ``HH:MM`` **IST** on ``_DAY`` (IST = UTC + 05:30)."""
     c = Decimal(close)
     total = hour * 60 + minute - (5 * 60 + 30)
@@ -83,7 +85,13 @@ def _day_bar(*, close: str, volume: int, day: date = _DAY) -> CandleBar:
 
 
 def _write(
-    tmp_path: Path, *, exchange: str, segment: str, symbol: str, interval: str, bars: list[CandleBar]
+    tmp_path: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    bars: list[CandleBar],
 ) -> None:
     ParquetWriter(lake_root=tmp_path).write(
         exchange=exchange, segment=segment, symbol=symbol, interval=interval, bars=bars
@@ -148,9 +156,15 @@ def _seed_two_exchange_spot(tmp_path: Path) -> None:
 class TestSpotExchangeScope:
     def test_compute_filters_to_one_exchange(self, tmp_path: Path) -> None:
         _seed_two_exchange_spot(tmp_path)
-        nse = compute_spot_candidates(lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE")
-        bse = compute_spot_candidates(lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="BSE")
-        both = compute_spot_candidates(lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange=None)
+        nse = compute_spot_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        bse = compute_spot_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="BSE"
+        )
+        both = compute_spot_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange=None
+        )
         assert {s.instrument.symbol for s in nse.snapshots} == {"NIFTY"}
         assert {s.instrument.symbol for s in bse.snapshots} == {"SENSEX"}
         assert {s.instrument.symbol for s in both.snapshots} == {"NIFTY", "SENSEX"}

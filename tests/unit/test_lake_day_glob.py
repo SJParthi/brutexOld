@@ -25,9 +25,9 @@ def _seed_month(base: Path, *, year: int, month: int, rows: int = 3) -> Path:
     """Write a tiny ``<base>/<yyyy>/<mm>.parquet`` and return its path."""
     target = base / f"{year:04d}" / f"{month:02d}.parquet"
     target.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({"close": [float(i) for i in range(rows)], "volume": list(range(rows))}).write_parquet(
-        target
-    )
+    pl.DataFrame(
+        {"close": [float(i) for i in range(rows)], "volume": list(range(rows))}
+    ).write_parquet(target)
     return target
 
 

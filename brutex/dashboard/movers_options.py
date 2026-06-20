@@ -929,7 +929,11 @@ def compute_options_candidates(
         # row's display name keeps the parsed underlying (the strike/type are in
         # `OptionMover.name`), optionally renamed via `names`.
         spot_ltp = _underlying_spot_ltp(
-            lake_root, exchange=contract_exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
+            lake_root,
+            exchange=contract_exchange,
+            underlying=underlying,
+            day=day,
+            cutoff_min=cutoff_min,
         )
         movers.append(
             compute_option_mover(

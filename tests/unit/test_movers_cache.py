@@ -30,8 +30,12 @@ class TestCandidateKey:
         assert key == "spot|NSE|1day|2024-06-13|||"
 
     def test_none_time_and_empty_time_key_identically(self) -> None:
-        a = candidate_key(asset="spot", exchange=None, interval="5minute", date="2024-06-13", time=None)
-        b = candidate_key(asset="spot", exchange=None, interval="5minute", date="2024-06-13", time="")
+        a = candidate_key(
+            asset="spot", exchange=None, interval="5minute", date="2024-06-13", time=None
+        )
+        b = candidate_key(
+            asset="spot", exchange=None, interval="5minute", date="2024-06-13", time=""
+        )
         assert a == b == "spot||5minute|2024-06-13|||"
 
     def test_options_key_includes_tier_and_track(self) -> None:
@@ -47,7 +51,9 @@ class TestCandidateKey:
         assert key == "options|BSE|1day|2024-06-13|09:20|near|monthly"
 
     def test_spot_and_options_keys_distinct_for_same_coordinate(self) -> None:
-        spot = candidate_key(asset="spot", exchange="NSE", interval="1day", date="2024-06-13", time=None)
+        spot = candidate_key(
+            asset="spot", exchange="NSE", interval="1day", date="2024-06-13", time=None
+        )
         opt = candidate_key(
             asset="options",
             exchange="NSE",

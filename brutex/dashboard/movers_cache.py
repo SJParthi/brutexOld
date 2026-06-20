@@ -195,9 +195,7 @@ class MoversSnapshotCache:
         with self._lock:
             return len(self._entries)
 
-    def get_or_compute(
-        self, key: str, *, generation: int, compute: Callable[[], _T]
-    ) -> _T:
+    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], _T]) -> _T:
         """Return *key*'s cached candidate set for *generation*, computing on a miss.
 
         Decision (the O(1) bookkeeping is under the lock; ``compute`` is not):
