@@ -805,29 +805,33 @@ def test_with_retry_threads_on_window(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [_tick]
 
 
-# ── _resolve_spot_window — the 1-day-first per-symbol window hook (DEC-SPOT-1DAY-FIRST-001) ──
+# ── _resolve_spot_window — the opt-in per-symbol window hook (DEC-SPOT-INTERVAL-DECOUPLE-001) ──
+#
+# The SPOT pull paths always pass ``symbol_windows=None`` since the 1-minute pull is
+# fully decoupled from the 1-day coverage (MIGRATION.md #851). These tests cover the
+# RETAINED opt-in mechanism (the never-narrow fallback any caller may still supply).
 
 
 class TestResolveSpotWindow:
-    """The pure ``(start, end)`` resolver behind the 1-day-first minute bounds."""
+    """The pure ``(start, end)`` resolver behind the opt-in per-symbol minute bounds."""
 
     def test_none_map_is_global_range(self) -> None:
-        # ``symbol_windows is None`` (the opt-in param's default) → the global range,
-        # byte-identical to the pre-feature behaviour.
+        # ``symbol_windows is None`` (the SPOT path's value since the decouple) → the
+        # global range — the 1-minute pull is the full ``[start, end)`` for every symbol.
         assert mod._resolve_spot_window(
             None, symbol="NIFTY", interval="1minute", start=_START, end=_END
         ) == (_START, _END)
 
     def test_daily_interval_is_never_bounded(self) -> None:
-        # The DAILY interval PRODUCES the bounds, so it must NEVER be bounded by them —
-        # even when the symbol is present in the map.
+        # The DAILY interval is never bounded — even when the symbol is present in the
+        # map (a spot index's daily series must advance to the requested end).
         windows = {"NIFTY": (date(2022, 4, 5), date(2022, 5, 5))}
         assert mod._resolve_spot_window(
             windows, symbol="NIFTY", interval="1day", start=_START, end=_END
         ) == (_START, _END)
 
-    def test_symbol_present_sub_daily_uses_bounded_window(self) -> None:
-        # A SUB-DAILY interval of a symbol in the map → its discovered bounded window
+    def test_symbol_present_sub_daily_uses_mapped_window(self) -> None:
+        # A SUB-DAILY interval of a symbol in an opt-in map → its mapped window
         # (the line-152 branch the leaf coverage was missing).
         bound = (date(2022, 4, 5), date(2022, 5, 5))
         assert (
@@ -846,10 +850,12 @@ class TestResolveSpotWindow:
 
 
 def test_symbol_windows_threaded_into_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``symbol_windows`` bounds each sub-daily pair's ``(start, end)`` end-to-end.
+    """An opt-in ``symbol_windows`` map bounds each sub-daily pair's ``(start, end)``.
 
-    The bounded symbol's 1-minute pull STARTS at its discovered listing date; its 1-day
-    pull stays the global range; an unbounded symbol's 1-minute stays global too.
+    A mapped symbol's 1-minute pull uses its mapped window; its 1-day pull stays the
+    global range; an unbounded symbol's 1-minute stays global too. (The SPOT path
+    passes ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001; this exercises the retained
+    opt-in fallback.)
     """
     seen: dict[tuple[str, str], tuple[date, date]] = {}
 

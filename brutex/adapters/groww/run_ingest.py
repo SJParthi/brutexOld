@@ -128,22 +128,23 @@ def _resolve_spot_window(
     start: date,
     end: date,
 ) -> tuple[date, date]:
-    """Resolve one ``(instrument, interval)`` pair's ``(start, end)`` — the 1-day-first hook.
+    """Resolve one ``(instrument, interval)`` pair's ``(start, end)`` — the opt-in bound hook.
 
-    DEC-SPOT-1DAY-FIRST-001 — the SPOT twin of the option/future
+    The SPOT twin of the option/future
     :func:`~brutex.adapters.groww.option_ingest._resolve_window`. Returns the
-    per-symbol bounded minute window from *symbol_windows* ONLY for sub-daily
-    intervals and only when *symbol* is in the map; every other case falls back to
-    the global ``(start, end)``:
+    per-symbol window from *symbol_windows* ONLY for sub-daily intervals and only
+    when *symbol* is in the map; every other case falls back to the global
+    ``(start, end)``:
 
-    * ``symbol_windows is None`` → ``(start, end)`` — byte-identical to the
-      pre-feature behaviour (the param is opt-in).
-    * ``interval == TRACK1_DAILY_INTERVAL`` → ``(start, end)`` — the DAILY interval
-      is the coverage that PRODUCES the bounds, so it must NEVER be bounded by them
-      (and a spot index's daily series must keep advancing to the requested end).
-    * *symbol* absent from the map → ``(start, end)`` — a symbol the caller did NOT
-      bound (the caller normally excludes a no-coverage symbol from the minute pull
-      entirely; this is the never-narrow fallback if one slips through).
+    * ``symbol_windows is None`` → ``(start, end)`` — the SPOT pull paths always pass
+      ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851): the 1-minute
+      pull is fully DECOUPLED from the 1-day coverage and runs over the full
+      ``[start, end]`` range for every symbol. This branch is the live path.
+    * ``interval == TRACK1_DAILY_INTERVAL`` → ``(start, end)`` — the DAILY interval is
+      never bounded (a spot index's daily series must keep advancing to the requested
+      end).
+    * *symbol* absent from the map → ``(start, end)`` — the never-narrow fallback for
+      any caller that does supply an opt-in *symbol_windows* map.
 
     Pure + **O(1)** (one dict lookup).
     """
@@ -301,14 +302,16 @@ def run_groww_spot_ingest(
         window worker threads; the caller owns throttle + thread-safety. ``None`` is a
         no-op (CLI / tests).
     symbol_windows
-        Optional per-symbol ``{symbol_name: (start, end)}`` map (DEC-SPOT-1DAY-FIRST-001,
-        the spot twin of options' ``contract_windows``) — typically built by
-        :func:`~brutex.adapters.groww.spot_bounds.discover_spot_minute_windows` from each
-        symbol's 1-day lake coverage. When supplied, a SUB-DAILY pull of a symbol present
-        in the map STARTS from its discovered 1-day listing date instead of the blind 2020
-        floor (see :func:`_resolve_spot_window`); the DAILY interval is never bounded and a
-        symbol absent from the map is pulled over the full ``[start, end)``. ``None`` (the
-        default) is byte-identical to the pre-feature behaviour.
+        Optional per-symbol ``{symbol_name: (start, end)}`` map (the spot twin of
+        options' ``contract_windows``). When supplied, a SUB-DAILY pull of a symbol
+        present in the map runs over its mapped ``(start, end)`` instead of the global
+        range (see :func:`_resolve_spot_window`); the DAILY interval is never bounded
+        and a symbol absent from the map is pulled over the full ``[start, end)``.
+        ``None`` (the default — and what the SPOT pull paths always pass since
+        DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851) pulls the full
+        ``[start, end)`` range for every symbol: the 1-minute fetch is fully decoupled
+        from the 1-day coverage. The alias is retained for any caller that does supply
+        an opt-in map (the never-narrow fallback).
 
     Returns
     -------
@@ -575,10 +578,11 @@ def run_groww_spot_ingest_with_retry(
     O(1)-total; the round count is bounded by *max_retry_rounds* (never infinite);
     every round is rate-safe; and a Groww auth death halts the loop (re-auth needed).
 
-    *symbol_windows* (DEC-SPOT-1DAY-FIRST-001) is forwarded verbatim to every
-    :func:`run_groww_spot_ingest` pass (each retry round honours the SAME per-symbol
-    1-day-first minute bounds), so the recovery rounds never re-pull a symbol's dead
-    pre-listing periods.
+    *symbol_windows* is forwarded verbatim to every :func:`run_groww_spot_ingest`
+    pass (each retry round honours the SAME opt-in per-symbol bounds). The SPOT pull
+    paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851), so
+    each round re-pulls only the still-failed windows of the full ``[start, end)``
+    range.
 
     Returns
     -------

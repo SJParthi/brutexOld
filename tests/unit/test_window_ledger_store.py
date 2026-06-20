@@ -200,7 +200,12 @@ class TestPlanWindows:
 
 
 class TestPlanWindowsSymbolWindows:
-    """DEC-SPOT-1DAY-FIRST-001 — per-symbol bounded sub-daily planning (plan_windows)."""
+    """Per-symbol opt-in sub-daily planning (plan_windows ``symbol_windows``).
+
+    The SPOT pull paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md
+    #851 — the 1-minute fetch is fully decoupled from the 1-day coverage), but the
+    ledger still accepts the opt-in map (the never-narrow fallback) — covered here.
+    """
 
     def _minute_tiles(self, start: date, end: date) -> list[tuple[date, date]]:
         from brutex.adapters.ingest_common import tile_windows
@@ -210,7 +215,7 @@ class TestPlanWindowsSymbolWindows:
 
     def test_bounded_sub_daily_symbol_tiles_from_its_window(self) -> None:
         # A symbol in the map → its SUB-DAILY (1minute) windows are tiled from the
-        # discovered ``(start, end)``, NOT the global range (lines 443-450).
+        # mapped ``(start, end)``, NOT the global range (lines 443-450).
         bound = (date(2026, 4, 1), date(2026, 6, 1))
         ledger = WindowLedger()
         # ``now_ist`` past the bound's end so the daily/intraday clamp is inert.
@@ -907,7 +912,12 @@ class TestReconcileLedgerWithLake:
 
 
 class TestReconcileSymbolWindows:
-    """DEC-SPOT-1DAY-FIRST-001 — per-symbol bounded sub-daily cold-start seeding."""
+    """Per-symbol opt-in sub-daily cold-start seeding (reconcile ``symbol_windows``).
+
+    The SPOT pull paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md
+    #851), but the reconcile still accepts the opt-in map (the never-narrow fallback) —
+    covered here.
+    """
 
     def _minute_tiles(self, start: date, end: date) -> list[tuple[date, date]]:
         from brutex.adapters.ingest_common import tile_windows
@@ -917,7 +927,7 @@ class TestReconcileSymbolWindows:
 
     def test_bounded_sub_daily_seeds_from_its_window(self) -> None:
         # The bounded SUB-DAILY tiling (lines 547-549): a 1minute symbol in the map is
-        # tiled from its discovered ``(start, end)`` so a seeded SUCCESS key matches a
+        # tiled from its mapped ``(start, end)`` so a seeded SUCCESS key matches a
         # bounded planned key exactly (no orphan). A span enclosing the bound seeds it.
         bound = (date(2026, 4, 1), date(2026, 6, 1))
         ledger = WindowLedger()

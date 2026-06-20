@@ -394,19 +394,19 @@ def plan_windows(
     moving between this plan and a fetch crossing 15:30 IST) self-heals on the
     next pull's plan→prune cycle.
 
-    1-DAY-FIRST per-symbol bounds (DEC-SPOT-1DAY-FIRST-001): *symbol_windows* is an
-    OPTIONAL ``{symbol_name: (start, end)}`` map (the spot twin of the option
-    ``contract_windows``, built by
-    :func:`~brutex.adapters.groww.spot_bounds.discover_spot_minute_windows`). When
-    supplied, a SUB-DAILY interval of a symbol in the map is tiled from its discovered
-    1-day-first ``(start, end)`` instead of the global range — so the PLANNED rows
-    match EXACTLY the windows the spine (:func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`)
-    actually fetches, with NO phantom pre-listing rows (the 2020→listing-day windows
-    that otherwise sit permanently PLANNED). The DAILY interval is NEVER bounded (it
-    produces the coverage + must advance to the requested end) and a symbol absent from
-    the map uses the global range (the never-narrow fallback). ``None`` (the default) is
-    byte-identical to the pre-feature behaviour — the planned/fetched-key parity invariant
-    holds in BOTH modes.
+    Per-symbol bounds: *symbol_windows* is an OPTIONAL
+    ``{symbol_name: (start, end)}`` map (the spot twin of the option
+    ``contract_windows``, type :data:`~brutex.adapters.groww.spot_bounds.SpotWindows`).
+    When supplied, a SUB-DAILY interval of a symbol in the map is tiled from its
+    mapped ``(start, end)`` instead of the global range — so the PLANNED rows match
+    EXACTLY the windows the spine
+    (:func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`) actually fetches.
+    The DAILY interval is NEVER bounded (it must advance to the requested end) and a
+    symbol absent from the map uses the global range (the never-narrow fallback). The
+    SPOT pull paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md
+    #851 — the 1-minute fetch is fully decoupled from the 1-day coverage; both phases
+    plan the full ``[start, end]`` range per symbol); the planned/fetched-key parity
+    invariant holds in BOTH modes.
     """
     # Vendor-neutral tiling/clamp helpers + the (relocated-to-neutral) interval→width
     # policy + coverage market namespace all live in ingest_common (CLAUDE.md §11
