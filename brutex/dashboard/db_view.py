@@ -36,7 +36,7 @@ import math
 import re
 import threading
 from collections.abc import Mapping
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -1260,16 +1260,29 @@ def query_candles(
     # **1-minute** close (DEC-SPOT-PREVCLOSE-1MIN-001). Mixing them is what made
     # adjustment-mismatched symbols (e.g. TMPV — adjusted daily ~112.9 vs raw
     # intraday ~186.6) read garbage. The engine store is unaffected — this is the
-    # read-only viewer. O(1) per-bar lookup once the map is built (CLAUDE.md §5).
+    # read-only viewer.
+    #
+    # The baseline reads ONLY what THIS page needs (DEC-DB-UNIVERSE-O1-LATENCY-001):
+    # * 1-day view — the whole 1-day partition (intrinsically tiny: ≤ one row per
+    #   trading day, ~1.5k rows for 6 years, flat as the lake deepens).
+    # * intraday view — page-bounded: the prior-day last-1-minute close is read for
+    #   the page's OWN date span plus the single bar immediately before it, NOT the
+    #   whole multi-year 1-minute partition. So a prev/next paging click scans ~1–2
+    #   trading days of minute bars regardless of how many years are stored — the
+    #   per-click cost stays flat as the lake grows. Byte-identical to the prior
+    #   full-partition scan for every page date (proven in the db-query tests).
     if interval == _DAILY_INTERVAL:
         prev_close = _prev_trading_close(
             _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
         )
     else:
-        prev_close = _prev_trading_close(
-            _intraday_last_close_by_date(
-                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-            )
+        prev_close = _intraday_prev_close_by_page_date(
+            conn,
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            page_dates=_page_ist_dates(raw_rows, out_columns),
         )
     derived = _spot_derived_rows(raw_rows, out_columns, prev_close, interval=interval)
     rows = [
@@ -1413,6 +1426,93 @@ def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
             out[day] = last_close[prev]
         prev = day
     return out
+
+
+def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> set[date]:
+    """The distinct IST trading dates present in a fetched page's ``timestamp`` column.
+
+    The set of dates the derived %-change baseline must cover for THIS page
+    (DEC-DB-UNIVERSE-O1-LATENCY-001). Keyed by :func:`_bar_ist_date` — the SAME
+    key :func:`_spot_derived_rows` looks the baseline up by — so the page-bounded
+    baseline map aligns bar-for-bar. Empty when ``timestamp`` is not projected
+    (the derived columns are then all blank anyway) or the page is empty.
+    """
+    ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
+    if ts_idx < 0:
+        return set()
+    return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
+
+
+def _intraday_prev_close_by_page_date(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    page_dates: set[date],
+) -> dict[date, Decimal]:
+    """Prior-day last-1-minute close for EXACTLY a page's IST dates — page-bounded.
+
+    The flat-latency replacement for ``_prev_trading_close(
+    _intraday_last_close_by_date(...))`` on the ``/db`` intraday candle pager
+    (DEC-DB-UNIVERSE-O1-LATENCY-001). Instead of aggregating the WHOLE multi-year
+    1-minute partition on every paging click, it reads only:
+
+    1. the last 1-minute close per day for the page's OWN ``[min, max]`` date span
+       (an intraday page covers ~1–2 trading days), and
+    2. the single 1-minute bar immediately BEFORE the page's earliest date — the
+       one baseline that lives outside the page's own span (the predecessor of the
+       first page row).
+
+    Both reads are bounded by the bar ``timestamp`` (IST-midnight instants), which
+    DuckDB row-group-prunes, so the per-click cost is O(page date-span) — flat as
+    the lake deepens, never O(all stored years). The result is **byte-identical**
+    to the prior full-partition scan for every page date: the page's dates are
+    contiguous trading days (a page is a ``LIMIT``/``OFFSET`` slice of
+    timestamp-sorted bars), and prepending their single shared predecessor makes
+    ``_prev_trading_close`` map each page date to the same prior-day close the full
+    scan would (proven in ``tests/unit/test_dashboard_db_query.py``). Returns
+    ``{}`` (every derived cell blank) when *page_dates* is empty or the symbol has
+    no 1-minute partition — matching :func:`_intraday_last_close_by_date`.
+
+    The baseline ALWAYS reads the ``1minute`` partition (DEC-SPOT-PREVCLOSE-1MIN-001),
+    even when a coarser intraday timeframe is being VIEWED — *page_dates* come from
+    the viewed bars, the close baseline from the 1-minute feed underneath them.
+    """
+    if not page_dates:
+        return {}
+    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    glob = base.as_posix() + "/**/*.parquet"
+    lo, hi = min(page_dates), max(page_dates)
+    # IST-midnight instants bound the scan to the page's own span (+ predecessor);
+    # session bars (09:15–15:29 IST) never fall before 09:15, so CAST(ts AS DATE)
+    # for a bar in [lo 00:00 IST, (hi+1) 00:00 IST) is its IST trading date — the
+    # SAME keying as _intraday_last_close_by_date (session-tz-independent here).
+    lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
+    hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
+    # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob is
+    #    built from validated coordinates (no free user text); path + instants bound.
+    span = conn.execute(
+        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d',
+        [glob, lo_instant, hi_instant],
+    ).fetchall()
+    last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
+    # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
+    #    page date (ORDER BY DESC LIMIT 1 reads ~one row-group, not the whole past).
+    pred = conn.execute(
+        'SELECT CAST("timestamp" AS DATE) AS d, close '
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1',
+        [glob, lo_instant],
+    ).fetchone()
+    if pred is not None:
+        last_close[pred[0]] = _to_decimal(pred[1])
+    return _prev_trading_close(last_close)
 
 
 def _daily_close_by_date(

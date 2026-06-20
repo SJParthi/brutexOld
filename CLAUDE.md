@@ -18,7 +18,19 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853 —
+_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #859 —
+the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
+correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
+1-minute partition to baseline the derived %-change columns on every paging click —
+`db_view.py::query_candles` now reads the prior-day last-1-minute close for ONLY the
+page's own date span + the single bar before it (`_intraday_prev_close_by_page_date`,
+byte-for-byte identical to the old full scan, proven exhaustively + a flat-latency
+bench), and the `/db` + `/universe` FRONTENDS update in place (grid-only `#dbgrid`
+refresh on paging instead of a full control-bar+datepicker teardown; a per-tab
+instrument cache + debounced search + in-place completeness patch). Honest envelope:
+O(page date-span) / O(visible), NOT a literal O(1)-total. Engine + 52-vocab + scope
+UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-1MINUTE-ONLY-DERIVE-1DAY-001,
+MIGRATION.md #853 —
 §1/§3/§6 facts: **1-minute is now the ONLY granularity fetched from Groww** (spot
 + futures + options); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED
 from the stored 1-minute and written to the lake (`spot_daily_resample`), never
@@ -118,7 +130,22 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/universe-tick-inplace-jlzt1n` (`/universe` "⊕ tick its constituents" selects the mapped stocks IN PLACE — no navigation to the Stocks screen — DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001, MIGRATION.md #858: the handler background-fetches `?kind=stock` into a LOCAL list and ticks into `selMulti` without re-assigning `filter`/switching tab; frontend-only template JS, no backend change. Prior merged: DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811, symbol-mismatched F&O stocks persisted tradable) + DEC-TF-PRECISION-PROOF-001 #856 (PR #810). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show only the years that actually have expiries, not the requested 2020-2026 span)
+- **Active branch:** `claude/intelligent-shannon-s8qea3` (`/db` + `/universe` dashboard
+  pages made INSTANT per interaction with ZERO correctness change —
+  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #859: `db_view.py::query_candles` now
+  page-bounds the intraday %-change baseline — reading the prior-day last-1-minute close
+  for ONLY the page's date span + the single bar before it
+  (`_intraday_prev_close_by_page_date`, byte-for-byte identical to the old whole-partition
+  scan, proven exhaustively + a flat-latency bench) — instead of aggregating the WHOLE
+  multi-year 1-minute partition on every paging click; the FRONTENDS update in place
+  (grid-only `#dbgrid` refresh; per-tab instrument cache + debounced search + in-place
+  completeness patch). Honest envelope: O(page date-span)/O(visible), NOT O(1)-total.
+  Engine/52-vocab/scope UNCHANGED — read-only viewer only; Live + the movers route
+  deliberately untouched (separate sessions own those). Prior merged:
+  DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812, "⊕ tick its constituents"
+  in place) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811) + DEC-TF-PRECISION-PROOF-001
+  #856 (PR #810). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show
+  only the years that actually have expiries, not the requested 2020-2026 span)
 
 ---
 
@@ -346,7 +373,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/universe-symbol-persist-jlzt1n`
+- **Active feature branch:** `claude/intelligent-shannon-s8qea3`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
