@@ -14,6 +14,7 @@ import threading
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.dashboard.db_view import (
@@ -2204,21 +2205,25 @@ def test_query_candles_chunked_paging_is_byte_identical_to_one_page(
     change_pct / open_gap_pct columns (Golden Rule #7 idempotence).
     """
     _write_session_minutes(tmp_path, days=6, bars_per_day=4)
-    coords = {
-        "exchange": "NSE",
-        "segment": "CASH",
-        "symbol": "NSE-NIFTY",
-        "interval": "1minute",
-    }
-    full = query_candles(
-        store.connection, tmp_path, **coords, descending=descending, limit=500, offset=0
-    )
+
+    def _page(limit: int, offset: int) -> dict[str, Any]:
+        return query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            descending=descending,
+            limit=limit,
+            offset=offset,
+        )
+
+    full = _page(500, 0)
     paged: list[list[object]] = []
     offset = 0
     while True:
-        page = query_candles(
-            store.connection, tmp_path, **coords, descending=descending, limit=5, offset=offset
-        )
+        page = _page(5, offset)
         paged.extend(page["rows"])
         if offset + len(page["rows"]) >= page["total"] or not page["rows"]:
             break
