@@ -106,15 +106,23 @@ from brutex.dashboard.live_manifest import (
 from brutex.dashboard.live_plan_view import read_connection_plan
 from brutex.dashboard.live_runner import LiveRunner
 from brutex.dashboard.metadata_pull import pull_expiries_contracts
-from brutex.dashboard.movers_futures import build_futures_payload, run_futures_snapshot
-from brutex.dashboard.movers_options import build_options_payload, run_options_snapshot
+from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
+from brutex.dashboard.movers_futures import (
+    build_futures_payload,
+    compute_futures_candidates,
+)
+from brutex.dashboard.movers_options import (
+    build_options_payload,
+    compute_options_candidates,
+    normalize_options_selectors,
+)
 from brutex.dashboard.movers_snapshot import (
     DEFAULT_INTERVAL,
     DEFAULT_TOP_N,
     build_snapshot_payload,
+    compute_spot_candidates,
     parse_snapshot_date,
     pending_asset_payload,
-    run_movers_snapshot,
 )
 from brutex.dashboard.preopen_report import (
     ReportBasis,
@@ -708,6 +716,7 @@ def build_app(
     *,
     instrument_store: Any = None,
     summary_cache: SummaryCache | None = None,
+    movers_cache: MoversSnapshotCache | None = None,
     quota_tracker: Any = None,
     live_runner: LiveRunner | None = None,
 ) -> Any:
@@ -736,6 +745,13 @@ def build_app(
         (``SummaryCache(ttl_floor_s=0.0)``) and assert the write-path
         invalidation deterministically; ``None`` (the default) builds a
         fresh production cache.
+    movers_cache
+        Optional :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`
+        backing the O(1) ``/movers`` re-interactions (DEC-MOVERS-O1-LATENCY-001).
+        Injected so a test can assert the cache hit/invalidation behaviour;
+        ``None`` (the default) builds a fresh production cache. It is invalidated
+        by the same write-generation as ``summary_cache`` (a pull/materialize
+        bumps that generation; the movers cache stamps every entry with it).
     quota_tracker
         Optional read-only daily-quota source for the ``/api/v1/quota``
         endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
@@ -835,6 +851,13 @@ def build_app(
     # counters are owned by this app instance (no module-global mutable state —
     # CLAUDE.md §4) and injected into the routes / the background pull job below.
     _summary_cache = summary_cache if summary_cache is not None else SummaryCache()
+    # The /movers point-in-time snapshot cache (DEC-MOVERS-O1-LATENCY-001): caches
+    # the expensive, top_n-independent candidate set per snapshot coordinate so a
+    # sub-filter / top_n / re-selection is an O(1) hit + a cheap re-rank, never a
+    # lake re-scan. It is invalidated for free by the SAME write-generation signal
+    # as the coverage SummaryCache (a pull/materialize bumps `_summary_cache`'s
+    # generation, which the movers cache stamps every entry with).
+    _movers_cache = movers_cache if movers_cache is not None else MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -2565,6 +2588,7 @@ def build_app(
         top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=200),
         expiry: str | None = Query(default=None),
         track: str | None = Query(default=None),
+        exchange: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -2576,12 +2600,27 @@ def build_app(
         (``price_gainers`` / ``price_losers`` / ``volume`` / ``value``) and sorts
         any column client-side.
 
+        **Latency (DEC-MOVERS-O1-LATENCY-001):** the expensive lake scan is split
+        from the cheap rank. The ``top_n``-independent *candidate* set is computed
+        once per ``(asset, exchange, interval, date, time[, tier, track])``
+        coordinate and cached behind ``_movers_cache`` (invalidated by the same
+        write-generation as the coverage cache), so re-clicking a sub-filter,
+        nudging ``top_n``, or re-selecting a coordinate is an O(1) hit + a cheap
+        re-rank — never a re-scan. The first view of a coordinate still pays the
+        real ``O(instruments × bars-read)`` scan (honest envelope, Golden Rule #10),
+        bounded per symbol to the day's month Parquet for intraday timeframes.
+
         Query parameters
         ----------------
         asset
             ``spot`` / ``futures`` / ``options`` — all three wired to the lake.
             Any other (unknown) asset returns an honest "ships after Spot"
             pending payload.
+        exchange
+            Restrict the ranking to one exchange (``NSE`` / ``BSE``) for an exact
+            per-exchange top-N; any other value (blank / unknown) ranks every
+            exchange. Part of the cache key, so toggling it re-uses the cached
+            scan when the coordinate was already viewed.
         expiry
             Options only — the ``near`` / ``next`` / ``far`` expiry tier (blank /
             unknown ⇒ ``near``); ranks only that serial expiry as-of *date*.
@@ -2622,6 +2661,10 @@ def build_app(
                         top_n=top_n,
                     )
                 )
+            # Normalise the exchange scope: NSE/BSE rank that exchange exactly;
+            # anything else (blank / typo) is the all-exchange population (never an
+            # empty-result surprise) — DEC-MOVERS-O1-LATENCY-001.
+            exch = exchange if exchange in ("NSE", "BSE") else None
             store_path = getattr(store, "path", None)
             if not isinstance(store_path, Path):
                 # No lake root wired → honest empty payload (never a 500), mirroring
@@ -2660,29 +2703,116 @@ def build_app(
                         skipped=0,
                     )
                 )
-            if asset == "options":
-                # Options carries the extra Near/Next/Far expiry tier (blank ⇒ near)
-                # plus the All/Monthly/Weekly cadence track (blank ⇒ all).
-                payload = await run_in_threadpool(
-                    run_options_snapshot,
-                    lake_root=store_path.parent,
+            lake_root = store_path.parent
+            # Normalise the date once so the cache key is canonical (``None`` ⇒
+            # today maps to the same key as the explicit ISO day). A malformed date
+            # raises HERE (synchronously) → 400, before any threadpool work.
+            date_str = parse_snapshot_date(date).isoformat()
+            # The current write-generation — a pull/materialize bumps it, so every
+            # cached candidate set computed at an older generation is dirty (the
+            # page never serves pre-pull data). Reused from the coverage cache.
+            generation = _summary_cache.generation
+
+            def _resolve() -> dict[str, Any]:
+                """Cache-or-compute the candidate set, then rank to top_n + exchange.
+
+                Runs on a threadpool worker (blocking lake reads + the cache's
+                threading.Lock). The ``compute=`` closure performs the real scan
+                ONLY on a miss / post-pull; a hit is an O(1) handoff + a cheap
+                in-memory rank (DEC-MOVERS-O1-LATENCY-001).
+                """
+                if asset == "options":
+                    # Options carries the extra Near/Next/Far expiry tier (blank ⇒
+                    # near) + the All/Monthly/Weekly cadence track (blank ⇒ all),
+                    # normalised so the key and the computed set agree.
+                    tier, trk = normalize_options_selectors(expiry, track)
+                    key = candidate_key(
+                        asset="options",
+                        exchange=exch,
+                        interval=interval,
+                        date=date_str,
+                        time=time,
+                        expiry_tier=tier,
+                        expiry_track=trk,
+                    )
+                    opt_cands = _movers_cache.get_or_compute(
+                        key,
+                        generation=generation,
+                        compute=lambda: compute_options_candidates(
+                            lake_root=lake_root,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=tier,
+                            expiry_track=trk,
+                            exchange=exch,
+                        ),
+                    )
+                    return build_options_payload(
+                        opt_cands.movers,
+                        interval=interval,
+                        date=opt_cands.date,
+                        time=time,
+                        top_n=top_n,
+                        skipped=opt_cands.skipped,
+                        expiry_tier=opt_cands.expiry_tier,
+                        expiry_track=opt_cands.expiry_track,
+                    )
+                if asset == "futures":
+                    key = candidate_key(
+                        asset="futures",
+                        exchange=exch,
+                        interval=interval,
+                        date=date_str,
+                        time=time,
+                    )
+                    fut_cands = _movers_cache.get_or_compute(
+                        key,
+                        generation=generation,
+                        compute=lambda: compute_futures_candidates(
+                            lake_root=lake_root,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            exchange=exch,
+                        ),
+                    )
+                    return build_futures_payload(
+                        fut_cands.movers,
+                        interval=interval,
+                        date=fut_cands.date,
+                        time=time,
+                        top_n=top_n,
+                        skipped=fut_cands.skipped,
+                    )
+                key = candidate_key(
+                    asset="spot",
+                    exchange=exch,
                     interval=interval,
-                    date=date,
+                    date=date_str,
+                    time=time,
+                )
+                spot_cands = _movers_cache.get_or_compute(
+                    key,
+                    generation=generation,
+                    compute=lambda: compute_spot_candidates(
+                        lake_root=lake_root,
+                        interval=interval,
+                        date=date_str,
+                        time=time,
+                        exchange=exch,
+                    ),
+                )
+                return build_snapshot_payload(
+                    spot_cands.snapshots,
+                    interval=interval,
+                    date=spot_cands.date,
                     time=time,
                     top_n=top_n,
-                    expiry_tier=(expiry or "near").lower(),
-                    expiry_track=(track or "all").lower(),
+                    skipped=spot_cands.skipped,
                 )
-            else:
-                runner = run_futures_snapshot if asset == "futures" else run_movers_snapshot
-                payload = await run_in_threadpool(
-                    runner,
-                    lake_root=store_path.parent,
-                    interval=interval,
-                    date=date,
-                    time=time,
-                    top_n=top_n,
-                )
+
+            payload = await run_in_threadpool(_resolve)
             return JSONResponse(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
