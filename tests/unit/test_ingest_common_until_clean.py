@@ -425,7 +425,20 @@ def test_outcome_and_round_are_frozen() -> None:
 
 def test_default_max_rounds_is_bounded() -> None:
     """The default outer budget is small + finite (Golden Rule #10 — never infinite)."""
-    assert DEFAULT_MAX_ROUNDS == 5
+    assert DEFAULT_MAX_ROUNDS == 10
+
+
+def test_max_rounds_covers_the_empty_terminal_threshold() -> None:
+    """INVARIANT (DEC-RETRY-PERSIST-10-001): the until-clean OUTER round budget must be
+    >= the cross-pull EMPTY→SKIPPED terminal threshold, so a RECENT empty window can
+    actually reach its SKIPPED settlement WITHIN the budget (streak bumps once per round;
+    it needs ``EMPTY_TERMINAL_THRESHOLD`` rounds to settle). If the two constants are ever
+    re-tuned independently so ``threshold > rounds``, a recent empty would hit the round
+    budget BEFORE settling and read ``pending`` forever on the completeness chip — this
+    guard pins the coupling the hostile review flagged (PR #804)."""
+    from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
+
+    assert DEFAULT_MAX_ROUNDS >= EMPTY_TERMINAL_THRESHOLD
 
 
 # ── DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 — the outstanding-windows path ────────

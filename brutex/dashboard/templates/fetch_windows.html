@@ -149,7 +149,7 @@
   </div>
 
   <details class="winhelp" style="margin:8px 16px 0;color:var(--muted);font-size:12px;">
-    <summary style="cursor:pointer;">ℹ️ How to read a row — <code>attempts</code> · <code>fetches (↻)</code> · <code>EMPTY x/3</code> · the 3× retry</summary>
+    <summary style="cursor:pointer;">ℹ️ How to read a row — <code>attempts</code> · <code>fetches (↻)</code> · <code>EMPTY x/10</code> · the 3× retry</summary>
     <div style="margin-top:6px;line-height:1.55;max-width:980px;">
       <b>attempts</b> = number of <b>pulls</b>, not network fetches — within <em>each</em> pull an
       empty window is automatically re-fetched up to <b>3×</b> before it is recorded (the in-pull
@@ -158,9 +158,11 @@
       retry was previously hidden behind. <code>1</code> = a clean first-try; <code><b>↻ 3</b></code>
       (amber) = the window came back empty and was re-fetched 3× this pull (the retry you asked to
       see); <code>—</code> = a planned window not yet fetched.<br>
-      <b>EMPTY x/3</b> = the vendor returned a clean, empty response on <b>x of 3</b> separate pulls;
-      the window is re-checked every pull and only settles as a durable no-data gap at <b>3/3</b>
-      (a 429 / timeout preserves the streak — it is not evidence of data).<br>
+      <b>EMPTY x/10</b> = the vendor returned a clean, empty response on <b>x of 10</b> separate pulls;
+      the window is re-checked every pull and only settles as a durable no-data gap at <b>10/10</b>
+      (raised 3→10 per DEC-RETRY-PERSIST-10-001 so a recent bar the vendor publishes late is never
+      settled empty too soon — "pull until a successful response"; a 429 / timeout preserves the
+      streak, it is not evidence of data).<br>
       A genuine <b>vendor gap</b> (e.g. Groww serves no SENSEX 1-day before ~2022, no FINNIFTY before
       ~2025) stays EMPTY <code>↻ 3</code> however many times it is retried — there is simply no data
       to fetch, and BruteX never fabricates one (Golden Rule #1).
@@ -202,7 +204,7 @@ function winStatus(r) {
   /* EMPTY rows show the genuine clean-empty streak vs the promotion threshold
      (window_ledger R1): an interleaved FAILED (429/timeout) PRESERVES the streak
      (a rate-limit is not evidence of data), only a SUCCESS resets it, so
-     "attempts 5, EMPTY 2/3" is by-design retrying, not a stuck row. */
+     "attempts 5, EMPTY 2/10" is by-design retrying, not a stuck row. */
   const streak = v === "EMPTY" && r.empty_streak != null
     ? ' <span style="color:#9aa4b2;font-weight:400;">' + esc(r.empty_streak) + "/" + esc(emptyThreshold) + "</span>"
     : "";
@@ -276,7 +278,7 @@ function renderWindows(rows) {
 /* KPI scoping (DEC-WINDOW-KPI-MARKET-SCOPE-001): the Spot/Options chip scopes
    the KPI tiles to THAT market's bucket; only the All chip sums both. The
    server's `counts` are always complete per bucket — selection is client-side. */
-let emptyThreshold = 3;
+let emptyThreshold = 10;
 function kpiBuckets(counts) {
   if (marketFilter) { const b = (counts || {})[marketFilter]; return b ? [b] : []; }
   return Object.values(counts || {});
@@ -302,7 +304,7 @@ async function poll() {
     if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
     const body = await r.json();
     const rows = body.windows || [];
-    emptyThreshold = body.empty_threshold ?? 3;
+    emptyThreshold = body.empty_threshold ?? 10;
     wincEl.textContent = num(countRecorded(body.counts, body.count ?? 0));
     failcEl.textContent = num(countStatus(body.counts, "FAILED"));
     const planEl = document.getElementById("planc");

@@ -1849,16 +1849,26 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     """Group the spot fetch-window ledger into ``(symbol, interval) → (resolved, pending, failed)``.
 
     The completeness source for the /coverage spot chips
-    (DEC-SPOT-COVERAGE-COMPLETENESS-001 + DEC-EMPTY-RESOLVED-REPORTING-001): counts come
-    ONLY from the unified window ledger — ``resolved`` is the ledger's COMPLETION
-    authority (:data:`~brutex.data.window_ledger.RESOLVED_STATUSES` =
-    SUCCESS+SKIPPED+**EMPTY**: a genuine no-data window is RESOLVED, never "pending",
-    because a wholly-past empty window can never gain data), ``failed`` is ``FAILED``,
-    and ``pending`` is ``PLANNED`` ONLY — genuinely-unfetched work a re-pull WILL attempt.
-    (EMPTY moved OUT of "pending" into "resolved", so the chip no longer marks an
-    all-empty pre-listing dataset "pending / re-pull".) The SKIP authority
-    (``SETTLED_STATUSES`` = SUCCESS+SKIPPED) is UNCHANGED — a below-threshold EMPTY is
-    still re-fetched next pull; only what the CHIP counts changed. Option rows
+    (DEC-SPOT-COVERAGE-COMPLETENESS-001 → DEC-COMPLETENESS-HONEST-EMPTY-001): counts come
+    ONLY from the unified window ledger — ``resolved`` is the ledger's SKIP/SETTLE
+    authority (:data:`~brutex.data.window_ledger.SETTLED_STATUSES` = SUCCESS+SKIPPED:
+    a window with real data, OR a TERMINALLY-empty window — one promoted to SKIPPED
+    because it was seen empty ``EMPTY_TERMINAL_THRESHOLD`` times or fast-settled as an
+    old pre-listing gap), ``failed`` is ``FAILED``, and ``pending`` is ``PLANNED`` **OR
+    a NON-terminal ``EMPTY``** — both are outstanding work a re-pull WILL attempt.
+
+    DEC-COMPLETENESS-HONEST-EMPTY-001 (supersedes the chip half of
+    DEC-EMPTY-RESOLVED-REPORTING-001): a NON-terminal ``EMPTY`` (status still ``EMPTY``,
+    below the terminal threshold — typically a RECENT daily/option window the vendor
+    has not published yet, which a later pull DID fill) now counts ``pending``, NOT
+    resolved, so the chip never reads "full" while recent data is genuinely missing.
+    An all-empty PRE-LISTING dataset still reads complete because its old windows
+    fast-settle to ``SKIPPED`` (terminal → resolved). The LIVE progress-bar numerator
+    (``RESOLVED_STATUSES``, window_ledger.py — still SUCCESS+SKIPPED+EMPTY so the bar
+    never freezes mid-pull) is deliberately UNCHANGED: completion-chip honesty and
+    progress-bar liveness are intentionally different authorities. The SKIP authority
+    (``SETTLED_STATUSES``) is also unchanged — a below-threshold EMPTY is still
+    re-fetched next pull; only what the CHIP counts changed. Option rows
     (``market == _OPTION_WINDOW_MARKET``) are excluded by the EXACT spot-market filter.
 
     A lake with NO ledger Parquet returns ``{}`` (every fetch-interval chip
@@ -1869,7 +1879,7 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
 
     O(rows) once per ledger flush (mtime-keyed cache); O(1) per cached call.
     """
-    from brutex.data.window_ledger import FAILED, RESOLVED_STATUSES
+    from brutex.data.window_ledger import EMPTY, FAILED, SETTLED_STATUSES
     from brutex.data.window_ledger_store import ledger_path
 
     path = ledger_path(lake_root)
@@ -1886,10 +1896,21 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
         if record.market != _SPOT_WINDOW_MARKET:
             continue
         cell = counts.setdefault((record.security_id, record.interval), [0, 0, 0])
-        if record.status in RESOLVED_STATUSES:
-            cell[0] += 1  # SUCCESS + SKIPPED + EMPTY — resolved (a no-data window IS done)
+        if record.status in SETTLED_STATUSES:
+            cell[0] += 1  # SUCCESS + SKIPPED — terminally settled (real data, or genuinely-no-data)
         elif record.status == FAILED:
             cell[2] += 1
+        elif record.status == EMPTY:
+            # DEC-COMPLETENESS-HONEST-EMPTY-001: a NON-terminal EMPTY (status still
+            # EMPTY, i.e. below the terminal threshold — typically a recent window the
+            # vendor has not published yet) is OUTSTANDING work the next pull WILL
+            # re-fetch, so the completeness CHIP counts it PENDING, never "full". This
+            # is the chip fix ONLY; the live progress-bar numerator (RESOLVED_STATUSES,
+            # which still counts EMPTY as progress so the bar never freezes mid-pull)
+            # is deliberately UNCHANGED. A genuinely-OLD empty fast-settles to SKIPPED
+            # (terminal → resolved above), so an all-empty PRE-LISTING dataset still
+            # reads complete — only a recent maybe-late empty reads pending (the fix).
+            cell[1] += 1
         else:  # PLANNED only — genuinely-unfetched work a re-pull WILL attempt
             cell[1] += 1
     rollup = {k: (v[0], v[1], v[2]) for k, v in counts.items()}

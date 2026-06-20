@@ -137,9 +137,21 @@ def _per_symbol_spot(
                 "category": category,
                 "1day": DIM_NONE,
                 "1minute": DIM_NONE,
+                # DEC-COMPLETENESS-HONEST-EMPTY-001: the actually-covered date range
+                # per dimension (the lake's earliest/latest bar) so a human sees in ONE
+                # view WHICH interval is partial AND exactly what span it holds — None
+                # until a row for that dimension is seen.
+                "1day_start": None,
+                "1day_end": None,
+                "1minute_start": None,
+                "1minute_end": None,
             },
         )
         entry[interval] = _spot_dimension_verdict(row.get("completeness"))
+        first = row.get("first_date")
+        last = row.get("last_date")
+        entry[f"{interval}_start"] = str(first) if first else None
+        entry[f"{interval}_end"] = str(last) if last else None
     for entry in by_symbol.values():
         entry["overall"] = _overall_spot(entry["1day"], entry["1minute"])
     return sorted(by_symbol.values(), key=lambda e: (e["symbol"], e["exchange"]))

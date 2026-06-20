@@ -618,7 +618,7 @@ def test_old_empty_contract_window_fast_settles_in_one_pull() -> None:
     )
     rec = ledger.records()[0]
     assert rec.status == SKIPPED  # terminal in this single pull
-    assert rec.empty_streak == 3  # forced to the threshold (a normal settle's shape)
+    assert rec.empty_streak == 10  # forced to the threshold (a normal settle's shape)
     assert rec.attempts == 1  # ONE pull
     assert rec.in_pull_fetches == 3  # re-hit the full in-pull budget, all empty
 

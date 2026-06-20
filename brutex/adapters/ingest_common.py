@@ -884,9 +884,14 @@ LoopVerdict = Literal[
 
 #: Default bounded OUTER round budget. Small + finite (Golden Rule #10 — never an
 #: infinite loop): a handful of full re-pull rounds drains a multi-minute 429 storm
-#: once the burst is over. Each round itself runs the bounded inner
-#: :func:`retry_failed_windows` loop, so the worst case is strictly bounded.
-DEFAULT_MAX_ROUNDS: int = 5
+#: once the burst is over, AND gives a recent maybe-late window (a daily/option bar
+#: the vendor publishes a day later) several more whole-pull chances to land before
+#: the run gives up. Raised 5→10 with the EMPTY terminal threshold under
+#: DEC-RETRY-PERSIST-10-001 (the "pull until successful response" contract). Each
+#: round itself runs the bounded inner :func:`retry_failed_windows` loop, and the
+#: four ``decide_until_clean`` guards (clean / dead / quota / no-progress) terminate
+#: long before this cap in every real run, so the worst case is strictly bounded.
+DEFAULT_MAX_ROUNDS: int = 10
 
 #: Auto-resume OUTER round budget (DEC-AUTO-RESUME-QUOTA-001): the "keep re-firing
 #: batches until 100% clean, zero clicks" path. Larger than

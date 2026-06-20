@@ -241,20 +241,26 @@ function renderSpot(rows) {
     spotPanel.innerHTML = '<div class="empty">no scored spot symbols yet — pull a spot symbol (e.g. NIFTY) from the Universe page</div>';
     return;
   }
+  // Covered span (DEC-COMPLETENESS-HONEST-EMPTY-001): "start → end" or "—" so the
+  // operator sees in ONE view which dimension is partial AND its actual date range.
+  const rng = (s, e) =>
+    (s || e) ? '<span class="rng">' + esc(s || "?") + " → " + esc(e || "?") + "</span>" : "—";
   const body = rows.map((r) =>
     "<tr>"
     + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
     + "<td>" + esc(r.exchange) + "</td>"
     + "<td>" + esc(r.category) + "</td>"
     + "<td>" + chip(r["1day"]) + "</td>"
+    + "<td>" + rng(r["1day_start"], r["1day_end"]) + "</td>"
     + "<td>" + chip(r["1minute"]) + "</td>"
+    + "<td>" + rng(r["1minute_start"], r["1minute_end"]) + "</td>"
     + "<td>" + chip(r.overall) + "</td>"
     + "</tr>"
   ).join("");
   spotPanel.innerHTML =
     "<table><thead><tr>"
     + "<th>Symbol</th><th>Exchange</th><th>Category</th>"
-    + "<th>1-day</th><th>1-minute</th><th>Overall</th>"
+    + "<th>1-day</th><th>1-day covered</th><th>1-minute</th><th>1-minute covered</th><th>Overall</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 

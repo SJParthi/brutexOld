@@ -68,9 +68,16 @@ SKIPPED: str = "SKIPPED"
 #: A window seen genuinely ``EMPTY`` on this many SEPARATE pulls is treated as
 #: terminal (``SKIPPED``) so it stops costing a re-fetch every run — the canonical
 #: home of the DEC-EMPTY-TERMINAL-001 threshold (``coverage_reconcile`` migrates to
-#: import this in the wiring slice). Three attempts give a transient empty (a
-#: load-induced ``{}`` that later fills) a few chances first.
-EMPTY_TERMINAL_THRESHOLD: int = 3
+#: import this in the wiring slice). Ten attempts give a transient empty (a
+#: load-induced ``{}`` that later fills, OR a recent daily/option bar the vendor has
+#: not published yet) a generous number of separate re-pull chances before the
+#: window is settled — the operator-raised 3→10 persistence of
+#: DEC-RETRY-PERSIST-10-001 (the "pull until it fetches a successful response"
+#: contract: a real-but-late bar must never be prematurely settled empty). Genuinely
+#: OLD pre-listing windows still fast-settle on the FIRST empty via the old-gap
+#: settle path (DEC-OLD-GAP-FAST-SETTLE-001), so raising this never re-hammers an
+#: ancient dead window — only recent maybe-late windows get the extra chances.
+EMPTY_TERMINAL_THRESHOLD: int = 10
 
 #: The two settled statuses — a window in either is skipped on the next pull.
 _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
