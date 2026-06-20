@@ -1315,6 +1315,14 @@ jobs:
           else
             echo "(brutex.data.fno_candle_lake test file not present yet — gate inactive)"
           fi
+          # DEC-FNO-MONEYNESS-001: the shared option moneyness (ITM/ATM/OTM) + ATM±N
+          # engine — pure, stdlib+Decimal only, the ONE source consumed by the movers
+          # screen + the /db F&O candle viewer. 100% line+branch standalone.
+          if compgen -G "tests/unit/test_moneyness.py" > /dev/null; then
+            pytest --cov=brutex.data.moneyness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_moneyness.py
+          else
+            echo "(brutex.data.moneyness test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_session.py" > /dev/null; then
             pytest --cov=brutex.data.session --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session.py
           else
@@ -1524,9 +1532,10 @@ jobs:
           # (DEC-DERIV-REGISTRY-DB-VIEW-001) + the F&O candle lake discovery/schema
           # (list_fno_candle_datasets / fno_candle_lake_schema,
           # DEC-FNO-CANDLE-LAKE-001). 100% line+branch across the viewer + registry
-          # + F&O-candle test files.
+          # + F&O-candle test files + the per-bar F&O moneyness derivation
+          # (query_candles segment=FNO ITM/ATM/OTM + ATM±N, DEC-FNO-MONEYNESS-001).
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi

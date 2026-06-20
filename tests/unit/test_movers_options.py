@@ -37,6 +37,7 @@ from brutex.dashboard.movers_options import (
     rank_value,
     rank_volume,
 )
+from brutex.data.moneyness import Moneyness
 
 # ── _tier_expiry_by_underlying (Near/Next/Far resolution) ──────────────────
 
@@ -261,6 +262,8 @@ def _mover(
     volume: int = 1000,
     value_paisa: int = 50_000,
     exchange: str = "NSE",
+    moneyness: Moneyness = Moneyness.ITM,
+    atm_offset: int | None = -8,
 ) -> OptionMover:
     """An :class:`OptionMover` with sensible defaults (override per test)."""
     return OptionMover(
@@ -279,6 +282,8 @@ def _mover(
         oi_chg_pct=oi_chg_pct,
         volume=volume,
         value_paisa=value_paisa,
+        moneyness=moneyness,
+        atm_offset=atm_offset,
     )
 
 
@@ -332,6 +337,51 @@ class TestComputeOptionMover:
         assert m.oi_chg == 100  # 1100 - 1000
         assert m.oi_chg_pct == Decimal("10")  # 1100 vs 1000
         assert m.value_paisa == 16_400_000
+        # spot 23622.90 < strike 24000, CE → OTM; no step passed → no ATM±N.
+        assert m.moneyness is Moneyness.OTM
+        assert m.atm_offset is None
+
+    def test_moneyness_with_dynamic_step(self) -> None:
+        # spot 23622.90, strike 24000, step 50 → CE OTM, ATM offset round((24000-23622.90)/50)=8.
+        m = compute_option_mover(
+            underlying="NIFTY",
+            expiry=date(2025, 6, 30),
+            strike=Decimal("24000"),
+            opt_type="CE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            exchange="NSE",
+            ltp=Decimal("164"),
+            volume=1000,
+            value_paisa=16_400_000,
+            oi=1100,
+            prev_close=Decimal("100"),
+            spot_ltp=Decimal("23622.9"),
+            prev_oi=1000,
+            strike_step=Decimal("50"),
+        )
+        assert m.moneyness is Moneyness.OTM
+        assert m.atm_offset == 8
+
+    def test_moneyness_unknown_without_spot(self) -> None:
+        m = compute_option_mover(
+            underlying="NIFTY",
+            expiry=date(2025, 6, 30),
+            strike=Decimal("24000"),
+            opt_type="CE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            exchange="NSE",
+            ltp=Decimal("164"),
+            volume=1000,
+            value_paisa=16_400_000,
+            oi=1100,
+            prev_close=Decimal("100"),
+            spot_ltp=None,
+            prev_oi=1000,
+            strike_step=Decimal("50"),
+        )
+        # No spot → honest UNKNOWN, never a fabricated bucket (Golden Rule #1).
+        assert m.moneyness is Moneyness.UNKNOWN
+        assert m.atm_offset is None
 
     def test_no_prior_day_nulls_pct_and_oi_change(self) -> None:
         m = compute_option_mover(
@@ -506,6 +556,9 @@ class TestBuildOptionsPayload:
         assert row["oi_chg"] == -3
         assert row["oi_chg_pct"] == "-3.80"
         assert row["volume"] == 1000
+        # Moneyness columns (DEC-FNO-MONEYNESS-001) — bucket string + signed ATM±N.
+        assert row["moneyness"] == "ITM"
+        assert row["atm_offset"] == -8
 
     def test_null_metrics_render_none(self) -> None:
         m = _mover(spot=None, pct_change=None, oi_chg=None, oi_chg_pct=None)

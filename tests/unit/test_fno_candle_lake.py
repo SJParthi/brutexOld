@@ -67,7 +67,18 @@ class TestColumns:
             col.name = "x"  # type: ignore[misc]
 
     def test_sources_are_known_kinds(self) -> None:
-        assert {c.source for c in FNO_CANDLE_COLUMNS} <= {"bar", "partition", "symbol"}
+        assert {c.source for c in FNO_CANDLE_COLUMNS} <= {"bar", "partition", "symbol", "derived"}
+
+    def test_derived_moneyness_columns(self) -> None:
+        # DEC-FNO-MONEYNESS-001: read-time derived (never stored) moneyness + ATM±N.
+        for name in ("moneyness", "atm_offset"):
+            col = next(c for c in FNO_CANDLE_COLUMNS if c.name == name)
+            assert col.source == "derived"
+            assert col.nullable is True
+        moneyness = next(c for c in FNO_CANDLE_COLUMNS if c.name == "moneyness")
+        atm_offset = next(c for c in FNO_CANDLE_COLUMNS if c.name == "atm_offset")
+        assert moneyness.dtype == "string"
+        assert atm_offset.dtype == "int"
 
 
 class TestSchemaMetaMapping:

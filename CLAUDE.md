@@ -18,7 +18,20 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-LIVE-REMOVE-001, MIGRATION.md #862 — the **entire
+_Last updated: 2026-06-20 (DEC-FNO-MONEYNESS-001, MIGRATION.md #863 — per-option
+**moneyness (ITM/ATM/OTM) + a signed ATM±N strike offset** are now DERIVED at read
+time (never stored — time-varying: the strike is fixed but the spot moves) for the
+ENTIRE F&O universe (all ~212 stocks + indices), from the NEW shared engine
+`brutex/data/moneyness.py` (`classify` / `derive_strike_step` [the **DYNAMIC** grid =
+the min positive strike gap, never a hardcoded NSE rule] / `atm_offset` / `moneyness_view`).
+Surfaced on BOTH the options-movers screen (as-of snapshot — `OptionMover` +
+`compute_option_mover(strike_step=)` + two `movers.html` columns) AND the `/db` F&O
+candle viewer (PER-BAR — `db_view.query_candles` appends `moneyness`+`atm_offset` to every
+`segment="FNO"` page, classifying each bar against the underlying spot joined by timestamp;
+a future reads `NA`, an option with no spot reads `UNKNOWN`). `fno_candle_lake.py`'s
+`FNO_CANDLE_COLUMNS` advertises the two as `source="derived"`. Read-only — the brute-force
+ENGINE stays NIFTY/BANKNIFTY/SENSEX; NO storage/scope/vocab/rate change. Earlier: 2026-06-20
+(DEC-LIVE-REMOVE-001, MIGRATION.md #862 — the **entire
 LIVE feed feature is REMOVED / retired in full**: the `brutex/live/` capture package
 + its `python -m brutex.live` CLI, the dashboard `/live` page + `/api/v1/live/*` +
 `/api/v1/db/live/*` routes + the `brutex/dashboard/live_*` surface, the
@@ -155,17 +168,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-mccarthy-qacssf` (REMOVE the entire LIVE feed
-  feature — DEC-LIVE-REMOVE-001, MIGRATION.md #862: deletes the `brutex/live/`
-  capture package + its CLI, the dashboard `/live` + `/api/v1/live/*` +
-  `/api/v1/db/live/*` routes + `brutex/dashboard/live_*` surface, the
-  `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
-  lake" section, the nav `/live` link, and the now-orphaned live leg-resolution
-  `adapters/groww/contract_pull.py` + `db_view.format_clean_ist_millis`; 44 files.
-  The historical/backtest pull + `rate_common` + the brute-force ENGINE are
-  UNTOUCHED — `_build_live_controller`/`build_live_client` are the production pull's
-  rate controller + client, KEPT. Prior merged: DEC-FNO-CANDLE-LAKE-001 #861 (PR #814)
-  + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
+- **Active branch:** `claude/relaxed-keller-6b7pzx` (per-option **moneyness
+  (ITM/ATM/OTM) + signed ATM±N strike offset** for the ENTIRE F&O universe —
+  DEC-FNO-MONEYNESS-001, MIGRATION.md #863: NEW shared engine `brutex/data/moneyness.py`
+  (`classify`/`derive_strike_step` [DYNAMIC grid = min positive strike gap, all ~212
+  stocks + indices, never hardcoded]/`atm_offset`/`moneyness_view`), DERIVED at read time
+  (never stored — time-varying). Surfaced on the options-movers screen (`OptionMover` +
+  `compute_option_mover(strike_step=)` + `movers.html` columns) AND the `/db` F&O candle
+  viewer (`db_view.query_candles` appends `moneyness`+`atm_offset` per bar for
+  `segment="FNO"`, classifying each bar vs the underlying spot joined by timestamp;
+  FUT→`NA`, no-spot→`UNKNOWN`); `fno_candle_lake.FNO_CANDLE_COLUMNS` advertises both as
+  `source="derived"`. Read-only — NO storage/scope/vocab/rate change, ENGINE unchanged.
+  Prior merged: DEC-LIVE-REMOVE-001 #862 (live feed removed) + DEC-FNO-CANDLE-LAKE-001 #861
+  (PR #814) + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815)
+  + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
   + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812))
 
 ---
