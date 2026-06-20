@@ -1332,12 +1332,25 @@ document.getElementById("tickconstbtn").onclick = async () => {
     btn.disabled = false;
     return;
   }
-  /* Switch to the Stocks tab so the ticked rows are visible, reload its
-     instruments, THEN tick the members in selMulti (renderInstruments reads
-     selMulti.has(symbol) so the checkboxes reflect the ticks). */
-  filter = "stock";
-  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === "stock"));
-  await loadInstruments();
+  /* Tick the constituents IN PLACE — do NOT navigate to the Stocks tab
+     (DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001). Selecting an index and ticking
+     its constituents must select ALL the mapped stocks WITHOUT changing the active
+     tab/view: fetch the stock instruments in the BACKGROUND (so selMulti gets real
+     inst objects) into a LOCAL list — never replacing the visible UNIV nor touching
+     `filter` — then add the members to selMulti and re-render the CURRENT view, so
+     only the selection count + "⤓ Pull spot" button update. The ticked stocks show
+     their checkboxes if/when the operator later switches to the Stocks tab
+     (renderInstruments reads selMulti.has(symbol)). */
+  let stockUniv;
+  try {
+    const sr = await fetch('/api/v1/universe/instruments?kind=stock');
+    stockUniv = (await sr.json()).instruments || [];
+  } catch (e) {
+    if (msg) { msg.classList.add("err"); msg.textContent = "couldn't load stocks to tick: " + esc(e.message); }
+    btn.disabled = false;
+    return;
+  }
+  const bySym = new Map(stockUniv.map(i => [i.symbol, i]));
   /* Honor the "F&O only" toggle (DEC-INDEX-CONSTITUENTS-FULL-001): the endpoint
      returns the index's FULL held membership (F&O + reference-only NTM stocks).
      With "F&O only" OFF tick the ENTIRE set; with it ON tick only the
@@ -1345,7 +1358,7 @@ document.getElementById("tickconstbtn").onclick = async () => {
      particular stocks". A reference-only row carries option_pullable === false. */
   let ticked = 0, skipped = 0;
   members.forEach(sym => {
-    const inst = UNIV.find(i => i.symbol === sym);
+    const inst = bySym.get(sym);
     if (!inst) return;
     if (fnoOnly && inst.option_pullable === false) { skipped++; return; }
     selMulti.set(inst.symbol, inst); ticked++;

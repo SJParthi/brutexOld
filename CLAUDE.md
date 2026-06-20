@@ -118,7 +118,7 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/universe-symbol-persist-jlzt1n` (persist symbol-mismatched F&O stocks as TRADABLE universe underlyings — DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001, MIGRATION.md #857: a genuinely F&O-eligible NSE stock whose spot `trading_symbol` ≠ its option leg's `underlying_symbol` (e.g. `BAJAJ-AUTO` vs `BAJAJAUTO`) is now ADMITTED + tagged `reference_only=FALSE` via the vendor-canonical token-join `security_id` evidence — closing the #855 audit-only split; F&O-tradable wins over NTM-reference; lake/ingest only, the brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX. The timeframe-OHLCV-precision proof pyramid DEC-TF-PRECISION-PROOF-001 #856 is MERGED to `main` via PR #810)
+- **Active branch:** `claude/universe-tick-inplace-jlzt1n` (`/universe` "⊕ tick its constituents" selects the mapped stocks IN PLACE — no navigation to the Stocks screen — DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001, MIGRATION.md #858: the handler background-fetches `?kind=stock` into a LOCAL list and ticks into `selMulti` without re-assigning `filter`/switching tab; frontend-only template JS, no backend change. Prior merged: DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811, symbol-mismatched F&O stocks persisted tradable) + DEC-TF-PRECISION-PROOF-001 #856 (PR #810). NEXT queued: the OPTIONS-completeness YEARS/`partial` honesty fix — show only the years that actually have expiries, not the requested 2020-2026 span)
 
 ---
 
