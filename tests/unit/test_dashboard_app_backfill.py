@@ -683,3 +683,21 @@ def test_universe_page_served(client: TestClient) -> None:
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert "/api/v1/universe" in resp.text
+
+
+def test_universe_tick_constituents_ticks_in_place_no_navigation(client: TestClient) -> None:
+    """⊕ tick its constituents selects the mapped stocks IN PLACE — no tab navigation.
+
+    DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001: selecting an index and ticking its
+    constituents must add the mapped stocks to the multi-select WITHOUT switching the
+    active tab to the Stocks screen. The handler fetches the stock instruments in the
+    BACKGROUND (``?kind=stock``) into a local list and re-renders the CURRENT view; it
+    must NOT re-assign ``filter`` to the stock tab (the prior navigating behavior).
+    """
+    html = client.get("/universe").text
+    # The in-place implementation marker + the background stock fetch are present.
+    assert "DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001" in html
+    assert "/api/v1/universe/instruments?kind=stock" in html
+    # The navigating behavior is GONE: the constituents handler no longer forces the
+    # Stocks tab (the removed ``filter = "stock"`` re-assignment).
+    assert 'filter = "stock"' not in html
