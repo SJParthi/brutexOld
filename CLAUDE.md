@@ -118,7 +118,7 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/serene-hamilton-jlzt1n` (the post-real-pull data-quality + universe-classification batch — DEC-POSTPULL-DATAQUALITY-BATCH-001, MIGRATION.md #854: completeness 1-day removal, real contracts count, empty-body retry, NTM cache resilience, F&O OPT/REF token-join + sourced NSE-index alias)
+- **Active branch:** `claude/serene-hamilton-jlzt1n` (the timeframe-OHLCV-precision proof pyramid — DEC-TF-PRECISION-PROOF-001, MIGRATION.md #856: 13 new tests proving the 1m→21-TF resampler derives every bar EXACTLY — tiling, all-88-divisor-pair associativity, session-bound + truncated-last-bar, half-day, independent-oracle, O(1) bench; test-only, no production change. The prior post-real-pull data-quality batch DEC-POSTPULL-DATAQUALITY-BATCH-001 #854 + remediation #855 are MERGED to `main` via PR #809)
 
 ---
 
