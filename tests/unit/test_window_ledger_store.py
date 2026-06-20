@@ -688,7 +688,7 @@ class TestLegacyBackwardCompat:
         assert ledger.count == 3  # loaded, NOT degraded to empty
         assert by_symbol["NIFTY"].empty_streak == 0  # SUCCESS → 0
         assert by_symbol["SENSEX"].empty_streak == 2  # EMPTY → attempts (still below threshold)
-        assert by_symbol["BANKNIFTY"].empty_streak == 10  # SKIPPED → threshold
+        assert by_symbol["BANKNIFTY"].empty_streak == 3  # SKIPPED → threshold
         # A legacy EMPTY-below-threshold row is still fetched (not masked).
         assert ledger.is_skippable(_key("SENSEX")) is False
         assert ledger.is_skippable(_key("BANKNIFTY")) is True

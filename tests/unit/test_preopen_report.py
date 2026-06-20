@@ -1106,9 +1106,15 @@ def test_zip_empty_selection_is_valid_single_workbook() -> None:
 
 def test_zip_is_deterministic() -> None:
     rows = [_mk(date(2024, 3, 4), "A", "5")]
-    a = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
-    b = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
-    assert a == b  # fixed _ZIP_EPOCH → byte-identical
+    # ``render_report_zip`` stamps each member's mtime with the GENERATION
+    # clock (down to the second, DEC-PREOPEN-XLSX-DATE-001) — only the workbook
+    # BODY uses ``_ZIP_EPOCH``. So determinism is asserted by PINNING the
+    # injectable ``now`` (without it, two calls straddling a 1-second boundary
+    # diverge at the DOS-time byte — a flake, never a body difference).
+    fixed_now = datetime(2024, 3, 4, 9, 15, 0)
+    a = render_report_zip(rows, mode="all", min_pct=Decimal("0"), now=fixed_now)
+    b = render_report_zip(rows, mode="all", min_pct=Decimal("0"), now=fixed_now)
+    assert a == b  # pinned mtime + fixed _ZIP_EPOCH body → byte-identical
 
 
 class TestReportFilename:

@@ -374,7 +374,7 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
     # R1 visibility (DEC-EMPTY-STREAK-VISIBLE-001): the consecutive-EMPTY
     # streak ships per row and the promotion bound ships once at the top.
     assert by_symbol["NIFTY"]["empty_streak"] == 0
-    assert payload["empty_threshold"] == 10
+    assert payload["empty_threshold"] == 3
     # In-pull fetch count ships per row (DEC-WINDOW-INPULL-FETCHES-001): the
     # NIFTY SUCCESS row was seeded from the lake (one fetch's data → 1).
     assert by_symbol["NIFTY"]["in_pull_fetches"] == 1
@@ -426,7 +426,7 @@ def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
         "source": "status_log",
         "count": 0,
         "counts": {"spot": {}, "options": {}, "futures": {}},
-        "empty_threshold": 10,
+        "empty_threshold": 3,
         "matched": 0,
         "returned": 0,
         "capped": False,
