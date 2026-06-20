@@ -78,7 +78,6 @@ from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
     OPTION_SEGMENT,
-    TRACK1_DAILY_INTERVAL,
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
@@ -121,10 +120,6 @@ if TYPE_CHECKING:
 #: listing date" barrier (DEC-HISTORICAL-1DAY-FIRST-001) is RETIRED: there is one vendor
 #: phase, bounded per contract to its ``expiry − 3mo → expiry`` default window.
 _MINUTE_INTERVAL: Final[str] = TRACK1_SPOT_INTERVAL
-
-#: The DERIVED interval — 1-day bars resampled from the just-written 1-minute and written
-#: to the lake's ``FNO/<symbol>/1day`` partition (NOT fetched from the vendor).
-_DERIVED_DAILY: Final[str] = TRACK1_DAILY_INTERVAL
 
 #: Structured logger — the start-date discovery degrade paths (catalog unavailable /
 #: per-contract skip) are logged LOUDLY (Golden Rule #10 observability), never silent.
