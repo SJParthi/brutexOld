@@ -552,14 +552,22 @@ def _classify_option_pullable(
                 # A BSE index — the index-only is_spot_only_index bridge DOES flip it
                 # REF→OPT, so this is a REAL rescue (added to the bridged set).
                 mechanism = "token_join"
-            else:
-                # An EQ stock — is_spot_only_index is False for non-IDX, so adding it to
-                # the bridged set is inert: the token-join does NOT change its
-                # classification. Surface it for the operator's audit in a SEPARATE,
-                # honestly-labelled bucket and do NOT pretend it was rescued
-                # (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001 — the honest split).
+            elif inst.exch_id == Exchange.NSE:
+                # An NSE EQ stock — is_spot_only_index is False for non-IDX, so adding it
+                # to the index bridged set would be inert. Instead surface it in the
+                # honest token_join_diagnostic bucket AND collect its security_id into the
+                # PERSIST set so is_universe_underlying keeps it as a TRADABLE underlying
+                # (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001). The NSE gate makes the set literally
+                # "NSE F&O stocks": a BSE EQ cannot be an F&O stock (no BSE derivatives in
+                # scope), so a coincidental BSE token collision (next arm) is excluded.
                 rescued["token_join_diagnostic"].append(f"{inst.exch_id.value}:{inst.symbol_name}")
                 eq_token_join_security_ids.add(inst.security_id)
+                continue
+            else:
+                # A BSE EQ whose numeric token coincidentally equals an NSE option leg's
+                # underlying_security_id — NOT an F&O stock (no BSE derivatives), so it is
+                # never persisted nor surfaced. Defense-in-depth at the producer; the
+                # downstream is_universe_underlying NSE gate would also reject it.
                 continue
         # 2. sourced / override alias (the 2 NSE indices the symbol bridge misses).
         elif inst.instrument is InstrumentType.IDX and aliased in options_eligible:

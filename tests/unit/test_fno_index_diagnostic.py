@@ -904,6 +904,21 @@ class TestClassifyOptionPullable:
         # NEW: the symbol-mismatched F&O stock's security_id is in the persist set.
         assert eq_ids == frozenset({16669})
 
+    def test_bse_equity_token_collision_excluded_from_persist_set(self) -> None:
+        # Defense-in-depth (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001): a BSE EQ whose numeric
+        # token coincidentally equals an NSE option leg's underlying_security_id is NOT an
+        # F&O stock (no BSE derivatives in scope), so the producer's NSE gate must EXCLUDE
+        # it from BOTH the persist set and the diagnostic (the downstream
+        # is_universe_underlying NSE gate would also reject it).
+        bse = _eq_with_token("FOO", security_id=16669, feed_token="16669", exchange=Exchange.BSE)
+        leg = _option_with_underlying_id("FOO", underlying_security_id=16669)  # an NSE leg
+        index = build_index([("BSE-FOO", bse), ("NSE-FOO-16Jun26-9000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued, eq_ids = _classify_option_pullable(index, options_eligible)
+        assert eq_ids == frozenset()  # the BSE collision is NOT persisted
+        assert rescued["token_join_diagnostic"] == []  # nor surfaced
+        assert (Exchange.BSE, "FOO") not in bridged
+
     def test_idx_token_join_is_a_real_rescue(self) -> None:
         # An IDX whose own GENUINE numeric vendor token matches an NSE option leg's
         # underlying_security_id IS a real rescue: is_spot_only_index reads the bridged
