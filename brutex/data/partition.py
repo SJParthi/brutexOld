@@ -86,6 +86,15 @@ VALID_EXCHANGES: Final[frozenset[str]] = frozenset({"NSE", "BSE"})
 #: ['CASH','FNO'], got 'INDEX'`` crash). DEC-PARTITION-INDEX-SEGMENT-001.
 VALID_SEGMENTS: Final[frozenset[str]] = frozenset({"INDEX", "CASH", "FNO"})
 
+#: The spot segments an instrument's UNDERLYING rides, in PROBE ORDER: an index
+#: underlying lives under ``INDEX``, a single-stock underlying under ``CASH`` (a tuple,
+#: not the unordered :data:`VALID_SEGMENTS` frozenset, because the probe order matters).
+#: The ONE source of truth for that order — both the movers underlying-spot resolver
+#: (``movers_futures._SPOT_SEGMENTS``) and the ``/db`` per-bar moneyness spot join
+#: (``db_view._SPOT_PROBE_SEGMENTS``) import it, so the order can never drift between the
+#: two surfaces (CLAUDE.md §11 COMMON; DEC-FNO-MONEYNESS-001).
+SPOT_PROBE_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH")
+
 
 #: Characters that would break filesystem paths on Linux / macOS /
 #: Windows. A symbol containing any of these is rejected.

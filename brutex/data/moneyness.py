@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_DOWN, Decimal
 from enum import StrEnum
 from typing import Final, TypeGuard
 
@@ -132,6 +132,14 @@ def atm_offset(strike: Decimal | None, spot: Decimal | None, step: Decimal | Non
     nearest strike, ``+N`` is N steps above spot, ``-N`` is N steps below. Returns
     ``None`` when *step* is missing / non-positive or *strike* / *spot* is invalid (no
     grid → no offset, but moneyness is still classifiable).
+
+    Rounds **half toward zero** (``ROUND_HALF_DOWN``) on purpose: a strike exactly
+    ``step / 2`` from spot — the INCLUSIVE edge of :func:`classify`'s default ATM band
+    (``|spot - strike| <= step / 2``) — then rounds to ``0``, so ``atm_offset == 0`` is
+    EXACTLY equivalent to :attr:`Moneyness.ATM`. Rounding half away from zero would put
+    that boundary strike at ``±1`` while :func:`classify` still called it ATM — the two
+    derived columns would contradict at the midpoint (every on-grid spot at
+    ``strike ± step/2`` hits it). Half-toward-zero makes them agree for every step.
     """
     if (
         not _is_positive_finite(step)
@@ -139,7 +147,7 @@ def atm_offset(strike: Decimal | None, spot: Decimal | None, step: Decimal | Non
         or not _is_positive_finite(spot)
     ):
         return None
-    return int(((strike - spot) / step).to_integral_value(rounding=ROUND_HALF_UP))
+    return int(((strike - spot) / step).to_integral_value(rounding=ROUND_HALF_DOWN))
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,9 +161,11 @@ class MoneynessView:
     atm_offset
         The signed ATM±N (``None`` when no grid could be derived, or N/A / UNKNOWN).
     label
-        A compact human label: ``"ATM"`` · ``"ATM+2 (OTM)"`` · ``"ATM-1 (ITM)"`` ·
-        ``"ATM (ITM)"`` (the nearest rung but a touch ITM) · ``"—"`` (a future) ·
-        ``"?"`` (spot unavailable).
+        A compact human label: ``"ATM"`` (offset 0) · ``"ATM+2 (OTM)"`` ·
+        ``"ATM-1 (ITM)"`` · ``"—"`` (a future) · ``"?"`` (spot unavailable). Because
+        :func:`atm_offset` rounds half toward zero, a bar bucketed :attr:`Moneyness.ATM`
+        always carries offset ``0`` (the two never disagree), so ``"ATM"`` never gains a
+        ``(ITM)``/``(OTM)`` suffix from :func:`moneyness_view`.
     """
 
     moneyness: Moneyness

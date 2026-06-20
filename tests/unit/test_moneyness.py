@@ -239,13 +239,18 @@ class TestAtmOffset:
     def test_zero_offset(self) -> None:
         assert atm_offset(Decimal("105"), Decimal("100"), Decimal("50")) == 0
 
-    def test_half_up_positive(self) -> None:
-        # 25 / 50 = 0.5 → rounds away from zero to 1.
-        assert atm_offset(Decimal("125"), Decimal("100"), Decimal("50")) == 1
+    def test_half_toward_zero_positive(self) -> None:
+        # 25 / 50 = 0.5 → rounds HALF TOWARD ZERO to 0 (the ATM-band edge agrees).
+        assert atm_offset(Decimal("125"), Decimal("100"), Decimal("50")) == 0
 
-    def test_half_up_negative(self) -> None:
-        # -25 / 50 = -0.5 → rounds away from zero to -1.
-        assert atm_offset(Decimal("75"), Decimal("100"), Decimal("50")) == -1
+    def test_half_toward_zero_negative(self) -> None:
+        # -25 / 50 = -0.5 → rounds half toward zero to 0.
+        assert atm_offset(Decimal("75"), Decimal("100"), Decimal("50")) == 0
+
+    def test_above_half_rounds_out(self) -> None:
+        # 26 / 50 = 0.52 → past the half-step, rounds out to 1 (consistent with OTM/ITM).
+        assert atm_offset(Decimal("126"), Decimal("100"), Decimal("50")) == 1
+        assert atm_offset(Decimal("74"), Decimal("100"), Decimal("50")) == -1
 
     @pytest.mark.parametrize("step", [None, Decimal("0"), Decimal("-5"), Decimal("NaN")])
     def test_bad_step_is_none(self, step: Decimal | None) -> None:
@@ -275,11 +280,6 @@ class TestFormatLabel:
     def test_atm_zero(self) -> None:
         assert _format_label(Moneyness.ATM, 0) == "ATM"
 
-    def test_atm_nonzero_offset_no_suffix(self) -> None:
-        # ATM bucket but offset != 0 (band boundary) → rung only, no "(ATM)" suffix.
-        assert _format_label(Moneyness.ATM, 1) == "ATM+1"
-        assert _format_label(Moneyness.ATM, -1) == "ATM-1"
-
     def test_graded_positive_offset_has_suffix(self) -> None:
         assert _format_label(Moneyness.OTM, 2) == "ATM+2 (OTM)"
 
@@ -308,6 +308,28 @@ class TestMoneynessView:
         assert v.moneyness is Moneyness.OTM
         assert v.atm_offset is None
         assert v.label == "OTM"
+
+    @pytest.mark.parametrize("option_type", ["CE", "PE"])
+    def test_strike_midpoint_bucket_and_offset_agree(self, option_type: str) -> None:
+        # The reconciliation regression (hostile review MAJOR): at EXACTLY the inclusive
+        # ATM-band edge |spot - strike| == step/2 (a reachable on-grid point — NIFTY 50 →
+        # 25.00), the bucket (ATM) and the offset (0) must AGREE, never "ATM" beside ±1.
+        v = moneyness_view(option_type, Decimal("100"), Decimal("125"), Decimal("50"))
+        assert v.moneyness is Moneyness.ATM
+        assert v.atm_offset == 0
+        assert v.label == "ATM"
+        # And one step BEYOND the edge grades + offsets consistently (never ATM + 0).
+        beyond = moneyness_view(option_type, Decimal("100"), Decimal("130"), Decimal("50"))
+        assert beyond.moneyness is not Moneyness.ATM
+        assert beyond.atm_offset != 0
+
+    def test_atm_bucket_always_carries_zero_offset(self) -> None:
+        # moneyness_view never emits the contradictory (ATM, non-zero) pair — so the
+        # label is always a bare "ATM", never "ATM-1 (…)" from the view.
+        v = moneyness_view(OPTION_CALL, Decimal("100"), Decimal("124.99"), Decimal("50"))
+        assert v.moneyness is Moneyness.ATM
+        assert v.atm_offset == 0
+        assert v.label == "ATM"
 
     def test_future_is_na(self) -> None:
         v = moneyness_view("FUT", Decimal("100"), Decimal("120"), Decimal("50"))

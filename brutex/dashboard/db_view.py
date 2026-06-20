@@ -57,6 +57,7 @@ from brutex.data.fno_candle_lake import (
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.moneyness import derive_strike_step, moneyness_view
 from brutex.data.partition import (
+    SPOT_PROBE_SEGMENTS,
     VALID_EXCHANGES,
     VALID_INTERVALS,
     VALID_SEGMENTS,
@@ -315,9 +316,10 @@ SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
 FNO_MONEYNESS_COLUMNS: Final = ("moneyness", "atm_offset")
 
 #: Spot segments probed (in order) to resolve an F&O contract's UNDERLYING spot series —
-#: an index underlying rides ``INDEX``, a single-stock underlying rides ``CASH`` (mirrors
-#: ``movers_futures._SPOT_SEGMENTS``; CLAUDE.md §11 COMMON).
-_SPOT_PROBE_SEGMENTS: Final = ("INDEX", "CASH")
+#: an index underlying rides ``INDEX``, a single-stock underlying rides ``CASH``. The
+#: shared :data:`brutex.data.partition.SPOT_PROBE_SEGMENTS` is the ONE source of truth for
+#: this order (also used by ``movers_futures._SPOT_SEGMENTS``; CLAUDE.md §11 COMMON).
+_SPOT_PROBE_SEGMENTS: Final = SPOT_PROBE_SEGMENTS
 
 
 def _fno_derived_columns(segment: str) -> tuple[str, ...]:
@@ -1699,10 +1701,13 @@ def _underlying_spot_close_by_ts(
             continue
         glob = base.as_posix() + "/**/*.parquet"
         # glob built from validated coordinates (no free user text); path + both bounds
-        # are bound parameters (same SQL/path-injection guard as query_candles).
+        # are bound parameters (same SQL/path-injection guard as query_candles). A NULL
+        # close is filtered in SQL so a stray null spot bar degrades that instant to
+        # UNKNOWN (the no-spot bucket) rather than raising in `_to_decimal(None)` —
+        # honouring the "never raises / honest UNKNOWN" contract.
         cursor = conn.execute(
             'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
-            'WHERE "timestamp" BETWEEN ? AND ?',
+            'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
             [glob, min_ts, max_ts],
         )
         return {_utc_instant(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
@@ -1755,6 +1760,12 @@ def _fno_moneyness_rows(
     ``NA`` on every bar (no spot read attempted); an option whose underlying spot is
     absent reads ``UNKNOWN``. Never raises — a per-bar browse never crashes on one
     contract whose spot was not pulled (Golden Rule #1).
+
+    The per-bar spot join keys on the bar ``timestamp``, so moneyness needs the
+    ``timestamp`` column present in *out_columns*. The viewer always projects it (it is
+    the candle grid's first column); a deliberately ``timestamp``-less column projection
+    therefore reads ``UNKNOWN`` on every bar (honest — the join key is absent — never a
+    fabricated bucket), not a crash.
     """
     parts = parse_fno_symbol(symbol)
     option_type = parts.option_type if parts is not None else None
