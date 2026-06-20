@@ -838,14 +838,15 @@ def list_fno_candle_datasets(lake_root: Path) -> list[dict[str, Any]]:
 
 
 def fno_candle_lake_schema() -> list[dict[str, Any]]:
-    """Return the F&O candle logical-table schema for the ``/db`` browser.
+    """Return the F&O candle logical-table schema (the documented column set).
 
     A JSON-friendly projection of
     :data:`brutex.data.fno_candle_lake.FNO_CANDLE_COLUMNS` — the documented columns
-    (the 7 physical OHLCV columns + the partition / symbol identity columns) the
-    ``/db`` F&O candle section lists so an operator sees the table's exact shape, the
-    twin of the ``schema_meta`` registration written at store-open
-    (DEC-FNO-CANDLE-LAKE-001). Pure projection — no disk access.
+    (the 7 physical OHLCV columns + the partition / symbol identity columns) — the
+    programmatic twin of the ``schema_meta`` registration written at store-open
+    (DEC-FNO-CANDLE-LAKE-001). Served on the candle-datasets endpoint for API clients;
+    the operator-facing surface of the same schema is the browsable ``schema_meta``
+    table row in ``/db``. Pure projection — no disk access.
     """
     return [
         {

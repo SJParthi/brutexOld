@@ -3330,8 +3330,9 @@ def build_app(
           (``<lake>/bars/<exch>/FNO/…``), each decoded to its contract identity
           (underlying / expiry / strike / instrument_type / option_type) via
           :func:`brutex.dashboard.db_view.list_fno_candle_datasets`. ``fno_schema``
-          carries the documented F&O candle logical-table columns (the ``/db`` twin of
-          the ``schema_meta`` registration).
+          carries the documented F&O candle logical-table columns for API clients (the
+          programmatic twin of the ``schema_meta`` registration; the operator browses the
+          same schema via the ``schema_meta`` table row).
         * ``options`` — the expired-option series (``<lake>/options/…``), each with a
           display-only decoded ``label`` (DEC-DB-OPTION-DATASET-DECODE-001); the
           ``series`` KEY stays byte-unchanged so ``/api/v1/db/options?series=…`` keeps

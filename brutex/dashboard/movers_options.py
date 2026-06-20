@@ -112,7 +112,7 @@ from brutex.dashboard.movers_snapshot import (
     interval_minutes,
     parse_snapshot_date,
 )
-from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
 
@@ -143,15 +143,6 @@ DEFAULT_OPTIONS_TOP_N: Final[int] = 50
 #: the lake (``bars/<exch>/FNO/<contract>/<interval>/...``). Mirrors the
 #: instrument-master backtesting segment (CLAUDE.md §6).
 _FNO_SEGMENT: Final[str] = "FNO"
-
-#: The vendor expiry-token format inside the contract symbol (``30Jun25``): a
-#: 2-digit day, a title-case 3-letter month, a 2-digit year. Used here only to
-#: FORMAT an expiry back to its display token (:attr:`OptionMover.name`); the
-#: PARSING of a contract symbol delegates to
-#: :func:`brutex.data.fno_symbol.parse_fno_symbol` (CLAUDE.md §11 COMMON — one
-#: parser, no copy-paste). Kept equal to
-#: :data:`brutex.data.fno_symbol.EXPIRY_DATE_FORMAT`.
-_EXPIRY_FORMAT: Final[str] = "%d%b%y"
 
 #: The ``?expiry=`` selector → the 0-based rank of the chosen expiry among an
 #: underlying's DISTINCT live (``>= snapshot date``) expiries, sorted ascending:
@@ -271,7 +262,7 @@ class OptionMover:
         without a trailing ``.0`` for a whole number), and the option type — the
         markets-screen Options row label.
         """
-        expiry_token = self.expiry.strftime(_EXPIRY_FORMAT)
+        expiry_token = self.expiry.strftime(EXPIRY_DATE_FORMAT)
         strike = self.strike.normalize()
         # `normalize()` can yield exponent form (``2.4E+4``) for a whole strike —
         # `quantize` back to an integer when there is no fractional part so the

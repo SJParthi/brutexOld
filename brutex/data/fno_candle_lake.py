@@ -119,8 +119,13 @@ class SchemaMetaWriter(Protocol):
     connection). ``parameters`` is positional to match the DuckDB ``execute`` call shape.
     """
 
-    def execute(self, query: str, parameters: object = ..., /) -> object:
-        """Execute *query* with optional bound *parameters*."""
+    def execute(self, _query: str, _parameters: object = ..., /) -> object:
+        """Execute a SQL statement with optional bound parameters (positional-only).
+
+        The parameters are positional-only (``/``) so this Protocol matches DuckDB's
+        ``execute(query, parameters)`` by POSITION; the names carry a leading underscore
+        only because a structural stub never reads them (the vulture dead-code gate).
+        """
         raise NotImplementedError  # structural Protocol stub — never executed
 
 
