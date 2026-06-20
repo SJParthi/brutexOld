@@ -19,12 +19,14 @@ from brutex.dashboard.completeness import (
     DIM_FULL,
     DIM_NONE,
     DIM_PARTIAL,
+    OPT_CONTRACTS_BY_DESIGN_NOTE,
     OPT_FAILED,
     OPT_GROWING,
     OPT_NONE,
     OPT_PARTIAL,
     OPT_STABLE,
     _aggregate_options,
+    _contracts_note,
     _option_verdict,
     _overall_spot,
     build_completeness_scoreboard,
@@ -199,6 +201,78 @@ def test_option_unmapped_underlying_skipped() -> None:
     records = [_cov("STRAY", 2025, STATUS_COMPLETE)]
     board = build_completeness_scoreboard([], {}, records, {"NIFTY": CATEGORY_INDEX})
     assert board["options"]["per_underlying"] == []
+
+
+# ── honest "0 contracts = metadata-only by design" label (DEC-METADATA-LIVE-PROGRESS-001) ──
+
+
+def test_contracts_note_only_for_expiries_only_zero_contracts() -> None:
+    """The by-design note attaches ONLY to an ``expiries_only`` verdict with 0 contracts.
+
+    Any other verdict, or a row that DID persist contracts, gets ``""`` — so the page
+    can never attach a false "metadata-only by design" claim (DEC-METADATA-LIVE-PROGRESS-001).
+    """
+    # The one honest by-design case: expiries captured, legs intentionally discarded.
+    assert _contracts_note(OPT_PARTIAL, 0) == OPT_CONTRACTS_BY_DESIGN_NOTE
+    # A partial row that somehow DID persist contracts is NOT "0 by design".
+    assert _contracts_note(OPT_PARTIAL, 5) == ""
+    # Every other verdict (even at 0 contracts) is not the metadata-only state.
+    assert _contracts_note(OPT_STABLE, 0) == ""
+    assert _contracts_note(OPT_GROWING, 0) == ""
+    assert _contracts_note(OPT_FAILED, 0) == ""
+    assert _contracts_note(OPT_NONE, 0) == ""
+
+
+def test_per_underlying_options_annotates_metadata_only_by_design() -> None:
+    """An expiries_only/0-contract underlying carries the honest by-design note in the payload.
+
+    This is the misleading ``contracts pulled = 0`` made HONEST: it is metadata-only by
+    design (legs discarded — DEC-INSTRUMENT-UNIVERSE-FAST-001), NOT a broken pull.
+    """
+    records = [_cov("NIFTY", 2026, STATUS_EXPIRIES_ONLY, expiries=42, contracts=0)]
+    board = build_completeness_scoreboard([], {}, records, {"NIFTY": CATEGORY_INDEX})
+    [row] = board["options"]["per_underlying"]
+    assert row["status"] == OPT_PARTIAL
+    assert row["contracts_pulled"] == 0
+    assert row["contracts_note"] == OPT_CONTRACTS_BY_DESIGN_NOTE
+    assert "by design" in row["contracts_note"]
+    assert "DEC-INSTRUMENT-UNIVERSE-FAST-001" in row["contracts_note"]
+
+
+def test_per_underlying_options_no_note_when_contracts_present() -> None:
+    """A stable underlying WITH persisted contracts gets an empty note (no false claim)."""
+    records = [_cov("NIFTY", 2025, STATUS_COMPLETE, expiries=50, contracts=10_000)]
+    board = build_completeness_scoreboard([], {}, records, {"NIFTY": CATEGORY_INDEX})
+    [row] = board["options"]["per_underlying"]
+    assert row["status"] == OPT_STABLE
+    assert row["contracts_note"] == ""
+
+
+def test_per_symbol_options_carries_by_design_note() -> None:
+    """The per-symbol ``/universe`` strip also annotates the by-design 0-contract state."""
+    records = [_cov("NIFTY", 2026, STATUS_EXPIRIES_ONLY, expiries=12, contracts=0)]
+    out = per_symbol_completeness([], {}, records, {"NIFTY": CATEGORY_INDEX})
+    opt = out["NIFTY"]["options"]
+    assert opt["status"] == OPT_PARTIAL
+    assert opt["contracts_note"] == OPT_CONTRACTS_BY_DESIGN_NOTE
+
+
+def test_per_symbol_options_default_has_empty_note() -> None:
+    """A symbol with NO option records gets the OPT_NONE default + an empty note."""
+    spot_rows = [_spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED)]
+    out = per_symbol_completeness(spot_rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    opt = out["NSE-NIFTY"]["options"]
+    assert opt["status"] == OPT_NONE
+    assert opt["contracts_note"] == ""
+
+
+def test_scoreboard_csv_options_detail_has_by_design_note() -> None:
+    """The downloadable CSV's options detail surfaces the honest by-design note too."""
+    records = [_cov("NIFTY", 2026, STATUS_EXPIRIES_ONLY, expiries=7, contracts=0)]
+    board = build_completeness_scoreboard([], {}, records, {"NIFTY": CATEGORY_INDEX})
+    csv_text = scoreboard_to_csv(board)
+    assert "Notes" in csv_text  # the new options-detail column header
+    assert "metadata-only by design" in csv_text
 
 
 def test_option_aggregate_counts_each_status() -> None:
@@ -426,8 +500,10 @@ def test_scoreboard_csv_full_board_has_all_sections_and_rows() -> None:
     # The per-symbol detail rows are present with their verdicts.
     assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},{DIM_FULL},{DIM_FULL}" in lines
     assert f"{CATEGORY_EQUITY},NSE-RELIANCE,NSE,{DIM_FULL},{DIM_PARTIAL},{DIM_PARTIAL}" in lines
-    # The per-underlying option detail row carries status + summed counts + the years.
-    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{OPT_STABLE},50,10000,2024" in lines
+    # The per-underlying option detail row carries status + summed counts + the years +
+    # the (empty, for a stable/has-contracts row) by-design Notes column
+    # (DEC-METADATA-LIVE-PROGRESS-001 added the trailing Notes column).
+    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{OPT_STABLE},50,10000,2024," in lines
 
 
 def test_scoreboard_csv_empty_board_keeps_section_skeleton() -> None:

@@ -65,6 +65,19 @@ OPT_GROWING: Final[str] = "growing"  # a year still PENDING — chain still fill
 OPT_FAILED: Final[str] = "failed"  # a year FAILED — needs a re-pull
 OPT_NONE: Final[str] = "none"  # no coverage record (no options / never attempted)
 
+#: Honest annotation for the misleading ``contracts_pulled = 0`` on an
+#: ``expiries_only`` underlying (DEC-METADATA-LIVE-PROGRESS-001). The lean universe
+#: PARSES then DISCARDS the ~89k option legs (DEC-INSTRUMENT-UNIVERSE-FAST-001) — the
+#: metadata pull persists only the chain SHAPE (expiry dates + contract symbols), so
+#: ``0`` here is BY DESIGN, not a broken/failed pull. Surfaced as a row note so the
+#: operator reads "metadata-only" instead of "0 = broken". Empty for every other case
+#: (a row with persisted contracts, or a non-``expiries_only`` verdict) so no false
+#: claim is ever attached.
+OPT_CONTRACTS_BY_DESIGN_NOTE: Final[str] = (
+    "metadata-only by design — option legs are discarded "
+    "(DEC-INSTRUMENT-UNIVERSE-FAST-001), only the chain shape is kept"
+)
+
 #: The coverage-ledger cell statuses this module BRANCHES on (mirror of the
 #: ``coverage_ledger.STATUS_*`` strings, duplicated here to keep this pure module
 #: import-light — a drift test pins them equal). ``complete`` is intentionally NOT
@@ -177,6 +190,21 @@ def _option_verdict(statuses: list[str]) -> str:
     return OPT_STABLE  # every attempted year is COMPLETE
 
 
+def _contracts_note(status: str, contracts_pulled: int) -> str:
+    """Honest note for a ``contracts_pulled = 0`` row — empty unless it is by-design.
+
+    Returns :data:`OPT_CONTRACTS_BY_DESIGN_NOTE` ONLY when the verdict is
+    :data:`OPT_PARTIAL` (every captured year is ``expiries_only``) AND no contract was
+    persisted — the lean-universe metadata-only state where ``0`` is intended, not
+    broken (DEC-METADATA-LIVE-PROGRESS-001 / DEC-INSTRUMENT-UNIVERSE-FAST-001). Any
+    other verdict, or any row that DID persist contracts, gets ``""`` so the page never
+    attaches a false "by design" claim. O(1).
+    """
+    if status == OPT_PARTIAL and contracts_pulled == 0:
+        return OPT_CONTRACTS_BY_DESIGN_NOTE
+    return ""
+
+
 def _per_underlying_options(
     records: Iterable[Any], categories: Mapping[str, str]
 ) -> list[dict[str, Any]]:
@@ -214,6 +242,9 @@ def _per_underlying_options(
         statuses = cell.pop("_statuses")
         cell["years"] = sorted(cell["years"])
         cell["status"] = _option_verdict(statuses)
+        # Honest annotation: a 0-contract expiries_only row is metadata-only BY DESIGN
+        # (legs discarded), not broken (DEC-METADATA-LIVE-PROGRESS-001).
+        cell["contracts_note"] = _contracts_note(cell["status"], cell["contracts_pulled"])
         out.append(cell)
     return sorted(out, key=lambda e: (e["underlying"], e["exchange"]))
 
@@ -258,6 +289,8 @@ def _new_per_symbol_entry(symbol: str, exchange: str, category: str) -> dict[str
             "status": OPT_NONE,
             "expiries_pulled": 0,
             "contracts_pulled": 0,
+            # OPT_NONE never carries the by-design note (no chain attempted) — empty.
+            "contracts_note": "",
             "years": [],
             "first_year": None,
             "last_year": None,
@@ -347,10 +380,14 @@ def _fold_per_symbol_options(
         entry = out.setdefault(
             underlying, _new_per_symbol_entry(underlying, acc["exchange"], acc["category"])
         )
+        status = _option_verdict(acc["statuses"])
         entry["options"] = {
-            "status": _option_verdict(acc["statuses"]),
+            "status": status,
             "expiries_pulled": acc["expiries"],
             "contracts_pulled": acc["contracts"],
+            # Honest annotation: a 0-contract expiries_only underlying is metadata-only
+            # BY DESIGN (legs discarded), not broken (DEC-METADATA-LIVE-PROGRESS-001).
+            "contracts_note": _contracts_note(status, acc["contracts"]),
             "years": years,
             "first_year": years[0],
             "last_year": years[-1],
@@ -684,6 +721,7 @@ def scoreboard_to_csv(
             "Expiries pulled",
             "Contracts pulled",
             "Years",
+            "Notes",
         ]
     )
     for row in board["options"]["per_underlying"]:
@@ -696,6 +734,9 @@ def scoreboard_to_csv(
                 row["expiries_pulled"],
                 row["contracts_pulled"],
                 " ".join(str(year) for year in row["years"]),
+                # Honest "0 contracts = metadata-only by design" note when applicable
+                # (DEC-METADATA-LIVE-PROGRESS-001); empty otherwise.
+                row.get("contracts_note", ""),
             ]
         )
 
@@ -711,6 +752,7 @@ __all__ = [
     "DIM_FULL",
     "DIM_NONE",
     "DIM_PARTIAL",
+    "OPT_CONTRACTS_BY_DESIGN_NOTE",
     "OPT_FAILED",
     "OPT_GROWING",
     "OPT_NONE",
