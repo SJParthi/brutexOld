@@ -113,6 +113,9 @@
   tbody tr:hover { background:var(--surface-2); }
   td { cursor:copy; }
   td.nullcell { color:var(--muted); font-style:italic; cursor:default; }
+  /* Moneyness tint (DEC-FNO-MONEYNESS-001): ITM green · OTM red · UNKNOWN/NA muted. */
+  td.mny-itm { color:var(--green); } td.mny-otm { color:var(--red); }
+  td.mny-na { color:var(--muted); }
   /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
   @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
   td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
@@ -295,7 +298,23 @@ function fmtCell(col, cell) {
     const n = Number(cell);
     return Number.isFinite(n) ? n.toFixed(2) : cell;
   }
+  /* Signed ATM±N (DEC-FNO-MONEYNESS-001): show the sign so the distance from the
+     at-the-money rung reads +2 / 0 / -1. */
+  if (col === "atm_offset") {
+    const n = Number(cell);
+    return Number.isFinite(n) && n > 0 ? "+" + n : cell;
+  }
   return cell;
+}
+
+/* Moneyness colour class for a candle cell (DEC-FNO-MONEYNESS-001) — purely a
+   display tint; the value text is unchanged. "" for every non-moneyness column. */
+function moneynessClass(col, cell) {
+  if (col !== "moneyness") return "";
+  if (cell === "ITM") return " mny-itm";
+  if (cell === "OTM") return " mny-otm";
+  if (cell === "UNKNOWN" || cell === "NA") return " mny-na";
+  return "";
 }
 
 /* DASH-UX D2 (DEC-DASHBOARD-DB-UX-001): column-type inference for the header
@@ -305,7 +324,7 @@ function fmtCell(col, cell) {
 const NUM_COLS = new Set([
   "open", "high", "low", "close", "volume", "open_interest", "oi",
   "strike", "spot", "iv", "lot_size", "tick_size", "sm_freeze_qty",
-  "security_id", "row_count", "underlying_security_id",
+  "security_id", "row_count", "underlying_security_id", "atm_offset",
 ]);
 function colType(col) {
   const c = String(col).toLowerCase();
@@ -694,7 +713,7 @@ function gridAndPager(cols, rows, total, off, lim, note) {
     }).join("") + '</tr></thead>';
     const tbody = '<tbody>' + rows.map(row =>
       '<tr>' + row.map((cell, i) =>
-        cell == null ? '<td class="nullcell">null</td>' : '<td>' + esc(fmtCell(cols[i], cell)) + '</td>'
+        cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
       ).join("") + '</tr>'
     ).join("") + '</tbody>';
     html += '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';

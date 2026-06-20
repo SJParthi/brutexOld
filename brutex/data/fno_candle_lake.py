@@ -68,9 +68,11 @@ class FnoCandleColumn:
         columns are derived strings / numbers.
     source
         Where the value comes from: ``"bar"`` (a physical Parquet column written per
-        bar), ``"partition"`` (encoded in the lake path), or ``"symbol"`` (decoded
+        bar), ``"partition"`` (encoded in the lake path), ``"symbol"`` (decoded
         from the contract ``groww_symbol`` via
-        :func:`~brutex.data.fno_symbol.parse_fno_symbol`).
+        :func:`~brutex.data.fno_symbol.parse_fno_symbol`), or ``"derived"`` (computed
+        at READ time by the ``/db`` browser against the underlying spot — NEVER stored,
+        so it can never go stale: :mod:`brutex.data.moneyness`, DEC-FNO-MONEYNESS-001).
     nullable
         Whether the column may be absent / ``None`` for a valid row (e.g. ``strike`` /
         ``option_type`` are ``None`` for a future leg).
@@ -108,6 +110,24 @@ FNO_CANDLE_COLUMNS: Final[tuple[FnoCandleColumn, ...]] = (
     FnoCandleColumn("strike", "decimal", "symbol", True, "Option strike (₹); None for a future."),
     FnoCandleColumn("option_type", "string", "symbol", True, "CE / PE; None for a future."),
     FnoCandleColumn("interval", "string", "partition", False, "Candle interval (1minute fetched)."),
+    # READ-time derived (never stored) — moneyness of THIS option vs the underlying
+    # spot at each bar's instant (DEC-FNO-MONEYNESS-001). Time-varying (the strike is
+    # fixed but the spot moves), so it must be derived, never persisted. NA for a
+    # future, UNKNOWN when the underlying spot is absent from the lake.
+    FnoCandleColumn(
+        "moneyness",
+        "string",
+        "derived",
+        True,
+        "ITM / ATM / OTM vs the per-bar underlying spot (NA future · UNKNOWN if no spot).",
+    ),
+    FnoCandleColumn(
+        "atm_offset",
+        "int",
+        "derived",
+        True,
+        "Signed ATM±N strike-steps from spot; None when the strike grid / spot is unknown.",
+    ),
 )
 
 

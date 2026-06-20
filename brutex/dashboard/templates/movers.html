@@ -70,6 +70,7 @@
   thead th.sorted { color:var(--blue); }
   td.name { color:var(--text-bright); font-weight:600; }
   td.pos { color:var(--green); } td.neg { color:var(--red); }
+  td.muted { color:var(--muted); }
   tbody tr:hover { background:var(--surface-2); }
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
   #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
@@ -158,7 +159,7 @@ const ASSETS = {
   },
   options: {
     cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
-    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["ATM±N","atm_offset","int"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
 };
 const TF_MIN = {"1minute":1,"5minute":5,"15minute":15,"30minute":30,"1hour":60,"1day":375};
@@ -183,9 +184,9 @@ const SAMPLE = {
     {name:"RELIANCE 30 JUN FUT", ltp:"₹1,296.50", spot:"₹1,293.00", premium:"+3.50", pct_change:"2.40", oi:"2,33,500", oi_chg_pct:"-1.1", volume:"8,200"},
   ],
   options: [
-    {name:"NIFTY 30 JUN 24000 CALL", spot:"₹23,622.90", ltp:"₹164.00", pct_change:"179.62", oi:"76,10,235", oi_chg:"-3,00,440", oi_chg_pct:"-3.80", volume:"1,47,65,790"},
-    {name:"BANKNIFTY 30 JUN 56000 CALL", spot:"₹56,814.80", ltp:"₹1,414.00", pct_change:"138.97", oi:"10,43,760", oi_chg:"89,640", oi_chg_pct:"9.40", volume:"59,83,260"},
-    {name:"NIFTY 30 JUN 23000 PUT", spot:"₹23,622.90", ltp:"₹73.50", pct_change:"-67.50", oi:"60,92,940", oi_chg:"8,82,770", oi_chg_pct:"16.94", volume:"1,06,25,485"},
+    {name:"NIFTY 30 JUN 24000 CALL", spot:"₹23,622.90", ltp:"₹164.00", moneyness:"OTM", atm_offset:8, pct_change:"179.62", oi:"76,10,235", oi_chg:"-3,00,440", oi_chg_pct:"-3.80", volume:"1,47,65,790"},
+    {name:"BANKNIFTY 30 JUN 56000 CALL", spot:"₹56,814.80", ltp:"₹1,414.00", moneyness:"ITM", atm_offset:-8, pct_change:"138.97", oi:"10,43,760", oi_chg:"89,640", oi_chg_pct:"9.40", volume:"59,83,260"},
+    {name:"NIFTY 30 JUN 23000 PUT", spot:"₹23,622.90", ltp:"₹73.50", moneyness:"OTM", atm_offset:-12, pct_change:"-67.50", oi:"60,92,940", oi_chg:"8,82,770", oi_chg_pct:"16.94", volume:"1,06,25,485"},
   ],
 };
 
@@ -245,6 +246,9 @@ function renderRows() {
   tb.innerHTML = data.map(row => "<tr>" + cols.map(([,field,type],i) => {
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
+    /* Signed ATM±N (DEC-FNO-MONEYNESS-001): show the sign so +2 / 0 / -1 read as the
+       distance from the at-the-money rung; done BEFORE the generic int grouping. */
+    if (field==="atm_offset" && typeof v === "number") v = (v>0?"+":"") + v;
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
        num → 2dp, int → grouped. Cells that already arrive as formatted strings
        (typeof !== "number") pass through unchanged. */
@@ -256,6 +260,12 @@ function renderRows() {
     if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
       const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
       if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + n.toFixed(2) + "%";
+    }
+    /* Moneyness chip (DEC-FNO-MONEYNESS-001): ITM in-the-money → green, OTM → red,
+       ATM neutral, UNKNOWN/NA muted. Purely a display tint; value is unchanged. */
+    if (field==="moneyness" && typeof v === "string") {
+      if (v==="ITM") cls = "pos"; else if (v==="OTM") cls = "neg";
+      else if (v==="UNKNOWN"||v==="NA"||v==="—") cls = "muted";
     }
     return `<td class="${cls}">${v}</td>`;
   }).join("") + "</tr>").join("");

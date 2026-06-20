@@ -113,6 +113,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
 )
 from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
+from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
 
@@ -239,6 +240,14 @@ class OptionMover:
     value_paisa
         Cumulative traded value over those session bars as int64 paisa
         (``Σ round_money(close) × volume``).
+    moneyness
+        The contract's moneyness vs the underlying spot as of the snapshot
+        (:class:`~brutex.data.moneyness.Moneyness` — ITM/ATM/OTM, or UNKNOWN when
+        the spot is absent). DERIVED, never stored (DEC-FNO-MONEYNESS-001).
+    atm_offset
+        The signed ATM±N strike-steps from spot (``0`` = the at-the-money rung,
+        ``+N`` above, ``-N`` below), or ``None`` when the spot / strike grid is
+        unknown.
     """
 
     underlying: str
@@ -256,6 +265,8 @@ class OptionMover:
     oi_chg_pct: Decimal | None
     volume: int
     value_paisa: int
+    moneyness: Moneyness
+    atm_offset: int | None
 
     @property
     def name(self) -> str:
@@ -367,6 +378,7 @@ def compute_option_mover(
     prev_close: Decimal | None,
     spot_ltp: Decimal | None,
     prev_oi: int | None,
+    strike_step: Decimal | None = None,
 ) -> OptionMover:
     """Reduce one option contract's reads to an :class:`OptionMover` (pure).
 
@@ -376,6 +388,13 @@ def compute_option_mover(
     *spot_ltp* is the underlying's spot LTP (``None`` ⇒ no spot column). *prev_oi*
     is the contract's prior 1-day OI. The money columns are snapped; the % / OI-%
     metrics keep full precision (CLAUDE.md §4).
+
+    Moneyness (ITM/ATM/OTM + signed ATM±N) is DERIVED against *spot_ltp* at the
+    snapshot instant (DEC-FNO-MONEYNESS-001) — never stored. *strike_step* is the
+    DYNAMIC grid step for this ``(underlying, expiry)`` (derived by the caller from
+    the screened strike ladder, so it works for EVERY F&O underlying, not just the
+    3 indices); ``None`` ⇒ no ATM±N offset but the ITM/ATM/OTM bucket still resolves.
+    A missing spot ⇒ :attr:`~brutex.data.moneyness.Moneyness.UNKNOWN`, never faked.
 
     Parameters
     ----------
@@ -392,6 +411,8 @@ def compute_option_mover(
         The underlying's spot LTP (rupees), or ``None`` when absent.
     prev_oi
         The contract's previous trading-day 1-day open interest, or ``None``.
+    strike_step
+        The ``(underlying, expiry)`` strike-grid step (rupees), or ``None``.
 
     Returns
     -------
@@ -408,6 +429,9 @@ def compute_option_mover(
         if (oi is not None and prev_oi is not None and prev_oi != 0)
         else None
     )
+    # Moneyness vs the snapshot spot (the snapped 2dp spot keeps it consistent with
+    # the displayed spot/strike); UNKNOWN when the spot is absent (Golden Rule #1).
+    view = moneyness_view(opt_type, strike, snapped_spot, strike_step)
     return OptionMover(
         underlying=underlying,
         expiry=expiry,
@@ -424,6 +448,8 @@ def compute_option_mover(
         oi_chg_pct=oi_chg_pct,
         volume=volume,
         value_paisa=value_paisa,
+        moneyness=view.moneyness,
+        atm_offset=view.atm_offset,
     )
 
 
@@ -441,6 +467,10 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "oi_chg": mover.oi_chg,
         "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
         "volume": mover.volume,
+        # Moneyness vs the snapshot spot (DEC-FNO-MONEYNESS-001). The StrEnum
+        # serialises to its bucket string ("ITM"); ATM±N is a signed int / None.
+        "moneyness": mover.moneyness.value,
+        "atm_offset": mover.atm_offset,
     }
 
 
@@ -856,6 +886,15 @@ def compute_options_candidates(
             movers=(), skipped=0, date=date_str, expiry_tier=tier, expiry_track=track
         )
 
+    # Derive the DYNAMIC strike-grid step ONCE per (underlying, expiry) from the
+    # screened strike ladder (CE + PE share the grid) — the min positive gap. This
+    # works for EVERY F&O underlying (all stocks + indices), never a hardcoded NSE
+    # rule (Golden Rule #1). O(K log K) once here; the per-contract ATM±N is O(1).
+    strikes_by_key: dict[tuple[str, date_cls], list[Decimal]] = {}
+    for _sym, _exch, c_underlying, c_expiry, c_strike, _opt in contracts:
+        strikes_by_key.setdefault((c_underlying, c_expiry), []).append(c_strike)
+    step_by_key = {key: derive_strike_step(strikes) for key, strikes in strikes_by_key.items()}
+
     movers: list[OptionMover] = []
     skipped = 0
     for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
@@ -905,6 +944,7 @@ def compute_options_candidates(
                 prev_close=prev_close,
                 spot_ltp=spot_ltp,
                 prev_oi=prev_oi,
+                strike_step=step_by_key.get((underlying, expiry)),
             )
         )
 

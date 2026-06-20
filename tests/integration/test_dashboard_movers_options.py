@@ -292,6 +292,13 @@ class TestRunOptionsSnapshot:
         assert ce_row["oi_chg"] == 100  # 1100 - 1000
         assert Decimal(ce_row["oi_chg_pct"]) == Decimal("10")  # 1100 vs 1000
         assert ce_row["volume"] == 500
+        # Moneyness vs spot 23622.90 < strike 24000 (DEC-FNO-MONEYNESS-001): CE OTM,
+        # PE ITM. Single strike in the lake → no inferable grid → ATM±N is None.
+        assert ce_row["moneyness"] == "OTM"
+        assert ce_row["atm_offset"] is None
+        pe_row = highest[1]
+        assert pe_row["moneyness"] == "ITM"
+        assert pe_row["atm_offset"] is None
 
         # CE oi% +10 → in oi_gainers; PE oi% -25 → in oi_losers.
         assert [r["name"] for r in payload["oi_gainers"]] == ["Nifty 50 27Jun24 24000 CE"]
@@ -308,6 +315,44 @@ class TestRunOptionsSnapshot:
         ]
         pe_signed = next(r for r in payload["oi_losers"])
         assert pe_signed["oi_chg"] == -300  # 900 - 1200
+
+    def test_dynamic_strike_step_drives_atm_offset(self, tmp_path: Path) -> None:
+        # Three CE strikes on the SAME (underlying, expiry) → the grid step is DERIVED
+        # (min gap 50), so ATM±N resolves for EVERY F&O underlying without a hardcoded
+        # NSE rule (DEC-FNO-MONEYNESS-001 / Golden Rule #1). Spot 23622.90.
+        for strike in ("23600", "23650", "24000"):
+            symbol = f"NSE-NIFTY-27Jun24-{strike}-CE"
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=symbol,
+                interval="1minute",
+                bars=[_min_bar(hour=9, minute=16, close="164", volume=400, oi=1100)],
+            )
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=symbol,
+                interval="1day",
+                bars=[_day_bar(day=date(2024, 6, 12), close="100", oi=1000)],
+            )
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="23622.90", volume=50, oi=None)],
+        )
+        payload = run_options_snapshot(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, top_n=10
+        )
+        by_name = {r["name"]: r for r in payload["highest_oi"]}
+        # 23600 CE: |23622.90 - 23600| = 22.90 <= step/2 (25) → ATM, offset 0.
+        assert by_name["NIFTY 27Jun24 23600 CE"]["moneyness"] == "ATM"
+        assert by_name["NIFTY 27Jun24 23600 CE"]["atm_offset"] == 0
+        # 24000 CE: spot below strike → OTM; round((24000-23622.90)/50) = 8.
+        assert by_name["NIFTY 27Jun24 24000 CE"]["moneyness"] == "OTM"
+        assert by_name["NIFTY 27Jun24 24000 CE"]["atm_offset"] == 8
 
     def test_no_underlying_spot_nulls_spot(self, tmp_path: Path) -> None:
         # CE present but NO underlying spot → spot null, still ranked.
