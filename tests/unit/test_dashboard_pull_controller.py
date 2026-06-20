@@ -168,10 +168,10 @@ class _DailyGapAdapter(SyntheticSpotAdapter):
 def _real_sink(lake_root: Path) -> BarSink:
     """A real catalog-free ``ParquetBarSink`` (the dashboard/spot-pull reality).
 
-    DEC-SPOT-1DAY-FIRST-001: the two-phase pull needs Phase 1's ``1day`` bars on disk
-    so Phase 2's start-date discovery can read each symbol's coverage back off the lake
-    (a NullBarSink writes nothing → the minute phase has no anchor to derive from). The
-    machinery tests that exercise BOTH intervals use this real sink.
+    The machinery tests that exercise BOTH intervals use this real sink so the
+    landed bars are written to disk and the window ledger reflects the planned +
+    fetched windows (DEC-SPOT-INTERVAL-DECOUPLE-001 — both phases pull the full range
+    independently; the minute phase no longer reads the lake for a 1-day anchor).
     """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
@@ -284,13 +284,14 @@ class TestPullCandlesDryRun:
         )
         assert report.total_completed == 0
         assert report.total_failed == 0
-        # 1day runs + returns empty (a genuine vendor no_data cell); the 1minute phase
-        # is the 3c skip (dry-run derives {} → never queried → SKIPPED, NOT vendor-empty).
-        assert report.total_no_data == 1  # the 1day fetch ran + returned empty
-        assert report.total_skipped == 1  # the 1minute was skipped (no anchor)
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: BOTH phases run the full range over the symbol
+        # (the 1minute is no longer skipped on absent 1-day coverage); the empty adapter
+        # returns no bars for each → two genuine vendor no_data cells, zero skipped.
+        assert report.total_no_data == 2  # both 1day + 1minute fetched + returned empty
+        assert report.total_skipped == 0  # nothing skipped — the minute phase ran
         d = report.to_dict()
         assert d["total_no_data"] == report.total_no_data
-        assert d["total_skipped"] == 1
+        assert d["total_skipped"] == 0
 
     def test_on_progress_forwarded_per_pair(self, tmp_path: Path) -> None:
         """pull_candles threads on_progress → fires once per (symbol, interval) pair.
@@ -298,10 +299,9 @@ class TestPullCandlesDryRun:
         The single-symbol twin of the bulk on_progress test: the dashboard's
         background-job percent ticks per completed pair, so the hook must fire
         for both fetched intervals (set-asserted — the parallel fan-out's
-        completion order is non-deterministic). DEC-SPOT-1DAY-FIRST-001: BOTH phases
-        only run when the 1-day phase wrote a readable lake, so this uses a real sink
-        (``dry_run=False`` + injected adapter) — Phase 1 (1day) lands real bars, then
-        Phase 2 (1minute) derives + runs.
+        completion order is non-deterministic). Uses a real sink (``dry_run=False`` +
+        injected adapter) so both the 1day + 1minute phases land real bars
+        (DEC-SPOT-INTERVAL-DECOUPLE-001 — both phases run the full range independently).
         """
         events: list[tuple[str, int, bool]] = []
         pull_candles(
@@ -349,12 +349,10 @@ class TestPullCandlesInjectedFactory:
         assert report.total_completed > 0
 
     def test_failing_adapter_reports_failures(self, tmp_path: Path) -> None:
-        # DEC-SPOT-1DAY-FIRST-001: Phase 1 (1day) quarantines (a terminal BadRequest,
-        # not an auth death) → the 1-minute phase still attempts to derive, but the
-        # failing adapter wrote NO 1-day lake → no anchor → the 1-minute fill is
-        # SKIPPED (we refused to query — no anchor), reported as a SKIPPED cell, NOT
-        # no_data (which means "vendor queried, returned empty"). So 1 failed (1day) +
-        # 1 skipped (1minute), 0 no_data — the honest distinction (Golden Rule #1).
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: Phase 1 (1day) quarantines (a terminal
+        # BadRequest, not an auth death) and the 1-minute phase STILL RUNS over the full
+        # range (no longer skipped on absent 1-day coverage). The failing adapter raises
+        # for BOTH intervals → both pairs quarantined → 2 failed, 0 skipped, 0 no_data.
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -364,9 +362,9 @@ class TestPullCandlesInjectedFactory:
             adapter_factory=lambda root, _inst: (_FailingAdapter(), _real_sink(root)),
         )
         assert report.total_completed == 0
-        assert report.total_failed == 1  # the 1day phase quarantined
-        assert report.total_skipped == 1  # the 1minute phase skipped (no 1-day anchor)
-        assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
+        assert report.total_failed == 2  # BOTH the 1day + 1minute phases quarantined
+        assert report.total_skipped == 0  # nothing skipped — the minute phase ran
+        assert report.total_no_data == 0  # both raised → quarantined, not vendor-empty
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -585,8 +583,8 @@ class TestPullAllSpot:
         # synthetic pull leaves no transient residual, so the wrapper runs no
         # extra rounds and the per-symbol rollup is identical to the single-pass
         # default — same engine, no behaviour change on a clean pull
-        # (DEC-INGEST-AUTO-RETRY-001). DEC-SPOT-1DAY-FIRST-001: a real sink so BOTH
-        # phases run (Phase 1 1day, then Phase 2 1minute from the discovered start).
+        # (DEC-INGEST-AUTO-RETRY-001). DEC-SPOT-INTERVAL-DECOUPLE-001: a real sink so
+        # BOTH phases run the full range (1day + 1minute, decoupled).
         report = pull_all_spot(
             [_index("13"), _index("25")],
             lake_root=tmp_path,
@@ -641,10 +639,10 @@ class TestPullAllSpot:
         assert report.end_date == "2026-05-29"  # previous day (now=05-30)
 
     def test_no_data_and_failure_branches(self, tmp_path: Path) -> None:
-        # DEC-SPOT-1DAY-FIRST-001: an EMPTY adapter writes no 1-day lake, so the
-        # 1-minute phase is SKIPPED (no anchor) and contributes nothing — only the
-        # 1day phase's settled empty surfaces as no-data (1, not 2). The verdict is
-        # still the known-gap (no operator action).
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: BOTH phases run the full range over the symbol
+        # (the 1minute is no longer skipped on absent 1-day coverage). An EMPTY adapter
+        # returns no bars for each interval → two settled no-data cells (1day + 1minute).
+        # The verdict is still the known-gap (no operator action).
         report = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
@@ -653,16 +651,16 @@ class TestPullAllSpot:
             intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
-        assert report.total_no_data == 1  # only the 1day phase ran (1minute skipped)
+        assert report.total_no_data == 2  # both the 1day + 1minute phases ran + empty
         assert report.total_completed == 0
         assert report.symbols[0].symbol == "13"
         # Nothing completed + only no-data → the known-gap verdict (no operator action).
         assert report.verdict.kind == "known_gap_only"
         assert report.verdict.needs_operator is False
         assert report.to_dict()["verdict"]["kind"] == "known_gap_only"
-        # A failing adapter → the 1day phase quarantines (terminal, not auth), so the
-        # 1-minute phase still attempts to derive but the failing adapter wrote no
-        # lake → 1-minute skipped (contributes nothing). 1 quarantined pair, no minute.
+        # A failing adapter → BOTH phases quarantine (terminal, not auth): the 1-minute
+        # phase now runs the full range too, and the failing adapter raises for it as
+        # well → 2 quarantined pairs.
         failed = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
@@ -671,16 +669,16 @@ class TestPullAllSpot:
             intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_FailingAdapter(), NullBarSink()),
         )
-        assert failed.total_failed == 1  # the 1day phase quarantined
+        assert failed.total_failed == 2  # both the 1day + 1minute phases quarantined
         assert failed.dry_run is False
         # Quarantined pairs with NO retryable windows (token alive) → quarantined_symbols:
         # a re-pull can NEVER recover a symbol that isn't on Groww, so it's a COMPLETE pull
         # (grey, needs_operator False — no false "re-pull to finish"), DEC-EMPTY-RESOLVED-
-        # REPORTING-001. The quarantined pair rides in failed_pairs, NOT pending_windows.
+        # REPORTING-001. The quarantined pairs ride in failed_pairs, NOT pending_windows.
         assert failed.verdict.kind == "quarantined_symbols"
         assert failed.verdict.needs_operator is False
         assert failed.verdict.pending_windows == 0
-        assert failed.verdict.failed_pairs == 1
+        assert failed.verdict.failed_pairs == 2
         assert failed.to_dict()["verdict"]["needs_operator"] is False
 
     def test_empty_fetch_is_no_data_not_a_failure(self, tmp_path: Path) -> None:
@@ -698,21 +696,21 @@ class TestPullAllSpot:
             adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert all_gap.total_failed == 0  # NOT counted as a failure
-        # DEC-SPOT-1DAY-FIRST-001: the empty 1day phase writes no lake → the 1minute
-        # phase is skipped (no anchor), so only the 1day settled no-data surfaces.
-        assert all_gap.total_no_data == 1  # the 1day interval is settled no-data (EMPTY)
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: BOTH phases run the full range over the symbol;
+        # the empty adapter returns no bars for each → two settled no-data cells.
+        assert all_gap.total_no_data == 2  # both 1day + 1minute are settled no-data (EMPTY)
         # Nothing completed + only no-data → known_gap_only (no operator action),
         # NOT transient_residual — zero manual re-pull is asked.
         assert all_gap.verdict.kind == "known_gap_only"
         assert all_gap.verdict.needs_operator is False
         assert all_gap.verdict.pending_windows == 0
 
-    def test_daily_gap_with_intraday_data_skips_minute(self, tmp_path: Path) -> None:
-        # DEC-SPOT-1DAY-FIRST-001 inverts the old "1day gap but 1minute lands" case:
-        # the 1minute fill now needs the symbol's discovered 1-day anchor, so a symbol
-        # with NO 1-day data is the 3c skip — the 1-minute pull is OMITTED entirely
-        # (never a blind 2020 pull). The pull is still CLEAN (no failure, no pending
-        # window): only the settled 1-day no-data remains.
+    def test_daily_gap_with_intraday_data_pulls_minute(self, tmp_path: Path) -> None:
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: the operator's "1day gap but 1minute lands"
+        # case — the 1minute fill is now FULLY DECOUPLED from the 1-day coverage, so a
+        # symbol with NO 1-day data STILL pulls its full-range 1-minute series (never
+        # skipped). The 1minute completes (bars land) and the 1day empty is a settled
+        # no-data; the pull is CLEAN (no failure, no pending window).
         report = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
@@ -721,10 +719,10 @@ class TestPullAllSpot:
             intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
         )
-        assert report.total_completed == 0  # 1minute SKIPPED (no 1-day anchor)
+        assert report.total_completed == 1  # 1minute LANDS (no longer skipped)
         assert report.total_failed == 0  # the 1day empty is NOT a failure
         assert report.total_no_data == 1  # only the 1day settled no-data
-        assert report.verdict.kind == "known_gap_only"
+        assert report.verdict.kind == "clean"
         assert report.verdict.needs_operator is False
         assert report.verdict.pending_windows == 0
 
@@ -777,8 +775,8 @@ class TestPullAllSpot:
         ``ingest.underlying`` rollup, covered separately.)
         """
         events: list[tuple[str, int, bool]] = []
-        # DEC-SPOT-1DAY-FIRST-001: a real sink so Phase 1's 1day lake lets Phase 2's
-        # 1minute derive + run (a NullBarSink would skip the minute phase).
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: a real sink so both the 1day + 1minute phases
+        # land real bars over the full range (decoupled).
         pull_all_spot(
             [_index("13"), _index("25")],
             lake_root=tmp_path,
@@ -1050,13 +1048,13 @@ class TestQuotaDeathMidRound:
     def _quota_death_scaffold() -> BulkAdapterFactory:
         """Build the deterministic phased quota-death fake.
 
-        DEC-SPOT-1DAY-FIRST-001 ordering: the ``1day`` phase (Phase 1) SUCCEEDS and
-        commits real bars to the lake; the ``1minute`` phase (Phase 2) then raises
-        ``DailyQuotaExceeded`` — the exception the pace bucket raises inside a window
-        worker when the daily quota dies mid-pass (never quarantined; the spine
-        re-raises it). A REAL sink so Phase 1's 1-day bars land (which is what lets
-        Phase 2 derive + then die). The committed 1-day work survives in the ledger;
-        the death maps to the loud quota verdict, not a crash.
+        Phase ordering: the ``1day`` phase (Phase 1) SUCCEEDS and commits real bars to
+        the lake; the ``1minute`` phase (Phase 2) then raises ``DailyQuotaExceeded`` —
+        the exception the pace bucket raises inside a window worker when the daily quota
+        dies mid-pass (never quarantined; the spine re-raises it). A REAL sink so
+        Phase 1's 1-day bars land. The committed 1-day work survives in the ledger; the
+        death maps to the loud quota verdict, not a crash. (DEC-SPOT-INTERVAL-DECOUPLE-001:
+        the minute phase runs the full range — the quota death is unaffected.)
         """
 
         class _QuotaDiesOnMinute(SyntheticSpotAdapter):
@@ -1107,9 +1105,9 @@ class TestQuotaDeathMidRound:
         assert report.verdict.kind == "quota_exhausted"
         assert report.auth_aborted is False
         assert report.still_failed_windows == 0
-        # DEC-SPOT-1DAY-FIRST-001: Phase 1 (1day) COMMITTED before the Phase-2 (1minute)
-        # quota death, so its 1-day pull is shown as completed — committed work is never
-        # hidden. The 1-minute phase died → its outcome is UNKNOWN (claim nothing).
+        # Phase 1 (1day) COMMITTED before the Phase-2 (1minute) quota death, so its
+        # 1-day pull is shown as completed — committed work is never hidden. The
+        # 1-minute phase died → its outcome is UNKNOWN (claim nothing).
         assert report.total_completed == 1  # the committed 1day phase
         assert report.total_failed == 0
         assert report.total_no_data == 0
@@ -1150,16 +1148,16 @@ class TestQuotaDeathMidRound:
     ) -> None:
         """A round-≥2 death reports the LAST COMPLETED round's state + rollup.
 
-        The ``passes[-1]`` arm of the in-phase ``DailyQuotaExceeded`` handler: under
-        DEC-SPOT-1DAY-FIRST-001 the 1-day phase (Phase 1) commits first; the 1-minute
-        phase (Phase 2) then runs the until-clean loop where round 1 quarantines the
-        1-minute pair terminally (a FAILED window is never skippable, so round 2
-        re-attempts exactly it), then round 2's worker dies on the quota. The real
-        driver would need round-1 transient residual + real inter-round backoff sleeps
-        to reach round 2, so the loop driver is faked to force the second round — the
-        quota exception itself still originates INSIDE a real worker pass and
-        propagates through the real except/finally path. A REAL sink so Phase 1's
-        1-day bars land (which is what lets Phase 2 derive + run).
+        The ``passes[-1]`` arm of the in-phase ``DailyQuotaExceeded`` handler: the
+        1-day phase (Phase 1) commits first; the 1-minute phase (Phase 2) then runs the
+        until-clean loop where round 1 quarantines the 1-minute pair terminally (a
+        FAILED window is never skippable, so round 2 re-attempts exactly it), then
+        round 2's worker dies on the quota. The real driver would need round-1 transient
+        residual + real inter-round backoff sleeps to reach round 2, so the loop driver
+        is faked to force the second round — the quota exception itself still originates
+        INSIDE a real worker pass and propagates through the real except/finally path.
+        A REAL sink so Phase 1's 1-day bars land. (DEC-SPOT-INTERVAL-DECOUPLE-001: the
+        minute phase runs the full range — this round-2 path is unaffected.)
         """
         from brutex.adapters.ingest_common import UntilCleanOutcome, UntilCleanRound
         from brutex.data.window_ledger_store import ledger_path
@@ -1268,9 +1266,9 @@ class TestStatusSidecarWriteRetired:
             intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
         )
-        # DEC-SPOT-1DAY-FIRST-001: the empty 1day phase writes no lake → the 1minute
-        # phase is the 3c skip → only the 1day settled no-data remains → known_gap_only.
-        assert report.verdict.kind == "known_gap_only"
+        # DEC-SPOT-INTERVAL-DECOUPLE-001: the 1minute phase runs the full range and lands
+        # (decoupled from the empty 1day coverage) → the symbol completes → clean verdict.
+        assert report.verdict.kind == "clean"
         assert ledger_path(tmp_path).is_file()
         assert not status_path(tmp_path).is_file()  # never written again
 
@@ -1440,14 +1438,14 @@ class TestPullAllSpotLedgerSync:
         assert pushes == []
 
 
-# ── 1-DAY-FIRST phasing (DEC-SPOT-1DAY-FIRST-001) ────────────────────────────
+# ── SPOT interval DECOUPLE phasing (DEC-SPOT-INTERVAL-DECOUPLE-001) ──────────
 #
-# The SPOT twin of the option/future DEC-HISTORICAL-1DAY-FIRST-001: the cheap 1day
-# phase runs FIRST so the lake holds each symbol's REAL 1-day coverage, then the heavy
-# 1minute fill STARTS from each symbol's discovered 1-day date (never blindly from
-# 2020). A symbol with NO 1-day data is the 3c skip (reported, never a blind pull).
-# These tests use a REAL ``ParquetBarSink`` so Phase 1 writes 1-day Parquet and Phase 2
-# can read each symbol's coverage back off the lake (a NullBarSink writes nothing).
+# The SPOT 1-minute pull is FULLY DECOUPLED from the 1-day coverage (MIGRATION.md
+# #850): the 1day phase pulls its full [start, end] range and the 1minute phase
+# INDEPENDENTLY pulls its full [start, end] range for EVERY requested symbol — no
+# coverage discovery, no per-symbol filtering, no minute-start bounding. The
+# verify-first 1-day-only DEFAULT (the operator picks granularity via the dropdown)
+# is RETAINED; only the 1-minute↔1-day COUPLING is removed.
 
 
 class _AuthFailAdapter(SyntheticSpotAdapter):
@@ -1469,80 +1467,12 @@ _SPOT_FROM = "2024-01-01"
 _SPOT_TO = "2024-01-31"
 
 
-class TestDiscoverMinuteWindows:
-    """``_discover_minute_windows`` — the Phase-1→2 start-date reader (the helper)."""
-
-    def test_dry_run_returns_empty_no_catalog(self, tmp_path: Path) -> None:
-        # A dry-run wrote nothing (NullBarSink) → no coverage → {} (skip minute), and it
-        # NEVER opens the catalog (no lake to read).
-        from brutex.dashboard import pull_controller as pc
-
-        out = pc._discover_minute_windows(
-            [_index("13")],
-            lake_root=tmp_path,
-            start=date(2024, 1, 1),
-            end=date(2024, 2, 1),
-            dry_run=True,
-        )
-        assert out == {}
-
-    def test_reads_discovered_window_from_lake(self, tmp_path: Path) -> None:
-        # After a real 1-day pull lands, the helper reads each symbol's coverage → a
-        # bounded ``(start, end)`` minute window starting at the discovered 1-day date.
-        from brutex.dashboard import pull_controller as pc
-
-        # Land 1-day bars via a real Phase-1 pull.
-        pull_all_spot(
-            [_index("13")],
-            lake_root=tmp_path,
-            dry_run=False,
-            now=_BULK_NOW,
-            from_date=_SPOT_FROM,
-            to_date=_SPOT_TO,
-            intervals=("1day",),
-            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
-        )
-        out = pc._discover_minute_windows(
-            [_index("13")],
-            lake_root=tmp_path,
-            start=date(2024, 1, 1),
-            end=date(2024, 2, 1),
-            dry_run=False,
-        )
-        assert "13" in out
-        start_date, end_date = out["13"]
-        assert start_date >= date(2024, 1, 1)
-        assert end_date == date(2024, 2, 1)  # a spot index never expires → full_end
-
-    def test_catalog_open_raises_degrades_to_empty(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # ``Catalog.open`` raising → an EMPTY map (loud degrade, skip the minute pull).
-        from brutex.dashboard import pull_controller as pc
-        from brutex.data.errors import CatalogError
-
-        def _boom(_path: Path) -> object:
-            raise CatalogError("no duckdb")
-
-        monkeypatch.setattr(pc.Catalog, "open", staticmethod(_boom))
-        with capture_logs() as logs:
-            out = pc._discover_minute_windows(
-                [_index("13")],
-                lake_root=tmp_path,
-                start=date(2024, 1, 1),
-                end=date(2024, 2, 1),
-                dry_run=False,
-            )
-        assert out == {}
-        assert any(e["event"] == "universe.pull_all.minute_discovery_unavailable" for e in logs)
-
-
-class TestPullAllSpotOneDayFirst:
-    """Phasing of the BULK pull (``pull_all_spot``)."""
+class TestPullAllSpotDecouple:
+    """Phasing of the BULK pull (``pull_all_spot``) under interval decoupling."""
 
     def test_one_day_only_is_single_phase_unchanged(self, tmp_path: Path) -> None:
-        # The verify-first default (``intervals=("1day",)``) runs ONLY Phase 1 — no
-        # minute derive, byte-identical to the pre-feature behaviour.
+        # The verify-first default (``intervals=("1day",)``) runs ONLY the 1day phase —
+        # no minute phase, byte-identical to the pre-feature behaviour.
         from brutex.data.window_ledger_store import load_window_ledger
 
         report = pull_all_spot(
@@ -1561,9 +1491,9 @@ class TestPullAllSpotOneDayFirst:
         intervals = {r.interval for r in load_window_ledger(tmp_path).records()}
         assert intervals == {"1day"}
 
-    def test_both_runs_one_day_then_minute(self, tmp_path: Path) -> None:
-        # ``both`` → Phase 1 (1day) over all symbols, then Phase 2 (1minute) from each
-        # symbol's discovered 1-day date. Both intervals land + are planned.
+    def test_both_runs_one_day_and_minute_full_range(self, tmp_path: Path) -> None:
+        # ``both`` → the 1day phase + the 1minute phase, EACH over the full range for
+        # EVERY symbol. Both intervals land + are planned.
         from brutex.data.window_ledger_store import load_window_ledger
 
         report = pull_all_spot(
@@ -1581,23 +1511,14 @@ class TestPullAllSpotOneDayFirst:
         intervals = {r.interval for r in load_window_ledger(tmp_path).records()}
         assert intervals == {"1day", "1minute"}
 
-    def test_minute_only_derives_from_pre_existing_one_day(self, tmp_path: Path) -> None:
-        # A 1-minute-only request reads PRE-EXISTING 1-day coverage (no Phase 1 pull),
-        # then pulls 1-minute from the discovered start.
-        # First seed the lake with a 1-day pull.
+    def test_minute_full_window_planned_for_every_symbol(self, tmp_path: Path) -> None:
+        # DECOUPLE: the 1-minute windows planned in the ledger span the FULL
+        # [start, end] range for every symbol — no per-symbol bounding to a 1-day
+        # listing date. The first planned 1minute window starts at the global start.
+        from brutex.data.window_ledger_store import load_window_ledger
+
         pull_all_spot(
-            [_index("13")],
-            lake_root=tmp_path,
-            dry_run=False,
-            now=_BULK_NOW,
-            from_date=_SPOT_FROM,
-            to_date=_SPOT_TO,
-            intervals=("1day",),
-            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
-        )
-        # Now pull 1-minute ONLY — it must derive from the pre-existing 1-day lake.
-        report = pull_all_spot(
-            [_index("13")],
+            [_index("13"), _index("25")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
@@ -1606,27 +1527,40 @@ class TestPullAllSpotOneDayFirst:
             intervals=("1minute",),
             adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
         )
-        assert report.total_completed == 1  # the 1-minute series landed
-        assert report.verdict.kind == "clean"
+        minute_rows = [r for r in load_window_ledger(tmp_path).records() if r.interval == "1minute"]
+        # Every requested symbol has 1-minute windows (none filtered out).
+        assert {r.security_id for r in minute_rows} == {"13", "25"}
+        # The full range is planned: the earliest planned window starts at the global
+        # start date for EACH symbol (no minute-start bounded to 1-day coverage).
+        for symbol in ("13", "25"):
+            sym_starts = [r.window_start for r in minute_rows if r.security_id == symbol]
+            assert min(sym_starts) == "2024-01-01"
 
-    def test_3c_skip_reported_for_symbol_without_one_day(self, tmp_path: Path) -> None:
-        # A symbol with NO 1-day coverage (its 1day fetch returns empty → no lake bars)
-        # is EXCLUDED from the 1-minute pull, LOUDLY reported (the 3c rule). A first
-        # pass primes the (still-empty) lake; its result is intentionally discarded —
-        # the asserted ``report`` is the second, log-captured pass.
-        pull_all_spot(
+    def test_no_one_day_symbol_still_pulls_full_minute(self, tmp_path: Path) -> None:
+        # The decouple linchpin: a symbol with ZERO 1-day coverage (the 1day fetch
+        # returns empty) is NO LONGER skipped from the minute pull — its full-range
+        # 1-minute series lands. The 1day empty is a settled no-data; the 1minute
+        # completes; the pull is CLEAN.
+        report = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
             from_date=_SPOT_FROM,
             to_date=_SPOT_TO,
-            intervals=("1minute",),  # 1minute-only, but no pre-existing 1-day lake
-            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            intervals=_BOTH_INTERVALS,
+            adapter_factory=_real_bulk_factory(_DailyGapAdapter()),
         )
-        with capture_logs() as _logs:
-            # Re-run to capture the skip log deterministically (still no 1-day lake).
-            report = pull_all_spot(
+        assert report.total_completed == 1  # the 1minute landed (NOT skipped)
+        assert report.total_no_data == 1  # the 1day is a settled empty
+        assert report.total_failed == 0
+        assert report.verdict.kind == "clean"
+
+    def test_no_skip_log_emitted(self, tmp_path: Path) -> None:
+        # The decoupled minute phase NEVER emits the retired 3c skip log — every symbol
+        # is pulled, none filtered. (Belt-and-suspenders against the coupling regressing.)
+        with capture_logs() as logs:
+            pull_all_spot(
                 [_index("13")],
                 lake_root=tmp_path,
                 dry_run=False,
@@ -1634,17 +1568,14 @@ class TestPullAllSpotOneDayFirst:
                 from_date=_SPOT_FROM,
                 to_date=_SPOT_TO,
                 intervals=("1minute",),
-                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+                adapter_factory=_real_bulk_factory(_DailyGapAdapter()),
             )
-        skip = _events(_logs, "universe.pull_all.minute_skipped_no_1day")
-        assert skip and skip[0]["symbols"] == ["13"]
-        # The 3c-skipped symbol contributes nothing (no completed/failed/no-data).
-        assert report.total_completed == 0
-        assert report.total_failed == 0
+        assert _events(logs, "universe.pull_all.minute_skipped_no_1day") == []
 
     def test_global_stop_auth_skips_minute_phase(self, tmp_path: Path) -> None:
-        # Phase 1's 1-day pull dies on a Groww auth error → the GLOBAL-STOP guard SKIPS
-        # the 1-minute phase entirely (the token is dead — no point), reported loudly.
+        # The 1-day phase dies on a Groww auth error → the GLOBAL-STOP guard SKIPS the
+        # 1-minute phase entirely (the token is dead — no point), reported loudly. This
+        # guard is RETAINED by the decouple (it is not the 1-day-coverage coupling).
         with capture_logs() as logs:
             report = pull_all_spot(
                 [_index("13")],
@@ -1663,12 +1594,29 @@ class TestPullAllSpotOneDayFirst:
         # The 1-minute phase never ran — only the 1day quarantine surfaces.
         assert report.total_failed == 1  # the 1day auth quarantine
 
+    def test_dry_run_minute_pulls_full_range(self, tmp_path: Path) -> None:
+        # A dry-run ``both`` pull: the minute phase runs the full range too (decoupled —
+        # no lake read, no skip). The synthetic dry-run adapter lands both intervals.
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            from_date=_SPOT_FROM,
+            to_date=_SPOT_TO,
+            intervals=_BOTH_INTERVALS,
+        )
+        assert report.dry_run is True
+        assert report.total_completed == 2  # both 1day + 1minute landed
+        assert report.total_failed == 0
 
-class TestPullCandlesOneDayFirst:
-    """Phasing of the single-symbol pull (``pull_candles``)."""
+
+class TestPullCandlesDecouple:
+    """Phasing of the single-symbol pull (``pull_candles``) under interval decoupling."""
 
     def test_one_day_only_is_single_phase(self, tmp_path: Path) -> None:
-        # The default 1-day-only request runs ONLY Phase 1 (the verify-first default).
+        # The default 1-day-only request runs ONLY the 1day phase (the verify-first
+        # default — retained by the decouple).
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -1681,8 +1629,9 @@ class TestPullCandlesOneDayFirst:
         assert [tf.interval for tf in report.timeframes] == ["1d"]
         assert report.total_completed == 1
 
-    def test_both_runs_one_day_then_minute(self, tmp_path: Path) -> None:
-        # ``both`` → Phase 1 (1day) lands → Phase 2 (1minute) derives + lands. Both cells.
+    def test_both_runs_one_day_and_minute_full_range(self, tmp_path: Path) -> None:
+        # ``both`` → the 1day phase + the 1minute phase, each over the full range. Both
+        # cells complete.
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -1696,10 +1645,10 @@ class TestPullCandlesOneDayFirst:
         assert labels == {"1m", "1d"}
         assert report.total_completed == 2
 
-    def test_minute_only_no_one_day_lake_is_3c_skip(self, tmp_path: Path) -> None:
-        # A 1-minute-only request with NO pre-existing 1-day lake → the 3c skip: the
-        # 1-minute cell is SKIPPED (we refused to query — no anchor), reported loudly,
-        # never a blind 2020 pull and never labeled vendor-empty (Golden Rule #1).
+    def test_minute_only_no_one_day_lake_still_pulls_full_range(self, tmp_path: Path) -> None:
+        # DECOUPLE: a 1-minute-only request with NO pre-existing 1-day lake is NO LONGER
+        # skipped — the full-range 1-minute series lands (never a skip, never queried as
+        # vendor-empty), and the retired 3c skip log is never emitted.
         with capture_logs() as logs:
             report = pull_candles(
                 _index(),
@@ -1711,23 +1660,14 @@ class TestPullCandlesOneDayFirst:
                 adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
             )
         assert [tf.interval for tf in report.timeframes] == ["1m"]
-        assert report.total_completed == 0
-        assert report.total_skipped == 1  # the 1-minute is a SKIPPED cell (no anchor)
-        assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
-        skip = _events(logs, "universe.pull.minute_skipped_no_1day")
-        assert skip and skip[0]["symbol"] == "13"
+        assert report.total_completed == 1  # the 1-minute series LANDS (not skipped)
+        assert report.total_skipped == 0
+        assert report.total_no_data == 0
+        assert _events(logs, "universe.pull.minute_skipped_no_1day") == []
 
-    def test_minute_only_derives_from_pre_existing_one_day(self, tmp_path: Path) -> None:
-        # Seed the 1-day lake, then a 1-minute-only request derives from it + lands.
-        pull_candles(
-            _index(),
-            lake_root=tmp_path,
-            dry_run=False,
-            from_date=_SPOT_FROM,
-            to_date=_SPOT_TO,
-            intervals=("1day",),
-            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
-        )
+    def test_minute_only_lands_independently_of_one_day(self, tmp_path: Path) -> None:
+        # A 1-minute-only request lands its full range regardless of whether a 1-day lake
+        # exists (the decouple's whole point — no coverage dependency).
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -1741,9 +1681,9 @@ class TestPullCandlesOneDayFirst:
         assert report.total_completed == 1
 
     def test_global_stop_auth_skips_minute_phase(self, tmp_path: Path) -> None:
-        # Phase 1's 1-day pull dies on auth → the global-stop guard skips the 1-minute
-        # phase; the 1day cell is the quarantine, the 1minute cell a SKIPPED cell (we
-        # refused to query — token dead), NOT vendor-empty.
+        # The 1-day phase dies on auth → the global-stop guard skips the 1-minute phase
+        # (RETAINED — not the coverage coupling); the 1day cell is the quarantine, the
+        # 1minute cell a SKIPPED cell (we refused to query — token dead), NOT vendor-empty.
         with capture_logs() as logs:
             report = pull_candles(
                 _index(),
@@ -1759,9 +1699,9 @@ class TestPullCandlesOneDayFirst:
         assert report.total_skipped == 1  # the 1minute phase skipped → SKIPPED cell
         assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
 
-    def test_dry_run_minute_request_skips_minute_honestly(self, tmp_path: Path) -> None:
-        # A dry-run 1-minute request: Phase 1 (dry, NullBarSink) writes no lake, so the
-        # minute phase derives {} and is the 3c skip — an honest SKIPPED cell, 0 bars.
+    def test_dry_run_minute_request_pulls_full_range(self, tmp_path: Path) -> None:
+        # A dry-run ``both`` request: the minute phase runs the full range too (decoupled
+        # — no lake read, no skip). The synthetic dry-run adapter lands both cells.
         report = pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -1773,8 +1713,8 @@ class TestPullCandlesOneDayFirst:
         assert report.dry_run is True
         labels = {tf.interval for tf in report.timeframes}
         assert labels == {"1m", "1d"}
-        # 1day completes (synthetic), 1minute is the 3c skip (SKIPPED, not vendor-empty)
-        # — no failures.
+        # Both cells complete (synthetic dry-run lands every interval) — nothing skipped.
+        assert report.total_completed == 2
         assert report.total_failed == 0
-        assert report.total_skipped == 1  # the 1minute is a SKIPPED cell (no anchor)
+        assert report.total_skipped == 0
         assert report.total_no_data == 0

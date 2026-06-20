@@ -17,8 +17,8 @@ The midnight-IST stamping rule (the linchpin — DO NOT change without re-verify
 ----------------------------------------------------------------------------------
 A vendor-fetched ``1day`` bar is stamped at **midnight IST** (``00:00`` IST =
 ``18:30`` UTC of the PREVIOUS calendar day), verified by
-:mod:`brutex.adapters.groww.spot_bounds` ("under midnight-IST stamping a
-Jan-1-IST bar lives in the *December* UTC partition") and the
+:func:`brutex.adapters.groww.contract_bounds.contract_daily_coverage` ("under
+midnight-IST stamping a Jan-1-IST bar lives in the *December* UTC partition") and the
 ``test_daily_coverage_cross_utc_month_midnight_ist_golden`` /
 ``test_load_prev_day_ist_date_differs_from_utc_date`` golden tests. The shared
 :func:`~brutex.data.tf_resampler.resample_1m_to_tf` labels its daily bucket at the

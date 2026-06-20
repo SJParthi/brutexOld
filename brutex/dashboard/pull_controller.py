@@ -53,7 +53,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -66,10 +66,7 @@ from brutex.adapters.groww.run_ingest import (
     run_groww_spot_ingest,
     run_groww_spot_ingest_with_retry,
 )
-from brutex.adapters.groww.spot_bounds import (
-    SpotWindows,
-    discover_spot_minute_windows,
-)
+from brutex.adapters.groww.spot_bounds import SpotWindows
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
@@ -80,8 +77,6 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.catalog import Catalog
-from brutex.data.errors import CatalogError
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.tf_autoderive import autoderive_enabled
 from brutex.data.window_ledger import WindowLedger
@@ -965,75 +960,12 @@ def make_live_sync(
     return _sync
 
 
-def _discover_minute_windows(
-    instruments: Sequence[Instrument],
-    *,
-    lake_root: Path,
-    start: date,
-    end: date,
-    dry_run: bool,
-) -> SpotWindows:
-    """Read each spot symbol's discovered 1-day start → its 1-minute pull window (Phase 1→2).
-
-    DEC-SPOT-1DAY-FIRST-001, the SPOT twin of
-    :func:`~brutex.dashboard.historical_pull._discover_start_dates`. After the cheap
-    1-day phase lands, the lake holds each symbol's REAL 1-day coverage, so its
-    earliest 1-day bar date PINS where the heavy 1-minute fill must begin (never
-    blindly from the 2020 floor). Opens the lake
-    :class:`~brutex.data.catalog.Catalog` and delegates to
-    :func:`~brutex.adapters.groww.spot_bounds.discover_spot_minute_windows`, which
-    reconciles ONCE per spot segment, reads each symbol's coverage, and OMITS a
-    symbol with no 1-day data (the 3c skip — the caller EXCLUDES it from the minute
-    pull + reports it). The ``with catalog:`` context closes the handle on any exit
-    (CodeQL prefers this over a ``finally``).
-
-    A **dry-run** has no live lake to read (its synthetic 1-day pull writes nothing —
-    :class:`~brutex.data.sink.NullBarSink`), so it returns ``{}`` (the caller then
-    skips the minute pull, honest — never a fabricated start). A missing / locked /
-    deps-absent catalog degrades to ``{}`` too — both LOUD, never silent
-    (Golden Rule #10).
-
-    Parameters
-    ----------
-    instruments
-        The resolved spot instruments whose minute pull to bound.
-    lake_root
-        Lake root (the parent of ``bars/``) — the catalog + reconcile read it.
-    start, end
-        The half-open ``[start, end)`` range the unbounded minute pull would use.
-    dry_run
-        When ``True`` no lake is read (the synthetic pull wrote nothing) → ``{}``.
-
-    Returns
-    -------
-    SpotWindows
-        ``{symbol_name: (start, end)}`` for every symbol with 1-day coverage; empty
-        on a dry-run or a catalog degrade (the caller skips the minute pull).
-    """
-    if dry_run:
-        # The dry-run 1-day pull wrote nothing (NullBarSink), so there is no coverage
-        # to read — skip the minute pull entirely (honest, never a blind 2020 pull).
-        return {}
-    try:
-        with Catalog.open(lake_root / "catalog.duckdb") as catalog:
-            return discover_spot_minute_windows(
-                catalog,
-                lake_root=lake_root,
-                instruments=instruments,
-                full_start=start,
-                full_end=end,
-            )
-    except (CatalogError, OSError):
-        # The data-lake deps are missing / the catalog file is unopenable / the
-        # lake_root is not accessible (PermissionError is an OSError) — degrade to an
-        # EMPTY map (the caller skips the whole minute pull), loud, never silent.
-        _LOG.warning("universe.pull_all.minute_discovery_unavailable", lake_root=str(lake_root))
-        return {}
-
-
-#: The Phase-1 daily interval (``"1day"``) — the cheap pull that PINS each symbol's
-#: 1-day start before the heavy 1-minute fill (DEC-SPOT-1DAY-FIRST-001). One source
-#: of truth shared with :func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`.
+#: The Phase-1 daily interval (``"1day"``). The SPOT pull runs the cheap ``1day``
+#: phase and the heavy ``1minute`` phase over INDEPENDENT full ``[start, end]``
+#: ranges (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #850 — the minute phase no
+#: longer reads 1-day coverage to bound itself). This constant just names the
+#: interval that splits the two phases; it is one source of truth shared with
+#: :func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`.
 _PHASE1_DAILY: Final[str] = TRACK1_DAILY_INTERVAL
 
 
@@ -1270,11 +1202,10 @@ def pull_all_spot(
         final_auth_cause: str | None = None
         final_quota_exhausted = False
         # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
-        # each interval's 1-day/1-minute outcome from its own phase's report (a symbol
-        # skipped from Phase 2 simply has no 1-minute pair → contributes nothing).
+        # each interval's 1-day/1-minute outcome from its own phase's report. Both
+        # phases run over EVERY requested instrument (DEC-SPOT-INTERVAL-DECOUPLE-001 —
+        # the minute phase is no longer filtered by 1-day coverage).
         phase_reports: list[GrowwIngestReport] = []
-        # The 3c skip set: symbols EXCLUDED from the minute pull (no 1-day coverage).
-        minute_skipped_symbols: list[str] = []
 
         def _run_phase(
             phase_intervals: tuple[str, ...],
@@ -1284,10 +1215,12 @@ def pull_all_spot(
             """Run ONE phase (1-day or 1-minute) over the SHARED ledger; fold its outcome.
 
             The single ingest call site (CLAUDE.md §11 COMMON) — both phases funnel
-            through here, differing only by *phase_intervals*, the filtered
-            *phase_instruments*, and the per-symbol *phase_windows* 1-day-first bounds
-            (None for Phase 1; the discovered map for Phase 2). Preserves EXACTLY the
-            existing until-clean / auto-retry / mid-round ``DailyQuotaExceeded`` /
+            through here, differing only by *phase_intervals* and the
+            *phase_instruments*. Both phases run over the SAME full instrument list
+            with *phase_windows* = ``None`` (DEC-SPOT-INTERVAL-DECOUPLE-001 — the
+            1-minute fetch is no longer bounded by the 1-day coverage; it pulls the
+            full ``[start, end]`` range for every requested symbol). Preserves EXACTLY
+            the existing until-clean / auto-retry / mid-round ``DailyQuotaExceeded`` /
             verdict behaviour — it just runs once per phase over the shared ledger.
             Aggregates into the ``final_*`` outer state: ``still_failed`` SUMS across
             phases; ``auth_aborted`` / ``quota_exhausted`` are ANY phase's; the FIRST
@@ -1430,14 +1363,22 @@ def pull_all_spot(
             )
 
         try:
-            # ── Phase 1 — 1-day ONLY first (over EVERY symbol; never per-symbol bounded) ──
+            # ── Phase 1 — 1-day ONLY first (over EVERY symbol; full range) ──
             if daily_requested:
                 _run_phase((_PHASE1_DAILY,), instruments, None)
-            # ── DERIVE → Phase 2 — 1-minute, each symbol from its discovered 1-day date ──
+            # ── Phase 2 — 1-minute over EVERY symbol, full range (DECOUPLED) ──
+            # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #850): the 1-minute pull is
+            # FULLY DECOUPLED from the 1-day coverage — it pulls its full ``[start,
+            # end]`` range for EVERY requested symbol (no coverage discovery, no
+            # per-symbol filtering, no minute-start bounding). ``symbol_windows=None``
+            # flows to plan_windows / reconcile_ledger_with_lake / _run_phase so the
+            # full range is used. SUPERSEDES the 1-minute-bounded-to-1-day-coverage
+            # coupling of DEC-SPOT-1DAY-FIRST-001; the verify-first 1-day-only DEFAULT
+            # (the operator picks granularity via the dropdown) is RETAINED.
             if minute_requested:
-                # GLOBAL-STOP GUARD (DEC-SPOT-1DAY-FIRST-001): if Phase 1 ended with a
-                # dead token or a spent quota, the minute pull would fail identically —
-                # SKIP it honestly (the verdict already carries the actionable state).
+                # GLOBAL-STOP GUARD: if Phase 1 ended with a dead token or a spent
+                # quota, the minute pull would fail identically — SKIP it honestly (the
+                # verdict already carries the actionable state).
                 if final_auth_aborted or final_quota_exhausted:
                     _LOG.warning(
                         "universe.pull_all.minute_skipped_global_stop",
@@ -1446,69 +1387,32 @@ def pull_all_spot(
                         quota_exhausted=final_quota_exhausted,
                     )
                 else:
-                    # Read each symbol's discovered 1-day start (after Phase 1 wrote the
-                    # 1-day lake; a 1-minute-only request reads pre-existing 1-day). A
-                    # symbol with NO 1-day coverage is OMITTED → the 3c skip.
-                    symbol_windows = _discover_minute_windows(
-                        instruments,
-                        lake_root=lake_root,
-                        start=start.date(),
-                        end=end.date(),
-                        dry_run=dry_run,
-                    )
-                    minute_instruments = [
-                        inst for inst in instruments if inst.symbol_name in symbol_windows
-                    ]
-                    minute_skipped_symbols = [
-                        inst.symbol_name
-                        for inst in instruments
-                        if inst.symbol_name not in symbol_windows
-                    ]
-                    if minute_skipped_symbols:
-                        # LOUD 3c report — these symbols have no 1-day anchor, so their
-                        # 1-minute fill is skipped (pull 1-day first), never silent.
-                        _LOG.warning(
-                            "universe.pull_all.minute_skipped_no_1day",
-                            pull_id=pid,
-                            symbols=minute_skipped_symbols,
-                        )
-                    if minute_instruments:
-                        # PLAN Phase 2's bounded minute windows now (AFTER the derive) so
-                        # the planned keys EQUAL the bounded fetched keys (no phantom
-                        # pre-listing rows). The DAILY interval is never in this phase.
-                        # ``ledger`` is non-None here by invariant: a non-empty
-                        # ``minute_instruments`` requires ``_discover_minute_windows`` to
-                        # have returned a non-empty map, which only happens for a LIVE
-                        # (``dry_run=False``) pull — and ``begin_pull_ledger`` returns a
-                        # real ledger for every live pull. The ``assert`` documents +
-                        # narrows that for the type checker (never the dry-run path).
-                        # ``ledger`` is non-None here by invariant (a non-empty
-                        # ``minute_instruments`` implies a LIVE pull — see above). cast
-                        # narrows for the type checker WITHOUT an assert (bandit B101 +
-                        # ``-O`` strips asserts) — a runtime no-op identity.
-                        live_ledger = cast(WindowLedger, ledger)
+                    if ledger is not None:
+                        # PLAN Phase 2's full-range minute windows (``symbol_windows=None``
+                        # → the global ``[start, end]`` per symbol). The DAILY interval is
+                        # never in this phase. Guarded on a non-None ledger (the live pull;
+                        # ``begin_pull_ledger`` returns None for a dry-run, which simply
+                        # skips the ledger plan + reconcile, mirroring Phase 1).
                         plan_windows(
-                            live_ledger,
-                            instruments=minute_instruments,
+                            ledger,
+                            instruments=instruments,
                             intervals=minute_intervals,
                             start=start.date(),
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
-                            symbol_windows=symbol_windows,
                         )
                         reconcile_ledger_with_lake(
-                            live_ledger,
+                            ledger,
                             lake_root,
-                            instruments=minute_instruments,
+                            instruments=instruments,
                             intervals=minute_intervals,
                             start=start.date(),
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
-                            symbol_windows=symbol_windows,
                         )
-                        _run_phase(minute_intervals, minute_instruments, symbol_windows)
+                    _run_phase(minute_intervals, instruments, None)
             # ── 1-DAY RESAMPLE-ON-EMPTY (DEC-SPOT-1DAY-RESAMPLE-ON-EMPTY-001) ──
             # Groww does not serve the recent ``1day`` for cash equities though it
             # serves ``1minute``; derive the missing daily bars from the 1-minute
@@ -1990,10 +1894,15 @@ def pull_candles(
             return phase_report
 
         try:
-            # ── Phase 1 — 1-day ONLY first (never per-symbol bounded) ──
+            # ── Phase 1 — 1-day ONLY first (full range) ──
             if daily_requested:
                 _run_phase((_PHASE1_DAILY,), None)
-            # ── DERIVE → Phase 2 — 1-minute from the discovered 1-day date ──
+            # ── Phase 2 — 1-minute over the full range (DECOUPLED) ──
+            # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #850): the 1-minute pull is
+            # FULLY DECOUPLED from the 1-day coverage — it pulls its full ``[start,
+            # end]`` range for the requested symbol (no coverage discovery, no skip
+            # when 1-day is absent). ``symbol_windows=None`` flows to plan_windows /
+            # reconcile_ledger_with_lake / _run_phase so the full range is used.
             if minute_requested:
                 # GLOBAL-STOP GUARD: a dead token in Phase 1 means the minute pull
                 # would fail identically — skip it honestly (the timeframes already
@@ -2001,32 +1910,23 @@ def pull_candles(
                 if phase_auth_aborted:
                     _LOG.warning("universe.pull.minute_skipped_global_stop", pull_id=pid)
                 else:
-                    symbol_windows = _discover_minute_windows(
-                        [instrument],
-                        lake_root=lake_root,
-                        start=start.date(),
-                        end=end.date(),
-                        dry_run=dry_run,
-                    )
-                    if symbol in symbol_windows:
-                        # ``ledger`` is non-None by invariant: ``symbol`` is in the
-                        # discovered map only for a LIVE pull (``_discover_minute_windows``
-                        # returns ``{}`` for a dry-run), and a live pull always has a real
-                        # ledger. cast narrows it for the type checker WITHOUT an assert
-                        # (bandit B101 + ``-O`` strips asserts) — a runtime no-op identity.
-                        live_ledger = cast(WindowLedger, ledger)
+                    if ledger is not None:
+                        # PLAN the full-range minute windows (``symbol_windows=None`` →
+                        # the global ``[start, end]``). Guarded on a non-None ledger (the
+                        # live pull; ``begin_pull_ledger`` returns None for a dry-run,
+                        # which simply skips the ledger plan + reconcile, mirroring
+                        # Phase 1).
                         plan_windows(
-                            live_ledger,
+                            ledger,
                             instruments=[instrument],
                             intervals=minute_intervals,
                             start=start.date(),
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
-                            symbol_windows=symbol_windows,
                         )
                         reconcile_ledger_with_lake(
-                            live_ledger,
+                            ledger,
                             lake_root,
                             instruments=[instrument],
                             intervals=minute_intervals,
@@ -2034,15 +1934,8 @@ def pull_candles(
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
-                            symbol_windows=symbol_windows,
                         )
-                        _run_phase(minute_intervals, symbol_windows)
-                    else:
-                        # The 3c skip — no 1-day anchor, so the minute fill is omitted
-                        # + reported (pull 1-day first), never a blind 2020 pull.
-                        _LOG.warning(
-                            "universe.pull.minute_skipped_no_1day", pull_id=pid, symbol=symbol
-                        )
+                    _run_phase(minute_intervals, None)
         finally:
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
@@ -2061,13 +1954,13 @@ def pull_candles(
                 # Terminal Groww error — quarantined, never in merged_pairs.
                 timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
             elif pair is None:
-                # The interval was never RUN for this symbol (a 3c-skipped minute with no
-                # 1-day anchor, or a 1-minute phase skipped by the global-stop guard) —
-                # report it as SKIPPED, NOT no_data: we deliberately refused to query the
-                # vendor (no anchor), which is honestly distinct from "vendor queried,
-                # returned empty" (the no_data cell below). Mirrors pull_all_spot, which
-                # likewise never labels a never-queried interval vendor-empty (Golden
-                # Rule #1 — no illusion).
+                # The interval was never RUN for this symbol (a 1-minute phase skipped
+                # by the global-stop guard — a dead Phase-1 token) — report it as
+                # SKIPPED, NOT no_data: we deliberately refused to query the vendor,
+                # which is honestly distinct from "vendor queried, returned empty" (the
+                # no_data cell below). Mirrors pull_all_spot, which likewise never
+                # labels a never-queried interval vendor-empty (Golden Rule #1 — no
+                # illusion).
                 timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, skipped=1))
             elif pair.bars_appended > 0:
                 timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
