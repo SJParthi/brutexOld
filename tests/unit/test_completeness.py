@@ -1,7 +1,8 @@
 """Unit tests for the Data Completeness Scoreboard (DEC-COMPLETENESS-SCOREBOARD-001).
 
 Pure re-aggregation surface — 100% line+branch offline (no lake / store / network). Covers
-the per-symbol spot rollup (1-day + 1-minute verdicts + overall), the honest option
+the per-symbol spot rollup (1-minute verdict = overall; 1-day is DERIVED from 1-minute so it
+is NOT scored — DEC-1MINUTE-ONLY-DERIVE-1DAY-001), the honest option
 stable/growing/partial/failed fold, the aggregate count tables, the category/derived-interval
 skips, sorting, and the cell-status drift guard against ``coverage_ledger``.
 """
@@ -93,68 +94,59 @@ def _cov(
 # ── per-symbol spot verdicts ──────────────────────────────────────────────────────────
 
 
-def test_symbol_full_when_both_intervals_settled() -> None:
+def test_symbol_full_when_one_minute_settled() -> None:
+    # 1-day is DERIVED from 1-minute so it is NOT scored — only the fetched 1-minute is, and a
+    # stray 1-day row is ignored (covers the SPOT_DIMENSIONS skip for 1-day).
     rows = [
-        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),
+        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),  # derived 1-day → skipped
         _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED),
     ]
     board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1day"] == DIM_FULL and row["1minute"] == DIM_FULL and row["overall"] == DIM_FULL
-    assert board["spot"]["by_category"][CATEGORY_INDEX] == {
-        "total": 1,
-        "full_1day": 1,
-        "full_1minute": 1,
-        "full_both": 1,
-    }
+    assert row["1minute"] == DIM_FULL and row["overall"] == DIM_FULL
+    assert "1day" not in row  # the 1-day column is gone from the per-symbol view
+    assert board["spot"]["by_category"][CATEGORY_INDEX] == {"total": 1, "full_1minute": 1}
 
 
 def test_symbol_partial_when_one_minute_pending() -> None:
-    rows = [
-        _spot_row("NSE-RELIANCE", "1day", COMPLETENESS_SETTLED),
-        _spot_row("NSE-RELIANCE", "1minute", COMPLETENESS_PENDING),
-    ]
+    rows = [_spot_row("NSE-RELIANCE", "1minute", COMPLETENESS_PENDING)]
     board = build_completeness_scoreboard(rows, {"NSE-RELIANCE": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert (
-        row["1day"] == DIM_FULL and row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
-    )
+    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
     agg = board["spot"]["by_category"][CATEGORY_EQUITY]
-    assert agg["full_1day"] == 1 and agg["full_1minute"] == 0 and agg["full_both"] == 0
+    assert agg == {"total": 1, "full_1minute": 0}
 
 
-def test_symbol_failed_when_any_dimension_failed() -> None:
-    rows = [
-        _spot_row("NSE-X", "1day", COMPLETENESS_FAILED),
-        _spot_row("NSE-X", "1minute", COMPLETENESS_SETTLED),
-    ]
+def test_symbol_failed_when_one_minute_failed() -> None:
+    rows = [_spot_row("NSE-X", "1minute", COMPLETENESS_FAILED)]
     board = build_completeness_scoreboard(rows, {"NSE-X": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1day"] == DIM_FAILED and row["overall"] == DIM_FAILED
+    assert row["1minute"] == DIM_FAILED and row["overall"] == DIM_FAILED
 
 
 def test_symbol_none_when_no_ledger_record() -> None:
-    rows = [_spot_row("NSE-Y", "1day", COMPLETENESS_NO_RECORD)]
+    rows = [_spot_row("NSE-Y", "1minute", COMPLETENESS_NO_RECORD)]
     board = build_completeness_scoreboard(rows, {"NSE-Y": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1day"] == DIM_NONE and row["1minute"] == DIM_NONE and row["overall"] == DIM_NONE
+    assert row["1minute"] == DIM_NONE and row["overall"] == DIM_NONE
 
 
 def test_unmapped_symbol_and_derived_interval_skipped() -> None:
     rows = [
-        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),
-        _spot_row("NSE-STRAY", "1day", COMPLETENESS_SETTLED),  # not in categories → skipped
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED),
+        _spot_row("NSE-STRAY", "1minute", COMPLETENESS_SETTLED),  # not in categories → skipped
         _spot_row("NSE-NIFTY", "5minute", COMPLETENESS_DERIVED),  # derived TF → skipped
+        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),  # derived 1-day → skipped
     ]
     board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
     syms = [r["symbol"] for r in board["spot"]["per_symbol"]]
-    assert syms == ["NSE-NIFTY"]  # stray excluded, derived interval ignored
+    assert syms == ["NSE-NIFTY"]  # stray excluded, derived intervals ignored
 
 
 def test_per_symbol_sorted_by_symbol_then_exchange() -> None:
     rows = [
-        _spot_row("NSE-B", "1day", COMPLETENESS_SETTLED),
-        _spot_row("NSE-A", "1day", COMPLETENESS_SETTLED),
+        _spot_row("NSE-B", "1minute", COMPLETENESS_SETTLED),
+        _spot_row("NSE-A", "1minute", COMPLETENESS_SETTLED),
     ]
     board = build_completeness_scoreboard(
         rows, {"NSE-A": CATEGORY_EQUITY, "NSE-B": CATEGORY_EQUITY}, [], {}
@@ -162,12 +154,13 @@ def test_per_symbol_sorted_by_symbol_then_exchange() -> None:
     assert [r["symbol"] for r in board["spot"]["per_symbol"]] == ["NSE-A", "NSE-B"]
 
 
-def test_overall_spot_direct_branches() -> None:
-    assert _overall_spot(DIM_FULL, DIM_FULL) == DIM_FULL
-    assert _overall_spot(DIM_FAILED, DIM_NONE) == DIM_FAILED
-    assert _overall_spot(DIM_FULL, DIM_NONE) == DIM_PARTIAL  # one full, one missing → partial
-    assert _overall_spot(DIM_PARTIAL, DIM_NONE) == DIM_PARTIAL
-    assert _overall_spot(DIM_NONE, DIM_NONE) == DIM_NONE
+def test_overall_spot_is_the_one_minute_verdict() -> None:
+    # The overall spot verdict IS the 1-minute verdict alone — no second dimension to AND
+    # against (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
+    assert _overall_spot(DIM_FULL) == DIM_FULL
+    assert _overall_spot(DIM_PARTIAL) == DIM_PARTIAL
+    assert _overall_spot(DIM_FAILED) == DIM_FAILED
+    assert _overall_spot(DIM_NONE) == DIM_NONE
 
 
 # ── option verdicts ───────────────────────────────────────────────────────────────────
@@ -259,7 +252,7 @@ def test_per_symbol_options_carries_by_design_note() -> None:
 
 def test_per_symbol_options_default_has_empty_note() -> None:
     """A symbol with NO option records gets the OPT_NONE default + an empty note."""
-    spot_rows = [_spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED)]
+    spot_rows = [_spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED)]
     out = per_symbol_completeness(spot_rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
     opt = out["NSE-NIFTY"]["options"]
     assert opt["status"] == OPT_NONE
@@ -359,12 +352,15 @@ def test_categorize_instruments_reference_wins_over_by_type_index() -> None:
 # ── per-symbol completeness WITH dates (DEC-COMPLETENESS-UNIVERSE-001) ─────────────────────
 
 
-def test_per_symbol_both_intervals_with_dates_from_2020() -> None:
-    """Both intervals settled from Jan-2020 → full + from_2020 True + explicit dates carried."""
+def test_per_symbol_one_minute_with_dates_from_2020() -> None:
+    """1-minute settled from Jan-2020 → full + from_2020 True + explicit dates carried.
+
+    A stray derived 1-day row is ignored (only 1-minute is scored — no 1-day sub-dict exists).
+    """
     rows = [
         _spot_row(
             "NSE-NIFTY",
-            "1day",
+            "1day",  # derived 1-day → skipped (not in SPOT_DIMENSIONS)
             COMPLETENESS_SETTLED,
             first_date="2020-01-01",
             last_date="2026-06-18",
@@ -380,9 +376,10 @@ def test_per_symbol_both_intervals_with_dates_from_2020() -> None:
     out = per_symbol_completeness(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
     entry = out["NSE-NIFTY"]
     assert entry["category"] == CATEGORY_INDEX and entry["exchange"] == "NSE"
-    day = entry["spot"]["1day"]
-    assert day["status"] == DIM_FULL and day["from_2020"] is True
-    assert day["first_date"] == "2020-01-01" and day["last_date"] == "2026-06-18"
+    assert "1day" not in entry["spot"]  # 1-day sub-dict dropped
+    minute = entry["spot"]["1minute"]
+    assert minute["status"] == DIM_FULL and minute["from_2020"] is True
+    assert minute["first_date"] == "2020-01-01" and minute["last_date"] == "2026-06-18"
     assert entry["spot"]["overall"] == DIM_FULL
     # the absent option side gets the honest defaults.
     assert entry["options"]["status"] == OPT_NONE and entry["options"]["first_year"] is None
@@ -390,15 +387,11 @@ def test_per_symbol_both_intervals_with_dates_from_2020() -> None:
 
 def test_per_symbol_from_2020_false_when_data_starts_2021() -> None:
     """A 1-minute series that only starts 2021 → from_2020 False (a late start, flagged)."""
-    rows = [
-        _spot_row("NSE-X", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01"),
-        _spot_row("NSE-X", "1minute", COMPLETENESS_PENDING, first_date="2021-03-04"),
-    ]
+    rows = [_spot_row("NSE-X", "1minute", COMPLETENESS_PENDING, first_date="2021-03-04")]
     out = per_symbol_completeness(rows, {"NSE-X": CATEGORY_EQUITY}, [], {})
     spot = out["NSE-X"]["spot"]
-    assert spot["1day"]["from_2020"] is True
     assert spot["1minute"]["from_2020"] is False and spot["1minute"]["status"] == DIM_PARTIAL
-    assert spot["overall"] == DIM_PARTIAL  # one full, one pending
+    assert spot["overall"] == DIM_PARTIAL
 
 
 def test_per_symbol_first_date_present_but_last_date_missing() -> None:
@@ -408,33 +401,42 @@ def test_per_symbol_first_date_present_but_last_date_missing() -> None:
     last bar date is absent — first_date drives the from_2020 flag, last_date stays None.
     """
     rows = [
-        _spot_row("NSE-Z", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01", last_date=None)
+        _spot_row("NSE-Z", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01", last_date=None)
     ]
     out = per_symbol_completeness(rows, {"NSE-Z": CATEGORY_EQUITY}, [], {})
-    day = out["NSE-Z"]["spot"]["1day"]
-    assert day["first_date"] == "2020-01-01" and day["last_date"] is None
-    assert day["from_2020"] is True and day["status"] == DIM_FULL
+    minute = out["NSE-Z"]["spot"]["1minute"]
+    assert minute["first_date"] == "2020-01-01" and minute["last_date"] is None
+    assert minute["from_2020"] is True and minute["status"] == DIM_FULL
 
 
 def test_per_symbol_missing_dates_and_no_record_default_none() -> None:
-    """A no-record row → status none, dates None, from_2020 False; 1-minute defaults to none."""
-    rows = [_spot_row("NSE-Y", "1day", COMPLETENESS_NO_RECORD)]  # first_date/last_date None
+    """A no-record 1-minute row → status none, dates None, from_2020 False."""
+    rows = [_spot_row("NSE-Y", "1minute", COMPLETENESS_NO_RECORD)]  # first_date/last_date None
     out = per_symbol_completeness(rows, {"NSE-Y": CATEGORY_EQUITY}, [], {})
     spot = out["NSE-Y"]["spot"]
-    assert spot["1day"]["status"] == DIM_NONE and spot["1day"]["first_date"] is None
-    assert spot["1day"]["from_2020"] is False
-    assert spot["1minute"]["status"] == DIM_NONE  # never present → default
+    assert spot["1minute"]["status"] == DIM_NONE and spot["1minute"]["first_date"] is None
+    assert spot["1minute"]["from_2020"] is False
     assert spot["overall"] == DIM_NONE
+
+
+def test_per_symbol_options_only_symbol_spot_defaults_to_none() -> None:
+    """An options-only underlying (no spot row at all) → spot side is the all-none default."""
+    out = per_symbol_completeness(
+        [], {}, [_cov("NSE-NIFTY", 2025, STATUS_PENDING)], {"NSE-NIFTY": CATEGORY_INDEX}
+    )
+    spot = out["NSE-NIFTY"]["spot"]
+    assert spot["1minute"]["status"] == DIM_NONE and spot["overall"] == DIM_NONE
 
 
 def test_per_symbol_unmapped_symbol_and_derived_interval_skipped() -> None:
     rows = [
-        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01"),
-        _spot_row("NSE-STRAY", "1day", COMPLETENESS_SETTLED),  # not in categories → skipped
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+        _spot_row("NSE-STRAY", "1minute", COMPLETENESS_SETTLED),  # not in categories → skipped
         _spot_row("NSE-NIFTY", "5minute", COMPLETENESS_DERIVED),  # derived TF → skipped
+        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),  # derived 1-day → skipped
     ]
     out = per_symbol_completeness(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
-    assert set(out) == {"NSE-NIFTY"}  # stray excluded; only the two real dimensions considered
+    assert set(out) == {"NSE-NIFTY"}  # stray excluded; only the 1-minute dimension considered
 
 
 def test_per_symbol_options_folded_with_year_span() -> None:
@@ -450,7 +452,7 @@ def test_per_symbol_options_folded_with_year_span() -> None:
     assert opt["first_year"] == 2024 and opt["last_year"] == 2025
     # options-only underlying → the spot side is the honest all-none default.
     assert out["NSE-NIFTY"]["spot"]["overall"] == DIM_NONE
-    assert out["NSE-NIFTY"]["spot"]["1day"]["status"] == DIM_NONE
+    assert out["NSE-NIFTY"]["spot"]["1minute"]["status"] == DIM_NONE
 
 
 def test_per_symbol_options_unmapped_underlying_skipped() -> None:
@@ -460,12 +462,12 @@ def test_per_symbol_options_unmapped_underlying_skipped() -> None:
 
 def test_per_symbol_spot_and_options_merge_on_same_symbol() -> None:
     """A symbol with BOTH spot rows and option records merges into one entry (no duplication)."""
-    rows = [_spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01")]
+    rows = [_spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
     records = [_cov("NSE-NIFTY", 2025, STATUS_PENDING)]
     cats = {"NSE-NIFTY": CATEGORY_INDEX}
     out = per_symbol_completeness(rows, cats, records, cats)
     [entry] = out.values()
-    assert entry["spot"]["1day"]["status"] == DIM_FULL
+    assert entry["spot"]["1minute"]["status"] == DIM_FULL
     assert entry["options"]["status"] == OPT_GROWING  # the pending year → growing
 
 
@@ -475,9 +477,8 @@ def test_per_symbol_spot_and_options_merge_on_same_symbol() -> None:
 def test_scoreboard_csv_full_board_has_all_sections_and_rows() -> None:
     """A populated board renders the four labelled sections + summary + per-row detail."""
     spot_rows = [
-        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),
+        _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),  # derived → skipped
         _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED),
-        _spot_row("NSE-RELIANCE", "1day", COMPLETENESS_SETTLED),
         _spot_row("NSE-RELIANCE", "1minute", COMPLETENESS_PENDING),
     ]
     cats = {"NSE-NIFTY": CATEGORY_INDEX, "NSE-RELIANCE": CATEGORY_EQUITY}
@@ -493,16 +494,17 @@ def test_scoreboard_csv_full_board_has_all_sections_and_rows() -> None:
     assert any(line.startswith("SUMMARY — options") for line in lines)
     assert any(line.startswith("DETAIL — spot") for line in lines)
     assert any(line.startswith("DETAIL — options") for line in lines)
-    # The spot summary carries the exact per-category FULL counts (index: both full).
-    assert f"{CATEGORY_INDEX},1,1,1,1" in lines
-    # equity: 1-day full, 1-minute pending → full_1minute=0, full_both=0.
-    assert f"{CATEGORY_EQUITY},1,1,0,0" in lines
-    # The per-symbol detail rows are present with their verdicts.
-    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},{DIM_FULL},{DIM_FULL}" in lines
-    assert f"{CATEGORY_EQUITY},NSE-RELIANCE,NSE,{DIM_FULL},{DIM_PARTIAL},{DIM_PARTIAL}" in lines
+    # The 1-day columns are GONE from the spot CSV (view-only removal).
+    assert "Full 1-day" not in csv_text and "1-day complete?" not in csv_text
+    # The spot summary carries the exact per-category FULL 1-minute count (index: full).
+    assert f"{CATEGORY_INDEX},1,1" in lines
+    # equity: 1-minute pending → full_1minute=0.
+    assert f"{CATEGORY_EQUITY},1,0" in lines
+    # The per-symbol detail rows are present with their 1-minute + overall verdicts.
+    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},{DIM_FULL}" in lines
+    assert f"{CATEGORY_EQUITY},NSE-RELIANCE,NSE,{DIM_PARTIAL},{DIM_PARTIAL}" in lines
     # The per-underlying option detail row carries status + summed counts + the years +
-    # the (empty, for a stable/has-contracts row) by-design Notes column
-    # (DEC-METADATA-LIVE-PROGRESS-001 added the trailing Notes column).
+    # the (empty, for a stable/has-contracts row) by-design Notes column.
     assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{OPT_STABLE},50,10000,2024," in lines
 
 
@@ -512,14 +514,16 @@ def test_scoreboard_csv_empty_board_keeps_section_skeleton() -> None:
     lines = csv_text.splitlines()
     assert any(line.startswith("DETAIL — spot") for line in lines)
     assert any(line.startswith("DETAIL — options") for line in lines)
-    # Each category still gets a zeroed summary row (the loops over CATEGORIES always run).
+    # Each category still gets a zeroed summary row (the loops over CATEGORIES always run):
+    # spot is now ``cat,0,0`` (total + full_1minute); options stays ``cat,0,0,0,0``.
     for cat in (CATEGORY_INDEX, CATEGORY_EQUITY, CATEGORY_REFERENCE):
-        assert f"{cat},0,0,0,0" in lines  # both spot + options zero rows share this shape
+        assert f"{cat},0,0" in lines  # the zeroed spot summary row (3 columns)
+        assert f"{cat},0,0,0,0" in lines  # the zeroed options summary row (5 columns)
 
 
 def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
     """A symbol carrying a comma is RFC-4180 quoted, never splitting the row (extreme input)."""
-    rows = [_spot_row("NSE-A,B", "1day", COMPLETENESS_SETTLED)]
+    rows = [_spot_row("NSE-A,B", "1minute", COMPLETENESS_SETTLED)]
     board = build_completeness_scoreboard(rows, {"NSE-A,B": CATEGORY_EQUITY}, [], {})
     csv_text = scoreboard_to_csv(board)
     assert '"NSE-A,B"' in csv_text  # the comma-bearing symbol is quoted, not field-split
@@ -531,7 +535,7 @@ def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
     detail = [
         r
         for r in _csv.reader(StringIO(csv_text))
-        if len(r) == 6 and r[1] == "NSE-A,B"  # the per-symbol detail row
+        if len(r) == 5 and r[1] == "NSE-A,B"  # the per-symbol detail row (now 5 columns)
     ]
     assert detail and detail[0][1] == "NSE-A,B"
 
@@ -564,7 +568,7 @@ def test_scoreboard_csv_prefixes_formula_injection_symbol() -> None:
     """A symbol whose text starts with '=' is quoted (') in the rendered CSV so a spreadsheet
     app renders it as literal text, never executes it as a formula (DEC-CSV-FORMULA-INJECTION-001)."""
     evil = "=HYPERLINK(0)"  # no comma → a single cell; starts with a formula lead-in
-    rows = [_spot_row(evil, "1day", COMPLETENESS_SETTLED)]
+    rows = [_spot_row(evil, "1minute", COMPLETENESS_SETTLED)]
     board = build_completeness_scoreboard(rows, {evil: CATEGORY_EQUITY}, [], {})
     csv_text = scoreboard_to_csv(board)
     assert "'=HYPERLINK(0)" in csv_text  # neutralised — prefixed, never bare "=HYPERLINK(0)"
@@ -573,26 +577,19 @@ def test_scoreboard_csv_prefixes_formula_injection_symbol() -> None:
     from io import StringIO
 
     detail = [
-        r for r in _csv.reader(StringIO(csv_text)) if len(r) == 6 and r[1].endswith("HYPERLINK(0)")
+        r for r in _csv.reader(StringIO(csv_text)) if len(r) == 5 and r[1].endswith("HYPERLINK(0)")
     ]
     assert detail and detail[0][1] == "'=HYPERLINK(0)"  # the safe (quoted) value round-trips
 
 
 def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> None:
     """DEC-COMPLETENESS-CSV-READABLE-001: a per_symbol map enriches the spot detail with the
-    explicit first→last bar dates + from_2020 flag per dimension (the SAME rich info the
-    /universe strip shows), so the CSV is never less informative than the page."""
+    explicit first→last bar dates + from_2020 flag for the 1-minute dimension (the SAME rich
+    info the /universe strip shows), so the CSV is never less informative than the page."""
     import csv as _csv
     from io import StringIO
 
     spot_rows = [
-        _spot_row(
-            "NSE-NIFTY",
-            "1day",
-            COMPLETENESS_SETTLED,
-            first_date="2020-01-01",
-            last_date="2026-06-18",
-        ),
         _spot_row(
             "NSE-NIFTY",
             "1minute",
@@ -600,14 +597,7 @@ def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> Non
             first_date="2020-01-01",
             last_date="2026-06-18",
         ),
-        # FINNIFTY: 1-day starts 2025 (from_2020 = no); 1-minute NEVER pulled (no dates → empty cells).
-        _spot_row(
-            "NSE-FINNIFTY",
-            "1day",
-            COMPLETENESS_SETTLED,
-            first_date="2025-01-01",
-            last_date="2026-06-18",
-        ),
+        # FINNIFTY: 1-minute NEVER pulled (no-record → empty date cells + from_2020 = no).
         _spot_row("NSE-FINNIFTY", "1minute", COMPLETENESS_NO_RECORD),
     ]
     cats = {"NSE-NIFTY": CATEGORY_INDEX, "NSE-FINNIFTY": CATEGORY_INDEX}
@@ -618,16 +608,19 @@ def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> Non
     lines = csv_text.splitlines()
     # The enriched section title + the new date / from-2020 column headers are present.
     assert any(line.startswith("DETAIL — spot (per symbol with first") for line in lines)
-    assert "1-day first bar" in csv_text and "1-day from 2020?" in csv_text
+    assert "1-minute first bar" in csv_text and "1-minute from 2020?" in csv_text
+    # The dropped 1-day headers are gone.
+    assert "1-day first bar" not in csv_text and "1-day from 2020?" not in csv_text
 
-    rows = [r for r in _csv.reader(StringIO(csv_text)) if len(r) == 12]
+    # Enriched spot detail rows now have 8 columns: cat, symbol, exch, 1m verdict, 1m first,
+    # 1m last, 1m from-2020, overall.
+    rows = [r for r in _csv.reader(StringIO(csv_text)) if len(r) == 8]
     by_symbol = {r[1]: r for r in rows}
-    # NIFTY: dated 2020→2026 on BOTH dimensions, from_2020 = yes (covers _csv_date truthy + _csv_yes_no True).
+    # NIFTY: dated 2020→2026, from_2020 = yes (covers _csv_date truthy + _csv_yes_no True).
     nifty = by_symbol["NSE-NIFTY"]
     assert nifty[4] == "2020-01-01" and nifty[5] == "2026-06-18" and nifty[6] == "yes"
-    assert nifty[8] == "2020-01-01" and nifty[9] == "2026-06-18" and nifty[10] == "yes"
-    # FINNIFTY: 1-day starts 2025 → from_2020 = no; 1-minute no-record → EMPTY date cells + no
-    # (covers _csv_date falsy + _csv_yes_no False).
+    assert nifty[7] == DIM_FULL  # overall = 1-minute verdict
+    # FINNIFTY: 1-minute no-record → EMPTY date cells + no (covers _csv_date falsy +
+    # _csv_yes_no False).
     finnifty = by_symbol["NSE-FINNIFTY"]
-    assert finnifty[4] == "2025-01-01" and finnifty[6] == "no"
-    assert finnifty[8] == "" and finnifty[9] == "" and finnifty[10] == "no"
+    assert finnifty[4] == "" and finnifty[5] == "" and finnifty[6] == "no"

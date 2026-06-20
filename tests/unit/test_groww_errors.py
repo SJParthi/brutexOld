@@ -7,6 +7,8 @@ tests use locally-defined fakes with the exact Groww SDK class names — no
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from brutex.adapters.groww import errors as e
 from brutex.models import BruteXError
@@ -111,6 +113,71 @@ def test_from_groww_exception_classifies_generic_by_code_and_message(
     assert type(e.from_groww_exception(exc)) is expected
 
 
+def _empty_body_decode_error() -> json.JSONDecodeError:
+    """The EXACT error the SDK's ``response.json()`` raises on an empty vendor body.
+
+    Reproduces the live TITAN / SHRIRAMFIN quarantine signature
+    ``"Expecting value: line 1 column 1 (char 0)"`` by decoding an empty string.
+    """
+    try:
+        json.loads("")
+    except json.JSONDecodeError as exc:
+        return exc
+    raise AssertionError("json.loads('') must raise JSONDecodeError")  # pragma: no cover
+
+
+def test_empty_body_json_decode_error_is_retryable() -> None:
+    """An empty / non-JSON vendor body (``JSONDecodeError``) → RETRYABLE, not terminal.
+
+    DEC-GROWW-EMPTY-BODY-RETRY-001 — the TITAN / SHRIRAMFIN bug: an empty-body blip
+    (a transient throttle) was classified terminal "not on Groww". It must map to a
+    RETRYABLE :class:`GrowwEmptyResponseError` so the until-clean loop re-pulls it.
+    """
+    exc = _empty_body_decode_error()
+    mapped = e.from_groww_exception(exc)
+    assert type(mapped) is e.GrowwEmptyResponseError
+    assert e.is_retryable(mapped) is True
+    assert isinstance(mapped, e.GrowwError)
+    assert isinstance(mapped, BruteXError)
+    # The signature line is preserved verbatim so the audit log still shows the cause.
+    assert "Expecting value: line 1 column 1 (char 0)" in str(mapped)
+    assert "JSONDecodeError" in str(mapped)
+
+
+def test_garbled_html_body_json_decode_error_is_retryable() -> None:
+    """A garbled (non-empty, non-JSON) body also decodes to a retryable empty-response error."""
+    try:
+        json.loads("<html>throttled</html>")
+    except json.JSONDecodeError as exc:
+        mapped = e.from_groww_exception(exc)
+    else:  # pragma: no cover - a non-JSON body always raises JSONDecodeError
+        raise AssertionError("json.loads('<html>...') must raise JSONDecodeError")
+    assert type(mapped) is e.GrowwEmptyResponseError
+    assert e.is_retryable(mapped) is True
+
+
+def test_plain_value_error_stays_terminal_not_retryable() -> None:
+    """A plain ``ValueError`` (a code bug, NOT a JSONDecodeError) stays TERMINAL.
+
+    Guards the narrow scope of the empty-body fix: ONLY ``json.JSONDecodeError`` is
+    retryable; a generic ``ValueError`` must NOT be blindly retried (Golden Rule #1).
+    """
+    mapped = e.from_groww_exception(ValueError("a real code bug"))
+    assert type(mapped) is e.GrowwError
+    assert e.is_retryable(mapped) is False
+
+
+def test_real_404_not_found_stays_terminal() -> None:
+    """A genuine missing symbol (a real ``404`` → ``GrowwAPINotFoundException``) stays terminal.
+
+    The empty-body fix must NOT make a real 404 retryable — a symbol truly absent
+    from Groww remains a terminal :class:`GrowwNotFoundError` quarantine.
+    """
+    mapped = e.from_groww_exception(GrowwAPINotFoundException("symbol not found"))
+    assert type(mapped) is e.GrowwNotFoundError
+    assert e.is_retryable(mapped) is False
+
+
 def test_is_rate_limit() -> None:
     assert e.is_rate_limit(e.GrowwRateLimitError("x")) is True
     assert e.is_rate_limit(e.GrowwTimeoutError("x")) is False
@@ -126,6 +193,7 @@ def test_is_auth_failure() -> None:
     [
         (e.GrowwRateLimitError("x"), True),
         (e.GrowwTimeoutError("x"), True),
+        (e.GrowwEmptyResponseError("x"), True),
         (e.GrowwBadRequestError("x"), False),
         (e.GrowwAuthError("x"), False),
         (e.GrowwNotFoundError("x"), False),

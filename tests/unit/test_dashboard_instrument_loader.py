@@ -23,17 +23,27 @@ usage follows ``tests/integration/test_universe_explorer_store.py``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
-from brutex.dashboard.instrument_loader import load_instrument_master
-from brutex.dashboard.ntm_cache import save_constituent_csv
+from brutex.dashboard.instrument_loader import (
+    FNO_INDEX_ALIASES_OVERRIDE_ENV,
+    load_instrument_master,
+)
+from brutex.dashboard.ntm_cache import load_cached_constituent_csv, save_constituent_csv
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import InstrumentFormatError
 from brutex.universe import is_option_pullable
+from structlog.testing import capture_logs
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
 
 
 def _row(**over: str) -> str:
@@ -391,6 +401,29 @@ def test_ntm_admits_non_fno_constituents_as_reference(tmp_path: Path) -> None:
     assert is_option_pullable(smallco, reference_only_ids=refs) is False
 
 
+def test_ntm_successful_live_fetch_persists_cache_for_next_outage(tmp_path: Path) -> None:
+    """A SUCCESSFUL live niftyindices fetch WRITES the last-good cache to disk.
+
+    The resilience cornerstone (DEC-NTM-CONSTITUENT-CACHE-001): cache-on-success is
+    what lets the NEXT transient 404 fall back to ~750 constituents instead of
+    cratering to the ~211 F&O base set. This pins that a clean fetch persists the
+    exact CSV under ``ntm_constituents.csv`` so the subsequent outage finds it.
+    """
+    cache_dir = tmp_path / "cache"
+    assert load_cached_constituent_csv(cache_dir=cache_dir) is None  # no cache before
+    constituents = _constituents_csv([("WIPRO", "INE075A01022"), ("SMALLCO", "INE999A01010")])
+    result = load_instrument_master(
+        store := _store(tmp_path),
+        http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
+        constituent_opener=lambda _url: constituents,
+        constituent_cache_dir=cache_dir,
+    )
+    assert result["ntm"]["from_cache"] is False  # served from the live fetch
+    # The clean fetch persisted the cache verbatim — the next outage now has a fallback.
+    assert load_cached_constituent_csv(cache_dir=cache_dir) == constituents
+    assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
+
+
 def test_ntm_fno_constituent_stays_tradable(tmp_path: Path) -> None:
     """An NTM basket whose only match is F&O-eligible adds NO reference rows.
 
@@ -541,3 +574,240 @@ def test_ntm_degrades_when_unreachable_and_no_cache(tmp_path: Path) -> None:
     assert ntm["admitted"] is False
     assert "unreachable" in ntm["reason"]
     assert store.reference_only_security_ids() == frozenset()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# DEC-FNO-INDEX-ALIAS-001 (#5) — comprehensive OPT/REF classification (E2E)
+# ════════════════════════════════════════════════════════════════════════
+#
+# The 2 genuine NSE F&O indices whose Groww spot trading_symbol differs from their
+# option-leg underlying_symbol AND whose own groww_symbol carries the SPOT spelling
+# (so the groww_symbol bridge cannot reach them — the real ``make run`` gap):
+#   spot NIFTYJR  ↔ F&O NIFTYNXT50;  spot NIFTYMIDSELECT ↔ F&O MIDCPNIFTY.
+# These mirror the live master schema; live behaviour is operator-verified.
+_NIFTYJR = _row(
+    exchange="NSE",
+    exchange_token="NIFTYJR",  # STRING token → surrogate security_id (no token-join)
+    trading_symbol="NIFTYJR",
+    groww_symbol="NSE-NIFTYJR",  # spot spelling → groww_symbol bridge misses
+    name="Nifty Next 50",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_NIFTYJR_CE = _row(
+    exchange="NSE",
+    exchange_token="80001",
+    trading_symbol="NIFTYNXT502661670000CE",
+    groww_symbol="NSE-NIFTYNXT50-16Jun26-70000-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="NIFTYNXT50",  # the F&O symbol the alias maps NIFTYJR to
+    underlying_exchange_token="26013",
+    expiry_date="2026-06-16",
+    strike_price="70000",
+    lot_size="25",
+    tick_size="0.05",
+)
+_NIFTYMIDSELECT = _row(
+    exchange="NSE",
+    exchange_token="NIFTYMIDSELECT",  # STRING token → surrogate (no token-join)
+    trading_symbol="NIFTYMIDSELECT",
+    groww_symbol="NSE-NIFTYMIDSELECT",  # spot spelling → groww_symbol bridge misses
+    name="Nifty Midcap Select",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_NIFTYMIDSELECT_CE = _row(
+    exchange="NSE",
+    exchange_token="81001",
+    trading_symbol="MIDCPNIFTY2661612000CE",
+    groww_symbol="NSE-MIDCPNIFTY-16Jun26-12000-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="MIDCPNIFTY",  # the F&O symbol the alias maps NIFTYMIDSELECT to
+    underlying_exchange_token="26074",
+    expiry_date="2026-06-16",
+    strike_price="12000",
+    lot_size="120",
+    tick_size="0.05",
+)
+# A stock whose own trading_symbol (BAJAJ-AUTO, hyphenated) differs from its option
+# leg's underlying_symbol (BAJAJAUTO) by spelling, but whose GENUINE numeric vendor
+# token (16669) == the leg's underlying_exchange_token → token-joined → OPT.
+_BAJAJ = _row(
+    exchange="NSE",
+    exchange_token="16669",  # numeric token → token-join is valid
+    trading_symbol="BAJAJ-AUTO",
+    groww_symbol="NSE-BAJAJ-AUTO",
+    name="Bajaj Auto",
+    instrument_type="EQ",
+    segment="CASH",
+    series="EQ",
+    isin="INE917I01010",
+    lot_size="1",
+    tick_size="0.05",
+)
+_BAJAJ_CE = _row(
+    exchange="NSE",
+    exchange_token="82001",
+    trading_symbol="BAJAJAUTO2661690000CE",
+    groww_symbol="NSE-BAJAJAUTO-16Jun26-9000-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="BAJAJAUTO",  # spelling differs from the spot symbol_name
+    underlying_exchange_token="16669",  # == the spot's numeric security_id
+    expiry_date="2026-06-16",
+    strike_price="9000",
+    lot_size="375",
+    tick_size="0.05",
+)
+
+
+def test_alias_rescues_niftyjr_and_niftymidselect_to_opt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2 NSE indices NIFTYJR / NIFTYMIDSELECT classify OPT via the sourced alias.
+
+    DEC-FNO-INDEX-ALIAS-001 (5b): their spot trading_symbol ≠ the option-leg
+    underlying_symbol and their groww_symbol carries the spot spelling, so the
+    token-join (surrogate id) and the groww_symbol bridge BOTH miss them. The
+    sourced alias map rescues them → NOT reference_only → option-pullable, and the
+    residual ``fno_index_unmatched`` diagnostic now reports ZERO gaps.
+    """
+    monkeypatch.delenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, raising=False)
+    store = _store(tmp_path)
+    rows = [_NIFTY, _BANKNIFTY, _NIFTYJR, _NIFTYJR_CE, _NIFTYMIDSELECT, _NIFTYMIDSELECT_CE]
+    with capture_logs() as logs:
+        load_instrument_master(
+            store,
+            http_get=lambda _url: _csv(rows),
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    refs = store.reference_only_security_ids()
+    jr = store.get("NIFTYJR")
+    mid = store.get("NIFTYMIDSELECT")
+    assert jr is not None and mid is not None
+    # Both NSE F&O indices keep their OPT badge (NOT reference_only).
+    assert jr.security_id not in refs
+    assert mid.security_id not in refs
+    assert is_option_pullable(jr, reference_only_ids=refs) is True
+    assert is_option_pullable(mid, reference_only_ids=refs) is True
+    # The residual gap diagnostic is SILENT — both NSE indices are resolved.
+    assert _events(logs, "universe.load.fno_index_unmatched") == []
+    # The reconciliation audit attributes both to the alias mechanism.
+    (audit,) = _events(logs, "universe.load.opt_reclassified")
+    assert audit["alias"] == ["NSE:NIFTYJR", "NSE:NIFTYMIDSELECT"]
+    assert audit["count"] == 2
+    assert audit["still_unmatched"] == 0
+
+
+def test_eq_token_join_surfaced_as_diagnostic_not_reclassified(tmp_path: Path) -> None:
+    """A symbol-mismatched STOCK token-join is surfaced for audit but NOT reclassified.
+
+    DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001 (the honesty split of 5a): BAJAJ-AUTO's spot
+    trading_symbol differs from its option leg's underlying_symbol (BAJAJAUTO), but its
+    GENUINE numeric vendor token equals the leg's underlying_exchange_token. The
+    token-join does NOT change a STOCK's OPT/REF classification (is_spot_only_index is
+    False for non-IDX; a stock's pullability is fno_eligible membership, a symbol-keyed
+    gate that is the out-of-scope follow-up). So the audit must surface BAJAJ-AUTO in the
+    SEPARATE token_join_diagnostic field — NOT the real token_join rescue bucket — and
+    must NOT inflate ``count`` (no flag flipped).
+    """
+    store = _store(tmp_path)
+    rows = [_NIFTY, _BANKNIFTY, _BAJAJ, _BAJAJ_CE]
+    with capture_logs() as logs:
+        load_instrument_master(
+            store,
+            http_get=lambda _url: _csv(rows),
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    (audit,) = _events(logs, "universe.load.opt_reclassified")
+    # Surfaced for audit in the honest diagnostic bucket — never claimed as a rescue.
+    assert audit["token_join_diagnostic"] == ["NSE:BAJAJ-AUTO"]
+    assert audit["token_join"] == []
+    assert audit["alias"] == []
+    assert audit["symbol_bridge"] == []
+    # No flag flipped, so the reclassified count stays 0 (honesty — Golden Rule #10).
+    assert audit["count"] == 0
+
+
+def test_env_override_adds_a_new_index_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator ``BRUTEX_FNO_INDEX_ALIASES`` entry rescues a NEW index (no code change).
+
+    DEC-FNO-INDEX-ALIAS-001 (DYNAMIC): a future NSE index whose spot symbol differs
+    from its F&O symbol is rescued purely by the env override merged on top of the
+    sourced defaults.
+    """
+    monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, '{"NEWSPOT": "NEWFNO"}')
+    newspot = _row(
+        exchange="NSE",
+        exchange_token="NEWSPOT",
+        trading_symbol="NEWSPOT",
+        groww_symbol="NSE-NEWSPOT",
+        name="New Index",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    newspot_ce = _row(
+        exchange="NSE",
+        exchange_token="83001",
+        trading_symbol="NEWFNO2661610000CE",
+        groww_symbol="NSE-NEWFNO-16Jun26-10000-CE",
+        instrument_type="CE",
+        segment="FNO",
+        underlying_symbol="NEWFNO",
+        underlying_exchange_token="90000",
+        expiry_date="2026-06-16",
+        strike_price="10000",
+        lot_size="50",
+        tick_size="0.05",
+    )
+    store = _store(tmp_path)
+    rows = [_NIFTY, _BANKNIFTY, newspot, newspot_ce]
+    load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=_empty_opener,
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    new_idx = store.get("NEWSPOT")
+    assert new_idx is not None
+    refs = store.reference_only_security_ids()
+    # The override rescued the new index → option-pullable (not reference_only).
+    assert is_option_pullable(new_idx, reference_only_ids=refs) is True
+
+
+def test_spot_only_index_stays_reference_and_audit_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine spot-only index (no option legs) stays REF; the audit emits 0 rescues.
+
+    Preserves the guarantee that NIFTY IT (no option leg) is NOT rescued by any of
+    the three mechanisms, and the reconciliation audit honestly reports ``count=0``
+    when nothing is rescued (the steady-state signal).
+    """
+    monkeypatch.delenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, raising=False)
+    store = _store(tmp_path)
+    rows = [_NIFTY, _BANKNIFTY, _NIFTYIT]
+    with capture_logs() as logs:
+        load_instrument_master(
+            store,
+            http_get=lambda _url: _csv(rows),
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    refs = store.reference_only_security_ids()
+    nifty_it = store.get("NIFTYIT")
+    assert nifty_it is not None
+    # The spot-only sectoral index is reference_only (no OPT badge) — unchanged.
+    assert is_option_pullable(nifty_it, reference_only_ids=refs) is False
+    (audit,) = _events(logs, "universe.load.opt_reclassified")
+    assert audit["count"] == 0
+    assert audit["token_join"] == []
+    assert audit["alias"] == []
+    assert audit["symbol_bridge"] == []
+    assert audit["token_join_diagnostic"] == []

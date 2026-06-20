@@ -30,6 +30,8 @@ classified here (Golden Rule #1 — no invented vendor error code).
 
 from __future__ import annotations
 
+import json
+
 from brutex.models import BruteXError
 
 
@@ -55,6 +57,25 @@ class GrowwRateLimitError(GrowwError):
 
 class GrowwTimeoutError(GrowwError):
     """Network read/connect timeout (retry)."""
+
+
+class GrowwEmptyResponseError(GrowwError):
+    """Empty / non-JSON vendor body — a transient throttle, RETRYABLE.
+
+    The Groww SDK decodes every REST body with ``response.json()``. Under a
+    transient throttle the vendor returns an EMPTY (or HTML/garbled) body and the
+    SDK's decode raises a :class:`json.JSONDecodeError` (a :class:`ValueError`
+    subclass) whose message is ``"Expecting value: line 1 column 1 (char 0)"`` —
+    NOT a real ``404``. The old classifier let that fall to the terminal base
+    :class:`GrowwError`, so a live pull mis-saw an empty-body blip as "not on
+    Groww" and TERMINALLY quarantined real F&O stocks (TITAN / SHRIRAMFIN).
+
+    This maps it to a RETRYABLE error (DEC-GROWW-EMPTY-BODY-RETRY-001): the
+    in-call fast-retry re-issues it, and any residual that exhausts the budget is
+    re-queued by the until-clean loop — never dropped. A genuine missing symbol
+    still returns a real ``404`` → :class:`GrowwNotFoundError` (stays terminal),
+    so this never makes a real 404 retryable.
+    """
 
 
 class GrowwFeedError(GrowwError):
@@ -135,8 +156,19 @@ def from_groww_exception(exc: Exception) -> GrowwError:
     the live derivatives chain pull mis-saw a 429 as terminal and died instantly).
     Any still-unrecognised failure maps to the terminal base :class:`GrowwError` —
     conservative: an unknown failure is never blindly retried (Golden Rule #1).
+
+    **An empty / non-JSON vendor body** (the SDK's ``response.json()`` raising a
+    :class:`json.JSONDecodeError`) is recognised FIRST as a RETRYABLE
+    :class:`GrowwEmptyResponseError` (DEC-GROWW-EMPTY-BODY-RETRY-001) — a transient
+    throttle, NOT a terminal "not on Groww". It is matched by ``isinstance`` (the
+    SDK is an optional extra, but :mod:`json` is stdlib so this import is always
+    safe). Narrow on purpose: ONLY a ``json.JSONDecodeError`` is treated this way,
+    NOT every :class:`ValueError`, so a genuine code bug surfacing as a plain
+    ``ValueError`` still maps to the terminal base (never blindly retried).
     """
     name = type(exc).__name__
+    if isinstance(exc, json.JSONDecodeError):
+        return GrowwEmptyResponseError(f"{name}: {exc}")
     error_cls = _SDK_NAME_TO_ERROR.get(name)
     if error_cls is None:
         error_cls = _classify_generic(exc)
@@ -156,15 +188,17 @@ def is_auth_failure(exc: GrowwError) -> bool:
 def is_retryable(exc: GrowwError) -> bool:
     """True if *exc* is transient and the orchestrator should retry it.
 
-    Retryable: rate-limit + timeout. Terminal: bad-request, not-found, auth
-    (needs re-auth), feed (out of scope), and any bare :class:`GrowwError`.
+    Retryable: rate-limit + timeout + empty/non-JSON body (a transient throttle —
+    DEC-GROWW-EMPTY-BODY-RETRY-001). Terminal: bad-request, not-found, auth (needs
+    re-auth), feed (out of scope), and any bare :class:`GrowwError`.
     """
-    return isinstance(exc, (GrowwRateLimitError, GrowwTimeoutError))
+    return isinstance(exc, (GrowwRateLimitError, GrowwTimeoutError, GrowwEmptyResponseError))
 
 
 __all__ = [
     "GrowwAuthError",
     "GrowwBadRequestError",
+    "GrowwEmptyResponseError",
     "GrowwError",
     "GrowwFeedError",
     "GrowwNotFoundError",

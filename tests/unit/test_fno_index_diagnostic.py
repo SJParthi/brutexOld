@@ -32,9 +32,18 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.adapters.groww.instruments import build_index
-from brutex.dashboard.instrument_loader import _groww_symbol_index_bridge, load_instrument_master
+from brutex.dashboard.instrument_loader import (
+    FNO_INDEX_ALIASES_OVERRIDE_ENV,
+    _classify_option_pullable,
+    _groww_symbol_index_bridge,
+    _has_genuine_numeric_token,
+    _option_underlying_security_ids,
+    _resolve_fno_index_aliases,
+    load_instrument_master,
+)
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import (
@@ -663,3 +672,341 @@ class TestLoaderBridgesVerboseIndex:
         assert line["gaps"] == [
             {"underlying": "ORPHANIDX", "nearest_index": None, "exchange": "NSE"},
         ]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# DEC-FNO-INDEX-ALIAS-001 (#5) — comprehensive OPT/REF classification
+# ════════════════════════════════════════════════════════════════════════
+#
+# Synthetic 21-col rows / Instruments mirroring the REAL schema (no live master is
+# reachable in CI). Live behaviour is operator-verified via ``make run``; these tests
+# pin the three bridges (token-join 5a, alias 5b, symbol-bridge) + the audit (5c).
+
+
+def _eq_with_token(
+    symbol: str,
+    *,
+    security_id: int,
+    feed_token: str | None,
+    exchange: Exchange = Exchange.NSE,
+) -> Instrument:
+    """Build a cash-equity Instrument with an explicit ``security_id`` + ``feed_token``."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+        feed_token=feed_token,
+    )
+
+
+def _idx_with_token(
+    symbol: str,
+    *,
+    security_id: int,
+    feed_token: str | None,
+    exchange: Exchange = Exchange.NSE,
+) -> Instrument:
+    """Build an IDX Instrument with an explicit ``security_id`` + ``feed_token``."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal("0"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+        feed_token=feed_token,
+    )
+
+
+def _option_with_underlying_id(
+    underlying: str,
+    *,
+    underlying_security_id: int | None,
+    exchange: Exchange = Exchange.NSE,
+    option_type: InstrumentType = InstrumentType.CE,
+) -> Instrument:
+    """Build a CE/PE leg carrying an explicit numeric ``underlying_security_id``."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=abs(hash(("opt", underlying, option_type))) % 100_000,
+        symbol_name=f"{underlying}-OPT",
+        display_name=underlying,
+        instrument=option_type,
+        segment=Segment.FNO,
+        series=None,
+        isin=None,
+        underlying_symbol=underlying,
+        underlying_security_id=underlying_security_id,
+        lot_size=50,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=date(2026, 6, 16),
+        strike_price=Decimal("100"),
+        asm_gsm_flag=False,
+        feed_token=None,
+    )
+
+
+class TestHasGenuineNumericToken:
+    """A numeric ``feed_token`` ⇒ real vendor token; non-numeric / None ⇒ surrogate."""
+
+    def test_numeric_feed_token_is_genuine(self) -> None:
+        inst = _eq_with_token("RELIANCE", security_id=2885, feed_token="2885")
+        assert _has_genuine_numeric_token(inst) is True
+
+    def test_non_numeric_feed_token_is_surrogate(self) -> None:
+        # An NSE index carries a STRING token (e.g. "NIFTYMIDSELECT") → surrogate.
+        inst = _idx_with_token("NIFTYMIDSELECT", security_id=999, feed_token="NIFTYMIDSELECT")
+        assert _has_genuine_numeric_token(inst) is False
+
+    def test_missing_feed_token_is_surrogate(self) -> None:
+        inst = _eq_with_token("RELIANCE", security_id=2885, feed_token=None)
+        assert _has_genuine_numeric_token(inst) is False
+
+
+class TestOptionUnderlyingSecurityIds:
+    """The set of numeric ``underlying_security_id`` named by NSE option legs."""
+
+    def test_collects_nse_option_underlying_ids(self) -> None:
+        index = build_index(
+            [
+                (
+                    "NSE-RELIANCE-16Jun26-3000-CE",
+                    _option_with_underlying_id("RELIANCE", underlying_security_id=2885),
+                ),
+                (
+                    "NSE-TCS-16Jun26-4000-PE",
+                    _option_with_underlying_id(
+                        "TCS", underlying_security_id=11536, option_type=InstrumentType.PE
+                    ),
+                ),
+            ]
+        )
+        assert _option_underlying_security_ids(index) == frozenset({2885, 11536})
+
+    def test_skips_bse_legs_and_none_ids(self) -> None:
+        index = build_index(
+            [
+                (
+                    "BSE-X-16Jun26-1-CE",
+                    _option_with_underlying_id(
+                        "X", underlying_security_id=7, exchange=Exchange.BSE
+                    ),
+                ),
+                (
+                    "NSE-Y-16Jun26-1-CE",
+                    _option_with_underlying_id("Y", underlying_security_id=None),
+                ),
+                ("NSE-Z-16Jun26-1-CE", _option_with_underlying_id("Z", underlying_security_id=42)),
+            ]
+        )
+        # BSE leg excluded; the None-id NSE leg excluded; only Z's id survives.
+        assert _option_underlying_security_ids(index) == frozenset({42})
+
+
+_SOURCED_DEFAULTS = {"NIFTYJR": "NIFTYNXT50", "NIFTYMIDSELECT": "MIDCPNIFTY"}
+
+
+class TestResolveFnoIndexAliases:
+    """Sourced defaults MERGED with the defensively-parsed env override."""
+
+    def test_defaults_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, raising=False)
+        assert _resolve_fno_index_aliases() == {
+            "NIFTYJR": "NIFTYNXT50",
+            "NIFTYMIDSELECT": "MIDCPNIFTY",
+        }
+
+    def test_env_override_merges_on_top(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, '{"newidx": "NEWFNO"}')
+        aliases = _resolve_fno_index_aliases()
+        assert aliases["NEWIDX"] == "NEWFNO"  # key upper-cased + trimmed
+        assert aliases["NIFTYJR"] == "NIFTYNXT50"  # sourced default preserved
+
+    def test_env_override_wins_over_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, '{"NIFTYJR": "OVERRIDDEN"}')
+        assert _resolve_fno_index_aliases()["NIFTYJR"] == "OVERRIDDEN"
+
+    def test_blank_env_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, "")
+        assert _resolve_fno_index_aliases() == dict(_SOURCED_DEFAULTS)
+
+    def test_invalid_json_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, "{not json")
+        assert _resolve_fno_index_aliases() == dict(_SOURCED_DEFAULTS)
+
+    def test_non_object_json_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, '["not", "an", "object"]')
+        assert _resolve_fno_index_aliases() == dict(_SOURCED_DEFAULTS)
+
+    def test_non_str_and_blank_pairs_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # int value, blank value, and blank key are each dropped; the good pair stays.
+        monkeypatch.setenv(
+            FNO_INDEX_ALIASES_OVERRIDE_ENV,
+            '{"GOODIDX": "GOODFNO", "BADINT": 5, "BLANKVAL": "  ", "  ": "X"}',
+        )
+        aliases = _resolve_fno_index_aliases()
+        assert aliases["GOODIDX"] == "GOODFNO"
+        assert "BADINT" not in aliases
+        assert "BLANKVAL" not in aliases
+        assert "" not in aliases
+
+
+class TestClassifyOptionPullable:
+    """The comprehensive fold: token-join + alias + symbol-bridge + the audit."""
+
+    def test_eq_token_join_is_diagnostic_only_not_a_rescue(self) -> None:
+        # A stock whose own symbol does NOT name its option leg's underlying_symbol
+        # (spelling drift, e.g. BAJAJ-AUTO vs BAJAJAUTO), but whose GENUINE numeric
+        # vendor token equals the leg's underlying_security_id. The EQ token-join is
+        # DIAGNOSTIC ONLY (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001): is_spot_only_index
+        # is False for non-IDX, so the stock's classification is UNCHANGED. It must be
+        # surfaced in token_join_diagnostic, NOT the real token_join rescue bucket,
+        # and NOT added to the bridged set (which only the index rule reads).
+        stock = _eq_with_token("BAJAJ-AUTO", security_id=16669, feed_token="16669")
+        leg = _option_with_underlying_id("BAJAJAUTO", underlying_security_id=16669)
+        index = build_index([("NSE-BAJAJ-AUTO", stock), ("NSE-BAJAJAUTO-16Jun26-9000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        # NOT a real rescue: the EQ pair is NOT in the (index-only) bridged set, and the
+        # token_join bucket stays empty — only the honest diagnostic bucket carries it.
+        assert (Exchange.NSE, "BAJAJ-AUTO") not in bridged
+        assert bridged == options_eligible
+        assert rescued["token_join"] == []
+        assert rescued["token_join_diagnostic"] == ["NSE:BAJAJ-AUTO"]
+        assert rescued["alias"] == []
+        assert rescued["symbol_bridge"] == []
+
+    def test_idx_token_join_is_a_real_rescue(self) -> None:
+        # An IDX whose own GENUINE numeric vendor token matches an NSE option leg's
+        # underlying_security_id IS a real rescue: is_spot_only_index reads the bridged
+        # set for IDX rows, so the token-join flips it REF→OPT. It lands in the real
+        # token_join bucket AND the bridged set — distinct from the EQ diagnostic path
+        # (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001). (NSE legs are the token-join evidence
+        # source, so the IDX carries a numeric feed_token to be genuinely token-joinable.)
+        idx = _idx_with_token("VERBOSEIDX", security_id=51, feed_token="51")
+        leg = _option_with_underlying_id("COMPACTIDX", underlying_security_id=51)
+        index = build_index([("NSE-VERBOSEIDX", idx), ("NSE-COMPACTIDX-16Jun26-1-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        assert (Exchange.NSE, "VERBOSEIDX") in bridged
+        assert rescued["token_join"] == ["NSE:VERBOSEIDX"]
+        assert rescued["token_join_diagnostic"] == []
+
+    def test_surrogate_token_index_is_not_token_joined(self) -> None:
+        # An NSE index with a STRING feed_token (surrogate security_id) must NOT
+        # spuriously token-join even if its surrogate id collides with a leg id.
+        idx = _idx_with_token("NIFTY MIDCAP 100", security_id=42, feed_token="NIFTYMIDCAP100")
+        leg = _option_with_underlying_id("SOMETHING", underlying_security_id=42)
+        index = build_index([("NSE-NIFTYMIDCAP100", idx), ("NSE-SOMETHING-16Jun26-1-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        # NOT token-joined (surrogate token) → stays spot-only (REF).
+        assert (Exchange.NSE, "NIFTY MIDCAP 100") not in bridged
+        assert rescued["token_join"] == []
+
+    def test_alias_rescues_niftyjr_and_niftymidselect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The 2 real NSE indices: spot trading_symbol NIFTYJR / NIFTYMIDSELECT, whose
+        # OWN groww_symbol carries the spot spelling (so the symbol bridge misses),
+        # but whose ALIASED F&O symbol (NIFTYNXT50 / MIDCPNIFTY) names the option leg.
+        monkeypatch.delenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, raising=False)
+        jr = _idx_with_token("NIFTYJR", security_id=101, feed_token="NIFTYJR")
+        jr_leg = _option_with_underlying_id("NIFTYNXT50", underlying_security_id=26013)
+        mid = _idx_with_token("NIFTYMIDSELECT", security_id=102, feed_token="NIFTYMIDSELECT")
+        mid_leg = _option_with_underlying_id("MIDCPNIFTY", underlying_security_id=26074)
+        index = build_index(
+            [
+                ("NSE-NIFTYJR", jr),
+                ("NSE-NIFTYNXT50-16Jun26-70000-CE", jr_leg),
+                ("NSE-NIFTYMIDSELECT", mid),
+                ("NSE-MIDCPNIFTY-16Jun26-12000-CE", mid_leg),
+            ]
+        )
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, aliases, rescued = _classify_option_pullable(index, options_eligible)
+        assert (Exchange.NSE, "NIFTYJR") in bridged
+        assert (Exchange.NSE, "NIFTYMIDSELECT") in bridged
+        assert rescued["alias"] == ["NSE:NIFTYJR", "NSE:NIFTYMIDSELECT"]
+        # The aliased F&O symbols are surfaced so the diagnostic stops reporting them.
+        assert (Exchange.NSE, "NIFTYNXT50") in aliases
+        assert (Exchange.NSE, "MIDCPNIFTY") in aliases
+        # And the residual gap diagnostic now reports ZERO gaps for the two.
+        assert diagnose_unmatched_option_underlyings(index.universe, aliases) == []
+
+    def test_symbol_bridge_rescues_verbose_groww_symbol_index(self) -> None:
+        # The existing groww_symbol bridge: an IDX whose verbose trading_symbol
+        # differs from the leg, but whose groww_symbol F&O component matches.
+        midcap = _idx_with_token("NIFTY MID SELECT", security_id=200, feed_token="MIDCPNIFTY")
+        leg = _option_with_underlying_id("MIDCPNIFTY", underlying_security_id=300)
+        index = build_index([("NSE-MIDCPNIFTY", midcap), ("NSE-MIDCPNIFTY-16Jun26-12000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        assert (Exchange.NSE, "NIFTY MID SELECT") in bridged
+        assert rescued["symbol_bridge"] == ["NSE:NIFTY MID SELECT"]
+        assert rescued["alias"] == []
+
+    def test_direct_symbol_match_is_not_a_rescue(self) -> None:
+        # NIFTY's own symbol_name IS the option underlying_symbol → already OPT, not
+        # counted as rescued; nothing else fires for it.
+        nifty = _idx_with_token("NIFTY", security_id=13, feed_token="NIFTY")
+        leg = _option_with_underlying_id("NIFTY", underlying_security_id=13)
+        index = build_index([("NSE-NIFTY", nifty), ("NSE-NIFTY-16Jun26-25000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        _bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        assert rescued == {
+            "token_join": [],
+            "alias": [],
+            "symbol_bridge": [],
+            "token_join_diagnostic": [],
+        }
+
+    def test_spot_only_index_is_not_rescued(self) -> None:
+        # A genuine spot-only index (no option legs at all) is rescued by NONE of
+        # the three mechanisms → stays REF.
+        sectoral = _idx_with_token("NIFTY MIDCAP 100", security_id=55, feed_token="NIFTYMIDCAP100")
+        index = build_index([("NSE-NIFTYMIDCAP100", sectoral)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        assert bridged == options_eligible
+        assert rescued == {
+            "token_join": [],
+            "alias": [],
+            "symbol_bridge": [],
+            "token_join_diagnostic": [],
+        }
+
+    def test_derivative_legs_are_not_rescued(self) -> None:
+        # Only EQ / IDX spot rows are candidates; the option leg row itself is
+        # skipped by the instrument-type guard (covers the continue arm).
+        nifty = _idx_with_token("NIFTY", security_id=13, feed_token="NIFTY")
+        leg = _option_with_underlying_id("NIFTY", underlying_security_id=13)
+        index = build_index([("NSE-NIFTY", nifty), ("NSE-NIFTY-16Jun26-25000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        _bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        # The CE leg contributed no rescue entry (it is not EQ/IDX).
+        assert "NSE:NIFTY-OPT" not in rescued["token_join"]

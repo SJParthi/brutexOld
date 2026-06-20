@@ -209,8 +209,10 @@ async function poll() {
       const b = await r.json();
       const idx = (b.spot && b.spot.by_category && b.spot.by_category.index) || {};
       const eq = (b.spot && b.spot.by_category && b.spot.by_category.equity) || {};
-      cCmp.textContent = num(idx.full_both) + "/" + num(idx.total) + " indices · "
-        + num(eq.full_both) + "/" + num(eq.total) + " equities full";
+      // 1-minute is the SINGLE fetched granularity (1-day is DERIVED from it,
+      // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — "full" = full 1-minute.
+      cCmp.textContent = num(idx.full_1minute) + "/" + num(idx.total) + " indices · "
+        + num(eq.full_1minute) + "/" + num(eq.total) + " equities full";
       ok++;
     }
   } catch (e) { cCmp.textContent = "offline"; }

@@ -2341,8 +2341,9 @@ def build_app(
         """GET /api/v1/completeness/scoreboard — per-symbol + aggregate data completeness.
 
         The Data Completeness Scoreboard (DEC-COMPLETENESS-SCOREBOARD-001): for every spot
-        symbol — indices vs equities-cash, **separately** — its 1-day + 1-minute spot
-        completeness (EXACT, ledger-backed) and overall verdict, PLUS for every option
+        symbol — indices vs equities-cash, **separately** — its 1-minute spot
+        completeness (EXACT, ledger-backed; 1-day is DERIVED from 1-minute so it is not
+        scored) and overall verdict, PLUS for every option
         underlying its expiries/contracts pulled + the honest ``stable``/``growing``/
         ``partial``/``failed`` verdict (NO fabricated % — the vendor exposes no expected
         total, so "stable" = all currently-listed expiries pulled + nothing new outstanding).
@@ -2442,10 +2443,11 @@ def build_app(
     async def api_universe_completeness() -> JSONResponse:
         """GET /api/v1/universe/completeness — per-symbol completeness map for the pull page.
 
-        DEC-COMPLETENESS-UNIVERSE-001. Returns ``{symbol_name: {category, exchange, spot:{1day,
+        DEC-COMPLETENESS-UNIVERSE-001. Returns ``{symbol_name: {category, exchange, spot:{
         1minute,overall}, options:{...}}}`` so the ``/universe`` page overlays, on EACH symbol
         row, whether that symbol has the entire 2020→today set — the EXPLICIT earliest/latest
-        bar date + a ``from_2020`` flag per spot dimension (1-day / 1-minute) and the honest
+        bar date + a ``from_2020`` flag for the 1-minute spot dimension (1-day is DERIVED from
+        1-minute so it is not scored) and the honest
         ``stable``/``growing``/``partial``/``failed`` option status + pulled counts + year span.
         Pure-engine delegation (:func:`brutex.dashboard.completeness.per_symbol_completeness`)
         over the SAME lake+ledger read the scoreboard uses; READ-ONLY, no pull logic. No lake
