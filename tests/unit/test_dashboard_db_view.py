@@ -374,7 +374,7 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
     # R1 visibility (DEC-EMPTY-STREAK-VISIBLE-001): the consecutive-EMPTY
     # streak ships per row and the promotion bound ships once at the top.
     assert by_symbol["NIFTY"]["empty_streak"] == 0
-    assert payload["empty_threshold"] == 3
+    assert payload["empty_threshold"] == 10
     # In-pull fetch count ships per row (DEC-WINDOW-INPULL-FETCHES-001): the
     # NIFTY SUCCESS row was seeded from the lake (one fetch's data → 1).
     assert by_symbol["NIFTY"]["in_pull_fetches"] == 1
@@ -426,7 +426,7 @@ def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
         "source": "status_log",
         "count": 0,
         "counts": {"spot": {}, "options": {}, "futures": {}},
-        "empty_threshold": 3,
+        "empty_threshold": 10,
         "matched": 0,
         "returned": 0,
         "capped": False,
@@ -645,8 +645,10 @@ class TestSpotWindowRollup:
         from brutex.dashboard.db_view import spot_window_rollup
 
         ledger = WindowLedger()
-        # SUCCESS + SKIPPED + EMPTY → resolved; PLANNED → pending; FAILED → failed
-        # (DEC-EMPTY-RESOLVED-REPORTING-001 — EMPTY is no-data-RESOLVED, not pending).
+        # SUCCESS + SKIPPED → resolved; PLANNED + non-terminal EMPTY → pending; FAILED
+        # → failed (DEC-COMPLETENESS-HONEST-EMPTY-001 — a below-threshold EMPTY is
+        # OUTSTANDING work the next pull re-fetches, so the chip counts it pending,
+        # never "full"; a TERMINAL empty settles to SKIPPED → resolved).
         ledger.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
         )
@@ -702,8 +704,8 @@ class TestSpotWindowRollup:
 
         rollup = spot_window_rollup(tmp_path)
         assert rollup == {
-            # resolved=3 (SUCCESS+SKIPPED+EMPTY), pending=1 (PLANNED only), failed=0
-            ("NIFTY", "1minute"): (3, 1, 0),
+            # resolved=2 (SUCCESS+SKIPPED), pending=2 (PLANNED + non-terminal EMPTY), failed=0
+            ("NIFTY", "1minute"): (2, 2, 0),
             ("NIFTY", "1day"): (0, 0, 1),
         }
 

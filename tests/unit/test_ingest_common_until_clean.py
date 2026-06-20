@@ -425,7 +425,7 @@ def test_outcome_and_round_are_frozen() -> None:
 
 def test_default_max_rounds_is_bounded() -> None:
     """The default outer budget is small + finite (Golden Rule #10 — never infinite)."""
-    assert DEFAULT_MAX_ROUNDS == 5
+    assert DEFAULT_MAX_ROUNDS == 10
 
 
 # ── DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001 — the outstanding-windows path ────────

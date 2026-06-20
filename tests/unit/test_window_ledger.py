@@ -196,8 +196,11 @@ class TestEmptyStreakR1:
             _key(), raw_bars=0, error_type="GrowwRateLimitError", bars_appended=0, now=_NOW
         )
         assert ledger.records()[0].empty_streak == 2
-        # So the NEXT clean empty reaches the threshold and the window finally settles.
-        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        # So further clean empties keep accumulating (the FAIL did not reset) until the
+        # streak finally reaches the threshold and the window settles SKIPPED.
+        status = ""
+        for _ in range(EMPTY_TERMINAL_THRESHOLD - 2):
+            status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
         assert status == SKIPPED
         assert ledger.records()[0].empty_streak == EMPTY_TERMINAL_THRESHOLD
         assert ledger.is_skippable(_key()) is True
@@ -207,11 +210,16 @@ class TestEmptyStreakR1:
         # is 429-throttled between every clean empty STILL converges to SKIPPED — the
         # full universe pull can finish instead of re-fetching it forever.
         ledger = WindowLedger()
-        outcomes = [None, "GrowwRateLimitError", None, "GrowwRateLimitError", None]
+        # A 429 BEFORE each clean empty — the storm interleaves the whole way, yet the
+        # threshold-th clean empty still settles the window (FAILED preserves the streak).
+        outcomes: list[str | None] = []
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            outcomes.append("GrowwRateLimitError")
+            outcomes.append(None)
         status = ""
         for err in outcomes:
             status = ledger.record(_key(), raw_bars=0, error_type=err, bars_appended=0, now=_NOW)
-        assert status == SKIPPED  # 3 CLEAN empties reached despite 2 interleaved 429s
+        assert status == SKIPPED  # threshold CLEAN empties reached despite interleaved 429s
         assert ledger.is_skippable(_key()) is True
 
     def test_real_data_after_empties_is_never_masked(self) -> None:

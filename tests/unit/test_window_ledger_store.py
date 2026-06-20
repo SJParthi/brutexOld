@@ -16,7 +16,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from brutex.data.fetch_coverage import WindowKey
-from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
+from brutex.data.window_ledger import (
+    EMPTY_TERMINAL_THRESHOLD,
+    SKIPPED,
+    SUCCESS,
+    WindowLedger,
+)
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
     end_pull_ledger,
@@ -118,10 +123,10 @@ class TestMigration:
     """The one-shot fold of the legacy status-log sidecar (coverage fold retired)."""
 
     def test_migrate_folds_status_log_sidecar(self, tmp_path: Path) -> None:
-        # Status log: a SUCCESS (NIFTY) + a terminal EMPTY (SENSEX, attempts>=3).
+        # Status log: a SUCCESS (NIFTY) + a terminal EMPTY (SENSEX, at the threshold).
         log = WindowStatusLog()
         log.record(_key("NIFTY"), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
-        for _ in range(3):
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
             log.record(_key("SENSEX"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
         save_window_status(log, tmp_path)
 
@@ -678,7 +683,7 @@ class TestLegacyBackwardCompat:
         assert ledger.count == 3  # loaded, NOT degraded to empty
         assert by_symbol["NIFTY"].empty_streak == 0  # SUCCESS → 0
         assert by_symbol["SENSEX"].empty_streak == 2  # EMPTY → attempts (still below threshold)
-        assert by_symbol["BANKNIFTY"].empty_streak == 3  # SKIPPED → threshold
+        assert by_symbol["BANKNIFTY"].empty_streak == 10  # SKIPPED → threshold
         # A legacy EMPTY-below-threshold row is still fetched (not masked).
         assert ledger.is_skippable(_key("SENSEX")) is False
         assert ledger.is_skippable(_key("BANKNIFTY")) is True
