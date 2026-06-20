@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #860 —
+_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #861 —
 the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
 correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
 1-minute partition to baseline the derived %-change columns on every paging click —
@@ -29,7 +29,12 @@ bench), and the `/db` + `/universe` FRONTENDS update in place (grid-only `#dbgri
 refresh on paging instead of a full control-bar+datepicker teardown; a per-tab
 instrument cache + debounced search + in-place completeness patch). Honest envelope:
 O(page date-span) / O(visible), NOT a literal O(1)-total. Engine + 52-vocab + scope
-UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001,
+UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-MOVERS-O1-LATENCY-001,
+MIGRATION.md #860 — the `/movers` page made near-O(1) per interaction: the `top_n`-independent
+lake scan is split from the cheap rank + cached per coordinate (`MoversSnapshotCache`,
+generation-invalidated), and the cold per-symbol intraday read is bounded to the day's
+`1minute/<yyyy>/<mm>.parquet` month file (`lake_day_glob`, byte-equivalent for session-filtered
+symbols); read-only lake/dashboard, ENGINE UNCHANGED). Earlier: 2026-06-20 (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001,
 MIGRATION.md #859 — the `/completeness` OPTIONS table shows only the years that ACTUALLY have
 expiries + an honest `partial` for late-listed underlyings (JIOFIN/ETERNAL): a 0-expiry
 pre-listing year no longer inflates `years` to a fake 2020→2026 span nor keeps it perpetually
@@ -137,7 +142,7 @@ hostile-review pass._
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
 - **Active branch:** `claude/intelligent-shannon-s8qea3` (`/db` + `/universe` dashboard
   pages made INSTANT per interaction with ZERO correctness change —
-  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #860: `db_view.py::query_candles` now
+  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #861: `db_view.py::query_candles` now
   page-bounds the intraday %-change baseline — reading the prior-day last-1-minute close
   for ONLY the page's date span + the single bar before it
   (`_intraday_prev_close_by_page_date`, byte-for-byte identical to the old whole-partition
@@ -147,11 +152,11 @@ hostile-review pass._
   completeness patch). Honest envelope: O(page date-span)/O(visible), NOT O(1)-total.
   Engine/52-vocab/scope UNCHANGED — read-only viewer only; Live + the movers route
   deliberately untouched (separate sessions own those). Prior merged:
-  DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows real
-  expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
-  (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811) + DEC-TF-PRECISION-PROOF-001
-  #856 (PR #810). Running in parallel sessions: F&O historical-candle table, Remove-Live,
-  Movers O(1) — see those PRs)
+  DEC-MOVERS-O1-LATENCY-001 #860 (PR #815, /movers near-O(1) snapshot cache + month-bounded
+  reads) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows
+  real expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
+  (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811). Running in parallel sessions:
+  F&O historical-candle table, Remove-Live — see those PRs)
 
 ---
 

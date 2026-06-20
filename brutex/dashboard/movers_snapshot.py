@@ -58,8 +58,10 @@ __all__ = [
     "DEFAULT_TOP_N",
     "MoverSnapshot",
     "ScreenInstrument",
+    "SpotCandidates",
     "build_snapshot_payload",
     "compute_snapshot",
+    "compute_spot_candidates",
     "interval_minutes",
     "parse_snapshot_date",
     "pending_asset_payload",
@@ -422,25 +424,36 @@ def _read_session_bars(
 ) -> list[CandleBar]:
     """Read *day*'s 1-minute bars, resample to *minutes*, slice to ``≤ cutoff_min``.
 
-    Reuses the COMMON :func:`~brutex.data.timeframe_materialize.make_lake_read_1m`
-    reader (CLAUDE.md §11) so the resampler is fed identically to the rest of the
-    lake; then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the
-    chosen timeframe (1minute → no-op, 1day → the single session bar). For an
-    intraday timeframe the bars are kept up to (and including) the bar whose IST
+    Reads *day*'s bars via :func:`~brutex.data.lake_day_glob.read_day_intraday_frame`
+    — ONLY ``1minute/<yyyy>/<mm>.parquet`` for a SESSION-FILTERED symbol (an IST
+    trading day's 1-minute bars all live in that one monthly file, the session
+    never crossing a UTC month boundary), so the slice is byte-equivalent to a
+    whole-partition read but ``O(one month)`` not ``O(all-bars)``
+    (DEC-MOVERS-O1-LATENCY-001); a SESSION-EXEMPT symbol (GIFT Nifty, ~21h) falls
+    back to the whole partition there to stay byte-equivalent (its full-day series
+    can cross a UTC month boundary). The frame is renamed to the resampler's
+    ``ts_utc`` shape (matching the COMMON
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11),
+    then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the chosen
+    timeframe (1minute → no-op, 1day → the single session bar). For an intraday
+    timeframe the bars are kept up to (and including) the bar whose IST
     open-minute ``≤ cutoff_min``. Empty when the symbol has no 1-minute bars on
     *day* (the caller reports it skipped, never fabricated — Golden Rule #1).
     """
     import polars as pl
 
+    from brutex.data.lake_day_glob import read_day_intraday_frame
     from brutex.data.tf_resampler import resample_1m_to_tf
-    from brutex.data.timeframe_materialize import make_lake_read_1m
 
-    try:
-        df = make_lake_read_1m(
-            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-        )()
-    except ValueError:
+    base = lake_root / "bars" / exchange / segment / symbol / "1minute"
+    month = read_day_intraday_frame(base, day, symbol=symbol)
+    if month is None:
         return []
+    df = (
+        month.rename({"timestamp": "ts_utc"})
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
     ist_date = pl.col("ts_utc").dt.convert_time_zone(_IST).dt.date()
     day_df = df.filter(ist_date == day).sort("ts_utc")
     if day_df.is_empty():
@@ -530,22 +543,52 @@ def _prev_day_close(
     return Decimal(str(prior.tail(1).get_column("close")[0]))
 
 
-def run_movers_snapshot(
+@dataclass(frozen=True, slots=True)
+class SpotCandidates:
+    """The cacheable spot candidate set for one snapshot coordinate (pre-ranking).
+
+    The expensive, ``top_n``-independent product of one lake scan — the per-instrument
+    :class:`MoverSnapshot` list + the skipped count + the normalised snapshot date.
+    Caching THIS (keyed by ``(exchange, interval, date, time)`` via
+    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`) makes re-clicking
+    a sub-filter pill or nudging ``top_n`` an O(1) hit + a cheap re-rank
+    (:func:`build_snapshot_payload`), never a re-scan (DEC-MOVERS-O1-LATENCY-001).
+
+    Attributes
+    ----------
+    snapshots
+        Every screened instrument's :class:`MoverSnapshot` (those with a bar on
+        the day); ranked per category at build time.
+    skipped
+        Count of instruments with no bar on the selected day/time — reported
+        honestly, never fabricated (Golden Rule #1).
+    date
+        The normalised ISO ``YYYY-MM-DD`` snapshot day (``date=None`` ⇒ today).
+    """
+
+    snapshots: tuple[MoverSnapshot, ...]
+    skipped: int
+    date: str
+
+
+def compute_spot_candidates(
     *,
     lake_root: Path,
     interval: str,
     date: str | None,
     time: str | None,
-    top_n: int,
+    exchange: str | None = None,
     names: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """Compute the spot movers snapshot over the lake → the ``/api/v1/movers`` payload.
+) -> SpotCandidates:
+    """Scan the lake → the spot :class:`SpotCandidates` for one snapshot coordinate.
 
-    Discovers every spot instrument that has data at the timeframe being asked
-    for (:func:`~brutex.dashboard.db_view.list_candle_datasets`), reads each
-    one's selected-day bar(s) at *interval* up to *time*, takes the previous
-    day's 1-day close, computes the per-instrument :class:`MoverSnapshot`, and
-    ranks them into the per-category payload.
+    The expensive, cacheable core extracted from :func:`run_movers_snapshot`:
+    discovers every spot instrument that has data at the timeframe being asked
+    for (:func:`~brutex.dashboard.db_view.list_candle_datasets`, optionally scoped
+    to *exchange*), reads each one's selected-day bar(s) at *interval* up to
+    *time*, takes the previous day's 1-day close, and computes the per-instrument
+    :class:`MoverSnapshot`. Ranking + the per-category payload is NOT done here —
+    it is the cheap, ``top_n``-dependent step done by :func:`build_snapshot_payload`.
 
     The discovery + read path depends on the timeframe (so the page works for
     EITHER timeframe — ``DEC-1MINUTE-ONLY-DERIVE-1DAY-001``):
@@ -557,8 +600,25 @@ def run_movers_snapshot(
     * **Intraday** (``1minute`` … ``4hour``) → discover the ``1minute``
       partitions and resample to *interval* up to *time* (:func:`_read_session_bars`).
 
-    An empty lake (or an unknown interval) yields an honest "pull spot first"
-    payload — never a 500, never a fabricated mover (Golden Rule #1).
+    An empty lake (or an unknown interval) yields an empty :class:`SpotCandidates`
+    — never a 500, never a fabricated mover (Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+    interval, date, time
+        The snapshot coordinates (date blank ⇒ today; time blank/daily ⇒ whole day).
+    exchange
+        Restrict the screened population to one exchange (``NSE`` / ``BSE``) for an
+        exact per-exchange ranking; ``None`` screens every exchange.
+    names
+        Optional ``symbol → display name`` map.
+
+    Returns
+    -------
+    SpotCandidates
+        The per-instrument snapshots + skipped count + normalised date.
 
     Raises
     ------
@@ -571,22 +631,23 @@ def run_movers_snapshot(
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
     if minutes is None:
-        return build_snapshot_payload(
-            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
-        )
+        return SpotCandidates(snapshots=(), skipped=0, date=date_str)
 
     is_daily = minutes >= _DAILY_MIN_FLOOR
     cutoff_min = None if is_daily else _cutoff_minute(time)
     resolved_names = names or {}
     # A daily snapshot reads the `1day` partitions directly (the `1day` series is
     # DERIVED from the fetched 1-minute — DEC-1MINUTE-ONLY-DERIVE-1DAY-001); an
-    # intraday snapshot resamples the `1minute` partitions.
+    # intraday snapshot resamples the `1minute` partitions. The exchange scope (when
+    # given) narrows discovery so only that exchange's partitions are ever read.
     discovery_interval = "1day" if is_daily else "1minute"
-    datasets = [d for d in list_candle_datasets(lake_root) if d["interval"] == discovery_interval]
+    datasets = [
+        d
+        for d in list_candle_datasets(lake_root)
+        if d["interval"] == discovery_interval and (exchange is None or d["exchange"] == exchange)
+    ]
     if not datasets:
-        return build_snapshot_payload(
-            [], interval=interval, date=date_str, time=time, top_n=top_n, skipped=0
-        )
+        return SpotCandidates(snapshots=(), skipped=0, date=date_str)
 
     snapshots: list[MoverSnapshot] = []
     skipped = 0
@@ -634,6 +695,51 @@ def run_movers_snapshot(
             continue
         snapshots.append(snap)
 
+    return SpotCandidates(snapshots=tuple(snapshots), skipped=skipped, date=date_str)
+
+
+def run_movers_snapshot(
+    *,
+    lake_root: Path,
+    interval: str,
+    date: str | None,
+    time: str | None,
+    top_n: int,
+    exchange: str | None = None,
+    names: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compute the spot movers snapshot over the lake → the ``/api/v1/movers`` payload.
+
+    The thin compose of :func:`compute_spot_candidates` (the expensive, cacheable
+    scan) + :func:`build_snapshot_payload` (the cheap, ``top_n``-dependent rank).
+    Behaviour is unchanged from the pre-split version — an empty lake (or an
+    unknown interval) yields an honest "pull spot first" payload, never a 500
+    (Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root, interval, date, time, top_n, exchange, names
+        See :func:`compute_spot_candidates` (plus *top_n*, the per-category
+        ranking depth).
+
+    Raises
+    ------
+    ValueError
+        On a malformed *date* / *time* (the route maps it to a 400).
+    """
+    candidates = compute_spot_candidates(
+        lake_root=lake_root,
+        interval=interval,
+        date=date,
+        time=time,
+        exchange=exchange,
+        names=names,
+    )
     return build_snapshot_payload(
-        snapshots, interval=interval, date=date_str, time=time, top_n=top_n, skipped=skipped
+        candidates.snapshots,
+        interval=interval,
+        date=candidates.date,
+        time=time,
+        top_n=top_n,
+        skipped=candidates.skipped,
     )
