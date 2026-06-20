@@ -98,8 +98,8 @@ def _seed_spot_lake(tmp_path: Path) -> None:
 
     Both the **1-minute** session (for the intraday-timeframe path) AND the stored
     **1-day** bars for the prior close (06-12) AND the snapshot day (06-13) — so the
-    DAILY timeframe reads the stored 1-day bar DIRECTLY (the 1-day-only pull case,
-    DEC-PULL-1DAY-FIRST-001), no 1-minute resample required. The 06-13 1-day close
+    DAILY timeframe reads the stored 1-day bar DIRECTLY (the derived-1-day partition,
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001), no 1-minute resample required. The 06-13 1-day close
     equals the 1-minute session close, so both paths agree (NIFTY 22000 = +10% vs
     20000; BANKNIFTY 40500 = -10% vs 45000).
     """
@@ -253,7 +253,7 @@ class TestReadSessionBars:
 
 
 class TestReadDailyBars:
-    """The 1-day-only DIRECT reader (DEC-PULL-1DAY-FIRST-001) — no 1-minute resample."""
+    """The derived-1-day DIRECT reader (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — no 1-minute resample."""
 
     def test_missing_1day_dir_returns_empty(self, tmp_path: Path) -> None:
         # No 1-day partition at all → _read_daily_partition is None → [].
@@ -420,7 +420,7 @@ class TestRunMoversSnapshot:
 
     def test_daily_discovers_1day_and_skips_symbol_absent_on_the_day(self, tmp_path: Path) -> None:
         # The DAILY timeframe discovers + reads the stored 1-day partitions DIRECTLY
-        # (the 1-day-only pull case — DEC-PULL-1DAY-FIRST-001), NOT the 1-minute series.
+        # (the derived-1-day partition — DEC-1MINUTE-ONLY-DERIVE-1DAY-001), NOT the 1-minute series.
         # HASDAY has a 1-day bar on the snapshot day (ranked); GAPDAY has 1-day data only
         # on a different day → no bar on 06-13 → skipped (never fabricated).
         _write(

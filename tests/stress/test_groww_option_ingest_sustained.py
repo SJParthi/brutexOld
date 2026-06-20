@@ -43,7 +43,14 @@ class _FakeSDK:
 
 class _Sink:
     def append(
-        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         del exchange, segment, symbol, interval
         return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())

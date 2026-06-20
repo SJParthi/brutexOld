@@ -86,7 +86,14 @@ class _Sink:
         self.appends: list[int] = []
 
     def append(
-        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         del exchange, segment, symbol, interval
         self.appends.append(len(bars))
@@ -901,7 +908,14 @@ class _ConflictSink:
         self._fake_path = Path("/dev/null")
 
     def append(
-        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         del exchange, segment, symbol, interval, bars
         ts = _IN_SESSION_TS

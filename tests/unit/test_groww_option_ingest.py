@@ -166,7 +166,14 @@ class _Sink:
         self._lock = threading.Lock()
 
     def append(
-        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         with self._lock:
             self.appends.append((exchange, segment, symbol, interval, len(bars)))
@@ -203,7 +210,14 @@ class _RaisingSink:
     """A sink whose append raises a NON-Groww error (a genuine bug path)."""
 
     def append(
-        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         del exchange, segment, symbol, interval, bars
         raise RuntimeError("genuine bug in the sink")

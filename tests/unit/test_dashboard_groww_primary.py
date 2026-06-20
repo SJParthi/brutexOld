@@ -175,28 +175,30 @@ def test_spot_pull_live_with_groww_creds(client: TestClient) -> None:
     _drain_job(client)
 
 
-def test_spot_interval_dropdown_scopes_the_pull_total(client: TestClient) -> None:
-    """The granularity dropdown (DEC-PULL-1DAY-FIRST-001) sets the fetched intervals.
+def test_spot_interval_param_is_ignored_always_one_minute(client: TestClient) -> None:
+    """The vestigial ``spot_interval`` param is IGNORED — always 1-minute only.
 
-    The route's reported ``total`` is symbols × intervals, so the verify-first
-    default (1-day only) is one unit per symbol, ``both`` is two (1m + 1d), and
-    ``1minute`` is back to one — proving the ``spot_interval`` param threads through
-    ``resolve_fetch_intervals`` into the pull plan + the progress denominator.
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: 1-minute is the ONLY granularity fetched (1-day is
+    derived from it), so ``resolve_fetch_intervals`` always returns ``("1minute",)``
+    regardless of the legacy ``spot_interval`` value. The route's reported ``total`` is
+    symbols × intervals, so EVERY value (default / ``both`` / ``1minute``) gives the SAME
+    one-interval-per-symbol total — the param no longer scopes the pull.
     """
-    one_day = client.post("/api/v1/universe/pull-all", params={"kind": "index"})
-    assert one_day.status_code == 200
-    one_day_total = one_day.json()["total"]
+    default = client.post("/api/v1/universe/pull-all", params={"kind": "index"})
+    assert default.status_code == 200
+    default_total = default.json()["total"]
     _drain_job(client)
     both = client.post(
         "/api/v1/universe/pull-all", params={"kind": "index", "spot_interval": "both"}
     )
     assert both.status_code == 200
-    assert both.json()["total"] == one_day_total * 2
+    # ``both`` is IGNORED — still 1-minute only → the SAME total (not doubled).
+    assert both.json()["total"] == default_total
     _drain_job(client)
     minute = client.post(
         "/api/v1/universe/pull-all", params={"kind": "index", "spot_interval": "1minute"}
     )
-    assert minute.json()["total"] == one_day_total
+    assert minute.json()["total"] == default_total
     _drain_job(client)
 
 

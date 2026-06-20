@@ -1,17 +1,16 @@
 """Per-symbol minute-pull window type for the SPOT ingest spine.
 
 DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md entry #851) — the SPOT 1-minute
-pull is now **fully decoupled** from the 1-day coverage. The 1-day phase pulls
-its full ``[start, end]`` range and the 1-minute phase **independently** pulls
-its full ``[start, end]`` range (the configured floor → today) for EVERY
+pull is now **fully decoupled** from the 1-day coverage. The 1-minute phase
+pulls its full ``[start, end]`` range (the configured floor → today) for EVERY
 requested symbol — no coverage discovery, no per-symbol filtering, and no
-per-symbol minute-start bounding. The verify-first **1-day-only DEFAULT** (the
-operator picks granularity via the ``/universe`` dropdown) is RETAINED; only the
-1-minute↔1-day COUPLING is removed.
+per-symbol minute-start bounding. 1-minute is now the ONLY fetched granularity
+and the ``1day`` series is DERIVED from it
+(``DEC-1MINUTE-ONLY-DERIVE-1DAY-001``); only the historical 1-minute↔1-day
+COUPLING is removed here.
 
 This SUPERSEDES the 1-minute-bounded-to-1-day-coverage coupling of
-DEC-SPOT-1DAY-FIRST-001 (MIGRATION.md #836) / DEC-PULL-1DAY-FIRST-001
-(MIGRATION.md #723). The coupled discovery driver
+DEC-SPOT-1DAY-FIRST-001 (MIGRATION.md #836). The coupled discovery driver
 (``discover_spot_minute_windows``), the pure coverage→window mapper
 (``spot_coverage_to_minute_window``), and the lake-read helper
 (``spot_daily_coverage``) were all deleted in the decouple cutover — the minute

@@ -360,6 +360,85 @@ class TestBarConflict:
         assert entry.last_ts == result.last_ts
 
 
+class TestLatestWinsMerge:
+    """``merge_mode="latest-wins"`` for the derived ``1day`` partition (FIX-2).
+
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: a re-derivation of the SAME timestamp OVERWRITES
+    the stored derived bar (no conflict recorded) so a later complete-session pull
+    corrects a partial-session frozen daily. Scoped to the derived ``1day`` write path
+    only — the default keep-first path is unchanged (covered by ``TestBarConflict``).
+    """
+
+    def test_latest_wins_overwrites_stored_bar(self, tmp_path: Path) -> None:
+        """A same-ts/different-value bar OVERWRITES the stored one, no conflict recorded."""
+        pl = pytest.importorskip("polars")
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            bars=[_bar(0, open_="100.00", high="110.00", low="90.00", close="105.00", volume=5)],
+            merge_mode="latest-wins",
+        )
+        second = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            bars=[_bar(0, open_="200.00", high="210.00", low="190.00", close="205.00", volume=9)],
+            merge_mode="latest-wins",
+        )
+        # latest-wins: NO conflict recorded, file IS rewritten with the corrected value.
+        assert second.conflicts == ()
+        assert second.row_count == 1
+        df = pl.read_parquet(second.path)
+        assert df["open"][0] == 200.0  # the corrected (latest) value won
+        assert df["volume"][0] == 9
+
+    def test_latest_wins_identical_rerun_is_noop(self, tmp_path: Path) -> None:
+        """latest-wins over IDENTICAL bars adds nothing + rewrites nothing (idempotent)."""
+        pytest.importorskip("polars")
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [_bar(0, open_="100.00", high="110.00", low="90.00", close="105.00", volume=5)]
+        first = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            bars=bars,
+            merge_mode="latest-wins",
+        )
+        second = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            bars=bars,
+            merge_mode="latest-wins",
+        )
+        # Identical re-derive → no rewrite (added==0 and rewrite==False) → byte-stable.
+        assert second.conflicts == ()
+        assert second.raw_hash == first.raw_hash
+
+    def test_unknown_merge_mode_raises(self, tmp_path: Path) -> None:
+        """An unrecognised merge_mode fails loud (WriterError) — no silent fallback."""
+        from brutex.data.errors import WriterError
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        with pytest.raises(WriterError, match="unknown merge_mode"):
+            writer.write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                interval="1day",
+                bars=[_bar(0, open_="100.00", high="110.00", low="90.00", close="105.00")],
+                merge_mode="bogus",
+            )
+
+
 class TestPartitionLock:
     """Per-partition write serialisation (DEC-DHAN-PARALLEL-WINDOWS-001).
 

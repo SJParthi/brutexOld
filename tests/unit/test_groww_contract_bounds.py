@@ -22,10 +22,13 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww.constants import OPTION_SEGMENT, TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.contract_bounds import (
+    DEFAULT_FNO_LOOKBACK_MONTHS,
     ContractCoverage,
     contract_daily_coverage,
     coverage_to_minute_window,
+    default_fno_minute_window,
     derive_contract_minute_windows,
+    subtract_calendar_months,
 )
 from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.nse import IST
@@ -171,6 +174,71 @@ def test_window_disjoint_after_range_falls_back_to_full() -> None:
         cov, full_start=_FULL_START, full_end=_FULL_END, expiry=date(2027, 1, 30)
     )
     assert window == (_FULL_START, _FULL_END)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# subtract_calendar_months + default_fno_minute_window (pure — DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+# ─────────────────────────────────────────────────────────────────────────
+def test_default_fno_lookback_is_three_months() -> None:
+    assert DEFAULT_FNO_LOOKBACK_MONTHS == 3
+
+
+def test_subtract_calendar_months_exact_month_ends() -> None:
+    # Target month has >= the anchor day → exact (no clamp).
+    assert subtract_calendar_months(date(2020, 1, 31), 3) == date(2019, 10, 31)
+    assert subtract_calendar_months(date(2020, 3, 31), 3) == date(2019, 12, 31)
+
+
+def test_subtract_calendar_months_feb_leap_and_nonleap_clamp() -> None:
+    # Day 31 → February: clamp to the month's last valid day (leap vs non-leap).
+    assert subtract_calendar_months(date(2020, 5, 31), 3) == date(2020, 2, 29)  # leap year
+    assert subtract_calendar_months(date(2021, 5, 31), 3) == date(2021, 2, 28)  # non-leap
+
+
+def test_subtract_calendar_months_within_year_no_clamp() -> None:
+    assert subtract_calendar_months(date(2024, 1, 25), 3) == date(2023, 10, 25)
+
+
+def test_subtract_calendar_months_year_borrow() -> None:
+    # Anchor month 2 − 3 → previous year month 11 (the divmod borrow path).
+    assert subtract_calendar_months(date(2024, 2, 15), 3) == date(2023, 11, 15)
+
+
+def test_default_fno_window_uses_expiry_minus_3mo() -> None:
+    win = default_fno_minute_window(
+        date(2024, 1, 25), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
+    )
+    # [expiry−3mo, expiry+1day) — end-exclusive includes the expiry day's intraday bars.
+    assert win == (date(2023, 10, 25), date(2024, 1, 26))
+
+
+def test_default_fno_window_clamps_start_to_full_start() -> None:
+    # expiry−3mo (2019-11-15) is BEFORE the floor → start clamps up to full_start.
+    win = default_fno_minute_window(
+        date(2020, 2, 15), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
+    )
+    assert win == (date(2020, 1, 1), date(2020, 2, 16))
+
+
+def test_default_fno_window_clamps_end_to_full_end() -> None:
+    # expiry+1day is AFTER full_end → end clamps down to full_end.
+    win = default_fno_minute_window(
+        date(2026, 6, 30), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
+    )
+    assert win == (date(2026, 3, 30), date(2026, 6, 13))
+
+
+def test_default_fno_window_none_expiry_is_full_range() -> None:
+    full = (date(2020, 1, 1), date(2026, 6, 13))
+    assert default_fno_minute_window(None, full_start=full[0], full_end=full[1]) == full
+
+
+def test_default_fno_window_collapsed_span_falls_back_to_full() -> None:
+    # expiry BEFORE full_start → the lookback window is entirely out of range
+    # (start>=end) → conservative full range.
+    full = (date(2024, 1, 1), date(2026, 6, 13))
+    win = default_fno_minute_window(date(2023, 6, 1), full_start=full[0], full_end=full[1])
+    assert win == full
 
 
 # ─────────────────────────────────────────────────────────────────────────

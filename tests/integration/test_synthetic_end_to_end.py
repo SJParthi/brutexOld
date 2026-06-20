@@ -42,6 +42,7 @@ class _CountingSink:
         symbol: str,
         interval: str,
         bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         """Record ``(symbol, interval, count)`` and report the count back."""
         del exchange, segment

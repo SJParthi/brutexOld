@@ -480,14 +480,13 @@ def _read_daily_partition(
 def _read_daily_bars(
     lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
 ) -> list[CandleBar]:
-    """Read *day*'s stored ``1day`` bar(s) directly — NO 1-minute resample.
+    """Read *day*'s stored ``1day`` bar(s) directly — NO 1-minute resample here.
 
-    The VERIFY-FIRST **1-day-only** default pull (``DEC-PULL-1DAY-FIRST-001``,
-    MIGRATION.md #723) populates ONLY the ``1day`` partitions, so the daily
-    movers timeframe reads them straight off disk (the same partitions
-    :func:`_prev_day_close` reads) instead of resampling the absent ``1minute``
-    series — that absence is exactly why a 1-day-only pull showed "no spot data"
-    before. For a daily timeframe "the bar IS the day": there is no intraday
+    1-minute is the ONLY fetched granularity and the ``1day`` partition is DERIVED
+    from it (``DEC-1MINUTE-ONLY-DERIVE-1DAY-001``), so the daily movers timeframe
+    reads the already-derived ``1day`` bars straight off disk (the same partitions
+    :func:`_prev_day_close` reads) instead of re-resampling the ``1minute`` series
+    here. For a daily timeframe "the bar IS the day": there is no intraday
     cutoff. Returns the (≤1) bar whose IST trading date equals *day*, or ``[]``
     when the symbol has no 1-day bar on *day* (the caller reports it skipped,
     never fabricated — Golden Rule #1).
@@ -549,12 +548,12 @@ def run_movers_snapshot(
     ranks them into the per-category payload.
 
     The discovery + read path depends on the timeframe (so the page works for
-    EITHER pull granularity — ``DEC-PULL-1DAY-FIRST-001``):
+    EITHER timeframe — ``DEC-1MINUTE-ONLY-DERIVE-1DAY-001``):
 
     * **Daily** (``1day``, the page default) → discover + read the stored
-      ``1day`` partitions DIRECTLY (:func:`_read_daily_bars`). The VERIFY-FIRST
-      1-day-only pull populates only these, so a daily snapshot must NOT require
-      1-minute data (the bug this fixes: a 1-day-only lake showed "no spot data").
+      ``1day`` partitions DIRECTLY (:func:`_read_daily_bars`). The ``1day`` series
+      is DERIVED from the fetched 1-minute, so a daily snapshot reads the derived
+      bars off disk and never re-resamples here.
     * **Intraday** (``1minute`` … ``4hour``) → discover the ``1minute``
       partitions and resample to *interval* up to *time* (:func:`_read_session_bars`).
 
@@ -579,8 +578,8 @@ def run_movers_snapshot(
     is_daily = minutes >= _DAILY_MIN_FLOOR
     cutoff_min = None if is_daily else _cutoff_minute(time)
     resolved_names = names or {}
-    # A daily snapshot reads the `1day` partitions directly (the VERIFY-FIRST
-    # 1-day-only pull populates ONLY those — DEC-PULL-1DAY-FIRST-001); an
+    # A daily snapshot reads the `1day` partitions directly (the `1day` series is
+    # DERIVED from the fetched 1-minute — DEC-1MINUTE-ONLY-DERIVE-1DAY-001); an
     # intraday snapshot resamples the `1minute` partitions.
     discovery_interval = "1day" if is_daily else "1minute"
     datasets = [d for d in list_candle_datasets(lake_root) if d["interval"] == discovery_interval]

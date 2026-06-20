@@ -7,11 +7,15 @@ index/stock or (lake-side) a contract — keyed by ``symbol_name`` (the engine
 symbol; ADR-0003). When the operator clicks a universe row and hits pull,
 :func:`pull_candles` ingests that instrument's candles across the
 **fetched** base timeframes
-(:data:`GROWW_FETCH_INTERVALS` — **``1day`` only during the verify-first phase**,
-DEC-PULL-1DAY-FIRST-001; ``1minute`` + the 19 intraday timeframes resampled from
-it return once the OHLCV-vs-bhavcopy check passes), reusing the proven
+(:data:`GROWW_FETCH_INTERVALS` — **``1minute`` ONLY**,
+DEC-1MINUTE-ONLY-DERIVE-1DAY-001; 1-minute is the single granularity fetched and
+``1day`` + the 19 intraday timeframes are DERIVED from it, never vendor-fetched),
+reusing the proven
 :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` orchestration
-core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
+core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine). The
+``1day`` partition is filled by resampling the just-pulled 1-minute to
+midnight-IST daily bars (:mod:`brutex.data.spot_daily_resample`), so the engine's
+daily anchor is an openly-derived bar, not a separate vendor pull.
 
 PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the SPOT
 pull + instrument-master load now run on Groww — the J2-equivalent the
@@ -94,8 +98,12 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
     from brutex.adapters.rate_common import RateController
+    from brutex.data.models import CandleBar
+    from brutex.data.spot_daily_resample import DailyDeriveTarget
 
 _LOG = structlog.get_logger(__name__)
 
@@ -110,51 +118,53 @@ _LOG = structlog.get_logger(__name__)
 #: clamped up to it so a too-early pick can never waste quota.
 GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
 
-#: Spot-pull interval selection (DEC-PULL-1DAY-FIRST-001, operator decision
-#: 2026-06-13). The operator picks the fetch granularity per pull via a
-#: ``/universe`` dropdown — **1-day only** (the verify-first default), **1-minute
-#: only**, or **both** — so they can pull 1-day first, cross-check it against the
-#: official NSE/BSE bhavcopy (CLAUDE.md §6), THEN choose 1-minute / both, with no
-#: code change. The three canonical choice tokens:
+#: Legacy spot-interval choice tokens (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 retired the
+#: ``/universe`` granularity dropdown). 1-minute is now the SOLE fetched granularity
+#: for spot — ``1day`` + the 19 intraday TFs are DERIVED from it, never vendor-fetched
+#: (the spot twin of DEC-DHAN-1M-ONLY-001). These tokens remain importable for the
+#: vestigial CLI ``--interval`` alias map (:func:`brutex.cli._resolve_fetch_intervals`),
+#: but the dashboard pull always fetches 1-minute only — :func:`resolve_fetch_intervals`
+#: ignores any choice and returns ``("1minute",)``.
 SPOT_INTERVAL_DAY: Final[str] = "1day"
 SPOT_INTERVAL_MINUTE: Final[str] = "1minute"
 SPOT_INTERVAL_BOTH: Final[str] = "both"
 
-#: Dropdown choice → the fetched-interval tuple. ``both`` keeps the canonical
-#: display order (1m before 1d; the 19 intraday TFs are resampled from the stored
-#: 1-minute base, never fetched — DEC-DHAN-1M-ONLY-001).
+#: Legacy dropdown choice → fetched-interval tuple. RETAINED only for the CLI alias
+#: map; the dashboard no longer reads it (:func:`resolve_fetch_intervals` is now a
+#: constant ``("1minute",)``). ``both`` keeps the canonical display order.
 SPOT_INTERVAL_CHOICES: Final[dict[str, tuple[str, ...]]] = {
     SPOT_INTERVAL_DAY: ("1day",),
     SPOT_INTERVAL_MINUTE: ("1minute",),
     SPOT_INTERVAL_BOTH: ("1minute", "1day"),
 }
 
-#: The verify-first DEFAULT the pull functions use when no explicit ``intervals``
-#: is passed: **1-day only**. One source of truth shared by callers + tests.
-GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = SPOT_INTERVAL_CHOICES[SPOT_INTERVAL_DAY]
+#: The ONLY fetched spot granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): **1-minute**.
+#: ``1day`` is resampled from it after the pull (:mod:`brutex.data.spot_daily_resample`),
+#: never fetched. One source of truth shared by callers + tests.
+GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = (SPOT_INTERVAL_MINUTE,)
 
 
 def resolve_fetch_intervals(choice: str | None) -> tuple[str, ...]:
-    """Map a spot-interval dropdown *choice* to the fetch-interval tuple.
+    """Resolve the spot fetch-interval tuple — ALWAYS ``("1minute",)``.
 
-    ``"1day"`` → ``("1day",)``, ``"1minute"`` → ``("1minute",)``, ``"both"`` →
-    ``("1minute", "1day")``. A blank / ``None`` / unrecognised choice falls back to
-    the verify-first **1-day only** default (:data:`GROWW_FETCH_INTERVALS`) — it
-    NEVER silently widens to 1-minute (DEC-PULL-1DAY-FIRST-001 / Golden Rule #1).
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001 makes **1-minute the single granularity fetched
+    from Groww for spot**; ``1day`` and the 19 intraday timeframes are DERIVED from
+    the stored 1-minute, never vendor-fetched. The legacy ``/universe`` granularity
+    dropdown is retired, so this function ignores *choice* entirely and always returns
+    :data:`GROWW_FETCH_INTERVALS` (``("1minute",)``). The *choice* parameter is kept so
+    the route signatures + the harmless ``spot_interval`` query param still type-check.
 
     Parameters
     ----------
     choice
-        The dropdown / query-param value, or ``None`` when unspecified.
+        The (now-ignored) legacy dropdown / query-param value, or ``None``.
 
     Returns
     -------
     tuple[str, ...]
-        The intervals to fetch, in display order.
+        Always ``("1minute",)``.
     """
-    if choice is None:
-        return GROWW_FETCH_INTERVALS
-    return SPOT_INTERVAL_CHOICES.get(choice.strip(), GROWW_FETCH_INTERVALS)
+    return GROWW_FETCH_INTERVALS
 
 
 #: Groww canonical interval → lake ``TF_LABELS`` display label, so the
@@ -444,11 +454,10 @@ class PullCandlesReport:
         this case.
     timeframes
         One :class:`TimeframeResult` per **fetched** interval, in
-        :data:`GROWW_FETCH_INTERVALS` order (``1d`` only during the
-        verify-first phase, DEC-PULL-1DAY-FIRST-001; ``1m`` then ``1d``
-        once 1-minute is re-enabled). The 19 derived intraday timeframes
-        are resampled from the 1-minute base downstream, not fetched here
-        (DEC-DHAN-1M-ONLY-001).
+        :data:`GROWW_FETCH_INTERVALS` order (``1m`` only —
+        DEC-1MINUTE-ONLY-DERIVE-1DAY-001). The 19 derived intraday timeframes
+        AND ``1d`` are derived from the 1-minute base downstream, not fetched
+        here (DEC-DHAN-1M-ONLY-001).
     """
 
     symbol: str
@@ -991,9 +1000,10 @@ def pull_all_spot(
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the whole *instruments* list and the fetched base intervals
     (the injected *intervals*, defaulting to :data:`GROWW_FETCH_INTERVALS` —
-    ``1d`` only during the verify-first phase, DEC-PULL-1DAY-FIRST-001), so the
-    live adapter is built ONCE with the full universe (O(1) index) and the fan-out quarantines
-    a bad symbol without sinking the rest. An empty list is a clean no-op.
+    ``1m`` only, DEC-1MINUTE-ONLY-DERIVE-1DAY-001; ``1d`` is DERIVED after the pull),
+    so the live adapter is built ONCE with the full universe (O(1) index) and the
+    fan-out quarantines a bad symbol without sinking the rest. An empty list is a
+    clean no-op.
 
     Parameters
     ----------
@@ -1096,15 +1106,16 @@ def pull_all_spot(
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): the ledger below is the page's
         # primary source; the sidecar stays on disk read-only (db_view fallback
         # + the one-shot ledger migration) until the Stage-6 deletion.
-        # DECOUPLED spot phases (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851 —
-        # supersedes the 1-minute↔1-day COUPLING of DEC-SPOT-1DAY-FIRST-001). For the
-        # SPOT pull the cheap ``1day`` phase and the heavy ``1minute`` fill each pull
-        # their OWN full ``[start, end]`` range over EVERY requested symbol,
-        # INDEPENDENTLY: the 1-minute phase is no longer bounded to a discovered 1-day
-        # date and no symbol is ever skipped for missing 1-day coverage (so a symbol
-        # the vendor serves only at 1-minute is still pulled, feeding the daily
-        # resample). ``intervals=("1day",)`` (the verify-first DEFAULT — retained) runs
-        # ONLY the 1-day phase; both phases pass ``symbol_windows=None``.
+        # 1-MINUTE-ONLY fetch (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): the SPOT pull fetches
+        # ONLY ``1minute`` from Groww — :func:`resolve_fetch_intervals` always resolves
+        # to ``("1minute",)`` so ``daily_requested`` is False and only the 1-minute phase
+        # runs. ``1day`` is DERIVED after the pull from the just-written 1-minute
+        # (``_resample_daily_after_pull``), never vendor-fetched. The legacy ``1day``
+        # phase block below is RETAINED but dormant for any defensive caller that still
+        # injects ``intervals=("1day",)`` directly. The decoupled-phase plumbing
+        # (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851) is unchanged; both phases
+        # pull their OWN full ``[start, end]`` range over EVERY requested symbol with
+        # ``symbol_windows=None``.
         daily_requested = _PHASE1_DAILY in intervals
         minute_intervals: tuple[str, ...] = tuple(i for i in intervals if i != _PHASE1_DAILY)
         minute_requested = bool(minute_intervals)
@@ -1370,8 +1381,8 @@ def pull_all_spot(
             # per-symbol filtering, no minute-start bounding). ``symbol_windows=None``
             # flows to plan_windows / reconcile_ledger_with_lake / _run_phase so the
             # full range is used. SUPERSEDES the 1-minute-bounded-to-1-day-coverage
-            # coupling of DEC-SPOT-1DAY-FIRST-001; the verify-first 1-day-only DEFAULT
-            # (the operator picks granularity via the dropdown) is RETAINED.
+            # coupling of DEC-SPOT-1DAY-FIRST-001. Per DEC-1MINUTE-ONLY-DERIVE-1DAY-001
+            # this 1-minute phase is the ONLY vendor phase (1-day is derived after).
             if minute_requested:
                 # GLOBAL-STOP GUARD: if Phase 1 ended with a dead token or a spent
                 # quota, the minute pull would fail identically — SKIP it honestly (the
@@ -1410,6 +1421,24 @@ def pull_all_spot(
                             window_days_for=groww_window_days_for,
                         )
                     _run_phase(minute_intervals, instruments, None)
+            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
+            # 1-minute is the ONLY granularity fetched from Groww; the 1-day partition
+            # the engine reads (the PDH/PDL daily anchor) is DERIVED here by resampling
+            # the just-pulled 1-minute over the FULL [start, end) range to midnight-IST
+            # daily bars and writing the 1-day partition. UNCONDITIONAL — there is no
+            # vendor 1-day to be empty (this supersedes the resample-on-EMPTY arm of the
+            # retired #842/#852). Runs AFTER the minute phase but BEFORE the finally's
+            # end_pull_ledger so it shares the pull's lifetime; quarantined end-to-end
+            # (it can NEVER fail the pull) and a no-op for any symbol with no 1-minute.
+            if not dry_run:  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
+                _resample_daily_after_pull(
+                    instruments=instruments,
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    now=now if now is not None else datetime.now(UTC),
+                    pull_id=pid,
+                )
         finally:
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
@@ -1583,6 +1612,95 @@ def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner c
         )
 
 
+def _resample_daily_after_pull(  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
+    *,
+    instruments: Sequence[Instrument],
+    lake_root: Path,
+    start: date,
+    end: date,
+    now: datetime,
+    pull_id: str,
+) -> None:
+    """Derive each symbol's ``1day`` partition from its just-pulled 1-minute (always-on).
+
+    The PRIMARY arm of DEC-1MINUTE-ONLY-DERIVE-1DAY-001: 1-minute is the ONLY granularity
+    fetched from Groww, so the ``1day`` series the engine reads is DERIVED here — resample
+    each symbol's freshly-written 1-minute over the FULL pulled ``[start, end)`` range to
+    midnight-IST daily bars (:func:`~brutex.data.spot_daily_resample.derive_daily_for_targets`,
+    reusing the single-source-of-truth OHLCV aggregation + midnight-IST re-stamp) and write
+    the ``1day`` partition. UNCONDITIONAL (no vendor 1-day to be empty). Binds the SHARED
+    window-bounded lake read + ``1day`` write builders per symbol and runs the quarantining
+    driver. Wrapped so NO failure here can ever surface as a pull error, and a no-op (no
+    1-minute backs the range) is honest, never an invented bar. Runs BEFORE the ``finally``'s
+    ``end_pull_ledger`` so it shares the pull's lifetime.
+    """
+    from brutex.calendars.nse import IST
+    from brutex.data.spot_daily_resample import (
+        DailyDeriveTarget,
+        derive_daily_for_targets,
+        make_lake_read_1m_window,
+        make_lake_write_1day,
+    )
+
+    try:
+        by_symbol = {inst.symbol_name: inst for inst in instruments}
+        # ``before`` is today's IST *date* (the forming-session cutoff). The canonical
+        # ``calendars.nse.IST`` (ZoneInfo) and the resampler's fixed +05:30 agree exactly
+        # for the 2020+ no-DST scope, so the cutoff date is representation-independent.
+        before = now.astimezone(IST).date()
+        targets = [
+            DailyDeriveTarget(
+                exchange=inst.exch_id.value,
+                segment=inst.segment.value,
+                symbol=inst.symbol_name,
+                start=start,
+                end=end,
+            )
+            for inst in instruments
+        ]
+
+        def _build_read(target: DailyDeriveTarget) -> Callable[[], pl.DataFrame]:
+            inst = by_symbol[target.symbol]
+            return make_lake_read_1m_window(
+                lake_root=lake_root,
+                exchange=inst.exch_id.value,
+                segment=inst.segment.value,
+                symbol=target.symbol,
+                start=target.start,
+                end=target.end,
+            )
+
+        def _build_write(
+            target: DailyDeriveTarget,
+        ) -> Callable[[Sequence[CandleBar]], int]:
+            inst = by_symbol[target.symbol]
+            return make_lake_write_1day(
+                lake_root=lake_root,
+                exchange=inst.exch_id.value,
+                segment=inst.segment.value,
+                symbol=target.symbol,
+            )
+
+        report = derive_daily_for_targets(
+            targets=targets,
+            build_read_1m=_build_read,
+            build_write_1day=_build_write,
+            before=before,
+        )
+    except Exception as exc:
+        _LOG.warning("universe.daily_derive.error", pull_id=pull_id, error=str(exc))
+        return
+    if report.targets:
+        _LOG.info(
+            "universe.daily_derive.done",
+            pull_id=pull_id,
+            derived=report.derived,
+            no_minute=report.no_minute,
+            errored=report.errored,
+            bars=report.bars,
+        )
+
+
 def pull_candles(
     instrument: Instrument,
     *,
@@ -1604,9 +1722,9 @@ def pull_candles(
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the single *instrument* and the Groww **fetched** base intervals
     (the injected *intervals*, defaulting to :data:`GROWW_FETCH_INTERVALS` —
-    ``1day`` only during the verify-first phase, DEC-PULL-1DAY-FIRST-001;
-    ``1minute`` + the 19 resampled intraday timeframes return once 1-minute is
-    re-enabled, per DEC-DHAN-1M-ONLY-001). The window is resolved by
+    ``1minute`` ONLY, DEC-1MINUTE-ONLY-DERIVE-1DAY-001; ``1day`` is DERIVED from
+    the just-pulled 1-minute after the pull, and the 19 intraday timeframes are
+    resampled from the same 1-minute base, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
     (day-inclusive, clamped to ``[2020-01-01, today]``) when either is given,
     else the full calendar *year*, else (no dates, no year) the full Track-1
@@ -1689,19 +1807,19 @@ def pull_candles(
         # FetchCoverage set was deleted in Stage e). The legacy window_status.json
         # sidecar is WRITE-RETIRED (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) — kept on
         # disk read-only for the db_view fallback + one-shot ledger migration.
-        # DECOUPLED spot phases (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851 —
-        # supersedes the 1-minute↔1-day COUPLING of DEC-SPOT-1DAY-FIRST-001): the
-        # ``1day`` and ``1minute`` phases each pull their OWN full ``[start, end]``
-        # range INDEPENDENTLY, over every requested symbol — the 1-minute fill is no
-        # longer bounded to a discovered 1-day date and no symbol is skipped for
-        # missing 1-day coverage. ``intervals=("1day",)`` (the verify-first DEFAULT —
-        # retained) runs ONLY the 1-day phase; both pass ``symbol_windows=None``.
+        # 1-MINUTE-ONLY fetch (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): the SPOT pull fetches
+        # ONLY ``1minute`` from Groww (``resolve_fetch_intervals`` → ``("1minute",)``),
+        # so only the 1-minute phase runs; ``1day`` is DERIVED after the pull
+        # (``_resample_daily_after_pull``), never vendor-fetched. The dormant ``1day``
+        # phase block is RETAINED for any defensive caller that injects
+        # ``intervals=("1day",)`` directly. The decoupled-phase plumbing
+        # (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851) is unchanged; both phases
+        # pass ``symbol_windows=None``.
         daily_requested = _PHASE1_DAILY in intervals
         minute_intervals: tuple[str, ...] = tuple(i for i in intervals if i != _PHASE1_DAILY)
         minute_requested = bool(minute_intervals)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate ONCE for the
-        # whole pull, shared by BOTH phases. Phase 1's 1-day windows are PLANNED
-        # upfront; Phase 2's bounded 1-minute windows after the derive.
+        # whole pull. Only the 1-minute phase runs; ``1day`` is derived after the pull.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         if ledger is not None and daily_requested:
             plan_windows(
@@ -1836,12 +1954,26 @@ def pull_candles(
                             window_days_for=groww_window_days_for,
                         )
                     _run_phase(minute_intervals, None)
+            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
+            # Derive this instrument's 1-day partition from the just-pulled 1-minute over
+            # the FULL [start, end) range (midnight-IST stamped). UNCONDITIONAL — 1-minute
+            # is the only fetched granularity; 1-day is never vendor-fetched. Quarantined
+            # end-to-end (can NEVER fail the pull); a no-op when no 1-minute backs it.
+            if not dry_run:  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
+                _resample_daily_after_pull(
+                    instruments=[instrument],
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    now=datetime.now(UTC),
+                    pull_id=pid,
+                )
         finally:
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
 
-        # Build one result per REQUESTED interval (the injected *intervals*, 1day-only
-        # during the verify-first phase, DEC-PULL-1DAY-FIRST-001). The label map gives
+        # Build one result per REQUESTED interval (the injected *intervals*, ``1m`` only
+        # — DEC-1MINUTE-ONLY-DERIVE-1DAY-001). The label map gives
         # the dashboard's ``1m``/``1d`` display label. Explicit ``dict[str, str]`` so
         # the keys are plain ``str`` (matching the ``str`` *intervals*).
         label_for: dict[str, str] = dict(_FETCH_INTERVAL_LABELS)

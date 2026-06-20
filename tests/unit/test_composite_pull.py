@@ -122,7 +122,14 @@ class _RecordingSink:
         self.appends: list[tuple[str, str, str, int]] = []
 
     def append(
-        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[object]
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[object],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         self.appends.append((segment, symbol, interval, len(bars)))
         return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())

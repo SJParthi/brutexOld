@@ -14,8 +14,8 @@ path consumes the *existing* historical daily lake only.
 
 ## Where the daily bar lives
 
-The historical lake stores the ``1day`` spot candle (the VERIFY-FIRST default
-pull granularity per CLAUDE.md §6 / DEC-PULL-1DAY-FIRST-001) under the canonical
+The historical lake stores the ``1day`` spot candle (DERIVED from the fetched
+1-minute per CLAUDE.md §6 / DEC-1MINUTE-ONLY-DERIVE-1DAY-001) under the canonical
 partition layout (``FR-CAT-001``)::
 
     <lake_root>/bars/<exchange>/<segment>/<symbol>/1day/<yyyy>/<mm>.parquet

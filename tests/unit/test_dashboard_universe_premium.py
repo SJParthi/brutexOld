@@ -59,14 +59,15 @@ def test_universe_wires_the_shared_component() -> None:
     html = _render_universe_html()
     assert "/static/bx-datepicker.css" in html, "the component stylesheet is not linked"
     assert "/static/bx-datepicker.js" in html, "the component script is not linked"
-    # the from->to RANGE container + the granularity dropdown. The two derivatives
-    # dropdowns (interval / contract-type) were removed when the bulk derivative
-    # buttons became metadata-only (DEC-DERIV-DECOMMISSION-FUSED-001) — a metadata
-    # pull has no candles, so there is no interval/contract-type knob left to wire.
+    # the from->to RANGE container. The granularity dropdown was retired by
+    # DEC-1MINUTE-ONLY-DERIVE-1DAY-001 (1-minute is the only granularity fetched; 1-day is
+    # derived from it), and the two derivatives dropdowns (interval / contract-type) were
+    # removed when the bulk derivative buttons became metadata-only
+    # (DEC-DERIV-DECOMMISSION-FUSED-001) — so NO ``data-bxsel`` select remains to wire.
     assert 'data-bxdp="range" data-from="fromDate" data-to="toDate"' in html, (
         "the date-range container is not wired to the component"
     )
-    assert html.count("data-bxsel") == 1, "the granularity select is not wired to the component"
+    assert html.count("data-bxsel") == 0, "no granularity select remains (the dropdown is retired)"
     # the inline picker must be GONE (single source of truth in the static file).
     assert "function enhanceCalendar" not in html and "function buildCalendar" not in html, (
         "the picker JS must not be inlined in the template (it lives in the static asset)"
@@ -74,10 +75,10 @@ def test_universe_wires_the_shared_component() -> None:
 
 
 def test_universe_keeps_native_controls_as_value_source() -> None:
-    """Progressive enhancement: the test-pinned native inputs/selects still exist
-    so the pull JS reads real values + the pins hold."""
+    """Progressive enhancement: the test-pinned native date inputs still exist
+    so the pull JS reads real values + the pins hold. The granularity dropdown is
+    retired (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 — 1-minute is the only fetched granularity)."""
     html = _render_universe_html()
     assert 'id="fromDate" min="2020-01-01"' in html
     assert 'id="toDate" min="2020-01-01"' in html
-    assert 'id="spotInterval"' in html
-    assert '<option value="1day" selected>' in html
+    assert 'id="spotInterval"' not in html  # the granularity dropdown is removed

@@ -76,39 +76,36 @@ def _index(symbol: str = "13") -> Instrument:
 #: Both fetch intervals — passed EXPLICITLY by the machinery tests that exercise
 #: per-(symbol, interval) mechanics (per-pair progress, mixed 1m-lands/1d-gap
 #: outcomes, both-interval failure/quarantine). The PRODUCTION default
-#: (``GROWW_FETCH_INTERVALS``) is **1-day only** — the verify-first default of the
-#: ``/universe`` granularity dropdown (DEC-PULL-1DAY-FIRST-001: 1day / 1minute /
-#: both). These tests opt INTO the two-interval ("both") shape so the multi-interval
-#: machinery stays covered while the default-behaviour tests assert the 1-day default.
+#: (``GROWW_FETCH_INTERVALS``) is **1-minute only** (DEC-1MINUTE-ONLY-DERIVE-1DAY-001:
+#: 1-minute is the ONLY granularity fetched; 1-day is derived from it). These tests opt
+#: INTO the two-interval ("both") shape so the multi-interval machinery stays covered
+#: while the default-behaviour tests assert the 1-minute-only default.
 _BOTH_INTERVALS: tuple[str, ...] = ("1minute", "1day")
 
 
 class TestResolveFetchIntervals:
-    """The spot-interval dropdown resolver (DEC-PULL-1DAY-FIRST-001)."""
+    """The spot fetch-interval resolver — ALWAYS 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001)."""
 
-    def test_default_is_one_day_only(self) -> None:
-        # The verify-first default: a blank/None choice NEVER widens to 1-minute.
-        assert resolve_fetch_intervals(None) == ("1day",)
-        assert GROWW_FETCH_INTERVALS == ("1day",)
-
-    def test_day_choice(self) -> None:
-        assert resolve_fetch_intervals("1day") == ("1day",)
+    def test_default_is_one_minute_only(self) -> None:
+        # 1-minute is the only granularity fetched; 1-day is derived from it.
+        assert resolve_fetch_intervals(None) == ("1minute",)
+        assert GROWW_FETCH_INTERVALS == ("1minute",)
 
     def test_minute_choice(self) -> None:
         assert resolve_fetch_intervals("1minute") == ("1minute",)
 
-    def test_both_choice_keeps_display_order(self) -> None:
-        # ``both`` fetches 1m then 1d (the canonical display order).
-        assert resolve_fetch_intervals("both") == ("1minute", "1day")
+    def test_legacy_day_choice_is_ignored(self) -> None:
+        # The legacy ``1day`` token is IGNORED — the dropdown is retired; always 1-minute.
+        assert resolve_fetch_intervals("1day") == ("1minute",)
 
-    def test_whitespace_is_stripped(self) -> None:
-        assert resolve_fetch_intervals("  both  ") == ("1minute", "1day")
+    def test_legacy_both_choice_is_ignored(self) -> None:
+        assert resolve_fetch_intervals("both") == ("1minute",)
 
-    def test_unknown_choice_falls_back_to_one_day(self) -> None:
-        # An unrecognised value safely defaults to 1-day (never crashes, never
-        # silently widens to 1-minute — Golden Rule #1).
-        assert resolve_fetch_intervals("5minute") == ("1day",)
-        assert resolve_fetch_intervals("") == ("1day",)
+    def test_any_value_resolves_to_one_minute(self) -> None:
+        # Whitespace / unknown / blank — every input resolves to 1-minute only.
+        assert resolve_fetch_intervals("  both  ") == ("1minute",)
+        assert resolve_fetch_intervals("5minute") == ("1minute",)
+        assert resolve_fetch_intervals("") == ("1minute",)
 
 
 class _EmptyAdapter(SyntheticSpotAdapter):
@@ -253,12 +250,11 @@ class TestPullCandlesDryRun:
 
     def test_covers_fetched_intervals(self, tmp_path: Path) -> None:
         report = pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
-        # Verify-first phase: the PRODUCTION default fetches 1-day ONLY
-        # (DEC-PULL-1DAY-FIRST-001) — 1-minute + the 19 resampled intraday TFs
-        # return once the OHLCV-vs-bhavcopy check passes — so the grid shows the
-        # single 1d cell (not two).
-        assert [tf.interval for tf in report.timeframes] == ["1d"]
-        assert GROWW_FETCH_INTERVALS == ("1day",)
+        # The PRODUCTION default fetches 1-minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
+        # 1-day + the 19 intraday TFs are derived from it — so the grid shows the single
+        # 1m cell (not two).
+        assert [tf.interval for tf in report.timeframes] == ["1m"]
+        assert GROWW_FETCH_INTERVALS == ("1minute",)
         # Synthetic adapter always returns bars → some completed, zero failed.
         assert report.total_failed == 0
         assert report.total_completed > 0

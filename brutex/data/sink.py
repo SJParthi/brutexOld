@@ -70,6 +70,7 @@ class BarSink(Protocol):
         symbol: str,
         interval: str,
         bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         """Persist *bars* for the given partition coordinates."""
         ...
@@ -97,9 +98,10 @@ class NullBarSink:
         symbol: str,
         interval: str,
         bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         """Discard *bars* and report the count — no persistence side effects."""
-        del exchange, segment, symbol, interval
+        del exchange, segment, symbol, interval, merge_mode
         return SinkAppendResult(
             bars_appended=len(bars),
             partitions_written=0,
@@ -155,12 +157,18 @@ class ParquetBarSink:
         symbol: str,
         interval: str,
         bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> SinkAppendResult:
         """Group *bars* by partition and write each group.
 
         Bars spanning more than one ``(year, month)`` partition are
         handled transparently — each group becomes exactly one
         :meth:`ParquetWriter.write` call.
+
+        *merge_mode* is forwarded verbatim to :meth:`ParquetWriter.write`:
+        ``"keep-first"`` (default, the vendor-spine identity) or
+        ``"latest-wins"`` (the derived ``1day`` partition's self-healing
+        restate — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / FIX-2).
         """
         if not bars:
             return SinkAppendResult(
@@ -183,6 +191,7 @@ class ParquetBarSink:
                 symbol=symbol,
                 interval=interval,
                 bars=group,
+                merge_mode=merge_mode,
             )
             results.append(write_result)
 
