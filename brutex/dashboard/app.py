@@ -3536,7 +3536,10 @@ def build_app(
         return JSONResponse(payload)
 
     @app.get("/api/v1/db/window-ledger")
-    async def api_db_window_ledger() -> JSONResponse:
+    async def api_db_window_ledger(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
         """GET /api/v1/db/window-ledger — the unified per-window skip/retry ledger.
 
         DEC-WINDOW-LEDGER-001. EVERY spot + options fetch window of the live
@@ -3548,6 +3551,15 @@ def build_app(
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
+
+        The response is now ONE ``LIMIT``/``OFFSET`` page with a real ``total``
+        (DEC-DB-VIEWER-PAGINATE-ALL-001) so the /db viewer renders O(visible), not
+        every window. Honest envelope (Golden Rule #10): the ledger is a SMALL
+        bounded sidecar (one row per fetch window — thousands, not the millions a
+        candle partition holds), so the read stays O(windows); only the page's rows
+        are IST-formatted + serialized, and the page-slice preserves the canonical
+        :meth:`~brutex.data.window_ledger_store.WindowLedger.to_rows` sort + derived
+        columns byte-for-byte.
         """
         from brutex.data.window_ledger_store import load_window_ledger
 
@@ -3569,15 +3581,22 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse({"columns": columns, "rows": [], "total": 0})
+            return JSONResponse(
+                {"columns": columns, "rows": [], "total": 0, "limit": limit, "offset": offset}
+            )
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
-            """Load the ledger Parquet + project its sorted rows to the grid shape."""
+            """Load the ledger, then slice + IST-format ONLY the requested page."""
             from brutex.data.session import format_ist_clock
 
+            all_rows = load_window_ledger(lake).to_rows()
+            total = len(all_rows)
+            # Slice BEFORE formatting → only the page's rows are IST-coerced (O(page)).
+            # An offset past the end is a clean empty page (Python slice never raises).
+            page = all_rows[offset : offset + limit]
             rows: list[list[Any]] = []
-            for row in load_window_ledger(lake).to_rows():
+            for row in page:
                 cells: list[Any] = list(row)
                 # first_seen_at (idx 9) + last_attempt_at (idx 10) are stored UTC;
                 # show clean IST (CLAUDE.md §6 / §11 COMMON). window_start/end stay
@@ -3585,7 +3604,13 @@ def build_app(
                 cells[9] = format_ist_clock(cells[9])
                 cells[10] = format_ist_clock(cells[10])
                 rows.append(cells)
-            return {"columns": columns, "rows": rows, "total": len(rows)}
+            return {
+                "columns": columns,
+                "rows": rows,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
 
         return JSONResponse(await run_in_threadpool(_load))
 
@@ -3646,13 +3671,16 @@ def build_app(
     async def api_db_registry_expiries(
         exch: str | None = Query(default=None),
         underlying: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         """GET /api/v1/db/registry/expiries — the registry's persisted expiry dates.
 
         Reads the sibling ``registry.duckdb`` cache read-only. Returns the grid
-        shape (``{columns, rows, total, counts, note}``) the /db page renders;
-        ``counts`` carries the registry-wide expiry/contract totals for the nav
-        badges. Thin wrapper over
+        shape (``{columns, rows, total, limit, offset, counts, note}``) the /db page
+        renders; the page is SQL-bounded (``LIMIT``/``OFFSET``) with a cheap FILTERED
+        ``total`` (DEC-DB-VIEWER-PAGINATE-ALL-001), and ``counts`` carries the
+        registry-wide expiry/contract totals for the nav badges. Thin wrapper over
         :func:`brutex.dashboard.db_view.list_registry_expiries`; never raises
         (an empty grid + ``note`` when no registry exists yet — Golden Rule #1).
         """
@@ -3666,7 +3694,9 @@ def build_app(
 
         def _load() -> dict[str, Any]:
             """Read the expiry grid + registry counts off the event loop."""
-            payload = list_registry_expiries(registry_path, exch=exch, underlying=underlying)
+            payload = list_registry_expiries(
+                registry_path, exch=exch, underlying=underlying, limit=limit, offset=offset
+            )
             payload["counts"] = registry_counts(registry_path)
             return payload
 
@@ -3677,13 +3707,17 @@ def build_app(
         exch: str | None = Query(default=None),
         underlying: str | None = Query(default=None),
         expiry_date: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         """GET /api/v1/db/registry/contracts — the registry's persisted contract legs.
 
         The structured chain view: one row per contract (expiry / strike / CE-PE /
         per-contract historical ``candle_status``). Optional ``exch`` /
-        ``underlying`` / ``expiry_date`` (ISO ``YYYY-MM-DD``) filters. Reads the
-        sibling ``registry.duckdb`` read-only; thin wrapper over
+        ``underlying`` / ``expiry_date`` (ISO ``YYYY-MM-DD``) filters. The page is
+        SQL-bounded (``LIMIT``/``OFFSET``) with a cheap FILTERED ``total`` so a chain
+        with tens of thousands of legs loads O(page) (DEC-DB-VIEWER-PAGINATE-ALL-001).
+        Reads the sibling ``registry.duckdb`` read-only; thin wrapper over
         :func:`brutex.dashboard.db_view.list_registry_contracts` — a malformed
         ``expiry_date`` raises ``ValueError`` there → HTTP 400 here; a missing
         registry degrades to an empty grid + ``note`` (never a 500).
@@ -3699,7 +3733,12 @@ def build_app(
         def _load() -> dict[str, Any]:
             """Read the contract grid + registry counts off the event loop."""
             payload = list_registry_contracts(
-                registry_path, exch=exch, underlying=underlying, expiry_date=expiry_date
+                registry_path,
+                exch=exch,
+                underlying=underlying,
+                expiry_date=expiry_date,
+                limit=limit,
+                offset=offset,
             )
             payload["counts"] = registry_counts(registry_path)
             return payload

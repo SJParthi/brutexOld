@@ -18,7 +18,15 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863 —
+_Last updated: 2026-06-20 (DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864 —
+EVERY `/db` tab is now O(page): the last two whole-table reads — the F&O registry
+(expiries/contracts) + the window-ledger sidecar — are SQL-`LIMIT`/`OFFSET` paginated,
+completing the candle/option/F&O/DuckDB-table pages already bounded. The registry is
+fully O(page) (DuckDB `LIMIT/OFFSET` over its index + a cheap FILTERED `COUNT(*)`;
+bench: first-page 1.04× for 10× more legs); the window-ledger is O(page) render+serialize
+with a deliberately-kept O(windows) bounded read (a small sidecar — honest envelope,
+NOT claimed O(page)-read). `registry_store.py` + `db_view.py` at 100% line+branch;
+read-only viewer, ENGINE UNCHANGED. Earlier: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863 —
 the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
 correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
 1-minute partition to baseline the derived %-change columns on every paging click —
@@ -161,25 +169,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/intelligent-shannon-s8qea3` (`/db` + `/universe` dashboard
-  pages made INSTANT per interaction with ZERO correctness change —
-  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863: `db_view.py::query_candles` now
-  page-bounds the intraday %-change baseline — reading the prior-day last-1-minute close
-  for ONLY the page's date span + the single bar before it
-  (`_intraday_prev_close_by_page_date`, byte-for-byte identical to the old whole-partition
-  scan, proven exhaustively + a flat-latency bench) — instead of aggregating the WHOLE
-  multi-year 1-minute partition on every paging click; the FRONTENDS update in place
-  (grid-only `#dbgrid` refresh; per-tab instrument cache + debounced search + in-place
-  completeness patch). Honest envelope: O(page date-span)/O(visible), NOT O(1)-total.
-  Engine/52-vocab/scope UNCHANGED — read-only viewer only; this PR did NOT touch Live
-  (removed by DEC-LIVE-REMOVE-001) or the movers route (DEC-MOVERS-O1-LATENCY-001) —
-  both owned by now-merged parallel sessions. Prior merged:
+- **Active branch:** `claude/db-registry-pagination` (EVERY `/db` tab is now O(page) —
+  DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864: the last two whole-table reads — the
+  F&O registry expiries/contracts (`RegistryStore.list_*` gain `LIMIT`/`OFFSET` + FILTERED
+  `count_*`; `db_view.list_registry_*` thread them + return the filtered `COUNT(*)`) and the
+  window-ledger sidecar (route slices one page BEFORE IST-formatting) — are paginated,
+  completing the candle/option/F&O/DuckDB-table pages already SQL-bounded; `db.html` pages
+  both in place via the COMMON `gridAndPager` + grid-split. Honest envelope: registry fully
+  O(page) (bench 1.04× for 10× legs), window-ledger O(page) render/serialize + O(windows)
+  bounded read (small sidecar, deliberately not SQL-rewritten). `registry_store.py` +
+  `db_view.py` at 100% line+branch; read-only viewer, ENGINE UNCHANGED. Prior merged:
+  DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817, /db+/universe instant) +
   DEC-LIVE-REMOVE-001 #862 (PR #816, entire LIVE feed removed) +
   DEC-FNO-CANDLE-LAKE-001 #861 (PR #814, F&O candle lake first-class `/db` table + schema_meta) +
   DEC-MOVERS-O1-LATENCY-001 #860 (PR #815, /movers near-O(1) snapshot cache + month-bounded
   reads) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows
   real expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
-  (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811))
+  (PR #812))
 
 ---
 
@@ -407,7 +413,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/intelligent-shannon-s8qea3`
+- **Active feature branch:** `claude/db-registry-pagination`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

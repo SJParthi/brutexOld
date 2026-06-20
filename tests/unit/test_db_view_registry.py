@@ -131,6 +131,8 @@ def test_list_registry_expiries_missing_file(tmp_path: Path) -> None:
         "columns": list(REGISTRY_EXPIRY_COLUMNS),
         "rows": [],
         "total": 0,
+        "limit": 500,
+        "offset": 0,
         "note": "no registry yet — pull expiries + contracts first",
     }
 
@@ -166,6 +168,8 @@ def test_list_registry_contracts_missing_file(tmp_path: Path) -> None:
         "columns": list(REGISTRY_CONTRACT_COLUMNS),
         "rows": [],
         "total": 0,
+        "limit": 500,
+        "offset": 0,
         "note": "no registry yet — pull expiries + contracts first",
     }
 
@@ -225,3 +229,39 @@ def test_list_registry_contracts_rejects_malformed_expiry_on_seeded_file(tmp_pat
     _seed_registry(path)
     with pytest.raises(ValueError, match="expiry_date must be ISO"):
         list_registry_contracts(path, expiry_date="30-01-2020")
+
+
+# ── pagination (DEC-DB-VIEWER-PAGINATE-ALL-001) ──────────────────────────────
+
+
+def test_list_registry_expiries_paged_total_is_filtered_not_page_len(tmp_path: Path) -> None:
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)  # 3 expiries total
+    page = list_registry_expiries(path, limit=2, offset=0)
+    assert len(page["rows"]) == 2  # one PAGE
+    assert page["total"] == 3  # but the FILTERED total is the full count
+    assert page["limit"] == 2 and page["offset"] == 0
+    # Page 2 is the contiguous remainder.
+    page2 = list_registry_expiries(path, limit=2, offset=2)
+    assert len(page2["rows"]) == 1
+    assert page2["total"] == 3 and page2["offset"] == 2
+
+
+def test_list_registry_expiries_paged_total_respects_filter(tmp_path: Path) -> None:
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)
+    page = list_registry_expiries(path, underlying="NIFTY", limit=1, offset=0)
+    assert page["total"] == 2  # NIFTY has 2 expiries (filtered count, not 3)
+    assert len(page["rows"]) == 1
+
+
+def test_list_registry_contracts_paged_total_is_filtered(tmp_path: Path) -> None:
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)  # 4 contract legs total
+    page = list_registry_contracts(path, limit=2, offset=0)
+    assert len(page["rows"]) == 2
+    assert page["total"] == 4
+    assert page["limit"] == 2 and page["offset"] == 0
+    # Filtered by underlying → filtered total.
+    nifty = list_registry_contracts(path, underlying="NIFTY", limit=10, offset=0)
+    assert nifty["total"] == 3  # NIFTY has 3 legs (CE+PE+FUT), BANKNIFTY excluded

@@ -306,3 +306,73 @@ def test_default_candle_status_is_none(tmp_path: Path) -> None:
     _seed_one(store)
     assert store.list_contracts()[0].candle_status == CANDLE_STATUS_NONE
     store.close()
+
+
+# ── pagination + filtered counts (DEC-DB-VIEWER-PAGINATE-ALL-001) ─────────────
+
+
+def _seed_many(store: RegistryStore, n_exp: int = 6, legs_per: int = 5) -> None:
+    """Seed *n_exp* NIFTY expiries, each with *legs_per* contract legs, deterministically."""
+    for i in range(n_exp):
+        exp = date(2020, 1, 1 + i)
+        store.upsert_expiry("NSE", "NIFTY", exp, run_id="r1", fetched_at=_NOW)
+        for k in range(legs_per):
+            store.upsert_contract(
+                "NSE",
+                "NIFTY",
+                exp,
+                f"NSE-NIFTY-{i:02d}-{k:02d}-CE",
+                side="CE",
+                strike=12000.0 + k,
+                run_id="r1",
+                fetched_at=_NOW,
+            )
+
+
+def test_count_expiries_filtered(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert_expiry("NSE", "NIFTY", date(2020, 1, 2), run_id="r1", fetched_at=_NOW)
+    store.upsert_expiry("NSE", "BANKNIFTY", date(2020, 1, 9), run_id="r1", fetched_at=_NOW)
+    assert store.count_expiries() == 2  # unfiltered = whole-table total (nav badge)
+    assert store.count_expiries(underlying="NIFTY") == 1  # FILTERED
+    assert store.count_expiries(exch="NSE", underlying="BANKNIFTY") == 1
+    assert store.count_expiries(underlying="ABSENT") == 0
+    store.close()
+
+
+def test_count_contracts_filtered(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _seed_many(store, n_exp=3, legs_per=4)  # 12 legs across 3 expiries
+    assert store.count_contracts() == 12
+    assert store.count_contracts(expiry_date=date(2020, 1, 1)) == 4
+    assert store.count_contracts(underlying="NIFTY", expiry_date=date(2020, 1, 2)) == 4
+    assert store.count_contracts(underlying="ABSENT") == 0
+    store.close()
+
+
+def test_list_expiries_limit_offset_pages(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _seed_many(store, n_exp=6, legs_per=1)
+    # limit=None keeps the legacy "all rows" behaviour.
+    assert len(store.list_expiries()) == 6
+    page1 = store.list_expiries(limit=2, offset=0)
+    page2 = store.list_expiries(limit=2, offset=2)
+    assert len(page1) == 2 and len(page2) == 2
+    # ORDER BY exch, underlying, expiry_date → contiguous, non-overlapping pages.
+    assert [r.expiry_date for r in page1] == [date(2020, 1, 1), date(2020, 1, 2)]
+    assert [r.expiry_date for r in page2] == [date(2020, 1, 3), date(2020, 1, 4)]
+    # Offset past the end → empty page (never raises).
+    assert store.list_expiries(limit=2, offset=999) == []
+    store.close()
+
+
+def test_list_contracts_limit_offset_pages(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _seed_many(store, n_exp=2, legs_per=5)  # 10 legs
+    assert len(store.list_contracts()) == 10  # limit=None → all
+    page = store.list_contracts(limit=3, offset=3)
+    assert len(page) == 3
+    # A last partial page returns only the remainder.
+    last = store.list_contracts(limit=4, offset=8)
+    assert len(last) == 2
+    store.close()
