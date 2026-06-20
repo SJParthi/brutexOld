@@ -546,15 +546,18 @@ def _read_future_session(
     """
     import polars as pl
 
-    from brutex.data.lake_day_glob import read_day_month_frame
+    from brutex.data.lake_day_glob import read_day_intraday_frame
 
-    # Read ONLY the day's month Parquet (1minute/<yyyy>/<mm>.parquet) — an IST
-    # trading day's 1-minute bars all live in that one file (the session never
-    # crosses a UTC month boundary, brutex.data.lake_day_glob), so this is
-    # byte-equivalent to the prior whole-partition read but O(one month) not
-    # O(all-bars) (DEC-MOVERS-O1-LATENCY-001).
+    # Read the day's bars via the symbol-aware reader: ONLY the day's month
+    # Parquet (1minute/<yyyy>/<mm>.parquet) for a session-filtered symbol — an IST
+    # day's 1-minute bars all live in that one file (the session never crosses a
+    # UTC month boundary), so this is byte-equivalent to the prior whole-partition
+    # read but O(one month) not O(all-bars) (DEC-MOVERS-O1-LATENCY-001); a
+    # session-exempt underlying spot (GIFT Nifty) falls back to the whole
+    # partition there. FNO contract symbols are session-filtered unconditionally
+    # at ingest, so they always take the fast month-bound path.
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-    df = read_day_month_frame(base, day)
+    df = read_day_intraday_frame(base, day, symbol=symbol)
     if df is None:
         return None
     ist = pl.col("timestamp").dt.convert_time_zone(_IST)

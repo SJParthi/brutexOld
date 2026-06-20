@@ -424,13 +424,14 @@ def _read_session_bars(
 ) -> list[CandleBar]:
     """Read *day*'s 1-minute bars, resample to *minutes*, slice to ``≤ cutoff_min``.
 
-    Reads ONLY *day*'s month Parquet (``1minute/<yyyy>/<mm>.parquet`` via
-    :func:`~brutex.data.lake_day_glob.read_day_month_frame`) instead of the whole
-    multi-year partition — an IST trading day's 1-minute bars all live in that one
-    monthly file (the session never crosses a UTC month boundary, see
-    :mod:`brutex.data.lake_day_glob`), so the slice is byte-equivalent to a
+    Reads *day*'s bars via :func:`~brutex.data.lake_day_glob.read_day_intraday_frame`
+    — ONLY ``1minute/<yyyy>/<mm>.parquet`` for a SESSION-FILTERED symbol (an IST
+    trading day's 1-minute bars all live in that one monthly file, the session
+    never crossing a UTC month boundary), so the slice is byte-equivalent to a
     whole-partition read but ``O(one month)`` not ``O(all-bars)``
-    (DEC-MOVERS-O1-LATENCY-001). The frame is renamed to the resampler's
+    (DEC-MOVERS-O1-LATENCY-001); a SESSION-EXEMPT symbol (GIFT Nifty, ~21h) falls
+    back to the whole partition there to stay byte-equivalent (its full-day series
+    can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
     :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11),
     then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the chosen
@@ -441,11 +442,11 @@ def _read_session_bars(
     """
     import polars as pl
 
-    from brutex.data.lake_day_glob import read_day_month_frame
+    from brutex.data.lake_day_glob import read_day_intraday_frame
     from brutex.data.tf_resampler import resample_1m_to_tf
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-    month = read_day_month_frame(base, day)
+    month = read_day_intraday_frame(base, day, symbol=symbol)
     if month is None:
         return []
     df = (

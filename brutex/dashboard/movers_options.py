@@ -621,14 +621,16 @@ def _session_value_paisa(
     """
     import polars as pl
 
-    from brutex.data.lake_day_glob import read_day_month_frame
+    from brutex.data.lake_day_glob import read_day_intraday_frame
 
-    # Read ONLY the day's month Parquet (1minute/<yyyy>/<mm>.parquet) — see
-    # movers_futures._read_future_session: an IST day's 1-minute bars are entirely
-    # within that one file, so this is byte-equivalent but O(one month) not
-    # O(all-bars) (DEC-MOVERS-O1-LATENCY-001).
+    # Read the day's bars via the symbol-aware reader — see
+    # movers_futures._read_future_session: an option CONTRACT symbol is
+    # session-filtered unconditionally at ingest, so it takes the fast month-bound
+    # path (O(one month) not O(all-bars), DEC-MOVERS-O1-LATENCY-001); the
+    # session-exempt fallback exists for consistency but never triggers for a
+    # full contract groww_symbol.
     base = lake_root / "bars" / exchange / _FNO_SEGMENT / symbol / "1minute"
-    df = read_day_month_frame(base, day)
+    df = read_day_intraday_frame(base, day, symbol=symbol)
     if df is None:
         return 0
     ist = pl.col("timestamp").dt.convert_time_zone(_IST)

@@ -39,7 +39,7 @@ from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.dashboard.movers_futures import compute_futures_candidates
 from brutex.dashboard.movers_options import compute_options_candidates
-from brutex.dashboard.movers_snapshot import compute_spot_candidates
+from brutex.dashboard.movers_snapshot import _read_session_bars, compute_spot_candidates
 from brutex.dashboard.summary_cache import SummaryCache
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
@@ -291,3 +291,52 @@ class TestDerivativeExchangeScope:
             exchange="NSE",
         )
         assert {m.underlying for m in nse.movers} == {"NIFTY"}  # BSE option filtered out
+
+
+# ── session-exempt (GIFT Nifty) month-boundary regression ──────────────────
+
+
+class TestSessionExemptMonthBoundary:
+    """A session-exempt spot symbol's bars that cross a UTC month boundary are NOT dropped.
+
+    GIFT Nifty (~21h) can hold an IST-``2026-07-01`` bar stored in the PRIOR UTC
+    month's ``2026/06.parquet`` (an IST ``02:00`` bar is UTC ``2026-06-30 20:30``).
+    The month-bounded read would drop it; the whole-partition fallback for
+    session-exempt symbols keeps it — the regression the hostile-review found.
+    """
+
+    def test_intraday_read_keeps_cross_month_bars(self, tmp_path: Path) -> None:
+        def _bar(ts: datetime, close: str, volume: int) -> CandleBar:
+            c = Decimal(close)
+            return CandleBar(
+                timestamp=ts, open=c, high=c, low=c, close=c, volume=volume, open_interest=None
+            )
+
+        # IST 2026-07-01 02:00 → UTC 2026-06-30 20:30 → stored in 2026/06.parquet.
+        # IST 2026-07-01 10:00 → UTC 2026-07-01 04:30 → stored in 2026/07.parquet.
+        # The lake writer requires one (year, month) per call, so write each month
+        # separately (exactly how the ingest lands cross-month days).
+        for ts, close, vol in (
+            (datetime(2026, 6, 30, 20, 30, tzinfo=UTC), "100", 10),
+            (datetime(2026, 7, 1, 4, 30, tzinfo=UTC), "110", 20),
+        ):
+            _write(
+                tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol="GIFTNIFTY",
+                interval="1minute",
+                bars=[_bar(ts, close, vol)],
+            )
+        bars = _read_session_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="GIFTNIFTY",
+            day=date(2026, 7, 1),
+            minutes=1,
+            cutoff_min=None,
+        )
+        # BOTH bars (the prior-UTC-month 02:00 and the same-month 10:00) are kept.
+        assert len(bars) == 2
+        assert sum(b.volume for b in bars) == 30
