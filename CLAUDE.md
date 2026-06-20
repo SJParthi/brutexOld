@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864 —
+_Last updated: 2026-06-20 (DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #865 —
+the `/universe` BACKEND summary + instruments reads are now O(1) on a repeat poll:
+NEW `brutex/dashboard/universe_cache.py` `UniverseSnapshotCache` memoises the three
+lean store reads (`fno_eligible_underlyings` + `list_index_equity_instruments` +
+`reference_only_security_ids`) + the derived `summary` / per-`kind` instrument rows,
+keyed by a content-revision token = `(count(*), max(fetched_at))` over the
+`instruments` table ITSELF (NOT the `instrument_runs` audit sidecar, which lags an
+upsert — the stale-illusion trap this avoids, Golden Rule #1). Every `upsert_many`
+stamps a fresh `fetched_at`, so any master change moves the token → rebuild; an empty
+store keys at the stable `(0, "")`. Wired into `build_app` as a `universe_cache` param
+(mirrors `summary_cache`/`movers_cache`); the routes call `_universe_cache.summary` /
+`.instruments`. Honest envelope: HIT is O(1) (bench ratio 1.02× for a 100× deeper
+universe; cold read scales 13×→166×), the first read after a load still pays the real
+O(candidates) scan (once per revision). `universe_cache.py` at 100% line+branch;
+read-only dashboard accelerator, ENGINE UNCHANGED (`InstrumentStore` untouched). This
+COMPLETES on the backend the `/universe` FRONTEND O(1) work of #863. Earlier: 2026-06-20
+(DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864 —
 EVERY `/db` tab is now O(page): the last two whole-table reads — the F&O registry
 (expiries/contracts) + the window-ledger sidecar — are SQL-`LIMIT`/`OFFSET` paginated,
 completing the candle/option/F&O/DuckDB-table pages already bounded. The registry is
@@ -169,16 +185,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-registry-pagination` (EVERY `/db` tab is now O(page) —
-  DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864: the last two whole-table reads — the
-  F&O registry expiries/contracts (`RegistryStore.list_*` gain `LIMIT`/`OFFSET` + FILTERED
-  `count_*`; `db_view.list_registry_*` thread them + return the filtered `COUNT(*)`) and the
-  window-ledger sidecar (route slices one page BEFORE IST-formatting) — are paginated,
-  completing the candle/option/F&O/DuckDB-table pages already SQL-bounded; `db.html` pages
-  both in place via the COMMON `gridAndPager` + grid-split. Honest envelope: registry fully
-  O(page) (bench 1.04× for 10× legs), window-ledger O(page) render/serialize + O(windows)
-  bounded read (small sidecar, deliberately not SQL-rewritten). `registry_store.py` +
-  `db_view.py` at 100% line+branch; read-only viewer, ENGINE UNCHANGED. Prior merged:
+- **Active branch:** `claude/universe-backend-cache` (the `/universe` BACKEND reads
+  are now O(1) on a repeat poll — DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #865: NEW
+  `brutex/dashboard/universe_cache.py` `UniverseSnapshotCache` memoises the three lean store
+  reads + the derived `summary` / per-`kind` instrument rows, keyed by a content-revision
+  token `(count(*), max(fetched_at))` over the `instruments` table ITSELF (every `upsert_many`
+  stamps a fresh `fetched_at` → any master change moves the token → rebuild; empty store keys
+  at the stable `(0, "")`; NOT keyed off the `instrument_runs` audit sidecar, which can lag —
+  Golden Rule #1). Wired into `build_app` as a `universe_cache` param (mirrors
+  `summary_cache`/`movers_cache`); `api_universe_summary` + `api_universe_instruments` call it.
+  Honest envelope: HIT O(1) (bench ratio 1.02× for a 100× deeper universe; cold read scales
+  13×→166×), first read after a load still pays O(candidates) once per revision.
+  `universe_cache.py` at 100% line+branch; read-only accelerator, ENGINE UNCHANGED — COMPLETES
+  the `/universe` FRONTEND O(1) work of #863 on the backend. Prior merged:
+  DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +
   DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817, /db+/universe instant) +
   DEC-LIVE-REMOVE-001 #862 (PR #816, entire LIVE feed removed) +
   DEC-FNO-CANDLE-LAKE-001 #861 (PR #814, F&O candle lake first-class `/db` table + schema_meta) +
@@ -413,7 +433,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-registry-pagination`
+- **Active feature branch:** `claude/universe-backend-cache`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

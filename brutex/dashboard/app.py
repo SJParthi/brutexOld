@@ -129,6 +129,7 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
+from brutex.dashboard.universe_cache import UniverseSnapshotCache
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
@@ -697,6 +698,7 @@ def build_app(
     instrument_store: Any = None,
     summary_cache: SummaryCache | None = None,
     movers_cache: MoversSnapshotCache | None = None,
+    universe_cache: UniverseSnapshotCache | None = None,
     quota_tracker: Any = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
@@ -731,6 +733,14 @@ def build_app(
         ``None`` (the default) builds a fresh production cache. It is invalidated
         by the same write-generation as ``summary_cache`` (a pull/materialize
         bumps that generation; the movers cache stamps every entry with it).
+    universe_cache
+        Optional :class:`~brutex.dashboard.universe_cache.UniverseSnapshotCache`
+        backing the O(1) ``/universe`` summary + instruments polls
+        (DEC-UNIVERSE-BACKEND-CACHE-001). Caches the lean base reads + derived
+        payloads keyed by the ``instrument_runs`` content-revision token, so a
+        repeat poll between two instrument loads is a dict handoff, not a re-scan.
+        Injected so a test can assert the hit/invalidation behaviour; ``None``
+        (the default) builds a fresh production cache.
     quota_tracker
         Optional read-only daily-quota source for the ``/api/v1/quota``
         endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
@@ -837,6 +847,13 @@ def build_app(
     # as the coverage SummaryCache (a pull/materialize bumps `_summary_cache`'s
     # generation, which the movers cache stamps every entry with).
     _movers_cache = movers_cache if movers_cache is not None else MoversSnapshotCache()
+    # The /universe backend snapshot cache (DEC-UNIVERSE-BACKEND-CACHE-001): caches
+    # the lean base reads (eligible set + IDX/EQ candidates + reference-only ids) +
+    # the derived summary / per-kind instrument rows, keyed by the master's own
+    # `instrument_runs` content-revision token. A repeat /universe poll between two
+    # loads is an O(1) dict handoff; a new instrument load moves the token and
+    # rebuilds. Content-exact (never a stale illusion — Golden Rule #1).
+    _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -1091,11 +1108,14 @@ def build_app(
         a SQL ``DISTINCT`` and the candidates are only the IDX + EQ rows, so
         neither this route nor the query helper ever materialises the
         ~tens-of-thousands of option/future legs.
+
+        O(1) repeat poll (DEC-UNIVERSE-BACKEND-CACHE-001): the base reads +
+        derived counts are cached behind ``_universe_cache``, keyed by the
+        master's ``instrument_runs`` content token — a re-poll between two loads
+        is a dict handoff, a new load rebuilds.
         """
         store = _require_store()
-        eligible = store.fno_eligible_underlyings()
-        candidates = store.list_index_equity_instruments()
-        return JSONResponse(universe_summary(candidates, fno_eligible=eligible))
+        return JSONResponse(_universe_cache.summary(store))
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -1111,18 +1131,15 @@ def build_app(
         Fast path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the eligible set is
         a SQL ``DISTINCT`` and the candidates are only the IDX + EQ rows, so
         the option/future legs are never materialised here.
+
+        O(1) repeat poll (DEC-UNIVERSE-BACKEND-CACHE-001): the base reads + the
+        per-*kind* classified rows are cached behind ``_universe_cache``, keyed by
+        the master's ``instrument_runs`` content token. A bad *kind* still surfaces
+        as a 400 (the classifier's ``ValueError`` is raised before any caching).
         """
         store = _require_store()
-        eligible = store.fno_eligible_underlyings()
-        candidates = store.list_index_equity_instruments()
-        reference_only_ids = store.reference_only_security_ids()
         try:
-            rows = list_underlyings(
-                candidates,
-                kind=kind,
-                fno_eligible=eligible,
-                reference_only_ids=reference_only_ids,
-            )
+            rows = _universe_cache.instruments(store, kind=kind)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
