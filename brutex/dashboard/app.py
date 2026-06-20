@@ -737,7 +737,7 @@ def build_app(
         Optional :class:`~brutex.dashboard.universe_cache.UniverseSnapshotCache`
         backing the O(1) ``/universe`` summary + instruments polls
         (DEC-UNIVERSE-BACKEND-CACHE-001). Caches the lean base reads + derived
-        payloads keyed by the ``instrument_runs`` content-revision token, so a
+        payloads keyed by the ``instruments``-table content-revision token, so a
         repeat poll between two instrument loads is a dict handoff, not a re-scan.
         Injected so a test can assert the hit/invalidation behaviour; ``None``
         (the default) builds a fresh production cache.
@@ -850,9 +850,11 @@ def build_app(
     # The /universe backend snapshot cache (DEC-UNIVERSE-BACKEND-CACHE-001): caches
     # the lean base reads (eligible set + IDX/EQ candidates + reference-only ids) +
     # the derived summary / per-kind instrument rows, keyed by the master's own
-    # `instrument_runs` content-revision token. A repeat /universe poll between two
-    # loads is an O(1) dict handoff; a new instrument load moves the token and
-    # rebuilds. Content-exact (never a stale illusion — Golden Rule #1).
+    # `instruments`-table content-revision token (count(*), max(fetched_at)) — NOT
+    # the `instrument_runs` audit sidecar, which can lag an upsert. A repeat
+    # /universe poll between two loads is an O(1) dict handoff; a new instrument
+    # load moves the token and rebuilds. Content-exact (never a stale illusion —
+    # Golden Rule #1).
     _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
@@ -1111,7 +1113,7 @@ def build_app(
 
         O(1) repeat poll (DEC-UNIVERSE-BACKEND-CACHE-001): the base reads +
         derived counts are cached behind ``_universe_cache``, keyed by the
-        master's ``instrument_runs`` content token — a re-poll between two loads
+        master's ``instruments``-table content token — a re-poll between two loads
         is a dict handoff, a new load rebuilds.
         """
         store = _require_store()
@@ -1134,7 +1136,7 @@ def build_app(
 
         O(1) repeat poll (DEC-UNIVERSE-BACKEND-CACHE-001): the base reads + the
         per-*kind* classified rows are cached behind ``_universe_cache``, keyed by
-        the master's ``instrument_runs`` content token. A bad *kind* still surfaces
+        the master's ``instruments``-table content token. A bad *kind* still surfaces
         as a 400 (the classifier's ``ValueError`` is raised before any caching).
         """
         store = _require_store()

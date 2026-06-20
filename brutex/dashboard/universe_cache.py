@@ -131,6 +131,12 @@ class UniverseSnapshotCache:
     wins — the reads are a deterministic function of the revision (idempotent,
     Golden Rule #7), so the duplicate work is harmless. A ``compute`` that raises
     (e.g. a bad ``kind``) propagates cleanly and nothing is stored.
+
+    Returns are READ-ONLY: :meth:`summary` / :meth:`instruments` hand back the LIVE
+    memoised dict / list (no defensive copy — mirrors ``MoversSnapshotCache`` /
+    ``SummaryCache``). The only callers are the two routes, which pass them straight
+    to ``JSONResponse`` without mutation; a caller that mutated a returned payload
+    would poison the resident snapshot, so treat them as immutable.
     """
 
     def __init__(self) -> None:
