@@ -24,7 +24,7 @@ LIVE feed feature is REMOVED / retired in full**: the `brutex/live/` capture pac
 `/api/v1/db/live/*` routes + the `brutex/dashboard/live_*` surface, the
 `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
 lake" section, the nav `/live` link, and the now-orphaned live leg-resolution
-`adapters/groww/contract_pull.py` (47 files). This aligns with §1 which already lists
+`adapters/groww/contract_pull.py` (44 files). This aligns with §1 which already lists
 "Live feed, WebSocket" as OUT OF SCOPE; the §1 out-of-scope note + active-branch line
 are updated. DELIBERATELY KEPT (the `live` = real/production naming trap, NOT the
 feed): `adapters/groww/live.py` `build_live_client`/`build_live_pool` (the historical
@@ -151,7 +151,7 @@ hostile-review pass._
   `/api/v1/db/live/*` routes + `brutex/dashboard/live_*` surface, the
   `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
   lake" section, the nav `/live` link, and the now-orphaned live leg-resolution
-  `adapters/groww/contract_pull.py` + `db_view.format_clean_ist_millis`; 47 files.
+  `adapters/groww/contract_pull.py` + `db_view.format_clean_ist_millis`; 44 files.
   The historical/backtest pull + `rate_common` + the brute-force ENGINE are
   UNTOUCHED — `_build_live_controller`/`build_live_client` are the production pull's
   rate controller + client, KEPT. Prior merged: DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001
