@@ -269,7 +269,9 @@ const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: 
 /* F&O registry-viewer state (DEC-DERIV-REGISTRY-DB-VIEW-001). `kind` is the
    active registry row ("expiries"|"contracts"); the registry is a SEPARATE
    `registry.duckdb` cache surfaced read-only as a grid (columns/rows/total). */
-const rstate = { kind: null };
+const rstate = { kind: null, offset: 0 };
+/* Window-ledger viewer state — paginated like the registry (DEC-DB-VIEWER-PAGINATE-ALL-001). */
+const lstate = { offset: 0 };
 
 /* Friendly labels for the allowlisted query operators (mirrors
    db_view.ALLOWED_OPERATORS — the backend is the source of truth + re-validates). */
@@ -442,6 +444,7 @@ async function loadTables() {
     });
     if (mode === "candles") markCandles();
     else if (mode === "registry") markRegistry(rstate.kind);
+    else if (mode === "ledger") markLedger("window_ledger");
     else if (selected) markSelected(selected);
   } catch (e) {
     tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">offline</div>';
@@ -474,30 +477,80 @@ function markLedger(kind) {
   });
 }
 
+/* The window-ledger sidecar is now SQL-page-shaped (DEC-DB-VIEWER-PAGINATE-ALL-001):
+   the route returns ONE LIMIT/OFFSET page + a real `total`, so the viewer renders
+   O(page) (the ledger is a small bounded sidecar — the read stays O(windows), the
+   render is the operator-visible win). Paging mirrors the registry grid-split. */
+const _LEDGER_LABEL = "window ledger";
+
+function ledgerHeadHtml(body) {
+  const sub = (body.columns || []).length + " cols · " + Number(body.total || 0).toLocaleString() + " rows";
+  return '<div class="datahead"><span class="dt">' + esc(_LEDGER_LABEL)
+    + '</span><span class="sub">' + esc(sub) + '</span></div>';
+}
+
+function ledgerGridHtml(body) {
+  const total = Number(body.total || 0);
+  if (total === 0) {
+    return '<div class="empty">no ' + esc(_LEDGER_LABEL)
+      + ' yet — pull a symbol on /universe, then it appears here</div>';
+  }
+  return gridAndPager(body.columns || [], body.rows || [], total,
+    Number(body.offset || 0), Number(body.limit || 100));
+}
+
+function wireLedgerPager(body) {
+  const off = Number(body.offset || 0), lim = Number(body.limit || 100);
+  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
+  if (prev) prev.addEventListener("click", () => { lstate.offset = Math.max(0, off - lim); runLedgerQuery(true); });
+  if (next) next.addEventListener("click", () => { lstate.offset = off + lim; runLedgerQuery(true); });
+}
+
+function renderLedgerView(body) {
+  dataEl.innerHTML = ledgerHeadHtml(body) + '<div id="dbgrid">' + ledgerGridHtml(body) + '</div>';
+  wireLedgerPager(body);
+}
+
+function updateLedgerGrid(body) {
+  const grid = document.getElementById("dbgrid");
+  if (!grid) { renderLedgerView(body); return; }  /* defensive: no container → full */
+  grid.classList.remove("is-loading");
+  grid.innerHTML = ledgerGridHtml(body);
+  const sub = dataEl.querySelector(".datahead .sub");
+  if (sub) sub.textContent = (body.columns || []).length + " cols · "
+    + Number(body.total || 0).toLocaleString() + " rows";
+  wireLedgerPager(body);
+}
+
+async function runLedgerQuery(gridOnly) {
+  const partial = gridOnly && document.getElementById("dbgrid");
+  if (partial) document.getElementById("dbgrid").classList.add("is-loading");
+  else dataEl.innerHTML = '<div class="empty">loading ' + _LEDGER_LABEL + '…</div>';
+  const url = "/api/v1/db/window-ledger?limit=" + encodeURIComponent(limitSel.value)
+    + "&offset=" + encodeURIComponent(lstate.offset);
+  try {
+    const r = await fetch(url);
+    const body = await r.json();
+    if (!r.ok) {
+      const msg = '<div class="empty qerr">error ' + r.status + '</div>';
+      if (partial) document.getElementById("dbgrid").innerHTML = msg; else dataEl.innerHTML = msg;
+      return;
+    }
+    if (partial) updateLedgerGrid(body); else renderLedgerView(body);
+  } catch (e) {
+    /* Honest "offline" on a mid-page network drop, not a "no data" empty state. */
+    const off = '<div class="empty">offline</div>';
+    if (partial) { const g = document.getElementById("dbgrid"); if (g) { g.classList.remove("is-loading"); g.innerHTML = off; } }
+    else dataEl.innerHTML = off;
+  }
+}
+
 async function selectLedger(kind) {
-  /* Render the window-ledger Parquet sidecar read-only in the grid — it returns
-     the grid shape (columns/rows) directly. */
   mode = "ledger";
   selected = null;
+  lstate.offset = 0;   /* a fresh ledger selection starts at page 1 */
   markLedger(kind);
-  const label = "window ledger";
-  dataEl.innerHTML = '<div class="empty">loading ' + label + '…</div>';
-  try {
-    const r = await fetch("/api/v1/db/window-ledger");
-    const body = await r.json();
-    if (!r.ok) { dataEl.innerHTML = '<div class="empty qerr">error ' + r.status + '</div>'; return; }
-    const cols = body.columns || [];
-    const rows = body.rows || [];
-    const total = rows.length;
-    const sub = cols.length + " cols · " + Number(total).toLocaleString() + " rows";
-    const head = '<div class="datahead"><span class="dt">' + esc(label) + '</span><span class="sub">' + esc(sub) + '</span></div>';
-    const grid = total === 0
-      ? '<div class="empty">no ' + esc(label) + ' yet — pull a symbol on /universe, then it appears here</div>'
-      : gridAndPager(cols, rows, total, 0, total);
-    dataEl.innerHTML = head + grid;
-  } catch (e) {
-    dataEl.innerHTML = '<div class="empty">offline</div>';
-  }
+  runLedgerQuery(false);
 }
 
 /* ── F&O registry (separate registry.duckdb cache) ── */
@@ -507,46 +560,94 @@ function markRegistry(kind) {
   });
 }
 
-async function selectRegistry(kind) {
-  /* Render the expiries / contracts registry grid read-only. Both routes return
-     the grid shape (columns/rows/total) directly, PLUS a `note` (an honest
-     "no registry yet — pull expiries + contracts first" when the cache file is
-     absent) and `counts` for the nav badges. EMPTY until a later PR populates the
-     cache — handled exactly like the expired-options "empty" path. */
-  mode = "registry";
-  selected = null;
-  rstate.kind = kind;
-  markRegistry(kind);
-  const isExp = kind === "expiries";
-  const label = isExp ? "expiries" : "contracts";
-  dataEl.innerHTML = '<div class="empty">loading ' + esc(label) + '…</div>';
-  try {
-    const r = await fetch(isExp
-      ? "/api/v1/db/registry/expiries"
-      : "/api/v1/db/registry/contracts");
-    const body = await r.json();
-    if (!r.ok) { dataEl.innerHTML = '<div class="empty qerr">error ' + r.status + '</div>'; return; }
-    /* Backfill the registry nav badges from the route's counts (the cache is
-       empty until a later PR populates it, so loadTables can't know the totals). */
-    updateRegistryBadges(body.counts || {});
-    const cols = body.columns || [];
-    const rows = body.rows || [];
-    const total = Number(body.total || 0);
-    const sub = cols.length + " cols · " + total.toLocaleString() + " rows";
-    const head = '<div class="datahead"><span class="dt">📅 ' + esc(label)
-      + '</span><span class="sub">' + esc(sub) + '</span></div>';
+/* Registry tabs are now SQL-paginated (DEC-DB-VIEWER-PAGINATE-ALL-001): the route
+   returns one LIMIT/OFFSET page + a FILTERED total, so a contracts chain with tens
+   of thousands of legs loads O(page), not all-at-once. Paging mirrors the candle /
+   table grid-split — prev/next update only #dbgrid, the head is rebuilt once. */
+function registryLabel() { return rstate.kind === "expiries" ? "expiries" : "contracts"; }
+
+function registryUrl() {
+  const isExp = rstate.kind === "expiries";
+  return (isExp ? "/api/v1/db/registry/expiries" : "/api/v1/db/registry/contracts")
+    + "?limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(rstate.offset);
+}
+
+function registryHeadHtml(body) {
+  const cols = body.columns || [];
+  const sub = cols.length + " cols · " + Number(body.total || 0).toLocaleString() + " rows";
+  const icon = rstate.kind === "expiries" ? "📅" : "⛓";
+  return '<div class="datahead"><span class="dt">' + icon + ' ' + esc(registryLabel())
+    + '</span><span class="sub">' + esc(sub) + '</span></div>';
+}
+
+function registryGridHtml(body) {
+  const total = Number(body.total || 0);
+  if (total === 0) {
     /* An honest empty state: the note (when present) names WHY — no registry
        pulled yet — never an invented row (Golden Rule #1). */
-    const emptyMsg = body.note
-      ? esc(body.note)
-      : "no " + esc(label) + " yet — pull expiries + contracts first";
-    const grid = total === 0
-      ? '<div class="empty">' + emptyMsg + '</div>'
-      : gridAndPager(cols, rows, total, 0, total);
-    dataEl.innerHTML = head + grid;
-  } catch (e) {
-    dataEl.innerHTML = '<div class="empty">offline</div>';
+    const emptyMsg = body.note ? esc(body.note)
+      : "no " + esc(registryLabel()) + " yet — pull expiries + contracts first";
+    return '<div class="empty">' + emptyMsg + '</div>';
   }
+  return gridAndPager(body.columns || [], body.rows || [], total,
+    Number(body.offset || 0), Number(body.limit || 100));
+}
+
+function wireRegistryPager(body) {
+  const off = Number(body.offset || 0), lim = Number(body.limit || 100);
+  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
+  if (prev) prev.addEventListener("click", () => { rstate.offset = Math.max(0, off - lim); runRegistryQuery(true); });
+  if (next) next.addEventListener("click", () => { rstate.offset = off + lim; runRegistryQuery(true); });
+}
+
+function renderRegistryView(body) {
+  dataEl.innerHTML = registryHeadHtml(body) + '<div id="dbgrid">' + registryGridHtml(body) + '</div>';
+  wireRegistryPager(body);
+}
+
+function updateRegistryGrid(body) {
+  const grid = document.getElementById("dbgrid");
+  if (!grid) { renderRegistryView(body); return; }  /* defensive: no container → full */
+  grid.classList.remove("is-loading");
+  grid.innerHTML = registryGridHtml(body);
+  const sub = dataEl.querySelector(".datahead .sub");
+  if (sub) sub.textContent = (body.columns || []).length + " cols · "
+    + Number(body.total || 0).toLocaleString() + " rows";
+  wireRegistryPager(body);
+}
+
+async function runRegistryQuery(gridOnly) {
+  const partial = gridOnly && document.getElementById("dbgrid");
+  if (partial) document.getElementById("dbgrid").classList.add("is-loading");
+  else dataEl.innerHTML = '<div class="empty">loading ' + esc(registryLabel()) + '…</div>';
+  try {
+    const r = await fetch(registryUrl());
+    const body = await r.json();
+    if (!r.ok) {
+      const msg = '<div class="empty qerr">error ' + r.status + '</div>';
+      if (partial) document.getElementById("dbgrid").innerHTML = msg; else dataEl.innerHTML = msg;
+      return;
+    }
+    /* Backfill the registry nav badges from the route's counts (the cache may be
+       empty until a pull populates it, so loadTables can't know the totals). */
+    updateRegistryBadges(body.counts || {});
+    if (partial) updateRegistryGrid(body); else renderRegistryView(body);
+  } catch (e) {
+    /* A mid-page network drop is an HONEST "offline", NOT a "no data" empty state
+       (hostile-review MINOR-1/2) — mirror the candle path. */
+    const off = '<div class="empty">offline</div>';
+    if (partial) { const g = document.getElementById("dbgrid"); if (g) { g.classList.remove("is-loading"); g.innerHTML = off; } }
+    else dataEl.innerHTML = off;
+  }
+}
+
+async function selectRegistry(kind) {
+  mode = "registry";
+  selected = null;
+  if (kind !== rstate.kind) rstate.offset = 0;   /* a fresh registry tab starts at page 1 */
+  rstate.kind = kind;
+  markRegistry(kind);
+  runRegistryQuery(false);
 }
 
 /* Fill the registry nav badges with the live expiry/contract counts (the cache
@@ -959,12 +1060,15 @@ function updateCandleGrid(body, err) {
 
 limitSel.addEventListener("change", () => {
   if (mode === "candles") { cstate.offset = 0; runCandleQuery(true); }
+  else if (mode === "registry") { rstate.offset = 0; runRegistryQuery(true); }
+  else if (mode === "ledger") { lstate.offset = 0; runLedgerQuery(true); }
   else if (selected) selectTable(selected);
 });
 refreshBtn.addEventListener("click", () => {
   loadTables();
   if (mode === "candles") selectCandles(cstate.kind);
   else if (mode === "registry") selectRegistry(rstate.kind);
+  else if (mode === "ledger") selectLedger("window_ledger");
   else if (selected) selectTable(selected);
 });
 

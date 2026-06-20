@@ -125,6 +125,19 @@ _SELECT_CONTRACTS: Final[str] = (
     "AND (? IS NULL OR expiry_date = ?) "
     "ORDER BY exch, underlying, expiry_date, contract_symbol"
 )
+#: Page suffix appended (a STATIC literal, never caller-built) when a ``limit`` is
+#: requested — keeps the registry ``/db`` tabs O(page) instead of loading every leg
+#: (DEC-DB-VIEWER-PAGINATE-ALL-001). ``limit`` / ``offset`` are bind parameters.
+_PAGE_SUFFIX: Final[str] = " LIMIT ? OFFSET ?"
+#: FILTERED counts — the same ``(? IS NULL OR col = ?)`` pass-through as the SELECTs,
+#: so a paged tab's ``total`` reflects the rows matching its filter, not the whole table.
+_COUNT_EXPIRIES: Final[str] = (
+    "SELECT count(*) FROM expiries WHERE (? IS NULL OR exch = ?) AND (? IS NULL OR underlying = ?)"
+)
+_COUNT_CONTRACTS: Final[str] = (
+    "SELECT count(*) FROM contracts WHERE (? IS NULL OR exch = ?) AND (? IS NULL OR underlying = ?) "
+    "AND (? IS NULL OR expiry_date = ?)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,31 +347,59 @@ class RegistryStore:
             return 0
         return int(row[0])
 
-    def count_expiries(self) -> int:
-        """Total number of persisted expiry dates."""
-        with self._lock:
-            self._ensure_open()
-            return self._scalar("SELECT count(*) FROM expiries", [])
+    def count_expiries(self, *, exch: str | None = None, underlying: str | None = None) -> int:
+        """Number of persisted expiry dates — total, or matching the given filter.
 
-    def count_contracts(self) -> int:
-        """Total number of persisted contract legs."""
+        With no filter this is the whole-table total (the nav-badge count); with an
+        ``exch`` / ``underlying`` filter it is the FILTERED total a paged tab needs
+        (DEC-DB-VIEWER-PAGINATE-ALL-001). Static ``(? IS NULL OR col = ?)`` pass-through.
+        """
         with self._lock:
             self._ensure_open()
-            return self._scalar("SELECT count(*) FROM contracts", [])
+            return self._scalar(_COUNT_EXPIRIES, [exch, exch, underlying, underlying])
+
+    def count_contracts(
+        self,
+        *,
+        exch: str | None = None,
+        underlying: str | None = None,
+        expiry_date: date | None = None,
+    ) -> int:
+        """Number of persisted contract legs — total, or matching the given filter.
+
+        With no filter the whole-table total (nav badge); with a filter the FILTERED
+        total for a paged tab (DEC-DB-VIEWER-PAGINATE-ALL-001).
+        """
+        with self._lock:
+            self._ensure_open()
+            return self._scalar(
+                _COUNT_CONTRACTS, [exch, exch, underlying, underlying, expiry_date, expiry_date]
+            )
 
     def list_expiries(
-        self, *, exch: str | None = None, underlying: str | None = None
+        self,
+        *,
+        exch: str | None = None,
+        underlying: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ExpiryRow]:
         """List persisted expiries, optionally filtered by exchange / underlying.
 
         Filters use a STATIC ``(? IS NULL OR col = ?)`` predicate — a ``None`` filter
         is a pass-through — so the SQL text is constant (never caller-built) and every
-        value is a bind parameter.
+        value is a bind parameter. When *limit* is given the read is SQL-bounded to one
+        ``LIMIT``/``OFFSET`` page (DEC-DB-VIEWER-PAGINATE-ALL-001) instead of materialising
+        every row; ``limit=None`` keeps the legacy "all rows" behaviour.
         """
         params: list[object] = [exch, exch, underlying, underlying]
+        sql = _SELECT_EXPIRIES
+        if limit is not None:
+            sql = _SELECT_EXPIRIES + _PAGE_SUFFIX
+            params = [*params, limit, offset]
         with self._lock:
             self._ensure_open()
-            rows = self._conn.execute(_SELECT_EXPIRIES, params).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         return [ExpiryRow(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def list_contracts(
@@ -367,16 +408,23 @@ class RegistryStore:
         exch: str | None = None,
         underlying: str | None = None,
         expiry_date: date | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ContractRow]:
         """List persisted contracts, optionally filtered by exch / underlying / expiry.
 
         Same static ``(? IS NULL OR col = ?)`` pass-through filtering as
-        :meth:`list_expiries` — constant SQL, parameterized values only.
+        :meth:`list_expiries` — constant SQL, parameterized values only — and the same
+        optional ``LIMIT``/``OFFSET`` page bound (DEC-DB-VIEWER-PAGINATE-ALL-001).
         """
         params: list[object] = [exch, exch, underlying, underlying, expiry_date, expiry_date]
+        sql = _SELECT_CONTRACTS
+        if limit is not None:
+            sql = _SELECT_CONTRACTS + _PAGE_SUFFIX
+            params = [*params, limit, offset]
         with self._lock:
             self._ensure_open()
-            rows = self._conn.execute(_SELECT_CONTRACTS, params).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         return [ContractRow(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]) for r in rows]
 
     def list_contract_jobs(self) -> list[tuple[str, str, date]]:

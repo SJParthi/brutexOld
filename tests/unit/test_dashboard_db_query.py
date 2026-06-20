@@ -2275,3 +2275,16 @@ def test_query_candles_coarse_interval_baselines_on_1minute_page_span(
     # Day 0's last 1-minute close is 100.2 → change = (205 - 100.2) / 100.2 * 100.
     assert out["rows"][0][chg_i] is not None
     assert round(float(out["rows"][0][chg_i]), 4) == round((205 - 100.2) / 100.2 * 100, 4)
+
+
+def test_clamp_offset_caps_above_int64_and_floors_negative() -> None:
+    """clamp_offset bounds the OFFSET into DuckDB's bindable int64 range so a
+    hostile huge / negative offset never throws at the bind (DEC-DB-VIEWER-PAGINATE-ALL-001
+    hostile-review MINOR-1)."""
+    from brutex.dashboard.db_view import _OFFSET_MAX, clamp_offset
+
+    assert clamp_offset(-5) == 0
+    assert clamp_offset(0) == 0
+    assert clamp_offset(42) == 42
+    assert clamp_offset(_OFFSET_MAX) == _OFFSET_MAX
+    assert clamp_offset(10**19) == _OFFSET_MAX  # > 2**63 - 1 → capped, not overflowed

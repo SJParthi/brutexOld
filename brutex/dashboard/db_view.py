@@ -411,14 +411,25 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
     return summary
 
 
-def clamp_offset(n: int) -> int:
-    """Clamp a requested row offset to a non-negative integer.
+#: DuckDB binds ``OFFSET`` as a signed 64-bit integer; a value above this throws
+#: ``ConversionException`` ("value out of range for INT64"). FastAPI's ``Query(ge=0)``
+#: caps nothing above, so this is the upper guard (DEC-DB-VIEWER-PAGINATE-ALL-001
+#: hostile-review MINOR-1).
+_OFFSET_MAX: Final = (1 << 63) - 1
 
-    A hostile / malformed ``?offset=-5`` (or a Python ``int`` from a query
-    string) must never produce a negative ``OFFSET`` (DuckDB would error).
-    Returns ``max(0, n)``.
+
+def clamp_offset(n: int) -> int:
+    """Clamp a requested row offset into DuckDB's bindable ``[0, 2**63 - 1]`` range.
+
+    A hostile / malformed ``?offset=-5`` must never produce a negative ``OFFSET``
+    (DuckDB errors); a hostile ``?offset=10000000000000000000`` (above int64) must
+    never reach the ``LIMIT ? OFFSET ?`` bind, where DuckDB raises a
+    ``ConversionException`` that would surface as an HTTP 500 (the routes promise
+    "never a 500"). Both clamp here — a too-large offset becomes the max, which
+    DuckDB returns as a clean empty page. This is the COMMON guard for every paged
+    reader (tables / candles / options / registry).
     """
-    return max(0, n)
+    return max(0, min(n, _OFFSET_MAX))
 
 
 def sample_rows(conn: Any, table: str, *, limit: int, offset: int = 0) -> dict[str, Any]:
@@ -2300,16 +2311,21 @@ def list_registry_expiries(
     *,
     exch: str | None = None,
     underlying: str | None = None,
+    limit: int = _LIMIT_MAX,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted expiry DATES as a browsable grid (``/db``).
 
     Reads the SEPARATE ``registry.duckdb`` cache read-only via
     :meth:`~brutex.data.registry_store.RegistryStore.list_expiries` (static
     ``(? IS NULL OR col = ?)`` filters — parameterized values only) and returns the
-    grid shape the ``/db`` page renders (``{columns, rows, total}``), each row
-    JSON-safe (``expiry_date`` ISO string, ``fetched_at`` clean IST). A MISSING
-    registry file degrades to an empty grid plus an honest ``note`` (never an
-    invented row — Golden Rule #1), mirroring the expired-options "empty" path.
+    grid shape the ``/db`` page renders (``{columns, rows, total, limit, offset}``),
+    each row JSON-safe (``expiry_date`` ISO string, ``fetched_at`` clean IST). The
+    page is SQL-bounded (``LIMIT``/``OFFSET``) and ``total`` is a cheap FILTERED
+    ``COUNT(*)`` — so a registry tab loads O(page), not every persisted expiry
+    (DEC-DB-VIEWER-PAGINATE-ALL-001). A MISSING registry file degrades to an empty
+    grid plus an honest ``note`` (never an invented row — Golden Rule #1), mirroring
+    the expired-options "empty" path.
 
     Parameters
     ----------
@@ -2318,25 +2334,50 @@ def list_registry_expiries(
     exch, underlying
         Optional exact-match filters (``None`` = no filter), passed straight to
         the store's parameterized SELECT.
+    limit, offset
+        Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
 
     Returns
     -------
     dict[str, Any]
         ``{"columns": REGISTRY_EXPIRY_COLUMNS, "rows": [...], "total": <int>,
-        "note": <str|None>}`` — ``note`` is the missing-registry message when the
-        cache file does not exist yet, else ``None``.
+        "limit": <int>, "offset": <int>, "note": <str|None>}`` — ``total`` is the
+        FILTERED row count; ``note`` is the missing-registry message when the cache
+        file does not exist yet, else ``None``.
     """
     columns = list(REGISTRY_EXPIRY_COLUMNS)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
     if not registry_path.is_file():
-        return {"columns": columns, "rows": [], "total": 0, "note": _REGISTRY_MISSING_NOTE}
+        return {
+            "columns": columns,
+            "rows": [],
+            "total": 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "note": _REGISTRY_MISSING_NOTE,
+        }
     from brutex.data.registry_store import RegistryStore
 
     store = RegistryStore.open(registry_path)
     try:
-        rows = [_expiry_grid_row(r) for r in store.list_expiries(exch=exch, underlying=underlying)]
+        total = store.count_expiries(exch=exch, underlying=underlying)
+        rows = [
+            _expiry_grid_row(r)
+            for r in store.list_expiries(
+                exch=exch, underlying=underlying, limit=safe_limit, offset=safe_offset
+            )
+        ]
     finally:
         store.close()
-    return {"columns": columns, "rows": rows, "total": len(rows), "note": None}
+    return {
+        "columns": columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "note": None,
+    }
 
 
 def list_registry_contracts(
@@ -2345,17 +2386,22 @@ def list_registry_contracts(
     exch: str | None = None,
     underlying: str | None = None,
     expiry_date: str | None = None,
+    limit: int = _LIMIT_MAX,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted contract SYMBOLS as a browsable grid (``/db``).
 
     The structured chain view the operator asked for: one row per contract leg
     (expiry / strike / CE-PE / per-contract historical ``candle_status``), read
     read-only via :meth:`~brutex.data.registry_store.RegistryStore.list_contracts`
-    (static parameterized filters). *expiry_date*, when given, is a strict ISO
-    ``YYYY-MM-DD`` string (a ``<input type="date">`` value), parsed via the shared
-    :func:`_parse_iso_date` (a malformed bound raises ``ValueError`` → HTTP 400 at
-    the route). A MISSING registry file degrades to an empty grid plus an honest
-    ``note`` (never an invented row — Golden Rule #1).
+    (static parameterized filters). The page is SQL-bounded (``LIMIT``/``OFFSET``)
+    and ``total`` is a cheap FILTERED ``COUNT(*)`` — so a chain with tens of thousands
+    of legs loads O(page), not every leg (DEC-DB-VIEWER-PAGINATE-ALL-001).
+    *expiry_date*, when given, is a strict ISO ``YYYY-MM-DD`` string (a
+    ``<input type="date">`` value), parsed via the shared :func:`_parse_iso_date`
+    (a malformed bound raises ``ValueError`` → HTTP 400 at the route). A MISSING
+    registry file degrades to an empty grid plus an honest ``note`` (never an
+    invented row — Golden Rule #1).
 
     Parameters
     ----------
@@ -2366,12 +2412,15 @@ def list_registry_contracts(
     expiry_date
         Optional ISO ``YYYY-MM-DD`` expiry filter (``None`` = no filter); a
         malformed value raises ``ValueError``.
+    limit, offset
+        Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
 
     Returns
     -------
     dict[str, Any]
         ``{"columns": REGISTRY_CONTRACT_COLUMNS, "rows": [...], "total": <int>,
-        "note": <str|None>}``.
+        "limit": <int>, "offset": <int>, "note": <str|None>}`` — ``total`` is the
+        FILTERED leg count.
 
     Raises
     ------
@@ -2379,24 +2428,45 @@ def list_registry_contracts(
         On a malformed *expiry_date* bound (not strict ISO ``YYYY-MM-DD``).
     """
     columns = list(REGISTRY_CONTRACT_COLUMNS)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
     # Parse the date BEFORE the file check so a malformed bound is rejected
     # consistently whether or not the cache exists yet (no silent empty page).
     parsed_expiry = _parse_iso_date(expiry_date, "expiry_date") if expiry_date is not None else None
     if not registry_path.is_file():
-        return {"columns": columns, "rows": [], "total": 0, "note": _REGISTRY_MISSING_NOTE}
+        return {
+            "columns": columns,
+            "rows": [],
+            "total": 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "note": _REGISTRY_MISSING_NOTE,
+        }
     from brutex.data.registry_store import RegistryStore
 
     store = RegistryStore.open(registry_path)
     try:
+        total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
         rows = [
             _contract_grid_row(r)
             for r in store.list_contracts(
-                exch=exch, underlying=underlying, expiry_date=parsed_expiry
+                exch=exch,
+                underlying=underlying,
+                expiry_date=parsed_expiry,
+                limit=safe_limit,
+                offset=safe_offset,
             )
         ]
     finally:
         store.close()
-    return {"columns": columns, "rows": rows, "total": len(rows), "note": None}
+    return {
+        "columns": columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "note": None,
+    }
 
 
 __all__ = [
