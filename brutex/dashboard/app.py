@@ -64,8 +64,10 @@ from brutex.dashboard.coverage_view import (
     build_spot_coverage_payload,
 )
 from brutex.dashboard.db_view import (
+    fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
+    list_fno_candle_datasets,
     list_option_datasets,
     list_option_series,
     list_registry_contracts,
@@ -130,6 +132,7 @@ from brutex.dashboard.sweep_runner import (
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
+from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
@@ -3424,25 +3427,35 @@ def build_app(
 
     @app.get("/api/v1/db/candles/datasets")
     async def api_db_candle_datasets() -> JSONResponse:
-        """GET /api/v1/db/candles/datasets — discovered candle + option datasets.
+        """GET /api/v1/db/candles/datasets — discovered candle + F&O + option datasets.
 
-        Lists every spot candle Parquet partition set (``<lake>/bars/…``, each
-        stamped ``kind="spot"``) AND every expired-option series
-        (``<lake>/options/…``, each ``kind="option"``) so the viewer can offer a
-        single dataset picker that distinguishes the two. Delegates to
-        :func:`brutex.dashboard.db_view.list_candle_datasets` +
-        :func:`brutex.dashboard.db_view.list_option_datasets`.
+        Lists THREE first-class candle surfaces so the viewer can present each as its
+        own browsable lake:
 
-        Each option entry carries a display-only ``label`` decoded to the
-        operator's coordinates (``BANKNIFTY · MONTH#1 ATM-10 CALL · 1m``) via
-        the id→symbol map (DEC-DB-OPTION-DATASET-DECODE-001); the ``series``
-        KEY stays byte-unchanged so ``/api/v1/db/options?series=…`` queries
-        keep working.
+        * ``datasets`` — the SPOT candle partition sets (``<lake>/bars/`` with a
+          non-``FNO`` segment: ``INDEX`` / ``CASH``). The F&O contracts are excluded
+          here — they are NOT spot, the honesty fix of DEC-FNO-CANDLE-LAKE-001.
+        * ``fno`` — the F&O (futures + options) candle partition sets
+          (``<lake>/bars/<exch>/FNO/…``), each decoded to its contract identity
+          (underlying / expiry / strike / instrument_type / option_type) via
+          :func:`brutex.dashboard.db_view.list_fno_candle_datasets`. ``fno_schema``
+          carries the documented F&O candle logical-table columns for API clients (the
+          programmatic twin of the ``schema_meta`` registration; the operator browses the
+          same schema via the ``schema_meta`` table row).
+        * ``options`` — the expired-option series (``<lake>/options/…``), each with a
+          display-only decoded ``label`` (DEC-DB-OPTION-DATASET-DECODE-001); the
+          ``series`` KEY stays byte-unchanged so ``/api/v1/db/options?series=…`` keeps
+          working.
+
+        An F&O contract is queried through the IDENTICAL ``segment="FNO"`` candle path
+        as spot (``/api/v1/db/candles``) — no new query surface.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse({"datasets": [], "options": []})
+            return JSONResponse(
+                {"datasets": [], "fno": [], "fno_schema": fno_candle_lake_schema(), "options": []}
+            )
         lake = lake_root.parent
 
         def _datasets() -> dict[str, Any]:
@@ -3457,8 +3470,16 @@ def build_app(
             symbol_for_id = {
                 str(i.security_id): i.symbol_name for i in store.list_index_equity_instruments()
             }
+            # SPOT list is honestly spot-only: drop any FNO set (an F&O contract is not
+            # spot) so the spot picker never conflates the two (DEC-FNO-CANDLE-LAKE-001);
+            # the F&O sets get their own first-class `fno` surface below.
+            spot = [
+                d for d in list_candle_datasets(lake) if d["segment"] != FNO_CANDLE_LAKE_SEGMENT
+            ]
             return {
-                "datasets": list_candle_datasets(lake),
+                "datasets": spot,
+                "fno": list_fno_candle_datasets(lake),
+                "fno_schema": fno_candle_lake_schema(),
                 "options": list_option_datasets(lake, symbol_for_id=symbol_for_id),
             }
 

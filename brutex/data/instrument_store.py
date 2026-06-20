@@ -90,6 +90,7 @@ from typing import Any, Final, Self
 
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
+from brutex.data.fno_candle_lake import register_fno_candle_lake
 from brutex.execution.types import InstrumentMeta as ExecutionInstrumentMeta
 from brutex.models import (
     Exchange,
@@ -896,6 +897,12 @@ class InstrumentStore(metaclass=_StoreMeta):
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
                 ["schema_version", str(SCHEMA_VERSION)],
             )
+            # Register the F&O candle lake as a first-class, documented logical table
+            # in schema_meta (DEC-FNO-CANDLE-LAKE-001). Idempotent: re-opening a store
+            # re-stamps the current descriptor. The F&O candle OHLC itself lives on the
+            # shared Parquet lake (bars/<exch>/FNO/<groww_symbol>/<interval>/…), NOT in
+            # this master — this only records the schema so /db can present it.
+            register_fno_candle_lake(conn)
         except Exception as exc:  # pragma: no cover \u2014 defensive
             raise CatalogError(f"failed to open InstrumentStore at {path}: {exc}") from exc
         return cls(conn=conn, path=path)

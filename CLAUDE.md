@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-LIVE-REMOVE-001, MIGRATION.md #861 — the **entire
+_Last updated: 2026-06-20 (DEC-LIVE-REMOVE-001, MIGRATION.md #862 — the **entire
 LIVE feed feature is REMOVED / retired in full**: the `brutex/live/` capture package
 + its `python -m brutex.live` CLI, the dashboard `/live` page + `/api/v1/live/*` +
 `/api/v1/db/live/*` routes + the `brutex/dashboard/live_*` surface, the
@@ -33,6 +33,11 @@ and `pull_controller.py::_build_live_controller`/`SessionRateController` (the
 PRODUCTION dashboard-pull rate controller — the §6 rate-controller rows are UNCHANGED,
 they describe the production pull, not the feed) — so the historical/backtest pull +
 `rate_common` + the brute-force ENGINE are UNTOUCHED. Earlier: 2026-06-20
+(DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #861 — the F&O (futures+options) historical-candle
+lake is now a FIRST-CLASS documented logical table, surfaced in `/db`'s Candle-lake
+section (the "📊 F&O candles" row) + registered in the master `schema_meta`; it
+FORMALIZES + SURFACES data ALREADY stored by the existing Groww pull (NOT a new store),
+the brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX). Earlier: 2026-06-20
 (DEC-MOVERS-O1-LATENCY-001, MIGRATION.md #860 — every `/movers` interaction made
 near-O(1): the `top_n`-independent lake scan split from the cheap rank + cached per
 coordinate (`movers_cache.py`, generation-invalidated), the cold per-symbol read
@@ -145,13 +150,13 @@ hostile-review pass._
   + lake **LIVE-feed SURFACE that once existed** (`brutex/live/`, the `/live`
   page + `/api/v1/live/*` routes, the `live_ticks`/`live_candles_1m` tables, the
   Movers "Live" tab + /db "Live lake" section) was **REMOVED in full —
-  DEC-LIVE-REMOVE-001 (MIGRATION.md #861)** — bringing the codebase in line with
+  DEC-LIVE-REMOVE-001 (MIGRATION.md #862)** — bringing the codebase in line with
   this out-of-scope rule. (The `live` = real/production naming-trap survivors —
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/relaxed-mccarthy-qacssf` (REMOVE the entire LIVE feed
-  feature — DEC-LIVE-REMOVE-001, MIGRATION.md #861: deletes the `brutex/live/`
+  feature — DEC-LIVE-REMOVE-001, MIGRATION.md #862: deletes the `brutex/live/`
   capture package + its CLI, the dashboard `/live` + `/api/v1/live/*` +
   `/api/v1/db/live/*` routes + `brutex/dashboard/live_*` surface, the
   `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
@@ -159,10 +164,9 @@ hostile-review pass._
   `adapters/groww/contract_pull.py` + `db_view.format_clean_ist_millis`; 44 files.
   The historical/backtest pull + `rate_common` + the brute-force ENGINE are
   UNTOUCHED — `_build_live_controller`/`build_live_client` are the production pull's
-  rate controller + client, KEPT. Prior merged: DEC-MOVERS-O1-LATENCY-001 #860 (PR #815)
-  + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813) +
-  DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812) +
-  DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811))
+  rate controller + client, KEPT. Prior merged: DEC-FNO-CANDLE-LAKE-001 #861 (PR #814)
+  + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
+  + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812))
 
 ---
 
@@ -539,6 +543,7 @@ bruteX/
 |------|-------|--------|
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
+| F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
 | Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window of per-contract `expiry − 3 calendar months → expiry` (explicit operator dates override; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`); `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
