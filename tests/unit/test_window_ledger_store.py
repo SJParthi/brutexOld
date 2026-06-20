@@ -203,7 +203,7 @@ class TestPlanWindowsSymbolWindows:
     """Per-symbol opt-in sub-daily planning (plan_windows ``symbol_windows``).
 
     The SPOT pull paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md
-    #850 — the 1-minute fetch is fully decoupled from the 1-day coverage), but the
+    #851 — the 1-minute fetch is fully decoupled from the 1-day coverage), but the
     ledger still accepts the opt-in map (the never-narrow fallback) — covered here.
     """
 

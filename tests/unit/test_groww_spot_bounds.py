@@ -1,7 +1,7 @@
 """Unit tests for ``brutex.adapters.groww.spot_bounds`` (DEC-SPOT-INTERVAL-DECOUPLE-001).
 
 The SPOT 1-minute pull is now fully DECOUPLED from the 1-day coverage
-(MIGRATION.md #850): the coupled discovery driver (``discover_spot_minute_windows``),
+(MIGRATION.md #851): the coupled discovery driver (``discover_spot_minute_windows``),
 the pure coverage→window mapper (``spot_coverage_to_minute_window``), and the
 lake-read helper (``spot_daily_coverage``) were all deleted. The module now exposes
 ONLY the :data:`~brutex.adapters.groww.spot_bounds.SpotWindows` type alias — the

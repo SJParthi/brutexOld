@@ -808,7 +808,7 @@ def test_with_retry_threads_on_window(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── _resolve_spot_window — the opt-in per-symbol window hook (DEC-SPOT-INTERVAL-DECOUPLE-001) ──
 #
 # The SPOT pull paths always pass ``symbol_windows=None`` since the 1-minute pull is
-# fully decoupled from the 1-day coverage (MIGRATION.md #850). These tests cover the
+# fully decoupled from the 1-day coverage (MIGRATION.md #851). These tests cover the
 # RETAINED opt-in mechanism (the never-narrow fallback any caller may still supply).
 
 

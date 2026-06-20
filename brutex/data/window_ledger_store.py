@@ -404,7 +404,7 @@ def plan_windows(
     The DAILY interval is NEVER bounded (it must advance to the requested end) and a
     symbol absent from the map uses the global range (the never-narrow fallback). The
     SPOT pull paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md
-    #850 — the 1-minute fetch is fully decoupled from the 1-day coverage; both phases
+    #851 — the 1-minute fetch is fully decoupled from the 1-day coverage; both phases
     plan the full ``[start, end]`` range per symbol); the planned/fetched-key parity
     invariant holds in BOTH modes.
     """

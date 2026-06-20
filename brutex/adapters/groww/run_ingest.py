@@ -137,7 +137,7 @@ def _resolve_spot_window(
     ``(start, end)``:
 
     * ``symbol_windows is None`` → ``(start, end)`` — the SPOT pull paths always pass
-      ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #850): the 1-minute
+      ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851): the 1-minute
       pull is fully DECOUPLED from the 1-day coverage and runs over the full
       ``[start, end]`` range for every symbol. This branch is the live path.
     * ``interval == TRACK1_DAILY_INTERVAL`` → ``(start, end)`` — the DAILY interval is
@@ -308,7 +308,7 @@ def run_groww_spot_ingest(
         range (see :func:`_resolve_spot_window`); the DAILY interval is never bounded
         and a symbol absent from the map is pulled over the full ``[start, end)``.
         ``None`` (the default — and what the SPOT pull paths always pass since
-        DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #850) pulls the full
+        DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851) pulls the full
         ``[start, end)`` range for every symbol: the 1-minute fetch is fully decoupled
         from the 1-day coverage. The alias is retained for any caller that does supply
         an opt-in map (the never-narrow fallback).
@@ -580,7 +580,7 @@ def run_groww_spot_ingest_with_retry(
 
     *symbol_windows* is forwarded verbatim to every :func:`run_groww_spot_ingest`
     pass (each retry round honours the SAME opt-in per-symbol bounds). The SPOT pull
-    paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #850), so
+    paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851), so
     each round re-pulls only the still-failed windows of the full ``[start, end)``
     range.
 

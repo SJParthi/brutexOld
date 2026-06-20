@@ -962,7 +962,7 @@ def make_live_sync(
 
 #: The Phase-1 daily interval (``"1day"``). The SPOT pull runs the cheap ``1day``
 #: phase and the heavy ``1minute`` phase over INDEPENDENT full ``[start, end]``
-#: ranges (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #850 — the minute phase no
+#: ranges (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851 — the minute phase no
 #: longer reads 1-day coverage to bound itself). This constant just names the
 #: interval that splits the two phases; it is one source of truth shared with
 #: :func:`~brutex.adapters.groww.run_ingest._resolve_spot_window`.
@@ -1100,23 +1100,24 @@ def pull_all_spot(
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): the ledger below is the page's
         # primary source; the sidecar stays on disk read-only (db_view fallback
         # + the one-shot ledger migration) until the Stage-6 deletion.
-        # 1-DAY-FIRST phase split (DEC-SPOT-1DAY-FIRST-001, the spot twin of the
-        # option/future DEC-HISTORICAL-1DAY-FIRST-001). For the SPOT pull the cheap
-        # ``1day`` phase runs FIRST (over EVERY symbol) so the lake holds each
-        # symbol's REAL 1-day coverage; the heavy ``1minute`` fill (Phase 2) then
-        # STARTS from each symbol's discovered 1-day date, NOT blindly from the 2020
-        # floor — and a symbol with NO 1-day data is SKIPPED + reported (the 3c rule).
-        # ``intervals=("1day",)`` (the verify-first default) runs ONLY Phase 1 with
-        # ``symbol_windows=None`` — byte-identical to the pre-feature behaviour.
+        # DECOUPLED spot phases (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851 —
+        # supersedes the 1-minute↔1-day COUPLING of DEC-SPOT-1DAY-FIRST-001). For the
+        # SPOT pull the cheap ``1day`` phase and the heavy ``1minute`` fill each pull
+        # their OWN full ``[start, end]`` range over EVERY requested symbol,
+        # INDEPENDENTLY: the 1-minute phase is no longer bounded to a discovered 1-day
+        # date and no symbol is ever skipped for missing 1-day coverage (so a symbol
+        # the vendor serves only at 1-minute is still pulled, feeding the daily
+        # resample). ``intervals=("1day",)`` (the verify-first DEFAULT — retained) runs
+        # ONLY the 1-day phase; both phases pass ``symbol_windows=None``.
         daily_requested = _PHASE1_DAILY in intervals
         minute_intervals: tuple[str, ...] = tuple(i for i in intervals if i != _PHASE1_DAILY)
         minute_requested = bool(minute_intervals)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load (one-shot
         # migrate) the durable Parquet ledger ONCE for the whole pull, shared by
-        # BOTH phases so the live progress (on_ledger_sync) spans them. Phase 1's
-        # 1-day windows are PLANNED upfront here; Phase 2's 1-minute windows are
-        # PLANNED after the derive (so the planned keys equal the bounded fetched
-        # keys, with no phantom pre-listing rows). Persisted to
+        # BOTH phases so the live progress (on_ledger_sync) spans them. Each phase
+        # plans its full ``[start, end]`` tiling per symbol upfront (1-day and
+        # 1-minute alike — DEC-SPOT-INTERVAL-DECOUPLE-001); the planned keys equal
+        # the fetched keys (no bounding, no phantom rows). Persisted to
         # <lake>/window_ledger/ — the single source /coverage/windows surfaces.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         if ledger is not None and daily_requested:
@@ -1367,7 +1368,7 @@ def pull_all_spot(
             if daily_requested:
                 _run_phase((_PHASE1_DAILY,), instruments, None)
             # ── Phase 2 — 1-minute over EVERY symbol, full range (DECOUPLED) ──
-            # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #850): the 1-minute pull is
+            # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851): the 1-minute pull is
             # FULLY DECOUPLED from the 1-day coverage — it pulls its full ``[start,
             # end]`` range for EVERY requested symbol (no coverage discovery, no
             # per-symbol filtering, no minute-start bounding). ``symbol_windows=None``
@@ -1448,10 +1449,11 @@ def pull_all_spot(
             if on_ledger_sync is not None and ledger is not None:
                 final = ledger.progress_counts()
                 on_ledger_sync(final.resolved, final.total, final.bars, final.failed, final.current)
-        # Per-symbol rollup combines BOTH phases (DEC-SPOT-1DAY-FIRST-001): a symbol's
-        # 1-day result comes from Phase 1's report + its 1-minute result from Phase 2's;
-        # a symbol SKIPPED from Phase 2 (no 1-day coverage) simply has no 1-minute pair
-        # → it contributes nothing for that interval. Each phase's report is the FIRST
+        # Per-symbol rollup combines BOTH phases (DEC-SPOT-INTERVAL-DECOUPLE-001): a
+        # symbol's 1-day result comes from the 1-day phase's report + its 1-minute
+        # result from the 1-minute phase's — both phases run over EVERY symbol now (no
+        # 1-day-coverage skip), so a symbol missing one interval only means that
+        # interval was not requested. Each phase's report is the FIRST
         # pass (the until-clean contract); a quota death before ANY pass completed leaves
         # an empty report → that interval's outcome is UNKNOWN (claim nothing — the quota
         # verdict carries the actionable state). The merged pair/failure maps fold across
@@ -1789,13 +1791,13 @@ def pull_candles(
         # FetchCoverage set was deleted in Stage e). The legacy window_status.json
         # sidecar is WRITE-RETIRED (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) — kept on
         # disk read-only for the db_view fallback + one-shot ledger migration.
-        # 1-DAY-FIRST phase split (DEC-SPOT-1DAY-FIRST-001): the SPOT pull runs the
-        # cheap ``1day`` phase FIRST so the lake holds this symbol's REAL 1-day
-        # coverage, then the heavy ``1minute`` fill STARTS from its discovered 1-day
-        # date (never blindly from 2020). A symbol with NO 1-day coverage is SKIPPED
-        # from the minute phase + reported (the 3c rule). ``intervals=("1day",)`` (the
-        # verify-first default) runs ONLY Phase 1 with ``symbol_windows=None`` —
-        # byte-identical to the pre-feature behaviour.
+        # DECOUPLED spot phases (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851 —
+        # supersedes the 1-minute↔1-day COUPLING of DEC-SPOT-1DAY-FIRST-001): the
+        # ``1day`` and ``1minute`` phases each pull their OWN full ``[start, end]``
+        # range INDEPENDENTLY, over every requested symbol — the 1-minute fill is no
+        # longer bounded to a discovered 1-day date and no symbol is skipped for
+        # missing 1-day coverage. ``intervals=("1day",)`` (the verify-first DEFAULT —
+        # retained) runs ONLY the 1-day phase; both pass ``symbol_windows=None``.
         daily_requested = _PHASE1_DAILY in intervals
         minute_intervals: tuple[str, ...] = tuple(i for i in intervals if i != _PHASE1_DAILY)
         minute_requested = bool(minute_intervals)
@@ -1898,7 +1900,7 @@ def pull_candles(
             if daily_requested:
                 _run_phase((_PHASE1_DAILY,), None)
             # ── Phase 2 — 1-minute over the full range (DECOUPLED) ──
-            # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #850): the 1-minute pull is
+            # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851): the 1-minute pull is
             # FULLY DECOUPLED from the 1-day coverage — it pulls its full ``[start,
             # end]`` range for the requested symbol (no coverage discovery, no skip
             # when 1-day is absent). ``symbol_windows=None`` flows to plan_windows /
