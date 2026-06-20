@@ -915,7 +915,7 @@ class TestReconcileSymbolWindows:
     """Per-symbol opt-in sub-daily cold-start seeding (reconcile ``symbol_windows``).
 
     The SPOT pull paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md
-    #850), but the reconcile still accepts the opt-in map (the never-narrow fallback) —
+    #851), but the reconcile still accepts the opt-in map (the never-narrow fallback) —
     covered here.
     """
 

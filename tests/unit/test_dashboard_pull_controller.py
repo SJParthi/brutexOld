@@ -1441,7 +1441,7 @@ class TestPullAllSpotLedgerSync:
 # ── SPOT interval DECOUPLE phasing (DEC-SPOT-INTERVAL-DECOUPLE-001) ──────────
 #
 # The SPOT 1-minute pull is FULLY DECOUPLED from the 1-day coverage (MIGRATION.md
-# #850): the 1day phase pulls its full [start, end] range and the 1minute phase
+# #851): the 1day phase pulls its full [start, end] range and the 1minute phase
 # INDEPENDENTLY pulls its full [start, end] range for EVERY requested symbol — no
 # coverage discovery, no per-symbol filtering, no minute-start bounding. The
 # verify-first 1-day-only DEFAULT (the operator picks granularity via the dropdown)

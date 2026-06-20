@@ -1,6 +1,6 @@
 """Per-symbol minute-pull window type for the SPOT ingest spine.
 
-DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md entry #850) — the SPOT 1-minute
+DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md entry #851) — the SPOT 1-minute
 pull is now **fully decoupled** from the 1-day coverage. The 1-day phase pulls
 its full ``[start, end]`` range and the 1-minute phase **independently** pulls
 its full ``[start, end]`` range (the configured floor → today) for EVERY
