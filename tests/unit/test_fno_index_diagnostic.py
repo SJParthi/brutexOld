@@ -878,27 +878,46 @@ class TestResolveFnoIndexAliases:
 class TestClassifyOptionPullable:
     """The comprehensive fold: token-join + alias + symbol-bridge + the audit."""
 
-    def test_eq_token_join_is_diagnostic_only_not_a_rescue(self) -> None:
+    def test_eq_token_join_surfaces_diagnostic_and_persist_id(self) -> None:
         # A stock whose own symbol does NOT name its option leg's underlying_symbol
         # (spelling drift, e.g. BAJAJ-AUTO vs BAJAJAUTO), but whose GENUINE numeric
-        # vendor token equals the leg's underlying_security_id. The EQ token-join is
-        # DIAGNOSTIC ONLY (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001): is_spot_only_index
-        # is False for non-IDX, so the stock's classification is UNCHANGED. It must be
-        # surfaced in token_join_diagnostic, NOT the real token_join rescue bucket,
-        # and NOT added to the bridged set (which only the index rule reads).
+        # vendor token equals the leg's underlying_security_id. The EQ token-join does
+        # NOT touch the INDEX-only bridged set (is_spot_only_index is False for non-IDX)
+        # nor the index reclassification buckets — it is STILL surfaced in
+        # token_join_diagnostic for the operator audit. But its security_id is now
+        # returned in the 4th element (the PERSIST set), which is_universe_underlying
+        # uses to keep the stock as a TRADABLE underlying
+        # (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001, the follow-up to the audit-only split).
         stock = _eq_with_token("BAJAJ-AUTO", security_id=16669, feed_token="16669")
         leg = _option_with_underlying_id("BAJAJAUTO", underlying_security_id=16669)
         index = build_index([("NSE-BAJAJ-AUTO", stock), ("NSE-BAJAJAUTO-16Jun26-9000-CE", leg)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
-        # NOT a real rescue: the EQ pair is NOT in the (index-only) bridged set, and the
-        # token_join bucket stays empty — only the honest diagnostic bucket carries it.
+        bridged, _aliases, rescued, eq_ids = _classify_option_pullable(index, options_eligible)
+        # Index classification UNCHANGED: the EQ pair is NOT in the (index-only) bridged
+        # set, the token_join bucket stays empty — only the honest diagnostic carries it.
         assert (Exchange.NSE, "BAJAJ-AUTO") not in bridged
         assert bridged == options_eligible
         assert rescued["token_join"] == []
         assert rescued["token_join_diagnostic"] == ["NSE:BAJAJ-AUTO"]
         assert rescued["alias"] == []
         assert rescued["symbol_bridge"] == []
+        # NEW: the symbol-mismatched F&O stock's security_id is in the persist set.
+        assert eq_ids == frozenset({16669})
+
+    def test_bse_equity_token_collision_excluded_from_persist_set(self) -> None:
+        # Defense-in-depth (DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001): a BSE EQ whose numeric
+        # token coincidentally equals an NSE option leg's underlying_security_id is NOT an
+        # F&O stock (no BSE derivatives in scope), so the producer's NSE gate must EXCLUDE
+        # it from BOTH the persist set and the diagnostic (the downstream
+        # is_universe_underlying NSE gate would also reject it).
+        bse = _eq_with_token("FOO", security_id=16669, feed_token="16669", exchange=Exchange.BSE)
+        leg = _option_with_underlying_id("FOO", underlying_security_id=16669)  # an NSE leg
+        index = build_index([("BSE-FOO", bse), ("NSE-FOO-16Jun26-9000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued, eq_ids = _classify_option_pullable(index, options_eligible)
+        assert eq_ids == frozenset()  # the BSE collision is NOT persisted
+        assert rescued["token_join_diagnostic"] == []  # nor surfaced
+        assert (Exchange.BSE, "FOO") not in bridged
 
     def test_idx_token_join_is_a_real_rescue(self) -> None:
         # An IDX whose own GENUINE numeric vendor token matches an NSE option leg's
@@ -911,7 +930,7 @@ class TestClassifyOptionPullable:
         leg = _option_with_underlying_id("COMPACTIDX", underlying_security_id=51)
         index = build_index([("NSE-VERBOSEIDX", idx), ("NSE-COMPACTIDX-16Jun26-1-CE", leg)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         assert (Exchange.NSE, "VERBOSEIDX") in bridged
         assert rescued["token_join"] == ["NSE:VERBOSEIDX"]
         assert rescued["token_join_diagnostic"] == []
@@ -923,7 +942,7 @@ class TestClassifyOptionPullable:
         leg = _option_with_underlying_id("SOMETHING", underlying_security_id=42)
         index = build_index([("NSE-NIFTYMIDCAP100", idx), ("NSE-SOMETHING-16Jun26-1-CE", leg)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         # NOT token-joined (surrogate token) → stays spot-only (REF).
         assert (Exchange.NSE, "NIFTY MIDCAP 100") not in bridged
         assert rescued["token_join"] == []
@@ -948,7 +967,7 @@ class TestClassifyOptionPullable:
             ]
         )
         options_eligible = build_options_eligible_underlyings(index.universe)
-        bridged, aliases, rescued = _classify_option_pullable(index, options_eligible)
+        bridged, aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         assert (Exchange.NSE, "NIFTYJR") in bridged
         assert (Exchange.NSE, "NIFTYMIDSELECT") in bridged
         assert rescued["alias"] == ["NSE:NIFTYJR", "NSE:NIFTYMIDSELECT"]
@@ -965,7 +984,7 @@ class TestClassifyOptionPullable:
         leg = _option_with_underlying_id("MIDCPNIFTY", underlying_security_id=300)
         index = build_index([("NSE-MIDCPNIFTY", midcap), ("NSE-MIDCPNIFTY-16Jun26-12000-CE", leg)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         assert (Exchange.NSE, "NIFTY MID SELECT") in bridged
         assert rescued["symbol_bridge"] == ["NSE:NIFTY MID SELECT"]
         assert rescued["alias"] == []
@@ -977,7 +996,7 @@ class TestClassifyOptionPullable:
         leg = _option_with_underlying_id("NIFTY", underlying_security_id=13)
         index = build_index([("NSE-NIFTY", nifty), ("NSE-NIFTY-16Jun26-25000-CE", leg)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        _bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        _bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         assert rescued == {
             "token_join": [],
             "alias": [],
@@ -991,7 +1010,7 @@ class TestClassifyOptionPullable:
         sectoral = _idx_with_token("NIFTY MIDCAP 100", security_id=55, feed_token="NIFTYMIDCAP100")
         index = build_index([("NSE-NIFTYMIDCAP100", sectoral)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         assert bridged == options_eligible
         assert rescued == {
             "token_join": [],
@@ -1007,6 +1026,6 @@ class TestClassifyOptionPullable:
         leg = _option_with_underlying_id("NIFTY", underlying_security_id=13)
         index = build_index([("NSE-NIFTY", nifty), ("NSE-NIFTY-16Jun26-25000-CE", leg)])
         options_eligible = build_options_eligible_underlyings(index.universe)
-        _bridged, _aliases, rescued = _classify_option_pullable(index, options_eligible)
+        _bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
         # The CE leg contributed no rescue entry (it is not EQ/IDX).
         assert "NSE:NIFTY-OPT" not in rescued["token_join"]
