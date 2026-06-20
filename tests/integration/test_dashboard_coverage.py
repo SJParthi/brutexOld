@@ -302,7 +302,7 @@ class TestWindowStatusApi:
             "source": "status_log",
             "count": 0,
             "counts": {"spot": {}, "options": {}, "futures": {}},
-            "empty_threshold": 10,
+            "empty_threshold": 3,
             "matched": 0,
             "returned": 0,
             "capped": False,
