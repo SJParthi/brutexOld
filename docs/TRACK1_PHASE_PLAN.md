@@ -274,7 +274,7 @@ O(1) bench passes.
 
 | Deliverable | Notes |
 |---|---|
-| First production sweep (full 5-year × 3 inst × 15 TF × ~33B trials) | 2-4 day wall on M4 Pro |
+| First production sweep (full 5-year × 3 inst × 21 TF × ~33B trials) | 2-4 day wall on M4 Pro |
 | Top 3 candidates produced + reviewed | |
 | Final Phase 4 hostile review | |
 | Track 1 SHIP signoff | |
