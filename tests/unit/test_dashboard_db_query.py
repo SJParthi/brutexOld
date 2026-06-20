@@ -11,9 +11,10 @@ real Parquet partitions written by the production
 from __future__ import annotations
 
 import threading
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.dashboard.db_view import (
@@ -28,7 +29,9 @@ from brutex.dashboard.db_view import (
     _format_candle_timestamp,
     _intraday_last_close_by_date,
     _intraday_open_by_date,
+    _intraday_prev_close_by_page_date,
     _ist_date,
+    _page_ist_dates,
     _prev_trading_close,
     _quote_ident,
     _spot_derived_rows,
@@ -2019,3 +2022,256 @@ def test_query_candles_1day_self_baselines_without_intraday(
     # 2024-03-02 baselines on 03-01's 1-day close (100.4), same basis:
     assert round(float(rows["2024-03-02"][chg_i]), 2) == 0.40  # (100.8-100.4)/100.4*100
     assert round(float(rows["2024-03-02"][gap_i]), 2) == -0.40  # (100-100.4)/100.4*100
+
+
+# ── Page-bounded intraday %-change baseline (DEC-DB-UNIVERSE-O1-LATENCY-001) ──
+#
+# The /db candle pager appends derived %-change / open-gap columns to every page.
+# Computing them needs the prior trading day's last 1-minute close. The OLD code
+# aggregated the WHOLE multi-year 1-minute partition on EVERY paging click; the
+# new path reads only the page's own date span (+ the single predecessor bar). The
+# tests below pin BOTH the branch behaviour AND byte-for-byte equality with the
+# full-partition scan it replaces (zero correctness change — Golden Rule #7).
+
+
+def _next_weekday(d: date) -> date:
+    """First weekday on/after *d* (Sat/Sun skipped) — a synthetic trading day."""
+    while d.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+        d += timedelta(days=1)
+    return d
+
+
+def _write_session_minutes(
+    lake_root: Path,
+    *,
+    days: int,
+    bars_per_day: int = 3,
+    symbol: str = "NSE-NIFTY",
+) -> list[date]:
+    """Write *days* session-1-minute trading days (weekends skipped) for *symbol*.
+
+    Each trading day gets *bars_per_day* bars from 09:15 IST (03:45 UTC), one per
+    minute, with a UNIQUE close per (day, bar) so a byte-for-byte comparison of the
+    derived baseline is meaningful. The weekend skips create real gaps between
+    consecutive trading dates — exercising the "previous trading day across a
+    non-trading gap" path. Returns the ordered list of trading dates written.
+    """
+    writer = ParquetWriter(lake_root=lake_root)
+    bars: list[CandleBar] = []
+    written: list[date] = []
+    cursor = _next_weekday(date(2024, 3, 1))
+    for di in range(days):
+        cursor = _next_weekday(cursor)
+        written.append(cursor)
+        base = datetime(cursor.year, cursor.month, cursor.day, 3, 45, tzinfo=UTC)
+        for bi in range(bars_per_day):
+            bars.append(
+                _ocbar(
+                    base + timedelta(minutes=bi),
+                    open_=str(99 + di),
+                    high=str(110 + di),
+                    low=str(90 + di),
+                    # Unique, ascending within the day → last bar's close is distinct.
+                    close=f"{100 + di}.{bi}",
+                )
+            )
+        cursor += timedelta(days=1)
+    writer.write(exchange="NSE", segment="CASH", symbol=symbol, interval="1minute", bars=bars)
+    return written
+
+
+def test_page_ist_dates_no_timestamp_column_is_empty() -> None:
+    # No "timestamp" in the projection → the derived columns are blank anyway, so
+    # there are no dates to baseline (ts_idx < 0 branch).
+    assert _page_ist_dates([(100.0, 101.0)], ["open", "close"]) == set()
+
+
+def test_page_ist_dates_extracts_distinct_ist_dates_skipping_non_datetime() -> None:
+    rows = [
+        (datetime(2024, 3, 1, 3, 45, tzinfo=UTC), Decimal("100")),  # 09:15 IST → 03-01
+        (datetime(2024, 3, 1, 9, 59, tzinfo=UTC), Decimal("101")),  # 15:29 IST → 03-01
+        (datetime(2024, 3, 4, 3, 45, tzinfo=UTC), Decimal("102")),  # 03-04
+        (None, Decimal("103")),  # non-datetime cell is skipped (isinstance False arm)
+    ]
+    assert _page_ist_dates(rows, ["timestamp", "close"]) == {date(2024, 3, 1), date(2024, 3, 4)}
+
+
+def test_intraday_prev_close_empty_page_dates_is_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    _write_session_minutes(tmp_path, days=3)
+    out = _intraday_prev_close_by_page_date(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        page_dates=set(),
+    )
+    assert out == {}
+
+
+def test_intraday_prev_close_missing_partition_is_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    out = _intraday_prev_close_by_page_date(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        page_dates={date(2024, 3, 1)},
+    )
+    assert out == {}
+
+
+def test_intraday_prev_close_first_day_has_no_predecessor(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    dates = _write_session_minutes(tmp_path, days=3, bars_per_day=3)
+    out = _intraday_prev_close_by_page_date(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        page_dates={dates[0]},
+    )
+    # The earliest stored day has no predecessor bar → no prev-close entry → the
+    # derived columns degrade to blank (pred is None branch).
+    assert out == {}
+
+
+def test_intraday_prev_close_interior_day_uses_prior_days_last_close(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    dates = _write_session_minutes(tmp_path, days=3, bars_per_day=3)
+    out = _intraday_prev_close_by_page_date(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        page_dates={dates[1]},
+    )
+    # Day 0's bars close 100.0 / 100.1 / 100.2 → the 15:29 (last) close is 100.2,
+    # read by the single predecessor query — NOT the whole partition.
+    assert out == {dates[1]: Decimal("100.2")}
+
+
+@pytest.mark.parametrize("days,bars_per_day", [(2, 1), (5, 3), (8, 2), (11, 1)])
+def test_intraday_prev_close_page_bounded_matches_full_scan(
+    store: InstrumentStore, tmp_path: Path, days: int, bars_per_day: int
+) -> None:
+    """The page-bounded baseline equals the full-partition scan for EVERY window.
+
+    In production a page's distinct dates form a CONTIGUOUS run of trading days (a
+    page is a LIMIT/OFFSET slice of timestamp-sorted bars), so this exhausts every
+    contiguous window. The helper is in fact robust to NON-contiguous page_dates too
+    — the span query fills the intervening days, so the predecessor chain is complete
+    regardless — which the endpoints-only ``{lo, hi}`` check below pins. Either way
+    the bounded helper returns the SAME prev-close for each page date as the
+    full-partition reference: exhaustive byte-for-byte proof.
+    """
+    _write_session_minutes(tmp_path, days=days, bars_per_day=bars_per_day)
+    coords = {"exchange": "NSE", "segment": "CASH", "symbol": "NSE-NIFTY"}
+    reference = _prev_trading_close(
+        _intraday_last_close_by_date(store.connection, tmp_path, **coords)
+    )
+    all_dates = sorted(_intraday_last_close_by_date(store.connection, tmp_path, **coords))
+    for i in range(len(all_dates)):
+        for j in range(i, len(all_dates)):
+            # The contiguous window a real page produces …
+            window = set(all_dates[i : j + 1])
+            # … AND the NON-contiguous endpoints-only subset (proves the span query
+            # fills the gap — the helper does not rely on the page being dense).
+            sparse = {all_dates[i], all_dates[j]}
+            for page in (window, sparse):
+                bounded = _intraday_prev_close_by_page_date(
+                    store.connection, tmp_path, **coords, page_dates=page
+                )
+                for d in page:
+                    assert bounded.get(d) == reference.get(d), (d, sorted(page))
+
+
+@pytest.mark.parametrize("descending", [False, True])
+def test_query_candles_chunked_paging_is_byte_identical_to_one_page(
+    store: InstrumentStore, tmp_path: Path, descending: bool
+) -> None:
+    """Paging in tiny chunks yields rows IDENTICAL to one big page — derived cols too.
+
+    Each 5-row page recomputes its OWN page-bounded baseline; concatenating them
+    must reproduce the single-query result bar-for-bar, including the derived
+    change_pct / open_gap_pct columns (Golden Rule #7 idempotence).
+    """
+    _write_session_minutes(tmp_path, days=6, bars_per_day=4)
+
+    def _page(limit: int, offset: int) -> dict[str, Any]:
+        return query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            descending=descending,
+            limit=limit,
+            offset=offset,
+        )
+
+    full = _page(500, 0)
+    paged: list[list[object]] = []
+    offset = 0
+    while True:
+        page = _page(5, offset)
+        paged.extend(page["rows"])
+        if offset + len(page["rows"]) >= page["total"] or not page["rows"]:
+            break
+        offset += 5
+    assert paged == full["rows"]
+
+
+def test_query_candles_coarse_interval_baselines_on_1minute_page_span(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    """A coarse intraday timeframe still baselines on the 1-minute feed underneath.
+
+    DEC-SPOT-PREVCLOSE-1MIN-001: viewing a 15-minute partition derives %-change
+    from the prior day's last 1-MINUTE close. The page-bounded reader must read the
+    1minute partition for the VIEWED page's dates (not the 15minute partition).
+    """
+    _write_session_minutes(tmp_path, days=3, bars_per_day=3, symbol="NSE-NIFTY")
+    # A single 15-minute bar on day 1 (the viewed timeframe); its IST date drives
+    # the 1-minute baseline lookup.
+    dates = (
+        _next_weekday(date(2024, 3, 1)),
+        _next_weekday(_next_weekday(date(2024, 3, 1)) + timedelta(days=1)),
+    )
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="15minute",
+        bars=[
+            _ocbar(
+                datetime(dates[1].year, dates[1].month, dates[1].day, 3, 45, tzinfo=UTC),
+                open_="200",
+                high="210",
+                low="190",
+                close="205",
+            )
+        ],
+    )
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="15minute",
+        limit=50,
+    )
+    chg_i = out["columns"].index("change_pct")
+    # Day 0's last 1-minute close is 100.2 → change = (205 - 100.2) / 100.2 * 100.
+    assert out["rows"][0][chg_i] is not None
+    assert round(float(out["rows"][0][chg_i]), 4) == round((205 - 100.2) / 100.2 * 100, 4)
