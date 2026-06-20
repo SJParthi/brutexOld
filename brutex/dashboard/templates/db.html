@@ -264,12 +264,13 @@ let mode = "table";  /* "table" | "candles" */
 
 /* Per-table structured-query state (DEC-DB-QUERY-001). cols=null → all. */
 const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], orderBy:"", desc:false} } */
-/* Candle-viewer state. `kind` ("spot"|"option") is the active Candle-lake
-   row: the spot bars (`bars/`) and the dedicated expired-options table
-   (`options/`) are now SEPARATE, self-contained sidebar rows, so `datasets`
-   holds ONLY the active row's datasets (never both at once). The selected
-   dataset's `kind` still drives which API + column set is used
-   (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer). */
+/* Candle-viewer state. `kind` ("spot"|"fno"|"option") is the active Candle-lake
+   row: the spot bars (`bars/` non-FNO), the F&O candle lake (`bars/<exch>/FNO/…`,
+   DEC-FNO-CANDLE-LAKE-001), and the dedicated expired-options table (`options/`)
+   are SEPARATE, self-contained sidebar rows, so `datasets` holds ONLY the active
+   row's datasets (never more than one at once). The selected dataset's `kind`
+   drives which API + column set is used; spot AND fno share the candle API + the
+   7 OHLCV columns (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer). */
 const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: null, desc: false, offset: 0 };
 /* F&O registry-viewer state (DEC-DERIV-REGISTRY-DB-VIEW-001). `kind` is the
    active registry row ("expiries"|"contracts"); the registry is a SEPARATE
@@ -392,6 +393,15 @@ async function loadTables() {
       + '<span class="nm">📈 candles</span>'
       + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">spot</span>'
       + '</div>';
+    /* DEC-FNO-CANDLE-LAKE-001: the F&O (futures + options) candle lake is its OWN
+       first-class, clickable row — the SAME bars/<exch>/FNO/<contract>/<interval>/
+       Parquet the Groww historical pull writes, surfaced per contract (decoded
+       underlying / expiry / strike / CE-PE-FUT). It is NOT spot (the honesty fix),
+       and browses through the IDENTICAL segment=FNO candle query path. */
+    const fnoRow = '<div class="tbl" data-candles="fno">'
+      + '<span class="nm">📊 F&amp;O candles</span>'
+      + '<span class="badge" style="color:var(--blue);background:rgba(91,141,239,.13)">FNO</span>'
+      + '</div>';
     /* DEC-DASHBOARD-UX-POLISH-001: the expired-options lake is HIDDEN from the
        browsable Candle-lake list per operator request — it is a documented
        REFERENCE_ONLY surface that clutters the spot-focused list. SCOPE-SAFE:
@@ -435,7 +445,7 @@ async function loadTables() {
       + '<span class="badge" style="color:var(--pink);background:rgba(255,107,157,.13)">live</span>'
       + '</div>').join("");
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
-      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow
+      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + fnoRow
       + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow
       + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow
       + '<h3 style="margin-top:14px">Live lake</h3>' + liveRows;
@@ -796,11 +806,27 @@ function updateTableGrid(name, body, err) {
    is the on-disk series segment. */
 function dsKey(d) {
   if (d.kind === "option") return "option:" + d.series;
+  /* F&O contract sets share the spot coords (exchange|segment=FNO|symbol|interval)
+     but carry their own "fno:" prefix so the two pickers never alias a key. */
+  if (d.kind === "fno") return "fno:" + [d.exchange, d.segment, d.symbol, d.interval].join("|");
   return "spot:" + [d.exchange, d.segment, d.symbol, d.interval].join("|");
 }
 function curDataset() { return cstate.datasets.find(d => dsKey(d) === cstate.key) || null; }
-/* Columns available for the currently-selected dataset (option vs spot). */
+/* Columns available for the currently-selected dataset. Spot AND F&O share the 7
+   OHLCV CANDLE_COLS (open_interest is first-class for F&O); only the expired-options
+   lake uses OPTION_COLS. */
 function curCols() { const d = curDataset(); return d && d.kind === "option" ? OPTION_COLS : CANDLE_COLS; }
+/* Friendly decoded label for an F&O contract dataset (underlying · expiry ·
+   strike+CE/PE or FUT · interval), falling back to the raw groww_symbol when the
+   directory name didn't decode (DEC-FNO-CANDLE-LAKE-001). Display-only — dsKey() /
+   buildCandleUrl() still address the raw symbol coords. */
+function fnoLabel(d) {
+  if (!d.underlying) return d.symbol + " · " + d.interval;
+  const leg = d.instrument_type === "FUT"
+    ? "FUT"
+    : (d.strike != null ? d.strike + " " : "") + (d.option_type || "");
+  return d.underlying + " · " + d.expiry + " · " + leg + " · " + d.interval;
+}
 
 async function selectCandles(kind) {
   mode = "candles";
@@ -812,19 +838,25 @@ async function selectCandles(kind) {
   cstate.offset = 0;
   markCandles();
   const isOpt = cstate.kind === "option";
-  dataEl.innerHTML = '<div class="empty">loading ' + (isOpt ? "expired-option" : "candle") + ' datasets…</div>';
+  const isFno = cstate.kind === "fno";
+  const lakeLabel = isOpt ? "expired-option" : isFno ? "F&O candle" : "candle";
+  dataEl.innerHTML = '<div class="empty">loading ' + lakeLabel + ' datasets…</div>';
   try {
     const r = await fetch("/api/v1/db/candles/datasets");
     const body = await r.json();
     /* This row browses ONE lake — keep only the active kind's datasets,
-       each tagged so curCols()/buildCandleUrl() pick the right schema. */
+       each tagged so curCols()/buildCandleUrl() pick the right schema + query path
+       (F&O reuses the spot segment=FNO candle path). */
     cstate.datasets = isOpt
       ? (body.options || []).map(d => ({ kind: "option", ...d }))
+      : isFno
+      ? (body.fno || []).map(d => ({ ...d, kind: "fno" }))
       : (body.datasets || []).map(d => ({ kind: "spot", ...d }));
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery(false);
-    else renderCandleView(null, isOpt
-      ? "No expired-option data yet — pull an instrument's options on /universe first."
+    else renderCandleView(null,
+      isOpt ? "No expired-option data yet — pull an instrument's options on /universe first."
+      : isFno ? "No F&O candle data yet — pull an instrument's futures/options history on /universe first."
       : "No spot candle data yet — pull an instrument's timeframes on /universe first.");
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
@@ -883,6 +915,8 @@ function candleControlsHtml() {
        dsKey()/buildCandleUrl() still address the raw `series` key. */
     const label = d.kind === "option"
       ? "[option] " + (d.label || (d.series + "·" + d.interval))
+      : d.kind === "fno"
+      ? "[F&O] " + fnoLabel(d)
       : "[spot] " + d.exchange + "·" + d.segment + "·" + d.symbol + "·" + d.interval;
     return '<option value="' + esc(k) + '"' + (k === cstate.key ? " selected" : "") + '>'
       + esc(label) + '</option>';
@@ -926,6 +960,7 @@ function candleHeadHtml(body) {
   /* The grid title mirrors the picker: the decoded option label when the
      server sent one (DEC-DB-OPTION-DATASET-DECODE-001), raw series fallback. */
   if (d && d.kind === "option") { title = esc(d.label || (d.series + " · " + d.interval)); icon = "🅾"; }
+  else if (d && d.kind === "fno") { title = esc(fnoLabel(d)); icon = "📊"; }
   else if (d) { title = esc(d.symbol + " · " + d.interval); }
   return '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + esc(sub) + '</span></div>';
 }

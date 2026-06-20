@@ -95,8 +95,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date as date_cls
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
@@ -113,6 +112,7 @@ from brutex.dashboard.movers_snapshot import (
     interval_minutes,
     parse_snapshot_date,
 )
+from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
 
@@ -147,22 +147,6 @@ DEFAULT_OPTIONS_TOP_N: Final[int] = 50
 #: instrument-master backtesting segment (CLAUDE.md §6).
 _FNO_SEGMENT: Final[str] = "FNO"
 
-#: The two option-type suffixes — Call / Put. A contract groww_symbol ends with
-#: one of these (``EXCH-UNDERLYING-DDMmmYY-STRIKE-CE|PE``); a FUT ends ``-FUT``
-#: and is excluded from the options universe.
-_OPTION_TYPES: Final[frozenset[str]] = frozenset({"CE", "PE"})
-
-#: The minimum hyphen-split arity of an option contract groww_symbol
-#: (``EXCH-UNDERLYING-DDMmmYY-STRIKE-CE|PE`` → 5 parts; a vendor symbol uses the
-#: hyphen only as the field separator).
-_MIN_OPTION_PARTS: Final[int] = 5
-
-#: The vendor expiry-token format inside the contract symbol (``30Jun25``): a
-#: 2-digit day, a title-case 3-letter month, a 2-digit year. The single parse
-#: spec (CLAUDE.md §11 COMMON — re-derived locally rather than importing a
-#: private from the Futures reader).
-_EXPIRY_FORMAT: Final[str] = "%d%b%y"
-
 #: The ``?expiry=`` selector → the 0-based rank of the chosen expiry among an
 #: underlying's DISTINCT live (``>= snapshot date``) expiries, sorted ascending:
 #: ``near`` = the front (closest) expiry, ``next`` = the one after, ``far`` = the
@@ -183,14 +167,17 @@ _EXPIRY_TRACKS: Final[frozenset[str]] = frozenset({"all", "weekly", "monthly"})
 
 
 def parse_option_symbol(symbol: str) -> tuple[str, date_cls, Decimal, str] | None:
-    """Parse an option contract groww_symbol into its parts, or ``None``.
+    """Parse an OPTION contract groww_symbol into its parts, or ``None``.
 
-    The contract groww_symbol is ``EXCH-UNDERLYING-DDMmmYY-STRIKE-CE|PE``
-    (hyphen-joined), e.g. ``"NSE-NIFTY-30Jun25-24000-CE"`` →
-    ``("NIFTY", date(2025, 6, 30), Decimal("24000"), "CE")``. Returns ``None``
-    for any non-option symbol — a future ends ``-FUT`` so its last part is not
-    ``CE`` / ``PE`` — and for any junk / unparseable expiry / non-numeric strike,
-    so the caller simply skips it (never raising — Golden Rule #1).
+    A thin options-only adapter over the canonical
+    :func:`brutex.data.fno_symbol.parse_fno_symbol` (CLAUDE.md §11 COMMON — one
+    parser, shared with the ``/db`` F&O candle browser): the contract groww_symbol
+    is ``EXCH-UNDERLYING-DDMmmYY-STRIKE-CE|PE`` (hyphen-joined), e.g.
+    ``"NSE-NIFTY-30Jun25-24000-CE"`` → ``("NIFTY", date(2025, 6, 30),
+    Decimal("24000"), "CE")``. Returns ``None`` for any non-option symbol — a
+    FUTURE (``-FUT``) is excluded here even though the shared parser decodes it —
+    and for any junk / unparseable expiry / non-positive strike, so the caller
+    simply skips it (never raising — Golden Rule #1).
 
     Parameters
     ----------
@@ -201,46 +188,12 @@ def parse_option_symbol(symbol: str) -> tuple[str, date_cls, Decimal, str] | Non
     -------
     tuple[str, datetime.date, decimal.Decimal, str] | None
         ``(underlying, expiry_date, strike, option_type)`` when *symbol* is a
-        well-formed option contract, else ``None``.
+        well-formed OPTION contract, else ``None``.
     """
-    parts = symbol.split("-")
-    # Need at least EXCH, UNDERLYING, expiry, STRIKE, CE|PE — and the last part
-    # must be an option type (a future's last part is FUT, so it is excluded).
-    if len(parts) < _MIN_OPTION_PARTS or parts[-1] not in _OPTION_TYPES:
+    parts = parse_fno_symbol(symbol)
+    if parts is None or parts.option_type is None or parts.strike is None:
         return None
-    underlying = parts[1]
-    opt_type = parts[-1]
-    expiry = _parse_expiry_token(parts[-3])
-    strike = _parse_strike(parts[-2])
-    if not underlying or expiry is None or strike is None:
-        return None
-    return underlying, expiry, strike, opt_type
-
-
-def _parse_expiry_token(token: str) -> date_cls | None:
-    """Parse a ``DDMmmYY`` expiry token (``30Jun25``) into a date, or ``None``.
-
-    Uses :meth:`datetime.datetime.strptime` with the vendor :data:`_EXPIRY_FORMAT`
-    (``%d%b%y``) — any other shape, an unknown month, or an out-of-range day
-    raises :class:`ValueError`, caught and reported as ``None`` so the caller
-    skips the malformed contract rather than raising (Golden Rule #1).
-    """
-    try:
-        return datetime.strptime(token, _EXPIRY_FORMAT).date()
-    except ValueError:
-        return None
-
-
-def _parse_strike(token: str) -> Decimal | None:
-    """Parse a strike token (``24000`` / ``24000.5``) into a Decimal, or ``None``.
-
-    A non-numeric token yields :class:`decimal.InvalidOperation`, caught and
-    reported as ``None`` so the caller skips the malformed contract.
-    """
-    try:
-        return Decimal(token)
-    except InvalidOperation:
-        return None
+    return parts.underlying, parts.expiry, parts.strike, parts.option_type
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +265,7 @@ class OptionMover:
         without a trailing ``.0`` for a whole number), and the option type — the
         markets-screen Options row label.
         """
-        expiry_token = self.expiry.strftime(_EXPIRY_FORMAT)
+        expiry_token = self.expiry.strftime(EXPIRY_DATE_FORMAT)
         strike = self.strike.normalize()
         # `normalize()` can yield exponent form (``2.4E+4``) for a whole strike —
         # `quantize` back to an integer when there is no fractional part so the

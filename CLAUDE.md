@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #861 —
+_Last updated: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #862 —
 the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
 correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
 1-minute partition to baseline the derived %-change columns on every paging click —
@@ -29,7 +29,12 @@ bench), and the `/db` + `/universe` FRONTENDS update in place (grid-only `#dbgri
 refresh on paging instead of a full control-bar+datepicker teardown; a per-tab
 instrument cache + debounced search + in-place completeness patch). Honest envelope:
 O(page date-span) / O(visible), NOT a literal O(1)-total. Engine + 52-vocab + scope
-UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-MOVERS-O1-LATENCY-001,
+UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-FNO-CANDLE-LAKE-001,
+MIGRATION.md #861 — the F&O (futures + options) historical-candle lake is now a
+FIRST-CLASS documented `/db` table (a "📊 F&O candles" row, decoded per contract) +
+registered in the master `schema_meta` (`fno_candle_lake.*`), FORMALIZING data ALREADY
+stored by the Groww pull at `bars/<exch>/FNO/<groww_symbol>/<interval>/…` — NOT a new
+store; lake-view only, ENGINE UNCHANGED). Earlier: 2026-06-20 (DEC-MOVERS-O1-LATENCY-001,
 MIGRATION.md #860 — the `/movers` page made near-O(1) per interaction: the `top_n`-independent
 lake scan is split from the cheap rank + cached per coordinate (`MoversSnapshotCache`,
 generation-invalidated), and the cold per-symbol intraday read is bounded to the day's
@@ -142,7 +147,7 @@ hostile-review pass._
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
 - **Active branch:** `claude/intelligent-shannon-s8qea3` (`/db` + `/universe` dashboard
   pages made INSTANT per interaction with ZERO correctness change —
-  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #861: `db_view.py::query_candles` now
+  DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #862: `db_view.py::query_candles` now
   page-bounds the intraday %-change baseline — reading the prior-day last-1-minute close
   for ONLY the page's date span + the single bar before it
   (`_intraday_prev_close_by_page_date`, byte-for-byte identical to the old whole-partition
@@ -152,11 +157,12 @@ hostile-review pass._
   completeness patch). Honest envelope: O(page date-span)/O(visible), NOT O(1)-total.
   Engine/52-vocab/scope UNCHANGED — read-only viewer only; Live + the movers route
   deliberately untouched (separate sessions own those). Prior merged:
+  DEC-FNO-CANDLE-LAKE-001 #861 (PR #814, F&O candle lake first-class `/db` table + schema_meta) +
   DEC-MOVERS-O1-LATENCY-001 #860 (PR #815, /movers near-O(1) snapshot cache + month-bounded
   reads) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows
   real expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
   (PR #812) + DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811). Running in parallel sessions:
-  F&O historical-candle table, Remove-Live — see those PRs)
+  Remove-Live — see those PRs)
 
 ---
 
@@ -533,6 +539,7 @@ bruteX/
 |------|-------|--------|
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
+| F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
 | Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window of per-contract `expiry − 3 calendar months → expiry` (explicit operator dates override; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`); `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
