@@ -401,3 +401,41 @@ def test_fully_tradable_selection_is_unchanged(
     assert "note" not in body
     assert _wait_for_job(ref_client)["state"] == "done"
     assert seen == [["NIFTY"]]
+
+
+def test_metadata_progress_sync_maps_onto_sync_from_ledger() -> None:
+    """The metadata progress hook maps ``(completed, total, current)`` onto the job's
+    ``sync_from_ledger`` with ``bars=0`` / ``failed=0`` (the metadata pull has NO candles;
+    DEC-METADATA-LIVE-PROGRESS-001). Asserted DIRECTLY because the route's ``_work`` body
+    is job-thread ``# pragma: no cover`` and the route fake ignores the hook — a swapped
+    arg / wrong ``bars`` / dropped ``current`` would fail HERE, not pass CI green
+    (hostile-review #804/PR-3 MAJOR fold)."""
+    from typing import cast
+
+    from brutex.dashboard.pull_jobs import BackgroundPullJob
+
+    calls: list[dict[str, Any]] = []
+
+    class _SpyJob:
+        def sync_from_ledger(
+            self,
+            *,
+            completed: int,
+            total: int,
+            bars: int,
+            failed: int = 0,
+            current: str = "",
+        ) -> None:
+            calls.append(
+                {
+                    "completed": completed,
+                    "total": total,
+                    "bars": bars,
+                    "failed": failed,
+                    "current": current,
+                }
+            )
+
+    app_module._metadata_progress_sync(cast(BackgroundPullJob, _SpyJob()), 3, 7, "NIFTY/2024")
+
+    assert calls == [{"completed": 3, "total": 7, "bars": 0, "failed": 0, "current": "NIFTY/2024"}]

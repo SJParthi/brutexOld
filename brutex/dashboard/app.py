@@ -42,6 +42,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1694,13 +1695,8 @@ def build_app(
             """
             del on_progress  # metadata progress is the absolute resync hook, not the 4-arg one
 
-            def _metadata_progress(completed: int, total: int, current: str) -> None:
-                # bars=0 / failed=0: the metadata pull persists only the chain SHAPE,
-                # never candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars.
-                _pull_job.sync_from_ledger(
-                    completed=completed, total=total, bars=0, failed=0, current=current
-                )
-
+            # The (completed, total, current) → sync_from_ledger mapping lives in the
+            # module-level _metadata_progress_sync (unit-tested); partial binds this job.
             with RegistryStore.open(registry_path) as registry:
                 report = pull_expiries_contracts(
                     instruments,
@@ -1709,7 +1705,7 @@ def build_app(
                     years=years,
                     dry_run=dry_run,
                     session_rate=_session_rate,
-                    on_progress=_metadata_progress,
+                    on_progress=partial(_metadata_progress_sync, _pull_job),
                 )
             return report.to_dict()
 
@@ -4044,6 +4040,21 @@ def build_app(
 # aliases keep this module's call sites unchanged.
 _make_read_1m = make_lake_read_1m
 _make_write_tf = make_lake_write_tf
+
+
+def _metadata_progress_sync(
+    job: BackgroundPullJob, completed: int, total: int, current: str
+) -> None:
+    """Map the metadata pull's absolute ``(completed, total, current)`` progress onto the
+    job's ``sync_from_ledger`` resync (DEC-METADATA-LIVE-PROGRESS-001).
+
+    ``bars=0`` / ``failed=0``: the metadata pull persists only the chain SHAPE, never
+    candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars. Lifted OUT of the
+    ``# pragma: no cover`` job-thread closure so the ``(completed, total, current)`` →
+    ``sync_from_ledger`` mapping is unit-tested (a swapped arg / wrong ``bars`` would now
+    fail a test, not pass CI green) instead of being pragma-hidden.
+    """
+    job.sync_from_ledger(completed=completed, total=total, bars=0, failed=0, current=current)
 
 
 def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:
