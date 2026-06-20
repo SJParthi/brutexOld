@@ -172,7 +172,9 @@ def test_option_verdict_all_states() -> None:
     assert _option_verdict([]) == OPT_NONE
     # any failed wins (even if that year had no expiries)
     assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_FAILED, 0)]) == OPT_FAILED
-    # a year that HAS expiries but is still pending → growing (genuinely filling)
+    # DEFENSIVE / forward-compat branch (UNREACHABLE in production — the ledger invariant is
+    # pending ⟺ expiries_pulled==0, so a (pending, n>0) cell is never emitted; hostile-review
+    # #859). Synthetic input exercises the retained `growing` fold, NOT a real pipeline state.
     assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_PENDING, 20)]) == OPT_GROWING
     # an expiries_only year (with expiries) → partial
     assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_EXPIRIES_ONLY, 12)]) == OPT_PARTIAL
@@ -309,7 +311,9 @@ def test_scoreboard_csv_options_detail_has_by_design_note() -> None:
 def test_option_aggregate_counts_each_status() -> None:
     records = [
         _cov("A", 2025, STATUS_COMPLETE, expiries=50),  # stable
-        _cov("B", 2025, STATUS_PENDING, expiries=20),  # growing (has expiries, still filling)
+        # DEFENSIVE / forward-compat: a (pending, n>0) cell is unreachable in production
+        # (pending ⟺ 0 expiries; hostile-review #859) — synthetic, exercises the `growing` fold.
+        _cov("B", 2025, STATUS_PENDING, expiries=20),  # → growing (defensive branch)
         _cov("C", 2025, STATUS_EXPIRIES_ONLY, expiries=12),  # partial
         _cov("D", 2025, STATUS_FAILED),  # failed
     ]
@@ -501,7 +505,8 @@ def test_per_symbol_options_unmapped_underlying_skipped() -> None:
 def test_per_symbol_spot_and_options_merge_on_same_symbol() -> None:
     """A symbol with BOTH spot rows and option records merges into one entry (no duplication)."""
     rows = [_spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
-    # A current year that HAS expiries but is still pending (contracts filling) → growing.
+    # DEFENSIVE / forward-compat: (pending, n>0) is unreachable in production (pending ⟺ 0
+    # expiries; hostile-review #859) — synthetic input exercises the retained `growing` fold.
     records = [_cov("NSE-NIFTY", 2025, STATUS_PENDING, expiries=10)]
     cats = {"NSE-NIFTY": CATEGORY_INDEX}
     out = per_symbol_completeness(rows, cats, records, cats)

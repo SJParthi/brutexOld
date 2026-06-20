@@ -185,8 +185,8 @@ def _option_verdict(cells: list[tuple[str, int]]) -> str:
 
     * any ``failed`` year → ``failed`` (a re-pull should retry);
     * else NO year has ANY expiries → ``none`` (the underlying has no option history in the grid);
-    * else any year that HAS expiries but is still ``pending`` → ``growing`` (genuinely filling —
-      a new contract could still arrive for a live expiry);
+    * else any year that HAS expiries but is still ``pending`` → ``growing`` (DEFENSIVE /
+      forward-compat — see the honesty note below);
     * else any requested year with ZERO expiries → ``partial`` (the option history does NOT span
       the full requested range — a late-listed start or a gap; HONEST, never a fabricated %);
     * else any ``expiries_only`` year → ``partial`` (expiries captured, contracts not yet);
@@ -196,6 +196,18 @@ def _option_verdict(cells: list[tuple[str, int]]) -> str:
     here for the ``partial`` signal but are EXCLUDED from the displayed ``years`` span (the caller
     appends a year only when it has expiries), so a late-listed underlying shows only its real
     expiry years, never the full requested 2020→now range.
+
+    Honesty note (Golden Rule #10, hostile-review #859): the ``growing`` arm is currently
+    UNREACHABLE in production — the ledger's :func:`brutex.data.coverage_ledger.classify_cell`
+    invariant is ``pending ⟺ expiries_pulled == 0`` (a year with discovered expiries is
+    ``expiries_only`` or ``complete``, never ``pending``), so a ``(pending, n>0)`` cell cannot
+    be emitted by the real pull. Under today's pipeline a still-being-filled current year reads
+    ``expiries_only`` → ``partial`` until it completes; ``growing`` therefore never fires. The
+    arm (and its synthetic ``(pending, n>0)`` unit fixtures) is retained as a DEFENSIVE /
+    forward-compat fold in case the ledger ever gains a true "chain still filling" status —
+    mirroring the existing defensive ``OPT_NONE`` aggregate case. It is NOT claimed as a live
+    verdict. (Consequently the ``growing_or_partial`` aggregate bucket is, in real data,
+    effectively partial-only.)
     """
     if not cells:
         return OPT_NONE
@@ -205,6 +217,10 @@ def _option_verdict(cells: list[tuple[str, int]]) -> str:
     if not with_expiries:
         return OPT_NONE
     if any(status == _CELL_PENDING for status, _n in with_expiries):
+        # DEFENSIVE / forward-compat (UNREACHABLE in production): the ledger invariant is
+        # ``pending ⟺ expiries_pulled == 0`` (classify_cell), so no real cell is (pending, n>0).
+        # Retained in case a true "chain still filling" status is ever added (see the docstring
+        # honesty note + hostile-review #859); exercised only by synthetic unit fixtures.
         return OPT_GROWING
     if any(n == 0 for _status, n in cells):
         return OPT_PARTIAL
