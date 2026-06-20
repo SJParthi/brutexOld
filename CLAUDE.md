@@ -118,7 +118,7 @@ hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/options-completeness-years` (the /completeness OPTIONS table shows only the years that ACTUALLY have expiries + honest `partial` for late-listed underlyings — DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001, MIGRATION.md #859: a 0-expiry pre-listing year of a recently-listed F&O underlying (JIOFIN/ETERNAL) no longer inflates `years` to a fake 2020→2026 span nor keeps it perpetually `growing`; `_option_verdict` now folds per-year `(status, expiries_pulled)` cells; read/rollup-side only, no pull/engine change. Prior merged: DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812), DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811), DEC-TF-PRECISION-PROOF-001 #856 (PR #810). Running in parallel sessions: F&O historical-candle table, Remove-Live, Movers O(1), /db+/universe O(1) — see those PRs)
+- **Active branch:** `claude/elegant-pascal-ovr7nb` (`/movers` per-interaction LATENCY → near-O(1) — DEC-MOVERS-O1-LATENCY-001, MIGRATION.md #860: the `top_n`-independent lake scan is split from the cheap rank and cached per `(asset, exchange, interval, date, time[, tier, track])` coordinate in `brutex/dashboard/movers_cache.py` `MoversSnapshotCache` [LRU, generation-invalidated via the existing coverage `SummaryCache.generation`], so a sub-filter / `top_n` / re-selection is an **O(1) hit + cheap re-rank**; the cold per-symbol intraday read is bounded to the day's `1minute/<yyyy>/<mm>.parquet` month file via `brutex/data/lake_day_glob.py` [byte-equivalent for session-filtered symbols — an IST session never crosses a UTC month boundary; session-exempt GIFT Nifty + the derived `1day` reader stay whole-partition]; `?exchange=NSE|BSE` now scopes discovery exactly; the sub-filter pill is a **zero-round-trip** client re-render. READ-only, lake/dashboard — the brute-force ENGINE is UNCHANGED. Honest: the FIRST view of a coordinate still pays the real O(N_instruments × N_bars-read) scan [NOT "O(1) total"]; Futures/Options ride whatever F&O `1minute` store exists today, Spot is fast unconditionally; the Live tab [being removed in a separate PR] was not touched. Prior merged: DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813), DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812), DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001 #857 (PR #811). Running in parallel sessions: F&O historical-candle table, Remove-Live, /db+/universe O(1) — see those PRs)
 
 ---
 
@@ -346,7 +346,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/universe-symbol-persist-jlzt1n`
+- **Active feature branch:** `claude/elegant-pascal-ovr7nb`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
