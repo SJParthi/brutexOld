@@ -121,7 +121,7 @@ class SchemaMetaWriter(Protocol):
 
     def execute(self, query: str, parameters: object = ..., /) -> object:
         """Execute *query* with optional bound *parameters*."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
 
 def fno_candle_lake_schema_meta() -> dict[str, str]:
