@@ -72,10 +72,11 @@ def _primed(
     """An *n*-underlying store + a cache PRIMED for both payload kinds (clean hits).
 
     A context manager so the store is closed via the ``with`` protocol at the call
-    site (CodeQL ``py/should-use-with``), never a hand-rolled ``finally``.
+    site, and the store itself is opened with ``with`` here (it is a context
+    manager — ``__exit__`` closes it) so there is NO hand-rolled ``finally``
+    anywhere (CodeQL ``py/should-use-with``).
     """
-    store = InstrumentStore.open(tmp_path / f"u_{tag}.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / f"u_{tag}.duckdb") as store:
         store.upsert_many(
             [_equity(i) for i in range(1, n + 1)],
             snapshot_date=date(2024, 1, 2),
@@ -86,8 +87,6 @@ def _primed(
         cache.summary(store)  # one base read → memoised
         cache.instruments(store, kind=None)
         yield store, cache
-    finally:
-        store.close()
 
 
 class TestCachedHitIsO1:
