@@ -323,29 +323,6 @@ def _format_candle_timestamp(value: Any, interval: str) -> Any:
     return _json_safe(value)
 
 
-def format_clean_ist_millis(value: datetime) -> str:
-    """Render a UTC instant as a clean IST wall-clock string, trimmed to MILLISECONDS.
-
-    The millisecond-precision sibling of :func:`_format_candle_timestamp`
-    (DEC-LIVE-DASH-PROBE-001): a tick stored as ``2026-06-15T10:04:41.335741Z``
-    renders ``2026-06-15 15:34:41.335`` (IST) — the operator's "drop the ``+05:30``
-    offset suffix … it should be clean", with the sub-second part trimmed from µs to
-    ms (the live feed's natural resolution). Converting to :data:`_IST` explicitly
-    keeps the output identical whether the server's DuckDB session runs in UTC (CI) or
-    Asia/Kolkata (the operator's box); a naive (tz-less) datetime is read as already
-    being the wall-clock and rendered as-is.
-
-    Used by the live-lake browser (:mod:`brutex.dashboard.live_lake_view`) for the
-    ``live_ticks.recv_ts`` / ``.exchange_ts`` + ``live_candles_1m.timestamp`` columns;
-    DISPLAY-ONLY — the underlying lake storage stays UTC ``Datetime("us","UTC")``
-    (CLAUDE.md §6 "stored UTC, displayed IST").
-    """
-    ist = value.astimezone(_IST) if value.tzinfo is not None else value
-    # %f is microseconds (6 digits); slice off the last 3 → milliseconds (the feed's
-    # resolution). strftime always emits 6 fractional digits, so the slice is total.
-    return ist.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-
 def _ist_date(value: Any) -> str | None:
     """Render a bar timestamp as its IST calendar date (``YYYY-MM-DD``), or ``None``.
 

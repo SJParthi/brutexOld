@@ -1,7 +1,7 @@
 """Single source of truth for the dashboard top navigation.
 
 DEC-DASHBOARD-NAV-UNIFY-001 — every served dashboard page exposes the SAME
-top navigation: Universe · Credentials · Database · Live · Coverage · Movers ·
+top navigation: Universe · Credentials · Database · Coverage · Movers ·
 Reports. Historically each template hand-coded its own ``<nav>``, which let the
 ``/groww-credentials`` page silently drift (a dead ``/credentials`` link, a
 missing ``Reports`` link, a renamed "Groww" tab — DEC-DASHBOARD-NAV-CREDS-
@@ -31,7 +31,6 @@ NAV_LINKS: tuple[NavLink, ...] = (
     NavLink("/universe", "Universe"),
     NavLink("/groww-credentials", "Credentials"),
     NavLink("/db", "Database"),
-    NavLink("/live", "Live"),
     NavLink("/coverage", "Coverage"),
     NavLink("/movers", "Movers"),
     NavLink("/reports", "Reports"),

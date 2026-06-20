@@ -29,7 +29,6 @@ _TOPNAV_PAGES = {
     "/universe": dashboard_app._render_universe_html,
     "/groww-credentials": dashboard_app._render_groww_credentials_html,
     "/db": dashboard_app._render_db_html,
-    "/live": dashboard_app._render_live_html,
     "/coverage": dashboard_app._render_coverage_html,
     "/movers": dashboard_app._render_movers_html,
     "/reports": dashboard_app._render_reports_html,

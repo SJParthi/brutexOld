@@ -93,7 +93,6 @@
       <a href="/universe">Universe</a>
       <a href="/groww-credentials">Credentials</a>
       <a href="/db">Database</a>
-      <a href="/live">Live</a>
       <a href="/coverage">Coverage</a>
       <a href="/movers" aria-current="page">Movers</a>
       <a href="/reports">Reports</a>
@@ -107,7 +106,6 @@
         <div class="tab on" data-asset="spot">📈 Spot</div>
         <div class="tab" data-asset="futures">🔮 Futures</div>
         <div class="tab" data-asset="options">🎯 Options</div>
-        <div class="tab" data-asset="live">💧 Live</div>
       </div>
 
       <div class="bar">
@@ -162,13 +160,6 @@ const ASSETS = {
     cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
     cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
-  /* Live: top gainers/losers from the newest live/candles_1m partition by the merged
-     pct_change derived statistic (DEC-LIVE-DASH-MOVERS-PARITY-001) + the prev-day
-     reference (prev_close) joined from live/prevday — read-only, reference-only lake. */
-  live: {
-    cats: [["gainers","Live Gainers"],["losers","Live Losers"]],
-    cols: [["Symbol","groww_symbol","str"],["Close","close","money"],["Prev Close","prev_close","money"],["Change %","pct_change","num"],["From Open %","pct_from_open","num"],["Volume","volume","int"],["Last (IST)","timestamp","str"]],
-  },
 };
 const TF_MIN = {"1minute":1,"5minute":5,"15minute":15,"30minute":30,"1hour":60,"1day":375};
 const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
@@ -190,13 +181,6 @@ const SAMPLE = {
     {name:"BANKNIFTY 30 JUN 56000 CALL", spot:"₹56,814.80", ltp:"₹1,414.00", pct_change:"138.97", oi:"10,43,760", oi_chg:"89,640", oi_chg_pct:"9.40", volume:"59,83,260"},
     {name:"NIFTY 30 JUN 23000 PUT", spot:"₹23,622.90", ltp:"₹73.50", pct_change:"-67.50", oi:"60,92,940", oi_chg:"8,82,770", oi_chg_pct:"16.94", volume:"1,06,25,485"},
   ],
-  /* Live rows arrive as RAW numbers from /api/v1/live/movers (renderRows formats them);
-     these samples mirror that shape so the standalone preview shows the layout. */
-  live: [
-    {groww_symbol:"NSE-NIFTY", close:23622.90, prev_close:23161.60, pct_change:1.991, pct_from_open:0.842, volume:0, timestamp:"2026-06-15 15:18:00.000"},
-    {groww_symbol:"NSE-BANKNIFTY", close:56814.80, prev_close:56102.40, pct_change:1.270, pct_from_open:0.553, volume:0, timestamp:"2026-06-15 15:18:00.000"},
-    {groww_symbol:"BSE-SENSEX", close:77620.40, prev_close:78001.10, pct_change:-0.488, pct_from_open:-0.214, volume:0, timestamp:"2026-06-15 15:18:00.000"},
-  ],
 };
 
 function fillTimes() {
@@ -209,7 +193,7 @@ function fillTimes() {
 function renderPills() {
   $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
   $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); load(); });
-  /* Expiry applies to futures/options only — hidden for spot AND the live tab. */
+  /* Expiry applies to futures/options only — hidden for spot. */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
   $("expiry").style.display = derivAsset ? "" : "none";
   if (derivAsset && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
@@ -247,38 +231,31 @@ function renderRows() {
   tb.innerHTML = data.map(row => "<tr>" + cols.map(([,field,type],i) => {
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
-    /* Raw numeric cells (the Live tab returns plain floats/ints, not pre-formatted
-       strings) get display formatting matching the historical tabs: money → ₹ + Indian
-       grouping @ 2dp, num → 2dp, int → grouped. The historical tabs already arrive as
-       formatted strings, so typeof !== "number" passes through unchanged (no regression). */
+    /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
+       num → 2dp, int → grouped. Cells that already arrive as formatted strings
+       (typeof !== "number") pass through unchanged. */
     if (typeof v === "number") {
       if (type === "int") v = v.toLocaleString("en-IN");
       else if (type === "money") v = "₹" + v.toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
       else if (type === "num") v = v.toFixed(2);
     }
-    if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct" || field==="pct_from_open") {
+    if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
       const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
-      if ((field==="pct_change"||field==="oi_chg_pct"||field==="pct_from_open") && n!==null) v = (n>0?"+":"") + n.toFixed(2) + "%";
+      if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + n.toFixed(2) + "%";
     }
     return `<td class="${cls}">${v}</td>`;
   }).join("") + "</tr>").join("");
 }
-/* The Live tab is a live-lake read (newest live/candles_1m partition), not the
-   historical /api/v1/movers snapshot — its date/interval/time/expiry controls do not
-   apply, so they are hidden when Live is selected (DEC-LIVE-DASH-MOVERS-PARITY-001). */
 function syncControls() {
-  const live = state.asset === "live";
   ["date","interval","time","exchange"].forEach(id => {
     const el = $(id).closest("label.ctl") || $(id);
-    el.style.display = live ? "none" : "";
+    el.style.display = "";
   });
-  $("topn").value = live ? Math.min(parseInt($("topn").value||"25",10)||25, 100) : ($("topn").value||"50");
-  $("topn").max = live ? "100" : "200";
+  $("topn").max = "200";
 }
 async function load() {
   $("note").innerHTML = "Loading…";
   syncControls();
-  if (state.asset === "live") return loadLive();
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"50" });
   if ($("date").value) p.set("date", $("date").value);
   if (state.time) p.set("time", state.time);
@@ -296,27 +273,7 @@ async function load() {
     rowsData = SAMPLE[state.asset] || SAMPLE.spot;
     renderHead(); renderRows();
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
-    $("note").innerHTML = "<b>Note:</b> preview of the layout with sample rows — run the dashboard for live lake data (reference-only, % vs prev-day close, fresh-session volume, click any column to sort).";
-  }
-}
-/* Live movers: newest live/candles_1m partition ranked by the merged pct_change
-   derived statistic, with the prev-day reference (prev_close) joined from live/prevday.
-   Decoupled Parquet read (DEC-LIVE-DECOUPLE-001); honest empty state, never fabricated. */
-async function loadLive() {
-  const p = new URLSearchParams({ top_n:$("topn").value||"25" });
-  try {
-    const r = await fetch("/api/v1/live/movers?"+p.toString());
-    if (!r.ok) throw new Error("HTTP "+r.status);
-    const j = await r.json();
-    rowsData = j[state.category] || [];
-    renderHead(); renderRows();
-    $("asof").textContent = `session ${(j.session_date||"—")} · ${j.ranked_instruments||0}/${j.total_instruments||0} ranked`;
-    $("note").innerHTML = "<b>Note:</b> "+(j.note || "top movers by % vs prev-day close (full-precision statistic); Prev Close from the live/prevday reference lake — reference-only, read-only, click any column to sort.");
-  } catch (e) {
-    rowsData = SAMPLE.live;
-    renderHead(); renderRows();
-    $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
-    $("note").innerHTML = "<b>Note:</b> preview of the live-movers layout with sample rows — turn the Live feed ON for real lake movers (% vs prev-day close, prev-day reference, click any column to sort).";
+    $("note").innerHTML = "<b>Note:</b> preview of the layout with sample rows — run the dashboard for real movers data (click any column to sort).";
   }
 }
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {

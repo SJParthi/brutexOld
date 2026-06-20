@@ -33,7 +33,6 @@ from brutex.dashboard.db_view import (
     build_window_payload,
     clamp_limit,
     clamp_offset,
-    format_clean_ist_millis,
     sample_rows,
     table_summary,
 )
@@ -45,22 +44,6 @@ from brutex.data.window_ledger_store import save_window_ledger
 from brutex.data.window_status import WindowStatusLog
 from brutex.data.window_status_store import save_window_status
 from brutex.models import Exchange, InstrumentType, Segment
-
-
-def test_format_clean_ist_millis_drops_offset_and_trims_to_ms() -> None:
-    """A UTC instant renders clean IST without +05:30, trimmed to milliseconds.
-
-    DEC-LIVE-DASH-PROBE-001 — the live-table timestamp formatter: aware UTC →
-    IST wall-clock with the µs sub-second trimmed to ms; a naive datetime is read as
-    already-wall-clock and rendered as-is (no conversion).
-    """
-    aware = datetime(2026, 6, 15, 10, 4, 41, 335741, tzinfo=UTC)
-    rendered = format_clean_ist_millis(aware)
-    assert rendered == "2026-06-15 15:34:41.335"
-    assert "+05:30" not in rendered
-    # A naive datetime (no tzinfo) is rendered verbatim (no astimezone conversion).
-    naive = datetime(2026, 6, 15, 15, 34, 41, 335741)
-    assert format_clean_ist_millis(naive) == "2026-06-15 15:34:41.335"
 
 
 def _open_empty(tmp_path: Path) -> InstrumentStore:

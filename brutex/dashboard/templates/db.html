@@ -206,7 +206,6 @@
       <a href="/universe">Universe</a>
       <a href="/groww-credentials">Credentials</a>
       <a href="/db" aria-current="page">Database</a>
-      <a href="/live">Live</a>
       <a href="/coverage">Coverage</a>
       <a href="/movers">Movers</a>
       <a href="/reports">Reports</a>
@@ -243,14 +242,9 @@ const dataEl = document.getElementById("data");
 const limitSel = document.getElementById("limit");
 const refreshBtn = document.getElementById("refresh");
 
-/* API route families for the structured table browser (DEC-DB-LIVE-TABLES-001).
-   DB_API drives the DuckDB master tables; LIVE_API is the /db-side alias that
-   browses the two live Parquet lake tables via the SAME columns/query/grid
-   contract. LIVE_TABLES is the allowlist the backend re-validates (an unknown
-   name → 400). */
+/* API route family for the structured table browser: DB_API drives the
+   DuckDB master tables. */
 const DB_API = "/api/v1/db";
-const LIVE_API = "/api/v1/db/live";
-const LIVE_TABLES = ["live_ticks", "live_candles_1m"];
 
 let selected = null;
 let counts = {};
@@ -362,11 +356,9 @@ async function loadTables() {
     const tables = body.tables || [];
     counts = {};
     tables.forEach(t => { counts[t.table] = t.row_count; });
-    /* The header count includes the DuckDB master tables AND the two LIVE lake
-       tables now browsable here (DEC-DB-LIVE-TABLES-001). */
     const dbpath = document.getElementById("dbpath");
     if (dbpath) {
-      const n = tables.length + LIVE_TABLES.length;
+      const n = tables.length;
       dbpath.textContent = n + " table" + (n === 1 ? "" : "s") + " · click a table to browse";
     }
     const tableRows = tables.map(t => {
@@ -416,32 +408,14 @@ async function loadTables() {
       + '<span class="nm">🔗 contracts</span>'
       + '<span class="badge" style="color:var(--yellow);background:rgba(255,183,77,.13)">registry</span>'
       + '</div>';
-    /* The two LIVE lake tables (live_ticks + live_candles_1m) live in a
-       SEPARATE `live/` Parquet lake the capture writes (DEC-LIVE-LAKE-SCHEMA-001),
-       NOT a master DuckDB table — surfaced PRIMARILY here on /db
-       (DEC-DB-LIVE-TABLES-001, operator request) as their OWN clickable
-       data-live rows, browsed with the SAME columns+rows grid + query builder
-       the other /db tables use. The badge starts blank; loadLiveTables() fills
-       it from /api/v1/db/live/tables (the live counts aren't in /api/v1/db/tables,
-       and an absent/empty lake degrades to 0 rows — never a 500). */
-    const liveRows = LIVE_TABLES.map(t =>
-      '<div class="tbl" data-live="' + esc(t) + '">'
-      + '<span class="nm">📡 ' + esc(t) + '</span>'
-      + '<span class="badge" style="color:var(--pink);background:rgba(255,107,157,.13)">live</span>'
-      + '</div>').join("");
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
       + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow
       + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow
-      + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow
-      + '<h3 style="margin-top:14px">Live lake</h3>' + liveRows;
+      + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
     tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
       el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
     });
-    tablesEl.querySelectorAll(".tbl[data-live]").forEach(el => {
-      el.addEventListener("click", () => selectTable(el.getAttribute("data-live"), LIVE_API));
-    });
-    loadLiveTables();
     tablesEl.querySelectorAll(".tbl[data-candles]").forEach(el => {
       el.addEventListener("click", () => selectCandles(el.getAttribute("data-candles")));
     });
@@ -459,29 +433,12 @@ async function loadTables() {
   }
 }
 
-/* Fetch the LIVE lake row counts (a separate Parquet lake, not in
-   /api/v1/db/tables) and fill the live badges. An absent/empty lake →
-   every count 0; an offline/error fetch leaves the badges blank (the rows
-   stay clickable and the browse path degrades to an honest empty page). */
-async function loadLiveTables() {
-  try {
-    const r = await fetch(LIVE_API + "/tables");
-    if (!r.ok) return;
-    const tabs = (await r.json()).tables || [];
-    tabs.forEach(t => {
-      const badge = tablesEl.querySelector('.tbl[data-live="' + (window.CSS && CSS.escape ? CSS.escape(t.table) : t.table) + '"] .badge');
-      if (badge) badge.textContent = (Number(t.row_count) || 0).toLocaleString();
-    });
-  } catch (e) { /* offline — live badges stay blank, rows still clickable */ }
-}
-
 function markSelected(name) {
-  /* Highlight the selected DuckDB row OR live-lake row (both browse via the
-     SAME table mode); a null name can't mass-match because getAttribute
-     returns null only for the other-kind rows, never equals a real name. */
+  /* Highlight the selected DuckDB master-table row; a null name can't
+     mass-match because getAttribute returns null only for the other-kind
+     rows, never equals a real name. */
   tablesEl.querySelectorAll(".tbl").forEach(el => {
-    el.classList.toggle("sel",
-      el.getAttribute("data-table") === name || el.getAttribute("data-live") === name);
+    el.classList.toggle("sel", el.getAttribute("data-table") === name);
   });
 }
 
@@ -600,10 +557,9 @@ function gridAndPager(cols, rows, total, off, lim, note) {
   const to = off + rows.length;
   let html = "";
   if (!rows.length) {
-    /* Schema-when-empty (DEC-LIVE-DB-SCHEMA-WHEN-EMPTY-001): when the table has no
-       rows BUT the backend returned its column DEFINITIONS (an empty live table —
-       market closed / feed off), render the column header so the operator can verify
-       the columns exist, plus the honest note. With no columns at all, the plain
+    /* Schema-when-empty: when the table has no rows BUT the backend returned its
+       column DEFINITIONS, render the column header so the operator can verify the
+       columns exist, plus the honest note. With no columns at all, the plain
        "no rows" message. Never fabricates a data row (Golden Rule #1). */
     if (cols.length) {
       const thead = '<thead><tr>' + cols.map(c => {
@@ -637,27 +593,18 @@ function gridAndPager(cols, rows, total, off, lim, note) {
 }
 
 /* ── Table mode (structured query) ── */
-/* `apiBase` selects which structured-query route family browses this row:
-   the default `/api/v1/db` for the DuckDB master tables, or the live-lake
-   alias `/api/v1/db/live` for live_ticks / live_candles_1m
-   (DEC-DB-LIVE-TABLES-001). Both families share the SAME columns/query/grid
-   contract, so this ONE table mode + gridAndPager render both (CLAUDE.md §11
-   COMMON). The chosen base is remembered per-table in qstate so paging /
+/* Browses a DuckDB master table via the `/api/v1/db` structured-query route
+   family (columns/query/grid), remembered per-table in qstate so paging /
    apply-query re-use it. */
-async function selectTable(name, apiBase) {
+async function selectTable(name) {
   mode = "table";
   selected = name;
   dbOffset = 0;
   markSelected(name);
-  /* Prefer the explicit base; else keep the row's remembered base (so a
-     limit-change / Refresh re-select of a live table stays on /api/v1/db/live);
-     else the DuckDB default. */
-  const base = apiBase || (qstate[name] && qstate[name].api) || DB_API;
-  if (!qstate[name]) qstate[name] = { allCols: [], cols: null, filters: [], orderBy: "", desc: false, api: base };
-  qstate[name].api = base;
+  if (!qstate[name]) qstate[name] = { allCols: [], cols: null, filters: [], orderBy: "", desc: false };
   if (!qstate[name].allCols.length) {
     try {
-      const rc = await fetch(base + "/columns/" + encodeURIComponent(name));
+      const rc = await fetch(DB_API + "/columns/" + encodeURIComponent(name));
       if (rc.ok) qstate[name].allCols = (await rc.json()).columns || [];
     } catch (e) { /* offline — controls degrade to none */ }
   }
@@ -666,7 +613,7 @@ async function selectTable(name, apiBase) {
 
 function buildTableUrl(name) {
   const st = qstate[name];
-  let u = (st.api || DB_API) + "/query/" + encodeURIComponent(name)
+  let u = DB_API + "/query/" + encodeURIComponent(name)
     + "?limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(dbOffset);
   if (st.cols) st.cols.forEach(c => { u += "&column=" + encodeURIComponent(c); });
   st.filters.forEach(f => { if (f.c && f.op) u += "&f=" + encodeURIComponent(f.c + ":" + f.op + ":" + f.v); });
