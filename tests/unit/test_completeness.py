@@ -167,15 +167,22 @@ def test_overall_spot_is_the_one_minute_verdict() -> None:
 
 
 def test_option_verdict_all_states() -> None:
+    # Cells are per-year (status, expiries_pulled); only expiries>0 years are real history
+    # (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001).
     assert _option_verdict([]) == OPT_NONE
-    assert _option_verdict([STATUS_COMPLETE, STATUS_FAILED]) == OPT_FAILED  # any failed wins
-    assert (
-        _option_verdict([STATUS_COMPLETE, STATUS_PENDING]) == OPT_GROWING
-    )  # any pending → growing
-    assert _option_verdict([STATUS_COMPLETE, STATUS_EXPIRIES_ONLY]) == OPT_PARTIAL
-    assert (
-        _option_verdict([STATUS_COMPLETE, STATUS_COMPLETE]) == OPT_STABLE
-    )  # all complete → stable
+    # any failed wins (even if that year had no expiries)
+    assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_FAILED, 0)]) == OPT_FAILED
+    # a year that HAS expiries but is still pending → growing (genuinely filling)
+    assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_PENDING, 20)]) == OPT_GROWING
+    # an expiries_only year (with expiries) → partial
+    assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_EXPIRIES_ONLY, 12)]) == OPT_PARTIAL
+    # every requested year complete AND non-empty → stable
+    assert _option_verdict([(STATUS_COMPLETE, 50), (STATUS_COMPLETE, 92)]) == OPT_STABLE
+    # late-listed underlying: a pre-listing year has ZERO expiries (pending) → NOT stuck
+    # growing; the real years are complete → partial (honest late-start)
+    assert _option_verdict([(STATUS_PENDING, 0), (STATUS_COMPLETE, 92)]) == OPT_PARTIAL
+    # every requested year returned zero expiries → none (no option history at all)
+    assert _option_verdict([(STATUS_PENDING, 0), (STATUS_PENDING, 0)]) == OPT_NONE
 
 
 def test_option_rollup_sums_years_and_folds_status() -> None:
@@ -194,6 +201,37 @@ def test_option_unmapped_underlying_skipped() -> None:
     records = [_cov("STRAY", 2025, STATUS_COMPLETE)]
     board = build_completeness_scoreboard([], {}, records, {"NIFTY": CATEGORY_INDEX})
     assert board["options"]["per_underlying"] == []
+
+
+def test_late_listed_underlying_shows_real_years_and_partial_not_growing() -> None:
+    """A late-listed underlying shows ONLY its real expiry years + ``partial`` (DEC-OPTIONS-
+    COMPLETENESS-REAL-YEARS-001) — not a fake 2020→2026 span nor a perpetual ``growing``.
+
+    JIOFIN's options began ~2023: the pre-listing years 2020-2022 returned ZERO expiries and
+    are recorded ``pending``. Before the fix they (a) inflated ``years`` to the full requested
+    span and (b) forced ``growing`` forever. Now: the empty years are excluded from ``years``
+    and the verdict is ``partial`` (honest late-start), while the real years are complete.
+    """
+    records = [
+        _cov("JIOFIN", 2020, STATUS_PENDING, expiries=0),  # pre-listing — no expiries
+        _cov("JIOFIN", 2021, STATUS_PENDING, expiries=0),  # pre-listing — no expiries
+        _cov("JIOFIN", 2022, STATUS_PENDING, expiries=0),  # pre-listing — no expiries
+        _cov("JIOFIN", 2023, STATUS_COMPLETE, expiries=10, contracts=400),
+        _cov("JIOFIN", 2024, STATUS_COMPLETE, expiries=12, contracts=600),
+    ]
+    board = build_completeness_scoreboard([], {}, records, {"JIOFIN": CATEGORY_EQUITY})
+    [row] = board["options"]["per_underlying"]
+    # YEARS shows ONLY the real expiry years — never the empty pre-listing years.
+    assert row["years"] == [2023, 2024]
+    # Honest verdict: partial (late start), NOT stuck growing.
+    assert row["status"] == OPT_PARTIAL
+    # Counts still sum across all folded cells (empty years contribute 0).
+    assert row["expiries_pulled"] == 22 and row["contracts_pulled"] == 1000
+    # The per-symbol view agrees (same shared rollup).
+    out = per_symbol_completeness([], {}, records, {"JIOFIN": CATEGORY_EQUITY})
+    opt = out["JIOFIN"]["options"]
+    assert opt["years"] == [2023, 2024] and opt["status"] == OPT_PARTIAL
+    assert opt["first_year"] == 2023 and opt["last_year"] == 2024
 
 
 # ── honest "0 contracts = metadata-only by design" label (DEC-METADATA-LIVE-PROGRESS-001) ──
@@ -270,9 +308,9 @@ def test_scoreboard_csv_options_detail_has_by_design_note() -> None:
 
 def test_option_aggregate_counts_each_status() -> None:
     records = [
-        _cov("A", 2025, STATUS_COMPLETE),  # stable
-        _cov("B", 2025, STATUS_PENDING),  # growing
-        _cov("C", 2025, STATUS_EXPIRIES_ONLY),  # partial
+        _cov("A", 2025, STATUS_COMPLETE, expiries=50),  # stable
+        _cov("B", 2025, STATUS_PENDING, expiries=20),  # growing (has expiries, still filling)
+        _cov("C", 2025, STATUS_EXPIRIES_ONLY, expiries=12),  # partial
         _cov("D", 2025, STATUS_FAILED),  # failed
     ]
     cats: dict[str, str] = dict.fromkeys(("A", "B", "C", "D"), CATEGORY_EQUITY)
@@ -463,12 +501,13 @@ def test_per_symbol_options_unmapped_underlying_skipped() -> None:
 def test_per_symbol_spot_and_options_merge_on_same_symbol() -> None:
     """A symbol with BOTH spot rows and option records merges into one entry (no duplication)."""
     rows = [_spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
-    records = [_cov("NSE-NIFTY", 2025, STATUS_PENDING)]
+    # A current year that HAS expiries but is still pending (contracts filling) → growing.
+    records = [_cov("NSE-NIFTY", 2025, STATUS_PENDING, expiries=10)]
     cats = {"NSE-NIFTY": CATEGORY_INDEX}
     out = per_symbol_completeness(rows, cats, records, cats)
     [entry] = out.values()
     assert entry["spot"]["1minute"]["status"] == DIM_FULL
-    assert entry["options"]["status"] == OPT_GROWING  # the pending year → growing
+    assert entry["options"]["status"] == OPT_GROWING  # a pending year WITH expiries → growing
 
 
 # ── CSV report export (DEC-COMPLETENESS-PAGE-001) ─────────────────────────────────────────
