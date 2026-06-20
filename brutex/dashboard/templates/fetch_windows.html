@@ -204,7 +204,7 @@ function winStatus(r) {
   /* EMPTY rows show the genuine clean-empty streak vs the promotion threshold
      (window_ledger R1): an interleaved FAILED (429/timeout) PRESERVES the streak
      (a rate-limit is not evidence of data), only a SUCCESS resets it, so
-     "attempts 5, EMPTY 2/3" is by-design retrying, not a stuck row. */
+     "attempts 5, EMPTY 2/10" is by-design retrying, not a stuck row. */
   const streak = v === "EMPTY" && r.empty_streak != null
     ? ' <span style="color:#9aa4b2;font-weight:400;">' + esc(r.empty_streak) + "/" + esc(emptyThreshold) + "</span>"
     : "";
@@ -278,7 +278,7 @@ function renderWindows(rows) {
 /* KPI scoping (DEC-WINDOW-KPI-MARKET-SCOPE-001): the Spot/Options chip scopes
    the KPI tiles to THAT market's bucket; only the All chip sums both. The
    server's `counts` are always complete per bucket — selection is client-side. */
-let emptyThreshold = 3;
+let emptyThreshold = 10;
 function kpiBuckets(counts) {
   if (marketFilter) { const b = (counts || {})[marketFilter]; return b ? [b] : []; }
   return Object.values(counts || {});
