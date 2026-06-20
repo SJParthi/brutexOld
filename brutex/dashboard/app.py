@@ -1282,10 +1282,10 @@ def build_app(
         Track-1 history ``[2020-01-01, previous day]``. A malformed date or
         a ``from`` after ``to`` surfaces as a 400 with the real reason
         (DEC-PULL-ERROR-VISIBILITY-001).
-        ``spot_interval`` is the verify-first granularity selector
-        (DEC-PULL-1DAY-FIRST-001): ``"1day"`` (the default — pull 1-day, verify vs
-        the official bhavcopy per CLAUDE.md §6, then widen), ``"1minute"``, or
-        ``"both"``; a blank / unknown value safely defaults to 1-day only.
+        ``spot_interval`` is now a VESTIGIAL, ignored query param
+        (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): 1-minute is the ONLY granularity fetched
+        from Groww and 1-day is DERIVED from it, so :func:`resolve_fetch_intervals`
+        always resolves to ``("1minute",)`` regardless of this value.
         ``dry_run`` is forced ``True`` automatically when Groww
         credentials are not present (via the testable
         :func:`brutex.config.credentials.groww_credentials_present`
@@ -1474,9 +1474,10 @@ def build_app(
             spot_interval=spot_interval,
             dry_run=dry_run,
         )
-        # Verify-first granularity (DEC-PULL-1DAY-FIRST-001): the operator's
-        # dropdown choice → 1day-only (default) / 1minute-only / both. Drives BOTH
-        # the fetch AND the progress total (symbols × intervals).
+        # 1-minute is the ONLY fetched granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001):
+        # ``resolve_fetch_intervals`` ignores the vestigial ``spot_interval`` and always
+        # returns ``("1minute",)``; 1-day is DERIVED server-side after the pull. Drives
+        # BOTH the fetch AND the progress total (symbols × intervals).
         fetch_intervals = resolve_fetch_intervals(spot_interval)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -1846,7 +1847,7 @@ def build_app(
         all: bool = Query(default=False),  # noqa: A002 — the public ?all=true query name
         symbols: str | None = Query(default=None),
         enumerate: bool = Query(default=False),  # noqa: A002 — the public ?enumerate flag name
-        interval: str = Query(default="1day"),
+        interval: str = Query(default="1minute"),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         until_clean: bool = Query(default=True),
@@ -1868,8 +1869,10 @@ def build_app(
         (single) · ``?contracts=a,b,c`` (multi) · ``?underlying=NIFTY[&expiry=2020-01-02]``
         (one expiry's chain or a whole underlying) · ``?kind=index|stock`` (every cached
         contract of that kind's admitted underlyings) · ``?all=true`` (every cached
-        contract). ``interval`` is ``1day`` / ``1minute`` / ``both`` (1day first). A bad
-        ``interval`` or ``expiry`` is a 400. An EMPTY registry / no-match is an honest 400
+        contract). ``interval`` is accepted (``1day`` / ``1minute`` / ``both``) but
+        F&O ALWAYS fetches ``1minute`` ONLY and DERIVES ``1day``
+        (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); the param only affects the echoed report
+        field. A bad ``interval`` or ``expiry`` is a 400. An EMPTY registry / no-match is an honest 400
         pointing at the metadata button (NEVER a fabricated contract — Golden Rule #1).
         ``until_clean`` DEFAULTS to ``true`` (DEC-GROWW-DERIV-UNTIL-CLEAN-001 #730 —
         auto-retry every failed window until the selection drains clean). ``dry_run`` is
@@ -2054,8 +2057,9 @@ def build_app(
             spot_interval=spot_interval,
             dry_run=dry_run,
         )
-        # Verify-first granularity (DEC-PULL-1DAY-FIRST-001): match the original
-        # pull's interval choice so a retry re-plans the SAME windows.
+        # 1-minute is the ONLY fetched granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001):
+        # ``resolve_fetch_intervals`` ignores the vestigial ``spot_interval`` and always
+        # returns ``("1minute",)``, so a retry re-plans the SAME 1-minute windows.
         fetch_intervals = resolve_fetch_intervals(spot_interval)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -2136,54 +2140,6 @@ def build_app(
         if raw is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **banner_for(raw).to_dict()})
-
-    @app.post("/api/v1/universe/verify-nse")
-    async def api_universe_verify_nse(
-        symbol: str = Query(...),
-        date_str: str = Query(..., alias="date"),
-    ) -> JSONResponse:
-        """POST /api/v1/universe/verify-nse — cross-check ONE index's spot 1-day OHLC vs NSE.
-
-        The MANUAL/AUTOMATED *first-verification* surface (DEC-NSE-VERIFY-ROUTE-001
-        + DEC-NSE-EQUITY-VERIFY-001): before a bulk pull is trusted, prove Groww's
-        spot holds the SAME data as the official exchange — for the underlying spot,
-        one day, alone. The symbol is AUTO-ROUTED: an **index** (``NIFTY`` /
-        ``BANKNIFTY`` / ``SENSEX``) goes to
-        :func:`brutex.data.validation.nse_oneday.validate_index_oneday` (four OHLC
-        fields vs the NSE ``ind_close_all`` snapshot — indices carry no volume); any
-        other symbol is a **STOCK** and goes to
-        :func:`brutex.data.validation.nse_equity_oneday.validate_equity_oneday`
-        (full **OHLCV including Volume** vs the NSE security bhavcopy). Both harnesses
-        are degrade-safe — they NEVER raise for a missing ``[groww]`` extra / missing
-        creds / network block; those each surface as an honest ``unavailable`` note,
-        so this route is always a 200 with a verdict (same ``to_dict`` wire shape,
-        the equity verdict adding a ``volume`` object). Run OFF the event loop (live
-        network) via the threadpool. ``date`` is an inclusive ISO ``YYYY-MM-DD`` IST
-        trade day; a malformed value is the lone 400, with the real reason
-        (DEC-PULL-ERROR-VISIBILITY-001).
-        """
-        from brutex.data.validation.nse_equity_oneday import validate_equity_oneday
-        from brutex.data.validation.nse_oneday import (
-            resolve_index_source,
-            validate_index_oneday,
-        )
-
-        try:
-            trade_date = date.fromisoformat(date_str)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"invalid date {date_str!r} — expected ISO YYYY-MM-DD ({exc})",
-            ) from exc
-        _LOG.info("universe.verify_nse.requested", symbol=symbol, date=date_str)
-        # Auto-route: a brute-force INDEX (has an official index-snapshot source) →
-        # the 4-field OHLC check; any OTHER symbol is a STOCK → the full OHLCV+VOLUME
-        # bhavcopy check (DEC-NSE-EQUITY-VERIFY-001). Both verdicts share to_dict().
-        if resolve_index_source(symbol) is not None:
-            index_verdict = await run_in_threadpool(validate_index_oneday, symbol, trade_date)
-            return JSONResponse(index_verdict.to_dict())
-        equity_verdict = await run_in_threadpool(validate_equity_oneday, symbol, trade_date)
-        return JSONResponse(equity_verdict.to_dict())
 
     @app.post("/api/v1/universe/derive-timeframes")
     async def api_universe_derive_timeframes(

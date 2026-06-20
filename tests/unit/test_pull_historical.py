@@ -25,7 +25,7 @@ invariants are asserted directly:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -85,6 +85,8 @@ class _FakeSDK:
         self._raise_for = dict(raise_for or {})
         self.calls: list[str] = []
         self.candle_symbols: list[str] = []
+        self.candle_intervals: list[str] = []
+        self.starts: list[tuple[str, str]] = []
 
     def get_expiries(self, **_kw: object) -> dict[str, object]:
         """Record + return empty — never expected to be called (no re-enumeration)."""
@@ -100,6 +102,8 @@ class _FakeSDK:
         """Return the canned candle bar, or raise the symbol's mapped error."""
         symbol = str(kw["groww_symbol"])
         self.candle_symbols.append(symbol)
+        self.candle_intervals.append(str(kw["candle_interval"]))
+        self.starts.append((symbol, str(kw["start_time"])))
         exc = self._raise_for.get(symbol)
         if exc is not None:
             raise exc
@@ -128,11 +132,6 @@ def _client(sdk: _FakeSDK) -> GrowwClient:
 def _factory(sdk: _FakeSDK, sink: BarSink) -> tuple[GrowwClient, BarSink]:
     """Return a fixed ``(client, sink)`` pair the ``client_factory`` hands back."""
     return _client(sdk), sink
-
-
-def _factory_with(sdk: object, sink: BarSink) -> tuple[GrowwClient, BarSink]:
-    """Wrap ANY GrowwSDK-shaped fake (e.g. ``_PhasedSDK``) in a no-sleep client + *sink*."""
-    return GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1), sink  # type: ignore[arg-type]
 
 
 # ── Groww-shaped exception NAMES the error-mapper recognises ──────────────────
@@ -782,265 +781,91 @@ def test_clean_symbols_excludes_quarantine_and_still_failing() -> None:
     assert hp._clean_symbols(report) == frozenset({"CLEAN"})
 
 
-# ── 1-day-first GLOBAL barrier (DEC-HISTORICAL-1DAY-FIRST-001) ─────────────────
+# ── 1-minute ONLY, 1-day DERIVED (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ────────────
 #
-# These tests use a REAL ``ParquetBarSink`` so Phase 1 writes real 1-day Parquet and
-# Phase 2's start-date discovery reads the contract's actual earliest 1-day bar date
-# back off the lake (the discovery is a lake read — a NullBarSink cannot exercise it).
+# 1-minute is the ONLY granularity fetched from Groww for F&O; 1-day is DERIVED
+# from it (never vendor-fetched), so the prior two-phase 1-day-first barrier is
+# RETIRED. These tests assert the single 1-minute phase, the per-contract default
+# window (expiry − 3 calendar months → expiry), and the explicit-dates override.
 
 
-class _PhasedSDK:
-    """A two-phase fake: per-symbol 1-day bars at a KNOWN start date + recorded 1m starts.
-
-    ``listing`` maps each contract ``groww_symbol`` to the earliest 1-day bar date the
-    Phase-1 pull should reveal (so Phase 2 can be asserted to START there). A symbol mapped
-    to ``None`` returns ZERO 1-day bars (it never traded → excluded from Phase 2).
-    ``raise_for_day`` raises on a symbol's 1-day fetch (to fail the global barrier).
-    ``minute_starts`` records the ``(symbol, start_time)`` of every 1-minute call so the
-    test can assert each minute pull began at the contract's discovered date.
-    """
-
-    def __init__(
-        self,
-        *,
-        listing: Mapping[str, date | None],
-        raise_for_day: Mapping[str, Exception] | None = None,
-    ) -> None:
-        self._listing = dict(listing)
-        self._raise_for_day = dict(raise_for_day or {})
-        self.minute_starts: list[tuple[str, str]] = []
-        self.day_symbols: list[str] = []
-
-    def get_expiries(self, **_kw: object) -> dict[str, object]:
-        """Never called (contracts are pre-resolved) — present for the Protocol surface."""
-        return {"expiries": []}  # pragma: no cover - never reached (no re-enumeration)
-
-    def get_contracts(self, **_kw: object) -> dict[str, object]:
-        """Never called (contracts are pre-resolved) — present for the Protocol surface."""
-        return {"contracts": []}  # pragma: no cover - never reached (no re-enumeration)
-
-    def get_historical_candles(self, **kw: object) -> dict[str, object]:
-        """Phase 1 → a 1-day bar at the symbol's listing; Phase 2 → a recorded 1-minute bar."""
-        symbol = str(kw["groww_symbol"])
-        interval = str(kw["candle_interval"])
-        if interval == "1day":
-            self.day_symbols.append(symbol)
-            exc = self._raise_for_day.get(symbol)
-            if exc is not None:
-                raise exc
-            listing = self._listing.get(symbol)
-            if listing is None:
-                return {"candles": []}  # no 1-day data → excluded from Phase 2
-            ts = f"{listing.isoformat()}T09:15:00"
-            return {"candles": [[ts, 100.0, 110.0, 90.0, 105.0, 50, 7]]}
-        # 1-minute: record where this contract's minute pull STARTED.
-        self.minute_starts.append((symbol, str(kw["start_time"])))
-        return {"candles": [["2024-01-15T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
-
-
-def _real_sink(lake_root: Path) -> BarSink:
-    """A real catalog-free ``ParquetBarSink`` (the dashboard/derivative-pull reality)."""
-    from brutex.data.parquet_writer import ParquetWriter
-    from brutex.data.sink import ParquetBarSink
-
-    return ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
-
-
-def test_one_day_pulled_first_even_when_only_minute_requested(
-    registry: RegistryStore, tmp_lake: Path
-) -> None:
-    """Phase 1 (1-day) ALWAYS runs first — even for a 1-minute-ONLY request."""
-    sdk = _PhasedSDK(
-        listing={
-            "NSE-NIFTY-25Jan24-21000-CE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-21000-PE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-FUT": date(2024, 1, 8),
-        }
-    )
-    sink = _real_sink(tmp_lake)
+def test_fno_pulls_minute_only_never_day(registry: RegistryStore) -> None:
+    """1-minute is the ONLY vendor granularity fetched — ``1day`` is NEVER requested."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
     selected = registry.list_contracts(underlying="NIFTY")
     report = pull_contract_candles(
         selected,
-        lake_root=tmp_lake,
-        dry_run=False,
-        intervals=("1minute",),  # operator asked for 1-minute ONLY
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day", "1minute"),  # even ``both`` → 1-minute ONLY is fetched
         registry=registry,
         from_date=_FROM,
         to_date=_TO,
-        client_factory=lambda _root: _factory_with(sdk, sink),
+        client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # 1-day was pulled FIRST for every contract despite the 1-minute-only request.
-    assert set(sdk.day_symbols) == {r.contract_symbol for r in selected}
-    assert report.phase1_clean is True
+    # The vendor was called ONLY at 1-minute, for every selected contract, never 1-day.
+    assert set(sdk.candle_intervals) == {"1minute"}
+    assert "1day" not in sdk.candle_intervals
+    assert set(sdk.candle_symbols) == {r.contract_symbol for r in selected}
+    # The repurposed single-phase report fields.
     assert report.minute_requested is True
     assert report.minute_skipped is False
-    # Then 1-minute ran for every contract (the barrier passed).
-    assert {sym for sym, _start in sdk.minute_starts} == {r.contract_symbol for r in selected}
-
-
-def test_phase2_minute_starts_at_discovered_one_day_date(
-    registry: RegistryStore, tmp_lake: Path
-) -> None:
-    """Each contract's 1-minute pull STARTS from its own discovered earliest 1-day date."""
-    listing = {
-        "NSE-NIFTY-25Jan24-21000-CE": date(2024, 1, 5),
-        "NSE-NIFTY-25Jan24-21000-PE": date(2024, 1, 12),
-        "NSE-NIFTY-25Jan24-FUT": date(2024, 1, 3),
-    }
-    sdk = _PhasedSDK(listing=listing)
-    sink = _real_sink(tmp_lake)
-    selected = registry.list_contracts(underlying="NIFTY")
-    report = pull_contract_candles(
-        selected,
-        lake_root=tmp_lake,
-        dry_run=False,
-        intervals=("1minute",),
-        registry=registry,
-        from_date=_FROM,
-        to_date=_TO,
-        client_factory=lambda _root: _factory_with(sdk, sink),
-        now=_NOW,
-    )
-    # The minute pull for each contract began at the DISCOVERED 1-day listing date.
-    started = {sym: start[:10] for sym, start in sdk.minute_starts}
-    for symbol, day in listing.items():
-        assert started[symbol] == day.isoformat()
-    # The report carries each contract's discovered start date verbatim.
-    assert report.start_dates == {sym: day.isoformat() for sym, day in listing.items()}
-
-
-def test_global_barrier_skips_minute_when_any_one_day_fails(
-    registry: RegistryStore, tmp_lake: Path
-) -> None:
-    """A contract whose 1-day FAILS → 1-minute is NOT attempted for ANY contract."""
-    sdk = _PhasedSDK(
-        listing={
-            "NSE-NIFTY-25Jan24-21000-CE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-21000-PE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-FUT": date(2024, 1, 8),
-        },
-        raise_for_day={"NSE-NIFTY-25Jan24-21000-CE": GrowwAPIBadRequestException("bad day")},
-    )
-    sink = _real_sink(tmp_lake)
-    selected = registry.list_contracts(underlying="NIFTY")
-    report = pull_contract_candles(
-        selected,
-        lake_root=tmp_lake,
-        dry_run=False,
-        intervals=("1minute",),
-        registry=registry,
-        from_date=_FROM,
-        to_date=_TO,
-        client_factory=lambda _root: _factory_with(sdk, sink),
-        now=_NOW,
-    )
-    # The 1-day phase did NOT clean → 1-minute SKIPPED entirely (no minute calls at all).
-    assert report.phase1_clean is False
-    assert report.minute_skipped is True
-    assert sdk.minute_starts == []
-    assert "1-day phase INCOMPLETE" in report.note
-    assert "SKIPPED" in report.note
-    # The quarantined CE is NOT in the 1-day completion set; the clean PE + FUT are.
-    assert "NSE-NIFTY-25Jan24-21000-CE" not in report.phase1_complete
-    assert "NSE-NIFTY-25Jan24-21000-PE" in report.phase1_complete
-
-
-def test_zero_one_day_bar_contract_excluded_from_phase2(
-    registry: RegistryStore, tmp_lake: Path
-) -> None:
-    """A contract with ZERO 1-day bars is EXCLUDED from Phase 2 (its 1-minute is empty too)."""
-    sdk = _PhasedSDK(
-        listing={
-            "NSE-NIFTY-25Jan24-21000-CE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-21000-PE": None,  # never traded → no 1-day data
-            "NSE-NIFTY-25Jan24-FUT": date(2024, 1, 8),
-        }
-    )
-    sink = _real_sink(tmp_lake)
-    selected = registry.list_contracts(underlying="NIFTY")
-    report = pull_contract_candles(
-        selected,
-        lake_root=tmp_lake,
-        dry_run=False,
-        intervals=("1minute",),
-        registry=registry,
-        from_date=_FROM,
-        to_date=_TO,
-        client_factory=lambda _root: _factory_with(sdk, sink),
-        now=_NOW,
-    )
-    # The barrier still passes (an EMPTY 1-day window is a SETTLED clean window), but the
-    # zero-data PE is absent from start_dates → it is NOT in the Phase-2 minute pulls.
     assert report.phase1_clean is True
-    minute_symbols = {sym for sym, _start in sdk.minute_starts}
-    assert "NSE-NIFTY-25Jan24-21000-PE" not in minute_symbols
-    assert "NSE-NIFTY-25Jan24-21000-PE" not in report.start_dates
-    assert minute_symbols == {"NSE-NIFTY-25Jan24-21000-CE", "NSE-NIFTY-25Jan24-FUT"}
 
 
-def test_both_intervals_pull_one_day_then_minute(registry: RegistryStore, tmp_lake: Path) -> None:
-    """``both`` → Phase 1 (1-day) then Phase 2 (1-minute); 1-day is never pulled twice."""
-    sdk = _PhasedSDK(
-        listing={
-            "NSE-NIFTY-25Jan24-21000-CE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-21000-PE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-FUT": date(2024, 1, 8),
-        }
-    )
-    sink = _real_sink(tmp_lake)
+def test_minute_window_defaults_to_expiry_minus_3mo(registry: RegistryStore) -> None:
+    """No explicit dates → each contract's 1-minute window STARTS at expiry − 3 months."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
     selected = registry.list_contracts(underlying="NIFTY")
     report = pull_contract_candles(
         selected,
-        lake_root=tmp_lake,
-        dry_run=False,
-        intervals=("1day", "1minute"),  # the ``both`` ordering
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1minute",),
         registry=registry,
-        from_date=_FROM,
-        to_date=_TO,
-        client_factory=lambda _root: _factory_with(sdk, sink),
+        # NO explicit dates → the per-contract default kicks in.
+        from_date=None,
+        to_date=None,
+        client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # Each contract's 1-day was pulled EXACTLY once (Phase 1, not duplicated by Phase 2).
-    assert sdk.day_symbols.count("NSE-NIFTY-25Jan24-FUT") == 1
-    assert report.minute_requested is True
-    assert report.minute_skipped is False
-    assert {sym for sym, _ in sdk.minute_starts} == {r.contract_symbol for r in selected}
+    # NIFTY chain expiry is 2024-01-25 → 2024-01-25 − 3 calendar months = 2023-10-25.
+    for symbol in (r.contract_symbol for r in selected):
+        assert report.start_dates[symbol] == "2023-10-25"
+    # The EARLIEST recorded fetch start is the default window start (2023-10-25, the
+    # first 30-day chunk), never blindly 2020. The 3-month window tiles into several
+    # 30-day chunks, so later chunk-starts are after it (all within the window).
+    starts = [start[:10] for _sym, start in sdk.starts]
+    assert min(starts) == "2023-10-25"
+    assert all("2023-10-25" <= s <= "2024-01-25" for s in starts)
 
 
-def test_one_day_only_request_runs_only_phase1(registry: RegistryStore, tmp_lake: Path) -> None:
-    """``intervals=["1day"]`` runs only Phase 1 — no minute pull, never skipped."""
-    sdk = _PhasedSDK(
-        listing={
-            "NSE-NIFTY-25Jan24-21000-CE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-21000-PE": date(2024, 1, 8),
-            "NSE-NIFTY-25Jan24-FUT": date(2024, 1, 8),
-        }
-    )
-    sink = _real_sink(tmp_lake)
+def test_explicit_dates_override_default_window(registry: RegistryStore) -> None:
+    """Explicit from/to dates apply to EVERY contract (override the per-contract default)."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
     selected = registry.list_contracts(underlying="NIFTY")
     report = pull_contract_candles(
         selected,
-        lake_root=tmp_lake,
-        dry_run=False,
-        intervals=("1day",),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1minute",),
         registry=registry,
-        from_date=_FROM,
-        to_date=_TO,
-        client_factory=lambda _root: _factory_with(sdk, sink),
+        from_date=date(2024, 1, 1),
+        to_date=date(2024, 1, 20),
+        client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    assert report.minute_requested is False
-    assert report.minute_skipped is False
-    assert report.start_dates == {}
-    assert sdk.minute_starts == []  # Phase 2 never ran
-    assert report.contracts_completed == 3
+    # All contracts share the explicit start (the default expiry−3mo is OVERRIDDEN).
+    assert set(report.start_dates.values()) == {"2024-01-01"}
+    assert {start[:10] for _sym, start in sdk.starts} == {"2024-01-01"}
 
 
 def test_dry_run_minute_request_is_honest_empty(registry: RegistryStore) -> None:
-    """A dry-run 1-minute request settles Phase 1 empty-clean, then runs Phase 2 empty."""
-    # The default dry-run factory uses the NullBarSink (no lake write), so start-date
-    # discovery finds nothing → every contract excluded from Phase 2 → honest 0-bar no-op.
+    """A dry-run 1-minute pull settles empty-clean; start_dates is the resolved windows."""
     selected = registry.list_contracts(underlying="NIFTY")
     report = pull_contract_candles(
         selected,
@@ -1053,80 +878,94 @@ def test_dry_run_minute_request_is_honest_empty(registry: RegistryStore) -> None
         now=_NOW,
     )
     assert report.dry_run is True
-    assert report.bars_appended == 0
-    # Phase 1 settled (empty windows are clean) → barrier passes; no lake → no discovered
-    # starts → Phase 2 has nothing to pull (honest empty, never fabricated).
-    assert report.phase1_clean is True
+    assert report.bars_appended == 0  # the empty-candle dry-run client appends 0 bars
+    assert report.phase1_clean is True  # an EMPTY window is a settled, clean window
     assert report.minute_requested is True
     assert report.minute_skipped is False
-    assert report.start_dates == {}
+    # start_dates is now POPULATED (resolved windows for every contract), not lake-discovered.
+    assert report.start_dates == {r.contract_symbol: "2024-01-01" for r in selected}
 
 
-def test_discover_start_dates_catalog_unavailable_degrades_empty(tmp_path: Path) -> None:
-    """A missing-deps / unopenable catalog degrades start discovery to an EMPTY map (loud)."""
-    rows = [
-        ContractRow(
-            "NSE",
-            "NIFTY",
-            date(2024, 1, 25),
-            "NSE-NIFTY-25Jan24-21000-CE",
-            21000.0,
-            "CE",
-            "none",
-            "r",
-            _FETCHED,
+def test_resolve_minute_windows_explicit_uses_full_range(registry: RegistryStore) -> None:
+    """``_resolve_minute_windows(explicit_dates=True)`` → the resolved range for all."""
+    rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
+    out = hp._resolve_minute_windows(
+        rebuilt=rebuilt, explicit_dates=True, start=date(2024, 1, 1), end=date(2024, 1, 21)
+    )
+    assert set(out.values()) == {(date(2024, 1, 1), date(2024, 1, 21))}
+    assert set(out) == {c.symbol for _r, c in rebuilt}
+
+
+def test_resolve_minute_windows_default_is_per_contract_expiry(registry: RegistryStore) -> None:
+    """``_resolve_minute_windows(explicit_dates=False)`` → expiry−3mo per contract."""
+    rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
+    out = hp._resolve_minute_windows(
+        rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 6, 13)
+    )
+    # NIFTY expiry 2024-01-25 → [2023-10-25, 2024-01-26).
+    assert set(out.values()) == {(date(2023, 10, 25), date(2024, 1, 26))}
+
+
+def test_derive_daily_from_minute_writes_one_day_partition(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """The always-on 1-day derivation resamples the just-written 1-minute to a 1-day bar."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    # Seed the lake with one full IST session of 1-minute for the FUT contract, so the
+    # derivation has real 1-minute to resample to a midnight-IST daily bar.
+    contract = "NSE-NIFTY-25Jan24-FUT"
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_lake))
+    minute_bars = [
+        CandleBar(
+            timestamp=datetime(2024, 1, 15, hh, mm, tzinfo=UTC),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("90"),
+            close=Decimal("105"),
+            volume=10,
+            open_interest=7,
         )
+        for (hh, mm) in [(3, 45), (6, 0), (10, 0)]  # 09:15 / mid / ~15:30 IST
     ]
-    rebuilt = hp._rebuild_contracts(rows)
-    # Point at a path whose catalog cannot be reconciled (no bars/ lake on disk → reconcile
-    # finds nothing, returns {} cleanly). The contract has no coverage → absent from the map.
-    out = hp._discover_start_dates(rebuilt=rebuilt, lake_root=tmp_path, start=_FROM, end=_TO)
-    assert out == {}
-
-
-def test_discover_start_dates_catalog_open_raises_degrades_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``Catalog.open`` raising :class:`CatalogError` → an EMPTY map (loud degrade)."""
-    from brutex.data.errors import CatalogError
-
-    def _boom(_path: Path) -> object:
-        raise CatalogError("no duckdb")
-
-    monkeypatch.setattr("brutex.dashboard.historical_pull.Catalog.open", staticmethod(_boom))
-    out = hp._discover_start_dates(rebuilt=[], lake_root=tmp_path, start=_FROM, end=_TO)
-    assert out == {}
-
-
-def test_discover_start_dates_reconcile_raises_degrades_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A reconcile that raises :class:`CatalogError` → an EMPTY map; the catalog is closed."""
-    import brutex.data.catalog_reconcile as cr
-    from brutex.data.errors import CatalogError
-
-    def _boom(**_kw: object) -> None:
-        raise CatalogError("busy lake")
-
-    monkeypatch.setattr(cr, "reconcile_catalog_from_lake", _boom)
-    out = hp._discover_start_dates(rebuilt=[], lake_root=tmp_path, start=_FROM, end=_TO)
-    assert out == {}
-
-
-def test_discover_start_dates_per_contract_error_skips_that_contract(
-    tmp_path: Path,
-) -> None:
-    """A malformed contract symbol (no exchange token) is skipped — the pass continues."""
-    bad = DerivativeContract(
-        underlying_symbol="NIFTY",
-        expiry=date(2024, 1, 25),
-        symbol="NODASH",  # no '-' → contract_exchange raises ValueError downstream
-        contract_type="FUT",
-        strike=None,
+    sink.append(
+        exchange="NSE", segment="FNO", symbol=contract, interval="1minute", bars=minute_bars
     )
-    row = ContractRow(
-        "NSE", "NIFTY", date(2024, 1, 25), "NODASH", None, "FUT", "none", "r", _FETCHED
+    rebuilt = hp._rebuild_contracts(
+        [r for r in registry.list_contracts() if r.contract_symbol == contract]
     )
-    out = hp._discover_start_dates(rebuilt=[(row, bad)], lake_root=tmp_path, start=_FROM, end=_TO)
-    # The malformed contract is excluded from the discovered-start map (skipped, not raised).
-    assert out == {}
+    windows = {contract: (date(2024, 1, 1), date(2024, 1, 26))}
+    hp._derive_daily_from_minute(
+        rebuilt=rebuilt,
+        windows=windows,
+        lake_root=tmp_lake,
+        now=datetime(2024, 2, 1, tzinfo=UTC),
+    )
+    # The 1-day partition now holds the derived midnight-IST daily bar.
+    daily_dir = tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day"
+    assert daily_dir.is_dir()
+    assert any(daily_dir.rglob("*.parquet"))
+
+
+def test_derive_daily_from_minute_no_minute_is_noop(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """No stored 1-minute for the contract → the derivation is a clean no-op (no 1-day)."""
+    from datetime import UTC, datetime
+
+    contract = "NSE-NIFTY-25Jan24-FUT"
+    rebuilt = hp._rebuild_contracts(
+        [r for r in registry.list_contracts() if r.contract_symbol == contract]
+    )
+    hp._derive_daily_from_minute(
+        rebuilt=rebuilt,
+        windows={contract: (date(2024, 1, 1), date(2024, 1, 26))},
+        lake_root=tmp_lake,
+        now=datetime(2024, 2, 1, tzinfo=UTC),
+    )
+    assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()

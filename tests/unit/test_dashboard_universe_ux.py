@@ -101,21 +101,20 @@ def test_multi_select_wiring_present() -> None:
 
 
 def test_timeframe_storage_is_explained_honestly() -> None:
-    """The page explains the verify-first granularity + that intraday TFs are derived, not stored.
+    """The page explains 1-minute-only fetch + that 1-day / intraday TFs are derived, not stored.
 
-    The pull-granularity copy was reworded by DEC-PULL-1DAY-FIRST-001 (the verify-first
-    1-day/1-minute/both dropdown) — the old "fetches + stores 1-minute + 1-day only"
-    phrasing was replaced by the verify-first explanation; this asserts the current
-    wording. The storage-honesty intent is still covered by the derived-on-demand
-    assertion below (DEC-NSE-EQUITY-VERIFY-001 merge-reconcile — the prior phrase was
-    left stale on main).
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: 1-minute is the ONLY granularity fetched from Groww;
+    1-day + the 19 intraday timeframes are DERIVED from it. The page copy explains this and
+    that the intraday TFs are computed on demand (not written to the drive by default).
     """
     html = _render_universe_html()
-    assert "pull 1-day first, cross-check it against the official NSE/BSE bhavcopy" in html, (
-        "the page must explain the verify-first granularity (pull 1-day first, cross-check "
-        "vs the official bhavcopy, THEN widen to 1-minute)"
+    assert "1-minute is the <b>only</b> granularity fetched from Groww" in html, (
+        "the page must explain that 1-minute is the only granularity fetched"
     )
-    assert "derived on demand, NOT written to your drive" in html, (
+    assert "1-day is DERIVED" in html, (
+        "the page must explain that 1-day is derived from the 1-minute base, not fetched"
+    )
+    assert "NOT written to your drive" in html, (
         "the page must state the intraday timeframes are derived on demand, not materialised; "
         "pre-materialising is a future external-drive (BRUTEX_LAKE_ROOT) step"
     )

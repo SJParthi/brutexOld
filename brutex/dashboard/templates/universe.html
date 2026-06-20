@@ -456,19 +456,19 @@
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
-    <div class="hsub">Spot pulls your chosen <b>granularity</b> from <b>2020-01-01 → previous trading day</b> — pick <b>1-day only</b> (the <b>verify-first</b> default), <b>1-minute only</b>, or <b>both</b> from the granularity dropdown below; the idea is pull 1-day first, cross-check it against the official NSE/BSE bhavcopy, THEN widen to 1-minute. Options fan
-      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1day-first.
-      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). When you fetch 1-minute the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
+    <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options fan
+      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
+      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b>; the intraday ones are computed on demand, <b>NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
     <div class="bulkgrid">
       <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
         <span class="shine"></span><span class="bnum">①</span>
         <span class="bicon">📈</span><span class="blabel">Indices · Spot</span>
-        <span class="bmeta">all index · granularity ↓ (1d default)</span>
+        <span class="bmeta">all index · 1-minute (1-day derived)</span>
       </button>
       <button class="bulkbtn stk" id="bulkStkSpot" data-surface="spot" data-kind="stock">
         <span class="shine"></span><span class="bnum">②</span>
         <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
-        <span class="bmeta">all F&amp;O stock · granularity ↓ (1d default)</span>
+        <span class="bmeta">all F&amp;O stock · 1-minute (1-day derived)</span>
       </button>
       <button class="bulkbtn idx" id="bulkIdxDeriv" data-surface="derivatives" data-kind="index"
               title="Metadata-only: enumerate + persist every expiry date + every listed contract symbol for ALL indices into the registry cache — no history. Use ⤓ Pull historical for OHLC. Re-click is safe (the immutable past is skipped).">
@@ -523,15 +523,9 @@
         <span class="dr-sep" aria-hidden="true">→</span>
         <label title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
       </div>
-      <label class="ctl-field" title="Verify-first granularity: pull 1-day, cross-check it against the official NSE/BSE bhavcopy, THEN widen to 1-minute or both. Defaults to 1-day.">granularity
-        <select id="spotInterval" data-bxsel style="background:transparent; color:var(--text); border:none; font:inherit; color-scheme:dark;">
-          <option value="1day" selected>1 day only · verify-first</option>
-          <option value="1minute">1 minute only</option>
-          <option value="both">both · 1day + 1minute</option>
-        </select></label>
-      <button class="pullbtn" id="pullbtn" title="Pull the selected granularity (1-day only by default — verify-first; pick 1-minute or both from the dropdown once the OHLCV-vs-bhavcopy check passes). Tick rows for many, or click one. Blank dates = full history (2020 → prev day)." disabled>⤓ Pull spot</button>
+      <span class="ctl-field" title="1-minute is the ONLY granularity fetched from Groww; 1-day + the 19 intraday timeframes are derived from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).">granularity · <b>1-minute</b> (1-day derived)</span>
+      <button class="pullbtn" id="pullbtn" title="Pull 1-minute spot (the only granularity fetched; 1-day is derived from it). Tick rows for many, or click one. Blank dates = full history (2020 → prev day)." disabled>⤓ Pull spot</button>
       <span class="pull-div" aria-hidden="true"></span>
-      <button class="loadbtn" id="verifybtn" title="Cross-check the highlighted symbol's pulled spot 1-day data against the official NSE for the 'to' date — the trust anchor before any bulk pull. An INDEX checks 4 OHLC fields (NIFTY / BANKNIFTY; SENSEX needs an operator-verified BSE source); a STOCK checks full OHLCV including VOLUME vs the NSE security bhavcopy." disabled>🛡 Verify vs NSE</button>
       <button class="loadbtn" id="pullDerivBtn" title="Pull expiries + contracts METADATA ONLY (every expiry date + every listed contract symbol, Jan-2020 → today) for the selected instrument(s) — no history, fast. The historical candle fill is a separate button. Re-click is safe (the immutable past is skipped)." disabled>⛓ Pull expiries + contracts</button>
       <button class="loadbtn" id="pullHistBtn" title="download OHLC for the SELECTED contracts (single / chain / all) — auto-retries until clean. Needs the contracts cached first (⛓ button); the candles land in the verified candle lake. Highlight an underlying (whole-underlying or pick an expiry for its chain), or click an option-chain cell for that one contract." disabled>⤓ Pull historical</button>
       <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
@@ -542,11 +536,6 @@
     </div>
   </div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
-  <!-- Spot-vs-NSE verify result (DEC-NSE-VERIFY-ROUTE-001): the one-day trust
-       anchor — matched (green) / mismatched (red) / unavailable (yellow) with
-       per-field signed-paisa deltas. Display-only; the verdict is the server's
-       degrade-safe validate_index_oneday. -->
-  <div class="loadmsg" id="verifymsg" style="margin:-4px 24px 8px;" role="status" aria-live="polite"></div>
 
   <!-- Pull-verdict banner (DEC-VERDICT-BANNER-001): coloured, actionable verdict
        shown after a pull. Colour + retry-button visibility come from the server's
@@ -1067,16 +1056,15 @@ async function runPull(symbol, label) {
      into the Groww-served window, so a malformed range can't waste quota. */
   const fromDate = document.getElementById("fromDate").value;
   const toDate = document.getElementById("toDate").value;
-  const spotInterval = (document.getElementById("spotInterval") || {}).value || "1day";
+  // 1-minute is the ONLY granularity fetched (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
+  // 1-day is derived server-side. The granularity dropdown is retired.
   let qs = '/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol);
   if (fromDate) qs += '&from_date=' + encodeURIComponent(fromDate);
   if (toDate) qs += '&to_date=' + encodeURIComponent(toDate);
-  qs += '&spot_interval=' + encodeURIComponent(spotInterval);
   const range = (fromDate || toDate)
     ? ` · ${fromDate || "2020-01-01"} → ${toDate || "prev day"}`
     : "";
-  const ivLabel = spotInterval === "both" ? "1-day + 1-minute"
-    : (spotInterval === "1minute" ? "1-minute" : "1-day");
+  const ivLabel = "1-minute (1-day derived)";
   document.getElementById("pulltitle").textContent = `Pulling ${label} · ${ivLabel}${range}`;
   windowsBucket = 'spot';
   refreshWindowsLine();
@@ -1158,11 +1146,10 @@ document.getElementById("pullbtn").onclick = async () => {
      history; clamped + defaulted server-side). */
   const fromDate = document.getElementById("fromDate").value;
   const toDate = document.getElementById("toDate").value;
-  const spotInterval = (document.getElementById("spotInterval") || {}).value || "1day";
+  // 1-minute only (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); 1-day is derived server-side.
   let dq = "";
   if (fromDate) dq += "&from_date=" + encodeURIComponent(fromDate);
   if (toDate) dq += "&to_date=" + encodeURIComponent(toDate);
-  dq += "&spot_interval=" + encodeURIComponent(spotInterval);
   if (items.length > 1) {
     /* DEC-DHAN-SPOT-MULTI-SATURATE-001: fan ALL ticked symbols in ONE server-side
        bulk pass via /universe/pull-all?symbols= — the cross-symbol window flatten
@@ -1181,56 +1168,6 @@ document.getElementById("pullbtn").onclick = async () => {
   } finally {
     spotPullInFlight = false;
     updateMultiBtn();
-  }
-};
-
-/* ── "🛡 Verify vs NSE" (DEC-NSE-VERIFY-ROUTE-001): the FIRST trust anchor — pull
-   ONE index's spot for ONE day, cross-check its OHLC against the official NSE
-   close (matched / mismatched / unavailable, per-field signed-paisa deltas)
-   before any bulk derivative pull is trusted. Single-symbol: the highlighted
-   index + the "to" date. Honest for non-indices (→ unavailable note). ── */
-function verdictColour(status) {
-  if (status === "matched") return "var(--green)";
-  if (status === "mismatched") return "var(--red)";
-  return "var(--yellow)";  /* unavailable */
-}
-function renderVerdict(v) {
-  const colour = verdictColour(v.status);
-  let html = `<b style="color:${colour}">${(v.status || "").toUpperCase()}</b>`
-    + ` — ${v.symbol} ${v.trade_date} (groww vs ${v.official_source || "nse"})`;
-  if (v.fields && v.fields.length) {
-    html += " · " + v.fields.map(f =>
-      `${f.field}: groww=${f.groww} nse=${f.official} Δ=${f.delta_paisa}p${f.matched ? "" : " ⚠"}`
-    ).join(" · ");
-  }
-  // Stocks add a VOLUME comparison (DEC-NSE-EQUITY-VERIFY-001); indices have none.
-  if (v.volume) {
-    html += ` · volume: groww=${v.volume.groww} nse=${v.volume.official}`
-      + ` Δ=${v.volume.delta}${v.volume.matched ? "" : " ⚠"}`;
-  }
-  if (v.note) html += `<div style="color:var(--muted);font-size:12px;margin-top:4px">${v.note}</div>`;
-  return html;
-}
-let verifyInFlight = false;
-document.getElementById("verifybtn").onclick = async () => {
-  if (verifyInFlight) return;
-  const sym = selInst;
-  const box = document.getElementById("verifymsg");
-  if (!sym) { box.textContent = "Highlight an index row first, then verify its spot vs NSE."; return; }
-  const day = document.getElementById("toDate").value;
-  if (!day) { box.textContent = "Pick a 'to' date — verify cross-checks that one day's spot vs NSE."; return; }
-  verifyInFlight = true;
-  box.textContent = `Verifying ${sym} spot vs NSE for ${day}…`;
-  try {
-    const r = await fetch("/api/v1/universe/verify-nse?symbol=" + encodeURIComponent(sym)
-      + "&date=" + encodeURIComponent(day), { method: "POST" });
-    const v = await r.json();
-    if (!r.ok) { box.textContent = "Verify failed: " + (v.detail || r.status); return; }
-    box.innerHTML = renderVerdict(v);
-  } catch (e) {
-    box.textContent = "Verify error: " + e;
-  } finally {
-    verifyInFlight = false;
   }
 };
 
@@ -1261,11 +1198,13 @@ document.getElementById("pullDerivBtn").onclick = () => {
      picked ISO expiry narrows it to that CHAIN, ?underlying=…&expiry=…). Requires the
      metadata already cached by the ⛓ button.
    Both default until_clean=true (auto-retry every failed window); both candle paths land
-   on the verified candle lake (PATH A). The interval comes from the same granularity knob
-   the spot pull uses. ── */
+   on the verified candle lake (PATH A). The interval is ALWAYS 1-minute
+   (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 — 1-day is derived from it, never fetched). ── */
 const _ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function histInterval() {
-  return (document.getElementById("spotInterval") || {}).value || "1day";
+  // F&O is 1-minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); 1-day is derived
+  // from the 1-minute server-side, never fetched. The granularity dropdown is retired.
+  return "1minute";
 }
 function pullHistorical(underlying, expiryDate) {
   /* Multi-select wins: the ONE-CLICK composite over the SAME selection the spot /
@@ -1316,10 +1255,6 @@ function updateMultiBtn() {
   const m = document.getElementById("matbtn");
   m.textContent = n > 0 ? `⚙ Pre-build timeframes · ${n} selected` : "⚙ Pre-build timeframes";
   m.disabled = n === 0 && !selPullSymbol;
-  // "🛡 Verify vs NSE" is single-symbol: enabled whenever ONE index row is
-  // highlighted (the trust anchor verifies that one underlying's spot 1-day).
-  const v = document.getElementById("verifybtn");
-  if (v) v.disabled = !selInst;
   // "⛓ Pull expiries + contracts" is selection-driven (one OR many) — same enable
   // rule as the spot pull (any ticked row OR a single highlight).
   const d = document.getElementById("pullDerivBtn");
@@ -1519,9 +1454,9 @@ BULK_BTNS.forEach(btn => {
       const path = '/api/v1/universe/pull-expiries-contracts?kind=' + encodeURIComponent(kind);
       startAndPoll(path, `ALL ${noun} expiries + contracts (metadata)`);
     } else {
-      const iv = (document.getElementById('spotInterval') || {}).value || '1day';
-      const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind)
-        + '&spot_interval=' + encodeURIComponent(iv);
+      // 1-minute is the only granularity fetched (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
+      // 1-day is derived server-side. The granularity dropdown is retired.
+      const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
       startAndPoll(path, `ALL ${noun} spot`);
     }
   });

@@ -70,10 +70,11 @@ derivatives PR (this module is the adapter-layer building block it consumes).
 
 from __future__ import annotations
 
+from calendar import monthrange
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -93,11 +94,20 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only (duckdb stays lazy, mirror
 #: silent, and the per-pull bounded/unbounded split is visible to the operator.
 _LOG = structlog.get_logger("brutex.adapters.groww.contract_bounds")
 
+#: Default F&O minute-window lookback — the per-contract DEFAULT span when the
+#: operator passes no explicit from/to dates: ``expiry − DEFAULT_FNO_LOOKBACK_MONTHS``
+#: → ``expiry`` at 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001). Three calendar months
+#: of intraday history is the operator's "recent life of the contract" default.
+DEFAULT_FNO_LOOKBACK_MONTHS: Final[int] = 3
+
 __all__ = [
+    "DEFAULT_FNO_LOOKBACK_MONTHS",
     "ContractCoverage",
     "contract_daily_coverage",
     "coverage_to_minute_window",
+    "default_fno_minute_window",
     "derive_contract_minute_windows",
+    "subtract_calendar_months",
 ]
 
 
@@ -233,6 +243,90 @@ def coverage_to_minute_window(
     ceiling = expiry if expiry is not None else coverage.last_date
     start = max(full_start, coverage.first_date)
     end = min(full_end, ceiling + timedelta(days=1))
+    if start >= end:
+        return (full_start, full_end)
+    return (start, end)
+
+
+def subtract_calendar_months(anchor: date, months: int) -> date:
+    """Subtract *months* CALENDAR months from *anchor*, clamping the day to month-end.
+
+    Pure, dependency-free month arithmetic (``python-dateutil`` is NOT a declared BruteX
+    dependency — only a transitive build-tool import — so the lookback is hand-rolled,
+    Golden Rule #1 no hidden deps). The day-of-month is CLAMPED to the target month's
+    last valid day, so a month-end anchor lands on the target month-end, never overflows
+    into the next month:
+
+    * ``2020-01-31 − 3mo`` → ``2019-10-31`` (Oct has 31 days — exact)
+    * ``2020-03-31 − 3mo`` → ``2019-12-31`` (Dec has 31 days — exact)
+    * ``2020-05-31 − 3mo`` → ``2020-02-29`` (Feb 2020 is a leap year → clamp to 29)
+    * ``2021-05-31 − 3mo`` → ``2021-02-28`` (Feb 2021 → clamp to 28)
+
+    Parameters
+    ----------
+    anchor
+        The date to subtract from (an F&O contract's expiry).
+    months
+        The number of calendar months to subtract (``>= 0``).
+
+    Returns
+    -------
+    date
+        ``anchor`` shifted back *months* calendar months, day-clamped to the target
+        month's last valid day.
+    """
+    # Zero-based month index arithmetic, then back to 1-based. ``divmod`` carries the
+    # year borrow correctly for any month count (e.g. anchor month 2 − 3 → prev year
+    # month 11).
+    total = (anchor.year * 12 + (anchor.month - 1)) - months
+    year, month0 = divmod(total, 12)
+    month = month0 + 1
+    last_day = monthrange(year, month)[1]
+    return date(year, month, min(anchor.day, last_day))
+
+
+def default_fno_minute_window(
+    expiry: date | None,
+    *,
+    full_start: date,
+    full_end: date,
+) -> tuple[date, date]:
+    """The DEFAULT half-open ``[start, end)`` 1-minute window for an F&O contract.
+
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. When the operator passes NO explicit from/to
+    dates, an F&O contract's 1-minute pull defaults to the last
+    :data:`DEFAULT_FNO_LOOKBACK_MONTHS` calendar months of its trading life:
+    ``[max(full_start, expiry − 3mo), min(full_end, expiry + 1 day))``. The
+    ``expiry + 1 day`` end is end-EXCLUSIVE so the expiry day's own intraday bars are
+    INCLUDED (the SAME ``+ 1 day`` ceiling convention :func:`coverage_to_minute_window`
+    uses).
+
+    Both bounds are clamped INTO the operator's resolved ``[full_start, full_end)``
+    range (the historical floor → previous-day envelope), so the default never widens
+    scope. A contract with NO ``expiry`` (defensive — a vendor-neutral perpetual has
+    none) or whose lookback collapses to an empty/inverted span falls back to the FULL
+    ``(full_start, full_end)`` range — the conservative never-skip choice (Golden
+    Rule #10).
+
+    Parameters
+    ----------
+    expiry
+        The contract's expiry date (its hard last tradable day), or ``None``.
+    full_start, full_end
+        The half-open ``[full_start, full_end)`` range the operator resolved (the
+        explicit-dates-or-default envelope from ``_resolve_range``).
+
+    Returns
+    -------
+    tuple[date, date]
+        The half-open ``(start, end)`` 1-minute window, always within
+        ``[full_start, full_end)``.
+    """
+    if expiry is None:
+        return (full_start, full_end)
+    lookback_start = subtract_calendar_months(expiry, DEFAULT_FNO_LOOKBACK_MONTHS)
+    start = max(full_start, lookback_start)
+    end = min(full_end, expiry + timedelta(days=1))
     if start >= end:
         return (full_start, full_end)
     return (start, end)

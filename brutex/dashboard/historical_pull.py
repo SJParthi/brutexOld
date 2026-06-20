@@ -81,15 +81,13 @@ from brutex.adapters.groww.constants import (
     TRACK1_DAILY_INTERVAL,
     TRACK1_SPOT_INTERVAL,
 )
-from brutex.adapters.groww.contract_bounds import (
-    contract_daily_coverage,
-    coverage_to_minute_window,
-)
+from brutex.adapters.groww.contract_bounds import default_fno_minute_window
 from brutex.adapters.groww.contracts import parse_contract_symbol
 from brutex.adapters.groww.option_ingest import (
     ContractWindows,
     GrowwOptionIngestReport,
     ProgressHook,
+    contract_exchange,
     run_groww_option_ingest,
 )
 from brutex.adapters.ingest_common import (
@@ -98,8 +96,7 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.data.catalog import Catalog
-from brutex.data.errors import CatalogError
+from brutex.calendars.nse import IST
 from brutex.data.registry_store import (
     CANDLE_STATUS_COMPLETE,
     ContractRow,
@@ -118,17 +115,16 @@ from brutex.orchestrator.universe_phases import RunParallel
 if TYPE_CHECKING:
     from brutex.dashboard.pull_controller import SessionRateController
 
-#: Phase-1 interval — the MANDATORY ``1day`` pull that runs FIRST for EVERY selected
-#: contract, regardless of the operator's interval choice (even a ``1minute``-only
-#: request). Its sole F&O job is to PIN each contract's precise listing/start date so
-#: the heavy Phase-2 minute fill begins at the right date (DEC-HISTORICAL-1DAY-FIRST-001;
-#: an F&O 1-day pull is NOT for bhavcopy matching — that is the spot check).
-_PHASE1_DAILY: Final[str] = TRACK1_DAILY_INTERVAL
+#: The ONLY granularity fetched from Groww for an F&O contract
+#: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
+#: from this (never vendor-fetched), so the prior two-phase "1-day-first to pin the
+#: listing date" barrier (DEC-HISTORICAL-1DAY-FIRST-001) is RETIRED: there is one vendor
+#: phase, bounded per contract to its ``expiry − 3mo → expiry`` default window.
+_MINUTE_INTERVAL: Final[str] = TRACK1_SPOT_INTERVAL
 
-#: Phase-2 interval — the HEAVY ``1minute`` fill, attempted ONLY when the operator
-#: requested it AND the global Phase-1 barrier passed (every selected contract's 1-day
-#: pull settled clean — no quarantine, no still-failing window).
-_PHASE2_MINUTE: Final[str] = TRACK1_SPOT_INTERVAL
+#: The DERIVED interval — 1-day bars resampled from the just-written 1-minute and written
+#: to the lake's ``FNO/<symbol>/1day`` partition (NOT fetched from the vendor).
+_DERIVED_DAILY: Final[str] = TRACK1_DAILY_INTERVAL
 
 #: Structured logger — the start-date discovery degrade paths (catalog unavailable /
 #: per-contract skip) are logged LOUDLY (Golden Rule #10 observability), never silent.
@@ -160,23 +156,24 @@ _RebuiltContract = tuple[ContractRow, DerivativeContract]
 class HistoricalPullReport:
     """The honest outcome of one selection-based historical candle pull (display + audit).
 
-    Two-phase shape (DEC-HISTORICAL-1DAY-FIRST-001): the F&O historical pull ALWAYS runs
-    ``1day`` FIRST (Phase 1) for every selected contract, and only proceeds to the heavy
-    ``1minute`` fill (Phase 2) when the WHOLE Phase-1 pull cleaned. The phase fields make
-    that barrier auditable:
+    Single-phase shape (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): 1-minute is the ONLY
+    granularity fetched from Groww; ``1day`` is DERIVED from it after the pull (never
+    vendor-fetched), so the prior two-phase 1-day-first barrier is RETIRED. The
+    (retained, repurposed) phase fields now describe the SINGLE minute phase:
 
-    * :attr:`phase1_clean` — did the ENTIRE 1-day phase settle clean (the global barrier)?
-    * :attr:`phase1_complete` — the contract symbols whose 1-day pull landed clean.
-    * :attr:`start_dates` — each contract's discovered earliest 1-day bar date (the date
-      the Phase-2 minute fill STARTS from; a contract with no 1-day data is ABSENT).
-    * :attr:`minute_requested` — did the operator request ``1minute`` at all?
-    * :attr:`minute_skipped` — was Phase 2 SKIPPED because the barrier did not pass?
+    * :attr:`phase1_clean` — did the ENTIRE 1-minute phase settle clean (every selected
+      contract, every window — the completion barrier)?
+    * :attr:`phase1_complete` — the contract symbols whose 1-minute pull landed clean.
+    * :attr:`start_dates` — each contract's RESOLVED 1-minute window start (the explicit
+      operator start, or the per-contract ``expiry − 3mo`` default, clamped into range).
+    * :attr:`minute_requested` — always ``True`` (1-minute is the only granularity).
+    * :attr:`minute_skipped` — always ``False`` (one phase; there is no barrier to skip).
 
     The aggregate :attr:`bars_appended` / :attr:`windows` / :attr:`failed_pairs` /
-    :attr:`still_failed_windows` / :attr:`auth_aborted` SUM/fold across BOTH phases (so the
-    top-line counts describe the whole pull); :attr:`contracts_completed` is the count
-    marked ``candle_status=complete`` (a contract is complete iff its 1-day phase cleaned —
-    Phase 1 is the gate the marker reads).
+    :attr:`still_failed_windows` / :attr:`auth_aborted` describe the 1-minute phase (the
+    top-line counts of the whole pull); :attr:`contracts_completed` is the count marked
+    ``candle_status=complete`` (a contract is complete iff its 1-minute phase cleaned).
+    The 1-day derivation runs AFTER, quarantined — it never affects these counts.
     """
 
     dry_run: bool
@@ -481,13 +478,13 @@ def _build_note(
     failed_pairs: int,
     still_failed_windows: int,
     auth_aborted: bool,
-    minute_skipped: bool = False,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
-    The ``minute_skipped`` arm (DEC-HISTORICAL-1DAY-FIRST-001) takes priority over the
-    generic quarantine/transient notes: when the global 1-day barrier did NOT clear, the
-    operator's headline is "1-day incomplete → 1-minute skipped", not the raw residual.
+    Single-phase 1-minute pull (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): the note describes
+    the 1-minute phase's outcome — empty selection / dry-run / auth death / quarantine /
+    transient residual / clean. The 1-day derivation runs after, quarantined, and never
+    enters the note (its failure is logged, not surfaced as a pull outcome).
     """
     if contracts_selected == 0:
         return (
@@ -501,12 +498,6 @@ def _build_note(
         )
     if auth_aborted:
         return "auth token expired mid-pull — re-set Groww credentials and re-pull (idempotent)"
-    if minute_skipped:
-        return (
-            f"1-day phase INCOMPLETE — {contracts_completed}/{contracts_selected} contract(s) "
-            "cleaned 1-day; 1-minute SKIPPED (global barrier). Re-pull to drain the 1-day "
-            "residual first (1-minute needs each contract's discovered start date)"
-        )
     if failed_pairs:
         return (
             f"pulled {windows} windows; {failed_pairs} contract/interval pair(s) quarantined — "
@@ -694,88 +685,116 @@ def _run_phase(
     )
 
 
-def _discover_start_dates(
+def _resolve_minute_windows(
     *,
     rebuilt: Sequence[_RebuiltContract],
-    lake_root: Path,
+    explicit_dates: bool,
     start: date,
     end: date,
 ) -> dict[str, tuple[date, date]]:
-    """Read each contract's earliest 1-day bar date from the JUST-WRITTEN lake (Phase 1→2).
+    """Resolve each contract's half-open ``[start, end)`` 1-minute fetch window — pure.
 
-    The crux of DEC-HISTORICAL-1DAY-FIRST-001: after the 1-day phase landed clean, the lake
-    holds each contract's REAL 1-day coverage, so its earliest 1-day bar date PINS where the
-    heavy 1-minute fill must begin (never blindly from 2020). Reconciles the catalog ONCE
-    over the FNO/``1day`` space (the blessed reconcile-once → read-many pattern), then reads
-    each contract's :func:`~brutex.adapters.groww.contract_bounds.contract_daily_coverage`
-    and converts it to a minute window via
-    :func:`~brutex.adapters.groww.contract_bounds.coverage_to_minute_window` — whose ``start``
-    IS the discovered listing date and whose ``end`` clamps to the contract's expiry, bounded
-    WITHIN the operator's resolved ``[start, end)`` range.
-
-    Unlike the optimisation-only
-    :func:`~brutex.adapters.groww.contract_bounds.derive_contract_minute_windows` (which also
-    OMITS a contract whose window collapses to the full range), this keeps EVERY contract
-    that has ANY 1-day coverage — because here the map is the AUTHORITATIVE Phase-2 contract
-    set, not a best-effort bound: a contract with real data but a full-range window must
-    still be pulled, just from its discovered start. A contract with ZERO 1-day bars (it never
-    traded in range) is OMITTED — the caller EXCLUDES it from Phase 2 (its 1-minute would be
-    empty too), honestly reported. The per-contract date is read from the contract's own 1-day
-    coverage, never fabricated. A missing/locked catalog or a malformed contract degrades that
-    contract (or the whole pass) to ABSENT — every excluded contract is reported; the honest
-    conservative choice for a barrier-passed but coverage-unreadable lake (Golden Rule #10).
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. When the operator passed explicit from/to dates
+    (*explicit_dates* True) EVERY contract uses the resolved ``[start, end)`` envelope
+    verbatim (the dates OVERRIDE). Otherwise each contract gets its OWN per-contract
+    DEFAULT — ``expiry − 3 calendar months → expiry+1day`` clamped into ``[start, end)``
+    (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`) — so the
+    1-minute fill targets the recent life of each contract, not blindly from 2020. A
+    contract with no ``expiry`` falls back to the full range (the helper's never-skip
+    choice). Pure + O(contracts); no lake I/O.
 
     Returns
     -------
     dict[str, tuple[date, date]]
-        ``{contract.symbol: (discovered_start, expiry_end)}`` for every contract whose 1-day
-        coverage the lake holds; symbols with no coverage are absent.
+        ``{contract.symbol: (start, end)}`` for EVERY selected contract.
     """
-    try:
-        catalog = Catalog.open(lake_root / "catalog.duckdb")
-    except (CatalogError, OSError):
-        # The data-lake deps are missing / the catalog file is unopenable / the lake_root is
-        # not accessible (e.g. a dry-run sentinel path that is not writable on a hardened CI
-        # runner — PermissionError is an OSError) — degrade to an EMPTY map (Phase 2 excludes
-        # every contract), loud, never silent (Golden Rule #10).
-        _LOG.warning("historical.start_discovery.catalog_unavailable", lake_root=str(lake_root))
-        return {}
     windows: dict[str, tuple[date, date]] = {}
-    # ``with`` manages the catalog lifetime (close on ANY exit) — CodeQL prefers this over a
-    # ``finally: catalog.close()``; the two distinct degrade-messages are preserved.
-    with catalog:
-        try:
-            from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
-
-            reconcile_catalog_from_lake(
-                lake_root=lake_root, catalog=catalog, segment=OPTION_SEGMENT, interval=_PHASE1_DAILY
+    for _row, contract in rebuilt:
+        if explicit_dates:
+            windows[contract.symbol] = (start, end)
+        else:
+            windows[contract.symbol] = default_fno_minute_window(
+                contract.expiry, full_start=start, full_end=end
             )
-            for _row, contract in rebuilt:
-                try:
-                    coverage = contract_daily_coverage(catalog, contract=contract)
-                except (CatalogError, ValueError) as exc:
-                    # A malformed contract symbol / mid-loop catalog error excludes THIS contract
-                    # from Phase 2 only (loud, per-contract) — never blanks the whole map.
-                    _LOG.warning(
-                        "historical.start_discovery.contract_skipped",
-                        symbol=contract.symbol,
-                        error=str(exc),
-                    )
-                    continue
-                if coverage is None:
-                    # No 1-day data for this contract — it never traded in range, so its
-                    # 1-minute would be empty too: EXCLUDE it from Phase 2 (honestly reported).
-                    continue
-                windows[contract.symbol] = coverage_to_minute_window(
-                    coverage, full_start=start, full_end=end, expiry=contract.expiry
-                )
-        except CatalogError:
-            # The reconcile itself failed (busy lake / missing deps) — degrade to EMPTY, loud.
-            _LOG.warning(
-                "historical.start_discovery.reconcile_unavailable", lake_root=str(lake_root)
-            )
-            return {}
     return windows
+
+
+def _derive_daily_from_minute(  # pragma: no cover — raw lake I/O, integration-tested
+    *,
+    rebuilt: Sequence[_RebuiltContract],
+    windows: dict[str, tuple[date, date]],
+    lake_root: Path,
+    now: datetime,
+) -> None:
+    """Derive 1-day bars from the just-written 1-minute per contract — best-effort.
+
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. 1-minute is the ONLY granularity fetched from
+    Groww; the 1-day series is DERIVED here (never fetched) by resampling each contract's
+    freshly-written 1-minute over its resolved window to midnight-IST daily bars
+    (:func:`~brutex.data.spot_daily_resample.fill_daily_from_minute`) and writing them to
+    the lake's ``FNO/<symbol>/1day`` partition. The OHLCV aggregation + midnight-IST
+    re-stamp share the spot resampler's single source of truth, so a derived F&O daily bar
+    is byte-identical in stamp/schema to a vendor daily (the keep-first dedup identity,
+    Golden Rule #7).
+
+    QUARANTINED: a per-contract derivation error (corrupt slice / write failure) is logged
+    + swallowed — it NEVER fails the pull. The 1-minute candles are already safely in the
+    lake; the derived daily partition is a convenience layer, so its failure must not
+    regress the authoritative minute data (Golden Rule #10).
+    """
+    from brutex.data.spot_daily_resample import (
+        fill_daily_from_minute,
+        make_lake_read_1m_window,
+        make_lake_write_1day,
+    )
+
+    before = now.astimezone(IST).date()
+    for _row, contract in rebuilt:
+        window = windows.get(contract.symbol)
+        if window is None:
+            continue
+        win_start, win_end = window
+        try:
+            exchange = contract_exchange(contract)
+        except ValueError as exc:
+            _LOG.warning(
+                "historical.derive_daily.contract_skipped",
+                symbol=contract.symbol,
+                error=str(exc),
+            )
+            continue
+        try:
+            result = fill_daily_from_minute(
+                read_1m=make_lake_read_1m_window(
+                    lake_root=lake_root,
+                    exchange=exchange,
+                    segment=OPTION_SEGMENT,
+                    symbol=contract.symbol,
+                    start=win_start,
+                    end=win_end,
+                ),
+                write_1day=make_lake_write_1day(
+                    lake_root=lake_root,
+                    exchange=exchange,
+                    segment=OPTION_SEGMENT,
+                    symbol=contract.symbol,
+                ),
+                before=before,
+            )
+        except Exception as exc:
+            # Quarantine: a derive error (corrupt slice / write failure) NEVER fails the
+            # pull — the authoritative 1-minute candles are already safely in the lake.
+            _LOG.warning(
+                "historical.derive_daily.errored",
+                symbol=contract.symbol,
+                error=str(exc),
+            )
+            continue
+        _LOG.info(
+            "historical.derive_daily.filled",
+            symbol=contract.symbol,
+            bars=result.bars_written,
+        )
 
 
 def pull_contract_candles(
@@ -806,41 +825,38 @@ def pull_contract_candles(
     (``bars/<exch>/FNO/<symbol>/<interval>/`` via :class:`~brutex.data.sink.ParquetBarSink`
     — PATH A), NOT the ``options/`` OptionBar lake (PATH B needs ``iv``/``spot``/``ATM±N``
     that ``get_historical_candles`` does not return — fabricating them would violate Golden
-    Rule #1). AFTER a contract's 1-day phase lands CLEAN its registry
+    Rule #1). AFTER a contract's 1-minute phase lands CLEAN its registry
     :meth:`~brutex.data.registry_store.RegistryStore.set_candle_status` is set to
     ``complete``.
 
-    **1-day-first GLOBAL barrier (DEC-HISTORICAL-1DAY-FIRST-001).** For F&O the pull is
-    TWO phases regardless of how many contracts are selected:
+    **1-minute ONLY, 1-day DERIVED (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).** For F&O the pull
+    is a SINGLE vendor phase (the prior two-phase 1-day-first barrier is RETIRED):
 
-    1. **Phase 1 — 1-day ONLY first, ALWAYS.** Every selected contract's ``1day`` interval
-       is pulled FIRST (the existing until-clean loop on 1-day alone) — EVEN IF the operator
-       requested only ``1minute`` (1-day is mandatory). For F&O the 1-day OHLCV is NOT a
-       bhavcopy cross-check (that is the spot path) — its sole job is to PIN each contract's
-       precise listing/start date for the minute fill.
-    2. **GLOBAL barrier.** Phase 2 starts ONLY when the ENTIRE 1-day phase cleaned — every
-       selected contract, every window settled (no quarantine / no still-failing / no auth
-       death). If 1-day did NOT fully clean, the pull STOPS: 1-minute is NOT started and the
-       report says 1-day incomplete (which contracts failed), 1-minute skipped.
-    3. **Phase 2 — 1-minute (only if requested AND the barrier passed).** Each contract's
-       minute fill STARTS from the precise earliest 1-day bar date its own Phase-1 pull
-       revealed (read from the just-written 1-day lake via
-       :func:`~brutex.adapters.groww.contract_bounds.contract_daily_coverage`), never blindly
-       from 2020. A contract with ZERO 1-day bars is EXCLUDED from Phase 2 (its 1-minute
-       would be empty too), honestly reported in ``start_dates``'s absence.
+    1. **Per-contract window.** When the operator passes NO explicit from/to dates, each
+       contract's 1-minute window DEFAULTS to ``expiry − 3 calendar months → expiry`` (its
+       own expiry; ``expiry+1day`` end-exclusive so the expiry day's intraday bars land),
+       clamped into the resolved envelope. Explicit operator dates OVERRIDE — every contract
+       then uses the resolved ``[start, end)`` range verbatim.
+    2. **One vendor phase — 1-minute ONLY.** Every selected contract's ``1minute`` is pulled
+       over its window. ``1day`` is NEVER fetched from the vendor.
+    3. **1-day DERIVED.** After the 1-minute lands, the 1-day partition is DERIVED by
+       resampling each contract's just-written 1-minute to midnight-IST daily bars
+       (:func:`~brutex.data.spot_daily_resample.fill_daily_from_minute`) and writing the
+       ``FNO/<symbol>/1day`` partition. The derivation is QUARANTINED — it can NEVER fail the
+       pull (the authoritative 1-minute candles are already in the lake).
 
-    With ``until_clean=True`` (DEC-GROWW-DERIV-UNTIL-CLEAN-001) EACH phase runs BOUNDED
-    re-pull rounds over its SHARED WindowLedger until the transient residual drains, the
-    token dies, or the budget / a no-progress round stops it
+    With ``until_clean=True`` (DEC-GROWW-DERIV-UNTIL-CLEAN-001) the single 1-minute phase runs
+    BOUNDED re-pull rounds over its SHARED WindowLedger until the transient residual drains,
+    the token dies, or the budget / a no-progress round stops it
     (:func:`~brutex.adapters.ingest_common.run_until_clean`, ``stop_when_stuck=True``).
     Each round re-ingests the SAME fixed contract list; the ledger SKIPS already-`SUCCESS`
     windows and RE-ATTEMPTS the prior round's `FAILED` (transient) ones. Default
-    ``until_clean=False`` is one single pass per phase.
+    ``until_clean=False`` is one single pass.
 
     Honest envelope (Golden Rule #10): an EMPTY *contracts* selection appends 0 bars + an
     honest note (never an invented contract). The per-contract fetch tiles each range
-    (network-bound, NOT O(1)-total) — the phasing OPTIMISES the 1-minute window set (it
-    starts at each contract's real date), it does NOT make the pull O(1)-total. Unlike the
+    (network-bound, NOT O(1)-total) — the per-contract default window OPTIMISES the 1-minute
+    set (the recent life of each contract), it does NOT make the pull O(1)-total. Unlike the
     chain pull, a round here is ``O(failed windows)`` — the contract list is fixed (no
     re-enumeration). Re-runs are rate-safe (the SAME 500/min bucket) + idempotent (the
     keep-first sink + WindowLedger).
@@ -856,8 +872,9 @@ def pull_contract_candles(
         When ``True``, the default factory uses the honest empty-candle client (0 bars,
         never a fabricated OHLC) + a :class:`NullBarSink`.
     intervals
-        The operator's requested intervals (``1day`` / ``1minute`` / both). ``1day`` is
-        ALWAYS pulled first (Phase 1); ``1minute`` triggers Phase 2 only after the barrier.
+        The operator's requested intervals — accepted + echoed in the report, but IGNORED
+        for granularity: F&O always fetches ``1minute`` ONLY and DERIVES ``1day``
+        (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
     registry
         The registry whose ``candle_status`` is marked ``complete`` per landed contract.
     from_date, to_date
@@ -908,120 +925,76 @@ def pull_contract_candles(
     for row, contract in rebuilt:
         by_market.setdefault(_contract_market(row), []).append((row, contract))
 
-    # ``1minute`` was requested iff it appears anywhere in the operator's interval list;
-    # Phase 1 ALWAYS pulls ``1day`` first regardless (DEC-HISTORICAL-1DAY-FIRST-001), so the
-    # raw *intervals* only decide whether Phase 2 runs (de-duped — 1day is never pulled twice).
-    minute_requested = _PHASE2_MINUTE in intervals
+    # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
+    # dates OVERRIDE (every contract uses the resolved range); else each contract's DEFAULT
+    # ``expiry − 3mo → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
+    # but IGNORED for granularity — F&O always fetches 1-minute only.
+    explicit_dates = from_date is not None or to_date is not None
+    minute_windows = _resolve_minute_windows(
+        rebuilt=rebuilt, explicit_dates=explicit_dates, start=start, end=end
+    )
 
-    def _phase(interval: str, contract_windows: ContractWindows | None) -> _PhaseResult:
-        """Run ONE phase (one interval) over the shared market buckets — the single call site."""
-        return _run_phase(
-            interval=interval,
-            by_market=by_market,
-            selected_symbols=selected_symbols,
-            client=client,
-            sink=sink,
-            lake_root=lake_root,
-            dry_run=dry_run,
-            start=start,
-            end=end,
-            pace=pace,
-            on_rate_limit=on_rate_limit,
-            on_timeout=on_timeout,
-            on_success=on_success,
-            on_progress=on_progress,
-            session_rate=session_rate,
-            until_clean=until_clean,
-            until_clean_rounds=until_clean_rounds,
-            contract_windows=contract_windows,
-            run_parallel=run_parallel,
+    # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
+    minute = _run_phase(
+        interval=_MINUTE_INTERVAL,
+        by_market=by_market,
+        selected_symbols=selected_symbols,
+        client=client,
+        sink=sink,
+        lake_root=lake_root,
+        dry_run=dry_run,
+        start=start,
+        end=end,
+        pace=pace,
+        on_rate_limit=on_rate_limit,
+        on_timeout=on_timeout,
+        on_success=on_success,
+        on_progress=on_progress,
+        session_rate=session_rate,
+        until_clean=until_clean,
+        until_clean_rounds=until_clean_rounds,
+        contract_windows=minute_windows,
+        run_parallel=run_parallel,
+    )
+
+    # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
+    # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the
+    # derived 1-day partition is a best-effort convenience. Skipped on a dry-run (the
+    # NullBarSink wrote nothing, and the sentinel lake_root may not be writable).
+    if not dry_run:
+        _derive_daily_from_minute(
+            rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root, now=now
         )
 
-    # ── Phase 1 — 1-day ONLY first, ALWAYS (even for a 1-minute-only request) ──────────
-    phase1 = _phase(_PHASE1_DAILY, None)
-
-    # The GLOBAL barrier: Phase 2 (1-minute) runs ONLY when the WHOLE 1-day phase cleaned —
-    # every selected contract, every window settled (no quarantine, no still-failing, no auth
-    # death). If 1-day did NOT fully clean, STOP: do not start 1-minute (DEC-HISTORICAL-1DAY-
-    # FIRST-001). The 1-day completion set IS the candle_status marker (Phase 1 is the gate).
-    start_dates: dict[str, tuple[date, date]] = {}
-    phase2: _PhaseResult | None = None
-    minute_skipped = False
-    if minute_requested:
-        if phase1.clean:
-            # Pin each contract's REAL start date from the just-written 1-day lake; a contract
-            # with ZERO 1-day bars is ABSENT → EXCLUDED from Phase 2 (its 1-minute is empty too).
-            start_dates = _discover_start_dates(
-                rebuilt=rebuilt, lake_root=lake_root, start=start, end=end
-            )
-            phase2_buckets = {
-                market: [(row, c) for row, c in bucket if c.symbol in start_dates]
-                for market, bucket in by_market.items()
-            }
-            phase2 = _run_phase(
-                interval=_PHASE2_MINUTE,
-                by_market={m: b for m, b in phase2_buckets.items() if b},
-                selected_symbols=frozenset(start_dates),
-                client=client,
-                sink=sink,
-                lake_root=lake_root,
-                dry_run=dry_run,
-                start=start,
-                end=end,
-                pace=pace,
-                on_rate_limit=on_rate_limit,
-                on_timeout=on_timeout,
-                on_success=on_success,
-                on_progress=on_progress,
-                session_rate=session_rate,
-                until_clean=until_clean,
-                until_clean_rounds=until_clean_rounds,
-                contract_windows=start_dates,
-                run_parallel=run_parallel,
-            )
-        else:
-            # Barrier FAILED — 1-minute is SKIPPED entirely, reported (which contracts failed).
-            minute_skipped = True
-
-    # Aggregate BOTH phases for the top-line counts. ``candle_status=complete`` keys on the
-    # Phase-1 completion set (a contract is "historically complete" once its 1-day pins land —
-    # Phase 2 is the optional heavy minute fill on top, not the completion gate).
-    contracts_completed = _mark_complete(registry, rebuilt, phase1.complete)
-    bars_appended = phase1.bars + (phase2.bars if phase2 is not None else 0)
-    windows = phase1.windows + (phase2.windows if phase2 is not None else 0)
-    # The residual (the operator's "re-pull this" signal) is the LAST phase actually run:
-    # Phase 2 when it ran, else Phase 1 (the barrier-failed / 1-day-only case).
-    last = phase2 if phase2 is not None else phase1
-    failed_pairs = last.failed_pairs
-    still_failed_windows = last.still_failed_windows
-    auth_aborted = phase1.auth_aborted or (phase2.auth_aborted if phase2 is not None else False)
-
+    # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
+    # "historically complete" once its 1-minute landed clean — the only vendor phase).
+    contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
     note = _build_note(
         dry_run=dry_run,
         contracts_selected=len(rebuilt),
         contracts_completed=contracts_completed,
-        windows=windows,
-        failed_pairs=failed_pairs,
-        still_failed_windows=still_failed_windows,
-        auth_aborted=auth_aborted,
-        minute_skipped=minute_skipped,
+        windows=minute.windows,
+        failed_pairs=minute.failed_pairs,
+        still_failed_windows=minute.still_failed_windows,
+        auth_aborted=minute.auth_aborted,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
         intervals=tuple(intervals),
         contracts_selected=len(rebuilt),
         contracts_completed=contracts_completed,
-        bars_appended=bars_appended,
-        windows=windows,
-        failed_pairs=failed_pairs,
-        still_failed_windows=still_failed_windows,
-        auth_aborted=auth_aborted,
+        bars_appended=minute.bars,
+        windows=minute.windows,
+        failed_pairs=minute.failed_pairs,
+        still_failed_windows=minute.still_failed_windows,
+        auth_aborted=minute.auth_aborted,
         note=note,
-        phase1_clean=phase1.clean,
-        phase1_complete=tuple(sorted(phase1.complete)),
-        start_dates={sym: win[0].isoformat() for sym, win in sorted(start_dates.items())},
-        minute_requested=minute_requested,
-        minute_skipped=minute_skipped,
+        # The retained, repurposed phase fields describe the SINGLE 1-minute phase.
+        phase1_clean=minute.clean,
+        phase1_complete=tuple(sorted(minute.complete)),
+        start_dates={sym: win[0].isoformat() for sym, win in sorted(minute_windows.items())},
+        minute_requested=True,
+        minute_skipped=False,
     )
 
 
