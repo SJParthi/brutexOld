@@ -25,9 +25,11 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
-import polars as pl
+import pytest
 from brutex.data.tf_resampler import resample_1m_to_tf
 from brutex.data.timeframes import ALL_TF_MINUTES, DAILY_TF_MINUTES
+
+pl = pytest.importorskip("polars")  # the frame construction needs the [data] extra
 
 #: 09:15 IST == 03:45 UTC — the fixed session anchor.
 _SESSION_OPEN_UTC = datetime(2024, 1, 2, 3, 45)
