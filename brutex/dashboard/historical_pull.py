@@ -719,7 +719,7 @@ def _resolve_minute_windows(
     return windows
 
 
-def _derive_daily_from_minute(  # pragma: no cover — raw lake I/O, integration-tested
+def _derive_daily_from_minute(
     *,
     rebuilt: Sequence[_RebuiltContract],
     windows: dict[str, tuple[date, date]],
@@ -730,30 +730,38 @@ def _derive_daily_from_minute(  # pragma: no cover — raw lake I/O, integration
 
     DEC-1MINUTE-ONLY-DERIVE-1DAY-001. 1-minute is the ONLY granularity fetched from
     Groww; the 1-day series is DERIVED here (never fetched) by resampling each contract's
-    freshly-written 1-minute over its resolved window to midnight-IST daily bars
-    (:func:`~brutex.data.spot_daily_resample.fill_daily_from_minute`) and writing them to
-    the lake's ``FNO/<symbol>/1day`` partition. The OHLCV aggregation + midnight-IST
-    re-stamp share the spot resampler's single source of truth, so a derived F&O daily bar
-    is byte-identical in stamp/schema to a vendor daily (the keep-first dedup identity,
-    Golden Rule #7).
+    freshly-written 1-minute over its resolved window to midnight-IST daily bars and
+    writing them to the lake's ``FNO/<symbol>/1day`` partition. This is the F&O twin of
+    the spot ``_resample_daily_after_pull`` and DELEGATES the quarantine/tally control
+    flow to the SAME tested driver
+    (:func:`~brutex.data.spot_daily_resample.derive_daily_for_targets`, CLAUDE.md §11
+    COMMON — no duplicated inline loop): it builds one
+    :class:`~brutex.data.spot_daily_resample.DailyDeriveTarget` per contract whose
+    exchange resolves, then hands the per-target read/write builders to the driver. The
+    OHLCV aggregation + midnight-IST re-stamp share the spot resampler's single source of
+    truth; the derived ``1day`` partition is written latest-wins so a later complete pull
+    self-heals a partial-session bar (FIX-2).
 
-    QUARANTINED: a per-contract derivation error (corrupt slice / write failure) is logged
-    + swallowed — it NEVER fails the pull. The 1-minute candles are already safely in the
-    lake; the derived daily partition is a convenience layer, so its failure must not
-    regress the authoritative minute data (Golden Rule #10).
+    QUARANTINED on TWO planes: (a) a contract whose ``exchange`` is unresolvable is
+    SKIPPED here (logged ``contract_skipped``, never a target); (b) a per-target
+    derivation error (corrupt slice / write failure) is quarantined by the driver
+    (``errored`` tally) — neither EVER fails the pull. The 1-minute candles are already
+    safely in the lake; the derived daily partition is a convenience layer, so its failure
+    must not regress the authoritative minute data (Golden Rule #10).
     """
     from brutex.data.spot_daily_resample import (
-        fill_daily_from_minute,
+        DailyDeriveTarget,
+        derive_daily_for_targets,
         make_lake_read_1m_window,
         make_lake_write_1day,
     )
 
     before = now.astimezone(IST).date()
+    targets: list[DailyDeriveTarget] = []
     for _row, contract in rebuilt:
         window = windows.get(contract.symbol)
         if window is None:
             continue
-        win_start, win_end = window
         try:
             exchange = contract_exchange(contract)
         except ValueError as exc:
@@ -763,38 +771,42 @@ def _derive_daily_from_minute(  # pragma: no cover — raw lake I/O, integration
                 error=str(exc),
             )
             continue
-        try:
-            result = fill_daily_from_minute(
-                read_1m=make_lake_read_1m_window(
-                    lake_root=lake_root,
-                    exchange=exchange,
-                    segment=OPTION_SEGMENT,
-                    symbol=contract.symbol,
-                    start=win_start,
-                    end=win_end,
-                ),
-                write_1day=make_lake_write_1day(
-                    lake_root=lake_root,
-                    exchange=exchange,
-                    segment=OPTION_SEGMENT,
-                    symbol=contract.symbol,
-                ),
-                before=before,
-            )
-        except Exception as exc:
-            # Quarantine: a derive error (corrupt slice / write failure) NEVER fails the
-            # pull — the authoritative 1-minute candles are already safely in the lake.
-            _LOG.warning(
-                "historical.derive_daily.errored",
+        win_start, win_end = window
+        targets.append(
+            DailyDeriveTarget(
+                exchange=exchange,
+                segment=OPTION_SEGMENT,
                 symbol=contract.symbol,
-                error=str(exc),
+                start=win_start,
+                end=win_end,
             )
-            continue
-        _LOG.info(
-            "historical.derive_daily.filled",
-            symbol=contract.symbol,
-            bars=result.bars_written,
         )
+
+    report = derive_daily_for_targets(
+        targets=targets,
+        build_read_1m=lambda t: make_lake_read_1m_window(
+            lake_root=lake_root,
+            exchange=t.exchange,
+            segment=t.segment,
+            symbol=t.symbol,
+            start=t.start,
+            end=t.end,
+        ),
+        build_write_1day=lambda t: make_lake_write_1day(
+            lake_root=lake_root,
+            exchange=t.exchange,
+            segment=t.segment,
+            symbol=t.symbol,
+        ),
+        before=before,
+    )
+    _LOG.info(
+        "historical.derive_daily.done",
+        derived=report.derived,
+        no_minute=report.no_minute,
+        errored=report.errored,
+        bars=report.bars,
+    )
 
 
 def pull_contract_candles(

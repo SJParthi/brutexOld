@@ -1,4 +1,4 @@
-"""Integration round-trip oracle for 1-day resample-on-empty (DEC-SPOT-1DAY-RESAMPLE-ON-EMPTY-001).
+"""Integration round-trip oracle for the always-on 1-day derive (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
 
 Proves the PRODUCTION lake I/O round-trips through the REAL builders
 (:func:`~brutex.data.spot_daily_resample.make_lake_read_1m_window` +
@@ -8,7 +8,10 @@ Proves the PRODUCTION lake I/O round-trips through the REAL builders
 reader and assert each daily bar is **midnight-IST stamped** (== 18:30 UTC of the
 prior calendar day → the correct UTC-month partition) with the correct OHLCV. Also
 pins: window-bounded read (out-of-window 1-minute excluded), idempotent re-run
-(byte-identical), and keep-first dedup against a pre-existing vendor daily bar.
+(byte-identical), and the FIX-2 latest-wins self-heal — a daily derived from a
+PARTIAL session is CORRECTED by a later COMPLETE-session re-derive at the same
+midnight-IST stamp (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), superseding the old keep-first
+dedup against a now-nonexistent vendor daily.
 """
 
 from __future__ import annotations
@@ -158,27 +161,60 @@ def test_daily_resample_is_idempotent(tmp_path: Path) -> None:
         assert p.read_bytes() == first_bytes[p]
 
 
-def test_keep_first_dedup_against_vendor_daily(tmp_path: Path) -> None:
-    # A pre-existing VENDOR daily bar at midnight IST for 2025-12-31 IST.
-    vendor = CandleBar(
-        timestamp=datetime(2025, 12, 30, 18, 30, tzinfo=UTC),  # == 2025-12-31 00:00 IST
-        open=Decimal("9999.00"),
-        high=Decimal("9999.00"),
-        low=Decimal("9999.00"),
-        close=Decimal("9999.00"),
-        volume=1,
-        open_interest=None,
-    )
+def _partial_morning_1m(day: date, base: float) -> list[CandleBar]:
+    """ONLY the first 5 in-session 1-minute bars (a partial session — mid-session death)."""
+    open_utc = datetime(day.year, day.month, day.day, 3, 45, tzinfo=UTC)
+    return [
+        CandleBar(
+            timestamp=open_utc + timedelta(minutes=i),
+            open=Decimal(str(base + i)),
+            high=Decimal(str(base + 10 + i)),
+            low=Decimal(str(base - 5 + i)),
+            close=Decimal(str(base + 2 + i)),
+            volume=100 + i,
+            open_interest=None,
+        )
+        for i in range(5)
+    ]
+
+
+def test_partial_session_daily_is_corrected_by_complete_repull(tmp_path: Path) -> None:
+    """FIX-2 latest-wins: a daily derived from a PARTIAL session is CORRECTED by a later
+    COMPLETE-session derive at the SAME midnight-IST stamp — no frozen wrong bar.
+
+    Supersedes the old ``test_keep_first_dedup_against_vendor_daily``: 1-day is now ALWAYS
+    derived from 1-minute (there is NO vendor daily to protect with keep-first), so the
+    derived ``1day`` partition is written latest-wins and a complete re-pull restates a
+    partial-session daily instead of freezing it.
+    """
+    day = date(2025, 12, 31)
+    base = 1400.0
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+
+    # 1) A PARTIAL pull lands only the morning 1-minute → a WRONG (partial) daily bar.
+    partial = _partial_morning_1m(day, base)
     sink.append(
-        exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL, interval="1day", bars=[vendor]
+        exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL, interval="1minute", bars=partial
     )
-
-    _write_1m(tmp_path)
-    _fill(tmp_path, start=date(2025, 12, 31), end=date(2026, 1, 3))
-
+    _fill(tmp_path, start=date(2025, 12, 31), end=date(2026, 1, 1))
     rows = _read_daily(tmp_path)
-    # Same-timestamp resample bar dedups keep-first → vendor's 9999 survives, NOT doubled.
-    dec31 = [r for r in rows if float(r[1]) == 9999.0]
-    assert len(dec31) == 1  # exactly one bar for the session — never a duplicate
-    assert len(rows) == 2  # the vendor Dec-31 bar + the resampled Jan-02 bar
+    assert len(rows) == 1
+    # The partial daily reflects ONLY the morning 5 minutes (the frozen-bar hazard).
+    assert float(rows[0][2]) == max(float(b.high) for b in partial)  # partial high
+    assert int(rows[0][5]) == sum(b.volume for b in partial)  # partial volume
+
+    # 2) The COMPLETE session's 1-minute arrives (a later full pull) → re-derive same date.
+    full = _session_1m(day, base)
+    sink.append(exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL, interval="1minute", bars=full)
+    _fill(tmp_path, start=date(2025, 12, 31), end=date(2026, 1, 1))
+    rows = _read_daily(tmp_path)
+    # Still exactly ONE daily bar for the session — never doubled.
+    assert len(rows) == 1
+    # latest-wins: the persisted daily is now the COMPLETE/correct bar, NOT the frozen partial.
+    assert float(rows[0][1]) == float(full[0].open)  # open = first minute
+    assert float(rows[0][2]) == max(float(b.high) for b in full)  # high = max over FULL session
+    assert float(rows[0][3]) == min(float(b.low) for b in full)  # low  = min over FULL session
+    assert float(rows[0][4]) == float(full[-1].close)  # close = last minute
+    assert int(rows[0][5]) == sum(b.volume for b in full)  # volume = sum over FULL session
+    # The corrected bar genuinely differs from the frozen partial (proof the fix engaged).
+    assert int(rows[0][5]) > sum(b.volume for b in partial)

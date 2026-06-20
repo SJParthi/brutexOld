@@ -969,3 +969,86 @@ def test_derive_daily_from_minute_no_minute_is_noop(
         now=datetime(2024, 2, 1, tzinfo=UTC),
     )
     assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
+
+
+def test_derive_daily_from_minute_window_none_skips(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """A contract with NO resolved window is SKIPPED (the ``window is None`` arm) — no 1-day."""
+    from datetime import UTC, datetime
+
+    contract = "NSE-NIFTY-25Jan24-FUT"
+    rebuilt = hp._rebuild_contracts(
+        [r for r in registry.list_contracts() if r.contract_symbol == contract]
+    )
+    # Empty windows map → the contract has no entry → the ``continue`` skip, no target built.
+    hp._derive_daily_from_minute(
+        rebuilt=rebuilt,
+        windows={},
+        lake_root=tmp_lake,
+        now=datetime(2024, 2, 1, tzinfo=UTC),
+    )
+    assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
+
+
+def test_derive_daily_from_minute_unresolvable_exchange_skipped(tmp_lake: Path) -> None:
+    """A contract whose symbol has no exchange token is SKIPPED (``contract_skipped`` arm)."""
+    from datetime import UTC, datetime
+
+    # A symbol with NO ``-`` → ``contract_exchange`` raises ValueError → quarantined-skip.
+    bad = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol="NOEXCHANGETOKEN",
+        contract_type="FUT",
+        strike=None,
+    )
+    row = ContractRow(
+        exch="NSE",
+        underlying="NIFTY",
+        expiry_date=date(2024, 1, 25),
+        contract_symbol="NOEXCHANGETOKEN",
+        strike=None,
+        side="FUT",
+        candle_status=CANDLE_STATUS_NONE,
+        last_run_id="run",
+        fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    hp._derive_daily_from_minute(
+        rebuilt=[(row, bad)],
+        windows={"NOEXCHANGETOKEN": (date(2024, 1, 1), date(2024, 1, 26))},
+        lake_root=tmp_lake,
+        now=datetime(2024, 2, 1, tzinfo=UTC),
+    )
+    # The bad contract never became a derive target → no partition written, pull unaffected.
+    assert not any(tmp_lake.rglob("*.parquet"))
+
+
+def test_derive_daily_from_minute_quarantines_per_target_error(
+    registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-target derive error is QUARANTINED by the driver — the pull is never failed."""
+    from datetime import UTC, datetime
+
+    import brutex.data.spot_daily_resample as sdr
+
+    contract = "NSE-NIFTY-25Jan24-FUT"
+    rebuilt = hp._rebuild_contracts(
+        [r for r in registry.list_contracts() if r.contract_symbol == contract]
+    )
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("corrupt 1-minute slice")
+
+    # Make the shared read builder's reader raise so the driver's ``except`` arm runs.
+    monkeypatch.setattr(sdr, "make_lake_read_1m_window", lambda **_kw: _boom)
+
+    # Must NOT raise — the quarantine swallows the per-target error (Golden Rule #10).
+    hp._derive_daily_from_minute(
+        rebuilt=rebuilt,
+        windows={contract: (date(2024, 1, 1), date(2024, 1, 26))},
+        lake_root=tmp_lake,
+        now=datetime(2024, 2, 1, tzinfo=UTC),
+    )
+    # No 1-day partition was written (the derive errored), but the pull completed cleanly.
+    assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()

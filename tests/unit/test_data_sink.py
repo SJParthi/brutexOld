@@ -43,6 +43,7 @@ class FakeWriter:
         symbol: str,
         interval: str,
         bars: list[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> WriteResult:
         self.calls.append(
             {
@@ -51,6 +52,7 @@ class FakeWriter:
                 "symbol": symbol,
                 "interval": interval,
                 "count": len(bars),
+                "merge_mode": merge_mode,
             }
         )
         first = bars[0].timestamp
@@ -180,9 +182,25 @@ class TestParquetBarSinkGrouping:
         assert result.partitions_written == 1
         assert len(writer.calls) == 1
         assert writer.calls[0]["count"] == 2
+        assert writer.calls[0]["merge_mode"] == "keep-first"  # default keep-first preserved
         assert len(catalog.upserts) == 1
         assert catalog.upserts[0].year == 2024
         assert catalog.upserts[0].month == 1
+
+    def test_latest_wins_merge_mode_is_forwarded(self, tmp_path: Path) -> None:
+        """``merge_mode="latest-wins"`` is forwarded verbatim to every writer.write call (FIX-2)."""
+        writer = FakeWriter(lake_root=tmp_path)
+        sink = ParquetBarSink(writer=writer)  # type: ignore[arg-type]
+
+        sink.append(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            bars=[_bar(2024, 1, 10), _bar(2024, 2, 5)],  # two partitions
+            merge_mode="latest-wins",
+        )
+        assert [c["merge_mode"] for c in writer.calls] == ["latest-wins", "latest-wins"]
 
     def test_multi_partition_splits(self, tmp_path: Path) -> None:
         writer = FakeWriter(lake_root=tmp_path)

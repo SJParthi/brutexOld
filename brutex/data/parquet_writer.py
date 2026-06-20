@@ -229,6 +229,7 @@ class ParquetWriter:
         symbol: str,
         interval: str,
         bars: list[CandleBar],
+        merge_mode: str = "keep-first",
     ) -> WriteResult:
         """Write *bars* to their canonical partition file.
 
@@ -243,6 +244,17 @@ class ParquetWriter:
             Partition coordinates.
         bars
             Non-empty list of :class:`CandleBar` instances to write.
+        merge_mode
+            How a same-timestamp/different-value collision against the stored
+            partition is resolved. ``"keep-first"`` (default) keeps the STORED
+            bar and records a :class:`BarConflict` — the vendor-spine identity
+            (DEC-LAKE-CONFLICT-KEEPFIRST-001). ``"latest-wins"`` OVERWRITES the
+            stored bar with the incoming one (no conflict recorded) — used ONLY
+            by the DERIVED ``1day`` partition so a later complete-session pull
+            corrects a partial-session frozen daily bar
+            (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / FIX-2). Never use latest-wins on
+            the authoritative 1-minute partition; its keep-first idempotence is
+            unchanged.
 
         Returns
         -------
@@ -252,10 +264,13 @@ class ParquetWriter:
         Raises
         ------
         WriterError
-            If *bars* is empty, spans multiple partitions, or the
-            destination already stores the SAME timestamp with DIFFERENT
-            OHLCV (a true data conflict — see merge-on-write above).
+            If *bars* is empty, spans multiple partitions, or *merge_mode* is
+            not a recognised value.
         """
+        if merge_mode not in ("keep-first", "latest-wins"):
+            raise WriterError(
+                f"unknown merge_mode {merge_mode!r}; expected 'keep-first' or 'latest-wins'"
+            )
         if not bars:
             raise WriterError("ParquetWriter.write called with an empty bars list")
 
@@ -311,7 +326,7 @@ class ParquetWriter:
         # acquires the lock first (order-independent, Rule #7).
         with _partition_lock(dest):
             if dest.exists():
-                return self._merge_write(dest, sorted_bars)
+                return self._merge_write(dest, sorted_bars, merge_mode=merge_mode)
 
             content_bytes = self._render_bytes(sorted_bars)
             self._atomic_write(dest, content_bytes)
@@ -324,20 +339,31 @@ class ParquetWriter:
                 bytes_written=len(content_bytes),
             )
 
-    def _merge_write(self, dest: Path, new_bars: list[CandleBar]) -> WriteResult:
+    def _merge_write(
+        self, dest: Path, new_bars: list[CandleBar], *, merge_mode: str = "keep-first"
+    ) -> WriteResult:
         """Union *new_bars* into the existing partition at *dest*, idempotently.
 
         Reads the stored bars, merges the incoming ones keyed by timestamp
-        (O(1) per bar), and rewrites the full month only if at least one new
-        timestamp was added. A timestamp already present with identical OHLCV
-        is a silent no-op; a same-timestamp/different-value bar records a
-        :class:`BarConflict` — the STORED bar is kept (keep-first, never
-        overwritten, DEC-LAKE-CONFLICT-KEEPFIRST-001 / CLAUDE.md Golden Rule
-        #7), the conflict is collected and returned to the caller for logging,
-        and the merge continues so the pull always finishes.
+        (O(1) per bar), and rewrites the full month only if the stored content
+        changed. A timestamp already present with identical OHLCV is a silent
+        no-op.
+
+        A same-timestamp/different-value collision is resolved per *merge_mode*:
+
+        * ``"keep-first"`` (default) — the STORED bar is kept (never
+          overwritten, DEC-LAKE-CONFLICT-KEEPFIRST-001 / CLAUDE.md Golden Rule
+          #7); the discrepancy is recorded as a :class:`BarConflict` and
+          returned for logging, and the merge continues so the pull always
+          finishes.
+        * ``"latest-wins"`` — the INCOMING bar OVERWRITES the stored one (no
+          conflict recorded). Used ONLY by the derived ``1day`` partition
+          (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / FIX-2) so a later
+          complete-session re-derive corrects a partial-session frozen daily.
         """
         merged = self._read_existing_bars(dest)
         added = 0
+        rewrite = False
         conflicts: list[BarConflict] = []
         for bar in new_bars:
             prev = merged.get(bar.timestamp)
@@ -345,12 +371,18 @@ class ParquetWriter:
                 merged[bar.timestamp] = bar
                 added += 1
             elif not self._bar_values_equal(prev, bar):
-                # Keep the STORED bar (keep-first — prev stays in `merged`).
-                # Record the discrepancy; do NOT increment `added`.
-                conflicts.append(BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar))
+                if merge_mode == "latest-wins":
+                    # Overwrite the stored bar with the corrected re-derivation;
+                    # no conflict recorded (an intentional latest-wins restate).
+                    merged[bar.timestamp] = bar
+                    rewrite = True
+                else:
+                    # Keep the STORED bar (keep-first — prev stays in `merged`).
+                    # Record the discrepancy; do NOT increment `added`.
+                    conflicts.append(BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar))
 
         merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
-        if added == 0:
+        if added == 0 and not rewrite:
             # Every incoming bar is already stored identically or is a conflict
             # (kept-first) → no rewrite needed; the stored file is unchanged.
             return WriteResult(
