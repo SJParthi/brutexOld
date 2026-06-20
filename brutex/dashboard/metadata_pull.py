@@ -85,6 +85,8 @@ from brutex.orchestrator.universe_phases import (
     ExpiryCell,
     RunParallel,
     cells_to_pull,
+    contract_jobs_from,
+    contract_jobs_to_pull,
     phase1_cells,
     run_two_phase,
     settled_contract_jobs,
@@ -106,6 +108,21 @@ DEFAULT_METADATA_RUN_ID: Final[str] = "metadata-pull"
 #: Factory: ``() -> GrowwClient`` — injected in tests; the default returns the
 #: honest empty-chain dry-run client or (live) the credentialed client.
 MetadataClientFactory = Callable[[], GrowwClient]
+
+#: ABSOLUTE live-progress hook — ``(completed, total, current)``
+#: (DEC-METADATA-LIVE-PROGRESS-001). Fired incrementally as the two phases settle
+#: so the ``/universe`` progress bar — which used to freeze at ``0/N`` for the
+#: whole metadata pull — advances per (underlying, year) expiry cell (Phase 1) and
+#: per contract job (Phase 2). The metadata pull has NO bars (it discards the ~89k
+#: option legs per DEC-INSTRUMENT-UNIVERSE-FAST-001 — it persists only the chain
+#: SHAPE), so this carries no ``bars`` arg: the absolute ``(completed, total)`` is
+#: the whole signal. ``total`` is the count of metadata UNITS — Phase-1 expiry cells
+#: plus the Phase-2 contract jobs discovered after Phase 1 (so the route's initial
+#: cell-only total is re-scaled the moment Phase 2's job count is known, the spot
+#: pull's ledger-resync shape, DEC-SPOT-WINDOW-PROGRESS-001). The route adapts it
+#: onto :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.sync_from_ledger` with
+#: ``bars=0``.
+MetadataProgressHook = Callable[[int, int, str], None]
 
 
 class _CoverageSink(Protocol):
@@ -318,6 +335,7 @@ def pull_expiries_contracts(
     run_parallel: RunParallel | None = None,
     client_factory: MetadataClientFactory | None = None,
     session_rate: SessionRateController | None = None,
+    on_progress: MetadataProgressHook | None = None,
     now: datetime | None = None,
     today: date | None = None,
     run_id: str = DEFAULT_METADATA_RUN_ID,
@@ -363,6 +381,15 @@ def pull_expiries_contracts(
         dry-run / live default (live wires the session rate hooks).
     session_rate
         The dashboard's ``SessionRateController`` (live pacing); ``None`` offline.
+    on_progress
+        ABSOLUTE live-progress hook ``(completed, total, current)``
+        (DEC-METADATA-LIVE-PROGRESS-001) — fired once per Phase-1 expiry cell as it
+        settles, once at the phase boundary to re-scale ``total`` from cells-only to
+        ``cells + contract_jobs`` (so the bar tracks the REAL Phase-2 work the moment
+        it is known), and once per Phase-2 contract job. ``None`` (the default, and
+        every non-dashboard caller) is a silent no-op — progress is opt-in, so the
+        engine's behaviour is byte-unchanged when no hook is wired. Carries no bars
+        arg (this pull persists only the chain SHAPE, never candles).
     now
         Injected clock for the persisted ``fetched_at`` timestamp (defaults to
         ``datetime.now(UTC)``).
@@ -399,6 +426,39 @@ def pull_expiries_contracts(
     expiries_persisted = 0
     contracts_persisted = 0
 
+    # ── Live progress (DEC-METADATA-LIVE-PROGRESS-001) ───────────────────────
+    # Drive the /universe bar — which used to freeze at 0/N for the whole metadata
+    # pull — off the SAME two callbacks run_two_phase already fires. ``_completed``
+    # ticks once per settled Phase-1 expiry cell, then once per settled Phase-2
+    # contract job; ``_total`` starts cells-only and is re-scaled to
+    # ``cells + contract_jobs`` at the phase boundary (computed by REUSING the
+    # engine's own contract_jobs_from / contract_jobs_to_pull — CLAUDE.md §11 COMMON,
+    # so the count matches the jobs run_two_phase then runs bit-for-bit). The hook is
+    # ABSOLUTE (completed, total, current) — the route maps it onto sync_from_ledger,
+    # the spot pull's exact resync shape (DEC-SPOT-WINDOW-PROGRESS-001).
+    progress_total = len(cells)
+    progress_completed = 0
+    expiries_seen: dict[ExpiryCell, Sequence[date]] = {}
+    cells_observed = 0
+
+    def _emit_progress(current: str) -> None:
+        """Fire *on_progress* with the absolute ``(completed, total, current)`` — no-op when unset."""
+        if on_progress is not None:
+            on_progress(progress_completed, progress_total, current)
+
+    def _rescale_to_phase2() -> None:
+        """At the Phase-1→2 boundary, grow ``total`` to ``cells + the real job count``.
+
+        Reuses the engine's ``contract_jobs_from`` + ``contract_jobs_to_pull`` (the
+        SAME derivation+skip ``run_two_phase`` applies) so the Phase-2 denominator is
+        exactly the jobs it will run — never an estimate (CLAUDE.md §11 COMMON).
+        """
+        nonlocal progress_total
+        jobs = contract_jobs_to_pull(
+            contract_jobs_from(dict(expiries_seen)), settled=contract_skip, today=today
+        )
+        progress_total = len(cells) + len(jobs)
+
     def _fetch_expiries(cell: ExpiryCell) -> Sequence[date]:
         """Phase-1 fetcher: resolve one cell's expiry dates (metadata only)."""
         exchange, underlying, year = cell
@@ -408,11 +468,21 @@ def pull_expiries_contracts(
         cell: ExpiryCell, expiries: Sequence[date], exc: BaseException | None
     ) -> None:
         """Persist each discovered expiry + write the per-cell coverage rollup."""
-        nonlocal expiries_persisted
+        nonlocal expiries_persisted, progress_completed, cells_observed
         exchange, underlying, year = cell
         for expiry in expiries:
             registry.upsert_expiry(exchange, underlying, expiry, run_id=run_id, fetched_at=now)
         expiries_persisted += len(expiries)
+        # Live progress: a successful cell contributes its expiries to the Phase-2
+        # worklist; tick the bar per cell and, when the LAST cell settles, re-scale
+        # ``total`` to include the now-known contract jobs (DEC-METADATA-LIVE-PROGRESS-001).
+        if exc is None:
+            expiries_seen[cell] = expiries
+        progress_completed += 1
+        cells_observed += 1
+        if cells_observed >= len(cells):
+            _rescale_to_phase2()
+        _emit_progress(f"{exchange}-{underlying} {year} expiries")
         error_message = None if exc is None else (str(exc) or repr(exc))
         # A failed cell ⇒ classify_cell → "failed"; a success with ≥1 expiry ⇒
         # "expiries_only" (captured but contracts are the separate Phase 2 here);
@@ -462,10 +532,16 @@ def pull_expiries_contracts(
 
         ``run_two_phase`` separates the fetch (which persists) from this result
         callback; the counts are accumulated in the fetcher, so this is the audit
-        seam (a structlog line in the live route). ``del`` keeps the unused params
-        explicit without a lint suppression.
+        seam. Here it ALSO ticks the live bar once per settled Phase-2 contract job
+        (DEC-METADATA-LIVE-PROGRESS-001). A contract job exists ONLY because Phase 1
+        already discovered + settled its expiry cell, so ``total`` is always already
+        re-scaled to ``cells + jobs`` by the time the first job lands here.
         """
-        del job, count, exc
+        nonlocal progress_completed
+        del count, exc
+        exchange, underlying, expiry = job
+        progress_completed += 1
+        _emit_progress(f"{exchange}-{underlying} {expiry} contracts")
 
     report = run_two_phase(
         cells,

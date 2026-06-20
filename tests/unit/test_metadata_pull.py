@@ -633,3 +633,186 @@ def test_rate_hooks_live_returns_controller_hooks() -> None:
     assert pace == controller.pace
     assert on_rate_limit == controller.on_rate_limit
     assert on_success == controller.on_success
+
+
+# ── LIVE incremental progress (DEC-METADATA-LIVE-PROGRESS-001) ────────────────
+
+
+class _ProgressCollector:
+    """A fake absolute ``on_progress`` hook — records every ``(completed, total, current)``.
+
+    Proves the metadata pull EMITS incremental progress (the bar no longer freezes at
+    ``0/N``): the spot-pull progress tests' style, but for the absolute 3-arg metadata
+    hook (DEC-METADATA-LIVE-PROGRESS-001).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int, str]] = []
+
+    def __call__(self, completed: int, total: int, current: str) -> None:
+        self.calls.append((completed, total, current))
+
+
+def test_progress_emitted_incrementally_per_cell_and_per_contract(tmp_path: Path) -> None:
+    """The pull fires progress per Phase-1 cell + per Phase-2 contract job, 0 → total.
+
+    Two expiry cells (2025, 2026) each discover one expiry; each expiry yields one
+    contract job. So total metadata UNITS = 2 cells + 2 contract jobs = 4, and
+    ``completed`` must climb 1 → 4 monotonically — the exact movement that was frozen
+    at ``0/N`` before this fix.
+    """
+    sdk = _FakeSDK(
+        expiries={
+            ("NSE", "NIFTY", 2025): ["2025-06-26"],
+            ("NSE", "NIFTY", 2026): ["2026-06-25"],
+        },
+        contracts={
+            ("NSE", "NIFTY", "2025-06-26"): ["NSE-NIFTY-26Jun25-24000-CE"],
+            ("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24500-PE"],
+        },
+    )
+    registry = _registry(tmp_path)
+    collector = _ProgressCollector()
+
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2025, 2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        on_progress=collector,
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    # The hook fired once per unit (2 cells + 2 contract jobs) — never silent.
+    assert len(collector.calls) == 4
+    completed_seq = [c for c, _t, _cur in collector.calls]
+    total_seq = [t for _c, t, _cur in collector.calls]
+    # completed climbs 1 → 4 monotonically (the bar advances, never frozen at 0).
+    assert completed_seq == [1, 2, 3, 4]
+    # total is re-scaled from cells-only (2) to cells + the discovered jobs (4) at the
+    # phase boundary: the LAST Phase-1 cell already reports the final total of 4.
+    assert total_seq == [2, 4, 4, 4]
+    # The final tick is 100% (completed == total) and labels the last contract job.
+    final_completed, final_total, final_current = collector.calls[-1]
+    assert final_completed == final_total == 4
+    assert "contracts" in final_current
+    # The Phase-1 ticks carry an "expiries" label; the Phase-2 ticks carry "contracts".
+    assert collector.calls[0][2].endswith("expiries")
+    assert collector.calls[2][2].endswith("contracts")
+    # The report's own counts agree with the progress total denominator.
+    assert report.expiry_cells == 2
+    assert report.contract_jobs == 2
+    registry.close()
+
+
+def test_progress_total_rescales_to_phase2_job_count(tmp_path: Path) -> None:
+    """One cell with TWO expiries → total re-scales 1 (cell) → 3 (cell + 2 jobs)."""
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25", "2026-07-30"]},
+        contracts={
+            ("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"],
+            ("NSE", "NIFTY", "2026-07-30"): ["NSE-NIFTY-30Jul26-24500-PE"],
+        },
+    )
+    registry = _registry(tmp_path)
+    collector = _ProgressCollector()
+
+    pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        on_progress=collector,
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    # 1 expiry cell, then 2 contract jobs → 3 progress ticks; total re-scales 1 → 3.
+    assert [c for c, _t, _cur in collector.calls] == [1, 2, 3]
+    assert [t for _c, t, _cur in collector.calls] == [3, 3, 3]
+    registry.close()
+
+
+def test_progress_failed_cell_ticks_but_adds_no_contract_jobs(tmp_path: Path) -> None:
+    """A failed Phase-1 cell still advances the bar but contributes ZERO Phase-2 jobs.
+
+    BANKNIFTY's expiry discovery succeeds (1 cell → 1 job); NIFTY's raises (1 cell, 0
+    jobs). So total = 2 cells + 1 job = 3, and the failed cell ticks the bar without
+    inflating the Phase-2 denominator (honest progress, never a phantom unit).
+    """
+    sdk = _FakeSDK(
+        expiries={("NSE", "BANKNIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "BANKNIFTY", "2026-06-25"): ["NSE-BANKNIFTY-25Jun26-52000-CE"]},
+        raise_expiry_for=frozenset({("NSE", "NIFTY")}),
+    )
+    registry = _registry(tmp_path)
+    collector = _ProgressCollector()
+
+    pull_expiries_contracts(
+        [_instrument("BANKNIFTY"), _instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        on_progress=collector,
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    # 2 cells (one failed) + 1 contract job (only the successful cell) = 3 ticks.
+    assert [c for c, _t, _cur in collector.calls] == [1, 2, 3]
+    # total settles at 3 (2 cells + 1 job); the failed cell added no phantom job.
+    assert collector.calls[-1][1] == 3
+    registry.close()
+
+
+def test_progress_no_cells_emits_nothing(tmp_path: Path) -> None:
+    """When every cell is skipped (nothing to pull), the hook is never fired — total 0.
+
+    An immutable past year already settled is skipped (Phase 1), leaving zero cells, so
+    there is no work and no progress to report (the bar stays honestly at 0/0).
+    """
+    sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2024): ["2024-06-27"]})
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink(
+        seed=[
+            CoverageRecord(
+                exch_id="NSE",
+                underlying_symbol="NIFTY",
+                year=2024,
+                expiries_pulled=5,
+                contracts_pulled=0,
+                status=STATUS_EXPIRIES_ONLY,
+                last_run_id="old",
+                last_fetched_at=_NOW,
+            )
+        ]
+    )
+    collector = _ProgressCollector()
+
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2024],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        on_progress=collector,
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    assert collector.calls == []  # nothing pulled → nothing reported
+    assert report.expiry_cells == 0
+    assert report.cells_skipped == 1
+    registry.close()

@@ -1681,8 +1681,26 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: enumerate + persist the chain METADATA (no candles)."""
-            del on_progress  # the metadata pull reports via its MetadataPullReport
+            """Background body: enumerate + persist the chain METADATA (no candles).
+
+            Wires LIVE incremental progress (DEC-METADATA-LIVE-PROGRESS-001): the
+            metadata pull's ABSOLUTE ``(completed, total, current)`` hook is mapped onto
+            the SAME ``sync_from_ledger`` resync the spot pull uses
+            (DEC-SPOT-WINDOW-PROGRESS-001), so the ``/universe`` bar advances per
+            (underlying, year) expiry cell (Phase 1) and per contract job (Phase 2)
+            instead of freezing at ``0/N``. The job's per-pair 4-arg ``on_progress``
+            is not the metadata pull's channel (it has no bars to stream), so it is
+            unused here — the bar is driven entirely by the absolute resync below.
+            """
+            del on_progress  # metadata progress is the absolute resync hook, not the 4-arg one
+
+            def _metadata_progress(completed: int, total: int, current: str) -> None:
+                # bars=0 / failed=0: the metadata pull persists only the chain SHAPE,
+                # never candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars.
+                _pull_job.sync_from_ledger(
+                    completed=completed, total=total, bars=0, failed=0, current=current
+                )
+
             with RegistryStore.open(registry_path) as registry:
                 report = pull_expiries_contracts(
                     instruments,
@@ -1691,10 +1709,16 @@ def build_app(
                     years=years,
                     dry_run=dry_run,
                     session_rate=_session_rate,
+                    on_progress=_metadata_progress,
                 )
             return report.to_dict()
 
-        started = _pull_job.start(_work, total=len(instruments), detail=detail)
+        # ledger_synced=True mirrors the spot pull: the bar's completed/total are driven
+        # by the absolute sync_from_ledger resync above (per cell + per contract job),
+        # NOT by the per-pair 4-arg hook — so it fills 0→100% instead of freezing
+        # (DEC-METADATA-LIVE-PROGRESS-001). The initial total is the instrument count, a
+        # placeholder the first cell-settle resync re-scales to cells (then cells+jobs).
+        started = _pull_job.start(_work, total=len(instruments), detail=detail, ledger_synced=True)
         return JSONResponse(
             {
                 "started": started,
