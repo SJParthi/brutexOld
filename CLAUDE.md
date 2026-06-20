@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-FNO-MONEYNESS-001, MIGRATION.md #863 — per-option
+_Last updated: 2026-06-20 (DEC-FNO-MONEYNESS-001, MIGRATION.md #865 — per-option
 **moneyness (ITM/ATM/OTM) + a signed ATM±N strike offset** are now DERIVED at read
 time (never stored — time-varying: the strike is fixed but the spot moves) for the
 ENTIRE F&O universe (all ~212 stocks + indices), from the NEW shared engine
@@ -31,36 +31,50 @@ candle viewer (PER-BAR — `db_view.query_candles` appends `moneyness`+`atm_offs
 a future reads `NA`, an option with no spot reads `UNKNOWN`). `fno_candle_lake.py`'s
 `FNO_CANDLE_COLUMNS` advertises the two as `source="derived"`. Read-only — the brute-force
 ENGINE stays NIFTY/BANKNIFTY/SENSEX; NO storage/scope/vocab/rate change. Earlier: 2026-06-20
-(DEC-LIVE-REMOVE-001, MIGRATION.md #862 — the **entire
-LIVE feed feature is REMOVED / retired in full**: the `brutex/live/` capture package
-+ its `python -m brutex.live` CLI, the dashboard `/live` page + `/api/v1/live/*` +
-`/api/v1/db/live/*` routes + the `brutex/dashboard/live_*` surface, the
-`live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab, the /db "Live
-lake" section, the nav `/live` link, and the now-orphaned live leg-resolution
-`adapters/groww/contract_pull.py` (44 files). This aligns with §1 which already lists
-"Live feed, WebSocket" as OUT OF SCOPE; the §1 out-of-scope note + active-branch line
-are updated. DELIBERATELY KEPT (the `live` = real/production naming trap, NOT the
-feed): `adapters/groww/live.py` `build_live_client`/`build_live_pool` (the historical
-fetch / metadata / historical pull client builder), `cli.py::_build_live_groww_spot`,
-and `pull_controller.py::_build_live_controller`/`SessionRateController` (the
-PRODUCTION dashboard-pull rate controller — the §6 rate-controller rows are UNCHANGED,
-they describe the production pull, not the feed) — so the historical/backtest pull +
-`rate_common` + the brute-force ENGINE are UNTOUCHED. Earlier: 2026-06-20
-(DEC-FNO-CANDLE-LAKE-001, MIGRATION.md #861 — the F&O (futures+options) historical-candle
-lake is now a FIRST-CLASS documented logical table, surfaced in `/db`'s Candle-lake
-section (the "📊 F&O candles" row) + registered in the master `schema_meta`; it
-FORMALIZES + SURFACES data ALREADY stored by the existing Groww pull (NOT a new store),
-the brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX). Earlier: 2026-06-20
-(DEC-MOVERS-O1-LATENCY-001, MIGRATION.md #860 — every `/movers` interaction made
-near-O(1): the `top_n`-independent lake scan split from the cheap rank + cached per
-coordinate (`movers_cache.py`, generation-invalidated), the cold per-symbol read
-month-bounded (`lake_day_glob.py`), and the sub-filter pill a zero-round-trip client
-re-render; READ-only lake/dashboard, the brute-force ENGINE UNCHANGED). Earlier: 2026-06-20
-(DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001, MIGRATION.md #859 — the `/completeness`
-OPTIONS table shows only the years that ACTUALLY have expiries + an honest
-`partial` for late-listed underlyings (no fake 2020→2026 span, no perpetual
-`growing`); read/rollup-side only, no pull/engine change). Earlier: 2026-06-20
-(DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853 —
+(DEC-DB-VIEWER-PAGINATE-ALL-001, MIGRATION.md #864 —
+EVERY `/db` tab is now O(page): the last two whole-table reads — the F&O registry
+(expiries/contracts) + the window-ledger sidecar — are SQL-`LIMIT`/`OFFSET` paginated,
+completing the candle/option/F&O/DuckDB-table pages already bounded. The registry is
+fully O(page) (DuckDB `LIMIT/OFFSET` over its index + a cheap FILTERED `COUNT(*)`;
+bench: first-page 1.04× for 10× more legs); the window-ledger is O(page) render+serialize
+with a deliberately-kept O(windows) bounded read (a small sidecar — honest envelope,
+NOT claimed O(page)-read). `registry_store.py` + `db_view.py` at 100% line+branch;
+read-only viewer, ENGINE UNCHANGED. Earlier: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863 —
+the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
+correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
+1-minute partition to baseline the derived %-change columns on every paging click —
+`db_view.py::query_candles` now reads the prior-day last-1-minute close for ONLY the
+page's own date span + the single bar before it (`_intraday_prev_close_by_page_date`,
+byte-for-byte identical to the old full scan, proven exhaustively + a flat-latency
+bench), and the `/db` + `/universe` FRONTENDS update in place (grid-only `#dbgrid`
+refresh on paging instead of a full control-bar+datepicker teardown; a per-tab
+instrument cache + debounced search + in-place completeness patch). Honest envelope:
+O(page date-span) / O(visible), NOT a literal O(1)-total. Engine + 52-vocab + scope
+UNCHANGED — read-only viewer only. Earlier: 2026-06-20 (DEC-LIVE-REMOVE-001,
+MIGRATION.md #862 — the **entire LIVE feed feature is REMOVED in full**: the
+`brutex/live/` capture package + `python -m brutex.live` CLI, the dashboard `/live`
+page + `/api/v1/live/*` + `/api/v1/db/live/*` routes + the `dashboard/live_*` surface,
+the `live_ticks`/`live_candles_1m` lake tables, the Movers "Live" tab + the /db "Live
+lake" section + the nav `/live` link (44 files). The production historical/backtest
+PULL + `rate_common` + the brute-force ENGINE are UNTOUCHED — `adapters/groww/live.py`
+`build_live_client` + `pull_controller._build_live_controller` are the PRODUCTION pull
+client/rate-controller, NOT the feed, deliberately kept). Earlier: 2026-06-20 (DEC-FNO-CANDLE-LAKE-001,
+MIGRATION.md #861 — the F&O (futures + options) historical-candle lake is now a
+FIRST-CLASS documented `/db` table (a "📊 F&O candles" row, decoded per contract) +
+registered in the master `schema_meta` (`fno_candle_lake.*`), FORMALIZING data ALREADY
+stored by the Groww pull at `bars/<exch>/FNO/<groww_symbol>/<interval>/…` — NOT a new
+store; lake-view only, ENGINE UNCHANGED). Earlier: 2026-06-20 (DEC-MOVERS-O1-LATENCY-001,
+MIGRATION.md #860 — the `/movers` page made near-O(1) per interaction: the `top_n`-independent
+lake scan is split from the cheap rank + cached per coordinate (`MoversSnapshotCache`,
+generation-invalidated), and the cold per-symbol intraday read is bounded to the day's
+`1minute/<yyyy>/<mm>.parquet` month file (`lake_day_glob`, byte-equivalent for session-filtered
+symbols); read-only lake/dashboard, ENGINE UNCHANGED). Earlier: 2026-06-20 (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001,
+MIGRATION.md #859 — the `/completeness` OPTIONS table shows only the years that ACTUALLY have
+expiries + an honest `partial` for late-listed underlyings (JIOFIN/ETERNAL): a 0-expiry
+pre-listing year no longer inflates `years` to a fake 2020→2026 span nor keeps it perpetually
+`growing`; read/rollup-side only — `brutex/dashboard/completeness.py`, no pull/engine change).
+Earlier: 2026-06-20 (DEC-1MINUTE-ONLY-DERIVE-1DAY-001,
+MIGRATION.md #853 —
 §1/§3/§6 facts: **1-minute is now the ONLY granularity fetched from Groww** (spot
 + futures + options); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED
 from the stored 1-minute and written to the lake (`spot_daily_resample`), never
@@ -170,7 +184,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/relaxed-keller-6b7pzx` (per-option **moneyness
   (ITM/ATM/OTM) + signed ATM±N strike offset** for the ENTIRE F&O universe —
-  DEC-FNO-MONEYNESS-001, MIGRATION.md #863: NEW shared engine `brutex/data/moneyness.py`
+  DEC-FNO-MONEYNESS-001, MIGRATION.md #865: NEW shared engine `brutex/data/moneyness.py`
   (`classify`/`derive_strike_step` [DYNAMIC grid = min positive strike gap, all ~212
   stocks + indices, never hardcoded]/`atm_offset`/`moneyness_view`), DERIVED at read time
   (never stored — time-varying). Surfaced on the options-movers screen (`OptionMover` +
@@ -179,7 +193,7 @@ hostile-review pass._
   `segment="FNO"`, classifying each bar vs the underlying spot joined by timestamp;
   FUT→`NA`, no-spot→`UNKNOWN`); `fno_candle_lake.FNO_CANDLE_COLUMNS` advertises both as
   `source="derived"`. Read-only — NO storage/scope/vocab/rate change, ENGINE unchanged.
-  Prior merged: DEC-LIVE-REMOVE-001 #862 (live feed removed) + DEC-FNO-CANDLE-LAKE-001 #861
+  Prior merged: DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818) + DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817) + DEC-LIVE-REMOVE-001 #862 (live feed removed) + DEC-FNO-CANDLE-LAKE-001 #861
   (PR #814) + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815)
   + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
   + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812))
@@ -410,7 +424,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/relaxed-mccarthy-qacssf`
+- **Active feature branch:** `claude/db-registry-pagination`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

@@ -535,7 +535,13 @@ class TestWindowLedgerApi:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/api/v1/db/window-ledger")
         assert resp.status_code == 200
-        assert resp.json() == {"columns": _LEDGER_COLS, "rows": [], "total": 0}
+        assert resp.json() == {
+            "columns": _LEDGER_COLS,
+            "rows": [],
+            "total": 0,
+            "limit": 100,
+            "offset": 0,
+        }
 
     def test_lists_recorded_windows_in_grid_shape(
         self, store: InstrumentStore, tmp_path: Path
@@ -583,4 +589,49 @@ class TestWindowLedgerApi:
             "columns": _LEDGER_COLS,
             "rows": [],
             "total": 0,
+            "limit": 100,
+            "offset": 0,
         }
+
+    def test_paginates_with_limit_offset(self, store: InstrumentStore, tmp_path: Path) -> None:
+        """The ledger returns ONE LIMIT/OFFSET page with the real (full) total
+        (DEC-DB-VIEWER-PAGINATE-ALL-001), and the page-slice preserves the
+        canonical to_rows() sort byte-for-byte (a page boundary never duplicates
+        or drops a row vs the full read)."""
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        for i in range(5):
+            ledger.record(
+                WindowKey(
+                    market="dhan",
+                    security_id=f"SYM{i:02d}",
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2021, 4, 1),
+                ),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=5,
+                now=datetime(2026, 6, 9, tzinfo=UTC),
+            )
+        save_window_ledger(ledger, tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        full = client.get("/api/v1/db/window-ledger?limit=500&offset=0").json()
+        assert full["total"] == 5 and len(full["rows"]) == 5
+
+        page1 = client.get("/api/v1/db/window-ledger?limit=2&offset=0").json()
+        page2 = client.get("/api/v1/db/window-ledger?limit=2&offset=2").json()
+        assert page1["total"] == 5 and page1["limit"] == 2 and page1["offset"] == 0
+        assert len(page1["rows"]) == 2 and len(page2["rows"]) == 2
+        # Contiguous, non-overlapping pages identical to the full read's slices.
+        assert page1["rows"] == full["rows"][0:2]
+        assert page2["rows"] == full["rows"][2:4]
+        # Offset past the end → a clean empty page, total still the real count.
+        tail = client.get("/api/v1/db/window-ledger?limit=10&offset=999").json()
+        assert tail["rows"] == [] and tail["total"] == 5

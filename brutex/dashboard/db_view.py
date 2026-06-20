@@ -36,7 +36,7 @@ import math
 import re
 import threading
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -437,14 +437,25 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
     return summary
 
 
-def clamp_offset(n: int) -> int:
-    """Clamp a requested row offset to a non-negative integer.
+#: DuckDB binds ``OFFSET`` as a signed 64-bit integer; a value above this throws
+#: ``ConversionException`` ("value out of range for INT64"). FastAPI's ``Query(ge=0)``
+#: caps nothing above, so this is the upper guard (DEC-DB-VIEWER-PAGINATE-ALL-001
+#: hostile-review MINOR-1).
+_OFFSET_MAX: Final = (1 << 63) - 1
 
-    A hostile / malformed ``?offset=-5`` (or a Python ``int`` from a query
-    string) must never produce a negative ``OFFSET`` (DuckDB would error).
-    Returns ``max(0, n)``.
+
+def clamp_offset(n: int) -> int:
+    """Clamp a requested row offset into DuckDB's bindable ``[0, 2**63 - 1]`` range.
+
+    A hostile / malformed ``?offset=-5`` must never produce a negative ``OFFSET``
+    (DuckDB errors); a hostile ``?offset=10000000000000000000`` (above int64) must
+    never reach the ``LIMIT ? OFFSET ?`` bind, where DuckDB raises a
+    ``ConversionException`` that would surface as an HTTP 500 (the routes promise
+    "never a 500"). Both clamp here — a too-large offset becomes the max, which
+    DuckDB returns as a clean empty page. This is the COMMON guard for every paged
+    reader (tables / candles / options / registry).
     """
-    return max(0, n)
+    return max(0, min(n, _OFFSET_MAX))
 
 
 def sample_rows(conn: Any, table: str, *, limit: int, offset: int = 0) -> dict[str, Any]:
@@ -1350,16 +1361,29 @@ def query_candles(
     # **1-minute** close (DEC-SPOT-PREVCLOSE-1MIN-001). Mixing them is what made
     # adjustment-mismatched symbols (e.g. TMPV — adjusted daily ~112.9 vs raw
     # intraday ~186.6) read garbage. The engine store is unaffected — this is the
-    # read-only viewer. O(1) per-bar lookup once the map is built (CLAUDE.md §5).
+    # read-only viewer.
+    #
+    # The baseline reads ONLY what THIS page needs (DEC-DB-UNIVERSE-O1-LATENCY-001):
+    # * 1-day view — the whole 1-day partition (intrinsically tiny: ≤ one row per
+    #   trading day, ~1.5k rows for 6 years, flat as the lake deepens).
+    # * intraday view — page-bounded: the prior-day last-1-minute close is read for
+    #   the page's OWN date span plus the single bar immediately before it, NOT the
+    #   whole multi-year 1-minute partition. So a prev/next paging click scans ~1–2
+    #   trading days of minute bars regardless of how many years are stored — the
+    #   per-click cost stays flat as the lake grows. Byte-identical to the prior
+    #   full-partition scan for every page date (proven in the db-query tests).
     if interval == _DAILY_INTERVAL:
         prev_close = _prev_trading_close(
             _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
         )
     else:
-        prev_close = _prev_trading_close(
-            _intraday_last_close_by_date(
-                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-            )
+        prev_close = _intraday_prev_close_by_page_date(
+            conn,
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            page_dates=_page_ist_dates(raw_rows, out_columns),
         )
     derived = _spot_derived_rows(raw_rows, out_columns, prev_close, interval=interval)
     # F&O option pages also carry per-bar moneyness (ITM/ATM/OTM + ATM±N) classified
@@ -1520,6 +1544,93 @@ def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
             out[day] = last_close[prev]
         prev = day
     return out
+
+
+def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> set[date]:
+    """The distinct IST trading dates present in a fetched page's ``timestamp`` column.
+
+    The set of dates the derived %-change baseline must cover for THIS page
+    (DEC-DB-UNIVERSE-O1-LATENCY-001). Keyed by :func:`_bar_ist_date` — the SAME
+    key :func:`_spot_derived_rows` looks the baseline up by — so the page-bounded
+    baseline map aligns bar-for-bar. Empty when ``timestamp`` is not projected
+    (the derived columns are then all blank anyway) or the page is empty.
+    """
+    ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
+    if ts_idx < 0:
+        return set()
+    return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
+
+
+def _intraday_prev_close_by_page_date(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    page_dates: set[date],
+) -> dict[date, Decimal]:
+    """Prior-day last-1-minute close for EXACTLY a page's IST dates — page-bounded.
+
+    The flat-latency replacement for ``_prev_trading_close(
+    _intraday_last_close_by_date(...))`` on the ``/db`` intraday candle pager
+    (DEC-DB-UNIVERSE-O1-LATENCY-001). Instead of aggregating the WHOLE multi-year
+    1-minute partition on every paging click, it reads only:
+
+    1. the last 1-minute close per day for the page's OWN ``[min, max]`` date span
+       (an intraday page covers ~1–2 trading days), and
+    2. the single 1-minute bar immediately BEFORE the page's earliest date — the
+       one baseline that lives outside the page's own span (the predecessor of the
+       first page row).
+
+    Both reads are bounded by the bar ``timestamp`` (IST-midnight instants), which
+    DuckDB row-group-prunes, so the per-click cost is O(page date-span) — flat as
+    the lake deepens, never O(all stored years). The result is **byte-identical**
+    to the prior full-partition scan for every page date: the page's dates are
+    contiguous trading days (a page is a ``LIMIT``/``OFFSET`` slice of
+    timestamp-sorted bars), and prepending their single shared predecessor makes
+    ``_prev_trading_close`` map each page date to the same prior-day close the full
+    scan would (proven in ``tests/unit/test_dashboard_db_query.py``). Returns
+    ``{}`` (every derived cell blank) when *page_dates* is empty or the symbol has
+    no 1-minute partition — matching :func:`_intraday_last_close_by_date`.
+
+    The baseline ALWAYS reads the ``1minute`` partition (DEC-SPOT-PREVCLOSE-1MIN-001),
+    even when a coarser intraday timeframe is being VIEWED — *page_dates* come from
+    the viewed bars, the close baseline from the 1-minute feed underneath them.
+    """
+    if not page_dates:
+        return {}
+    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    glob = base.as_posix() + "/**/*.parquet"
+    lo, hi = min(page_dates), max(page_dates)
+    # IST-midnight instants bound the scan to the page's own span (+ predecessor);
+    # session bars (09:15–15:29 IST) never fall before 09:15, so CAST(ts AS DATE)
+    # for a bar in [lo 00:00 IST, (hi+1) 00:00 IST) is its IST trading date — the
+    # SAME keying as _intraday_last_close_by_date (session-tz-independent here).
+    lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
+    hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
+    # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob is
+    #    built from validated coordinates (no free user text); path + instants bound.
+    span = conn.execute(
+        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d',
+        [glob, lo_instant, hi_instant],
+    ).fetchall()
+    last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
+    # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
+    #    page date (ORDER BY DESC LIMIT 1 reads ~one row-group, not the whole past).
+    pred = conn.execute(
+        'SELECT CAST("timestamp" AS DATE) AS d, close '
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1',
+        [glob, lo_instant],
+    ).fetchone()
+    if pred is not None:
+        last_close[pred[0]] = _to_decimal(pred[1])
+    return _prev_trading_close(last_close)
 
 
 def _daily_close_by_date(
@@ -2388,16 +2499,21 @@ def list_registry_expiries(
     *,
     exch: str | None = None,
     underlying: str | None = None,
+    limit: int = _LIMIT_MAX,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted expiry DATES as a browsable grid (``/db``).
 
     Reads the SEPARATE ``registry.duckdb`` cache read-only via
     :meth:`~brutex.data.registry_store.RegistryStore.list_expiries` (static
     ``(? IS NULL OR col = ?)`` filters — parameterized values only) and returns the
-    grid shape the ``/db`` page renders (``{columns, rows, total}``), each row
-    JSON-safe (``expiry_date`` ISO string, ``fetched_at`` clean IST). A MISSING
-    registry file degrades to an empty grid plus an honest ``note`` (never an
-    invented row — Golden Rule #1), mirroring the expired-options "empty" path.
+    grid shape the ``/db`` page renders (``{columns, rows, total, limit, offset}``),
+    each row JSON-safe (``expiry_date`` ISO string, ``fetched_at`` clean IST). The
+    page is SQL-bounded (``LIMIT``/``OFFSET``) and ``total`` is a cheap FILTERED
+    ``COUNT(*)`` — so a registry tab loads O(page), not every persisted expiry
+    (DEC-DB-VIEWER-PAGINATE-ALL-001). A MISSING registry file degrades to an empty
+    grid plus an honest ``note`` (never an invented row — Golden Rule #1), mirroring
+    the expired-options "empty" path.
 
     Parameters
     ----------
@@ -2406,25 +2522,50 @@ def list_registry_expiries(
     exch, underlying
         Optional exact-match filters (``None`` = no filter), passed straight to
         the store's parameterized SELECT.
+    limit, offset
+        Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
 
     Returns
     -------
     dict[str, Any]
         ``{"columns": REGISTRY_EXPIRY_COLUMNS, "rows": [...], "total": <int>,
-        "note": <str|None>}`` — ``note`` is the missing-registry message when the
-        cache file does not exist yet, else ``None``.
+        "limit": <int>, "offset": <int>, "note": <str|None>}`` — ``total`` is the
+        FILTERED row count; ``note`` is the missing-registry message when the cache
+        file does not exist yet, else ``None``.
     """
     columns = list(REGISTRY_EXPIRY_COLUMNS)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
     if not registry_path.is_file():
-        return {"columns": columns, "rows": [], "total": 0, "note": _REGISTRY_MISSING_NOTE}
+        return {
+            "columns": columns,
+            "rows": [],
+            "total": 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "note": _REGISTRY_MISSING_NOTE,
+        }
     from brutex.data.registry_store import RegistryStore
 
     store = RegistryStore.open(registry_path)
     try:
-        rows = [_expiry_grid_row(r) for r in store.list_expiries(exch=exch, underlying=underlying)]
+        total = store.count_expiries(exch=exch, underlying=underlying)
+        rows = [
+            _expiry_grid_row(r)
+            for r in store.list_expiries(
+                exch=exch, underlying=underlying, limit=safe_limit, offset=safe_offset
+            )
+        ]
     finally:
         store.close()
-    return {"columns": columns, "rows": rows, "total": len(rows), "note": None}
+    return {
+        "columns": columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "note": None,
+    }
 
 
 def list_registry_contracts(
@@ -2433,17 +2574,22 @@ def list_registry_contracts(
     exch: str | None = None,
     underlying: str | None = None,
     expiry_date: str | None = None,
+    limit: int = _LIMIT_MAX,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted contract SYMBOLS as a browsable grid (``/db``).
 
     The structured chain view the operator asked for: one row per contract leg
     (expiry / strike / CE-PE / per-contract historical ``candle_status``), read
     read-only via :meth:`~brutex.data.registry_store.RegistryStore.list_contracts`
-    (static parameterized filters). *expiry_date*, when given, is a strict ISO
-    ``YYYY-MM-DD`` string (a ``<input type="date">`` value), parsed via the shared
-    :func:`_parse_iso_date` (a malformed bound raises ``ValueError`` → HTTP 400 at
-    the route). A MISSING registry file degrades to an empty grid plus an honest
-    ``note`` (never an invented row — Golden Rule #1).
+    (static parameterized filters). The page is SQL-bounded (``LIMIT``/``OFFSET``)
+    and ``total`` is a cheap FILTERED ``COUNT(*)`` — so a chain with tens of thousands
+    of legs loads O(page), not every leg (DEC-DB-VIEWER-PAGINATE-ALL-001).
+    *expiry_date*, when given, is a strict ISO ``YYYY-MM-DD`` string (a
+    ``<input type="date">`` value), parsed via the shared :func:`_parse_iso_date`
+    (a malformed bound raises ``ValueError`` → HTTP 400 at the route). A MISSING
+    registry file degrades to an empty grid plus an honest ``note`` (never an
+    invented row — Golden Rule #1).
 
     Parameters
     ----------
@@ -2454,12 +2600,15 @@ def list_registry_contracts(
     expiry_date
         Optional ISO ``YYYY-MM-DD`` expiry filter (``None`` = no filter); a
         malformed value raises ``ValueError``.
+    limit, offset
+        Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
 
     Returns
     -------
     dict[str, Any]
         ``{"columns": REGISTRY_CONTRACT_COLUMNS, "rows": [...], "total": <int>,
-        "note": <str|None>}``.
+        "limit": <int>, "offset": <int>, "note": <str|None>}`` — ``total`` is the
+        FILTERED leg count.
 
     Raises
     ------
@@ -2467,24 +2616,45 @@ def list_registry_contracts(
         On a malformed *expiry_date* bound (not strict ISO ``YYYY-MM-DD``).
     """
     columns = list(REGISTRY_CONTRACT_COLUMNS)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
     # Parse the date BEFORE the file check so a malformed bound is rejected
     # consistently whether or not the cache exists yet (no silent empty page).
     parsed_expiry = _parse_iso_date(expiry_date, "expiry_date") if expiry_date is not None else None
     if not registry_path.is_file():
-        return {"columns": columns, "rows": [], "total": 0, "note": _REGISTRY_MISSING_NOTE}
+        return {
+            "columns": columns,
+            "rows": [],
+            "total": 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "note": _REGISTRY_MISSING_NOTE,
+        }
     from brutex.data.registry_store import RegistryStore
 
     store = RegistryStore.open(registry_path)
     try:
+        total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
         rows = [
             _contract_grid_row(r)
             for r in store.list_contracts(
-                exch=exch, underlying=underlying, expiry_date=parsed_expiry
+                exch=exch,
+                underlying=underlying,
+                expiry_date=parsed_expiry,
+                limit=safe_limit,
+                offset=safe_offset,
             )
         ]
     finally:
         store.close()
-    return {"columns": columns, "rows": rows, "total": len(rows), "note": None}
+    return {
+        "columns": columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "note": None,
+    }
 
 
 __all__ = [

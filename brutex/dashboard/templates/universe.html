@@ -591,6 +591,13 @@
    option-chain cell pulls THAT contract via the same /pull endpoint. */
 let filter = "index";          // active tab kind
 let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange,lot_size,tick_size,freeze_quantity,option_pullable}]
+// Per-tab instrument cache (DEC-DB-UNIVERSE-O1-LATENCY-001): a tab the operator
+// already visited renders from memory — no second server round-trip (each
+// /universe/instruments call recomputes 3 latest-snapshot self-joins + serialises
+// ~750 rows). Only the FIRST visit (or an explicit master reload) fetches.
+const UNIV_CACHE = {};         // kind → instruments[]  (only successful, non-empty sets are pinned)
+let reloadEpoch = 0;           // bumped on a master reload — invalidates in-flight fetches that predate it
+let searchTimer = null;        // debounce handle for the search box (coalesce keystrokes)
 let COV = {};                  // symbol → per-symbol completeness (DEC-COMPLETENESS-UNIVERSE-001)
 let covSig = "";               // last COV signature — re-render only when it actually changes
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
@@ -644,7 +651,14 @@ function buildTabs(summary) {
   });
   search.className = "search";
   search.placeholder = "Search symbol…";
-  search.oninput = renderInstruments;
+  // Debounce the keystroke filter (DEC-DB-UNIVERSE-O1-LATENCY-001): a fast typist
+  // fires oninput per character; coalesce to ONE render of the matching rows ~140ms
+  // after they pause, instead of rebuilding the list on every keypress. The filter
+  // is pure client-side over the already-loaded UNIV (no server round-trip).
+  search.oninput = () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(renderInstruments, 140);
+  };
   tabsEl.appendChild(search);
   fnoBtn.className = "fnobtn" + (fnoOnly ? " on" : "");
   fnoBtn.id = "fno-only";
@@ -733,8 +747,13 @@ async function loadInstrumentMaster(msgId) {
       msg.textContent = `Loaded ${body.total} instruments `
         + `(${body.index_count} indices · ${body.stock_count} stocks).`;
     }
+    // The master changed → every tab's cache is stale; bump the epoch (so any
+    // in-flight pre-reload fetch aborts instead of re-pinning stale data) and drop
+    // the cache, then force a refetch.
+    reloadEpoch++;
+    Object.keys(UNIV_CACHE).forEach(k => delete UNIV_CACHE[k]);
     await loadSummary();
-    await loadInstruments();
+    await loadInstruments(true);
   } catch (e) {
     if (msg) { msg.classList.add("err"); msg.textContent = "couldn't load instruments: " + esc(e.message); }
   } finally {
@@ -766,16 +785,38 @@ async function loadSummary() {
   } catch (e) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); return z; }
 }
 
-async function loadInstruments() {
+async function loadInstruments(forceReload) {
   const el = document.getElementById("instruments");
+  const kind = filter;          // pin the kind for this call (the tab may change mid-fetch)
+  const epoch = reloadEpoch;    // pin the reload epoch — a master reload mid-fetch supersedes us
+  // Cache hit: re-render the already-fetched set for this tab with ZERO network /
+  // SQL cost (DEC-DB-UNIVERSE-O1-LATENCY-001). The instrument set only changes on
+  // a master reload (forceReload), so a tab the operator flips back to is instant.
+  if (!forceReload && UNIV_CACHE[kind]) {
+    UNIV = UNIV_CACHE[kind];
+    listAnimated = false;
+    renderInstruments();
+    return;
+  }
   // Skeleton-shimmer placeholder instead of a bare "loading…" — reads as a fast,
   // alive load (DEC-DASHBOARD-UNIVERSE-UX-001).
   el.innerHTML = Array.from({length: 8}, () => '<div class="skel-row"></div>').join("");
+  let fetched = [];
   try {
-    const r = await fetch('/api/v1/universe/instruments?kind=' + encodeURIComponent(filter));
+    const r = await fetch('/api/v1/universe/instruments?kind=' + encodeURIComponent(kind));
     const body = await r.json();
-    UNIV = body.instruments || [];
-  } catch (e) { UNIV = []; }
+    fetched = body.instruments || [];
+  } catch (e) { fetched = []; }
+  // A master reload landed WHILE we were fetching → this result predates the new
+  // master; abort without pinning or rendering it (the reload's own forced load
+  // renders the fresh set). Closes the stale-repin race a slow fetch + a master
+  // reload could otherwise open (hostile-review MINOR-1).
+  if (epoch !== reloadEpoch) return;
+  // Pin only a successful, non-empty set — an offline / empty fetch must stay
+  // retryable on the next visit, never pinned as the answer.
+  if (fetched.length) UNIV_CACHE[kind] = fetched;
+  if (kind !== filter) return;   // a newer tab switch already won — don't clobber it
+  UNIV = fetched;
   listAnimated = false;   // a fresh instrument set animates in ONCE
   renderInstruments();
 }
@@ -852,8 +893,22 @@ async function loadCompleteness() {
     const sig = JSON.stringify(map);
     if (sig === covSig) return;   // unchanged — no needless re-render
     COV = map; covSig = sig;
-    renderInstruments();
+    refreshCov();   // patch ONLY the per-row .cov strips — never a ~750-row rebuild
   } catch (e) { /* transient — keep the last shown strip */ }
+}
+
+/* Patch only the per-row completeness strip in place on a COV change — the live
+   15s poll no longer rebuilds the whole list (so it never restarts the entrance
+   animation, jumps the scroll, or churns ~750 rows). O(visible) text update keyed
+   off each row's data-symbol (DEC-DB-UNIVERSE-O1-LATENCY-001 / DEC-COMPLETENESS-UNIVERSE-001). */
+function refreshCov() {
+  const bySym = {};
+  UNIV.forEach(i => { bySym[i.symbol] = i; });
+  document.querySelectorAll('#instruments .inst').forEach(row => {
+    const i = bySym[row.dataset.symbol];
+    const cov = row.querySelector(".cov");
+    if (i && cov) cov.outerHTML = covStrip(i);
+  });
 }
 
 function renderInstruments() {
