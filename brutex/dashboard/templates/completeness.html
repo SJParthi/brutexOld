@@ -159,7 +159,7 @@
 
   <div id="status"></div>
 
-  <div class="sectiontitle">Per-symbol — spot (1-day + 1-minute, 2020→today)</div>
+  <div class="sectiontitle">Per-symbol — spot (1-minute, 2020→today)</div>
   <div class="panelwrap"><div class="panel" id="spotpanel"><div class="empty">loading…</div></div></div>
 
   <div class="sectiontitle">Per-underlying — options (expiries + contracts)</div>
@@ -179,10 +179,10 @@
    DEC-COMPLETENESS-PAGE-001) ──
    Read-only: polls /api/v1/completeness/scoreboard and renders the per-category
    summary cards (indices vs equities-cash, separately), the per-symbol spot table
-   (1-day + 1-minute + overall), and the per-underlying option table (expiries +
-   contracts + the honest stable/growing/partial/failed verdict). The "Download CSV
-   report" link streams the same data from /api/v1/completeness/scoreboard.csv.
-   Escape-before-innerHTML (XSS). */
+   (1-minute + overall — 1-day is DERIVED from 1-minute so it is not scored), and the
+   per-underlying option table (expiries + contracts + the honest
+   stable/growing/partial/failed verdict). The "Download CSV report" link streams the
+   same data from /api/v1/completeness/scoreboard.csv. Escape-before-innerHTML (XSS). */
 const cardsEl = document.getElementById("cards");
 const spotPanel = document.getElementById("spotpanel");
 const optPanel = document.getElementById("optpanel");
@@ -206,8 +206,10 @@ function esc(s) {
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 function chip(kind) { return '<span class="chip ' + esc(kind) + '">' + esc(kind) + "</span>"; }
 
-/* One summary card per category: spot FULL-both / FULL-1day / FULL-1minute counts
-   (out of total) + the option stable count. Indices vs equities are SEPARATE cards. */
+/* One summary card per category: spot FULL-1minute count (out of total) + the option
+   stable count. 1-minute is the SINGLE fetched granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
+   1-day is DERIVED from it, so there is no 1-day / both tile. Indices vs equities are
+   SEPARATE cards. */
 function renderCards(board) {
   const html = CATS.map((c) => {
     const s = (board.spot.by_category || {})[c.key] || {};
@@ -219,11 +221,7 @@ function renderCards(board) {
       + '<h2><span>' + c.ic + '</span><span class="' + c.cls + '">' + esc(c.label) + "</span>"
       + '<span class="tot">· ' + num(sTot) + " spot · " + num(oTot) + " option underlyings</span></h2>"
       + '<div class="grid">'
-      + '<div class="metric"><span class="v ok">' + num(s.full_both) + "/" + num(sTot)
-        + '</span><span class="l">full 1d + 1m</span></div>'
-      + '<div class="metric"><span class="v">' + num(s.full_1day) + "/" + num(sTot)
-        + '</span><span class="l">full 1-day</span></div>'
-      + '<div class="metric"><span class="v">' + num(s.full_1minute) + "/" + num(sTot)
+      + '<div class="metric"><span class="v ok">' + num(s.full_1minute) + "/" + num(sTot)
         + '</span><span class="l">full 1-minute</span></div>'
       + '<div class="metric"><span class="v ok">' + num(o.stable) + "/" + num(oTot)
         + '</span><span class="l">options stable</span></div>'
@@ -251,8 +249,6 @@ function renderSpot(rows) {
     + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
     + "<td>" + esc(r.exchange) + "</td>"
     + "<td>" + esc(r.category) + "</td>"
-    + "<td>" + chip(r["1day"]) + "</td>"
-    + "<td>" + rng(r["1day_start"], r["1day_end"]) + "</td>"
     + "<td>" + chip(r["1minute"]) + "</td>"
     + "<td>" + rng(r["1minute_start"], r["1minute_end"]) + "</td>"
     + "<td>" + chip(r.overall) + "</td>"
@@ -261,7 +257,7 @@ function renderSpot(rows) {
   spotPanel.innerHTML =
     "<table><thead><tr>"
     + "<th>Symbol</th><th>Exchange</th><th>Category</th>"
-    + "<th>1-day</th><th>1-day covered</th><th>1-minute</th><th>1-minute covered</th><th>Overall</th>"
+    + "<th>1-minute</th><th>1-minute covered</th><th>Overall</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 

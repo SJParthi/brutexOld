@@ -271,6 +271,65 @@ def test_terminal_generic_exception_is_not_retried() -> None:
     assert successes == []
 
 
+def _empty_body_decode_error() -> Exception:
+    """The exact ``JSONDecodeError`` an SDK ``response.json()`` raises on an empty body."""
+    import json
+
+    try:
+        json.loads("")
+    except json.JSONDecodeError as exc:
+        return exc
+    raise AssertionError("json.loads('') must raise")  # pragma: no cover
+
+
+def test_empty_body_json_decode_error_is_retried_then_succeeds() -> None:
+    """THE TITAN / SHRIRAMFIN regression: an empty-body ``JSONDecodeError`` is RETRIED, not terminal.
+
+    DEC-GROWW-EMPTY-BODY-RETRY-001 — the SDK's ``response.json()`` raises a
+    ``json.JSONDecodeError`` on a transient empty/throttled body. The old mapping
+    saw it terminal ("not on Groww") and dropped real F&O stocks. It must now
+    classify retryable so the in-call loop re-issues it and the pull recovers.
+    """
+    sdk = _FakeSDK(raises=[_empty_body_decode_error()], payload={"candles": []})
+    client, slept = _client(sdk)
+    out = client.historical_candles(
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-TITAN",
+        interval="1minute",
+        start="2024-01-01 09:15:00",
+        end="2024-01-02 15:30:00",
+    )
+    assert out == {"candles": []}  # retried → succeeded
+    assert sdk.calls == 2  # one empty-body failure + one success (NOT a terminal drop)
+    assert slept == [0.1]  # one bounded backoff
+
+
+def test_empty_body_exhausts_and_raises_retryable() -> None:
+    """A SUSTAINED empty-body throttle exhausts the in-call budget then raises a RETRYABLE error.
+
+    The exhausted residual is then re-queued by the until-clean loop (the per-window
+    transient path) — NEVER a terminal "not on Groww" quarantine.
+    """
+    from brutex.adapters.groww.errors import GrowwEmptyResponseError, is_retryable
+
+    sdk = _FakeSDK(
+        raises=[_empty_body_decode_error(), _empty_body_decode_error(), _empty_body_decode_error()]
+    )
+    client, _slept = _client(sdk)
+    with pytest.raises(GrowwEmptyResponseError) as caught:
+        client.historical_candles(
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-SHRIRAMFIN",
+            interval="1minute",
+            start="2024-01-01 09:15:00",
+            end="2024-01-02 15:30:00",
+        )
+    assert sdk.calls == 3  # all attempts used (NOT a single terminal drop)
+    assert is_retryable(caught.value) is True  # residual stays re-queueable
+
+
 class _RecordingSDK:
     """Captures the exact kwargs forwarded to ``get_expiries`` (DEC-GROWW-OPTION-INGEST-001)."""
 

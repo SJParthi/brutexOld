@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contracts import resolve_contracts, resolve_expiries
 from brutex.data.coverage_ledger import (
+    STATUS_COMPLETE,
     STATUS_EXPIRIES_ONLY,
     CoverageRecord,
     classify_cell,
@@ -325,6 +326,73 @@ def _build_note(*, dry_run: bool, expiries_persisted: int, contracts_persisted: 
     )
 
 
+def _rewrite_contract_counts(
+    coverage_store: _CoverageSink,
+    *,
+    cells: dict[ExpiryCell, Sequence[date]],
+    contract_counts: dict[ContractJob, int],
+    run_id: str,
+    now: datetime,
+) -> None:
+    """Re-upsert each Phase-1 coverage cell with its REAL enumerated contract count.
+
+    DEC-METADATA-CONTRACTS-COUNT-001 (year-key correctness fix, DEC-METADATA-CONTRACTS
+    -EXPIRY-FOLD-001). Phase 1 wrote every successful cell with ``contracts_pulled=0`` +
+    status :data:`STATUS_EXPIRIES_ONLY` (contracts are the separate Phase 2). After Phase
+    2 enumerates them, this folds the per-job counts accumulated in *contract_counts*
+    (keyed by the FULL ``(exchange, underlying, expiry)`` job — NOT ``expiry.year``) back
+    to the cell that DISCOVERED each expiry and rewrites the rollup so the
+    ``/completeness`` page shows the REAL integer count instead of the misleading "0 by
+    design".
+
+    The fold matches Phase-1's discovery grouping EXACTLY: for each cell
+    ``(exchange, underlying, year)`` it sums the counts of every job whose ``expiry`` is
+    in THAT cell's own discovered-expiries list (*cells* = ``expiries_seen``). This is the
+    correct attribution because ``get_expiries(year=Y)`` is NOT filtered to Y by the
+    vendor (``adapters/groww/contracts.resolve_expiries`` passes ``year`` to the SDK but
+    never drops returned dates), so a 2025 cell can legitimately surface a 2026-Jan
+    expiry; keying the fold by ``expiry.year`` would mis-credit that count to a
+    (possibly never-pulled / already-settled-and-skipped) 2026 cell, leaving the 2025
+    cell permanently stuck at ``expiries_only contracts_pulled=0`` (``expiries_only`` is
+    in :data:`~brutex.orchestrator.universe_phases._SETTLED_STATUSES`, so a past-year cell
+    is SKIPPED on re-run and the under-count never self-heals). Folding by the discovered
+    expiry is also robust to ``contract_jobs_from``'s cross-cell dedup (a shared expiry's
+    single count lands on every cell that discovered it).
+
+    A cell that enumerated ≥1 contract graduates to :data:`STATUS_COMPLETE`; a cell that
+    genuinely has no contracts (e.g. a sectoral index) stays ``expiries_only`` (0
+    contracts — the honest metadata-only state, the by-design note still reads truthfully).
+    Idempotent on the PK (rerun-safe, CLAUDE.md §7); lean-universe compliant — only the
+    COUNT is persisted, the legs themselves are never stored
+    (DEC-INSTRUMENT-UNIVERSE-FAST-001). O(total discovered expiries).
+    """
+    for (exchange, underlying, year), expiries in cells.items():
+        if not expiries:
+            # A 0-expiry cell ran but discovered nothing — it has NO contract jobs and
+            # Phase 1 already recorded it as ``pending`` (classify_cell). Leave that intact;
+            # rewriting it here would wrongly claim ``expiries_only`` for an empty chain.
+            continue
+        # Sum every job count for an expiry THIS cell discovered — attributing each
+        # expiry's contracts to the cell that surfaced it, regardless of the expiry's
+        # own calendar year (the vendor does not year-filter; a year=2025 cell can
+        # legitimately surface a 2026-Jan expiry).
+        count = sum(contract_counts.get((exchange, underlying, expiry), 0) for expiry in expiries)
+        status = STATUS_COMPLETE if count > 0 else STATUS_EXPIRIES_ONLY
+        coverage_store.upsert_coverage(
+            CoverageRecord(
+                exch_id=exchange,
+                underlying_symbol=underlying,
+                year=year,
+                expiries_pulled=len(expiries),
+                contracts_pulled=count,
+                status=status,
+                last_run_id=run_id,
+                last_fetched_at=now,
+                error_message=None,
+            )
+        )
+
+
 def pull_expiries_contracts(
     instruments: Sequence[Instrument],
     *,
@@ -425,6 +493,15 @@ def pull_expiries_contracts(
     # (the classify_cell rule keys completeness off expiries_pulled).
     expiries_persisted = 0
     contracts_persisted = 0
+    # Per-EXPIRY enumerated CONTRACT count (DEC-METADATA-CONTRACTS-COUNT-001, keyed by the
+    # FULL ``(exchange, underlying, expiry)`` job — NOT ``expiry.year``; the year-key
+    # correctness fix). Phase 2 enumerates the contracts per expiry; ``_rewrite_contract_
+    # counts`` then folds each expiry's count into the cell that DISCOVERED it (matching
+    # Phase-1's grouping), so the cell records the REAL count even when a year=Y cell
+    # surfaced an expiry dated in Y+1 (the vendor does not year-filter expiries).
+    # Lean-universe compliant (DEC-INSTRUMENT-UNIVERSE-FAST-001): only the integer COUNT is
+    # persisted, never the ~89k legs (still discarded).
+    contract_counts: dict[ContractJob, int] = {}
 
     # ── Live progress (DEC-METADATA-LIVE-PROGRESS-001) ───────────────────────
     # Drive the /universe bar — which used to freeze at 0/N for the whole metadata
@@ -533,15 +610,27 @@ def pull_expiries_contracts(
         ``run_two_phase`` separates the fetch (which persists) from this result
         callback; the counts are accumulated in the fetcher, so this is the audit
         seam. Here it ALSO ticks the live bar once per settled Phase-2 contract job
-        (DEC-METADATA-LIVE-PROGRESS-001). A contract job exists ONLY because Phase 1
-        already discovered + settled its expiry cell, so ``total`` is always already
-        re-scaled to ``cells + jobs`` by the time the first job lands here.
+        (DEC-METADATA-LIVE-PROGRESS-001) AND records the per-job enumerated contract
+        *count* keyed by the FULL ``(exchange, underlying, expiry)`` job
+        (DEC-METADATA-CONTRACTS-COUNT-001) — ``_rewrite_contract_counts`` later folds each
+        expiry's count into the cell that DISCOVERED it. A failed job (``exc`` set)
+        contributes nothing. A contract job exists ONLY because Phase 1 already discovered
+        + settled its expiry cell, so ``total`` is always already re-scaled to
+        ``cells + jobs`` by the time the first job lands here.
         """
         nonlocal progress_completed
-        del count, exc
-        exchange, underlying, expiry = job
         progress_completed += 1
+        exchange, underlying, expiry = job
         _emit_progress(f"{exchange}-{underlying} {expiry} contracts")
+        if exc is None:
+            # Key by the FULL expiry, NOT ``expiry.year``: ``get_expiries(year=Y)`` is not
+            # year-filtered by the vendor, so a year=Y cell can surface an expiry dated in
+            # Y+1. ``_rewrite_contract_counts`` attributes this count to whichever cell's
+            # discovered-expiries list contains this expiry (Phase-1's grouping exactly),
+            # which keys-by-year would mis-credit to a never-pulled / skipped Y+1 cell.
+            # Accumulate the integer count only — the legs themselves are persisted by the
+            # fetcher then conceptually discarded from the lean universe.
+            contract_counts[job] = contract_counts.get(job, 0) + count
 
     report = run_two_phase(
         cells,
@@ -552,6 +641,20 @@ def pull_expiries_contracts(
         on_contract=_on_contract,
         contract_skip=contract_skip,
         today=today,
+    )
+
+    # Phase 2 done — rewrite each cell's coverage rollup with the REAL enumerated contract
+    # count (DEC-METADATA-CONTRACTS-COUNT-001). The Phase-1 record wrote ``contracts_pulled=0``
+    # (the by-design metadata-only placeholder); now that contracts have been enumerated, the
+    # cell carries the real integer count and — once ≥1 contract is in — graduates from
+    # ``expiries_only`` to ``complete`` (a chain with no enumerated contracts stays
+    # ``expiries_only``, so the "metadata-only by design" note still reads honestly).
+    _rewrite_contract_counts(
+        coverage_store,
+        cells=expiries_seen,
+        contract_counts=contract_counts,
+        run_id=run_id,
+        now=now,
     )
 
     note = _build_note(

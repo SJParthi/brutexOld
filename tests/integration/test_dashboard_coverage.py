@@ -449,7 +449,9 @@ class TestCompletenessScoreboard:
         assert "NIFTY" in resp.text
         # DEC-COMPLETENESS-CSV-READABLE-001: the live download takes the date-ENRICHED path
         # (per_symbol map wired), so the spot detail carries the first→last bar date columns.
-        assert "1-day first bar" in resp.text and "1-day from 2020?" in resp.text
+        # 1-day is DERIVED from 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so it is not scored.
+        assert "1-minute first bar" in resp.text and "1-minute from 2020?" in resp.text
+        assert "1-day first bar" not in resp.text
 
     def test_scoreboard_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))
@@ -479,8 +481,9 @@ class TestCompletenessScoreboard:
         body = client.get("/api/v1/universe/completeness").json()
         assert "NIFTY" in body
         entry = body["NIFTY"]
-        assert set(entry["spot"]) == {"1day", "1minute", "overall"}
-        assert entry["spot"]["1day"]["status"] == "none"  # no spot lake data in this fixture
+        # 1-day is DERIVED from 1-minute so it is not scored — only 1-minute + overall remain.
+        assert set(entry["spot"]) == {"1minute", "overall"}
+        assert entry["spot"]["1minute"]["status"] == "none"  # no spot lake data in this fixture
         assert entry["options"]["status"] in {"stable", "growing", "partial", "failed"}
         assert entry["options"]["first_year"] == years[0]
 

@@ -836,8 +836,10 @@ function covStrip(i) {
   const c = COV[i.symbol];
   if (!c) return '<div class="cov"><span class="dim">completeness: not pulled yet</span></div>';
   const s = c.spot || {};
+  // 1-minute is the SINGLE fetched granularity (1-day is DERIVED from it,
+  // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — only the 1-minute segment is shown.
   return '<div class="cov">'
-    + spotSeg("1d", s["1day"]) + spotSeg("1m", s["1minute"]) + optSeg(c.options)
+    + spotSeg("1m", s["1minute"]) + optSeg(c.options)
     + "</div>";
 }
 

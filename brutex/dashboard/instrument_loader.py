@@ -79,12 +79,14 @@ degrades HONESTLY to the F&O-eligible base set with a ``reason`` note (never a
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import threading
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -125,6 +127,38 @@ _NTM_INDEX_NAME = "NIFTY TOTAL MARKET"
 #: only the inlined ``gaps`` list is capped so a pathological master can never
 #: bloat one log line. 50 is far above the handful of real F&O indices.
 _FNO_INDEX_GAP_LOG_CAP = 50
+
+#: Sourced spot-``trading_symbol`` → NSE F&O ``underlying_symbol`` equivalence for
+#: the two genuine NSE index derivatives whose Groww spot ``trading_symbol`` differs
+#: from the symbol the vendor stamps on their option legs — AND whose own
+#: ``groww_symbol`` ALSO carries the spot spelling, so the groww_symbol bridge
+#: (:func:`_groww_symbol_index_bridge`) cannot resolve them either
+#: (DEC-FNO-INDEX-ALIAS-001).
+#:
+#: Source — NSE's OWN index-derivatives product naming (Golden Rule #1, a SOURCED
+#: vendor equivalence, NOT invented membership):
+#:
+#: * "Nifty Next 50" — NSE index F&O symbol ``NIFTYNXT50``; the Groww spot
+#:   ``trading_symbol`` observed in the operator's live ``make run`` is ``NIFTYJR``.
+#: * "Nifty Midcap Select" — NSE index F&O symbol ``MIDCPNIFTY``; the Groww spot
+#:   ``trading_symbol`` observed in the operator's live ``make run`` is
+#:   ``NIFTYMIDSELECT``.
+#:
+#: Keyed by spot ``trading_symbol`` (the ``IDX`` row's ``symbol_name``); the value
+#: is the F&O ``underlying_symbol`` to test against the options-eligible set. The
+#: live ``universe.load.fno_index_unmatched count=2 gaps=[MIDCPNIFTY, NIFTYNXT50]``
+#: log is exactly these two — after this fix the gap count drops to 0.
+_SOURCED_FNO_INDEX_ALIASES: Final[dict[str, str]] = {
+    "NIFTYJR": "NIFTYNXT50",
+    "NIFTYMIDSELECT": "MIDCPNIFTY",
+}
+
+#: Operator JSON override env for :data:`_SOURCED_FNO_INDEX_ALIASES`
+#: (``{spot_trading_symbol: fno_underlying_symbol}``) — MERGED on top of the sourced
+#: defaults (operator entries win). Mirrors ``BRUTEX_INDEX_CSV_FILENAMES``
+#: (DEC-CONSTITUENTS-OVERRIDE-001): a future such index needs no code change
+#: (CLAUDE.md §11 DYNAMIC). Parsed defensively — absent / malformed → ignored.
+FNO_INDEX_ALIASES_OVERRIDE_ENV: Final[str] = "BRUTEX_FNO_INDEX_ALIASES"
 
 #: Serialises concurrent keyless loads (DEC-UNDERLYING-ECONOMICS-001). Two
 #: overlapping ``load-instruments`` POSTs each do a full-snapshot upsert which
@@ -264,6 +298,34 @@ def _ntm_admission(
     return reference_security_ids, note
 
 
+def _resolve_fno_index_aliases() -> dict[str, str]:
+    """Return the spot→F&O index alias map: sourced defaults MERGED with the env override.
+
+    DEC-FNO-INDEX-ALIAS-001 — the :data:`_SOURCED_FNO_INDEX_ALIASES` defaults
+    (NSE-sourced ``NIFTYJR``→``NIFTYNXT50`` / ``NIFTYMIDSELECT``→``MIDCPNIFTY``)
+    with the operator's :data:`FNO_INDEX_ALIASES_OVERRIDE_ENV` JSON merged ON TOP
+    (operator entries win, mirroring ``BRUTEX_INDEX_CSV_FILENAMES``). Keys are
+    upper-cased + trimmed spot ``trading_symbol``s; values are trimmed F&O
+    ``underlying_symbol``s. The env is parsed defensively — absent, empty, non-JSON,
+    a non-object, or a non-``str→non-blank-str`` pair is ignored (a lost / malformed
+    override costs only the extra indices, never a crash — reliability).
+    """
+    aliases = dict(_SOURCED_FNO_INDEX_ALIASES)
+    raw = os.environ.get(FNO_INDEX_ALIASES_OVERRIDE_ENV)
+    if not raw:
+        return aliases
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return aliases
+    if not isinstance(parsed, dict):
+        return aliases
+    for key, value in parsed.items():
+        if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+            aliases[key.strip().upper()] = value.strip()
+    return aliases
+
+
 def _groww_symbol_index_bridge(
     index: InstrumentIndex,
     options_eligible: frozenset[tuple[Exchange, str]],
@@ -330,6 +392,198 @@ def _groww_symbol_index_bridge(
         if alias in options_eligible:
             bridged.add((inst.exch_id, inst.symbol_name))
     return frozenset(options_eligible | bridged), frozenset(index_alias_symbols)
+
+
+def _option_underlying_security_ids(index: InstrumentIndex) -> frozenset[int]:
+    """Return the ``underlying_security_id`` set named by every NSE option leg.
+
+    DEC-FNO-INDEX-TOKEN-JOIN-001 — the vendor-CANONICAL evidence for the
+    token-join (5a): every ``CE`` / ``PE`` leg carries the NUMERIC
+    ``underlying_security_id`` of its spot row (e.g. a RELIANCE option carries
+    RELIANCE's numeric SECURITY_ID). A spot row whose own GENUINE numeric vendor
+    token equals one of these IS option-pullable, immune to any symbol-spelling
+    drift. Mirrors :func:`~brutex.universe.build_options_eligible_underlyings`
+    (NSE option legs only — BSE contributes only the SENSEX index, no NSE-set
+    derivatives) so the two evidence sources stay in lockstep.
+    """
+    return frozenset(
+        inst.underlying_security_id
+        for inst in index.universe
+        if inst.is_option
+        and inst.exch_id == Exchange.NSE
+        and inst.underlying_security_id is not None
+    )
+
+
+def _has_genuine_numeric_token(instrument: Instrument) -> bool:
+    """True iff *instrument*'s ``security_id`` is a GENUINE numeric vendor token.
+
+    DEC-FNO-INDEX-TOKEN-JOIN-001. The Groww parser
+    (:func:`~brutex.adapters.groww.instruments._security_id`) uses the raw CSV
+    ``exchange_token`` directly when it is numeric, but hashes a NON-numeric index
+    token (e.g. ``"NIFTY"`` / ``"NIFTYMIDSELECT"``) into a blake2b SURROGATE — which
+    can NEVER joinably equal an option leg's numeric ``underlying_security_id``.
+    The raw token is preserved on ``feed_token``, so a numeric ``feed_token`` ⇒
+    ``security_id`` IS the real vendor token (a token-join is valid); a non-numeric
+    or absent ``feed_token`` ⇒ a surrogate, so the token-join MUST be skipped for
+    that row (it could otherwise spuriously collide). This is why stocks + BSE
+    indices (numeric tokens) token-join cleanly while NSE indices (string tokens)
+    do not.
+    """
+    token = instrument.feed_token
+    return token is not None and token.isdigit()
+
+
+def _classify_option_pullable(
+    index: InstrumentIndex,
+    options_eligible: frozenset[tuple[Exchange, str]],
+) -> tuple[frozenset[tuple[Exchange, str]], frozenset[tuple[Exchange, str]], dict[str, list[str]]]:
+    """Fold ALL three OPT-vs-REF bridges into one comprehensive classification.
+
+    DEC-FNO-INDEX-ALIAS-001 — the union of three evidence sources that each rescue
+    a spot row REF→OPT (``reference_only=FALSE``) when the plain
+    ``(exchange, symbol_name)``-in-*options_eligible* check would miss it. Every
+    rescued row's ``(exchange, symbol_name)`` is added to the returned bridged set
+    so the UNCHANGED :func:`~brutex.universe.is_spot_only_index` symbol_name check
+    matches it (the single, shared classifier — CLAUDE.md §11 COMMON):
+
+    1. ``token_join`` (5a) — a spot ``IDX`` whose own GENUINE numeric vendor token
+       (:func:`_has_genuine_numeric_token`) equals an option leg's
+       ``underlying_security_id`` (:func:`_option_underlying_security_ids`). This
+       makes BSE-index classification immune to symbol-spelling drift with NO
+       alias and DOES change the row REF→OPT (an ``IDX`` row's pullability is the
+       :func:`~brutex.universe.is_spot_only_index` rule, which keys off this
+       bridged set). An NSE index carries a non-numeric token (surrogate
+       ``security_id``) so it is correctly NOT token-joined.
+
+       **EQ token-join is DIAGNOSTIC ONLY (honesty, DEC-FNO-INDEX-EQ-TOKEN-JOIN-
+       AUDIT-001).** An ``EQ`` row whose numeric token matches a leg is surfaced in
+       the SEPARATE ``token_join_diagnostic`` bucket — it does NOT change the
+       stock's ``reference_only`` (a stock's pullability is decided by
+       ``fno_eligible`` membership, NOT this index-only bridge:
+       :func:`~brutex.universe.is_spot_only_index` returns ``False`` for any non-
+       ``IDX`` row, so adding an ``EQ`` pair here is inert). The operator still SEES
+       every symbol-mismatched stock (the audit value asked for), but is not told
+       its flag changed when it did not; a symbol-keyed ``is_universe_underlying``
+       change is the out-of-scope follow-up.
+    2. ``alias`` (5b) — a spot ``IDX`` whose ``symbol_name`` is a key in the
+       sourced+override alias map (:func:`_resolve_fno_index_aliases`) whose
+       ALIASED F&O symbol is options-eligible (the 2 NSE indices ``NIFTYJR`` /
+       ``NIFTYMIDSELECT`` the groww_symbol bridge cannot reach).
+    3. ``symbol_bridge`` — a spot ``IDX`` whose ``groww_symbol`` F&O symbol is
+       options-eligible (the EXISTING :func:`_groww_symbol_index_bridge`,
+       DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001).
+
+    A row already directly in *options_eligible* (its ``symbol_name`` IS the F&O
+    symbol — NIFTY / BANKNIFTY / FINNIFTY) is NOT counted as rescued; nor is the
+    brute-force trio (always tradable regardless). The mechanisms are tried in the
+    order above and the FIRST that fires labels the row, so the audit attributes
+    each rescue to ONE mechanism deterministically.
+
+    Returns ``(options_eligible_bridged, index_alias_symbols, rescued)``:
+
+    * ``options_eligible_bridged`` — *options_eligible* UNION every rescued row's
+      ``(exchange, symbol_name)``, fed to :func:`_reference_only_of`.
+    * ``index_alias_symbols`` — the groww_symbol F&O aliases for EVERY ``IDX`` row
+      (from :func:`_groww_symbol_index_bridge`) UNION the ALIASED F&O symbol of
+      every row rescued via the alias map (e.g. ``(NSE, "NIFTYNXT50")`` for the
+      ``NIFTYJR`` spot row), fed to
+      :func:`~brutex.universe.diagnose_unmatched_option_underlyings` so the
+      diagnostic stops reporting underlyings ANY bridge already resolved (the
+      residual gap count for the 2 NSE indices drops to 0).
+    * ``rescued`` — ``{mechanism: sorted [exch:symbol_name, …]}`` for the
+      reconciliation audit (5c), ``mechanism`` ∈ ``token_join`` (real IDX rescues)
+      / ``alias`` / ``symbol_bridge`` / ``token_join_diagnostic`` (EQ rows surfaced
+      for audit — OPT/REF classification UNCHANGED, never a real rescue).
+    """
+    bridged_pairs, symbol_alias_symbols = _groww_symbol_index_bridge(index, options_eligible)
+    symbol_bridged = bridged_pairs - options_eligible  # rows the groww_symbol bridge added
+
+    underlying_security_ids = _option_underlying_security_ids(index)
+    aliases = _resolve_fno_index_aliases()
+
+    rescued: dict[str, list[str]] = {
+        "token_join": [],
+        "alias": [],
+        "symbol_bridge": [],
+        "token_join_diagnostic": [],
+    }
+    rescued_pairs: set[tuple[Exchange, str]] = set()
+    # Aliased F&O symbols of the rows rescued via the alias map — fed to the
+    # diagnostic so the now-resolved underlying (e.g. NIFTYNXT50) stops reporting.
+    alias_resolved_symbols: set[tuple[Exchange, str]] = set()
+    for inst in index.universe:
+        if inst.instrument not in (InstrumentType.IDX, InstrumentType.EQ):
+            continue
+        pair = (inst.exch_id, inst.symbol_name)
+        if pair in options_eligible:
+            continue  # already OPT by its own symbol — not a rescue
+        aliased = (inst.exch_id, aliases.get(inst.symbol_name, ""))
+        # 1. token-join (a genuine numeric vendor token matching an option leg's id).
+        if _has_genuine_numeric_token(inst) and inst.security_id in underlying_security_ids:
+            if inst.instrument is InstrumentType.IDX:
+                # A BSE index — the index-only is_spot_only_index bridge DOES flip it
+                # REF→OPT, so this is a REAL rescue (added to the bridged set).
+                mechanism = "token_join"
+            else:
+                # An EQ stock — is_spot_only_index is False for non-IDX, so adding it to
+                # the bridged set is inert: the token-join does NOT change its
+                # classification. Surface it for the operator's audit in a SEPARATE,
+                # honestly-labelled bucket and do NOT pretend it was rescued
+                # (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT-001 — the honest split).
+                rescued["token_join_diagnostic"].append(f"{inst.exch_id.value}:{inst.symbol_name}")
+                continue
+        # 2. sourced / override alias (the 2 NSE indices the symbol bridge misses).
+        elif inst.instrument is InstrumentType.IDX and aliased in options_eligible:
+            mechanism = "alias"
+            alias_resolved_symbols.add(aliased)
+        # 3. the existing groww_symbol bridge (verbose IDX whose groww F&O matches).
+        elif pair in symbol_bridged:
+            mechanism = "symbol_bridge"
+        else:
+            continue
+        rescued[mechanism].append(f"{inst.exch_id.value}:{inst.symbol_name}")
+        rescued_pairs.add(pair)
+
+    options_eligible_bridged = frozenset(options_eligible | rescued_pairs)
+    index_alias_symbols = symbol_alias_symbols | frozenset(alias_resolved_symbols)
+    rescued = {mechanism: sorted(names) for mechanism, names in rescued.items()}
+    return options_eligible_bridged, index_alias_symbols, rescued
+
+
+def _log_opt_reclassified(rescued: dict[str, list[str]], *, still_unmatched: int) -> None:
+    """Emit ONE ``universe.load.opt_reclassified`` reconciliation-audit line (5c).
+
+    DEC-FNO-INDEX-ALIAS-001 — the operator's comprehensive OPT-vs-REF audit
+    ("check all stocks/indices thoroughly"). Enumerates EVERY spot row actually
+    rescued REF→OPT keyed by the mechanism that rescued it (``token_join`` (IDX) /
+    ``alias`` / ``symbol_bridge``), the total ``count`` of those REAL rescues, and
+    ``still_unmatched`` — the number of index-like option underlyings with NO spot
+    row after ALL bridges (the residual
+    :func:`~brutex.universe.diagnose_unmatched_option_underlyings` gap count, which
+    is now ``0`` for the 2 NSE indices). Always emitted, even when nothing was
+    rescued (a steady-state ``count=0`` is itself the audit signal); changes NO
+    classification.
+
+    The SEPARATE ``token_join_diagnostic`` field (DEC-FNO-INDEX-EQ-TOKEN-JOIN-AUDIT
+    -001 — honesty) lists EQ stocks whose numeric vendor token matched an option
+    leg but whose OPT/REF classification is UNCHANGED (a stock's pullability is
+    ``fno_eligible`` membership, not the index-only bridge). They are surfaced for
+    the operator's audit but are deliberately EXCLUDED from ``count`` — ``count`` is
+    only the rows whose flag genuinely flipped, so the audit never claims a stock
+    was reclassified when it was not.
+    """
+    reclassified = ("token_join", "alias", "symbol_bridge")
+    total = sum(len(rescued[mechanism]) for mechanism in reclassified)
+    _LOG.info(
+        "universe.load.opt_reclassified",
+        count=total,
+        token_join=rescued["token_join"],
+        alias=rescued["alias"],
+        symbol_bridge=rescued["symbol_bridge"],
+        token_join_diagnostic=rescued["token_join_diagnostic"],
+        still_unmatched=still_unmatched,
+    )
 
 
 def _reference_only_of(
@@ -593,25 +847,30 @@ def load_instrument_master(
         # to tag spot-only indices reference_only so the dashboard never badges a
         # non-option index "OPT" (DEC-NON-OPTION-INDEX-REFTAG-001).
         options_eligible = build_options_eligible_underlyings(index.universe)
-        # Bridge each IDX spot row to its options via its groww_symbol F&O
-        # symbol (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001) — so an index whose
-        # verbose trading_symbol differs from the option legs' underlying_symbol
-        # (MIDCPNIFTY / NIFTYNXT50) keeps its OPT badge instead of dropping to
-        # REF. The bridge reads the vendor's OWN groww_symbol identity, never a
-        # hardcoded alias (Golden Rule #1).
-        options_eligible_bridged, index_alias_symbols = _groww_symbol_index_bridge(
+        # Comprehensive OPT-vs-REF classification (DEC-FNO-INDEX-ALIAS-001):
+        # fold the THREE bridges (vendor-canonical token-join for numeric-token
+        # stocks + BSE indices; sourced/override alias for the 2 NSE indices
+        # NIFTYJR / NIFTYMIDSELECT; the existing groww_symbol bridge) into one
+        # bridged options-eligible set so no genuine F&O underlying is silently
+        # dropped to REFERENCE_ONLY by symbol-spelling drift. ``rescued`` is the
+        # REF→OPT audit (5c); ``index_alias_symbols`` suppresses every resolved
+        # underlying from the residual gap diagnostic.
+        options_eligible_bridged, index_alias_symbols, rescued = _classify_option_pullable(
             index, options_eligible
         )
 
         # OBSERVE-ONLY diagnostic (DEC-FNO-INDEX-MATCH-DIAG-001): surface any
         # NSE option underlying that LOOKS like an index but matches no IDX
-        # spot row even AFTER the groww_symbol bridge — a residual gap the
-        # bridge could not resolve (logged with the real strings, changes no
-        # classification). Indices the bridge fixed are passed as
-        # index_alias_symbols so they are no longer reported (honest count).
-        _log_fno_index_gaps(
-            diagnose_unmatched_option_underlyings(index.universe, index_alias_symbols)
-        )
+        # spot row even AFTER ALL bridges — a residual gap none could resolve
+        # (logged with the real strings, changes no classification). Resolved
+        # indices are passed as index_alias_symbols so they are no longer
+        # reported (honest count → 0 for the 2 NSE indices).
+        residual_gaps = diagnose_unmatched_option_underlyings(index.universe, index_alias_symbols)
+        _log_fno_index_gaps(residual_gaps)
+        # Reconciliation audit (DEC-FNO-INDEX-ALIAS-001, 5c): one line enumerating
+        # every spot row rescued REF→OPT by which mechanism, plus the residual
+        # still-unmatched count — the operator's "check all stocks/indices" audit.
+        _log_opt_reclassified(rescued, still_unmatched=len(residual_gaps))
 
         # NTM enrichment is fail-soft — it never blocks the keyless core load
         # (DEC-NTM-GROWW-REPOINT-001). The returned ids ADMIT the non-F&O

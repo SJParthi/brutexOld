@@ -1,19 +1,21 @@
-"""Data Completeness Scoreboard — per-symbol + aggregate, across all four dimensions.
+"""Data Completeness Scoreboard — per-symbol + aggregate, across all three dimensions.
 
 ``DEC-COMPLETENESS-SCOREBOARD-001``. One honest answer to "of all our symbols, how many
 have the COMPLETE 6-year (2020→today) dataset?" — split **indices vs equities-cash,
-SEPARATELY**, across four dimensions:
+SEPARATELY**, across three dimensions:
 
-1. **1-day spot** — EXACT %: the window ledger knows every expected trading-day window, so
+1. **1-minute spot** — EXACT %: the window ledger knows every expected trading-day window, so
    completeness is ``resolved ÷ total`` (reuses the chip classification already proven by
-   :func:`~brutex.dashboard.coverage_view.build_spot_coverage_payload`).
-2. **1-minute spot** — EXACT %: same ledger authority.
-3. **Option EXPIRIES** — there is **no knowable expected total** (Groww only returns the set
+   :func:`~brutex.dashboard.coverage_view.build_spot_coverage_payload`). 1-minute is the
+   SINGLE granularity fetched from Groww (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); 1-day + the 19
+   intraday TFs are DERIVED from it (their fetch-ledger has no windows), so they are NOT
+   scored — only the one fetched dimension is.
+2. **Option EXPIRIES** — there is **no knowable expected total** (Groww only returns the set
    that EXISTS when asked), so this is NOT a fake percentage; it is the pulled-count + a
    **stable / growing** signal: ``stable`` = every currently-listed expiry pulled AND the
    last re-pull found 0 new (the honest "complete" for options — made trustworthy by the
    ``get_expiries`` empty-retry of DEC-EMPTY-RETRY-EVERYWHERE-001).
-4. **Option CONTRACTS** — same: pulled-count + status; expected total unknowable.
+3. **Option CONTRACTS** — same: pulled-count + status; expected total unknowable.
 
 This module is a **pure re-aggregation** over inputs the route already computes (the
 annotated spot rows from :func:`build_spot_coverage_payload`, a ``symbol → category`` map,
@@ -42,9 +44,13 @@ from brutex.dashboard.coverage_view import (
     COMPLETENESS_SETTLED,
 )
 
-#: The two physically-fetched spot dimensions the scoreboard reports (the 19 intraday TFs are
-#: RESAMPLED from 1-minute — derived, not separately pulled — so they are not scored).
-SPOT_DIMENSIONS: Final[tuple[str, str]] = ("1day", "1minute")
+#: The ONE physically-fetched spot dimension the scoreboard reports. 1-minute is the SINGLE
+#: granularity fetched from Groww (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); ``1day`` (the PDH/PDL
+#: anchor) AND the 19 intraday TFs are DERIVED from the stored 1-minute, never separately
+#: pulled — so they are NOT scored. 1-day was dropped from the scoreboard view because its
+#: fetch-ledger has no 1-day windows (it is derived), which made the column always read
+#: "none" even though the derived 1-day exists in the lake.
+SPOT_DIMENSIONS: Final[tuple[str]] = ("1minute",)
 
 #: Instrument categories — counted SEPARATELY per the operator requirement.
 CATEGORY_INDEX: Final[str] = "index"
@@ -111,27 +117,29 @@ def _spot_dimension_verdict(completeness: str | None) -> str:
     return DIM_NONE
 
 
-def _overall_spot(one_day: str, one_minute: str) -> str:
-    """A symbol's overall spot verdict: ``full`` iff BOTH 1-day and 1-minute are full."""
-    if one_day == DIM_FULL and one_minute == DIM_FULL:
-        return DIM_FULL
-    if DIM_FAILED in (one_day, one_minute):
-        return DIM_FAILED
-    if DIM_PARTIAL in (one_day, one_minute) or DIM_FULL in (one_day, one_minute):
-        return DIM_PARTIAL
-    return DIM_NONE
+def _overall_spot(one_minute: str) -> str:
+    """A symbol's overall spot verdict — the 1-MINUTE verdict alone.
+
+    1-minute is the SINGLE granularity fetched (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); 1-day +
+    the intraday TFs are DERIVED from it, so the overall spot standing IS the 1-minute
+    standing (``full`` / ``partial`` / ``failed`` / ``none``) — there is no second dimension
+    to AND against.
+    """
+    return one_minute
 
 
 def _per_symbol_spot(
     spot_rows: Iterable[Mapping[str, Any]], categories: Mapping[str, str]
 ) -> list[dict[str, Any]]:
-    """Group annotated spot rows by symbol → one row per symbol with 1-day + 1-minute verdicts.
+    """Group annotated spot rows by symbol → one row per symbol with the 1-minute verdict.
 
     *spot_rows* are the annotated rows from
     :func:`~brutex.dashboard.coverage_view.build_spot_coverage_payload` (each carries
     ``symbol`` · ``interval`` · ``completeness``). *categories* maps a symbol to its
     :data:`CATEGORIES` bucket; an unmapped symbol is excluded (it is not in the scored
-    universe). Symbols are returned sorted (symbol, exchange) for a stable view.
+    universe). 1-day is DERIVED from 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so it is
+    not scored — only the single fetched 1-minute dimension is. Symbols are returned sorted
+    (symbol, exchange) for a stable view.
     """
     by_symbol: dict[str, dict[str, Any]] = {}
     for row in spot_rows:
@@ -141,21 +149,17 @@ def _per_symbol_spot(
             continue  # not a scored universe symbol (e.g. a stray lake partition)
         interval = str(row["interval"])
         if interval not in SPOT_DIMENSIONS:
-            continue  # a derived intraday TF — not a separately-pulled dimension
+            continue  # a derived TF (incl. 1-day) — not the separately-pulled dimension
         entry = by_symbol.setdefault(
             symbol,
             {
                 "symbol": symbol,
                 "exchange": str(row.get("exchange", "")),
                 "category": category,
-                "1day": DIM_NONE,
                 "1minute": DIM_NONE,
-                # DEC-COMPLETENESS-HONEST-EMPTY-001: the actually-covered date range
-                # per dimension (the lake's earliest/latest bar) so a human sees in ONE
-                # view WHICH interval is partial AND exactly what span it holds — None
-                # until a row for that dimension is seen.
-                "1day_start": None,
-                "1day_end": None,
+                # DEC-COMPLETENESS-HONEST-EMPTY-001: the actually-covered date range for the
+                # 1-minute dimension (the lake's earliest/latest bar) so a human sees in ONE
+                # view what span it holds — None until a 1-minute row is seen.
                 "1minute_start": None,
                 "1minute_end": None,
             },
@@ -166,7 +170,7 @@ def _per_symbol_spot(
         entry[f"{interval}_start"] = str(first) if first else None
         entry[f"{interval}_end"] = str(last) if last else None
     for entry in by_symbol.values():
-        entry["overall"] = _overall_spot(entry["1day"], entry["1minute"])
+        entry["overall"] = _overall_spot(entry["1minute"])
     return sorted(by_symbol.values(), key=lambda e: (e["symbol"], e["exchange"]))
 
 
@@ -284,7 +288,7 @@ def _new_per_symbol_entry(symbol: str, exchange: str, category: str) -> dict[str
         "symbol": symbol,
         "exchange": exchange,
         "category": category,
-        "spot": {"1day": dict(none_dim), "1minute": dict(none_dim), "overall": DIM_NONE},
+        "spot": {"1minute": dict(none_dim), "overall": DIM_NONE},
         "options": {
             "status": OPT_NONE,
             "expiries_pulled": 0,
@@ -308,8 +312,8 @@ def per_symbol_completeness(
 
     DEC-COMPLETENESS-UNIVERSE-001 — the data behind the ``/universe`` per-row completeness strip
     that answers, at pull time, *does THIS symbol have the entire 2020→today set?* For each
-    symbol it carries, per spot dimension (``1day`` / ``1minute``), the verdict + the REAL
-    earliest/latest bar date + the ``from_2020`` flag; and per option underlying the honest
+    symbol it carries, for the single fetched spot dimension (``1minute``), the verdict + the
+    REAL earliest/latest bar date + the ``from_2020`` flag; and per option underlying the honest
     ``stable``/``growing``/``partial``/``failed`` status + pulled counts + the year span. Keyed
     by ``symbol_name`` — the SAME key the ``/universe`` rows carry (``i.symbol``), the spot
     datasets carry (``symbol``), and the option records carry (``underlying_symbol``) — so the
@@ -334,9 +338,7 @@ def per_symbol_completeness(
         )
         entry["spot"][interval] = _spot_dimension_detail(row)
     for entry in out.values():
-        entry["spot"]["overall"] = _overall_spot(
-            entry["spot"]["1day"]["status"], entry["spot"]["1minute"]["status"]
-        )
+        entry["spot"]["overall"] = _overall_spot(entry["spot"]["1minute"]["status"])
     _fold_per_symbol_options(out, option_records, option_categories)
     return out
 
@@ -395,19 +397,18 @@ def _fold_per_symbol_options(
 
 
 def _aggregate_spot(per_symbol: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    """Count, per category, how many symbols are FULL on each spot dimension + overall."""
-    agg: dict[str, dict[str, int]] = {
-        cat: {"total": 0, "full_1day": 0, "full_1minute": 0, "full_both": 0} for cat in CATEGORIES
-    }
+    """Count, per category, how many symbols are FULL on the 1-minute spot dimension.
+
+    1-minute is the single fetched granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so there is
+    one ``full_1minute`` count per category; the prior ``full_1day`` / ``full_both`` buckets
+    were dropped with the derived 1-day column.
+    """
+    agg: dict[str, dict[str, int]] = {cat: {"total": 0, "full_1minute": 0} for cat in CATEGORIES}
     for entry in per_symbol:
         bucket = agg[entry["category"]]
         bucket["total"] += 1
-        if entry["1day"] == DIM_FULL:
-            bucket["full_1day"] += 1
         if entry["1minute"] == DIM_FULL:
             bucket["full_1minute"] += 1
-        if entry["overall"] == DIM_FULL:
-            bucket["full_both"] += 1
     return agg
 
 
@@ -588,16 +589,16 @@ def scoreboard_to_csv(
     *how many symbols from indices vs equities-cash, SEPARATELY, have the full dataset* — and
     then the per-symbol / per-underlying drill-down:
 
-    1. ``SUMMARY — spot`` — per category: ``total``, and how many symbols are FULL on 1-day /
-       1-minute / both (EXACT, window-ledger backed).
+    1. ``SUMMARY — spot`` — per category: ``total``, and how many symbols are FULL on 1-minute
+       (EXACT, window-ledger backed; 1-day is DERIVED from 1-minute so it is not scored).
     2. ``SUMMARY — options`` — per category: ``total``, ``stable`` (the honest "complete"),
        ``growing_or_partial``, ``failed`` (NO fabricated %, per CLAUDE.md §6).
-    3. ``DETAIL — spot`` — one row per symbol with its 1-day / 1-minute / overall verdict;
+    3. ``DETAIL — spot`` — one row per symbol with its 1-minute / overall verdict;
        when *per_symbol* (a :func:`per_symbol_completeness` map) is supplied the row is
-       ENRICHED with the explicit first→last bar date + ``from_2020`` flag per dimension
-       (DEC-COMPLETENESS-CSV-READABLE-001 — the SAME rich info the ``/universe`` strip shows,
-       so the CSV is never less informative than the page); ``None`` keeps the compact
-       verdict-only columns (backward-compatible).
+       ENRICHED with the explicit first→last bar date + ``from_2020`` flag for the 1-minute
+       dimension (DEC-COMPLETENESS-CSV-READABLE-001 — the SAME rich info the ``/universe``
+       strip shows, so the CSV is never less informative than the page); ``None`` keeps the
+       compact verdict-only columns (backward-compatible).
     4. ``DETAIL — options`` — one row per underlying with status + pulled counts + the years.
 
     Uses :mod:`csv` so any symbol with a comma / quote is escaped correctly (an extreme-input
@@ -620,20 +621,10 @@ def scoreboard_to_csv(
     spot_by_cat = board["spot"]["by_category"]
     writer.writerow([])
     writer.writerow(["SUMMARY — spot: how many symbols have the FULL dataset per asset class"])
-    writer.writerow(
-        ["Asset class", "Symbols", "Full 1-day", "Full 1-minute", "Full 1-day AND 1-minute"]
-    )
+    writer.writerow(["Asset class", "Symbols", "Full 1-minute"])
     for cat in CATEGORIES:
         bucket = spot_by_cat[cat]
-        writer.writerow(
-            [
-                cat,
-                bucket["total"],
-                bucket["full_1day"],
-                bucket["full_1minute"],
-                bucket["full_both"],
-            ]
-        )
+        writer.writerow([cat, bucket["total"], bucket["full_1minute"]])
 
     opt_by_cat = board["options"]["by_category"]
     writer.writerow([])
@@ -655,7 +646,6 @@ def scoreboard_to_csv(
                 "Asset class",
                 "Symbol",
                 "Exchange",
-                "1-day complete?",
                 "1-minute complete?",
                 "Overall",
             ]
@@ -666,7 +656,6 @@ def scoreboard_to_csv(
                     row["category"],
                     row["symbol"],
                     row["exchange"],
-                    row["1day"],
                     row["1minute"],
                     row["overall"],
                 ]
@@ -678,10 +667,6 @@ def scoreboard_to_csv(
                 "Asset class",
                 "Symbol",
                 "Exchange",
-                "1-day complete?",
-                "1-day first bar",
-                "1-day last bar",
-                "1-day from 2020?",
                 "1-minute complete?",
                 "1-minute first bar",
                 "1-minute last bar",
@@ -691,17 +676,12 @@ def scoreboard_to_csv(
         )
         for row in board["spot"]["per_symbol"]:
             spot = per_symbol.get(row["symbol"], {}).get("spot", {})
-            one_day = spot.get("1day", {})
             one_min = spot.get("1minute", {})
             writer.writerow(
                 [
                     row["category"],
                     row["symbol"],
                     row["exchange"],
-                    row["1day"],
-                    _csv_date(one_day.get("first_date")),
-                    _csv_date(one_day.get("last_date")),
-                    _csv_yes_no(one_day.get("from_2020")),
                     row["1minute"],
                     _csv_date(one_min.get("first_date")),
                     _csv_date(one_min.get("last_date")),
