@@ -212,19 +212,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-candle-count-cache` (the `/db` candle-pager TOTAL is now
-  an O(1) cached-hit per paging click — DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867:
-  `db_view.query_candles`'s page `COUNT(*)` over `read_parquet(glob)` is O(files) — a
-  Parquet-footer read per file, recomputed on EVERY click — and is now memoised behind an
-  optional injected `count_cache` (`CandleCountCache` Protocol) + `generation`, keyed by
-  `candle_count_key(coords,start,end)` (excludes limit/offset/sort/columns); `build_app`
-  REUSES the COMMON `MoversSnapshotCache` LRU and the `/api/v1/db/candles` route passes
-  `_summary_cache.generation` (a pull bumps it → recount, never stale). HONEST envelope: the
-  cached-total HIT is O(1) in depth (bench flat; COUNT runs once per dataset+generation) but
-  paging is NOT O(1) overall — the page DATA query is itself O(files) and ~2.4× larger, so
-  this removes only ONE of two O(files) footer scans (~16% on a deep partition); true O(page)
-  needs a write-time lake manifest (FUTURE work, NOT claimed). `db_view.py` at 100%
-  line+branch; read-only viewer, ENGINE UNCHANGED. Prior merged:
+- **Active branch:** `claude/serene-hamilton-jlzt1n` (the `/completeness` + `/universe` SPOT
+  1-minute verdict is HONESTLY downgraded `full` → `partial` when the symbol's covered data
+  does NOT begin in JANUARY 2020 — DEC-SPOT-COMPLETENESS-2020-FLOOR-001, MIGRATION.md #868:
+  the spot pull starts at the 2020 `GROWW_HISTORY_FLOOR`, so a late-listed / late-data symbol
+  (JIOFIN 2023-08-21, TMPV 2025-10-24, SHRIRAMFIN 2022-12-20, and within-2020-but-late starts
+  TATACONSUM 2020-02-27 / MAXHEALTH 2020-08-21) has its empty pre-start windows RESOLVE → every
+  planned window `settled` → the prior verdict read `full` even though the data starts late. One
+  COMMON helper `_spot_dimension_verdict_with_floor` (used by BOTH the scoreboard rollup
+  `_per_symbol_spot` and the `/universe` detail `_spot_dimension_detail`) downgrades a `full`
+  whose `_from_2020(first_date)` is False to `partial`; the floor is MONTH-granular January 2020
+  (`_FROM_2020_EXCLUSIVE_UPPER = 2020-02-01`, operator decree "must have Jan-2020 data"), so only
+  symbols with the solid full-2020 history read `full` (the strong evidence the deep-drill
+  brute-force backtest needs); `partial`/`failed`/`none` unchanged. The SPOT analog of the
+  OPTIONS real-years fix #859. Read/rollup-side only — `completeness.py` at 100% line+branch
+  (43 tests, +5); NO pull/registry/engine/scope/vocab change, ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cache) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
   DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +
@@ -461,7 +465,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-candle-count-cache`
+- **Active feature branch:** `claude/serene-hamilton-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
