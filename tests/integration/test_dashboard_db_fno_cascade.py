@@ -107,3 +107,36 @@ def test_no_lake_root_degrades_to_empty_on_all_three_routes() -> None:
         "/api/v1/db/fno/contracts", params={"underlying": "NIFTY", "expiry": "2025-01-02"}
     ).json()
     assert con == {"underlying": "NIFTY", "expiry": "2025-01-02", "contracts": []}
+
+
+def test_undecodable_partition_surfaced_in_unparsed(tmp_path: Path) -> None:
+    # A present-but-undecodable F&O partition (bad expiry token) is surfaced in
+    # `unparsed`, never hidden, and never pollutes the cascade (Golden Rule #1).
+    lake = tmp_path / "lake"
+    _write_fno(lake, "NSE-NIFTY-02Jan25-24000-CE")
+    _write_fno(lake, "NSE-NIFTY-BADX-FUT")  # bad expiry token → does not decode
+    fake_store = SimpleNamespace(path=lake / "instruments.duckdb")
+    c = TestClient(build_app(DashboardState(), instrument_store=fake_store))
+    body = c.get("/api/v1/db/fno/underlyings").json()
+    assert body["underlyings"] == ["NIFTY"]  # only the decodable one
+    assert [u["symbol"] for u in body["unparsed"]] == ["NSE-NIFTY-BADX-FUT"]
+
+
+def test_db_page_wires_the_cascade_frontend() -> None:
+    # The /db page serves the cascade picker: it must reference all three lazy
+    # endpoints + the level handlers, so the symbol→expiry→contract UI is live
+    # (the repo's template-presence convention — JS is not Python-coverage-gated).
+    c = TestClient(build_app(DashboardState(), instrument_store=SimpleNamespace(path=None)))
+    html = c.get("/db").text
+    assert "/api/v1/db/fno/underlyings" in html
+    assert "/api/v1/db/fno/expiries?underlying=" in html
+    assert "/api/v1/db/fno/contracts?underlying=" in html
+    for fn in (
+        "loadFnoCascade",
+        "onFnoUnderlyingChange",
+        "onFnoExpiryChange",
+        "onFnoContractChange",
+    ):
+        assert fn in html
+    # The cascade picker elements + the flat-dropdown fallback for spot/option.
+    assert 'id="cund"' in html and 'id="cexp"' in html and 'id="ccon"' in html

@@ -268,7 +268,11 @@ const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], 
    row's datasets (never more than one at once). The selected dataset's `kind`
    drives which API + column set is used; spot AND fno share the candle API + the
    7 OHLCV columns (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer). */
-const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: null, desc: false, offset: 0 };
+const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: null, desc: false, offset: 0,
+  /* F&O cascade substate (DEC-DB-FNO-CASCADE-001): lazy symbol→expiry→contract picker.
+     `unds`/`exps`/`cons` are the three level lists; `und`/`exp`/`con` the current
+     selections. Only used when kind === "fno"; spot/option keep the flat dropdown. */
+  fno: { unds: [], und: "", exps: [], exp: "", cons: [], con: "" } };
 /* F&O registry-viewer state (DEC-DERIV-REGISTRY-DB-VIEW-001). `kind` is the
    active registry row ("expiries"|"contracts"); the registry is a SEPARATE
    `registry.duckdb` cache surfaced read-only as a grid (columns/rows/total). */
@@ -903,6 +907,9 @@ async function selectCandles(kind) {
   const isFno = cstate.kind === "fno";
   const lakeLabel = isOpt ? "expired-option" : isFno ? "F&O candle" : "candle";
   dataEl.innerHTML = '<div class="empty">loading ' + lakeLabel + ' datasets…</div>';
+  /* F&O uses the lazy symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001) —
+     O(1) tiny payloads, not the flat thousand-row contract dropdown. */
+  if (isFno) { await loadFnoCascade(); return; }
   try {
     const r = await fetch("/api/v1/db/candles/datasets");
     const body = await r.json();
@@ -923,6 +930,60 @@ async function selectCandles(kind) {
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
   }
+}
+
+/* ── F&O symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001) ──
+   Each level is a tiny O(1)-cached fetch; only when a CONTRACT is picked do we
+   build the (interval) dataset descriptors so curDataset()/buildCandleUrl() work
+   exactly as for spot — the cascade is purely the picker, the query path is shared. */
+async function _fnoFetch(url) {
+  try { const r = await fetch(url); return r.ok ? await r.json() : null; }
+  catch (e) { return null; }
+}
+async function loadFnoCascade() {
+  const body = await _fnoFetch("/api/v1/db/fno/underlyings");
+  cstate.fno = { unds: (body && body.underlyings) || [],
+                 und: "", exps: [], exp: "", cons: [], con: "" };
+  cstate.datasets = []; cstate.key = null;
+  if (!cstate.fno.unds.length) {
+    renderCandleView(null, "No F&O candle data yet — pull an instrument's futures/options history on /universe first.");
+    return;
+  }
+  renderCandleView(null, "pick an underlying → expiry → contract");
+}
+async function onFnoUnderlyingChange(und) {
+  cstate.fno.und = und; cstate.fno.exp = ""; cstate.fno.exps = [];
+  cstate.fno.con = ""; cstate.fno.cons = []; cstate.datasets = []; cstate.key = null;
+  if (und) {
+    const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(und));
+    cstate.fno.exps = (body && body.expiries) || [];
+  }
+  renderCandleView(null, "pick an expiry");
+}
+async function onFnoExpiryChange(exp) {
+  cstate.fno.exp = exp; cstate.fno.con = ""; cstate.fno.cons = [];
+  cstate.datasets = []; cstate.key = null;
+  if (exp) {
+    const body = await _fnoFetch("/api/v1/db/fno/contracts?underlying="
+      + encodeURIComponent(cstate.fno.und) + "&expiry=" + encodeURIComponent(exp));
+    cstate.fno.cons = (body && body.contracts) || [];
+  }
+  renderCandleView(null, "pick a contract");
+}
+/* A contract carries its available intervals; materialise ONE fno dataset
+   descriptor per interval so the shared candle query path can address it, then
+   select the first interval and run the page. */
+function onFnoContractChange(symbol) {
+  cstate.fno.con = symbol;
+  const con = cstate.fno.cons.find(c => c.symbol === symbol) || null;
+  if (!con) { cstate.datasets = []; cstate.key = null; renderCandleView(null, "pick a contract"); return; }
+  cstate.datasets = (con.intervals || []).map(iv => ({
+    kind: "fno", exchange: con.exchange, segment: "FNO", symbol: con.symbol, interval: iv,
+    underlying: cstate.fno.und, expiry: cstate.fno.exp,
+    strike: con.strike, instrument_type: con.instrument_type, option_type: con.option_type }));
+  cstate.cols = null; cstate.offset = 0;
+  cstate.key = cstate.datasets.length ? dsKey(cstate.datasets[0]) : null;
+  if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a contract");
 }
 
 function buildCandleUrl() {
@@ -987,8 +1048,13 @@ function candleControlsHtml() {
     const on = cstate.cols === null || cstate.cols.has(c);
     return '<label><input type="checkbox" class="ccol" value="' + c + '"' + (on ? " checked" : "") + '>' + c + '</label>';
   }).join("");
+  /* F&O shows the symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001); spot &
+     option keep the single flat dataset dropdown. */
+  const picker = cstate.kind === "fno"
+    ? fnoCascadeHtml()
+    : '<span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>';
   return '<div class="qbar">'
-    + '<div class="qrow"><span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>'
+    + '<div class="qrow">' + picker
     + '<span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '">'
     + '<span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></div>'
     + '<div class="qrow"><span class="lab">Columns</span><div class="colbox">' + colChecks + '</div></div>'
@@ -996,6 +1062,32 @@ function candleControlsHtml() {
     + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select>'
     + '<button class="apply" id="capply">Apply query</button></div>'
     + '</div>';
+}
+
+/* The F&O cascade picker markup: three dependent selects (underlying → expiry →
+   contract) + an interval sub-pick when the chosen contract has more than one
+   stored interval (DEC-DB-FNO-CASCADE-001). A later level is disabled until its
+   parent is chosen, so the operator can never land on an impossible combination. */
+function fnoCascadeHtml() {
+  const f = cstate.fno;
+  const opt = (v, sel, label) => '<option value="' + esc(v) + '"'
+    + (v === sel ? " selected" : "") + '>' + esc(label || v) + '</option>';
+  const undOpts = '<option value="">— underlying —</option>' + f.unds.map(u => opt(u, f.und)).join("");
+  const expOpts = '<option value="">— expiry —</option>' + f.exps.map(e => opt(e, f.exp)).join("");
+  const conOpts = '<option value="">— contract —</option>'
+    + f.cons.map(c => opt(c.symbol, f.con, c.label)).join("");
+  let h = '<span class="lab">Underlying</span><select id="cund">' + undOpts + '</select>'
+    + '<span class="lab">Expiry</span><select id="cexp"' + (f.und ? "" : " disabled") + '>' + expOpts + '</select>'
+    + '<span class="lab">Contract</span><select id="ccon"' + (f.exp ? "" : " disabled") + '>' + conOpts + '</select>';
+  const d = curDataset();
+  const intervals = cstate.datasets.map(x => x.interval);
+  if (intervals.length > 1) {
+    h += '<span class="lab">Interval</span><select id="cintv">'
+      + intervals.map(iv => '<option value="' + esc(iv) + '"'
+        + (d && iv === d.interval ? " selected" : "") + '>' + esc(iv) + '</option>').join("")
+      + '</select>';
+  }
+  return h;
 }
 
 function readCandleControls() {
@@ -1056,6 +1148,20 @@ function renderCandleView(body, err) {
   if (ap) ap.addEventListener("click", () => { readCandleControls(); cstate.offset = 0; runCandleQuery(true); });
   const ds = document.getElementById("cds");
   if (ds) ds.addEventListener("change", () => { readCandleControls(); cstate.offset = 0; runCandleQuery(false); });
+  /* F&O cascade handlers (DEC-DB-FNO-CASCADE-001): each level fetches the next; the
+     contract pick materialises the dataset + runs the page; the interval sub-pick
+     re-points to the chosen interval's descriptor. */
+  const cund = document.getElementById("cund");
+  if (cund) cund.addEventListener("change", () => onFnoUnderlyingChange(cund.value));
+  const cexp = document.getElementById("cexp");
+  if (cexp) cexp.addEventListener("change", () => onFnoExpiryChange(cexp.value));
+  const ccon = document.getElementById("ccon");
+  if (ccon) ccon.addEventListener("change", () => onFnoContractChange(ccon.value));
+  const cintv = document.getElementById("cintv");
+  if (cintv) cintv.addEventListener("change", () => {
+    const pick = cstate.datasets.find(x => x.interval === cintv.value);
+    if (pick) { cstate.key = dsKey(pick); cstate.offset = 0; runCandleQuery(false); }
+  });
   wireCandlePager(body);
 }
 
