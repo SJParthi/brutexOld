@@ -27,7 +27,7 @@ class TestDescriptorConstants:
     def test_table_segment_version(self) -> None:
         assert FNO_CANDLE_LAKE_TABLE == "fno_candles"
         assert FNO_CANDLE_LAKE_SEGMENT == "FNO"
-        assert FNO_CANDLE_LAKE_SCHEMA_VERSION == 1
+        assert FNO_CANDLE_LAKE_SCHEMA_VERSION == 2
 
     def test_path_template_is_the_canonical_bars_layout(self) -> None:
         rendered = FNO_CANDLE_LAKE_PATH_TEMPLATE.format(
@@ -69,16 +69,15 @@ class TestColumns:
     def test_sources_are_known_kinds(self) -> None:
         assert {c.source for c in FNO_CANDLE_COLUMNS} <= {"bar", "partition", "symbol", "derived"}
 
-    def test_derived_moneyness_columns(self) -> None:
-        # DEC-FNO-MONEYNESS-001: read-time derived (never stored) moneyness + ATM±N.
-        for name in ("moneyness", "atm_offset"):
-            col = next(c for c in FNO_CANDLE_COLUMNS if c.name == name)
-            assert col.source == "derived"
-            assert col.nullable is True
+    def test_derived_moneyness_column(self) -> None:
+        # DEC-FNO-MONEYNESS-001: ONE read-time derived (never stored) combined column —
+        # bucket + signed depth as a single "ITM -1" / "OTM +10" string.
         moneyness = next(c for c in FNO_CANDLE_COLUMNS if c.name == "moneyness")
-        atm_offset = next(c for c in FNO_CANDLE_COLUMNS if c.name == "atm_offset")
+        assert moneyness.source == "derived"
+        assert moneyness.nullable is True
         assert moneyness.dtype == "string"
-        assert atm_offset.dtype == "int"
+        # the old separate atm_offset column is folded into the moneyness label.
+        assert all(c.name != "atm_offset" for c in FNO_CANDLE_COLUMNS)
 
 
 class TestSchemaMetaMapping:
@@ -99,7 +98,7 @@ class TestSchemaMetaMapping:
         meta = fno_candle_lake_schema_meta()
         assert meta["fno_candle_lake.table"] == "fno_candles"
         assert meta["fno_candle_lake.segment"] == "FNO"
-        assert meta["fno_candle_lake.schema_version"] == "1"
+        assert meta["fno_candle_lake.schema_version"] == "2"
         assert meta["fno_candle_lake.instrument_types"] == "CE,FUT,PE"
         assert meta["fno_candle_lake.columns"].split(",") == [c.name for c in FNO_CANDLE_COLUMNS]
         assert all(isinstance(v, str) for v in meta.values())

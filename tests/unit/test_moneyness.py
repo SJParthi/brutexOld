@@ -280,11 +280,14 @@ class TestFormatLabel:
     def test_atm_zero(self) -> None:
         assert _format_label(Moneyness.ATM, 0) == "ATM"
 
-    def test_graded_positive_offset_has_suffix(self) -> None:
-        assert _format_label(Moneyness.OTM, 2) == "ATM+2 (OTM)"
+    def test_otm_is_bucket_plus_depth(self) -> None:
+        assert _format_label(Moneyness.OTM, 2) == "OTM +2"
 
-    def test_graded_negative_offset_has_suffix(self) -> None:
-        assert _format_label(Moneyness.ITM, -1) == "ATM-1 (ITM)"
+    def test_itm_is_bucket_minus_depth(self) -> None:
+        # The sign tracks the BUCKET (ITM negative), not the raw offset — a raw +offset
+        # ITM (a put) still reads "ITM -N".
+        assert _format_label(Moneyness.ITM, -1) == "ITM -1"
+        assert _format_label(Moneyness.ITM, 1) == "ITM -1"
 
 
 class TestMoneynessView:
@@ -294,7 +297,7 @@ class TestMoneynessView:
         v = moneyness_view(OPTION_CALL, Decimal("100"), Decimal("180"), Decimal("50"))
         assert v.moneyness is Moneyness.ITM
         assert v.atm_offset == -2
-        assert v.label == "ATM-2 (ITM)"
+        assert v.label == "ITM -2"
 
     def test_nearest_rung_reads_atm(self) -> None:
         # spot 120, strike 100, step 50 → band 25, |20| <= 25 → ATM, offset 0.
@@ -325,7 +328,7 @@ class TestMoneynessView:
 
     def test_atm_bucket_always_carries_zero_offset(self) -> None:
         # moneyness_view never emits the contradictory (ATM, non-zero) pair — so the
-        # label is always a bare "ATM", never "ATM-1 (…)" from the view.
+        # label is always a bare "ATM", never "ITM -…"/"OTM +…" for an ATM bar.
         v = moneyness_view(OPTION_CALL, Decimal("100"), Decimal("124.99"), Decimal("50"))
         assert v.moneyness is Moneyness.ATM
         assert v.atm_offset == 0
@@ -355,14 +358,15 @@ class TestGoldenTable:
     @pytest.mark.parametrize(
         ("option_type", "strike", "spot", "step", "bucket", "offset", "label"),
         [
-            # CALL across the grid (step 50, spot 1000).
-            ("CE", "800", "1000", "50", Moneyness.ITM, -4, "ATM-4 (ITM)"),
+            # CALL across the grid (step 50, spot 1000) — ITM minus, OTM plus.
+            ("CE", "800", "1000", "50", Moneyness.ITM, -4, "ITM -4"),
             ("CE", "1000", "1000", "50", Moneyness.ATM, 0, "ATM"),
-            ("CE", "1200", "1000", "50", Moneyness.OTM, 4, "ATM+4 (OTM)"),
-            # PUT mirror.
-            ("PE", "1200", "1000", "50", Moneyness.ITM, 4, "ATM+4 (ITM)"),
+            ("CE", "1200", "1000", "50", Moneyness.OTM, 4, "OTM +4"),
+            # PUT mirror — raw offset sign flips, but the label sign tracks the BUCKET,
+            # so a deep-ITM put still reads "ITM -4" (consistent with the call).
+            ("PE", "1200", "1000", "50", Moneyness.ITM, 4, "ITM -4"),
             ("PE", "1000", "1000", "50", Moneyness.ATM, 0, "ATM"),
-            ("PE", "800", "1000", "50", Moneyness.OTM, -4, "ATM-4 (OTM)"),
+            ("PE", "800", "1000", "50", Moneyness.OTM, -4, "OTM +4"),
             # Future → N/A regardless of strike/spot/step.
             ("FUT", "1000", "1000", "50", Moneyness.NA, None, "—"),
             # No grid → bucket only.

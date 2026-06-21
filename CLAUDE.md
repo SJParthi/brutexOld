@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-21 (DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
+_Last updated: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869 — the
+per-option moneyness + strike-distance is now shown as ONE combined cell
+(**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"**) instead of the split
+bucket + ATM±N columns of #865 — `brutex/data/moneyness.py` `_format_label`
+reformatted to `"<bucket> <signed depth>"` (sign tracks the BUCKET: ITM negative,
+OTM positive, so calls AND puts read alike; depth = `|atm_offset|` strikes). The
+movers screen + the `/db` F&O candle view each collapse the two columns into one
+"moneyness" column (`OptionMover.moneyness_label`; `FNO_CANDLE_COLUMNS` /
+`FNO_MONEYNESS_COLUMNS` now a single derived `moneyness` label). Pure DISPLAY reshape
+over the SAME read-time-derived values; ENGINE stays NIFTY/BANKNIFTY/SENSEX, NO
+storage/scope/vocab/rate change. Earlier: 2026-06-21 (DEC-SPOT-COMPLETENESS-2020-FLOOR-001,
+MIGRATION.md #868 — the `/completeness` + `/universe` SPOT 1-minute verdict is HONESTLY
+downgraded `full` → `partial` when the symbol's covered data does NOT begin in January 2020
+(a late listing / late vendor data, even one starting later WITHIN 2020); one COMMON helper
+`_spot_dimension_verdict_with_floor` so only symbols with the solid full-2020 history read
+`full`; read/rollup-side only — `completeness.py`, ENGINE UNCHANGED). Earlier: 2026-06-21
+(DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
 the `/db` candle-pager TOTAL (`COUNT(*)` over `read_parquet(glob)`, O(files) — a
 Parquet-footer read per file, recomputed on EVERY paging click) is now memoised behind
 a generation-stamped cache: `db_view.query_candles` gains an optional `count_cache`
@@ -213,18 +229,18 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/mapping-integrity-jlzt1n` (a real-time GREEN/RED audit that PROVES
-  the core spot↔options mapping is precise — DEC-MAPPING-INTEGRITY-RECONCILE-001, MIGRATION.md #869:
+  the core spot↔options mapping is precise — DEC-MAPPING-INTEGRITY-RECONCILE-001, MIGRATION.md #870:
   the new PURE `brutex/data/mapping_integrity.py` reconciles every options-eligible spot underlying
   (`store.fno_eligible_underlyings`) against the coverage ledger (`store.list_coverage`) in ONE
   O(eligible) pass / O(1) per spot — flagging each that pulled ZERO expiries (`none`, the GATING
   red, e.g. M&M) or only PART of the 2020→today span (`partial`, amber, e.g. BAJAJ-AUTO's
   2024-only). Surfaced as `GET /api/v1/universe/mapping-integrity` + a green/red `/universe`
   `#mappanel` (15s live). The DETECTOR only — M&M reads RED until **F2** normalises the
-  options-fetch symbol (route the vendor F&O underlying via token-join + encode `&`/`-`, the
-  options sibling of #845), after which the panel flips GREEN. The special-char options-fetch gap
-  (`contracts.py` sends the spot `trading_symbol` verbatim) is the root cause F2 fixes.
+  options-fetch symbol (encode `&`; the instrument.csv confirms the mapping is already exact,
+  so M&M's `&` is an HTTP-encoding bug, not a symbol mismatch), after which the panel flips GREEN.
   `mapping_integrity.py` at 100% line+branch (13 unit + 3 integration); NO pull/engine/scope/vocab
   change, ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-FNO-MONEYNESS-LABEL-001 #869 (PR #824, /movers + /db moneyness + strike-distance as one cell) +
   DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, spot late-start → partial, Jan-2020 floor) +
   DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cache) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
