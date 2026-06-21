@@ -228,9 +228,30 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-corrupt-skip-jlzt1n` (a single corrupt / unreadable Parquet file now SKIPS
-  that one instrument on the `/movers` screens — logged + counted — instead of 500-ing the WHOLE page —
-  DEC-MOVERS-CORRUPT-SKIP-001, MIGRATION.md #886, gap #4 of the operator's critical-risks resilience-hardening
+- **Active branch:** `claude/lake-partition-flock-jlzt1n` (a cross-process advisory `fcntl.flock` now serialises
+  concurrent writers to the SAME lake month partition, closing a SILENT data-LOSS race —
+  DEC-LAKE-PARTITION-FLOCK-001, MIGRATION.md #887, gap #5 of the operator's critical-risks resilience-hardening
+  batch: the two lake Parquet writers do a READ-modify-WRITE on a month partition guarded ONLY by a per-partition
+  `threading.Lock` (intra-process), so two pulls sharing `BRUTEX_LAKE_ROOT` — a CLI `brutex fetch` + a dashboard
+  pull — writing the same partition lost-update SILENTLY: P1 reads `[T1,T2,T3]`, P2 reads `[T1,T2,T3]`, P1 writes
+  `[…,T4]`, P2's `os.replace` clobbers it → T4 gone, no error (keep-first only dedups WITHIN one process; across
+  processes the last `os.replace` wins). NEW `brutex/data/partition_lock.py` (`partition_write_lock(lake_root,
+  dest)` + `partition_lock_path`) takes a blocking exclusive `flock` held ACROSS the whole read-modify-write so
+  the later process reads AFTER the earlier `os.replace`; BOTH writers nest it inside their existing per-partition
+  `threading.Lock` (same lock ORDER everywhere → no cross-partition deadlock). HONEST envelope: the lock is on a
+  STABLE sidecar `<lake_root>/.locks/<sha256(dest)>.lock` (NEVER the partition file — `os.replace` swaps its
+  inode; `.locks` is outside `bars/`+`options/` and not a `*.parquet`, so no scanner sees it); PER PARTITION
+  (different partitions never contend — fan-out parallelism kept); NO stale-lock recovery needed (the kernel
+  releases an flock on fd-close/process death); O(1) per partition write (one open+flock+close, NOT per bar); a
+  disk-full at lock creation maps to `LakeWriteHalt` (reuses #885's `lake_write_guard`); POSIX (Linux+macOS),
+  Windows OUT OF SCOPE; it serialises CONCURRENT writers, NOT a cross-partition transaction. `partition_lock.py`
+  at 100% line+branch; both writers stay 100% line+branch with NEW deterministic regression tests probing a
+  SEPARATE fd DURING the merge READ to assert the lock is HELD (FAIL without the flock); chaos/sink/ingest/
+  lake-scan suites green; ruff/mypy --strict/pyright clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-MOVERS-CORRUPT-SKIP-001, MIGRATION.md #886 (a single corrupt /
+  unreadable Parquet file now SKIPS
+  that one instrument on the `/movers` screens — logged + counted — instead of 500-ing the WHOLE page,
+  gap #4 of the operator's critical-risks resilience-hardening
   batch: a multi-agent audit flagged this the MOST production-likely HIGH — the spot/futures/options candidate
   loops (`movers_snapshot.compute_spot_candidates`, `movers_futures.compute_futures_candidates`,
   `movers_options.compute_options_candidates`) read each instrument's Parquet with NO per-instrument guard, so
@@ -618,7 +639,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-corrupt-skip-jlzt1n`
+- **Active feature branch:** `claude/lake-partition-flock-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
