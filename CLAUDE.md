@@ -228,8 +228,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-fno-columns-jlzt1n` (the `/db` F&O candle view gains four read-time
-  derived value columns — DEC-DB-FNO-COLUMNS-001, MIGRATION.md #881: `spot` · `intrinsic` · `time_value` ·
+- **Active branch:** `claude/options-lake-reader-jlzt1n` (the options executor's `OptionBarSource` seam now
+  has a PRODUCTION lake reader — DEC-OPTIONS-LAKE-READER-001, MIGRATION.md #882, gap-analysis item 1: NEW
+  `brutex/options/lake_source.py` `LakeOptionBarSource` resolves a leg's `(instrument, expiry, strike,
+  option_type, entry_ts, exit_ts)` to its F&O-candle-lake contract — DISCOVERED by scanning +
+  `parse_fno_symbol`-matching the `bars/<exch>/FNO/` dirs (cached per underlying, robust, not a reconstructed
+  string) — reads its 1-minute bars into a cached `{instant→OptionBar}` map, and returns the entry+exit
+  `OptionBarPair` matched on the EXACT UTC minute, or `None` (never a fabricated price). `side`/`strike` from
+  the query; `spot`/`iv` honest `None` (the candle lake stores neither). O(1) per `load_pair` after the
+  per-contract read. `lake_source.py` 100% line+branch (13 unit) + 2 executor-integration tests pricing a
+  real round-trip through `materialize_trade`; options suite (53) + F&O smoke (77) green; ruff/mypy
+  --strict/pyright clean (a hostile-review BLOCKER on a mis-coded `# type: ignore` was folded — row typed
+  `Mapping[str, Any]` like `movers_snapshot._row_to_bar`). REFERENCE_ONLY F&O lake; ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX). Prior merged: DEC-DB-FNO-COLUMNS-001, MIGRATION.md #881 (PR #835: the `/db` F&O candle view gains four read-time
+  derived value columns: `spot` · `intrinsic` · `time_value` ·
   `days_to_expiry` appended after `moneyness`, ALL riding the SAME single per-bar underlying-spot join
   `moneyness` already does (no extra read). `db_view._fno_moneyness_rows` → `_fno_derived_rows` (5-tuple
   from ONE join) + pure `_option_intrinsic`; a future/undecodable reads `—`/`None` values but still gets
@@ -545,7 +557,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-fno-cascade-jlzt1n`
+- **Active feature branch:** `claude/options-lake-reader-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
