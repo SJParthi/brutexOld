@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #868 — the
+_Last updated: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869 — the
 per-option moneyness + strike-distance is now shown as ONE combined cell
 (**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"**) instead of the split
 bucket + ATM±N columns of #865 — `brutex/data/moneyness.py` `_format_label`
@@ -28,7 +28,13 @@ movers screen + the `/db` F&O candle view each collapse the two columns into one
 "moneyness" column (`OptionMover.moneyness_label`; `FNO_CANDLE_COLUMNS` /
 `FNO_MONEYNESS_COLUMNS` now a single derived `moneyness` label). Pure DISPLAY reshape
 over the SAME read-time-derived values; ENGINE stays NIFTY/BANKNIFTY/SENSEX, NO
-storage/scope/vocab/rate change. Earlier: 2026-06-21 (DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
+storage/scope/vocab/rate change. Earlier: 2026-06-21 (DEC-SPOT-COMPLETENESS-2020-FLOOR-001,
+MIGRATION.md #868 — the `/completeness` + `/universe` SPOT 1-minute verdict is HONESTLY
+downgraded `full` → `partial` when the symbol's covered data does NOT begin in January 2020
+(a late listing / late vendor data, even one starting later WITHIN 2020); one COMMON helper
+`_spot_dimension_verdict_with_floor` so only symbols with the solid full-2020 history read
+`full`; read/rollup-side only — `completeness.py`, ENGINE UNCHANGED). Earlier: 2026-06-21
+(DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
 the `/db` candle-pager TOTAL (`COUNT(*)` over `read_parquet(glob)`, O(files) — a
 Parquet-footer read per file, recomputed on EVERY paging click) is now memoised behind
 a generation-stamped cache: `db_view.query_candles` gains an optional `count_cache`
@@ -222,8 +228,8 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-keller-6b7pzx` (the per-option moneyness +
-  strike-distance is now ONE combined cell — DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #868:
+- **Active branch:** `claude/fno-moneyness-label` (the per-option moneyness +
+  strike-distance is now ONE combined cell — DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869:
   `brutex/data/moneyness.py` `_format_label` reformatted to `"<bucket> <signed depth>"`
   (**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"** · `"—"` future · `"?"` no spot),
   the sign tracking the BUCKET so calls AND puts read alike (ITM negative, OTM positive,
@@ -234,6 +240,7 @@ hostile-review pass._
   `moneyness` column) each show ONE column reading the combined label, tinted by the leading
   bucket. Pure DISPLAY reshape over the SAME #865 read-time-derived values; ENGINE
   UNCHANGED, NO storage/scope/vocab/rate change. Prior merged:
+  DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, /completeness spot late-start partial) +
   DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cached) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
@@ -471,7 +478,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-candle-count-cache`
+- **Active feature branch:** `claude/serene-hamilton-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

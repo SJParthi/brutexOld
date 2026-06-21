@@ -96,10 +96,11 @@ def _cov(
 
 def test_symbol_full_when_one_minute_settled() -> None:
     # 1-day is DERIVED from 1-minute so it is NOT scored — only the fetched 1-minute is, and a
-    # stray 1-day row is ignored (covers the SPOT_DIMENSIONS skip for 1-day).
+    # stray 1-day row is ignored (covers the SPOT_DIMENSIONS skip for 1-day). The 1-minute series
+    # starts at the 2020 floor → genuinely ``full`` (DEC-SPOT-COMPLETENESS-2020-FLOOR-001).
     rows = [
         _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),  # derived 1-day → skipped
-        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED),
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
     ]
     board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
     [row] = board["spot"]["per_symbol"]
@@ -129,6 +130,81 @@ def test_symbol_none_when_no_ledger_record() -> None:
     board = build_completeness_scoreboard(rows, {"NSE-Y": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
     assert row["1minute"] == DIM_NONE and row["overall"] == DIM_NONE
+
+
+def test_symbol_partial_when_settled_but_data_starts_after_2020() -> None:
+    """DEC-SPOT-COMPLETENESS-2020-FLOOR-001 — a 1-minute series whose windows are all settled
+    but whose earliest bar is LATE (a late listing / late data, e.g. JIOFIN 2023-08-21) is
+    HONESTLY downgraded ``full`` → ``partial``: it does NOT hold the solid 2020-floor history the
+    deep-drill brute-force backtest needs, and is excluded from the FULL 1-minute count."""
+    rows = [_spot_row("NSE-JIOFIN", "1minute", COMPLETENESS_SETTLED, first_date="2023-08-21")]
+    board = build_completeness_scoreboard(rows, {"NSE-JIOFIN": CATEGORY_EQUITY}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
+    # the actually-covered start is carried so the operator SEES why it is partial.
+    assert row["1minute_start"] == "2023-08-21"
+    # a late-start symbol does NOT inflate the FULL 1-minute count.
+    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {"total": 1, "full_1minute": 0}
+
+
+def test_symbol_partial_when_settled_but_no_first_date() -> None:
+    """A settled 1-minute dimension with NO bars at all (every planned window resolved empty →
+    no first_date) cannot claim solid 2020 history → ``partial``, never ``full``
+    (DEC-SPOT-COMPLETENESS-2020-FLOOR-001 — the ``from_2020`` False / first_date None edge)."""
+    rows = [_spot_row("NSE-EMPTY", "1minute", COMPLETENESS_SETTLED)]  # first_date defaults None
+    board = build_completeness_scoreboard(rows, {"NSE-EMPTY": CATEGORY_EQUITY}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
+
+
+def test_within_2020_late_start_is_partial_january_floor() -> None:
+    """DEC-SPOT-COMPLETENESS-2020-FLOOR-001 (operator decree "must have Jan-2020 data") — a symbol
+    whose first bar is LATER within 2020 (TATACONSUM 2020-02-27, MAXHEALTH 2020-08-21) is missing
+    the START of 2020 → ``partial``, NOT ``full``. Only a January-2020 start counts as solid."""
+    rows = [
+        _spot_row("NSE-TATACONSUM", "1minute", COMPLETENESS_SETTLED, first_date="2020-02-27"),
+        _spot_row("NSE-MAXHEALTH", "1minute", COMPLETENESS_SETTLED, first_date="2020-08-21"),
+    ]
+    cats = {"NSE-TATACONSUM": CATEGORY_EQUITY, "NSE-MAXHEALTH": CATEGORY_EQUITY}
+    board = build_completeness_scoreboard(rows, cats, [], {})
+    verdicts = {r["symbol"]: r["1minute"] for r in board["spot"]["per_symbol"]}
+    assert verdicts == {"NSE-TATACONSUM": DIM_PARTIAL, "NSE-MAXHEALTH": DIM_PARTIAL}
+    # neither within-2020-late symbol counts toward the FULL 1-minute total.
+    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {"total": 2, "full_1minute": 0}
+
+
+def test_january_2020_boundary_full_vs_partial() -> None:
+    """The January-2020 floor boundary (DEC-SPOT-COMPLETENESS-2020-FLOOR-001): a last-January-day
+    start (2020-01-31) is still solid → ``full``; the very next day (2020-02-01, the exclusive
+    upper bound) is already missing the start of 2020 → ``partial``."""
+    rows = [
+        _spot_row("NSE-JANEND", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-31"),
+        _spot_row("NSE-FEB1", "1minute", COMPLETENESS_SETTLED, first_date="2020-02-01"),
+    ]
+    cats = {"NSE-JANEND": CATEGORY_EQUITY, "NSE-FEB1": CATEGORY_EQUITY}
+    board = build_completeness_scoreboard(rows, cats, [], {})
+    verdicts = {r["symbol"]: r["1minute"] for r in board["spot"]["per_symbol"]}
+    assert verdicts == {"NSE-JANEND": DIM_FULL, "NSE-FEB1": DIM_PARTIAL}
+
+
+def test_per_symbol_detail_downgrades_late_start_to_partial() -> None:
+    """The per-symbol DETAIL map (the /universe strip) applies the SAME 2020-floor downgrade
+    (DEC-SPOT-COMPLETENESS-2020-FLOOR-001): a settled-but-late-start dimension reads ``partial``
+    with from_2020 False, while the explicit first/last dates disambiguate the reason."""
+    rows = [
+        _spot_row(
+            "NSE-TMPV",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2025-10-24",
+            last_date="2026-06-19",
+        )
+    ]
+    out = per_symbol_completeness(rows, {"NSE-TMPV": CATEGORY_EQUITY}, [], {})
+    minute = out["NSE-TMPV"]["spot"]["1minute"]
+    assert minute["status"] == DIM_PARTIAL and minute["from_2020"] is False
+    assert minute["first_date"] == "2025-10-24" and minute["last_date"] == "2026-06-19"
+    assert out["NSE-TMPV"]["spot"]["overall"] == DIM_PARTIAL
 
 
 def test_unmapped_symbol_and_derived_interval_skipped() -> None:
@@ -522,7 +598,8 @@ def test_scoreboard_csv_full_board_has_all_sections_and_rows() -> None:
     """A populated board renders the four labelled sections + summary + per-row detail."""
     spot_rows = [
         _spot_row("NSE-NIFTY", "1day", COMPLETENESS_SETTLED),  # derived → skipped
-        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED),
+        # settled FROM the 2020 floor → genuinely full (DEC-SPOT-COMPLETENESS-2020-FLOOR-001).
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
         _spot_row("NSE-RELIANCE", "1minute", COMPLETENESS_PENDING),
     ]
     cats = {"NSE-NIFTY": CATEGORY_INDEX, "NSE-RELIANCE": CATEGORY_EQUITY}
