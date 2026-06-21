@@ -65,6 +65,7 @@ from brutex.data.partition import (
 from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
+from brutex.money import round_money
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
 #: (a single corrupt / version-incompatible Parquet file is SKIPPED, logged as
@@ -316,6 +317,17 @@ SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
 #: A FUTURE reads ``—``; an option whose underlying spot is absent reads ``?`` (never faked).
 FNO_MONEYNESS_COLUMNS: Final = ("moneyness",)
 
+#: The per-bar derived VALUE columns appended after ``moneyness`` (DEC-DB-FNO-COLUMNS-001) —
+#: the option's worth at a glance, ALL from the SAME per-bar spot join ``moneyness`` already
+#: does (no extra read). ``spot``/``intrinsic``/``time_value`` are 2-dp money strings (``None``
+#: for a future / when the underlying spot is absent); ``days_to_expiry`` is a pure int (no I/O)
+#: resolvable for any decodable contract (option OR future), ``None`` only when undecodable.
+FNO_VALUE_COLUMNS: Final = ("spot", "intrinsic", "time_value", "days_to_expiry")
+
+#: The full F&O derived column set in display order: the combined moneyness label, then the
+#: value columns. ``_fno_derived_columns`` returns this for an ``FNO`` page.
+FNO_DERIVED_COLUMNS: Final = FNO_MONEYNESS_COLUMNS + FNO_VALUE_COLUMNS
+
 #: Spot segments probed (in order) to resolve an F&O contract's UNDERLYING spot series —
 #: an index underlying rides ``INDEX``, a single-stock underlying rides ``CASH``. The
 #: shared :data:`brutex.data.partition.SPOT_PROBE_SEGMENTS` is the ONE source of truth for
@@ -326,10 +338,12 @@ _SPOT_PROBE_SEGMENTS: Final = SPOT_PROBE_SEGMENTS
 def _fno_derived_columns(segment: str) -> tuple[str, ...]:
     """The extra derived columns an F&O candle page carries beyond the spot pair.
 
-    :data:`FNO_MONEYNESS_COLUMNS` for an ``FNO`` partition, else ``()`` — so spot and
-    F&O views keep a stable, segment-appropriate column set (DEC-FNO-MONEYNESS-001).
+    :data:`FNO_DERIVED_COLUMNS` (the combined moneyness label + the value columns
+    ``spot``/``intrinsic``/``time_value``/``days_to_expiry``, DEC-DB-FNO-COLUMNS-001) for an
+    ``FNO`` partition, else ``()`` — so spot and F&O views keep a stable, segment-appropriate
+    column set (DEC-FNO-MONEYNESS-001).
     """
-    return FNO_MONEYNESS_COLUMNS if segment == FNO_CANDLE_LAKE_SEGMENT else ()
+    return FNO_DERIVED_COLUMNS if segment == FNO_CANDLE_LAKE_SEGMENT else ()
 
 
 def _format_candle_timestamp(value: Any, interval: str) -> Any:
@@ -1455,7 +1469,7 @@ def query_candles(
     # against the underlying spot at each bar (DEC-FNO-MONEYNESS-001); spot pages do not.
     extra_columns: list[str] = [*SPOT_DERIVED_COLUMNS, *_fno_derived_columns(segment)]
     if segment == FNO_CANDLE_LAKE_SEGMENT:
-        moneyness = _fno_moneyness_rows(
+        fno_cells = _fno_derived_rows(
             conn,
             lake_root,
             exchange=exchange,
@@ -1465,7 +1479,7 @@ def query_candles(
             out_columns=out_columns,
         )
         extra_cells: list[tuple[Any, ...]] = [
-            (*spot_pair, *money) for spot_pair, money in zip(derived, moneyness, strict=True)
+            (*spot_pair, *fno) for spot_pair, fno in zip(derived, fno_cells, strict=True)
         ]
     else:
         extra_cells = list(derived)
@@ -1918,7 +1932,19 @@ def _fno_strike_step(lake_root: Path, *, exchange: str, symbol: str) -> Decimal 
     return derive_strike_step(strikes)
 
 
-def _fno_moneyness_rows(
+def _option_intrinsic(option_type: str, strike: Decimal, spot: Decimal) -> Decimal:
+    """Intrinsic value of an option at *spot*: ``max(0, spot−strike)`` CE / ``max(0, strike−spot)`` PE.
+
+    Pure + O(1); returns ``Decimal(0)`` for an out-of-the-money option (never negative). The
+    caller (:func:`_fno_derived_rows`) only reaches here with *strike* and *spot* both present
+    (the early-return guard narrows ``strike``; the per-row ``spot is None`` check precedes the
+    call), so no ``None`` handling is needed here.
+    """
+    diff = (spot - strike) if option_type == "CE" else (strike - spot)
+    return diff if diff > Decimal(0) else Decimal(0)
+
+
+def _fno_derived_rows(
     conn: Any,
     lake_root: Path,
     *,
@@ -1927,33 +1953,57 @@ def _fno_moneyness_rows(
     interval: str,
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],
-) -> list[tuple[str]]:
-    """Compute the per-bar combined moneyness label for an F&O candle page.
+) -> list[tuple[str, str | None, str | None, str | None, int | None]]:
+    """Compute the per-bar F&O derived cells: ``(moneyness, spot, intrinsic, time_value, days_to_expiry)``.
 
-    Each row is a 1-tuple ``(label,)`` — the bucket + signed strike-depth as ONE string
-    (``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"``), matching :data:`FNO_MONEYNESS_COLUMNS`.
-    For an OPTION contract each bar is classified against the underlying spot at THAT
-    bar's instant (DEC-FNO-MONEYNESS-001) — time-varying, so a fixed-strike contract
-    reads ``OTM +N`` then ``ITM -N`` as the spot moves. A FUTURE (or an undecodable
-    symbol) reads ``—`` on every bar (no spot read attempted); an option whose underlying
-    spot is absent reads ``?``. Never raises — a per-bar browse never crashes on one
-    contract whose spot was not pulled (Golden Rule #1).
+    Matches :data:`FNO_DERIVED_COLUMNS`. The combined ``moneyness`` label (bucket + signed
+    strike-depth, ``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"``) is classified against the
+    underlying spot at THAT bar's instant (DEC-FNO-MONEYNESS-001) — time-varying, so a
+    fixed-strike contract reads ``OTM +N`` then ``ITM -N`` as the spot moves. The VALUE
+    columns (DEC-DB-FNO-COLUMNS-001) ride the SAME single per-bar spot join (no extra read):
 
-    The per-bar spot join keys on the bar ``timestamp``, so moneyness needs the
-    ``timestamp`` column present in *out_columns*. The viewer always projects it (it is
-    the candle grid's first column); a deliberately ``timestamp``-less column projection
-    therefore reads ``UNKNOWN`` on every bar (honest — the join key is absent — never a
-    fabricated bucket), not a crash.
+    * ``spot`` — the underlying spot close at the bar (2-dp money string), ``None`` if absent;
+    * ``intrinsic`` — :func:`_option_intrinsic` (2-dp), ``None`` when no spot;
+    * ``time_value`` — ``close − intrinsic`` (2-dp), ``None`` when no spot;
+    * ``days_to_expiry`` — pure ``(expiry − bar IST date).days`` (no I/O), resolvable for any
+      decodable contract (option OR future), ``None`` only when undecodable / no timestamp.
+
+    A FUTURE (or an undecodable symbol) reads ``moneyness="—"`` with ``None`` value columns
+    and no spot read attempted — but still gets ``days_to_expiry`` when its expiry decodes; an
+    option whose underlying spot is absent reads ``moneyness="?"`` with ``None`` values. Never
+    raises — a per-bar browse never crashes on one contract whose spot was not pulled
+    (Golden Rule #1).
+
+    The per-bar spot join keys on the bar ``timestamp``; a deliberately ``timestamp``-less
+    column projection therefore reads ``UNKNOWN``/``None`` on every bar (honest — the join key
+    is absent — never a fabricated value), not a crash.
     """
     parts = parse_fno_symbol(symbol)
     option_type = parts.option_type if parts is not None else None
     strike = parts.strike if parts is not None else None
     underlying = parts.underlying if parts is not None else None
-    # A future / undecodable contract has no moneyness — "—" on every bar, no spot read.
-    if option_type is None or underlying is None:
-        na = moneyness_view(option_type, strike, None, None)
-        return [(na.label,)] * len(raw_rows)
+    expiry = parts.expiry if parts is not None else None
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
+    close_idx = out_columns.index("close") if "close" in out_columns else -1
+
+    def _dte(ts: Any) -> int | None:
+        """Calendar days from the bar's IST date to expiry — pure, ``None`` if unknown."""
+        if expiry is None or not isinstance(ts, datetime):
+            return None
+        return (expiry - _bar_ist_date(ts)).days
+
+    # A future / undecodable contract (or an option with no decoded strike) has no
+    # moneyness/value — "—" + None on every bar, no spot read; days_to_expiry still resolves
+    # for a future whose expiry decoded. Narrowing on ``strike`` here lets the option branch
+    # below treat it as a definite ``Decimal`` (an option always decodes a strike, else
+    # ``parse_fno_symbol`` returns ``None`` → caught by ``underlying is None``).
+    if option_type is None or underlying is None or strike is None:
+        na_label = moneyness_view(option_type, strike, None, None).label
+        return [
+            (na_label, None, None, None, _dte(row[ts_idx] if ts_idx >= 0 else None))
+            for row in raw_rows
+        ]
+
     ts_values = [
         row[ts_idx] for row in raw_rows if ts_idx >= 0 and isinstance(row[ts_idx], datetime)
     ]
@@ -1966,12 +2016,26 @@ def _fno_moneyness_rows(
         interval=interval,
         ts_values=ts_values,
     )
-    rows: list[tuple[str]] = []
+    rows: list[tuple[str, str | None, str | None, str | None, int | None]] = []
     for row in raw_rows:
         ts = row[ts_idx] if ts_idx >= 0 else None
         spot = spot_by_ts.get(_utc_instant(ts)) if isinstance(ts, datetime) else None
         view = moneyness_view(option_type, strike, spot, step)
-        rows.append((view.label,))
+        if spot is None:
+            rows.append((view.label, None, None, None, _dte(ts)))
+            continue
+        intrinsic = _option_intrinsic(option_type, strike, spot)
+        close = row[close_idx] if close_idx >= 0 else None
+        time_value = str(round_money(_to_decimal(close) - intrinsic)) if close is not None else None
+        rows.append(
+            (
+                view.label,
+                str(round_money(spot)),
+                str(round_money(intrinsic)),
+                time_value,
+                _dte(ts),
+            )
+        )
     return rows
 
 
@@ -2727,7 +2791,9 @@ def list_registry_contracts(
 __all__ = [
     "ALLOWED_OPERATORS",
     "CANDLE_COLUMNS",
+    "FNO_DERIVED_COLUMNS",
     "FNO_MONEYNESS_COLUMNS",
+    "FNO_VALUE_COLUMNS",
     "KNOWN_TABLES",
     "OPTIONS_DIR_NAME",
     "OPTION_CANDLE_COLUMNS",

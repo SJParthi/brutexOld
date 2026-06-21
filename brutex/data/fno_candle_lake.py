@@ -127,6 +127,34 @@ FNO_CANDLE_COLUMNS: Final[tuple[FnoCandleColumn, ...]] = (
         'ITM/ATM/OTM + signed strike-depth vs the per-bar spot ("ITM -1" / "OTM +10"; '
         "— future · ? if no spot).",
     ),
+    # READ-time derived value columns (DEC-DB-FNO-COLUMNS-001) — the option's worth at a
+    # glance, all reusing the SAME per-bar spot join moneyness already does (no extra read).
+    # ``None`` for a future / when the underlying spot is absent; ``days_to_expiry`` is pure
+    # (no I/O) and resolves for any decodable contract (option OR future).
+    FnoCandleColumn(
+        "spot", "decimal", "derived", True, "Underlying spot at the bar (₹, 2-dp); None if absent."
+    ),
+    FnoCandleColumn(
+        "intrinsic",
+        "decimal",
+        "derived",
+        True,
+        "Intrinsic max(0, spot−strike) CE / max(0, strike−spot) PE (₹, 2-dp); None if no spot.",
+    ),
+    FnoCandleColumn(
+        "time_value",
+        "decimal",
+        "derived",
+        True,
+        "Time value = close − intrinsic (₹, 2-dp); None if no spot.",
+    ),
+    FnoCandleColumn(
+        "days_to_expiry",
+        "int",
+        "derived",
+        True,
+        "Calendar days from the bar's IST date to expiry; None if undecodable.",
+    ),
 )
 
 

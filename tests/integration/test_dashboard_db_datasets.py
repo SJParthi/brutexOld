@@ -171,6 +171,11 @@ class TestDbCandleDatasetsApi:
             "strike",
             "option_type",
             "interval",
-            # READ-time derived combined moneyness label (DEC-FNO-MONEYNESS-001).
+            # READ-time derived combined moneyness label (DEC-FNO-MONEYNESS-001) + the
+            # value columns (DEC-DB-FNO-COLUMNS-001).
             "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
         ]

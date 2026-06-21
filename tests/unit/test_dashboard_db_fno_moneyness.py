@@ -28,10 +28,10 @@ import duckdb
 import pytest
 from brutex.dashboard.db_view import (
     CANDLE_COLUMNS,
-    FNO_MONEYNESS_COLUMNS,
+    FNO_DERIVED_COLUMNS,
     SPOT_DERIVED_COLUMNS,
     _fno_derived_columns,
-    _fno_moneyness_rows,
+    _fno_derived_rows,
     _fno_strike_step,
     _underlying_spot_close_by_ts,
     _utc_instant,
@@ -106,8 +106,16 @@ class TestUtcInstant:
 
 
 class TestFnoDerivedColumns:
-    def test_fno_segment_carries_the_moneyness_pair(self) -> None:
-        assert _fno_derived_columns("FNO") == FNO_MONEYNESS_COLUMNS
+    def test_fno_segment_carries_the_derived_columns(self) -> None:
+        assert _fno_derived_columns("FNO") == FNO_DERIVED_COLUMNS
+        # moneyness first, then the four value columns (DEC-DB-FNO-COLUMNS-001).
+        assert FNO_DERIVED_COLUMNS == (
+            "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
+        )
 
     @pytest.mark.parametrize("segment", ["CASH", "INDEX"])
     def test_spot_segment_carries_nothing(self, segment: str) -> None:
@@ -244,16 +252,16 @@ class TestUnderlyingSpotByTs:
         assert set(out) == {_utc_instant(_T1), _utc_instant(_T2)}
 
 
-# ── _fno_moneyness_rows ─────────────────────────────────────────────────────
+# ── _fno_derived_rows ───────────────────────────────────────────────────────
 
 
-class TestFnoMoneynessRows:
+class TestFnoDerivedRows:
     def test_option_classifies_per_bar_against_spot(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_option_lake(tmp_path)
         raw = [(_T1, Decimal("150")), (_T2, Decimal("210"))]
-        rows = _fno_moneyness_rows(
+        rows = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -262,14 +270,19 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp", "close"],
         )
-        # T1 spot 23900 < 24000 CE → OTM +2; T2 spot 24200 > 24000 → ITM -4 (combined label).
-        assert rows == [("OTM +2",), ("ITM -4",)]
+        # (moneyness, spot, intrinsic, time_value, days_to_expiry). T1 spot 23900 < 24000 CE
+        # → OTM +2, intrinsic max(0, 23900−24000)=0, tv 150−0=150; T2 spot 24200 → ITM -4,
+        # intrinsic 200, tv 210−200=10. Bar IST date 2025-06-02 → expiry 2025-06-30 = 28 days.
+        assert rows == [
+            ("OTM +2", "23900.00", "0.00", "150.00", 28),
+            ("ITM -4", "24200.00", "200.00", "10.00", 28),
+        ]
 
-    def test_future_is_na_on_every_bar(
+    def test_future_is_na_with_days_to_expiry(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         raw = [(_T1,), (_T2,)]
-        rows = _fno_moneyness_rows(
+        rows = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -278,32 +291,34 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp"],
         )
-        assert rows == [("—",), ("—",)]
+        # A future: "—" + None value columns (no spot read), but days_to_expiry resolves.
+        assert rows == [("—", None, None, None, 28), ("—", None, None, None, 28)]
 
-    def test_undecodable_symbol_is_na(
+    def test_undecodable_symbol_is_na_and_dte_none(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         raw = [(_T1,)]
-        rows = _fno_moneyness_rows(
+        rows = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
-            symbol="NSE-NIFTY-BADX-FUT",
+            symbol="NSE-NIFTY-BADX-FUT",  # bad expiry token → no expiry → dte None
             interval="1minute",
             raw_rows=raw,
             out_columns=["timestamp"],
         )
-        assert rows == [("—",)]
+        assert rows == [("—", None, None, None, None)]
 
     def test_option_without_spot_is_unknown(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
-        # CE present, but no underlying spot in the lake → UNKNOWN, never faked.
+        # CE present, but no underlying spot in the lake → "?" + None values, never faked;
+        # days_to_expiry still resolves (it is pure, no spot needed).
         _write(
             tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-24000-CE", bars=[_bar(_T1, "150")]
         )
         raw = [(_T1, Decimal("150"))]
-        rows = _fno_moneyness_rows(
+        rows = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -312,15 +327,16 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp", "close"],
         )
-        assert rows == [("?",)]
+        assert rows == [("?", None, None, None, 28)]
 
     def test_no_timestamp_projection_is_unknown(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
-        # When the page omits the timestamp column there is no per-bar spot → UNKNOWN.
+        # When the page omits the timestamp column there is no per-bar spot → "?", and no
+        # join key for days_to_expiry either → None.
         _seed_option_lake(tmp_path)
         raw = [(Decimal("150"),), (Decimal("210"),)]
-        rows = _fno_moneyness_rows(
+        rows = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -329,7 +345,54 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["close"],
         )
-        assert rows == [("?",), ("?",)]
+        assert rows == [("?", None, None, None, None), ("?", None, None, None, None)]
+
+    def test_spot_present_but_close_not_projected_time_value_none(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # Spot resolves (timestamp projected + spot in lake) but ``close`` is not in the
+        # projection → spot/intrinsic still compute, time_value is None (no close to net).
+        _seed_option_lake(tmp_path)
+        raw = [(_T1,)]
+        rows = _fno_derived_rows(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            interval="1minute",
+            raw_rows=raw,
+            out_columns=["timestamp"],  # no "close"
+        )
+        assert rows == [("OTM +2", "23900.00", "0.00", None, 28)]
+
+    def test_put_intrinsic_is_strike_minus_spot(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # A PUT mirrors the CE: intrinsic = max(0, strike − spot). The seeded lake gives the
+        # NIFTY spot (T1 23900, T2 24200) + the sibling-strike grid (step 50); add a 24000 PE.
+        _seed_option_lake(tmp_path)
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jun25-24000-PE",
+            bars=[_bar(_T1, "150"), _bar(_T2, "90")],
+        )
+        raw = [(_T1, Decimal("150")), (_T2, Decimal("90"))]
+        rows = _fno_derived_rows(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            symbol="NSE-NIFTY-30Jun25-24000-PE",
+            interval="1minute",
+            raw_rows=raw,
+            out_columns=["timestamp", "close"],
+        )
+        # T1 spot 23900 < 24000 PE → ITM, intrinsic 24000−23900=100, tv 150−100=50;
+        # T2 spot 24200 > 24000 → OTM, intrinsic max(0, 24000−24200)=0, tv 90−0=90.
+        assert [(r[0].split()[0], r[2], r[3]) for r in rows] == [
+            ("ITM", "100.00", "50.00"),
+            ("OTM", "0.00", "90.00"),
+        ]
 
 
 # ── query_candles integration ───────────────────────────────────────────────
@@ -349,10 +412,22 @@ class TestQueryCandlesFnoMoneyness:
             interval="1minute",
             limit=50,
         )
-        assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS, *FNO_MONEYNESS_COLUMNS]
-        # Two derived spot cols then the ONE combined moneyness label per bar vs spot.
+        assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS, *FNO_DERIVED_COLUMNS]
+        # The combined moneyness label + the value columns per bar vs spot.
         m_idx = out["columns"].index("moneyness")
         assert [r[m_idx] for r in out["rows"]] == ["OTM +2", "ITM -4"]
+        cols = out["columns"]
+        spot_idx, intr_idx, tv_idx, dte_idx = (
+            cols.index("spot"),
+            cols.index("intrinsic"),
+            cols.index("time_value"),
+            cols.index("days_to_expiry"),
+        )
+        # T1 spot 23900 (CE 24000 → intrinsic 0, tv close-0); T2 spot 24200 (intrinsic 200).
+        assert [r[spot_idx] for r in out["rows"]] == ["23900.00", "24200.00"]
+        assert [r[intr_idx] for r in out["rows"]] == ["0.00", "200.00"]
+        assert [r[tv_idx] for r in out["rows"]] == ["150.00", "10.00"]
+        assert [r[dte_idx] for r in out["rows"]] == [28, 28]
 
     def test_fno_empty_page_still_has_moneyness_columns(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -368,7 +443,7 @@ class TestQueryCandlesFnoMoneyness:
             limit=50,
         )
         assert out["rows"] == []
-        assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS, *FNO_MONEYNESS_COLUMNS]
+        assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS, *FNO_DERIVED_COLUMNS]
 
     def test_spot_page_has_no_moneyness_columns(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path

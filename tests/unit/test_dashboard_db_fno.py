@@ -101,10 +101,15 @@ class TestFnoCandleLakeSchema:
             "strike",
             "option_type",
             "interval",
-            # READ-time derived combined moneyness label (DEC-FNO-MONEYNESS-001).
+            # READ-time derived combined moneyness label (DEC-FNO-MONEYNESS-001) + the
+            # value columns (DEC-DB-FNO-COLUMNS-001).
             "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
         ]
         # each entry is a flat JSON-friendly dict
         assert all({"name", "dtype", "source", "nullable", "doc"} == set(c) for c in schema)
         derived = {c["name"]: c for c in schema if c["source"] == "derived"}
-        assert set(derived) == {"moneyness"}
+        assert set(derived) == {"moneyness", "spot", "intrinsic", "time_value", "days_to_expiry"}
