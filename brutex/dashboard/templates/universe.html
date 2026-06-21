@@ -568,6 +568,17 @@
     <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
   </div>
 
+  <!-- Mapping integrity — the real-time green/red spot↔options guarantee
+       (DEC-MAPPING-INTEGRITY-RECONCILE-001). VERIFIED = every options-eligible spot pulled
+       its option history; RED = a spot pulled ZERO expiries (e.g. M&M before the F2 fix). -->
+  <div id="mappanel" role="status" aria-live="polite"
+       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Mapping integrity</b>
+    <span id="mapverdict" style="font-weight:600;"></span>
+    <span id="mapdetail" style="color:var(--muted);"></span>
+  </div>
+
   <main class="grid" aria-label="Instrument drill-down">
     <section class="col" aria-labelledby="h-instruments">
       <h3 id="h-instruments">Instruments</h3>
@@ -895,6 +906,35 @@ async function loadCompleteness() {
     COV = map; covSig = sig;
     refreshCov();   // patch ONLY the per-row .cov strips — never a ~750-row rebuild
   } catch (e) { /* transient — keep the last shown strip */ }
+}
+
+async function loadMappingIntegrity() {
+  /* Read-only: the green/red spot↔options mapping verdict (DEC-MAPPING-INTEGRITY-RECONCILE-001).
+     VERIFIED when every options-eligible spot pulled >=1 expiry; RED lists the spots that
+     pulled ZERO (e.g. M&M before the F2 options-fetch fix). Never throws — keeps last shown. */
+  try {
+    const r = await fetch("/api/v1/universe/mapping-integrity");
+    if (!r.ok) return;
+    const m = await r.json();
+    const panel = document.getElementById("mappanel");
+    const verdict = document.getElementById("mapverdict");
+    const detail = document.getElementById("mapdetail");
+    if (!panel) return;
+    panel.style.display = "block";
+    if (m.is_green) {
+      verdict.textContent = " ✅ VERIFIED";
+      verdict.style.color = "#4ade80";
+      detail.textContent = " · " + m.fully_covered + "/" + m.total_eligible +
+        " eligible spots pulled their option history";
+    } else {
+      const reds = (m.under_pulled || [])
+        .filter(u => u.reason === "none" && !u.whitelisted).map(u => u.symbol);
+      verdict.textContent = " ❌ " + m.gating_failures + " spot(s) pulled ZERO expiries";
+      verdict.style.color = "#f87171";
+      detail.textContent = reds.length ? (" · " + reds.slice(0, 12).join(", ") +
+        (reds.length > 12 ? " …" : "")) : "";
+    }
+  } catch (e) { /* transient — keep the last shown verdict */ }
 }
 
 /* Patch only the per-row completeness strip in place on a COV change — the live
@@ -1765,6 +1805,8 @@ async function bootstrap() {
   // live so the "has the entire 2020→today set?" answer updates as pulls land.
   loadCompleteness();
   setInterval(loadCompleteness, 15000);
+  loadMappingIntegrity();
+  setInterval(loadMappingIntegrity, 15000);
 }
 bootstrap();
 </script>

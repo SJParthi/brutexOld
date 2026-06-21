@@ -228,20 +228,21 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fno-moneyness-label` (the per-option moneyness +
-  strike-distance is now ONE combined cell — DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869:
-  `brutex/data/moneyness.py` `_format_label` reformatted to `"<bucket> <signed depth>"`
-  (**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"** · `"—"` future · `"?"` no spot),
-  the sign tracking the BUCKET so calls AND puts read alike (ITM negative, OTM positive,
-  depth = `|atm_offset|` strikes). The movers screen (`OptionMover.moneyness_label`,
-  `_option_row`'s `"moneyness"` key, single `movers.html` column) AND the `/db` F&O candle
-  view (`db_view._fno_moneyness_rows` single label; `FNO_MONEYNESS_COLUMNS` /
-  `fno_candle_lake.FNO_CANDLE_COLUMNS` collapse `(moneyness, atm_offset)` → one derived
-  `moneyness` column) each show ONE column reading the combined label, tinted by the leading
-  bucket. Pure DISPLAY reshape over the SAME #865 read-time-derived values; ENGINE
-  UNCHANGED, NO storage/scope/vocab/rate change. Prior merged:
-  DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, /completeness spot late-start partial) +
-  DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cached) +
+- **Active branch:** `claude/mapping-integrity-jlzt1n` (a real-time GREEN/RED audit that PROVES
+  the core spot↔options mapping is precise — DEC-MAPPING-INTEGRITY-RECONCILE-001, MIGRATION.md #870:
+  the new PURE `brutex/data/mapping_integrity.py` reconciles every options-eligible spot underlying
+  (`store.fno_eligible_underlyings`) against the coverage ledger (`store.list_coverage`) in ONE
+  O(eligible) pass / O(1) per spot — flagging each that pulled ZERO expiries (`none`, the GATING
+  red, e.g. M&M) or only PART of the 2020→today span (`partial`, amber, e.g. BAJAJ-AUTO's
+  2024-only). Surfaced as `GET /api/v1/universe/mapping-integrity` + a green/red `/universe`
+  `#mappanel` (15s live). The DETECTOR only — M&M reads RED until **F2** normalises the
+  options-fetch symbol (encode `&`; the instrument.csv confirms the mapping is already exact,
+  so M&M's `&` is an HTTP-encoding bug, not a symbol mismatch), after which the panel flips GREEN.
+  `mapping_integrity.py` at 100% line+branch (13 unit + 3 integration); NO pull/engine/scope/vocab
+  change, ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-FNO-MONEYNESS-LABEL-001 #869 (PR #824, /movers + /db moneyness + strike-distance as one cell) +
+  DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, spot late-start → partial, Jan-2020 floor) +
+  DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cache) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
   DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +
@@ -478,7 +479,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/serene-hamilton-jlzt1n`
+- **Active feature branch:** `claude/mapping-integrity-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

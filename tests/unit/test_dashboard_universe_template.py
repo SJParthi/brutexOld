@@ -112,3 +112,16 @@ def test_universe_wires_per_symbol_completeness_strip() -> None:
     # the honest from-2020 flag drives the green ✓ vs amber ⚠ vs red ✕ states.
     assert "dim.from_2020" in html
     assert "first_date" in html and "last_date" in html
+
+
+def test_universe_wires_mapping_integrity_panel() -> None:
+    """The /universe page renders the green/red mapping-integrity panel
+    (DEC-MAPPING-INTEGRITY-RECONCILE-001) — fetches the verdict endpoint, keeps it live,
+    and has the panel element the JS targets."""
+    from brutex.dashboard.app import _render_universe_html
+
+    html = _render_universe_html()
+    assert "/api/v1/universe/mapping-integrity" in html
+    assert "function loadMappingIntegrity(" in html
+    assert "setInterval(loadMappingIntegrity" in html
+    assert 'id="mappanel"' in html and 'id="mapverdict"' in html

@@ -134,6 +134,12 @@ from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
+from brutex.data.mapping_integrity import (
+    EligibleSpot,
+    coverage_years_from_records,
+    reconcile_mapping_integrity,
+    report_to_dict,
+)
 from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
@@ -2496,6 +2502,40 @@ def build_app(
             _build_per_symbol_completeness, store, lake_root.parent
         )
         return JSONResponse(per_symbol)
+
+    @app.get("/api/v1/universe/mapping-integrity")
+    async def api_universe_mapping_integrity() -> JSONResponse:
+        """GET /api/v1/universe/mapping-integrity — the green/red spot↔options mapping verdict.
+
+        DEC-MAPPING-INTEGRITY-RECONCILE-001. Reconciles every options-eligible spot underlying
+        (``store.fno_eligible_underlyings``) against the coverage ledger
+        (``store.list_coverage``) and returns the honest integrity verdict: each eligible spot
+        that pulled ZERO expiries (gating RED — e.g. M&M, the special-character options-fetch
+        bug F2 fixes) or only PART of the 2020→today span (amber — e.g. BAJAJ-AUTO's 2024-only).
+        This is the real-time, self-checking guarantee that the core spot↔options mapping is
+        precise, surfaced as ``is_green`` + a drill-down. Pure delegation to
+        :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
+        line+branch); READ-ONLY, no pull. No store wired → 503.
+        """
+        store = _require_store()
+        expected_years = _coverage_years()
+
+        def _build() -> dict[str, Any]:
+            """Gather the two store reads off the event loop and reconcile (thin I/O glue)."""
+            eligible = [
+                EligibleSpot(exchange=exch.value, symbol=sym)
+                for exch, sym in store.fno_eligible_underlyings()
+            ]
+            report = reconcile_mapping_integrity(
+                eligible_spots=eligible,
+                covered_years=coverage_years_from_records(store.list_coverage()),
+                expected_years=expected_years,
+                whitelist=(),
+                now=datetime.now(UTC),
+            )
+            return report_to_dict(report)
+
+        return JSONResponse(await run_in_threadpool(_build))
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
