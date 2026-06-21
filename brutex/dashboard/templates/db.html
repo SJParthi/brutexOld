@@ -324,11 +324,17 @@ const NUM_COLS = new Set([
   "open", "high", "low", "close", "volume", "open_interest", "oi",
   "strike", "spot", "iv", "lot_size", "tick_size", "sm_freeze_qty",
   "security_id", "row_count", "underlying_security_id",
+  // F&O derived value columns (DEC-DB-FNO-COLUMNS-001) — numeric, NOT timestamps,
+  // even though "time_value"/"days_to_expiry" contain the substrings time/expiry.
+  "intrinsic", "time_value", "days_to_expiry",
 ]);
 function colType(col) {
   const c = String(col).toLowerCase();
-  if (c === "timestamp" || c.includes("date") || c.includes("time") ||
-      c === "expiry" || c.endsWith("_at")) {
+  // An EXPLICIT numeric column wins over the time-NAME heuristic below, so
+  // "time_value"/"days_to_expiry" read as numeric (# ), not timestamps (⏱).
+  if (!NUM_COLS.has(c) &&
+      (c === "timestamp" || c.includes("date") || c.includes("time") ||
+       c === "expiry" || c.endsWith("_at"))) {
     return { cls: "t-time", glyph: "⏱", title: "timestamp" };
   }
   if (NUM_COLS.has(c) || PCT_COLS.has(col) ||
