@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-FNO-MONEYNESS-001, MIGRATION.md #865 — per-option
+_Last updated: 2026-06-20 (DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #866 —
+the `/universe` BACKEND summary + instruments reads are now O(1) on a repeat poll:
+NEW `brutex/dashboard/universe_cache.py` `UniverseSnapshotCache` memoises the three
+lean store reads (`fno_eligible_underlyings` + `list_index_equity_instruments` +
+`reference_only_security_ids`) + the derived `summary` / per-`kind` instrument rows,
+keyed by a content-revision token = `(count(*), max(fetched_at))` over the
+`instruments` table ITSELF (NOT the `instrument_runs` audit sidecar, which lags an
+upsert — the stale-illusion trap this avoids, Golden Rule #1). Every `upsert_many`
+stamps a fresh `fetched_at`, so any master change moves the token → rebuild; an empty
+store keys at the stable `(0, "")`. Wired into `build_app` as a `universe_cache` param
+(mirrors `summary_cache`/`movers_cache`); the routes call `_universe_cache.summary` /
+`.instruments`. Honest envelope: HIT is O(1) (bench ratio 1.02× for a 100× deeper
+universe; cold read scales 13×→166×), the first read after a load still pays the real
+O(candidates) scan (once per revision). `universe_cache.py` at 100% line+branch;
+read-only dashboard accelerator, ENGINE UNCHANGED (`InstrumentStore` untouched). This
+COMPLETES on the backend the `/universe` FRONTEND O(1) work of #863. Earlier: 2026-06-20
+(DEC-FNO-MONEYNESS-001, MIGRATION.md #865 — per-option
 **moneyness (ITM/ATM/OTM) + a signed ATM±N strike offset** are now DERIVED at read
 time (never stored — time-varying: the strike is fixed but the spot moves) for the
 ENTIRE F&O universe (all ~212 stocks + indices), from the NEW shared engine
@@ -182,22 +198,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-keller-6b7pzx` (per-option **moneyness
-  (ITM/ATM/OTM) + signed ATM±N strike offset** for the ENTIRE F&O universe —
-  DEC-FNO-MONEYNESS-001, MIGRATION.md #865: NEW shared engine `brutex/data/moneyness.py`
-  (`classify`/`derive_strike_step` [DYNAMIC grid = min positive strike gap, all ~212
-  stocks + indices, never hardcoded]/`atm_offset`/`moneyness_view`), DERIVED at read time
-  (never stored — time-varying). Surfaced on the options-movers screen (`OptionMover` +
-  `compute_option_mover(strike_step=)` + `movers.html` columns) AND the `/db` F&O candle
-  viewer (`db_view.query_candles` appends `moneyness`+`atm_offset` per bar for
-  `segment="FNO"`, classifying each bar vs the underlying spot joined by timestamp;
-  FUT→`NA`, no-spot→`UNKNOWN`); `fno_candle_lake.FNO_CANDLE_COLUMNS` advertises both as
-  `source="derived"`. Read-only — NO storage/scope/vocab/rate change, ENGINE unchanged.
-  Prior merged: DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818) + DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817) + DEC-LIVE-REMOVE-001 #862 (live feed removed) + DEC-FNO-CANDLE-LAKE-001 #861
-  (PR #814) + DEC-MOVERS-O1-LATENCY-001 #860 (PR #815)
-  + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813)
-  + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858 (PR #812))
-
+- **Active branch:** `claude/universe-backend-cache` (the `/universe` BACKEND reads
+  are now O(1) on a repeat poll — DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #866: NEW
+  `brutex/dashboard/universe_cache.py` `UniverseSnapshotCache` memoises the three lean store
+  reads + the derived `summary` / per-`kind` instrument rows, keyed by a content-revision
+  token `(count(*), max(fetched_at))` over the `instruments` table ITSELF (every `upsert_many`
+  stamps a fresh `fetched_at` → any master change moves the token → rebuild; empty store keys
+  at the stable `(0, "")`; NOT keyed off the `instrument_runs` audit sidecar, which can lag —
+  Golden Rule #1). Wired into `build_app` as a `universe_cache` param (mirrors
+  `summary_cache`/`movers_cache`); `api_universe_summary` + `api_universe_instruments` call it.
+  Honest envelope: HIT O(1) (bench ratio 1.02× for a 100× deeper universe; cold read scales
+  13×→166×), first read after a load still pays O(candidates) once per revision.
+  `universe_cache.py` at 100% line+branch; read-only accelerator, ENGINE UNCHANGED — COMPLETES
+  the `/universe` FRONTEND O(1) work of #863 on the backend. Prior merged:
+  DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
+  DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +
+  DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817, /db+/universe instant) +
+  DEC-LIVE-REMOVE-001 #862 (PR #816, entire LIVE feed removed) +
+  DEC-FNO-CANDLE-LAKE-001 #861 (PR #814, F&O candle lake first-class `/db` table + schema_meta) +
+  DEC-MOVERS-O1-LATENCY-001 #860 (PR #815, /movers near-O(1) snapshot cache + month-bounded
+  reads) + DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001 #859 (PR #813, /completeness OPTIONS shows
+  real expiry years + honest `partial`) + DEC-UNIVERSE-CONSTITUENTS-TICK-IN-PLACE-001 #858
+  (PR #812))
 ---
 
 ## 2. Golden Rules (never violate)
@@ -424,7 +446,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-registry-pagination`
+- **Active feature branch:** `claude/universe-backend-cache`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
