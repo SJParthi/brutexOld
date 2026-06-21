@@ -179,9 +179,12 @@ class TestAtomicWriteCleanup:
     def test_tmp_file_cleaned_up_on_replace_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Force os.replace to fail AFTER the tmp parquet is written → the
-        # finally-branch must unlink the orphan tmp so no .tmp leaks.
-        import brutex.data.option_parquet_writer as mod
+        # Force os.replace to fail AFTER the tmp parquet is written → the cleanup
+        # must unlink the orphan tmp so no .tmp leaks. _atomic_write_parquet now
+        # delegates to the shared atomic_io helper (DEC-LAKE-WRITE-HALT-001), so the
+        # rename happens there — patch os.replace at that module. A generic OSError
+        # (no ENOSPC errno) re-raises as-is (it is NOT escalated to a LakeWriteHalt).
+        import brutex.data.atomic_io as mod
 
         def _boom(src: object, dst: object) -> None:
             raise OSError("disk full")

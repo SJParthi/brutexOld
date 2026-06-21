@@ -54,10 +54,7 @@ never affects the stored data (CLAUDE.md §2 Rule 7).
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import os
-import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,6 +62,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import WriterError
 from brutex.data.models import CandleBar, CatalogEntry
 from brutex.data.partition import (
@@ -507,67 +505,61 @@ class ParquetWriter:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
-        # Build columns from the bars. Keep Decimal → float conversion
-        # explicit so the cast is visible in audit logs.
-        rows = {
-            "timestamp": [b.timestamp for b in sorted_bars],
-            "open": [float(b.open) for b in sorted_bars],
-            "high": [float(b.high) for b in sorted_bars],
-            "low": [float(b.low) for b in sorted_bars],
-            "close": [float(b.close) for b in sorted_bars],
-            "volume": [b.volume for b in sorted_bars],
-            "open_interest": [b.open_interest for b in sorted_bars],
-        }
-        df = pl.DataFrame(
-            rows,
-            schema={
-                "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
-                "open": pl.Float64,
-                "high": pl.Float64,
-                "low": pl.Float64,
-                "close": pl.Float64,
-                "volume": pl.Int64,
-                "open_interest": pl.Int64,
-            },
-        )
-
-        buffer: list[bytes] = []
-
-        # polars write_parquet → file-like. Use an in-memory BytesIO so
-        # we can compute the hash before touching the filesystem.
+        # Build columns from the bars + render to a Parquet byte blob. The polars
+        # allocations (the DataFrame build + write_parquet) are the lake-write OOM
+        # site, so they run inside lake_write_guard: a MemoryError here becomes a
+        # LakeWriteHalt pull-wide stop instead of a raw mid-render crash
+        # (DEC-LAKE-WRITE-HALT-001). Decimal → float conversion is explicit so the
+        # cast is visible in audit logs.
         import io
 
-        bio = io.BytesIO()
-        df.write_parquet(
-            bio,
-            compression="zstd",
-            compression_level=ZSTD_LEVEL,
-            row_group_size=ROW_GROUP_SIZE,
-            use_pyarrow=False,
-            statistics=False,  # stats are non-deterministic; skip for reproducibility
-        )
-        buffer.append(bio.getvalue())
-        return b"".join(buffer)
+        with lake_write_guard():
+            rows = {
+                "timestamp": [b.timestamp for b in sorted_bars],
+                "open": [float(b.open) for b in sorted_bars],
+                "high": [float(b.high) for b in sorted_bars],
+                "low": [float(b.low) for b in sorted_bars],
+                "close": [float(b.close) for b in sorted_bars],
+                "volume": [b.volume for b in sorted_bars],
+                "open_interest": [b.open_interest for b in sorted_bars],
+            }
+            df = pl.DataFrame(
+                rows,
+                schema={
+                    "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                    "open": pl.Float64,
+                    "high": pl.Float64,
+                    "low": pl.Float64,
+                    "close": pl.Float64,
+                    "volume": pl.Int64,
+                    "open_interest": pl.Int64,
+                },
+            )
+
+            buffer: list[bytes] = []
+
+            # polars write_parquet → file-like. Use an in-memory BytesIO so
+            # we can compute the hash before touching the filesystem.
+            bio = io.BytesIO()
+            df.write_parquet(
+                bio,
+                compression="zstd",
+                compression_level=ZSTD_LEVEL,
+                row_group_size=ROW_GROUP_SIZE,
+                use_pyarrow=False,
+                statistics=False,  # stats are non-deterministic; skip for reproducibility
+            )
+            buffer.append(bio.getvalue())
+            return b"".join(buffer)
 
     @staticmethod
     def _atomic_write(dest: Path, content: bytes) -> None:
-        """Atomically write *content* to *dest* via tempfile + rename.
+        """Atomically write *content* to *dest* via the shared atomic_io helper.
 
-        Prevents a half-written parquet file being left on disk if the
-        process is killed mid-write. Uses the same directory so the
-        rename is always on one filesystem.
+        Delegates to :func:`~brutex.data.atomic_io.atomic_write_via` (CLAUDE.md §11
+        COMMON — one tmp→fsync→``os.replace``→cleanup implementation), which also
+        maps a full disk (``ENOSPC``) to a :class:`~brutex.data.errors.LakeWriteHalt`
+        pull-wide stop instead of a raw ``OSError`` (DEC-LAKE-WRITE-HALT-001).
+        Prevents a half-written parquet file being left on disk on a kill/error.
         """
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(dest.parent), prefix=".brutex-write-", suffix=".parquet.tmp"
-        )
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
-        except Exception:
-            # Clean up on any error path.
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp_path)
-            raise
+        atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))

@@ -228,9 +228,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/cli-ledger-checkpoint-jlzt1n` (the `brutex fetch` CLI now checkpoints the durable
+- **Active branch:** `claude/lake-write-halt-jlzt1n` (disk-full / OOM at the lake-write boundary now HALTS the
+  pull gracefully — a `LakeWriteHalt` global stop — instead of crashing raw or quarantining per-symbol, via a
+  shared `atomic_io` write helper — DEC-LAKE-WRITE-HALT-001, MIGRATION.md #885, gap #3 of the operator's
+  critical-risks resilience-hardening batch: NEW `brutex/data/errors.py` `LakeWriteHalt(DataLakeError)`
+  (`reason` = `disk_full`/`out_of_memory`) + NEW `brutex/data/atomic_io.py` (`lake_write_guard` maps
+  `ENOSPC`/`MemoryError`→`LakeWriteHalt`, every other error UNCHANGED; `atomic_write_via` = the ONE
+  tmp→fsync→`os.replace`→cleanup). BOTH lake writers delegate to it (spot `_render_bytes` polars alloc also
+  guarded) + `LakeWriteHalt` added to BOTH ingest spines' `_GLOBAL_STOP_ERRORS` so a full disk propagates
+  past the per-symbol/contract quarantine and halts (temp always cleaned first — no half-written partition,
+  no fabricated data). HONEST: graceful DETECTION + halt, NOT a memory CAP (a true RSS ceiling needs
+  setrlimit/cgroups — OUT OF SCOPE); a non-`ENOSPC` `OSError` re-raises as-is (never mis-escalated); only the
+  2 data-lake writers consolidated (the other 5 atomic-write copies remain noted COMMON debt). `atomic_io.py`
+  + `errors.py` 100% line+branch; the 2 writers + 2 ingest spines stay 100%; ruff/mypy --strict/pyright clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged:
+  DEC-CLI-LEDGER-CHECKPOINT-001, MIGRATION.md #884 (the `brutex fetch` CLI now checkpoints the durable
   window ledger MID-pull per window, not only at pull end, so a crash recovers in seconds instead of
-  re-pulling the whole span — DEC-CLI-LEDGER-CHECKPOINT-001, MIGRATION.md #884, gap #2 of the operator's
+  re-pulling the whole span — gap #2 of the operator's
   critical-risks resilience-hardening batch: `cmd_fetch` threads the SAME throttled `make_live_ledger_flush`
   the dashboard uses as the ingest engine's per-WINDOW `on_window` hook, wrapped in a NEW single-flight
   `window_ledger_store.make_locked_flush` (the `on_window` fires from PARALLEL worker threads + the throttled
@@ -581,7 +595,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/cli-ledger-checkpoint-jlzt1n`
+- **Active feature branch:** `claude/lake-write-halt-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

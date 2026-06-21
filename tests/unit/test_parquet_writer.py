@@ -163,11 +163,14 @@ class TestWriterErrors:
         def _fail_replace(src: str, dst: str) -> None:
             raise OSError("simulated replace failure")
 
-        # Patch at the module level so the writer sees our fake.
-        import brutex.data.parquet_writer as _pw
+        # _atomic_write now delegates to the shared atomic_io helper, so the rename
+        # happens there (DEC-LAKE-WRITE-HALT-001). Patch os.replace at that module so
+        # the writer→atomic_io path still exercises the cleanup. A generic OSError
+        # (no ENOSPC errno) is NOT mapped to LakeWriteHalt — it re-raises as-is.
+        import brutex.data.atomic_io as _aio
 
-        original = _pw.os.replace
-        _pw.os.replace = _fail_replace  # type: ignore[assignment]
+        original = _aio.os.replace
+        _aio.os.replace = _fail_replace  # type: ignore[assignment]
         try:
             pytest.importorskip("polars")
             writer = ParquetWriter(lake_root=tmp_path)
@@ -183,7 +186,7 @@ class TestWriterErrors:
             tmp_files = list(tmp_path.rglob("*.tmp"))
             assert tmp_files == []
         finally:
-            _pw.os.replace = original
+            _aio.os.replace = original
 
     def test_render_bytes_raises_on_missing_polars(self, tmp_path: Path) -> None:
         """_render_bytes raises WriterError with install hint when polars is absent."""

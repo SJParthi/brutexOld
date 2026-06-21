@@ -29,6 +29,25 @@ class WriterError(DataLakeError):
     """
 
 
+class LakeWriteHalt(DataLakeError):
+    """A lake write hit an UNRECOVERABLE host condition — disk full / out of memory.
+
+    Unlike a per-symbol :class:`WriterError`, this is a PULL-WIDE stop: a full disk
+    or an exhausted heap fails EVERY remaining window identically, so it must
+    propagate past the per-symbol / per-contract quarantine (it is a member of both
+    ingest spines' ``_GLOBAL_STOP_ERRORS``) and halt the pull GRACEFULLY — never a
+    silent crash, never a half-written partition, never fabricated data (Golden Rule
+    #1). The half-written temp file is always cleaned up before this is raised.
+
+    ``reason`` is a non-secret machine token: ``"disk_full"`` (an ``OSError`` with
+    errno ``ENOSPC``) or ``"out_of_memory"`` (a ``MemoryError``).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"lake write halted: {reason}")
+        self.reason = reason
+
+
 class CatalogError(DataLakeError):
     """Raised when a DuckDB catalog operation fails or is malformed.
 
