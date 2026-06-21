@@ -564,7 +564,9 @@ class SpotCandidates:
         Every screened instrument's :class:`MoverSnapshot` (those with a bar on
         the day); ranked per category at build time.
     skipped
-        Count of instruments with no bar on the selected day/time — reported
+        Count of instruments OMITTED from the ranking — either no bar on the
+        selected day/time OR an unreadable Parquet file (logged as
+        ``movers.parquet_skip``; DEC-MOVERS-CORRUPT-SKIP-001) — reported
         honestly, never fabricated (Golden Rule #1).
     date
         The normalised ISO ``YYYY-MM-DD`` snapshot day (``date=None`` ⇒ today).

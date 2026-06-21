@@ -514,8 +514,10 @@ def build_options_payload(
     interval, date, time, top_n
         Echoed snapshot coordinates.
     skipped
-        Count of contracts dropped (no session bar on the selected day/time) —
-        reported honestly, never hidden (Golden Rule #1).
+        Count of contracts dropped — no session bar on the selected day/time,
+        OR an unreadable Parquet file (logged as ``movers.parquet_skip``;
+        DEC-MOVERS-CORRUPT-SKIP-001) — reported honestly, never hidden
+        (Golden Rule #1).
     expiry_tier
         The selected ``near`` / ``next`` / ``far`` expiry tier, echoed in the note.
     expiry_track
@@ -824,7 +826,8 @@ class OptionsCandidates:
     movers
         The computed option-contract rows (one per strike × CE/PE on the tier expiry).
     skipped
-        Count of contracts dropped (no session bar on the selected day/time).
+        Count of contracts dropped (no session bar on the selected day/time,
+        or an unreadable Parquet file logged as ``movers.parquet_skip``).
     date
         The normalised ISO ``YYYY-MM-DD`` snapshot day.
     expiry_tier, expiry_track

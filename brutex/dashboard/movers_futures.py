@@ -463,8 +463,10 @@ def build_futures_payload(
     interval, date, time, top_n
         Echoed snapshot coordinates.
     skipped
-        Count of underlyings/contracts dropped (all-expired, no session bars) —
-        reported honestly, never hidden (Golden Rule #1).
+        Count of underlyings/contracts dropped — all-expired, no session bars,
+        OR an unreadable Parquet file (logged as ``movers.parquet_skip``;
+        DEC-MOVERS-CORRUPT-SKIP-001) — reported honestly, never hidden
+        (Golden Rule #1).
 
     Returns
     -------
@@ -695,7 +697,8 @@ class FuturesCandidates:
     movers
         The computed near-month future rows (one per live underlying).
     skipped
-        Count of underlyings/contracts dropped (all-expired, no session bars).
+        Count of underlyings/contracts dropped (all-expired, no session bars,
+        or an unreadable Parquet file logged as ``movers.parquet_skip``).
     date
         The normalised ISO ``YYYY-MM-DD`` snapshot day.
     """

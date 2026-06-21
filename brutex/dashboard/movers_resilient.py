@@ -24,8 +24,9 @@ def movers_read_skip_errors() -> tuple[type[BaseException], ...]:
     a corrupt / version-incompatible file — confirmed against polars 1.41) and
     ``OSError`` covers file-level faults. NARROW on purpose: a genuine code bug
     (``ValueError`` / ``KeyError`` / …) still propagates, so a logic error is never
-    silently swallowed as a "skipped symbol" (Golden Rule #1). Imported lazily so
-    importing this module never forces the optional ``polars`` dependency.
+    silently swallowed as a "skipped symbol" (Golden Rule #1). ``polars`` is imported
+    inside the call (not at module load) to keep this tiny helper module importable
+    without paying the polars import cost — the candidate-loop readers import it anyway.
     """
     import polars as pl
 
