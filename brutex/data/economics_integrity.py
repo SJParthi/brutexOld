@@ -145,7 +145,13 @@ def audit_economics_integrity(
 
     mismatches: list[LotMismatch] = []
     lot_mismatch = 0
-    for (exch, under, expiry), lots in sorted(lots_by_expiry.items(), key=lambda kv: kv[0][:2]):
+    # Sort on the FULL key (exch, under, expiry-string) so the capped sample is
+    # input-order-independent; a None expiry sorts first as "" (it never occurs for a
+    # parsed leg — sm_expiry_date is always present for FUT/CE/PE — but the key stays total).
+    for (exch, under, expiry), lots in sorted(
+        lots_by_expiry.items(),
+        key=lambda kv: (kv[0][0], kv[0][1], kv[0][2].isoformat() if kv[0][2] else ""),
+    ):
         if len(lots) > 1:
             lot_mismatch += 1
             if len(mismatches) < SAMPLE_CAP:
@@ -153,6 +159,8 @@ def audit_economics_integrity(
                     LotMismatch(
                         exchange=exch,
                         underlying=under,
+                        # Defensive ``else ""``: a parsed leg always carries sm_expiry_date,
+                        # so the empty arm is latently unreachable but keeps the type total.
                         expiry=expiry.isoformat() if expiry else "",
                         lots=tuple(sorted(lots)),
                     )
