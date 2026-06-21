@@ -509,10 +509,11 @@ def test_cmd_fetch_checkpoints_ledger_mid_pull(
     DEC-CLI-LEDGER-CHECKPOINT-001 — before this, ``cmd_fetch`` saved the ledger
     SOLELY via ``end_pull_ledger``, so a crash after N windows lost every completed
     window's SUCCESS row → a full re-pull. The CLI now threads
-    ``make_live_sync(ledger, make_live_ledger_flush(...), None)`` as the ingest
-    engine's per-WINDOW ``on_window`` hook (the SAME helpers the dashboard uses,
-    CLAUDE.md §11 COMMON). The fake ingest fires that hook once (a window landing)
-    and we assert a durable save happened DURING the pull — before the end save.
+    ``make_locked_flush(make_live_ledger_flush(...))`` as the ingest engine's
+    per-WINDOW ``on_window`` hook (reusing the SAME throttled flush the dashboard
+    uses, behind a single-flight lock, CLAUDE.md §11 COMMON). The fake ingest fires
+    that hook once (a window landing) and we assert a durable save happened DURING
+    the pull — before the end save.
     """
     pytest.importorskip("polars")
     pytest.importorskip("duckdb")
@@ -589,9 +590,10 @@ def test_cmd_fetch_inspect_ledger_checkpoint_is_noop(
 ) -> None:
     """Under ``--inspect`` (ledger None) the per-window checkpoint never touches disk.
 
-    The checkpoint is built unconditionally, but a ``None`` ledger makes BOTH
-    ``make_live_ledger_flush`` and ``make_live_sync`` no-ops, so firing ``on_window``
-    saves nothing — the persistence-free contract of ``--inspect`` is preserved.
+    The checkpoint is built unconditionally, but a ``None`` ledger makes the
+    underlying ``make_live_ledger_flush`` a no-op, so ``make_locked_flush`` wraps a
+    no-op and firing ``on_window`` saves nothing — the persistence-free contract of
+    ``--inspect`` is preserved.
     """
     pytest.importorskip("polars")
     pytest.importorskip("duckdb")
