@@ -856,6 +856,17 @@ def build_app(
     # load moves the token and rebuilds. Content-exact (never a stale illusion —
     # Golden Rule #1).
     _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
+    # The /db candle-pager TOTAL cache (DEC-DB-CANDLE-COUNT-CACHE-001): the page
+    # `COUNT(*)` over `read_parquet(glob)` is O(files) (a Parquet-footer read per
+    # monthly file — ~8 ms at 6 years, growing as the lake deepens) and was
+    # recomputed on EVERY paging click. The total is invariant across paging / sort
+    # / column subsetting of one `(coords, start, end)`, so it is memoised here per
+    # that key + stamped with `_summary_cache.generation` — a prev/next click is an
+    # O(1) hit, and a pull/materialize bumps the generation → recompute (the SAME
+    # write-invalidation the movers cache uses; never a stale total). We REUSE the
+    # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
+    # generic keyed cache; no movers coupling, just the shared implementation).
+    _candle_count_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -3548,6 +3559,8 @@ def build_app(
                     descending=desc,
                     limit=limit,
                     offset=offset,
+                    count_cache=_candle_count_cache,
+                    generation=_summary_cache.generation,
                 )
             )
         except ValueError as exc:

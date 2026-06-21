@@ -18,7 +18,21 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-20 (DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #866 —
+_Last updated: 2026-06-21 (DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
+the `/db` candle-pager TOTAL (`COUNT(*)` over `read_parquet(glob)`, O(files) — a
+Parquet-footer read per file, recomputed on EVERY paging click) is now memoised behind
+a generation-stamped cache: `db_view.query_candles` gains an optional `count_cache`
+(`CandleCountCache` Protocol) + `generation`, keyed by `candle_count_key(coords,start,
+end)` (excludes limit/offset/sort/columns — the paging-invariance the cache exploits);
+`build_app` REUSES the COMMON `MoversSnapshotCache` LRU and the `/api/v1/db/candles`
+route passes `_summary_cache.generation` (a pull bumps it → recount, never stale —
+Golden Rule #1). HONEST envelope: a cached-total HIT is O(1) in partition depth (bench
+flat; COUNT runs once per dataset+generation), but paging is NOT O(1) overall — the
+page DATA query (`ORDER BY ts DESC LIMIT` over the glob) is itself O(files) and ~2.4×
+larger, so this removes only ONE of two O(files) footer scans (~16% on a deep
+partition); true O(page) paging needs a write-time lake manifest (explicit FUTURE work,
+NOT claimed). `db_view.py` at 100% line+branch; read-only viewer, ENGINE UNCHANGED.
+Earlier: 2026-06-20 (DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #866 —
 the `/universe` BACKEND summary + instruments reads are now O(1) on a repeat poll:
 NEW `brutex/dashboard/universe_cache.py` `UniverseSnapshotCache` memoises the three
 lean store reads (`fno_eligible_underlyings` + `list_index_equity_instruments` +
@@ -198,19 +212,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/universe-backend-cache` (the `/universe` BACKEND reads
-  are now O(1) on a repeat poll — DEC-UNIVERSE-BACKEND-CACHE-001, MIGRATION.md #866: NEW
-  `brutex/dashboard/universe_cache.py` `UniverseSnapshotCache` memoises the three lean store
-  reads + the derived `summary` / per-`kind` instrument rows, keyed by a content-revision
-  token `(count(*), max(fetched_at))` over the `instruments` table ITSELF (every `upsert_many`
-  stamps a fresh `fetched_at` → any master change moves the token → rebuild; empty store keys
-  at the stable `(0, "")`; NOT keyed off the `instrument_runs` audit sidecar, which can lag —
-  Golden Rule #1). Wired into `build_app` as a `universe_cache` param (mirrors
-  `summary_cache`/`movers_cache`); `api_universe_summary` + `api_universe_instruments` call it.
-  Honest envelope: HIT O(1) (bench ratio 1.02× for a 100× deeper universe; cold read scales
-  13×→166×), first read after a load still pays O(candidates) once per revision.
-  `universe_cache.py` at 100% line+branch; read-only accelerator, ENGINE UNCHANGED — COMPLETES
-  the `/universe` FRONTEND O(1) work of #863 on the backend. Prior merged:
+- **Active branch:** `claude/db-candle-count-cache` (the `/db` candle-pager TOTAL is now
+  an O(1) cached-hit per paging click — DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867:
+  `db_view.query_candles`'s page `COUNT(*)` over `read_parquet(glob)` is O(files) — a
+  Parquet-footer read per file, recomputed on EVERY click — and is now memoised behind an
+  optional injected `count_cache` (`CandleCountCache` Protocol) + `generation`, keyed by
+  `candle_count_key(coords,start,end)` (excludes limit/offset/sort/columns); `build_app`
+  REUSES the COMMON `MoversSnapshotCache` LRU and the `/api/v1/db/candles` route passes
+  `_summary_cache.generation` (a pull bumps it → recount, never stale). HONEST envelope: the
+  cached-total HIT is O(1) in depth (bench flat; COUNT runs once per dataset+generation) but
+  paging is NOT O(1) overall — the page DATA query is itself O(files) and ~2.4× larger, so
+  this removes only ONE of two O(files) footer scans (~16% on a deep partition); true O(page)
+  needs a write-time lake manifest (FUTURE work, NOT claimed). `db_view.py` at 100%
+  line+branch; read-only viewer, ENGINE UNCHANGED. Prior merged:
+  DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
   DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +
   DEC-DB-UNIVERSE-O1-LATENCY-001 #863 (PR #817, /db+/universe instant) +
@@ -446,7 +461,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/universe-backend-cache`
+- **Active feature branch:** `claude/db-candle-count-cache`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
