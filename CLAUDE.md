@@ -233,7 +233,7 @@ hostile-review pass._
   ALREADY built + wired by DEC-GROWW-FUTURE-INGEST-001 #707 (`future_contracts`,
   `ingest_underlying_futures`, the `groww-future` coverage namespace, `composite_pull` pulls
   FUT+CE/PE) — the only gap was a Golden-Rule-#3 CONTRADICTION: the `build_options_eligible_underlyings`
-  docstring still quoted the retired Dhan-era "we will NEVER pull futures" decree (#602) and the
+  docstring still quoted the retired prior-vendor "we will NEVER pull futures" decree (#602) and the
   Futures-tab hint implied a phantom "Type: futures" selector. This DOCS-only reconciliation
   rewrites that docstring (the set is the OPT-badge DETECTOR, NOT a pull gate; futures ARE pulled),
   fixes the Futures-tab hint, amends #602 as pull-scope-SUPERSEDED, and formally records the

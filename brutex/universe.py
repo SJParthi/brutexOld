@@ -355,7 +355,7 @@ def build_options_eligible_underlyings(
     it does NOT mean "futures are never pulled".** FUTURES ARE pulled into the reference lake
     (DEC-GROWW-FUTURE-INGEST-001 #707, formalised by DEC-FUTURES-PULL-ENABLE-001 #871): the pull
     paths scope on the FUT-inclusive :func:`build_fno_eligible_underlyings` + the reference-only
-    partition, never on this set. The original Dhan-era "we will NEVER pull futures — only
+    partition, never on this set. The original prior-vendor-era "we will NEVER pull futures — only
     options" decree (#602) was the prior vendor's options-CHAIN quota guard and is retired for
     pull scope. This is the AUTHORITATIVE, data-driven set — derived from the vendor's own
     instrument master in the SAME single pass the F&O-eligibility scan uses, so it auto-tracks
