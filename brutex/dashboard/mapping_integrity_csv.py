@@ -81,9 +81,7 @@ def mapping_integrity_to_csv(report: MappingIntegrityReport) -> str:
     writer.writerow(["Fully covered", report.fully_covered])
     writer.writerow(["Under-pulled", len(report.under_pulled)])
     writer.writerow(["Gating failures (none, not whitelisted)", len(report.gating_failures)])
-    writer.writerow(
-        ["Whitelist", _years_cell(()) if not report.whitelist else " ".join(report.whitelist)]
-    )
+    writer.writerow(["Whitelist", " ".join(report.whitelist)])
 
     writer.writerow([])
     writer.writerow(["DETAIL — under-pulled spots"])
