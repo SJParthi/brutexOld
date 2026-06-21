@@ -2963,7 +2963,7 @@ def build_app(
             The intraday ``HH:MM`` IST bar to snapshot as-of (blank / daily ⇒ the
             whole-day bar). A malformed value is a 400.
         top_n
-            Ranking depth for each category (1..200).
+            Ranking depth for each category (1..500; default 100 — DEC-MOVERS-COMPLETENESS-001).
 
         **Honest envelope (Golden Rule #10):** the snapshot is only as good as the
         ingested lake — an empty lake (or a store with no lake root) returns an

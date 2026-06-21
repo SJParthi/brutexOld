@@ -302,12 +302,12 @@ function syncControls() {
     const el = $(id).closest("label.ctl") || $(id);
     el.style.display = "";
   });
-  $("topn").max = "200";
+  $("topn").max = "500";  // matches the /api/v1/movers route cap (DEC-MOVERS-COMPLETENESS-001).
 }
 async function load() {
   $("note").innerHTML = "Loading…";
   syncControls();
-  const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"50" });
+  const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"100" });
   if ($("date").value) p.set("date", $("date").value);
   if (state.time) p.set("time", state.time);
   if ($("exchange").value) p.set("exchange", $("exchange").value);

@@ -587,16 +587,32 @@ class TestMoversPage:
         assert again.text == resp.text
 
     def test_movers_page_lists_all_21_timeframes(self, store: InstrumentStore) -> None:
-        # DEC-MOVERS-COMPLETENESS-001: every one of the 21 canonical lake interval labels
-        # is an option in the Timeframe dropdown (none missing) + the Top-N input defaults
-        # to the deeper 100. The labels mirror LAKE_INTERVAL_LABELS (single source of truth).
+        # DEC-MOVERS-COMPLETENESS-001: the Timeframe dropdown lists EXACTLY the 21 canonical
+        # lake interval labels — none missing AND no stray/dead extra option (an exact-set
+        # check, so a dead `value=` can never sneak in). The labels mirror LAKE_INTERVAL_LABELS
+        # (single source of truth). Top-N defaults to 100 and the input + the route cap allow
+        # up to 500 — and the syncControls() handler must NOT clobber that back to 200 (the
+        # hostile-review MAJOR: a 500 cap unreachable through the UI is exactly the illusion
+        # the operator forbids).
+        import re
+
         from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         text = client.get("/movers").text
-        for label in LAKE_INTERVAL_LABELS.values():
-            assert f'value="{label}"' in text, f"timeframe {label!r} missing from the dropdown"
-        assert 'id="topn"' in text and 'value="100"' in text
+        select = re.search(r'<select id="interval">(.*?)</select>', text, re.DOTALL)
+        assert select is not None, "interval <select> not found"
+        dropdown_values = set(re.findall(r'<option value="([^"]+)"', select.group(1)))
+        assert dropdown_values == set(LAKE_INTERVAL_LABELS.values())
+        assert len(dropdown_values) == 21
+        # Top-N default 100, reachable up to 500, and NEVER clobbered to 200 by syncControls()
+        # (the hostile-review MAJOR — precisely target the JS `.max = "200"` assignment so an
+        # unrelated "200" elsewhere can't false-pass/fail this guard).
+        assert 'id="topn"' in text and 'value="100"' in text and 'max="500"' in text
+        assert '.max = "200"' not in text, (
+            "topn max must not be reset to 200 by syncControls (DEC-MOVERS-COMPLETENESS-001)"
+        )
+        assert '.max = "500"' in text, "syncControls must set the topn max to 500"
 
     def test_movers_link_in_every_pages_nav(self, store: InstrumentStore) -> None:
         # DEC-INDEX-CONSTITUENTS-COVERAGE-001: the /movers page must be reachable
