@@ -46,16 +46,13 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from brutex.costs.types import OptionType
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.models import OptionBar
 from brutex.options.executor import OptionBarPair
 from brutex.options.lot_size_history import OptionsUnderlying
-
-if TYPE_CHECKING:
-    import polars as pl
 
 __all__ = ["LakeOptionBarSource"]
 
