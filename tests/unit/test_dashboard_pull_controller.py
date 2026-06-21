@@ -43,6 +43,7 @@ from brutex.dashboard.pull_controller import (
     resolve_candle_range,
     resolve_fetch_intervals,
     resolve_pull_symbols,
+    resolve_pull_targets,
 )
 from brutex.data.models import CandleBar
 from brutex.data.sink import BarSink, NullBarSink
@@ -958,6 +959,56 @@ class TestResolvePullSymbols:
         store = {"NIFTY": _index("NIFTY")}
         (only,) = resolve_pull_symbols("NIFTY", store.get)
         assert only.symbol_name == "NIFTY"
+
+
+class TestResolvePullTargets:
+    """``resolve_pull_targets`` — the SHARED selection resolver (DEC-PULL-SELECTED-PIPELINE-001)."""
+
+    def test_symbols_selection_wins_and_labels_selection(self) -> None:
+        store = {"A": _index("A"), "B": _index("B")}
+        universe_called = False
+
+        def _universe() -> list[Instrument]:
+            nonlocal universe_called
+            universe_called = True
+            return [_index("Z")]
+
+        out, source = resolve_pull_targets(
+            symbols="B,A", symbol="A", lookup=store.get, whole_universe=_universe
+        )
+        assert [i.symbol_name for i in out] == ["B", "A"]  # symbols precedence + order
+        assert source == "selection"
+        assert universe_called is False  # the fallback is never reached
+
+    def test_single_symbol_when_no_symbols(self) -> None:
+        store = {"A": _index("A")}
+        out, source = resolve_pull_targets(
+            symbols=None, symbol="A", lookup=store.get, whole_universe=lambda: []
+        )
+        assert [i.symbol_name for i in out] == ["A"]
+        assert source == "single"
+
+    def test_unknown_single_symbol_fails_closed(self) -> None:
+        with pytest.raises(ValueError, match="unknown security_id 'NOPE'"):
+            resolve_pull_targets(
+                symbols=None, symbol="NOPE", lookup={}.get, whole_universe=lambda: []
+            )
+
+    def test_empty_symbols_fails_closed(self) -> None:
+        with pytest.raises(ValueError, match="symbols= was empty"):
+            resolve_pull_targets(
+                symbols="  , ,", symbol=None, lookup={}.get, whole_universe=lambda: []
+            )
+
+    def test_no_selection_falls_back_to_whole_universe(self) -> None:
+        out, source = resolve_pull_targets(
+            symbols=None,
+            symbol=None,
+            lookup={}.get,
+            whole_universe=lambda: [_index("X"), _index("Y")],
+        )
+        assert [i.symbol_name for i in out] == ["X", "Y"]
+        assert source == "universe"
 
 
 class TestPullPopulatesLedger:

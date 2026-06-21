@@ -557,6 +557,11 @@
       <button class="loadbtn" id="pullHistBtn" title="download OHLC for the SELECTED contracts (single / chain / all) — auto-retries until clean. Needs the contracts cached first (⛓ button); the candles land in the verified candle lake. Highlight an underlying (whole-underlying or pick an expiry for its chain), or click an option-chain cell for that one contract." disabled>⤓ Pull historical</button>
       <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
       <span class="pull-div" aria-hidden="true"></span>
+      <!-- The one-click full pipeline scoped to ONLY the ticked instruments
+           (DEC-PULL-SELECTED-PIPELINE-001): spot → expiries+contracts → historical
+           over the selection, gated/fail-closed exactly like "▶ Pull EVERYTHING"
+           (which stays whole-universe). Active only when ≥1 row is ticked. -->
+      <button class="loadbtn" id="pullSelPipelineBtn" title="ONE click over ONLY the ticked instruments: pull spot → expiries + contracts → historical, in that order, each phase gated on the previous finishing clean (a dead token / quota / failed window stops the chain). Re-click is safe — already-pulled windows are skipped. (The hero '▶ Pull EVERYTHING' button covers the whole universe.)" disabled>▶ Pull selected — full pipeline</button>
       <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
       <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
       <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's constituent stocks — ALL of them, or only F&amp;O-eligible when 'F&amp;O only' is on (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
@@ -1449,6 +1454,23 @@ function pullHistorical(underlying, expiryDate) {
 }
 document.getElementById("pullHistBtn").onclick = () => pullHistorical(selInst, selExp);
 
+/* ── "▶ Pull selected — full pipeline" (DEC-PULL-SELECTED-PIPELINE-001): the one-click
+   spot→expiries+contracts→historical chain over ONLY the ticked instruments. Posts the
+   SAME /api/v1/universe/pull-pipeline route as the whole-universe hero, but with
+   ?symbols= so resolve_pull_targets scopes it to the selection (empty selection there =
+   whole universe; here we always send the ticks). Single-flight via startAndPoll. ── */
+const SEL_PIPELINE_BTN = document.getElementById("pullSelPipelineBtn");
+if (SEL_PIPELINE_BTN) {
+  SEL_PIPELINE_BTN.onclick = () => {
+    const items = spotSelection();
+    if (!items.length) return;
+    const ids = items.map(it => it.pull_symbol).join(",");
+    startAndPoll(
+      "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids),
+      `${items.length} selected — spot → expiries + contracts → historical`);
+  };
+}
+
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
    selected" pulls each instrument's spot in turn (sequential, so the one shared
    rate budget is respected and each shows in the live panel). The per-row
@@ -1486,6 +1508,15 @@ function updateMultiBtn() {
   if (h) {
     h.textContent = n > 0 ? `⤓ Pull historical · ${n} selected` : "⤓ Pull historical";
     h.disabled = n === 0 && !selInst;
+  }
+  // "▶ Pull selected — full pipeline" (DEC-PULL-SELECTED-PIPELINE-001): the one-click
+  // spot→expiries+contracts→historical chain scoped to the ticked set. Active ONLY when
+  // ≥1 row is ticked OR a single underlying is highlighted (same enable rule as the spot
+  // pull); the label reflects the selection count.
+  const sp = document.getElementById("pullSelPipelineBtn");
+  if (sp) {
+    sp.textContent = n > 0 ? `▶ Pull selected · ${n} — full pipeline` : "▶ Pull selected — full pipeline";
+    sp.disabled = n === 0 && !selPullSymbol;
   }
 }
 document.getElementById("selallbtn").onclick = () => {

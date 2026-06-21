@@ -413,6 +413,69 @@ def resolve_pull_symbols(
     return resolved
 
 
+def resolve_pull_targets(
+    *,
+    symbols: str | None,
+    symbol: str | None,
+    lookup: Callable[[str], Instrument | None],
+    whole_universe: Callable[[], list[Instrument]],
+) -> tuple[list[Instrument], str]:
+    """Resolve a pull's target instruments from an OPTIONAL selection (DEC-PULL-SELECTED-PIPELINE-001).
+
+    The single COMMON resolver behind every "selection OR whole-universe" pull
+    surface — the one-click pipeline (``/pull-pipeline``) and the failed-window
+    retry (``/retry-failed``) — replacing the byte-identical ``if symbols … elif
+    symbol … else`` block both used to inline (CLAUDE.md §11 COMMON, no copy-paste).
+
+    Precedence (most-specific wins): ``symbols`` (the comma list of ticked ids) >
+    ``symbol`` (one highlighted id) > ``whole_universe()`` (NO selection → the full
+    admitted universe — the byte-for-byte prior default, so an un-parametrised call
+    is unchanged). Resolution is O(selection) with O(1) ``lookup`` per id (the store
+    ``get`` is a dict hit); the ``symbols`` branch de-duplicates + preserves input
+    order via :func:`resolve_pull_symbols`.
+
+    Fails CLOSED (Golden Rule #1 — no silent scope drift): an EMPTY or ANY-unknown
+    ``symbols`` selection, or an unknown single ``symbol``, raises
+    :class:`ValueError` naming the offender(s); the route maps it to a 400 so a typo
+    never silently pulls a partial set. The ``whole_universe`` fallback is only
+    reached when BOTH ``symbols`` and ``symbol`` are ``None``.
+
+    Parameters
+    ----------
+    symbols
+        The raw comma-joined ``?symbols=`` value (the ticked many), or ``None``.
+    symbol
+        A single ``?symbol=`` security id (one highlight), or ``None``.
+    lookup
+        ``store.get``-style resolver: an id → :class:`Instrument` or ``None``.
+    whole_universe
+        Zero-arg factory for the full admitted universe (every index + stock
+        underlying), called only when no selection is given.
+
+    Returns
+    -------
+    tuple[list[Instrument], str]
+        ``(instruments, source)`` where *source* is ``"selection"`` (``symbols``),
+        ``"single"`` (``symbol``), or ``"universe"`` (the fallback) — for the
+        route's log + progress detail.
+
+    Raises
+    ------
+    ValueError
+        On an empty/unknown ``symbols`` list, or an unknown single ``symbol``.
+    """
+    if symbols is not None:
+        return resolve_pull_symbols(symbols, lookup), "selection"
+    if symbol is not None:
+        instrument = lookup(symbol)
+        if instrument is None:
+            raise ValueError(
+                f"unknown security_id {symbol!r} — not in the instrument store"
+            )
+        return [instrument], "single"
+    return whole_universe(), "universe"
+
+
 #: A factory that builds the ``(adapter, sink)`` pair the Groww ingest spine
 #: needs, given the lake root + the instrument being pulled. The default
 #: builds the offline synthetic pair; the live path injects
@@ -2042,4 +2105,5 @@ __all__ = [
     "resolve_candle_range",
     "resolve_fetch_intervals",
     "resolve_pull_symbols",
+    "resolve_pull_targets",
 ]

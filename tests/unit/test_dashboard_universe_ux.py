@@ -60,6 +60,23 @@ def test_multi_select_controls_present() -> None:
         assert needle in html, f"missing multi-select control: {needle}"
 
 
+def test_pull_selected_pipeline_button_present_and_wired() -> None:
+    """The "▶ Pull selected — full pipeline" button + its selection-scoped wiring.
+
+    DEC-PULL-SELECTED-PIPELINE-001 — the one-click pipeline over ONLY the ticked
+    instruments: the button exists, posts ``/pull-pipeline?symbols=`` (the SAME route
+    as the whole-universe hero, scoped by the selection), and is enable/label-driven
+    by ``updateMultiBtn`` (so it activates only when ≥1 row is ticked).
+    """
+    html = _render_universe_html()
+    assert 'id="pullSelPipelineBtn"' in html, "the selected-pipeline button is missing"
+    assert "▶ Pull selected — full pipeline" in html, "the button label is missing"
+    # Posts the pipeline route WITH ?symbols= (scoped to the ticks), via startAndPoll.
+    assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids)' in html
+    # The hero whole-universe button is untouched (still posts the bare route).
+    assert 'id="pullPipelineBtn"' in html, "the whole-universe hero must remain"
+
+
 def test_pull_button_is_unified_single_or_many() -> None:
     """ONE "⤓ Pull spot" button drives single OR multi (DEC-UNIVERSE-PULL-UNIFY-001).
 

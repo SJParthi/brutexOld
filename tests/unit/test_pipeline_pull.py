@@ -291,6 +291,85 @@ def test_pipeline_complete_note_with_no_candle_subreport() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# run_full_pipeline — the GATED phase-4 movers warm (DEC-PULL-SELECTED-PIPELINE-001)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_warms_movers_on_clean_run() -> None:
+    # All three fetch phases clean + a warmer injected → phase 4 runs, the count is
+    # recorded, and the note appends the warm clause.
+    spot, meta = _Spy(_spot()), _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+    movers = _Spy(7)
+    report = run_full_pipeline(
+        run_spot=spot, run_metadata=meta, run_historical=hist, run_movers=movers
+    )
+    assert report.ok is True
+    assert movers.called is True
+    assert report.movers_warmed == 7
+    assert "movers 7 snapshot(s) warmed" in report.note
+    assert report.to_dict()["movers_warmed"] == 7
+
+
+def test_pipeline_warms_movers_zero_is_honest_not_none() -> None:
+    # A warmer that warmed nothing (e.g. an empty lake) returns 0 — recorded as 0
+    # (ran, warmed nothing), DISTINCT from None (did not run).
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_movers=_Spy(0),
+    )
+    assert report.movers_warmed == 0
+    assert "movers 0 snapshot(s) warmed" in report.note
+
+
+def test_pipeline_skips_movers_when_historical_not_clean() -> None:
+    # The HARD gate: a historical fetch that completed-with-failures (failed_pairs)
+    # must NEVER warm movers ("until/unless successful fetches happen, never run").
+    hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
+    movers = _Spy(5)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=hist,
+        run_movers=movers,
+    )
+    assert report.ok is False  # historical gate failed
+    assert movers.called is False  # movers NOT warmed
+    assert report.movers_warmed is None
+    assert "warmed" not in report.note
+
+
+def test_pipeline_skips_movers_when_stopped_at_spot() -> None:
+    # An early stop never reaches phase 4 — the warmer is not even consulted.
+    movers = _Spy(3)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot(auth_aborted=True)),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_movers=movers,
+    )
+    assert report.stopped_after == PHASE_SPOT
+    assert movers.called is False
+    assert report.movers_warmed is None
+
+
+def test_pipeline_no_movers_phase_when_not_injected() -> None:
+    # Backward-compatible: with no warmer (the whole-universe pipeline), phase 4 is
+    # skipped entirely and movers_warmed is None — never a fabricated count.
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert report.ok is True
+    assert report.movers_warmed is None
+    assert "warmed" not in report.note
+    assert report.to_dict()["movers_warmed"] is None
+
+
+# --------------------------------------------------------------------------- #
 # PipelinePullReport.ok — branch coverage of the conjunction chain
 # --------------------------------------------------------------------------- #
 

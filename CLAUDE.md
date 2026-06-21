@@ -228,8 +228,17 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-completeness-jlzt1n` (movers completeness —
-  DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876: the `/movers` page defaults Top-N to 100 and offers ALL
+- **Active branch:** `claude/pull-selected-pipeline-jlzt1n` (selected-scope one-click pipeline + gated
+  movers-warm hook — DEC-PULL-SELECTED-PIPELINE-001, MIGRATION.md #877: the `/pull-pipeline` route + a new
+  "▶ Pull selected — full pipeline" button run the gated spot→expiries+contracts→historical chain over ONLY
+  the ticked instruments (`?symbols=`; no selection → whole universe, no regression), via the SHARED
+  `resolve_pull_targets` resolver (COMMON; `/retry-failed` refactored onto it). `run_full_pipeline` gains an
+  OPTIONAL gated 4th phase `run_movers` + `PipelinePullReport.movers_warmed` that runs ONLY after a
+  fully-successful fetch (`historical_phase_ok`) — the operator's "never run movers unless the fetch
+  succeeded". The WARMER is NOT yet bound in the route (a today-coordinate warm would cache empty snapshots
+  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump). 
+  `pipeline_pull.py` at 100% line+branch; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED. Prior merged:
+  DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876 (PR #830: the `/movers` page defaults Top-N to 100 and offers ALL
   21 Track-1 timeframes (1m + 19 derived intraday + 1d), every one derived on-the-fly from the stored
   1-minute via `resample_1m_to_tf` — NO pre-materialised partition needed; the only prerequisite is
   1-minute spot + F&O candles. Backend already supported all 21 (`_INTERVAL_MINUTES` ← `LAKE_INTERVAL_LABELS`);
