@@ -228,9 +228,30 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-write-halt-jlzt1n` (disk-full / OOM at the lake-write boundary now HALTS the
+- **Active branch:** `claude/movers-corrupt-skip-jlzt1n` (a single corrupt / unreadable Parquet file now SKIPS
+  that one instrument on the `/movers` screens — logged + counted — instead of 500-ing the WHOLE page —
+  DEC-MOVERS-CORRUPT-SKIP-001, MIGRATION.md #886, gap #4 of the operator's critical-risks resilience-hardening
+  batch: a multi-agent audit flagged this the MOST production-likely HIGH — the spot/futures/options candidate
+  loops (`movers_snapshot.compute_spot_candidates`, `movers_futures.compute_futures_candidates`,
+  `movers_options.compute_options_candidates`) read each instrument's Parquet with NO per-instrument guard, so
+  ONE corrupt / version-incompatible file raised out of the loop and — since the route recomputes per call —
+  re-500'd EVERY `/movers` open until the file was manually quarantined. NEW `brutex/dashboard/movers_resilient.py`
+  with `movers_read_skip_errors()` (the ONE place defining the unreadable-file set — empirically confirmed
+  `polars.exceptions.PolarsError` + `OSError`, COMMON) + `log_movers_skip()`; each of the THREE candidate loops
+  wraps its per-instrument read in `try/except` that on an unreadable file logs `movers.parquet_skip`
+  (source+symbol+reason), increments the screen's existing `skipped` tally, and `continue`s — mirroring
+  `db_view._aggregate_parquet_resilient` (the proven coverage-side pattern). HONEST envelope: NARROW catch — a
+  genuine code bug (`ValueError`/`KeyError`/…) STILL propagates, never silently swallowed; a skipped instrument
+  is OMITTED + counted, never a fabricated price (the file stays for the operator to quarantine); pure
+  read-time DETECT-and-skip — no write surface, no engine/lake/scope change. `movers_resilient.py` at 100%
+  line+branch; the 3 candidate readers all stay 100% line+branch with NEW integration tests writing a GOOD
+  symbol + a SECOND whose on-disk Parquet is overwritten with garbage so the REAL `pl.read_parquet` raises a
+  `ComputeError` — the screen still ranks the good one, reports the corrupt one `skipped`, logs the skip, and
+  does NOT 500 (one per spot/futures/options); ruff/mypy --strict/pyright clean. READ-ONLY dashboard — ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-LAKE-WRITE-HALT-001,
+  MIGRATION.md #885 (disk-full / OOM at the lake-write boundary now HALTS the
   pull gracefully — a `LakeWriteHalt` global stop — instead of crashing raw or quarantining per-symbol, via a
-  shared `atomic_io` write helper — DEC-LAKE-WRITE-HALT-001, MIGRATION.md #885, gap #3 of the operator's
+  shared `atomic_io` write helper, gap #3 of the operator's
   critical-risks resilience-hardening batch: NEW `brutex/data/errors.py` `LakeWriteHalt(DataLakeError)`
   (`reason` = `disk_full`/`out_of_memory`) + NEW `brutex/data/atomic_io.py` (`lake_write_guard` maps
   `ENOSPC`/`MemoryError`→`LakeWriteHalt`, every other error UNCHANGED; `atomic_write_via` = the ONE
@@ -597,7 +618,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/lake-write-halt-jlzt1n`
+- **Active feature branch:** `claude/movers-corrupt-skip-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
