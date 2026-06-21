@@ -89,7 +89,9 @@ __all__ = [
 #: populated if ANY future was pulled) and a generous depth — mirrors the Spot
 #: tab defaults (CLAUDE.md §11 COMMON keeps the two pages aligned).
 DEFAULT_FUTURES_INTERVAL: Final[str] = "1day"
-DEFAULT_FUTURES_TOP_N: Final[int] = 50
+#: 100 default (DEC-MOVERS-COMPLETENESS-001 — operator-directed "minimum 100 always");
+#: mirrors the Spot tab default (CLAUDE.md §11 COMMON keeps the pages aligned).
+DEFAULT_FUTURES_TOP_N: Final[int] = 100
 
 #: The FNO segment every futures (and options) contract partition lives under in
 #: the lake (``bars/<exch>/FNO/<contract>/<interval>/...``). Mirrors the

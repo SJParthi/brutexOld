@@ -543,6 +543,26 @@ class TestMoversApi:
         assert Decimal(body["price_gainers"][0]["pct_change"]) == Decimal("10")
         assert {r["symbol"] for r in body["volume"]} == {"NIFTY", "BANKNIFTY"}
 
+    def test_topn_default_is_100_and_cap_is_500(self, store: InstrumentStore) -> None:
+        # DEC-MOVERS-COMPLETENESS-001: the operator-directed deeper default + cap. The
+        # cap boundary is enforced by the route (≤ 500 ok, > 500 → 422), never silently
+        # clamped — so a deep markets screen is honest about its limit.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # No explicit top_n → the new 100 default is echoed back in the payload.
+        assert client.get("/api/v1/movers").json()["top_n"] == 100
+        assert client.get("/api/v1/movers", params={"top_n": 500}).status_code == 200
+        assert client.get("/api/v1/movers", params={"top_n": 501}).status_code == 422
+
+    def test_non_default_timeframe_resolves_not_422(self, store: InstrumentStore) -> None:
+        # Every one of the 21 canonical TFs is a valid movers interval (derived from
+        # 1-minute on-the-fly) — a 2hour/3hour request degrades to an honest empty
+        # payload on an empty lake, never a 422/500 (DEC-MOVERS-COMPLETENESS-001).
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        for interval in ("2hour", "3hour", "7minute", "14minute"):
+            resp = client.get("/api/v1/movers", params={"interval": interval, "time": "09:30"})
+            assert resp.status_code == 200, f"{interval} must not 422"
+            assert resp.json()["interval"] == interval
+
 
 class TestMoversPage:
     def test_movers_page_renders(self, store: InstrumentStore) -> None:
@@ -565,6 +585,18 @@ class TestMoversPage:
         again = client.get("/movers")
         assert again.status_code == 200
         assert again.text == resp.text
+
+    def test_movers_page_lists_all_21_timeframes(self, store: InstrumentStore) -> None:
+        # DEC-MOVERS-COMPLETENESS-001: every one of the 21 canonical lake interval labels
+        # is an option in the Timeframe dropdown (none missing) + the Top-N input defaults
+        # to the deeper 100. The labels mirror LAKE_INTERVAL_LABELS (single source of truth).
+        from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        text = client.get("/movers").text
+        for label in LAKE_INTERVAL_LABELS.values():
+            assert f'value="{label}"' in text, f"timeframe {label!r} missing from the dropdown"
+        assert 'id="topn"' in text and 'value="100"' in text
 
     def test_movers_link_in_every_pages_nav(self, store: InstrumentStore) -> None:
         # DEC-INDEX-CONSTITUENTS-COVERAGE-001: the /movers page must be reachable

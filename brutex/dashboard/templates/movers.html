@@ -120,17 +120,38 @@
       <div class="controls-row">
         <label class="ctl">Date<input type="date" id="date" /></label>
         <label class="ctl">Timeframe
+          <!-- ALL 21 Track-1 timeframes (DEC-MOVERS-COMPLETENESS-001): 1m base + 19 derived
+               intraday + 1d. Every option is derived ON-THE-FLY from the stored 1-minute by
+               resample_1m_to_tf (movers_snapshot.py) — none needs a pre-materialised partition,
+               so all 21 work as long as 1-minute spot / FNO candles are in the lake. The labels
+               + minute map below mirror brutex.data.timeframes.LAKE_INTERVAL_LABELS (the single
+               source of truth — CLAUDE.md §11 COMMON). -->
           <select id="interval">
             <option value="1day" selected>1 day</option>
+            <option value="4hour">4 hour</option>
+            <option value="3hour">3 hour</option>
+            <option value="2hour">2 hour</option>
             <option value="1hour">1 hour</option>
             <option value="30minute">30 min</option>
             <option value="15minute">15 min</option>
+            <option value="14minute">14 min</option>
+            <option value="13minute">13 min</option>
+            <option value="12minute">12 min</option>
+            <option value="11minute">11 min</option>
+            <option value="10minute">10 min</option>
+            <option value="9minute">9 min</option>
+            <option value="8minute">8 min</option>
+            <option value="7minute">7 min</option>
+            <option value="6minute">6 min</option>
             <option value="5minute">5 min</option>
+            <option value="4minute">4 min</option>
+            <option value="3minute">3 min</option>
+            <option value="2minute">2 min</option>
             <option value="1minute">1 min</option>
           </select>
         </label>
         <label class="ctl">Time<select id="time"><option value="">(daily)</option></select></label>
-        <label class="ctl">Top N<input type="number" id="topn" min="1" max="200" value="50" /></label>
+        <label class="ctl">Top N<input type="number" id="topn" min="1" max="500" value="100" /></label>
         <button class="go" id="refresh">↻ Refresh</button>
         <span id="asof"></span>
       </div>
@@ -162,7 +183,15 @@ const ASSETS = {
     cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
 };
-const TF_MIN = {"1minute":1,"5minute":5,"15minute":15,"30minute":30,"1hour":60,"1day":375};
+/* Lake interval label → bar minutes for ALL 21 Track-1 timeframes — mirrors
+   brutex.data.timeframes.LAKE_INTERVAL_LABELS (single source of truth, CLAUDE.md §11
+   COMMON). Drives fillTimes() so each TF lists its own session bar start-times. */
+const TF_MIN = {
+  "1minute":1,"2minute":2,"3minute":3,"4minute":4,"5minute":5,"6minute":6,"7minute":7,
+  "8minute":8,"9minute":9,"10minute":10,"11minute":11,"12minute":12,"13minute":13,
+  "14minute":14,"15minute":15,"30minute":30,"1hour":60,"2hour":120,"3hour":180,
+  "4hour":240,"1day":375,
+};
 const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
 let rowsData = [];
 /* The full payload from the last successful fetch — it holds EVERY category list

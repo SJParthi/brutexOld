@@ -2909,7 +2909,7 @@ def build_app(
         interval: str = Query(default=DEFAULT_INTERVAL),
         date: str | None = Query(default=None),
         time: str | None = Query(default=None),
-        top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=200),
+        top_n: int = Query(default=DEFAULT_TOP_N, ge=1, le=500),
         expiry: str | None = Query(default=None),
         track: str | None = Query(default=None),
         exchange: str | None = Query(default=None),

@@ -228,8 +228,15 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/instrument-economics-integrity-jlzt1n` (instrument-master ECONOMICS audit —
-  DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001, MIGRATION.md #875: the economics sibling of #874 — a parse-time
+- **Active branch:** `claude/movers-completeness-jlzt1n` (movers completeness —
+  DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876: the `/movers` page defaults Top-N to 100 and offers ALL
+  21 Track-1 timeframes (1m + 19 derived intraday + 1d), every one derived on-the-fly from the stored
+  1-minute via `resample_1m_to_tf` — NO pre-materialised partition needed; the only prerequisite is
+  1-minute spot + F&O candles. Backend already supported all 21 (`_INTERVAL_MINUTES` ← `LAKE_INTERVAL_LABELS`);
+  the change is the dropdown (6→21) + the `TF_MIN` JS map + the three Top-N defaults 50→100 + the route cap
+  `le=200`→`500`. Per-metric formulas re-verified correct. READ-ONLY display polish; movers_snapshot/futures/options
+  stay 100% line+branch; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001, MIGRATION.md #875 (PR #829: the economics sibling of #874 — a parse-time
   audit proving `lot_size` is uniform PER (underlying, expiry) across the whole `instrument.csv` (a within-expiry
   mismatch is RED), with cross-expiry lot revisions (legit NSE quarterly — AMBUJACEM 1050→1200) shown as
   INFORMATIONAL, never RED. The HONEST design (real-CSV-grounded, no illusion): lot/tick POSITIVITY is already

@@ -72,7 +72,10 @@ __all__ = [
 #: The page opens on the coarse 1-day timeframe (cheapest, always populated if
 #: ANY spot was pulled) and a generous depth (the broker markets screens list many rows).
 DEFAULT_INTERVAL: Final[str] = "1day"
-DEFAULT_TOP_N: Final[int] = 50
+#: Top-N default is 100 (DEC-MOVERS-COMPLETENESS-001 — operator-directed "minimum 100
+#: always"); the broker markets screens list deep, and the candidate set is computed
+#: once per coordinate then ranked cheaply, so a larger N costs only the in-memory sort.
+DEFAULT_TOP_N: Final[int] = 100
 
 #: IST is a fixed +05:30 (no DST) — the lake stores bar time as tz-aware UTC.
 _IST: Final[str] = "Asia/Kolkata"
