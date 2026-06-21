@@ -1890,6 +1890,8 @@ def cmd_fetch(
     from brutex.data.window_ledger_store import (
         begin_pull_ledger,
         end_pull_ledger,
+        make_live_ledger_flush,
+        make_locked_flush,
         plan_windows,
         reconcile_ledger_with_lake,
     )
@@ -2097,6 +2099,23 @@ def cmd_fetch(
             stack=storm_stack,
         )
 
+        # Mid-pull ledger checkpoint (DEC-CLI-LEDGER-CHECKPOINT-001): the CLI fetch
+        # path saved the durable ledger ONLY at pull END (`end_pull_ledger`), so a
+        # crash after N windows lost every completed window's SUCCESS row and the
+        # next run re-pulled the whole span. This threads the SAME throttled
+        # `make_live_ledger_flush` helper the dashboard uses (CLAUDE.md §11 COMMON,
+        # no copy-paste) as the ingest engine's `on_window` hook (fires per WINDOW
+        # from the PARALLEL worker threads) so the durable ledger is flushed mid-pull.
+        # `on_window` is concurrent and the throttled flush is not itself thread-safe,
+        # so it is wrapped in `make_locked_flush` (single-flight lock). The CLI wants
+        # the flush ONLY — not the dashboard bar push — so it deliberately does NOT
+        # use `make_live_sync` (which no-ops without an `on_ledger_sync`). A `None`
+        # ledger (`--dry-run` / `--inspect`) makes the flush a no-op, so the lock
+        # wraps a no-op and nothing touches disk. The save is tmp→atomic-rename and
+        # the keep-first sink is idempotent, so a re-pull of an un-flushed window is
+        # safe; loss is bounded to one throttle interval, not the whole pull.
+        ledger_checkpoint = make_locked_flush(make_live_ledger_flush(ledger, resolved))
+
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
             return run_groww_spot_ingest_with_retry(
@@ -2111,6 +2130,7 @@ def cmd_fetch(
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
                 on_progress=storm_progress,
+                on_window=ledger_checkpoint,
                 auto_retry=do_retry_flag,
                 audit=ingest_audit,
             )
