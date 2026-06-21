@@ -88,6 +88,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
 from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
 from brutex.dashboard.movers_futures import (
@@ -141,6 +142,7 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.mapping_integrity import (
     EligibleSpot,
+    MappingIntegrityReport,
     coverage_years_from_records,
     reconcile_mapping_integrity,
     report_to_dict,
@@ -2640,6 +2642,28 @@ def build_app(
         )
         return JSONResponse(per_symbol)
 
+    def _build_mapping_integrity_report() -> MappingIntegrityReport:
+        """Reconcile the live store's eligibility + coverage into one report (thin I/O glue).
+
+        The SINGLE builder shared by the JSON route AND the CSV download (CLAUDE.md §11
+        COMMON), so both surfaces serialise the identical verdict — never two drifting
+        reconciliations. Gathers the two store reads (eligible underlyings + coverage ledger)
+        off the event loop and delegates to the 100%-tested
+        :func:`~brutex.data.mapping_integrity.reconcile_mapping_integrity`.
+        """
+        store = _require_store()
+        eligible = [
+            EligibleSpot(exchange=exch.value, symbol=sym)
+            for exch, sym in store.fno_eligible_underlyings()
+        ]
+        return reconcile_mapping_integrity(
+            eligible_spots=eligible,
+            covered_years=coverage_years_from_records(store.list_coverage()),
+            expected_years=_coverage_years(),
+            whitelist=(),
+            now=datetime.now(UTC),
+        )
+
     @app.get("/api/v1/universe/mapping-integrity")
     async def api_universe_mapping_integrity() -> JSONResponse:
         """GET /api/v1/universe/mapping-integrity — the green/red spot↔options mapping verdict.
@@ -2654,25 +2678,32 @@ def build_app(
         :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
         line+branch); READ-ONLY, no pull. No store wired → 503.
         """
-        store = _require_store()
-        expected_years = _coverage_years()
+        _require_store()
+        report = await run_in_threadpool(_build_mapping_integrity_report)
+        return JSONResponse(report_to_dict(report))
 
-        def _build() -> dict[str, Any]:
-            """Gather the two store reads off the event loop and reconcile (thin I/O glue)."""
-            eligible = [
-                EligibleSpot(exchange=exch.value, symbol=sym)
-                for exch, sym in store.fno_eligible_underlyings()
-            ]
-            report = reconcile_mapping_integrity(
-                eligible_spots=eligible,
-                covered_years=coverage_years_from_records(store.list_coverage()),
-                expected_years=expected_years,
-                whitelist=(),
-                now=datetime.now(UTC),
-            )
-            return report_to_dict(report)
+    @app.get("/api/v1/universe/mapping-integrity.csv")
+    async def api_universe_mapping_integrity_csv() -> Response:
+        """GET /api/v1/universe/mapping-integrity.csv — the mapping verdict as a download.
 
-        return JSONResponse(await run_in_threadpool(_build))
+        DEC-MAPPING-INTEGRITY-EXPORT-001 — the "open it in Excel and SEE the proof" file
+        companion to the live panel + JSON route (#870). Reuses the SAME
+        :func:`_build_mapping_integrity_report` builder (one reconciliation, never two that
+        drift) and serialises it via the pure
+        :func:`brutex.dashboard.mapping_integrity_csv.mapping_integrity_to_csv` (a three-section
+        human report; every cell formula-injection-safe via the shared
+        :class:`~brutex.dashboard._csv_utils.FormulaSafeWriter`). READ-ONLY, no pull; no store
+        wired → 503.
+        """
+        _require_store()
+        report = await run_in_threadpool(_build_mapping_integrity_report)
+        return Response(
+            content=mapping_integrity_to_csv(report),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="mapping_integrity.csv"',
+            },
+        )
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(

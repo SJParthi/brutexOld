@@ -661,30 +661,6 @@ def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
     assert detail and detail[0][1] == "NSE-A,B"
 
 
-def test_csv_safe_neutralises_formula_leaders() -> None:
-    """DEC-CSV-FORMULA-INJECTION-001: a STRING cell starting with a spreadsheet formula
-    lead-in (= + - @ TAB CR) is prefixed with a single quote; non-string / empty / non-leading
-    cells pass through UNCHANGED (numeric columns + dates stay numeric/plain)."""
-    from brutex.dashboard import completeness as c
-
-    for leader in ("=", "+", "-", "@", "\t", "\r"):
-        payload = f"{leader}cmd|'/c calc'!A1"
-        assert c._csv_safe(payload) == "'" + payload
-    # The leading-WHITESPACE bypass: " =cmd" / "  +cmd" — first non-whitespace char is a
-    # formula lead-in, so it is ALSO neutralised (the out-of-box edge).
-    assert c._csv_safe(" =cmd") == "' =cmd"
-    assert c._csv_safe("  @SUM(A1)") == "'  @SUM(A1)"
-    # Passthrough cases: plain string, ISO date, int, None, empty, all-whitespace, and
-    # leading-whitespace-then-NON-formula (the lstrip branch's false side).
-    assert c._csv_safe("NSE-NIFTY") == "NSE-NIFTY"
-    assert c._csv_safe("2026-06-19") == "2026-06-19"
-    assert c._csv_safe(42) == 42
-    assert c._csv_safe(None) is None
-    assert c._csv_safe("") == ""
-    assert c._csv_safe("   ") == "   "  # all-whitespace → lstrip empty → passthrough
-    assert c._csv_safe(" plain") == " plain"  # whitespace then non-formula → passthrough
-
-
 def test_scoreboard_csv_prefixes_formula_injection_symbol() -> None:
     """A symbol whose text starts with '=' is quoted (') in the rendered CSV so a spreadsheet
     app renders it as literal text, never executes it as a formula (DEC-CSV-FORMULA-INJECTION-001)."""

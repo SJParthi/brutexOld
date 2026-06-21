@@ -228,24 +228,21 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/one-click-pipeline-jlzt1n` (a single "▶ Pull EVERYTHING" button —
-  DEC-ONE-CLICK-PIPELINE-001, MIGRATION.md #872: a THIN pure sequencer `brutex/dashboard/pipeline_pull.py`
-  chains the three EXISTING, separately-tested pull spines into ONE gated click — spot
-  (`pull_all_spot`) → expiries+contracts (`pull_expiries_contracts`) → historical
-  (`pull_historical_for_underlyings`) — exactly the operator's "do all the process in a single shot …
-  started from pull spot once it is successfully completed then pull expiries and contracts and when it
-  is successfully completed and then pull historical". `run_full_pipeline(*, run_spot, run_metadata,
-  run_historical)` takes three INJECTED callables (100%-testable offline, ZERO network) and applies a
-  concrete-typed GATE between phases (`spot_phase_ok`/`metadata_phase_ok`/`historical_phase_ok`, reading
-  the REAL report fields — `auth_aborted`/`quota_exhausted`/`still_failed_windows`,
-  `expiry_failures`/`contract_failures`, `failed_pairs`) so a failed earlier phase STOPS the chain
-  fail-CLOSED (the later phases never make a doomed vendor call, reported `None`, never falsely
-  "complete"). Surfaced as `POST /api/v1/universe/pull-pipeline` (thin route over the WHOLE universe on
-  the SAME single-flight `BackgroundPullJob`) + a green `/universe` hero button (`#pullPipelineBtn`).
-  Honest envelope: the sequencer is O(1) (3 calls + 3 gate checks); the WORK it triggers is the real
-  multi-hour full-history vendor fill (network-bound, NOT O(1)-total — stated). `pipeline_pull.py` at
-  100% line+branch (27 unit + 2 route tests); ruff/pyright/mypy --strict clean. NO pull/engine/scope/vocab
-  change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+- **Active branch:** `claude/mapping-integrity-export-jlzt1n` (downloadable mapping-integrity CSV —
+  DEC-MAPPING-INTEGRITY-EXPORT-001, MIGRATION.md #873: the green/red spot↔options mapping audit of #870
+  is now a DOWNLOADABLE CSV "receipt" — a NEW pure `brutex/dashboard/mapping_integrity_csv.py`
+  `mapping_integrity_to_csv(report)` (three-section human report: VERDICT · SUMMARY · DETAIL per
+  under-pulled spot) served by `GET /api/v1/universe/mapping-integrity.csv` (reusing a SINGLE extracted
+  `_build_mapping_integrity_report()` shared with the JSON route — one reconciliation, never two that
+  drift) + a `⤓ CSV` link on the `/universe` panel. The CSV-injection guard (`csv_safe` +
+  `FormulaSafeWriter`) is EXTRACTED to ONE shared `brutex/dashboard/_csv_utils.py` reused by BOTH the
+  completeness scoreboard AND this audit (CLAUDE.md §11 COMMON; `completeness.py` imports it, aliased to
+  its old private names, byte-unchanged). A byte-stable GOLDEN oracle pins the exact CSV + SHA-256 (the
+  "CI gate over a committed fixture" #870 follow-up). Both new modules at 100% line+branch (6+6 unit +
+  2 golden + 3 integration); ruff/pyright/mypy --strict clean. READ-ONLY — NOT the F2 fix (M&M still
+  reads RED until the live `get_expiries` symbol question is answered; this makes the proof DOWNLOADABLE,
+  no illusion). NO pull/engine/scope/vocab change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-ONE-CLICK-PIPELINE-001 #872 (PR #826, one-click full-universe pull pipeline spot→metadata→historical, gated) +
   DEC-FUTURES-PULL-ENABLE-001 #871 (PR #825, formally enable futures pulling, supersede never-pull decree) +
   DEC-MAPPING-INTEGRITY-RECONCILE-001 #870 (PR #823, real-time spot↔options mapping-integrity audit) +
   DEC-FNO-MONEYNESS-LABEL-001 #869 (PR #824, /movers + /db moneyness + strike-distance as one cell) +
