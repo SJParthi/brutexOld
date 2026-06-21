@@ -279,8 +279,6 @@ def audit_master_integrity(
         exch = inst.exch_id.value
         under_sym = inst.underlying_symbol
         under_tok = inst.underlying_security_id
-        if under_sym and any(ch in _SPECIAL_CHARS for ch in under_sym):
-            special.add(under_sym)
 
         if not under_sym and under_tok is None:
             empty_underlying += 1
@@ -289,10 +287,14 @@ def audit_master_integrity(
 
         # Exchange TEST instruments (*NSETEST*/*BSETEST*) have no real spot — count + report
         # them in their own non-gating bucket so they never read as perpetual false orphans
-        # (they are NOT silently dropped — Golden Rule #10).
+        # (they are NOT silently dropped — Golden Rule #10). Checked BEFORE the special-char
+        # tally so a test leg never inflates the special-char count.
         if under_sym and any(m in under_sym.upper() for m in markers):
             test_instrument += 1
             continue
+
+        if under_sym and any(ch in _SPECIAL_CHARS for ch in under_sym):
+            special.add(under_sym)
 
         leg_sym_key: tuple[str, str] | None = (
             (exch, reverse_aliases.get(under_sym, under_sym)) if under_sym else None

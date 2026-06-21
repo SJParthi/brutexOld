@@ -22,6 +22,9 @@ from hypothesis import strategies as st
 _NOW = datetime(2026, 6, 21, tzinfo=UTC)
 _EXPIRY = date(2024, 1, 25)
 _SYMS = st.text(alphabet="ABCDM&-", min_size=1, max_size=5)
+#: Leg-underlying strategy that ALSO occasionally emits an exchange-test underlying
+#: (``*NSETEST*``), so the partition property exercises the non-gating test bucket too.
+_LEG_UNDERS = st.one_of(_SYMS, st.just("011NSETEST"), st.just("BSETEST99"))
 
 
 def _spot(symbol: str, sid: int, numeric_token: bool) -> Instrument:
@@ -81,7 +84,7 @@ def _master(draw: st.DrawFn) -> list[Instrument]:
         instruments.append(_spot(sym, sid, numeric))
     legs = draw(
         st.lists(
-            st.tuples(_SYMS, st.one_of(st.none(), st.integers(1, 60))),
+            st.tuples(_LEG_UNDERS, st.one_of(st.none(), st.integers(1, 60))),
             min_size=0,
             max_size=8,
         )
