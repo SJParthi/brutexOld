@@ -60,6 +60,7 @@ from brutex.options.expiry_calendar import (
     next_monthly_expiry,
     next_weekly_expiry,
 )
+from brutex.options.lake_source import LakeOptionBarSource
 from brutex.options.lot_size_history import (
     LotSizeChange,
     OptionsUnderlying,
@@ -100,6 +101,7 @@ __all__ = [
     "WEDNESDAY",
     "AuditAppend",
     "ExpiryKind",
+    "LakeOptionBarSource",
     "LotSizeChange",
     "MaterializedTrade",
     "OptionBarPair",
