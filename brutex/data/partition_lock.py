@@ -41,8 +41,12 @@ Design notes (COMMON · O(1) · honest):
 **Honest envelope (Golden Rule #10):** this serialises CONCURRENT writers to one
 partition; it is NOT a transaction across partitions and does NOT make a single
 write atomic on its own (``atomic_write_via`` already does the crash-safe rename).
-``fcntl.flock`` is POSIX (Linux + macOS — the Track-1 hardware envelope); Windows
-is out of scope.
+The acquire is a BLOCKING ``LOCK_EX`` with no timeout: a CRASHED holder is released
+by the kernel (no stale lock), but a HUNG holder (e.g. stuck mid-``write_parquet``
+on a slow volume) stalls other writers to the SAME partition until it finishes or
+dies — the deliberate correctness-first trade-off (impact bounded to one partition;
+writers to OTHER partitions proceed unblocked). ``fcntl.flock`` is POSIX
+(Linux + macOS — the Track-1 hardware envelope); Windows is out of scope.
 """
 
 from __future__ import annotations
