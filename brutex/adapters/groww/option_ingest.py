@@ -214,6 +214,44 @@ def fetch_option_candles(
     )
 
 
+def _clamped_window_key(
+    contract_symbol: str,
+    *,
+    interval: str,
+    start: date,
+    end: date,
+    market: str,
+    now_for_clamp: datetime,
+) -> WindowKey | None:
+    """The canonical fetch-window key for one RESOLVED ``(contract, interval)`` range — or ``None``.
+
+    The SINGLE source of truth for a derivative ledger key (CLAUDE.md §11 COMMON): BOTH
+    the fetch (:func:`ingest_option_contract`, which records the landed outcome) AND the
+    pre-plan (:func:`plan_contract_windows`, which seeds ``PLANNED``) build the key HERE,
+    so a planned key is BYTE-IDENTICAL to the fetched key — the "planned == fetched"
+    invariant that keeps a ``PLANNED`` row from becoming a permanent ghost it can never
+    settle (the F&O twin of the spot spine's guarantee in
+    :func:`brutex.data.window_ledger_store.plan_windows`).
+
+    *start*/*end* are ALREADY resolved (post-:func:`_resolve_window`). The ``end`` is clamped
+    EXACTLY as the spine clamps it (:func:`~brutex.adapters.ingest_common.clamp_window_end` —
+    daily → ``today``; intraday → ``today + 1`` only from the 15:30 IST close). Returns
+    ``None`` for an empty clamped range (``start >= clamped_end``) — exactly the case the
+    fetch returns ``windows=0`` for and never touches the ledger, so that pair is not planned
+    either. Pure + clock-injected (every branch unit-testable offline).
+    """
+    clamped_end = clamp_window_end(interval, end, now_ist=now_for_clamp)
+    if start >= clamped_end:
+        return None
+    return WindowKey(
+        market=market,
+        security_id=contract_symbol,
+        interval=interval,
+        start=start,
+        end=clamped_end,
+    )
+
+
 def ingest_option_contract(
     client: GrowwClientProtocol,
     sink: BarSink,
@@ -269,9 +307,21 @@ def ingest_option_contract(
     """
     exchange = contract_exchange(contract)
     now_for_clamp = (now_ist or _now_ist)()
-    clamped_end = clamp_window_end(interval, end, now_ist=now_for_clamp)
-    if start >= clamped_end:
+    # The window key is derived in ONE shared place (CLAUDE.md §11 COMMON) so the key the
+    # planner seeds PLANNED is byte-identical to the key this fetch records (the
+    # "planned == fetched" invariant). ``None`` == the empty clamped range the old inline
+    # ``start >= clamped_end`` guard returned ``windows=0`` for.
+    key = _clamped_window_key(
+        contract.symbol,
+        interval=interval,
+        start=start,
+        end=end,
+        market=market,
+        now_for_clamp=now_for_clamp,
+    )
+    if key is None:
         return IngestReport(windows=0, bars_appended=0, transient_failures=0)
+    clamped_end = key.end
     # OLD-gap fast-settle cutoff (DEC-OLD-GAP-FAST-SETTLE-001): an expired contract's window
     # whose ``end`` is strictly before this date can never gain vendor data, so an in-pull-
     # confirmed-empty old window settles SKIPPED in ONE pull (the spot-spine twin). Computed
@@ -280,13 +330,6 @@ def ingest_option_contract(
     old_cutoff = now_for_clamp.date() - timedelta(days=OLD_GAP_HORIZON_DAYS)
     pull_id = current_pull_id()
     fields = {"symbol": contract.symbol, "interval": interval}
-    key = WindowKey(
-        market=market,
-        security_id=contract.symbol,
-        interval=interval,
-        start=start,
-        end=clamped_end,
-    )
     if ledger is not None and ledger.is_skippable(key):
         _LOG.debug("option.ingest.window", pull_id=pull_id, action="skipped", **fields)
         return IngestReport(windows=1, bars_appended=0, transient_failures=0, skipped_windows=1)
@@ -529,6 +572,96 @@ def _resolve_window(
     return contract_windows.get(symbol, (start, end))
 
 
+def plan_contract_windows(
+    ledger: WindowLedger,
+    *,
+    contracts: Sequence[DerivativeContract],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    market: str,
+    contract_windows: ContractWindows | None = None,
+    now_ist: Callable[[], datetime] | None = None,
+) -> int:
+    """Upsert every ``(contract, interval)`` window as ``PLANNED`` BEFORE any fetch — returns the count.
+
+    The F&O twin of the spot spine's
+    :func:`brutex.data.window_ledger_store.plan_windows` (DEC-FNO-WINDOW-PLAN-001).
+    For each resolved derivative ``(contract, interval)`` pair it derives the SAME ledger
+    key the fetch records (:func:`_clamped_window_key`, over the
+    :func:`_resolve_window`-resolved range) and :meth:`~brutex.data.window_ledger.WindowLedger.plan`-s
+    it — idempotent, so a settled (``SUCCESS`` / ``SKIPPED``) row from a prior pull is NEVER
+    reset (the no-re-fetch guarantee). This is what gives the ``/coverage/windows`` Options +
+    Futures tabs a real ``PLANNED`` total + units BEFORE any contract lands: every contract this
+    pull will attempt has a row up front, so an un-reached / quarantined contract shows
+    ``PLANNED`` (genuinely-outstanding, never silently missing), exactly like spot.
+
+    The key derivation is BYTE-IDENTICAL to :func:`ingest_option_contract` (both call
+    :func:`_clamped_window_key` over the SAME :func:`_resolve_window` resolution), so the
+    planned key always equals the fetched key — no ghost ``PLANNED`` row that can never
+    settle. A pair whose clamped range is empty (``start >= clamped_end``) yields no key and
+    is not planned (the fetch returns ``windows=0`` for it and never touches the ledger
+    either). SUPERSEDED rows of the planned series — a key a previous pull's shorter / longer
+    bound produced as the global ``end`` advances across pulls — are pruned afterwards
+    (:meth:`~brutex.data.window_ledger.WindowLedger.prune_superseded`,
+    DEC-WINDOW-TRAILING-GC-001), so the ledger tracks the live tiling instead of accumulating
+    one orphan per series per day.
+
+    Each derivative ``(contract, interval)`` maps to a SINGLE coverage window (the contract's
+    whole range — the vendor per-call tiling happens INSIDE ``fetch_candle_windows``, not in
+    the ledger), so each ``planned_tiles`` series carries exactly one ``{start: end}`` entry.
+
+    *market* is the namespace the matching ingest records under
+    (:data:`~brutex.adapters.groww.constants.GROWW_OPTION_COVERAGE_MARKET` for options,
+    :data:`~brutex.adapters.groww.constants.GROWW_FUTURE_COVERAGE_MARKET` for futures), so the
+    planned rows land in the SAME bucket ``/coverage/windows`` reads. *now_ist* injects the
+    clamp clock (the production default is the live IST wall-clock); the 15:30 IST boundary
+    race (the clamp moving between this plan and a fetch crossing the close) self-heals on the
+    next pull's plan→prune cycle, exactly as the spot planner documents.
+
+    Returns the number of windows planned. ``O(contracts × intervals)`` plan + one
+    ``O(rows)`` prune scan — NOT an O(1)-total claim (the per-window plan IS O(1)).
+    """
+    stamp = datetime.now(UTC)
+    now_for_clamp = (now_ist or _now_ist)()
+    planned_tiles: dict[tuple[str, str, str], dict[str, str]] = {}
+    planned = 0
+    for contract in contracts:
+        for interval in intervals:
+            window_start, window_end = _resolve_window(
+                contract_windows,
+                symbol=contract.symbol,
+                interval=interval,
+                start=start,
+                end=end,
+            )
+            key = _clamped_window_key(
+                contract.symbol,
+                interval=interval,
+                start=window_start,
+                end=window_end,
+                market=market,
+                now_for_clamp=now_for_clamp,
+            )
+            if key is None:
+                continue  # empty clamped range — the fetch plans/records nothing here either
+            ledger.plan(key, now=stamp)
+            planned_tiles[market, contract.symbol, interval] = {
+                key.start.isoformat(): key.end.isoformat()
+            }
+            planned += 1
+    pruned = ledger.prune_superseded(planned_tiles)
+    if pruned:
+        _LOG.info(
+            "option.ingest.pruned_superseded",
+            pull_id=current_pull_id(),
+            pruned=pruned,
+            planned=planned,
+            market=market,
+        )
+    return planned
+
+
 def run_groww_option_ingest(
     client: GrowwClientProtocol,
     sink: BarSink,
@@ -621,10 +754,27 @@ def run_groww_option_ingest(
     runner: RunParallel = run_parallel if run_parallel is not None else SerialRunParallel()
     # Deterministic worklist: one job per (contract, interval) pair, in the caller's
     # contract order × interval order — the OUTER fan-out unit (each a distinct lake
-    # partition). ``contracts`` is materialised ONCE (it may be a one-shot iterator).
+    # partition). ``contracts`` is materialised ONCE (it may be a one-shot iterator) so it
+    # can feed BOTH the jobs list AND the pre-plan below.
+    contract_list = list(contracts)
     jobs: list[OptionJob] = [
-        (contract, interval) for contract in contracts for interval in intervals
+        (contract, interval) for contract in contract_list for interval in intervals
     ]
+    # Pre-plan every window PLANNED before the drain (DEC-FNO-WINDOW-PLAN-001) so the
+    # /coverage/windows Options + Futures tabs show a real planned total + units up front —
+    # idempotent (a settled prior-pull row is untouched) and byte-key-identical to what each
+    # fetch records, so a PLANNED row is never a ghost. Skipped for a dry-run (ledger=None).
+    if ledger is not None:
+        plan_contract_windows(
+            ledger,
+            contracts=contract_list,
+            intervals=intervals,
+            start=start,
+            end=end,
+            market=market,
+            contract_windows=contract_windows,
+            now_ist=now_ist,
+        )
 
     def _run_pair(job: OptionJob) -> IngestReport:
         """Pull one ``(contract, interval)`` pair — runs inside a worker thread.
@@ -874,5 +1024,6 @@ __all__ = [
     "ingest_option_contract",
     "ingest_underlying_futures",
     "ingest_underlying_options",
+    "plan_contract_windows",
     "run_groww_option_ingest",
 ]

@@ -17,12 +17,18 @@ from pathlib import Path
 
 import polars as pl
 from brutex.adapters.groww.client import GrowwClient
-from brutex.adapters.groww.option_ingest import run_groww_option_ingest
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+)
+from brutex.adapters.groww.option_ingest import plan_contract_windows, run_groww_option_ingest
 from brutex.adapters.protocol import DerivativeContract
+from brutex.dashboard.db_view import build_window_payload
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.partition import build_partition_path
 from brutex.data.sink import ParquetBarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.window_ledger_store import save_window_ledger
 
 _SYMBOL = "NSE-NIFTY-02Jan25-28500-CE"
 
@@ -115,3 +121,57 @@ def test_option_bars_land_in_fno_partition_and_repull_is_idempotent(tmp_path: Pa
     assert second.skipped_windows == 1 and second.bars_appended == 0
     assert sdk.calls == calls_after_first
     assert pl.read_parquet(part).height == 2  # no duplication on re-pull
+
+
+def test_coverage_windows_shows_fno_planned_total_and_units(tmp_path: Path) -> None:
+    """End-to-end: the pre-fetch plan makes /coverage/windows show PLANNED counts for F&O.
+
+    DEC-FNO-WINDOW-PLAN-001 — the operator's "why no planned items + units for futures and
+    options?" complaint. Pre-planning an options + a futures series, persisting the ledger,
+    and projecting it through the SAME ``build_window_payload`` the dashboard route uses
+    proves both buckets now carry a real ``PLANNED`` total (the units), exactly like spot.
+    """
+    lake = tmp_path / "lake"
+    ledger = WindowLedger()
+    option = _contract()
+    future = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2025, 1, 2),
+        symbol="NSE-NIFTY-02Jan25-FUT",
+        contract_type="FUT",
+    )
+    plan_contract_windows(
+        ledger,
+        contracts=[option],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 3),
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    plan_contract_windows(
+        ledger,
+        contracts=[future],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 3),
+        market=GROWW_FUTURE_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    save_window_ledger(ledger, lake)
+
+    payload = build_window_payload(lake)
+    # Both F&O buckets now show a PLANNED total (the units) — the spot-parity fix.
+    assert payload["counts"]["options"]["PLANNED"] == 1
+    assert payload["counts"]["futures"]["PLANNED"] == 1
+    assert payload["count"] == 2
+
+    # PLANNED rows are counted everywhere but only LISTED on an explicit status filter
+    # (they are the bulk of a fresh plan and carry no per-row info beyond the count).
+    assert all(r["status"] != "PLANNED" for r in payload["windows"])
+    planned_only = build_window_payload(lake, status="PLANNED")
+    assert planned_only["matched"] == 2
+    assert {r["market"] for r in planned_only["windows"]} == {
+        GROWW_OPTION_COVERAGE_MARKET,
+        GROWW_FUTURE_COVERAGE_MARKET,
+    }
