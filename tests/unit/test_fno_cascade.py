@@ -121,8 +121,17 @@ def test_contracts_sorted_futures_first_then_strike_then_type() -> None:
 def test_contract_aggregates_multiple_intervals_into_one_leaf() -> None:
     idx = build_fno_cascade(
         [
-            _opt("NSE-NIFTY-06Feb20-12250-PE", "NIFTY", "2020-02-06", "12250", "PE", interval="1minute"),
-            _opt("NSE-NIFTY-06Feb20-12250-PE", "NIFTY", "2020-02-06", "12250", "PE", interval="1day"),
+            _opt(
+                "NSE-NIFTY-06Feb20-12250-PE",
+                "NIFTY",
+                "2020-02-06",
+                "12250",
+                "PE",
+                interval="1minute",
+            ),
+            _opt(
+                "NSE-NIFTY-06Feb20-12250-PE", "NIFTY", "2020-02-06", "12250", "PE", interval="1day"
+            ),
         ]
     )
     contracts = idx.contracts("NIFTY", "2020-02-06")
