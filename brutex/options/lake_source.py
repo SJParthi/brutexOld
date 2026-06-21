@@ -42,10 +42,11 @@ The first touch of a contract is O(bars-in-contract) (a single small partition).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from brutex.costs.types import OptionType
 from brutex.data.fno_symbol import parse_fno_symbol
@@ -195,9 +196,12 @@ class LakeOptionBarSource:
         return bars
 
 
-def _row_to_option_bar(row: dict[str, object], *, side: OptionType, strike: Decimal) -> OptionBar:
+def _row_to_option_bar(row: Mapping[str, Any], *, side: OptionType, strike: Decimal) -> OptionBar:
     """Build an :class:`OptionBar` from one F&O candle-lake row + the known side/strike.
 
+    *row* is one ``polars`` ``iter_rows(named=True)`` mapping — typed ``Mapping[str, Any]``
+    exactly like the sibling lake reader (``movers_snapshot._row_to_bar``, CLAUDE.md §11
+    COMMON) so the integer casts resolve under ``mypy --strict`` without a suppression.
     ``spot`` / ``iv`` are ``None`` (not stored in the F&O candle lake — honest).
     """
     raw_oi = row["open_interest"]
@@ -207,8 +211,8 @@ def _row_to_option_bar(row: dict[str, object], *, side: OptionType, strike: Deci
         high=_as_decimal(row["high"]),
         low=_as_decimal(row["low"]),
         close=_as_decimal(row["close"]),
-        volume=int(row["volume"]),  # type: ignore[arg-type]
-        open_interest=None if raw_oi is None else int(raw_oi),  # type: ignore[arg-type]
+        volume=int(row["volume"]),
+        open_interest=None if raw_oi is None else int(raw_oi),
         side=side,
         strike=strike,
         spot=None,
