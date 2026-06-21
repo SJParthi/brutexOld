@@ -610,6 +610,21 @@
        style="margin-left:10px;color:var(--blue);text-decoration:none;font-size:12px;">⤓ CSV</a>
   </div>
 
+  <!-- Instrument-master structural integrity (DEC-INSTRUMENT-MASTER-INTEGRITY-001):
+       every FUT/CE/PE leg must map to exactly ONE IDX/EQ spot (by symbol AND numeric token).
+       VERIFIED = all legs mapped; RED = orphan / ambiguous / disagreement / empty-underlying.
+       Computed at ingest (before the legs are discarded) + persisted; this reads the snapshot. -->
+  <div id="masterpanel" role="status" aria-live="polite"
+       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Master mapping integrity</b>
+    <span id="masterverdict" style="font-weight:600;"></span>
+    <span id="masterdetail" style="color:var(--muted);"></span>
+    <a href="/api/v1/universe/master-integrity.csv" download
+       title="Download the full instrument-master leg↔spot mapping audit as a CSV (indices/equities/futures/options)"
+       style="margin-left:10px;color:var(--blue);text-decoration:none;font-size:12px;">⤓ CSV</a>
+  </div>
+
   <main class="grid" aria-label="Instrument drill-down">
     <section class="col" aria-labelledby="h-instruments">
       <h3 id="h-instruments">Instruments</h3>
@@ -964,6 +979,36 @@ async function loadMappingIntegrity() {
       verdict.style.color = "#f87171";
       detail.textContent = reds.length ? (" · " + reds.slice(0, 12).join(", ") +
         (reds.length > 12 ? " …" : "")) : "";
+    }
+  } catch (e) { /* transient — keep the last shown verdict */ }
+}
+
+async function loadMasterIntegrity() {
+  /* Read-only: the green/red leg↔spot structural mapping verdict
+     (DEC-INSTRUMENT-MASTER-INTEGRITY-001). VERIFIED when every FUT/CE/PE leg maps to exactly
+     one IDX/EQ spot (by symbol AND token); RED counts orphan/ambiguous/disagreement/empty
+     legs. Reads the snapshot the ingest hook persisted. Never throws — keeps last shown. */
+  try {
+    const r = await fetch("/api/v1/universe/master-integrity");
+    if (!r.ok) return;
+    const m = await r.json();
+    const panel = document.getElementById("masterpanel");
+    const verdict = document.getElementById("masterverdict");
+    const detail = document.getElementById("masterdetail");
+    if (!panel || !m.present) return;
+    panel.style.display = "block";
+    const tc = m.type_counts || {};
+    if (m.is_green) {
+      verdict.textContent = " ✅ VERIFIED";
+      verdict.style.color = "#4ade80";
+      detail.textContent = " · " + (tc.legs || 0) + " legs all map to " +
+        (tc.spots || 0) + " spots (idx " + (tc.idx || 0) + " · eq " + (tc.eq || 0) +
+        " · fut " + (tc.fut || 0) + " · ce " + (tc.ce || 0) + " · pe " + (tc.pe || 0) + ")";
+    } else {
+      verdict.textContent = " ❌ " + m.gating_failures + " leg(s) do not map cleanly";
+      verdict.style.color = "#f87171";
+      detail.textContent = " · orphan " + m.orphan_count + " · ambiguous " + m.ambiguous_count +
+        " · disagreement " + m.disagreement_count + " · empty " + m.empty_underlying_count;
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1850,6 +1895,8 @@ async function bootstrap() {
   setInterval(loadCompleteness, 15000);
   loadMappingIntegrity();
   setInterval(loadMappingIntegrity, 15000);
+  loadMasterIntegrity();
+  setInterval(loadMasterIntegrity, 15000);
 }
 bootstrap();
 </script>

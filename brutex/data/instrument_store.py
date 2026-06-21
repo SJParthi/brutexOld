@@ -925,6 +925,28 @@ class InstrumentStore(metaclass=_StoreMeta):
             ).fetchone()
             return int(row[0]) if row else SCHEMA_VERSION
 
+    def set_meta(self, key: str, value: str) -> None:
+        """Persist one ``schema_meta`` key/value (the generic key-value sidecar).
+
+        Used for bounded bookkeeping summaries that ride alongside the instrument
+        rows — e.g. the instrument-master integrity audit
+        (DEC-INSTRUMENT-MASTER-INTEGRITY-001). Auto-locked by ``_StoreMeta``.
+        """
+        self._ensure_open()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
+            [key, value],
+        )
+
+    def get_meta(self, key: str) -> str | None:
+        """Return a ``schema_meta`` value (``None`` if the key is absent)."""
+        self._ensure_open()
+        row = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key = ?",
+            [key],
+        ).fetchone()
+        return str(row[0]) if row else None
+
     # ── Write side ────────────────────────────────────────────────
 
     def upsert_many(

@@ -228,20 +228,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/mapping-integrity-export-jlzt1n` (downloadable mapping-integrity CSV —
-  DEC-MAPPING-INTEGRITY-EXPORT-001, MIGRATION.md #873: the green/red spot↔options mapping audit of #870
-  is now a DOWNLOADABLE CSV "receipt" — a NEW pure `brutex/dashboard/mapping_integrity_csv.py`
-  `mapping_integrity_to_csv(report)` (three-section human report: VERDICT · SUMMARY · DETAIL per
-  under-pulled spot) served by `GET /api/v1/universe/mapping-integrity.csv` (reusing a SINGLE extracted
-  `_build_mapping_integrity_report()` shared with the JSON route — one reconciliation, never two that
-  drift) + a `⤓ CSV` link on the `/universe` panel. The CSV-injection guard (`csv_safe` +
-  `FormulaSafeWriter`) is EXTRACTED to ONE shared `brutex/dashboard/_csv_utils.py` reused by BOTH the
-  completeness scoreboard AND this audit (CLAUDE.md §11 COMMON; `completeness.py` imports it, aliased to
-  its old private names, byte-unchanged). A byte-stable GOLDEN oracle pins the exact CSV + SHA-256 (the
-  "CI gate over a committed fixture" #870 follow-up). Both new modules at 100% line+branch (6+6 unit +
-  2 golden + 3 integration); ruff/pyright/mypy --strict clean. READ-ONLY — NOT the F2 fix (M&M still
-  reads RED until the live `get_expiries` symbol question is answered; this makes the proof DOWNLOADABLE,
-  no illusion). NO pull/engine/scope/vocab change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+- **Active branch:** `claude/instrument-master-integrity-jlzt1n` (instrument-master structural mapping audit —
+  DEC-INSTRUMENT-MASTER-INTEGRITY-001, MIGRATION.md #874: a parse-time audit over the WHOLE `instrument.csv`
+  master proving every FUT/CE/PE leg maps to exactly ONE IDX/EQ spot — cross-checked by BOTH `underlying_symbol`
+  AND the numeric `underlying_security_id` token-join — captured at INGEST before the lean store discards the
+  ~89k legs (DEC-INSTRUMENT-UNIVERSE-FAST-001). NEW pure `brutex/data/master_integrity.py`
+  `audit_master_integrity` (two O(rows) sweeps, O(1) lookups, O(spots) space; buckets every leg into
+  resolved_both / symbol_only / token_only / orphan / ambiguous / disagreement / empty_underlying + dedup +
+  spots-with-no-legs + capped orphan sample); an ingest hook `_persist_master_integrity` (structlog + persist
+  bounded JSON to `schema_meta` via NEW `InstrumentStore.set_meta`/`get_meta`); routes
+  `GET /api/v1/universe/master-integrity[.csv]` (CSV via NEW `master_integrity_csv.py` reusing #873's shared
+  `FormulaSafeWriter`) + a green/red `/universe` "Master mapping integrity" panel. STRUCTURAL sibling of #870
+  (the COVERAGE audit). Both new modules at 100% line+branch (17 unit + 3 property + 6 CSV + 1 golden + 4
+  integration); instrument_loader stays 100%; ruff/pyright/mypy --strict clean. READ-ONLY, DETECT-only — legs
+  SUMMARISED, never re-stored (lean-store decree stands); never crashes a keyless load. NO pull/engine/scope/vocab
+  change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-MAPPING-INTEGRITY-EXPORT-001 #873 (PR #827, downloadable mapping-integrity CSV + golden gate + shared CSV guard) +
   DEC-ONE-CLICK-PIPELINE-001 #872 (PR #826, one-click full-universe pull pipeline spot→metadata→historical, gated) +
   DEC-FUTURES-PULL-ENABLE-001 #871 (PR #825, formally enable futures pulling, supersede never-pull decree) +
   DEC-MAPPING-INTEGRITY-RECONCILE-001 #870 (PR #823, real-time spot↔options mapping-integrity audit) +

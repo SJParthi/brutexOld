@@ -89,6 +89,7 @@ from brutex.dashboard.db_view import (
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
+from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
 from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
 from brutex.dashboard.movers_futures import (
@@ -147,6 +148,8 @@ from brutex.data.mapping_integrity import (
     reconcile_mapping_integrity,
     report_to_dict,
 )
+from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
+from brutex.data.master_integrity import report_from_dict as master_report_from_dict
 from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
@@ -2702,6 +2705,59 @@ def build_app(
             media_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": 'attachment; filename="mapping_integrity.csv"',
+            },
+        )
+
+    def _read_master_integrity() -> dict[str, Any] | None:
+        """Read the persisted instrument-master integrity snapshot (``None`` if never loaded).
+
+        The audit runs at ingest (the legs are discarded straight after), so its bounded JSON
+        summary is persisted to ``schema_meta`` — this reads that snapshot back. One DB get.
+        """
+        raw = _require_store().get_meta(MASTER_INTEGRITY_META_KEY)
+        if raw is None:
+            return None
+        parsed: dict[str, Any] = json.loads(raw)
+        return parsed
+
+    @app.get("/api/v1/universe/master-integrity")
+    async def api_universe_master_integrity() -> JSONResponse:
+        """GET /api/v1/universe/master-integrity — the green/red leg↔spot mapping verdict.
+
+        DEC-INSTRUMENT-MASTER-INTEGRITY-001. Returns the structural-integrity snapshot the
+        ingest hook persisted to ``schema_meta`` (every FUT/CE/PE leg maps to exactly one
+        IDX/EQ spot by symbol AND token, else orphan/ambiguous/disagreement/empty). READ-ONLY;
+        ``{"present": false}`` until the instrument master has been loaded once. No store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_master_integrity)
+        if snapshot is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **snapshot})
+
+    @app.get("/api/v1/universe/master-integrity.csv")
+    async def api_universe_master_integrity_csv() -> Response:
+        """GET /api/v1/universe/master-integrity.csv — the leg↔spot audit as a download.
+
+        DEC-INSTRUMENT-MASTER-INTEGRITY-001 — the "open it in Excel and SEE the mapping proof"
+        file companion. Re-renders the persisted snapshot via
+        :func:`brutex.data.master_integrity.report_from_dict` →
+        :func:`brutex.dashboard.master_integrity_csv.master_integrity_to_csv` (every cell
+        formula-injection-safe). READ-ONLY; a one-line placeholder until the master is loaded.
+        No store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_master_integrity)
+        if snapshot is None:
+            content = (
+                "BruteX — Instrument-Master Integrity Audit\n"
+                "no audit recorded yet — load the instrument master first\n"
+            )
+        else:
+            content = master_integrity_to_csv(master_report_from_dict(snapshot))
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="master_integrity.csv"',
             },
         )
 

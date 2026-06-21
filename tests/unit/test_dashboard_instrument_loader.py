@@ -290,6 +290,10 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     ntm = result.pop("ntm")
     assert ntm["admitted"] is False
     assert "no NSE cash equities" in ntm["reason"]
+    # The empty master audits green with all-zero counts (DEC-INSTRUMENT-MASTER-INTEGRITY-001).
+    mi = result.pop("master_integrity")
+    assert mi["is_green"] is True
+    assert mi["type_counts"]["legs"] == 0 and mi["gating_failures"] == 0
     assert result == {
         "parsed": 0,
         "persisted": 0,
