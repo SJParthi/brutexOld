@@ -228,8 +228,16 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-fno-cascade-jlzt1n` (the `/db` F&O picker is now a lazy
-  symbol→expiry→contract cascade — DEC-DB-FNO-CASCADE-001, MIGRATION.md #880: the `/db` F&O dataset
+- **Active branch:** `claude/db-fno-columns-jlzt1n` (the `/db` F&O candle view gains four read-time
+  derived value columns — DEC-DB-FNO-COLUMNS-001, MIGRATION.md #881: `spot` · `intrinsic` · `time_value` ·
+  `days_to_expiry` appended after `moneyness`, ALL riding the SAME single per-bar underlying-spot join
+  `moneyness` already does (no extra read). `db_view._fno_moneyness_rows` → `_fno_derived_rows` (5-tuple
+  from ONE join) + pure `_option_intrinsic`; a future/undecodable reads `—`/`None` values but still gets
+  `days_to_expiry`; an option with no spot reads `?`/`None` (never a fabricated price). `FNO_CANDLE_COLUMNS`
+  advertises the four as `source="derived"`; the candle grid renders them column-generically. The stated
+  part-2 follow-up to the #880 cascade. `/db` F&O moneyness/schema/datasets/candle-lake suites green;
+  ruff/pyright/mypy --strict clean. READ-ONLY viewer; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-DB-FNO-CASCADE-001, MIGRATION.md #880 (PR #834: the `/db` F&O dataset
   selector was ONE flat dropdown of thousands of contract partitions (impossible to find a precise strike —
   the operator's screenshot). NEW pure `brutex/dashboard/fno_cascade.py` `build_fno_cascade` groups the
   decoded F&O datasets into a 3-level `FnoCascadeIndex` (O(1) `underlyings`/`expiries`/`contracts`,
