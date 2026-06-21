@@ -2096,8 +2096,9 @@ def build_app(
                 symbols=symbols,
                 symbol=symbol,
                 lookup=_require_store().get,
-                whole_universe=lambda: _select_bulk_targets("index")
-                + _select_bulk_targets("stock"),
+                whole_universe=lambda: (
+                    _select_bulk_targets("index") + _select_bulk_targets("stock")
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2251,8 +2252,9 @@ def build_app(
                 symbols=symbols,
                 symbol=symbol,
                 lookup=_require_store().get,
-                whole_universe=lambda: _select_bulk_targets("index")
-                + _select_bulk_targets("stock"),
+                whole_universe=lambda: (
+                    _select_bulk_targets("index") + _select_bulk_targets("stock")
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

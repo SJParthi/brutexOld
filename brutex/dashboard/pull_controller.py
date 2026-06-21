@@ -469,9 +469,7 @@ def resolve_pull_targets(
     if symbol is not None:
         instrument = lookup(symbol)
         if instrument is None:
-            raise ValueError(
-                f"unknown security_id {symbol!r} — not in the instrument store"
-            )
+            raise ValueError(f"unknown security_id {symbol!r} — not in the instrument store")
         return [instrument], "single"
     return whole_universe(), "universe"
 
