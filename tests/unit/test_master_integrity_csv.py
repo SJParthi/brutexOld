@@ -48,6 +48,8 @@ def _report(
         empty_underlying_count=0,
         dedup_collisions=0,
         spots_with_no_legs=0,
+        test_instrument_count=0,
+        special_char_count=len(special),
         special_char_underlyings=special,
         orphan_legs=legs,
     )
@@ -93,7 +95,8 @@ def test_detail_row_with_numeric_underlying_id() -> None:
 def test_special_char_underlyings_rendered() -> None:
     text = master_integrity_to_csv(_report(special=("BAJAJ-AUTO", "M&M")))
     rows = _parse(text)
-    assert ["Special-char underlyings", "BAJAJ-AUTO M&M"] in rows
+    assert ["Special-char underlyings (count)", "2"] in rows
+    assert ["Special-char underlyings (sample)", "BAJAJ-AUTO M&M"] in rows
 
 
 def test_formula_injection_symbol_is_neutralised() -> None:

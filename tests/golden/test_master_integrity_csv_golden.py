@@ -16,7 +16,7 @@ from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.data.master_integrity import audit_master_integrity
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
-_GOLDEN_SHA256 = "e99a54e6470a78ea858f38dd833d7e12dc9ea0ac8ba4043d8b20b349089beba4"
+_GOLDEN_SHA256 = "117691185751632b20b026d15d5e43e3ee3ab68850d57d0a499501b3e1b5d8ed"
 
 
 def _spot(sym: str, sid: int, kind: InstrumentType, ft: str | None) -> Instrument:

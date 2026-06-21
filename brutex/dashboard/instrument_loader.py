@@ -965,15 +965,6 @@ def load_instrument_master(
         # still-unmatched count — the operator's "check all stocks/indices" audit.
         _log_opt_reclassified(rescued, still_unmatched=len(residual_gaps))
 
-        # Parse-time structural mapping audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001): verify
-        # every FUT/CE/PE leg maps to exactly ONE IDX/EQ spot (symbol AND token) NOW, while
-        # the full leg-bearing universe is still in memory — the lean ingest below discards
-        # the legs. Persists the bounded JSON summary to schema_meta (read by the dashboard
-        # panel + CSV download) + a structlog counts line.
-        master_integrity = _persist_master_integrity(
-            index, store, run_id=run_id, csv_sha256=csv_sha256
-        )
-
         # NTM enrichment is fail-soft — it never blocks the keyless core load
         # (DEC-NTM-GROWW-REPOINT-001). The returned ids ADMIT the non-F&O
         # constituents into the lean set AND tag them reference_only at upsert.
@@ -1016,6 +1007,16 @@ def load_instrument_master(
             reference_only_of=_reference_only_of(reference_security_ids, options_eligible_bridged),
         )
         pruned = store.prune_to_latest_snapshot()
+        # Parse-time structural mapping audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001): verify
+        # every FUT/CE/PE leg maps to exactly ONE IDX/EQ spot (symbol AND token). Runs against
+        # the still-in-memory full leg-bearing ``index.universe`` (``_lean_universe`` returns a
+        # NEW list, it never mutates ``index``), but persists AFTER the lean upsert + prune so
+        # the schema_meta snapshot is transactionally consistent with the rows that persisted
+        # (it can never describe a master whose upsert rolled back). Persists the bounded JSON
+        # summary to schema_meta (read by the dashboard panel + CSV) + a structlog counts line.
+        master_integrity = _persist_master_integrity(
+            index, store, run_id=run_id, csv_sha256=csv_sha256
+        )
         summary = _summarise_stored(store)
 
     _LOG.info(

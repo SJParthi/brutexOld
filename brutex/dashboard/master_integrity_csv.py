@@ -76,7 +76,11 @@ def master_integrity_to_csv(report: MasterIntegrityReport) -> str:
     writer.writerow(["Gating failures (red)", report.gating_failures])
     writer.writerow(["Duplicate rows", report.dedup_collisions])
     writer.writerow(["Spots with no legs", report.spots_with_no_legs])
-    writer.writerow(["Special-char underlyings", " ".join(report.special_char_underlyings)])
+    writer.writerow(["Exchange test legs (excluded, non-gating)", report.test_instrument_count])
+    writer.writerow(["Special-char underlyings (count)", report.special_char_count])
+    writer.writerow(
+        ["Special-char underlyings (sample)", " ".join(report.special_char_underlyings)]
+    )
 
     writer.writerow([])
     writer.writerow(["DETAIL — failing legs (capped sample)"])

@@ -19,6 +19,7 @@ from brutex.data.master_integrity import (
     REASON_DISAGREEMENT,
     REASON_EMPTY_UNDERLYING,
     REASON_ORPHAN,
+    SPECIAL_CHAR_SAMPLE_CAP,
     audit_master_integrity,
     report_from_dict,
     report_to_dict,
@@ -133,6 +134,39 @@ def test_leg_pointing_at_another_leg_is_orphan() -> None:
     assert not rep.is_green
 
 
+def test_exchange_test_instrument_is_non_gating() -> None:
+    # An NSE exchange TEST future (*NSETEST*) has no real spot — counted in its own bucket,
+    # EXCLUDED from the gating verdict (green), never a false orphan, never silently dropped.
+    rep = audit_master_integrity(
+        [
+            _spot("RELIANCE", sid=100, feed_token="100"),
+            _leg(
+                "031NSETEST36DECFUT",
+                sid=14753,
+                kind=InstrumentType.FUT,
+                under_sym="031NSETEST",
+                under_sid=14753,
+            ),
+            _leg("RELIANCE24JANCE", sid=900, under_sym="RELIANCE", under_sid=100),
+        ],
+        now=_NOW,
+    )
+    assert rep.test_instrument_count == 1
+    assert rep.orphan_count == 0
+    assert rep.is_green  # the test future does not gate; the real leg resolved
+    assert rep.resolved_both == 1
+
+
+def test_test_marker_is_injectable() -> None:
+    # The markers are injectable (DYNAMIC) — a custom marker reclassifies a leg as a test row.
+    rep = audit_master_integrity(
+        [_leg("FOO36DECFUT", sid=1, kind=InstrumentType.FUT, under_sym="MYPROBE1", under_sid=9)],
+        test_underlying_markers=("MYPROBE",),
+        now=_NOW,
+    )
+    assert rep.test_instrument_count == 1 and rep.orphan_count == 0 and rep.is_green
+
+
 def test_spot_with_no_legs_is_green() -> None:
     rep = audit_master_integrity([_spot("NIFTY", sid=1, kind=InstrumentType.IDX)], now=_NOW)
     assert rep.is_green
@@ -242,6 +276,7 @@ def test_special_char_underlyings_collected() -> None:
         now=_NOW,
     )
     assert rep.special_char_underlyings == ("BAJAJ-AUTO", "M&M")
+    assert rep.special_char_count == 2
     assert rep.is_green  # both resolve both-ways
 
 
@@ -253,6 +288,21 @@ def test_orphan_sample_capped_but_count_exact() -> None:
     rep = audit_master_integrity(legs, now=_NOW)
     assert rep.orphan_count == ORPHAN_SAMPLE_CAP + 25  # exact
     assert len(rep.orphan_legs) == ORPHAN_SAMPLE_CAP  # sample capped
+
+
+def test_special_char_sample_capped_but_count_exact() -> None:
+    # Many distinct special-char underlyings (all resolving) → the sample is capped at
+    # SPECIAL_CHAR_SAMPLE_CAP but special_char_count is the exact total (anti-bloat bound).
+    n = SPECIAL_CHAR_SAMPLE_CAP + 7
+    insts: list[Instrument] = []
+    for i in range(n):
+        sym = f"A&B{i}"  # distinct special-char symbol
+        insts.append(_spot(sym, sid=3000 + i, feed_token=str(3000 + i)))
+        insts.append(_leg(f"L{i}CE", sid=7000 + i, under_sym=sym, under_sid=3000 + i))
+    rep = audit_master_integrity(insts, now=_NOW)
+    assert rep.special_char_count == n  # exact
+    assert len(rep.special_char_underlyings) == SPECIAL_CHAR_SAMPLE_CAP  # sample capped
+    assert rep.is_green
 
 
 def test_fut_and_options_of_same_underlying_all_resolve() -> None:

@@ -102,6 +102,7 @@ def test_buckets_partition_the_legs(instruments: list[Instrument]) -> None:
         + rep.ambiguous_count
         + rep.disagreement_count
         + rep.empty_underlying_count
+        + rep.test_instrument_count
     )
     assert bucket_sum == rep.type_counts.legs
 

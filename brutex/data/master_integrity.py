@@ -66,12 +66,24 @@ GATING_REASONS: Final[tuple[str, str, str, str]] = (
 #: bounded so the persisted summary / JSONL line can never bloat on a pathological master).
 ORPHAN_SAMPLE_CAP: Final[int] = 200
 
+#: Cap on the special-char-underlying SAMPLE (``special_char_count`` carries the true total).
+#: Same anti-bloat rationale as :data:`ORPHAN_SAMPLE_CAP` — a pathological / vendor-drift
+#: master where most legs name special-char symbols can never bloat the persisted summary.
+SPECIAL_CHAR_SAMPLE_CAP: Final[int] = 200
+
 #: The ``schema_meta`` key the ingest hook persists the audit JSON under (read by the
 #: dashboard routes — the legs are discarded post-load, so this snapshot is the source).
 META_KEY: Final[str] = "master_integrity"
 
 #: Characters that make an underlying symbol "special" (the cases the resolver must handle).
 _SPECIAL_CHARS: Final[frozenset[str]] = frozenset("&-. ")
+
+#: Underlying-symbol markers identifying EXCHANGE TEST instruments (NSE/BSE inject fake
+#: ``*NSETEST*`` / ``*BSETEST*`` contracts into every master). A leg whose underlying carries
+#: one of these is a known non-tradable test row — counted + reported in its own bucket but
+#: EXCLUDED from the gating verdict (it has no real spot, so it would otherwise be a perpetual
+#: false-RED orphan). Injected + extensible (DYNAMIC) — NOT silently dropped (Golden Rule #10).
+DEFAULT_TEST_UNDERLYING_MARKERS: Final[tuple[str, str]] = ("NSETEST", "BSETEST")
 
 _Identity = tuple[str, int]  # (exchange value, security_id) — the spot identity
 
@@ -127,7 +139,9 @@ class MasterIntegrityReport:
     empty_underlying_count: int
     dedup_collisions: int
     spots_with_no_legs: int
-    special_char_underlyings: tuple[str, ...]
+    test_instrument_count: int  # exchange TEST legs (*NSETEST*/*BSETEST*) — non-gating, reported
+    special_char_count: int  # true total of distinct special-char leg underlyings
+    special_char_underlyings: tuple[str, ...]  # capped sample (≤ SPECIAL_CHAR_SAMPLE_CAP)
     orphan_legs: tuple[OrphanLeg, ...]  # capped sample (≤ ORPHAN_SAMPLE_CAP)
 
     @property
@@ -174,6 +188,7 @@ def audit_master_integrity(
     instruments: Sequence[Instrument],
     *,
     index_aliases: Mapping[str, str] | None = None,
+    test_underlying_markers: Sequence[str] = DEFAULT_TEST_UNDERLYING_MARKERS,
     now: datetime,
     run_id: str = "",
     csv_source_sha256: str = "",
@@ -238,8 +253,9 @@ def audit_master_integrity(
                 spot_by_token[(inst.exch_id.value, inst.security_id)] = identity
 
     # Pass 2 — resolve every leg against the spot tables.
+    markers = tuple(m.upper() for m in test_underlying_markers)
     resolved_both = resolved_symbol_only = resolved_token_only = 0
-    orphan = ambiguous = disagreement = empty_underlying = 0
+    orphan = ambiguous = disagreement = empty_underlying = test_instrument = 0
     orphan_sample: list[OrphanLeg] = []
     referenced: set[_Identity] = set()
     special: set[str] = set()
@@ -269,6 +285,13 @@ def audit_master_integrity(
         if not under_sym and under_tok is None:
             empty_underlying += 1
             _record_orphan(inst, REASON_EMPTY_UNDERLYING)
+            continue
+
+        # Exchange TEST instruments (*NSETEST*/*BSETEST*) have no real spot — count + report
+        # them in their own non-gating bucket so they never read as perpetual false orphans
+        # (they are NOT silently dropped — Golden Rule #10).
+        if under_sym and any(m in under_sym.upper() for m in markers):
+            test_instrument += 1
             continue
 
         leg_sym_key: tuple[str, str] | None = (
@@ -319,7 +342,9 @@ def audit_master_integrity(
         empty_underlying_count=empty_underlying,
         dedup_collisions=dedup_collisions,
         spots_with_no_legs=len(spot_identities - referenced),
-        special_char_underlyings=tuple(sorted(special)),
+        test_instrument_count=test_instrument,
+        special_char_count=len(special),
+        special_char_underlyings=tuple(sorted(special))[:SPECIAL_CHAR_SAMPLE_CAP],
         orphan_legs=tuple(orphan_sample),
     )
 
@@ -351,6 +376,8 @@ def report_to_dict(report: MasterIntegrityReport) -> dict[str, Any]:
         "empty_underlying_count": report.empty_underlying_count,
         "dedup_collisions": report.dedup_collisions,
         "spots_with_no_legs": report.spots_with_no_legs,
+        "test_instrument_count": report.test_instrument_count,
+        "special_char_count": report.special_char_count,
         "special_char_underlyings": list(report.special_char_underlyings),
         "orphan_legs": [
             {
@@ -389,6 +416,8 @@ def report_from_dict(payload: Mapping[str, Any]) -> MasterIntegrityReport:
         empty_underlying_count=payload["empty_underlying_count"],
         dedup_collisions=payload["dedup_collisions"],
         spots_with_no_legs=payload["spots_with_no_legs"],
+        test_instrument_count=payload["test_instrument_count"],
+        special_char_count=payload["special_char_count"],
         special_char_underlyings=tuple(payload["special_char_underlyings"]),
         orphan_legs=tuple(
             OrphanLeg(
@@ -405,6 +434,7 @@ def report_from_dict(payload: Mapping[str, Any]) -> MasterIntegrityReport:
 
 
 __all__ = [
+    "DEFAULT_TEST_UNDERLYING_MARKERS",
     "GATING_REASONS",
     "META_KEY",
     "ORPHAN_SAMPLE_CAP",
@@ -412,6 +442,7 @@ __all__ = [
     "REASON_DISAGREEMENT",
     "REASON_EMPTY_UNDERLYING",
     "REASON_ORPHAN",
+    "SPECIAL_CHAR_SAMPLE_CAP",
     "MasterIntegrityReport",
     "OrphanLeg",
     "TypeCounts",
