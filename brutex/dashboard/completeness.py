@@ -93,12 +93,17 @@ _CELL_EXPIRIES_ONLY: Final[str] = "expiries_only"
 _CELL_PENDING: Final[str] = "pending"
 _CELL_FAILED: Final[str] = "failed"
 
-#: Exclusive upper bound for the "data begins in 2020" test (DEC-COMPLETENESS-UNIVERSE-001).
-#: A dimension's earliest bar date ``< 2021-01-01`` ⇒ its first bar falls in calendar 2020
-#: (the ``GROWW_HISTORY_FLOOR`` year per CLAUDE.md §3 / DEC-PULL-FLOOR-2020-001), so the symbol
-#: HAS data starting 2020 on that dimension. Year-granular on purpose: robust to which exact
-#: first-trading-day of Jan-2020 the vendor serves (holidays vary), never a magic threshold.
-_FROM_2020_EXCLUSIVE_UPPER: Final[str] = "2021-01-01"
+#: Exclusive upper bound for the "has SOLID 2020-floor data" test (DEC-COMPLETENESS-UNIVERSE-001,
+#: tightened by DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868). A dimension's earliest bar date
+#: ``< 2020-02-01`` ⇒ its first bar falls in JANUARY 2020 ⇒ the symbol has data from the START of
+#: the ``GROWW_HISTORY_FLOOR`` year (CLAUDE.md §3 / DEC-PULL-FLOOR-2020-001), i.e. the solid full
+#: 2020→today history the deep-drill brute-force backtest needs. A symbol whose first bar is LATER
+#: — even later WITHIN 2020 (TATACONSUM 2020-02-27, MAXHEALTH 2020-08-21) — is missing the start
+#: of 2020 and is honestly NOT "solid 2020" (operator decree 2026-06-21: "must have Jan-2020
+#: data"). Month-granular (not exact-day) on purpose: robust to which exact first-trading-day of
+#: January 2020 the vendor serves (Jan-1 is a market holiday; the first session varies), never a
+#: brittle single-date magic threshold.
+_FROM_2020_EXCLUSIVE_UPPER: Final[str] = "2020-02-01"
 
 
 def _spot_dimension_verdict(completeness: str | None) -> str:
@@ -164,10 +169,14 @@ def _per_symbol_spot(
                 "1minute_end": None,
             },
         )
-        entry[interval] = _spot_dimension_verdict(row.get("completeness"))
         first = row.get("first_date")
         last = row.get("last_date")
-        entry[f"{interval}_start"] = str(first) if first else None
+        first_s = str(first) if first else None
+        # 2020-floor honesty downgrade: a settled-but-late-start 1-minute dimension reads
+        # ``partial``, not ``full`` (DEC-SPOT-COMPLETENESS-2020-FLOOR-001) — the start date
+        # below shows the operator WHEN it actually begins.
+        entry[interval] = _spot_dimension_verdict_with_floor(row.get("completeness"), first_s)
+        entry[f"{interval}_start"] = first_s
         entry[f"{interval}_end"] = str(last) if last else None
     for entry in by_symbol.values():
         entry["overall"] = _overall_spot(entry["1minute"])
@@ -294,22 +303,55 @@ def _per_underlying_options(
 
 
 def _from_2020(first_date: str | None) -> bool:
-    """True iff *first_date* (an ISO ``YYYY-MM-DD`` or ``None``) falls in calendar 2020.
+    """True iff *first_date* (an ISO ``YYYY-MM-DD`` or ``None``) has SOLID 2020-floor data.
 
-    The honest "has data starting 2020" flag for the per-symbol view — a symbol whose earliest
-    bar is in 2020 has data from the GROWW_HISTORY_FLOOR year; one whose earliest bar is later
-    (a late listing OR a gap) is flagged so the operator SEES it (the explicit dates disambiguate).
+    The honest "has data from the START of 2020" flag for the per-symbol view — True iff the
+    earliest bar falls in JANUARY 2020 (``< 2020-02-01``), i.e. the symbol holds the full
+    2020→today history from the GROWW_HISTORY_FLOOR. A symbol whose earliest bar is later — a late
+    listing OR a gap, even one later WITHIN 2020 (TATACONSUM 2020-02-27, MAXHEALTH 2020-08-21) — is
+    flagged False so the operator SEES it (the explicit dates disambiguate). Tightened from the
+    prior calendar-2020 test by DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (operator decree).
     """
     return first_date is not None and first_date < _FROM_2020_EXCLUSIVE_UPPER
 
 
+def _spot_dimension_verdict_with_floor(completeness: str | None, first_date: str | None) -> str:
+    """The spot 1-minute verdict WITH the 2020-floor honesty downgrade applied.
+
+    DEC-SPOT-COMPLETENESS-2020-FLOOR-001 — the SPOT analog of the options real-years fix
+    (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001, #859). The pull start is the
+    ``GROWW_HISTORY_FLOOR`` (2020-01-01), so the window ledger PLANS a window for every
+    trading day from 2020. A LATE-listed / late-data symbol — JIOFIN 2023-08-21,
+    SHRIRAMFIN 2022-12-20, TMPV 2025-10-24, and even one that starts later WITHIN 2020 like
+    MAXHEALTH 2020-08-21 or TATACONSUM 2020-02-27 — has NO vendor bars before its first bar;
+    those pre-start windows still RESOLVE (the vendor honestly returns empty), so every
+    planned window is settled and the base verdict reads ``full``. But ``full`` must mean
+    SOLID 2020-floor coverage — data from the START of 2020, the strong evidence the
+    deep-drill brute-force backtest needs. So a ``full`` whose covered range does NOT begin in
+    JANUARY 2020 (``from_2020`` is False — the earliest bar is after January 2020, OR there
+    are no bars at all) is HONESTLY downgraded to ``partial`` (the symbol HAS 1-minute data,
+    just not from the floor). ``partial`` / ``failed`` / ``none`` already carry no positive
+    2020 claim and pass through unchanged. One source of truth (CLAUDE.md §11 COMMON) for BOTH
+    the scoreboard rollup and the per-symbol detail.
+    """
+    verdict = _spot_dimension_verdict(completeness)
+    if verdict == DIM_FULL and not _from_2020(first_date):
+        return DIM_PARTIAL
+    return verdict
+
+
 def _spot_dimension_detail(row: Mapping[str, Any]) -> dict[str, Any]:
-    """One spot dimension's verdict + EXPLICIT first/last bar dates + the ``from_2020`` flag."""
+    """One spot dimension's verdict + EXPLICIT first/last bar dates + the ``from_2020`` flag.
+
+    The verdict honours the 2020-floor downgrade (DEC-SPOT-COMPLETENESS-2020-FLOOR-001): a
+    settled-but-late-start dimension reads ``partial``, not ``full`` — the ``from_2020`` flag
+    and the explicit first/last dates disambiguate WHY.
+    """
     first = row.get("first_date")
     last = row.get("last_date")
     first_s = str(first) if first else None
     return {
-        "status": _spot_dimension_verdict(row.get("completeness")),
+        "status": _spot_dimension_verdict_with_floor(row.get("completeness"), first_s),
         "first_date": first_s,
         "last_date": str(last) if last else None,
         "from_2020": _from_2020(first_s),
