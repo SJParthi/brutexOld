@@ -32,7 +32,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Protocol
+from typing import Any, Final
+
+from brutex.data.coverage_ledger import CoverageRecord
 
 #: An options-eligible spot pulled ZERO expiries — the hard, GATING failure (it has an
 #: options chain on the vendor master but the coverage ledger shows nothing pulled, e.g.
@@ -125,17 +127,8 @@ class MappingIntegrityReport:
         return not self.gating_failures
 
 
-class _CoverageRow(Protocol):
-    """The duck-typed coverage-ledger row this module reads (a subset of ``CoverageRecord``)."""
-
-    exch_id: str
-    underlying_symbol: str
-    year: int
-    expiries_pulled: int
-
-
 def coverage_years_from_records(
-    records: Iterable[_CoverageRow],
+    records: Iterable[CoverageRecord],
 ) -> dict[tuple[str, str], set[int]]:
     """Group coverage-ledger rows → ``{(exch_id, underlying_symbol): {years with expiries}}``.
 
@@ -237,7 +230,7 @@ def reconcile_mapping_integrity(
     )
 
 
-def report_to_dict(report: MappingIntegrityReport) -> dict[str, object]:
+def report_to_dict(report: MappingIntegrityReport) -> dict[str, Any]:
     """Project a :class:`MappingIntegrityReport` to the JSON the dashboard route returns."""
     return {
         "generated_at": report.generated_at,
