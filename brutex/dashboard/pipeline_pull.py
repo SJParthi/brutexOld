@@ -79,10 +79,14 @@ from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pull_controller import BulkSpotReport
 
-#: The three ordered pipeline phases (used for ``stopped_after`` + audit labels).
+#: The ordered pipeline phases (used for ``stopped_after`` + audit labels).
 PHASE_SPOT = "spot"
 PHASE_METADATA = "metadata"
 PHASE_HISTORICAL = "historical"
+#: The OPTIONAL gated post-pull phase (DEC-PULL-SELECTED-PIPELINE-001): warm the
+#: movers snapshot ONLY after every fetch phase succeeds (never on a partial/broken
+#: pull — the operator's "until/unless successful fetches happen, never run movers").
+PHASE_MOVERS = "movers"
 
 
 def spot_phase_ok(report: BulkSpotReport) -> bool:
@@ -201,6 +205,13 @@ class PipelinePullReport:
         :data:`PHASE_METADATA`; ``None`` when all three phases ran.
     note
         An honest one-line outcome summary.
+    movers_warmed
+        The number of movers snapshots warmed by the OPTIONAL gated post-pull phase
+        (DEC-PULL-SELECTED-PIPELINE-001), or ``None`` when that phase did NOT run —
+        either no ``run_movers`` was injected, OR the historical fetch did not pass
+        its gate (the hard rule: movers is warmed ONLY after a fully-successful pull,
+        never on a partial/broken one). ``0`` is an honest "ran, warmed nothing"
+        (e.g. an empty lake), distinct from ``None`` "did not run".
     """
 
     spot: BulkSpotReport | None
@@ -208,6 +219,7 @@ class PipelinePullReport:
     historical: CompositePullReport | None
     stopped_after: str | None
     note: str
+    movers_warmed: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -232,6 +244,7 @@ class PipelinePullReport:
             "ok": self.ok,
             "stopped_after": self.stopped_after,
             "note": self.note,
+            "movers_warmed": self.movers_warmed,
             "spot": self.spot.to_dict() if self.spot is not None else None,
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
@@ -259,16 +272,23 @@ def _complete_note(
     spot: BulkSpotReport,
     metadata: MetadataPullReport,
     historical: CompositePullReport,
+    movers_warmed: int | None = None,
 ) -> str:
-    """Build the honest summary note for a fully-run pipeline."""
+    """Build the honest summary note for a fully-run pipeline.
+
+    Appends a movers-warm clause ONLY when the gated phase 4 ran (``movers_warmed``
+    is not ``None``) — honestly distinguishing "warmed N snapshots" from a run where
+    movers was skipped (no warmer injected) or gated-out (historical not clean).
+    """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
     contracts = hist.contracts_completed if hist is not None else 0
+    movers = f", movers {movers_warmed} snapshot(s) warmed" if movers_warmed is not None else ""
     return (
         f"pipeline complete — spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
-        f"contracts, historical {bars} bars over {contracts} contract(s)"
+        f"contracts, historical {bars} bars over {contracts} contract(s){movers}"
     )
 
 
@@ -277,8 +297,9 @@ def run_full_pipeline(
     run_spot: Callable[[], BulkSpotReport],
     run_metadata: Callable[[], MetadataPullReport],
     run_historical: Callable[[], CompositePullReport],
+    run_movers: Callable[[], int] | None = None,
 ) -> PipelinePullReport:
-    """Run the gated spot→metadata→historical pipeline over three injected spines.
+    """Run the gated spot→metadata→historical(→movers) pipeline over injected spines.
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -287,10 +308,21 @@ def run_full_pipeline(
     "metadata"``, historical ``None``). Otherwise ``run_historical`` runs and the
     report carries all three with ``stopped_after = None``.
 
-    The three callables are INJECTED so the entire control flow is unit-testable
-    with no network (the route binds them to the real pull functions). The
-    sequencer itself is O(1) — three calls + three gate checks; the WORK it
-    triggers is the real multi-hour vendor fill (no throughput claim).
+    **Gated movers warm (DEC-PULL-SELECTED-PIPELINE-001):** if ``run_movers`` is
+    injected, it runs ONLY after a fully-successful fetch — i.e. spot + metadata
+    already passed their gates (to reach here) AND :func:`historical_phase_ok`
+    passes. This is the operator's hard rule "until/unless successful fetches
+    happen, NEVER run movers": a historical fetch that completed-with-failures
+    (``historical_phase_ok`` False) leaves ``movers_warmed = None`` (movers NOT
+    warmed). A clean run records the count ``run_movers`` returns (``0`` is an
+    honest "warmed nothing", distinct from ``None`` "did not run"). The pull's own
+    success (``stopped_after``/``ok``) is NEVER affected by the warm — it is a
+    read-only post-success accelerator over the just-filled lake.
+
+    The callables are INJECTED so the entire control flow is unit-testable with no
+    network (the route binds them to the real pull functions + the movers-cache
+    warmer). The sequencer itself is O(1) — four calls + the gate checks; the WORK
+    it triggers is the real multi-hour vendor fill (no throughput claim).
 
     Parameters
     ----------
@@ -303,6 +335,11 @@ def run_full_pipeline(
     run_historical
         Zero-arg callable returning a
         :class:`~brutex.dashboard.composite_pull.CompositePullReport` (phase 3).
+    run_movers
+        OPTIONAL zero-arg callable that warms the movers snapshot(s) over the
+        just-filled lake and returns how many were warmed; called ONLY after a
+        fully-successful fetch (phase 4, gated). ``None`` (default) skips it
+        entirely — backward-compatible with the whole-universe pipeline.
 
     Returns
     -------
@@ -330,10 +367,15 @@ def run_full_pipeline(
         )
 
     historical = run_historical()
+    # Phase 4 (gated, optional): warm movers ONLY on a fully-successful fetch.
+    movers_warmed: int | None = None
+    if run_movers is not None and historical_phase_ok(historical):
+        movers_warmed = run_movers()
     return PipelinePullReport(
         spot=spot,
         metadata=metadata,
         historical=historical,
         stopped_after=None,
-        note=_complete_note(spot, metadata, historical),
+        note=_complete_note(spot, metadata, historical, movers_warmed),
+        movers_warmed=movers_warmed,
     )

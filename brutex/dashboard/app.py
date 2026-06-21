@@ -127,6 +127,7 @@ from brutex.dashboard.pull_controller import (
     pull_candles,
     resolve_fetch_intervals,
     resolve_pull_symbols,
+    resolve_pull_targets,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
@@ -2053,21 +2054,30 @@ def build_app(
         )
 
     @app.post("/api/v1/universe/pull-pipeline")
-    async def api_universe_pull_pipeline() -> JSONResponse:
-        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK full-universe pull.
+    async def api_universe_pull_pipeline(
+        symbols: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
 
-        Backs the "▶ Pull EVERYTHING" hero button (DEC-ONE-CLICK-PIPELINE-001 — the
-        operator's "one button does the whole thing" request). Chains the THREE
-        existing, separately-tested pull spines into one click, in the exact order
-        the operator asked for — "start from pull spot, once it is successfully
-        completed then pull expiries and contracts, and when it is successfully
-        completed then pull historical" — over the WHOLE admitted universe (every
-        index + stock spot underlying for phase 1; every F&O-eligible underlying for
-        phases 2 + 3, with reference-only names a true zero-call no-op):
+        Backs BOTH the "▶ Pull EVERYTHING" hero button (no selection → the WHOLE
+        admitted universe — DEC-ONE-CLICK-PIPELINE-001) AND the "▶ Pull selected · N
+        — full pipeline" button (``?symbols=a,b,c`` → ONLY the ticked underlyings —
+        DEC-PULL-SELECTED-PIPELINE-001). Precedence ``symbols`` > ``symbol`` >
+        whole-universe is resolved by the SHARED
+        :func:`~brutex.dashboard.pull_controller.resolve_pull_targets` (O(1) per id,
+        fail-CLOSED on an empty/unknown selection → 400, so a typo never silently
+        pulls a partial set). Chains the THREE existing, separately-tested pull
+        spines in the exact order the operator asked for — "start from pull spot,
+        once it is successfully completed then pull expiries and contracts, and when
+        it is successfully completed then pull historical":
 
         1. **Spot** — :func:`~brutex.dashboard.pull_controller.pull_all_spot`.
         2. **Metadata** — :func:`~brutex.dashboard.metadata_pull.pull_expiries_contracts`.
         3. **Historical** — :func:`~brutex.dashboard.composite_pull.pull_historical_for_underlyings`.
+        4. **Movers (gated)** — warm the default movers snapshots ONLY after a
+           fully-successful fetch (DEC-PULL-SELECTED-PIPELINE-001 — "until/unless
+           successful fetches happen, never run movers").
 
         The GATE between phases is the pure
         :func:`~brutex.dashboard.pipeline_pull.run_full_pipeline`: a phase that ends
@@ -2081,7 +2091,17 @@ def build_app(
         Golden Rule #1).
         """
         dry_run = not groww_credentials_present()
-        targets = _select_bulk_targets("index") + _select_bulk_targets("stock")
+        try:
+            targets, target_source = resolve_pull_targets(
+                symbols=symbols,
+                symbol=symbol,
+                lookup=_require_store().get,
+                whole_universe=lambda: (
+                    _select_bulk_targets("index") + _select_bulk_targets("stock")
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         years = _resolve_metadata_years(None, None)
         fetch_intervals = resolve_fetch_intervals(None)
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
@@ -2092,6 +2112,7 @@ def build_app(
             "universe.pull_pipeline.requested",
             targets=len(targets),
             tradable=len(tradable),
+            target_source=target_source,
             years=years,
             dry_run=dry_run,
         )
@@ -2161,6 +2182,15 @@ def build_app(
                         until_clean=True,
                     )
 
+            # ``run_movers`` is intentionally NOT bound here yet: the gated phase-4
+            # hook (run_full_pipeline(run_movers=...)) is proven by the sequencer
+            # tests, but a warm pinned to the DEFAULT (today) coordinate would cache
+            # EMPTY snapshots right after a historical pull (the lake fills only to
+            # the previous trading day) — an illusion this codebase forbids
+            # (DEC-PULL-SELECTED-PIPELINE-001). Movers already auto-refresh on the
+            # next /movers open (the pull bumps the SummaryCache generation, which
+            # invalidates the movers cache). The latest-available-date warm binding
+            # is the explicit follow-up.
             report = run_full_pipeline(
                 run_spot=_run_spot,
                 run_metadata=_run_metadata,
@@ -2179,6 +2209,7 @@ def build_app(
                 "targets": len(targets),
                 "total": len(targets),  # the JS title reads body.total for the first render
                 "tradable": len(tradable),
+                "target_source": target_source,  # "selection" / "single" / "universe"
                 "years": years,
                 "dry_run": dry_run,
             }
@@ -2213,26 +2244,21 @@ def build_app(
         post-cutover, DEC-DHAN-GROWW-REMIGRATE-001).
         """
         dry_run = not groww_credentials_present()
-        if symbols is not None:
-            try:
-                instruments = resolve_pull_symbols(symbols, _require_store().get)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            detail = f"retry {len(instruments)} symbols spot"
-        elif symbol is not None:
-            store = _require_store()
-            instrument = store.get(symbol)
-            if instrument is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
-                )
-            instruments = [instrument]
-            detail = f"retry {symbol} spot"
-        else:
-            # No explicit selection → the full admitted spot universe (index + stock).
-            instruments = _select_bulk_targets("index") + _select_bulk_targets("stock")
-            detail = f"retry {kind or 'all'} spot"
+        # SHARED selection resolver (CLAUDE.md §11 COMMON — the same precedence
+        # symbols > symbol > whole-universe the pull-pipeline uses; fail-CLOSED on an
+        # empty/unknown selection → 400, DEC-PULL-SELECTED-PIPELINE-001).
+        try:
+            instruments, target_source = resolve_pull_targets(
+                symbols=symbols,
+                symbol=symbol,
+                lookup=_require_store().get,
+                whole_universe=lambda: (
+                    _select_bulk_targets("index") + _select_bulk_targets("stock")
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = f"retry {symbols or symbol or (kind or 'all')} spot ({target_source})"
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info(
             "universe.retry_failed.requested",

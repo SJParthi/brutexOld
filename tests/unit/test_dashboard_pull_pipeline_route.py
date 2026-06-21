@@ -185,3 +185,56 @@ def test_pull_pipeline_completes_and_records_verdict(
     verdict = client.get("/api/v1/universe/pull-verdict").json()
     assert isinstance(verdict, dict)
     assert verdict["present"] is True
+
+
+# ── selection-scoped pipeline (DEC-PULL-SELECTED-PIPELINE-001) ────────────────
+
+
+def test_pull_pipeline_no_selection_is_whole_universe(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No ?symbols= / ?symbol= → the whole admitted universe (backward-compatible
+    # with the "▶ Pull EVERYTHING" hero); target_source echoes "universe".
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    body = client.post("/api/v1/universe/pull-pipeline").json()
+    assert body["started"] is True
+    assert body["target_source"] == "universe"
+    assert _wait_for_job(client)["state"] == "done"
+
+
+def test_pull_pipeline_symbols_scopes_to_selection(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ?symbols= the ticked id → scoped to the selection (one name here);
+    # target_source echoes "selection", and the chain still settles clean offline.
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    body = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"}).json()
+    assert body["started"] is True
+    assert body["targets"] == 1
+    assert body["target_source"] == "selection"
+    assert _wait_for_job(client)["state"] == "done"
+
+
+def test_pull_pipeline_single_symbol_scopes_to_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    body = client.post("/api/v1/universe/pull-pipeline", params={"symbol": "NIFTY"}).json()
+    assert body["targets"] == 1
+    assert body["target_source"] == "single"
+    assert _wait_for_job(client)["state"] == "done"
+
+
+def test_pull_pipeline_unknown_selection_fails_closed_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unknown id never silently pulls a partial set — it fails CLOSED with a 400
+    # naming the offender (Golden Rule #1; DEC-PULL-SELECTED-PIPELINE-001).
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "99999"})
+    assert resp.status_code == 400
+    assert "99999" in resp.json()["detail"]
