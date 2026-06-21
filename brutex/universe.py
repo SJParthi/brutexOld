@@ -345,18 +345,24 @@ def build_options_eligible_underlyings(
 ) -> frozenset[tuple[Exchange, str]]:
     """Return the ``(exchange, underlying_symbol)`` set that has tradeable OPTIONS.
 
-    DEC-OPTIONS-ELIGIBLE-GUARD-001. The OPTIONS-ONLY sibling of
-    :func:`build_fno_eligible_underlyings` (operator decree: "we will NEVER pull
-    futures — only options"): an underlying is options-eligible iff at least one
+    DEC-OPTIONS-ELIGIBLE-GUARD-001 — **pull-scope clause SUPERSEDED by
+    DEC-FUTURES-PULL-ENABLE-001 (#871).** The OPTIONS-ONLY sibling of
+    :func:`build_fno_eligible_underlyings`: an underlying is options-eligible iff at least one
     vendor **option** leg (``CE`` / ``PE`` — i.e. an ``OPTIDX`` index option or an
-    ``OPTSTK`` stock option) names it as the underlying. A ``FUT`` leg does NOT
-    qualify it. This is the AUTHORITATIVE, data-driven set — derived from the
-    vendor's own instrument master in the SAME single pass the F&O-eligibility scan
-    uses, so it auto-tracks NSE adding/removing an F&O name, never a hardcoded guess
-    (Golden Rule #1). The dashboard guards the options-chain pull on this set: a
-    ``Pull options chain`` on an underlying NOT in it is rejected BEFORE any vendor
-    call, so a mis-click can never waste the 100,000/day quota on options that do
-    not exist (e.g. NIFTY 100 / INDIA VIX / a non-F&O equity).
+    ``OPTSTK`` stock option) names it as the underlying; a ``FUT`` leg does NOT qualify it.
+
+    **This set is the options-eligibility / reference-tag DETECTOR only — NOT a pull gate, and
+    it does NOT mean "futures are never pulled".** FUTURES ARE pulled into the reference lake
+    (DEC-GROWW-FUTURE-INGEST-001 #707, formalised by DEC-FUTURES-PULL-ENABLE-001 #871): the pull
+    paths scope on the FUT-inclusive :func:`build_fno_eligible_underlyings` + the reference-only
+    partition, never on this set. The original Dhan-era "we will NEVER pull futures — only
+    options" decree (#602) was the prior vendor's options-CHAIN quota guard and is retired for
+    pull scope. This is the AUTHORITATIVE, data-driven set — derived from the vendor's own
+    instrument master in the SAME single pass the F&O-eligibility scan uses, so it auto-tracks
+    NSE adding/removing an F&O name, never a hardcoded guess (Golden Rule #1). Its live consumer
+    is the reference-only / OPT badge classification (`instrument_loader`), which keeps a
+    mis-click from wasting quota on an options chain that does not exist (e.g. NIFTY 100 /
+    INDIA VIX / a non-F&O equity).
 
     Cross-reference with the admitted ``INDEX`` vs ``EQ`` rows to split it into the
     **F&O indices** (the ~handful: NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY /
