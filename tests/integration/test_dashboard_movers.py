@@ -543,6 +543,21 @@ class TestMoversApi:
         assert Decimal(body["price_gainers"][0]["pct_change"]) == Decimal("10")
         assert {r["symbol"] for r in body["volume"]} == {"NIFTY", "BANKNIFTY"}
 
+    def test_no_date_defaults_to_latest_available_day(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-PULL-MOVERS-WARM-001: with NO ?date=, the route defaults to the LATEST
+        # available spot day (2024-06-13 here), NOT today — so movers show DATA on open
+        # right after a pull (the lake fills only to the prior day, so a today-default
+        # would be empty), and the post-pull warm (which keys on that same latest day)
+        # is a cache HIT, not a miss.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/movers", params={"asset": "spot", "interval": "1day"}).json()
+        assert body["date"] == "2024-06-13"  # the latest seeded day, not today
+        assert body["instrument_count"] == 2  # NIFTY + BANKNIFTY, never an empty today
+        assert [r["symbol"] for r in body["price_gainers"]] == ["NIFTY"]
+
     def test_topn_default_is_100_and_cap_is_500(self, store: InstrumentStore) -> None:
         # DEC-MOVERS-COMPLETENESS-001: the operator-directed deeper default + cap. The
         # cap boundary is enforced by the route (≤ 500 ok, > 500 → 422), never silently

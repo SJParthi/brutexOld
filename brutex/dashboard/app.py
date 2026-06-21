@@ -110,6 +110,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
+from brutex.dashboard.movers_warm import latest_movers_date, warm_movers_snapshots
 from brutex.dashboard.pipeline_pull import run_full_pipeline
 from brutex.dashboard.preopen_report import (
     ReportBasis,
@@ -2182,19 +2183,101 @@ def build_app(
                         until_clean=True,
                     )
 
-            # ``run_movers`` is intentionally NOT bound here yet: the gated phase-4
-            # hook (run_full_pipeline(run_movers=...)) is proven by the sequencer
-            # tests, but a warm pinned to the DEFAULT (today) coordinate would cache
-            # EMPTY snapshots right after a historical pull (the lake fills only to
-            # the previous trading day) — an illusion this codebase forbids
-            # (DEC-PULL-SELECTED-PIPELINE-001). Movers already auto-refresh on the
-            # next /movers open (the pull bumps the SummaryCache generation, which
-            # invalidates the movers cache). The latest-available-date warm binding
-            # is the explicit follow-up.
+            def _warm_movers() -> int:
+                """Gated phase 4 (DEC-PULL-MOVERS-WARM-001): warm the default movers snapshots.
+
+                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate). Targets the
+                LATEST available spot day (never 'today' — the pull fills only to the previous
+                trading day, so a today-warm would cache empties), at the current post-pull
+                generation, so the operator's first /movers open is an O(1) cache hit. Reuses
+                the EXACT candidate_key + compute the /api/v1/movers route uses (no drift,
+                CLAUDE.md §11 COMMON). Returns how many of spot/futures/options warmed non-empty.
+
+                Whole-body best-effort: the date resolution + every job is wrapped so a
+                transient lake-read race NEVER propagates to fail the already-successful pull
+                (Correctness of the pull > the warm's latency benefit, DEC-PULL-MOVERS-WARM-001).
+                """
+                try:
+                    warm_date = latest_movers_date(lake_root)
+                except Exception as exc:  # pylint: disable=broad-except - best-effort warm
+                    _LOG.warning("movers.warm.latest_date_failed", error=str(exc))
+                    return 0
+                if warm_date is None:
+                    return 0
+                gen = _summary_cache.generation  # post-pull generation (the pull bumped it)
+                tier, trk = normalize_options_selectors(None, None)  # near / all
+
+                def _spot_job() -> int:
+                    cands = _movers_cache.get_or_compute(
+                        candidate_key(
+                            asset="spot",
+                            exchange=None,
+                            interval=DEFAULT_INTERVAL,
+                            date=warm_date,
+                            time=None,
+                        ),
+                        generation=gen,
+                        compute=lambda: compute_spot_candidates(
+                            lake_root=lake_root,
+                            interval=DEFAULT_INTERVAL,
+                            date=warm_date,
+                            time=None,
+                            exchange=None,
+                        ),
+                    )
+                    return len(cands.snapshots)
+
+                def _fut_job() -> int:
+                    cands = _movers_cache.get_or_compute(
+                        candidate_key(
+                            asset="futures",
+                            exchange=None,
+                            interval=DEFAULT_INTERVAL,
+                            date=warm_date,
+                            time=None,
+                        ),
+                        generation=gen,
+                        compute=lambda: compute_futures_candidates(
+                            lake_root=lake_root,
+                            interval=DEFAULT_INTERVAL,
+                            date=warm_date,
+                            time=None,
+                            exchange=None,
+                        ),
+                    )
+                    return len(cands.movers)
+
+                def _opt_job() -> int:
+                    cands = _movers_cache.get_or_compute(
+                        candidate_key(
+                            asset="options",
+                            exchange=None,
+                            interval=DEFAULT_INTERVAL,
+                            date=warm_date,
+                            time=None,
+                            expiry_tier=tier,
+                            expiry_track=trk,
+                        ),
+                        generation=gen,
+                        compute=lambda: compute_options_candidates(
+                            lake_root=lake_root,
+                            interval=DEFAULT_INTERVAL,
+                            date=warm_date,
+                            time=None,
+                            expiry_tier=tier,
+                            expiry_track=trk,
+                            exchange=None,
+                        ),
+                    )
+                    return len(cands.movers)
+
+                return warm_movers_snapshots([_spot_job, _fut_job, _opt_job])
+
             report = run_full_pipeline(
                 run_spot=_run_spot,
                 run_metadata=_run_metadata,
                 run_historical=_run_historical,
+                run_movers=_warm_movers,
             )
             if report.spot is not None:
                 _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
@@ -3054,10 +3137,17 @@ def build_app(
                     )
                 )
             lake_root = store_path.parent
-            # Normalise the date once so the cache key is canonical (``None`` ⇒
-            # today maps to the same key as the explicit ISO day). A malformed date
-            # raises HERE (synchronously) → 400, before any threadpool work.
-            date_str = parse_snapshot_date(date).isoformat()
+            # Normalise the date once so the cache key is canonical. With NO explicit
+            # date, default to the LATEST available spot day (DEC-PULL-MOVERS-WARM-001),
+            # NOT today: a historical pull fills the lake only to the previous trading
+            # day, so a today-default would show an EMPTY snapshot on open (and miss the
+            # post-pull warm, which keys on that same latest day). Falls back to today
+            # only when the lake has no spot data yet (an honest empty payload). An
+            # EXPLICIT malformed date still raises HERE (synchronously) → 400.
+            if date is None:
+                date_str = latest_movers_date(lake_root) or parse_snapshot_date(None).isoformat()
+            else:
+                date_str = parse_snapshot_date(date).isoformat()
             # The current write-generation — a pull/materialize bumps it, so every
             # cached candidate set computed at an older generation is dirty (the
             # page never serves pre-pull data). Reused from the coverage cache.

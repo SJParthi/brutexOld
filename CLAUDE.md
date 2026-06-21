@@ -228,8 +228,16 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-selected-pipeline-jlzt1n` (selected-scope one-click pipeline + gated
-  movers-warm hook — DEC-PULL-SELECTED-PIPELINE-001, MIGRATION.md #877: the `/pull-pipeline` route + a new
+- **Active branch:** `claude/movers-warm-after-pull-jlzt1n` (bind the gated movers warmer —
+  DEC-PULL-MOVERS-WARM-001, MIGRATION.md #878: closes the #877 follow-up by BINDING the gated phase-4
+  warmer in the `/pull-pipeline` route. After a fully-successful fetch it pre-computes the default
+  spot/futures/options movers snapshots for the LATEST AVAILABLE day (`latest_movers_date` — never
+  'today', so never an empty illusion) into the SAME `MoversSnapshotCache` at the post-pull generation,
+  reusing the EXACT `candidate_key`/`compute_*_candidates` the `/api/v1/movers` route uses. NEW pure
+  `brutex/dashboard/movers_warm.py` (`latest_movers_date` + best-effort `warm_movers_snapshots`) at 100%
+  line+branch; a warm failure NEVER fails the successful pull (movers also still auto-refresh on next
+  open via the generation bump). READ-ONLY accelerator; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED.
+  Prior merged: DEC-PULL-SELECTED-PIPELINE-001, MIGRATION.md #877 (PR #831: the `/pull-pipeline` route + a new
   "▶ Pull selected — full pipeline" button run the gated spot→expiries+contracts→historical chain over ONLY
   the ticked instruments (`?symbols=`; no selection → whole universe, no regression), via the SHARED
   `resolve_pull_targets` resolver (COMMON; `/retry-failed` refactored onto it). `run_full_pipeline` gains an
