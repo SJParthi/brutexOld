@@ -212,22 +212,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/serene-hamilton-jlzt1n` (the `/completeness` + `/universe` SPOT
-  1-minute verdict is HONESTLY downgraded `full` → `partial` when the symbol's covered data
-  does NOT begin in JANUARY 2020 — DEC-SPOT-COMPLETENESS-2020-FLOOR-001, MIGRATION.md #868:
-  the spot pull starts at the 2020 `GROWW_HISTORY_FLOOR`, so a late-listed / late-data symbol
-  (JIOFIN 2023-08-21, TMPV 2025-10-24, SHRIRAMFIN 2022-12-20, and within-2020-but-late starts
-  TATACONSUM 2020-02-27 / MAXHEALTH 2020-08-21) has its empty pre-start windows RESOLVE → every
-  planned window `settled` → the prior verdict read `full` even though the data starts late. One
-  COMMON helper `_spot_dimension_verdict_with_floor` (used by BOTH the scoreboard rollup
-  `_per_symbol_spot` and the `/universe` detail `_spot_dimension_detail`) downgrades a `full`
-  whose `_from_2020(first_date)` is False to `partial`; the floor is MONTH-granular January 2020
-  (`_FROM_2020_EXCLUSIVE_UPPER = 2020-02-01`, operator decree "must have Jan-2020 data"), so only
-  symbols with the solid full-2020 history read `full` (the strong evidence the deep-drill
-  brute-force backtest needs); `partial`/`failed`/`none` unchanged. The SPOT analog of the
-  OPTIONS real-years fix #859. Read/rollup-side only — `completeness.py` at 100% line+branch
-  (43 tests, +5); NO pull/registry/engine/scope/vocab change, ENGINE UNCHANGED
-  (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+- **Active branch:** `claude/mapping-integrity-jlzt1n` (a real-time GREEN/RED audit that PROVES
+  the core spot↔options mapping is precise — DEC-MAPPING-INTEGRITY-RECONCILE-001, MIGRATION.md #869:
+  the new PURE `brutex/data/mapping_integrity.py` reconciles every options-eligible spot underlying
+  (`store.fno_eligible_underlyings`) against the coverage ledger (`store.list_coverage`) in ONE
+  O(eligible) pass / O(1) per spot — flagging each that pulled ZERO expiries (`none`, the GATING
+  red, e.g. M&M) or only PART of the 2020→today span (`partial`, amber, e.g. BAJAJ-AUTO's
+  2024-only). Surfaced as `GET /api/v1/universe/mapping-integrity` + a green/red `/universe`
+  `#mappanel` (15s live). The DETECTOR only — M&M reads RED until **F2** normalises the
+  options-fetch symbol (route the vendor F&O underlying via token-join + encode `&`/`-`, the
+  options sibling of #845), after which the panel flips GREEN. The special-char options-fetch gap
+  (`contracts.py` sends the spot `trading_symbol` verbatim) is the root cause F2 fixes.
+  `mapping_integrity.py` at 100% line+branch (13 unit + 3 integration); NO pull/engine/scope/vocab
+  change, ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, spot late-start → partial, Jan-2020 floor) +
   DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cache) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
@@ -465,7 +463,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/serene-hamilton-jlzt1n`
+- **Active feature branch:** `claude/mapping-integrity-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
