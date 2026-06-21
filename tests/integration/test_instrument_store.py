@@ -204,6 +204,16 @@ class TestOpenAndSchema:
             assert store.schema_version == SCHEMA_VERSION
         assert db.exists()
 
+    def test_set_and_get_meta_roundtrip(self, tmp_path: Path) -> None:
+        # The generic schema_meta key/value sidecar (DEC-INSTRUMENT-MASTER-INTEGRITY-001).
+        db = tmp_path / "instruments.duckdb"
+        with InstrumentStore.open(db) as store:
+            assert store.get_meta("master_integrity") is None  # absent → None
+            store.set_meta("master_integrity", '{"is_green": true}')
+            assert store.get_meta("master_integrity") == '{"is_green": true}'
+            store.set_meta("master_integrity", '{"is_green": false}')  # INSERT OR REPLACE
+            assert store.get_meta("master_integrity") == '{"is_green": false}'
+
     def test_reopen_is_idempotent(self, tmp_path: Path) -> None:
         db = tmp_path / "instruments.duckdb"
         with InstrumentStore.open(db) as s:

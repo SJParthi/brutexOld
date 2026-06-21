@@ -256,6 +256,15 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     # No live NTM constituent CSV → an honest no-admission note (not a crash).
     assert result["ntm"]["admitted"] is False
     assert "constituent CSV available" in result["ntm"]["reason"]
+    # Master-integrity audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001) ran END-TO-END against the
+    # full leg-bearing universe BEFORE the lean discard — it SAW the WIPRO CE leg (legs > 0)
+    # and resolved it to its WIPRO spot, so the verdict is green. This pins the
+    # audit-before-discard ordering through the real load_instrument_master path.
+    mi = result["master_integrity"]
+    assert mi["type_counts"]["legs"] == 1  # the WIPRO CE leg was audited (not yet discarded)
+    assert mi["type_counts"]["ce"] == 1
+    assert mi["is_green"] is True and mi["gating_failures"] == 0
+    assert store.get_meta("master_integrity") is not None  # persisted to schema_meta
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
@@ -290,6 +299,10 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     ntm = result.pop("ntm")
     assert ntm["admitted"] is False
     assert "no NSE cash equities" in ntm["reason"]
+    # The empty master audits green with all-zero counts (DEC-INSTRUMENT-MASTER-INTEGRITY-001).
+    mi = result.pop("master_integrity")
+    assert mi["is_green"] is True
+    assert mi["type_counts"]["legs"] == 0 and mi["gating_failures"] == 0
     assert result == {
         "parsed": 0,
         "persisted": 0,

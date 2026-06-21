@@ -84,7 +84,7 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -99,6 +99,13 @@ from brutex.dashboard.ntm_cache import (
     save_constituent_csv,
 )
 from brutex.dashboard.universe_query import universe_summary
+from brutex.data.master_integrity import (
+    META_KEY as _MASTER_INTEGRITY_META_KEY,
+)
+from brutex.data.master_integrity import (
+    audit_master_integrity,
+    report_to_dict,
+)
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.universe import (
     OptionUnderlyingGap,
@@ -802,6 +809,46 @@ def _lean_universe(
     return lean, legs_dropped
 
 
+def _persist_master_integrity(
+    index: InstrumentIndex, store: Any, *, run_id: str, csv_sha256: str
+) -> dict[str, Any]:
+    """Run the parse-time structural mapping audit, log + persist it, return the summary.
+
+    DEC-INSTRUMENT-MASTER-INTEGRITY-001 — the ONE place the leg→spot mapping can be verified
+    (the lean store discards the ~89k legs straight after). Audits the FULL leg-bearing
+    ``index.universe`` while it is still in memory, emits a structlog counts line, and
+    persists the bounded JSON summary to ``schema_meta`` (the dashboard routes read THAT — by
+    the time they run, the legs are gone). Pure audit + one INSERT; never re-stores the legs.
+    """
+    report = audit_master_integrity(
+        index.universe,
+        index_aliases=_resolve_fno_index_aliases(),
+        now=datetime.now(UTC),
+        run_id=run_id,
+        csv_source_sha256=csv_sha256,
+    )
+    payload = report_to_dict(report)
+    store.set_meta(_MASTER_INTEGRITY_META_KEY, json.dumps(payload))
+    _LOG.info(
+        "universe.load.master_integrity",
+        is_green=report.is_green,
+        gating=report.gating_failures,
+        orphan=report.orphan_count,
+        ambiguous=report.ambiguous_count,
+        disagreement=report.disagreement_count,
+        empty_underlying=report.empty_underlying_count,
+        dedup=report.dedup_collisions,
+        spots=report.type_counts.spots,
+        legs=report.type_counts.legs,
+        idx=report.type_counts.idx,
+        eq=report.type_counts.eq,
+        fut=report.type_counts.fut,
+        ce=report.type_counts.ce,
+        pe=report.type_counts.pe,
+    )
+    return payload
+
+
 def load_instrument_master(
     store: Any,
     *,
@@ -960,6 +1007,16 @@ def load_instrument_master(
             reference_only_of=_reference_only_of(reference_security_ids, options_eligible_bridged),
         )
         pruned = store.prune_to_latest_snapshot()
+        # Parse-time structural mapping audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001): verify
+        # every FUT/CE/PE leg maps to exactly ONE IDX/EQ spot (symbol AND token). Runs against
+        # the still-in-memory full leg-bearing ``index.universe`` (``_lean_universe`` returns a
+        # NEW list, it never mutates ``index``), but persists AFTER the lean upsert + prune so
+        # the schema_meta snapshot is transactionally consistent with the rows that persisted
+        # (it can never describe a master whose upsert rolled back). Persists the bounded JSON
+        # summary to schema_meta (read by the dashboard panel + CSV) + a structlog counts line.
+        master_integrity = _persist_master_integrity(
+            index, store, run_id=run_id, csv_sha256=csv_sha256
+        )
         summary = _summarise_stored(store)
 
     _LOG.info(
@@ -989,6 +1046,9 @@ def load_instrument_master(
         # operator SEES whether NIFTY Total Market's constituents were admitted
         # this load (and, if skipped, the honest reason).
         "ntm": ntm_note,
+        # Instrument-master structural integrity audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001)
+        # — the green/red leg↔spot mapping verdict, also persisted to schema_meta.
+        "master_integrity": master_integrity,
     }
 
 

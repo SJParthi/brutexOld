@@ -272,6 +272,13 @@ class _InterleaveProbeStore:
     def record_run(self, _run: Any) -> None:
         """No-op: this probe tests lock serialisation, not run recording."""
 
+    def set_meta(self, _key: str, _value: str) -> None:
+        """No-op: the master-integrity audit persists here; the probe ignores it."""
+
+    def get_meta(self, _key: str) -> str | None:
+        """No-op: nothing persisted on this probe."""
+        return None
+
     def fno_eligible_underlyings(self) -> frozenset[tuple[Any, str]]:
         return frozenset()
 
