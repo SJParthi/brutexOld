@@ -916,16 +916,14 @@ async function selectCandles(kind) {
     /* This row browses ONE lake — keep only the active kind's datasets,
        each tagged so curCols()/buildCandleUrl() pick the right schema + query path
        (F&O reuses the spot segment=FNO candle path). */
+    /* F&O returned early above (its own cascade), so only spot + option reach here. */
     cstate.datasets = isOpt
       ? (body.options || []).map(d => ({ kind: "option", ...d }))
-      : isFno
-      ? (body.fno || []).map(d => ({ ...d, kind: "fno" }))
       : (body.datasets || []).map(d => ({ kind: "spot", ...d }));
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery(false);
     else renderCandleView(null,
       isOpt ? "No expired-option data yet — pull an instrument's options on /universe first."
-      : isFno ? "No F&O candle data yet — pull an instrument's futures/options history on /universe first."
       : "No spot candle data yet — pull an instrument's timeframes on /universe first.");
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
@@ -982,7 +980,10 @@ function onFnoContractChange(symbol) {
     underlying: cstate.fno.und, expiry: cstate.fno.exp,
     strike: con.strike, instrument_type: con.instrument_type, option_type: con.option_type }));
   cstate.cols = null; cstate.offset = 0;
-  cstate.key = cstate.datasets.length ? dsKey(cstate.datasets[0]) : null;
+  /* Default to 1-minute (the fetched granularity an operator most wants for an F&O
+     contract); fall back to the first available interval otherwise. */
+  const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
+  cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a contract");
 }
 
