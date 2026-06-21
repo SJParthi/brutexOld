@@ -20,6 +20,19 @@ from brutex.data.errors import LakeWriteHalt
 from brutex.data.partition_lock import partition_lock_path, partition_write_lock
 
 
+def _raise(exc: BaseException) -> None:
+    """Raise *exc* via a CALL, not a literal ``raise`` statement.
+
+    Keeps the assertion AFTER a ``with pytest.raises(...), partition_write_lock(...)``
+    block reachable to the static analyzer: a literal ``raise`` as the last with-body
+    statement makes CodeQL mark the following assert "unreachable" (a false positive —
+    ``pytest.raises`` suppresses the exception). A function call is not treated as
+    unconditionally terminating, so the assert stays reachable (mirrors
+    ``tests/unit/test_atomic_io.py``).
+    """
+    raise exc
+
+
 def _try_lock_held_by_other_fd(lock_path: Path) -> bool:
     """Return True iff a SEPARATE fd cannot take the exclusive lock (i.e. it is held).
 
@@ -28,7 +41,7 @@ def _try_lock_held_by_other_fd(lock_path: Path) -> bool:
     contention the production lock must win. A non-blocking ``LOCK_EX`` that raises
     ``BlockingIOError`` proves the lock is currently held.
     """
-    probe_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    probe_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -80,7 +93,7 @@ def test_lock_released_even_when_body_raises(tmp_path: Path) -> None:
     lock_path = partition_lock_path(tmp_path, dest)
 
     with pytest.raises(ValueError, match="boom"), partition_write_lock(tmp_path, dest):
-        raise ValueError("boom")
+        _raise(ValueError("boom"))
 
     assert _try_lock_held_by_other_fd(lock_path) is False
 

@@ -32,7 +32,7 @@ def _partition_lock_is_held(lock_path: Path) -> bool:
     ``flock`` treats it like another PROCESS — the exact cross-process contention
     the lake's partition lock must win (DEC-LAKE-PARTITION-FLOCK-001).
     """
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
