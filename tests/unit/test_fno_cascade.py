@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from brutex.dashboard.fno_cascade import FnoContract, build_fno_cascade
+from brutex.dashboard.fno_cascade import (
+    FnoCascadeCache,
+    FnoContract,
+    build_fno_cascade,
+    contract_to_json,
+)
 
 
 def _ds(
@@ -193,3 +198,72 @@ def test_fractional_strike_sorts_numerically() -> None:
     )
     labels = [c.label for c in idx.contracts("X", "2020-02-06")]
     assert labels == ["99 CE", "100 CE", "100.5 CE"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# contract_to_json — JSON-native projection
+# ─────────────────────────────────────────────────────────────────────────
+def test_contract_to_json_option_shape() -> None:
+    c = FnoContract(
+        symbol="NSE-NIFTY-06Feb20-12250-PE",
+        exchange="NSE",
+        strike="12250",
+        option_type="PE",
+        instrument_type="PE",
+        intervals=("1day", "1minute"),
+    )
+    assert contract_to_json(c) == {
+        "symbol": "NSE-NIFTY-06Feb20-12250-PE",
+        "label": "12250 PE",
+        "exchange": "NSE",
+        "strike": "12250",
+        "option_type": "PE",
+        "instrument_type": "PE",
+        "intervals": ["1day", "1minute"],
+    }
+
+
+def test_contract_to_json_future_nulls() -> None:
+    c = FnoContract(
+        symbol="NSE-NIFTY-06Feb20-FUT",
+        exchange="NSE",
+        strike=None,
+        option_type=None,
+        instrument_type="FUT",
+        intervals=("1minute",),
+    )
+    row = contract_to_json(c)
+    assert row["strike"] is None and row["option_type"] is None
+    assert row["label"] == "FUT" and row["intervals"] == ["1minute"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# FnoCascadeCache — generation-stamped memo
+# ─────────────────────────────────────────────────────────────────────────
+def test_cache_builds_once_then_hits_same_generation() -> None:
+    calls = {"n": 0}
+
+    def _build() -> Any:
+        calls["n"] += 1
+        return build_fno_cascade(
+            [_opt("NSE-NIFTY-06Feb20-12250-PE", "NIFTY", "2020-02-06", "12250", "PE")]
+        )
+
+    cache = FnoCascadeCache()
+    first = cache.get(generation=7, build=_build)
+    second = cache.get(generation=7, build=_build)
+    assert first is second  # O(1) handoff of the SAME index
+    assert calls["n"] == 1  # built once, not re-scanned
+
+
+def test_cache_rebuilds_on_generation_bump() -> None:
+    calls = {"n": 0}
+
+    def _build() -> Any:
+        calls["n"] += 1
+        return build_fno_cascade([])
+
+    cache = FnoCascadeCache()
+    cache.get(generation=1, build=_build)
+    cache.get(generation=2, build=_build)  # a pull bumped the generation → rebuild
+    assert calls["n"] == 2

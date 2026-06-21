@@ -88,6 +88,12 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
+from brutex.dashboard.fno_cascade import (
+    FnoCascadeCache,
+    FnoCascadeIndex,
+    build_fno_cascade,
+    contract_to_json,
+)
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -888,6 +894,12 @@ def build_app(
     # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
     # generic keyed cache; no movers coupling, just the shared implementation).
     _candle_count_cache = MoversSnapshotCache()
+    # The /db F&O cascade cache (DEC-DB-FNO-CASCADE-001): the underlying→expiry→contract
+    # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
+    # write-generation as the caches above so a pull rebuilds it but every cascade click
+    # (underlyings / expiries / contracts) is an O(1) handoff — tiny lazy payloads, never
+    # the flat thousand-row dropdown.
+    _fno_cascade_cache = FnoCascadeCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -3945,6 +3957,80 @@ def build_app(
             }
 
         return JSONResponse(await run_in_threadpool(_datasets))
+
+    async def _fno_cascade_or_none() -> FnoCascadeIndex | None:
+        """Resolve the cached F&O cascade index (DEC-DB-FNO-CASCADE-001), or ``None``.
+
+        ONE source of truth for the three cascade routes (CLAUDE.md §11 COMMON):
+        resolves the lake, then hands the ``O(datasets)`` dir-walk + grouping to a
+        threadpool worker MEMOISED behind ``_summary_cache.generation`` — so a pull
+        rebuilds the index but every cascade click is an O(1) cached handoff. Returns
+        ``None`` when no lake path is configured (the route then ships an empty shape,
+        never a 500 — mirrors the datasets endpoint).
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return None
+        lake = lake_root.parent
+        gen = _summary_cache.generation
+        return await run_in_threadpool(
+            lambda: _fno_cascade_cache.get(
+                generation=gen,
+                build=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
+            )
+        )
+
+    @app.get("/api/v1/db/fno/underlyings")
+    async def api_db_fno_underlyings() -> JSONResponse:
+        """GET /api/v1/db/fno/underlyings — the cascade's level-1 picker (DEC-DB-FNO-CASCADE-001).
+
+        Every underlying that has F&O candle data (ascending) + the ``unparsed``
+        partitions surfaced honestly. O(1) cached read; tiny payload (~hundreds of
+        names) instead of the flat thousand-row contract dropdown.
+        """
+        idx = await _fno_cascade_or_none()
+        if idx is None:
+            return JSONResponse({"underlyings": [], "unparsed": []})
+        return JSONResponse(
+            {
+                "underlyings": list(idx.underlyings()),
+                "unparsed": [contract_to_json(c) for c in idx.unparsed],
+            }
+        )
+
+    @app.get("/api/v1/db/fno/expiries")
+    async def api_db_fno_expiries(underlying: str = Query(...)) -> JSONResponse:
+        """GET /api/v1/db/fno/expiries?underlying=NIFTY — level-2 picker, scoped to one underlying.
+
+        The ISO ``YYYY-MM-DD`` expiries for *underlying* (ascending). Empty list for
+        an unknown underlying (never a 500). O(1) cached read.
+        """
+        idx = await _fno_cascade_or_none()
+        if idx is None:
+            return JSONResponse({"underlying": underlying, "expiries": []})
+        return JSONResponse({"underlying": underlying, "expiries": list(idx.expiries(underlying))})
+
+    @app.get("/api/v1/db/fno/contracts")
+    async def api_db_fno_contracts(
+        underlying: str = Query(...), expiry: str = Query(...)
+    ) -> JSONResponse:
+        """GET /api/v1/db/fno/contracts?underlying=NIFTY&expiry=2020-02-06 — level-3 picker.
+
+        The contracts for one ``(underlying, expiry)`` — futures first, then ascending
+        strike, CE before PE — each carrying its query ``symbol`` + display ``label`` +
+        available ``intervals``. Empty list for an unknown cell (never a 500). O(1) cached.
+        """
+        idx = await _fno_cascade_or_none()
+        if idx is None:
+            return JSONResponse({"underlying": underlying, "expiry": expiry, "contracts": []})
+        return JSONResponse(
+            {
+                "underlying": underlying,
+                "expiry": expiry,
+                "contracts": [contract_to_json(c) for c in idx.contracts(underlying, expiry)],
+            }
+        )
 
     @app.get("/api/v1/db/candles")
     async def api_db_candles(

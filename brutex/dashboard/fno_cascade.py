@@ -34,14 +34,16 @@ dropped (Golden Rule #1).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 __all__ = [
+    "FnoCascadeCache",
     "FnoCascadeIndex",
     "FnoContract",
     "build_fno_cascade",
+    "contract_to_json",
 ]
 
 #: The sentinel sort key for a FUTURE (no strike) so it orders BEFORE any real
@@ -222,3 +224,48 @@ def build_fno_cascade(datasets: Iterable[Mapping[str, Any]]) -> FnoCascadeIndex:
         _contracts=contracts_sorted,
         unparsed=unparsed,
     )
+
+
+def contract_to_json(contract: FnoContract) -> dict[str, Any]:
+    """Project one :class:`FnoContract` to a JSON-native cascade row (no Decimal/None traps).
+
+    The exact shape the ``/db`` cascade frontend consumes: the query key (``symbol``)
+    + the display ``label`` + the decoded identity + the available ``intervals``.
+    Every value is a JSON primitive (strike stays a string, ``None`` is JSON ``null``),
+    so Starlette's ``JSONResponse`` never chokes.
+    """
+    return {
+        "symbol": contract.symbol,
+        "label": contract.label,
+        "exchange": contract.exchange,
+        "strike": contract.strike,
+        "option_type": contract.option_type,
+        "instrument_type": contract.instrument_type,
+        "intervals": list(contract.intervals),
+    }
+
+
+@dataclass(slots=True)
+class FnoCascadeCache:
+    """A generation-stamped memo of the :class:`FnoCascadeIndex` — O(1) repeat reads.
+
+    The cascade index is an ``O(datasets)`` build over a lake dir-walk; this memoises
+    it behind the SAME write-generation signal the other dashboard caches use
+    (DEC-MOVERS-O1-LATENCY-001 / DEC-DB-CANDLE-COUNT-CACHE-001) — a pull/materialize
+    bumps the generation, so the next cascade read rebuilds; otherwise every
+    underlying/expiry/contract click is an O(1) handoff of the cached index, never a
+    re-scan. Single-threaded dashboard use (the route runs the build on a threadpool
+    worker); no lock needed for the int+ref swap, which is atomic under the GIL.
+    """
+
+    _generation: int = -1
+    _index: FnoCascadeIndex | None = field(default=None, repr=False)
+
+    def get(self, *, generation: int, build: Callable[[], FnoCascadeIndex]) -> FnoCascadeIndex:
+        """Return the cached index for *generation*, running *build* on a miss/stale gen."""
+        cached = self._index
+        if cached is None or self._generation != generation:
+            cached = build()
+            self._index = cached
+            self._generation = generation
+        return cached
