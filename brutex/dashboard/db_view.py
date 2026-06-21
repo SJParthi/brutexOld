@@ -35,11 +35,11 @@ from __future__ import annotations
 import math
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -1236,6 +1236,38 @@ def list_option_series(
     ]
 
 
+class CandleCountCache(Protocol):
+    """The minimal generation-stamped cache contract ``query_candles`` needs.
+
+    Structural (``Protocol``) so :mod:`brutex.dashboard.db_view` never hard-imports
+    a concrete cache class — the dashboard injects the COMMON generation-stamped LRU
+    (:class:`brutex.dashboard.movers_cache.MoversSnapshotCache`, reused as the generic
+    cache per CLAUDE.md §11, DEC-DB-CANDLE-COUNT-CACHE-001) which satisfies this.
+    A ``compute`` that raises propagates cleanly and nothing is cached.
+    """
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], int]) -> int:
+        """Return *key*'s cached count for *generation*, running *compute* on a miss."""
+        ...  # pragma: no cover - structural protocol declaration
+
+
+def candle_count_key(
+    exchange: str, segment: str, symbol: str, interval: str, start: str | None, end: str | None
+) -> str:
+    """Build the stable cache key for a candle-page **total** (DEC-DB-CANDLE-COUNT-CACHE-001).
+
+    The total ``COUNT(*)`` depends ONLY on the partition coordinates + the inclusive
+    date bounds — NOT on ``limit`` / ``offset`` / ``descending`` / the projected
+    ``columns`` (paging, sort, and column subsetting never change how many rows match).
+    So every page of the same ``(coords, start, end)`` shares ONE cached total: a
+    prev/next click is an O(1) hit instead of re-reading every Parquet footer. ``|``
+    cannot appear in a validated coordinate or an ISO date, so the join is
+    unambiguous; ``None`` bounds render as an empty segment (``start=None`` keys
+    identically to an explicit open lower bound).
+    """
+    return f"{exchange}|{segment}|{symbol}|{interval}|{start or ''}|{end or ''}"
+
+
 def query_candles(
     conn: Any,
     lake_root: Path,
@@ -1250,6 +1282,8 @@ def query_candles(
     descending: bool = False,
     limit: int,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """Read one page of OHLCV candles for a partition set (DEC-DB-QUERY-001).
 
@@ -1280,6 +1314,14 @@ def query_candles(
         ``None`` for all. An empty tuple is rejected.
     descending, limit, offset
         Sort direction on ``timestamp`` + page bounds (clamped).
+    count_cache, generation
+        Optional generation-stamped cache for the page ``total``
+        (DEC-DB-CANDLE-COUNT-CACHE-001) + the current write-generation it is keyed
+        by. When supplied, the O(files) Parquet-footer ``COUNT(*)`` is memoised per
+        ``(coords, start, end)`` so a prev/next paging click within one dataset is
+        an O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        ``None`` (the default) keeps the function pure — the COUNT runs inline,
+        behaviour-identical to before.
 
     Returns
     -------
@@ -1336,11 +1378,33 @@ def query_candles(
     # bound parameter and every date/page value is parameter-bound.
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
-    total_row = conn.execute(
-        f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-        [glob, *where_params],
-    ).fetchone()
-    total = int(total_row[0]) if total_row else 0
+
+    # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
+    # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
+    # deep multi-year partition it re-reads every monthly file's footer on EVERY
+    # paging click (~8 ms at 6 years, growing as the lake deepens). The total is
+    # invariant across paging / sort / column subsetting of the same
+    # (coords, start, end), so the dashboard injects a generation-stamped cache
+    # (DEC-DB-CANDLE-COUNT-CACHE-001): a prev/next click within one dataset is an
+    # O(1) hit, and a pull/materialize bumps the generation → recompute (the SAME
+    # write-invalidation signal the movers cache uses — never a stale total). When
+    # no cache is injected (the pure-function default), the COUNT runs inline,
+    # behaviour-identical to before.
+    def _count_total() -> int:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+            [glob, *where_params],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    if count_cache is None:
+        total = _count_total()
+    else:
+        total = count_cache.get_or_compute(
+            candle_count_key(exchange, segment, symbol, interval, start, end),
+            generation=generation,
+            compute=_count_total,
+        )
     cursor = conn.execute(
         f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
         [glob, *where_params, safe_limit, safe_offset],
