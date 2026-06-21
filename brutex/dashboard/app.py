@@ -57,7 +57,10 @@ from brutex.dashboard.completeness import (
     per_symbol_completeness,
     scoreboard_to_csv,
 )
-from brutex.dashboard.composite_pull import pull_historical_for_underlyings
+from brutex.dashboard.composite_pull import (
+    CompositePullReport,
+    pull_historical_for_underlyings,
+)
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -85,7 +88,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
 from brutex.dashboard.historical_pull import pull_contract_candles
-from brutex.dashboard.metadata_pull import pull_expiries_contracts
+from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
 from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
 from brutex.dashboard.movers_futures import (
     build_futures_payload,
@@ -104,6 +107,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
+from brutex.dashboard.pipeline_pull import run_full_pipeline
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -114,6 +118,7 @@ from brutex.dashboard.preopen_report import (
     resolve_report_datasets,
 )
 from brutex.dashboard.pull_controller import (
+    BulkSpotReport,
     SessionRateController,
     pull_all_spot,
     pull_candles,
@@ -2035,6 +2040,138 @@ def build_app(
                 "intervals": list(intervals),
                 "selected": len(selected),
                 "until_clean": until_clean,
+                "dry_run": dry_run,
+            }
+        )
+
+    @app.post("/api/v1/universe/pull-pipeline")
+    async def api_universe_pull_pipeline() -> JSONResponse:
+        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK full-universe pull.
+
+        Backs the "▶ Pull EVERYTHING" hero button (DEC-ONE-CLICK-PIPELINE-001 — the
+        operator's "one button does the whole thing" request). Chains the THREE
+        existing, separately-tested pull spines into one click, in the exact order
+        the operator asked for — "start from pull spot, once it is successfully
+        completed then pull expiries and contracts, and when it is successfully
+        completed then pull historical" — over the WHOLE admitted universe (every
+        index + stock spot underlying for phase 1; every F&O-eligible underlying for
+        phases 2 + 3, with reference-only names a true zero-call no-op):
+
+        1. **Spot** — :func:`~brutex.dashboard.pull_controller.pull_all_spot`.
+        2. **Metadata** — :func:`~brutex.dashboard.metadata_pull.pull_expiries_contracts`.
+        3. **Historical** — :func:`~brutex.dashboard.composite_pull.pull_historical_for_underlyings`.
+
+        The GATE between phases is the pure
+        :func:`~brutex.dashboard.pipeline_pull.run_full_pipeline`: a phase that ends
+        with a blocking failure (dead token, daily quota, still-failing windows, or
+        a raised chain enumeration) STOPS the chain — the later phases never make a
+        doomed vendor call and are reported ``None`` (fail-CLOSED, never a false
+        "complete"). Runs on the single-flight background job (returns at once; poll
+        ``/pull-progress``). ``dry_run`` is forced when Groww creds are absent (the
+        PRIMARY gate post-cutover, DEC-DHAN-GROWW-REMIGRATE-001) — a no-creds run
+        honestly pulls nothing and stops at an empty chain (never fabricated data,
+        Golden Rule #1).
+        """
+        dry_run = not groww_credentials_present()
+        targets = _select_bulk_targets("index") + _select_bulk_targets("stock")
+        years = _resolve_metadata_years(None, None)
+        fetch_intervals = resolve_fetch_intervals(None)
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        registry_path = lake_root / "registry.duckdb"
+        reference_only_ids = _require_store().reference_only_security_ids()
+        tradable = [inst for inst in targets if inst.security_id not in reference_only_ids]
+        _LOG.info(
+            "universe.pull_pipeline.requested",
+            targets=len(targets),
+            tradable=len(tradable),
+            years=years,
+            dry_run=dry_run,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: run the gated spot→metadata→historical pipeline.
+
+            Binds the three INJECTED callables of
+            :func:`~brutex.dashboard.pipeline_pull.run_full_pipeline` to the real
+            pull spines (with their store / registry / lake / rate dependencies),
+            so the sequencer + gates stay 100%-testable offline while this thin
+            wiring streams live progress through the shared single-flight job.
+            """
+
+            def _phase_progress(label: str, bars: int, failed: bool) -> None:
+                on_progress(label, bars, failed, False)
+
+            def _ledger_sync(
+                completed: int, total: int, bars: int, failed: int, current: str
+            ) -> None:
+                _pull_job.sync_from_ledger(
+                    completed=completed, total=total, bars=bars, failed=failed, current=current
+                )
+
+            def _run_spot() -> BulkSpotReport:
+                return pull_all_spot(
+                    targets,
+                    lake_root=lake_root,
+                    dry_run=dry_run,
+                    from_date=None,
+                    to_date=None,
+                    year=None,
+                    intervals=fetch_intervals,
+                    on_progress=_phase_progress,
+                    rate_observer=make_rate_observer(state),
+                    session_rate=_session_rate,
+                    auto_retry=True,
+                    until_clean=True,
+                    on_ledger_sync=_ledger_sync,
+                )
+
+            def _run_metadata() -> MetadataPullReport:
+                with RegistryStore.open(registry_path) as registry:
+                    return pull_expiries_contracts(
+                        tradable,
+                        registry=registry,
+                        coverage_store=instrument_store,
+                        years=years,
+                        dry_run=dry_run,
+                        session_rate=_session_rate,
+                        on_progress=partial(_metadata_progress_sync, _pull_job),
+                    )
+
+            def _run_historical() -> CompositePullReport:
+                with RegistryStore.open(registry_path) as registry:
+                    return pull_historical_for_underlyings(
+                        targets,
+                        reference_only_ids=reference_only_ids,
+                        registry=registry,
+                        coverage_store=instrument_store,
+                        lake_root=lake_root,
+                        dry_run=dry_run,
+                        intervals=("1minute",),
+                        years=years,
+                        on_progress=_phase_progress,
+                        session_rate=_session_rate,
+                        until_clean=True,
+                    )
+
+            report = run_full_pipeline(
+                run_spot=_run_spot,
+                run_metadata=_run_metadata,
+                run_historical=_run_historical,
+            )
+            if report.spot is not None:
+                _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+            return report.to_dict()
+
+        started = _pull_job.start(
+            _work, total=len(targets), detail=f"pipeline {len(targets)} symbols", ledger_synced=True
+        )
+        return JSONResponse(
+            {
+                "started": started,
+                "targets": len(targets),
+                "total": len(targets),  # the JS title reads body.total for the first render
+                "tradable": len(tradable),
+                "years": years,
                 "dry_run": dry_run,
             }
         )

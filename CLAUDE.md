@@ -228,19 +228,25 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/futures-pull-enable-jlzt1n` (formally ENABLE futures pulling —
-  DEC-FUTURES-PULL-ENABLE-001, MIGRATION.md #871: the HONEST finding is futures pulling was
-  ALREADY built + wired by DEC-GROWW-FUTURE-INGEST-001 #707 (`future_contracts`,
-  `ingest_underlying_futures`, the `groww-future` coverage namespace, `composite_pull` pulls
-  FUT+CE/PE) — the only gap was a Golden-Rule-#3 CONTRADICTION: the `build_options_eligible_underlyings`
-  docstring still quoted the retired prior-vendor "we will NEVER pull futures" decree (#602) and the
-  Futures-tab hint implied a phantom "Type: futures" selector. This DOCS-only reconciliation
-  rewrites that docstring (the set is the OPT-badge DETECTOR, NOT a pull gate; futures ARE pulled),
-  fixes the Futures-tab hint, amends #602 as pull-scope-SUPERSEDED, and formally records the
-  operator's enable. The empty Futures tab was a DATA/run gap (no FUT candle pull yet), not code —
-  proven by the pre-existing FUT tests (future_contracts FUT-only filter, FUT ingest, groww-future
-  window namespace, `_contract_market(FUT)→groww-future`). Futures = LAKE/REFERENCE_ONLY; ENGINE
-  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), NO 52-vocab change. Prior merged:
+- **Active branch:** `claude/one-click-pipeline-jlzt1n` (a single "▶ Pull EVERYTHING" button —
+  DEC-ONE-CLICK-PIPELINE-001, MIGRATION.md #872: a THIN pure sequencer `brutex/dashboard/pipeline_pull.py`
+  chains the three EXISTING, separately-tested pull spines into ONE gated click — spot
+  (`pull_all_spot`) → expiries+contracts (`pull_expiries_contracts`) → historical
+  (`pull_historical_for_underlyings`) — exactly the operator's "do all the process in a single shot …
+  started from pull spot once it is successfully completed then pull expiries and contracts and when it
+  is successfully completed and then pull historical". `run_full_pipeline(*, run_spot, run_metadata,
+  run_historical)` takes three INJECTED callables (100%-testable offline, ZERO network) and applies a
+  concrete-typed GATE between phases (`spot_phase_ok`/`metadata_phase_ok`/`historical_phase_ok`, reading
+  the REAL report fields — `auth_aborted`/`quota_exhausted`/`still_failed_windows`,
+  `expiry_failures`/`contract_failures`, `failed_pairs`) so a failed earlier phase STOPS the chain
+  fail-CLOSED (the later phases never make a doomed vendor call, reported `None`, never falsely
+  "complete"). Surfaced as `POST /api/v1/universe/pull-pipeline` (thin route over the WHOLE universe on
+  the SAME single-flight `BackgroundPullJob`) + a green `/universe` hero button (`#pullPipelineBtn`).
+  Honest envelope: the sequencer is O(1) (3 calls + 3 gate checks); the WORK it triggers is the real
+  multi-hour full-history vendor fill (network-bound, NOT O(1)-total — stated). `pipeline_pull.py` at
+  100% line+branch (27 unit + 2 route tests); ruff/pyright/mypy --strict clean. NO pull/engine/scope/vocab
+  change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-FUTURES-PULL-ENABLE-001 #871 (PR #825, formally enable futures pulling, supersede never-pull decree) +
   DEC-MAPPING-INTEGRITY-RECONCILE-001 #870 (PR #823, real-time spot↔options mapping-integrity audit) +
   DEC-FNO-MONEYNESS-LABEL-001 #869 (PR #824, /movers + /db moneyness + strike-distance as one cell) +
   DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, spot late-start → partial, Jan-2020 floor) +
@@ -481,7 +487,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/futures-pull-enable-jlzt1n`
+- **Active feature branch:** `claude/one-click-pipeline-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
