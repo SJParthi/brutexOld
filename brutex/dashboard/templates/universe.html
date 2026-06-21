@@ -323,6 +323,22 @@
   .universe-hero .htitle { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
   .universe-hero .htitle b { font-size:16px; color:var(--text-bright); letter-spacing:.3px; }
   .universe-hero .hsub { font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.55; }
+  /* One-click full-pipeline hero button (DEC-ONE-CLICK-PIPELINE-001) */
+  .pull-everything-btn { position:relative; overflow:hidden; cursor:pointer; width:100%;
+    display:flex; align-items:center; gap:16px; text-align:left;
+    margin:0 0 var(--s-3); padding:16px 20px; border-radius:var(--r-lg);
+    border:1px solid rgba(56,217,169,.5);
+    background:linear-gradient(95deg, rgba(56,217,169,.16), rgba(91,141,239,.10));
+    transition:.18s var(--ease); }
+  .pull-everything-btn:hover:not(:disabled) { transform:translateY(-2px);
+    box-shadow:0 0 28px rgba(56,217,169,.4); }
+  .pull-everything-btn:disabled { opacity:.45; cursor:default; transform:none; box-shadow:none; }
+  .pull-everything-btn .pe-icon { font-size:18px; width:42px; height:42px; flex:none;
+    display:grid; place-items:center; border-radius:var(--r-md); color:var(--green);
+    background:rgba(56,217,169,.14); box-shadow:inset 0 0 0 1px rgba(56,217,169,.5); }
+  .pull-everything-btn .pe-text { display:flex; flex-direction:column; gap:3px; }
+  .pull-everything-btn .pe-text b { font-size:14.5px; color:var(--text-bright); letter-spacing:.2px; }
+  .pull-everything-btn .pe-sub { font-size:11.5px; color:var(--muted); line-height:1.4; }
   .bulkgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:var(--s-3); }
   @media (max-width:880px){ .bulkgrid { grid-template-columns:repeat(2,1fr); } }
   @media (max-width:520px){ .bulkgrid { grid-template-columns:1fr; } }
@@ -458,6 +474,18 @@
     <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
       Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b>; the intraday ones are computed on demand, <b>NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
+    <!-- One-click full pipeline (DEC-ONE-CLICK-PIPELINE-001): runs all three
+         phases in order — spot → expiries+contracts → historical — over the WHOLE
+         universe on ONE click, gated so a failed earlier phase stops the chain
+         (the buttons below stay for per-surface manual control). -->
+    <button class="pull-everything-btn" id="pullPipelineBtn"
+            title="ONE click: pull all spot (2020 → prev day, 1-minute), then ALL expiries + contracts metadata, then ALL historical F&amp;O candles — in that order. Each phase only starts once the previous one finishes clean (a dead token / quota / failed window stops the chain). Re-click is safe — already-pulled windows are skipped.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b>Pull EVERYTHING — one click, full pipeline</b>
+        <span class="pe-sub">spot → expiries + contracts → historical · whole universe · auto-gated, fail-closed</span>
+      </span>
+    </button>
     <div class="bulkgrid">
       <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
         <span class="shine"></span><span class="bnum">①</span>
@@ -1543,9 +1571,21 @@ document.getElementById("matbtn").onclick = async () => {
    Disables every bulk button while one runs so two universe pulls can't race. */
 const BULK_BTNS = ['bulkIdxSpot','bulkStkSpot','bulkIdxDeriv','bulkStkDeriv']
   .map(id => document.getElementById(id));
+const PIPELINE_BTN = document.getElementById('pullPipelineBtn');
 
 function setBulkDisabled(on) {
   BULK_BTNS.forEach(b => { if (b) b.disabled = on; });
+  if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
+}
+
+/* ── One-click full pipeline (DEC-ONE-CLICK-PIPELINE-001): spot → expiries +
+   contracts → historical over the WHOLE universe, server-gated so a failed
+   earlier phase stops the chain. Single-flight via startAndPoll. ── */
+if (PIPELINE_BTN) {
+  PIPELINE_BTN.addEventListener('click', () => {
+    startAndPoll('/api/v1/universe/pull-pipeline',
+      'EVERYTHING — spot → expiries + contracts → historical');
+  });
 }
 
 BULK_BTNS.forEach(btn => {
