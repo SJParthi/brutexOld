@@ -264,6 +264,7 @@ def _mover(
     exchange: str = "NSE",
     moneyness: Moneyness = Moneyness.ITM,
     atm_offset: int | None = -8,
+    moneyness_label: str = "ITM -8",
 ) -> OptionMover:
     """An :class:`OptionMover` with sensible defaults (override per test)."""
     return OptionMover(
@@ -284,6 +285,7 @@ def _mover(
         value_paisa=value_paisa,
         moneyness=moneyness,
         atm_offset=atm_offset,
+        moneyness_label=moneyness_label,
     )
 
 
@@ -340,6 +342,7 @@ class TestComputeOptionMover:
         # spot 23622.90 < strike 24000, CE → OTM; no step passed → no ATM±N.
         assert m.moneyness is Moneyness.OTM
         assert m.atm_offset is None
+        assert m.moneyness_label == "OTM"  # no grid → bucket only
 
     def test_moneyness_with_dynamic_step(self) -> None:
         # spot 23622.90, strike 24000, step 50 → CE OTM, ATM offset round((24000-23622.90)/50)=8.
@@ -361,6 +364,7 @@ class TestComputeOptionMover:
         )
         assert m.moneyness is Moneyness.OTM
         assert m.atm_offset == 8
+        assert m.moneyness_label == "OTM +8"  # the combined "bucket + depth" label
 
     def test_moneyness_unknown_without_spot(self) -> None:
         m = compute_option_mover(
@@ -382,6 +386,7 @@ class TestComputeOptionMover:
         # No spot → honest UNKNOWN, never a fabricated bucket (Golden Rule #1).
         assert m.moneyness is Moneyness.UNKNOWN
         assert m.atm_offset is None
+        assert m.moneyness_label == "?"
 
     def test_no_prior_day_nulls_pct_and_oi_change(self) -> None:
         m = compute_option_mover(
@@ -556,8 +561,10 @@ class TestBuildOptionsPayload:
         assert row["oi_chg"] == -3
         assert row["oi_chg_pct"] == "-3.80"
         assert row["volume"] == 1000
-        # Moneyness columns (DEC-FNO-MONEYNESS-001) — bucket string + signed ATM±N.
-        assert row["moneyness"] == "ITM"
+        # The single shown moneyness cell is the combined "bucket + signed depth" label
+        # (DEC-FNO-MONEYNESS-001); the raw bucket + ATM±N stay in the payload too.
+        assert row["moneyness"] == "ITM -8"
+        assert row["moneyness_bucket"] == "ITM"
         assert row["atm_offset"] == -8
 
     def test_null_metrics_render_none(self) -> None:

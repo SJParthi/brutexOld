@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-21 (DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
+_Last updated: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869 — the
+per-option moneyness + strike-distance is now shown as ONE combined cell
+(**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"**) instead of the split
+bucket + ATM±N columns of #865 — `brutex/data/moneyness.py` `_format_label`
+reformatted to `"<bucket> <signed depth>"` (sign tracks the BUCKET: ITM negative,
+OTM positive, so calls AND puts read alike; depth = `|atm_offset|` strikes). The
+movers screen + the `/db` F&O candle view each collapse the two columns into one
+"moneyness" column (`OptionMover.moneyness_label`; `FNO_CANDLE_COLUMNS` /
+`FNO_MONEYNESS_COLUMNS` now a single derived `moneyness` label). Pure DISPLAY reshape
+over the SAME read-time-derived values; ENGINE stays NIFTY/BANKNIFTY/SENSEX, NO
+storage/scope/vocab/rate change. Earlier: 2026-06-21 (DEC-SPOT-COMPLETENESS-2020-FLOOR-001,
+MIGRATION.md #868 — the `/completeness` + `/universe` SPOT 1-minute verdict is HONESTLY
+downgraded `full` → `partial` when the symbol's covered data does NOT begin in January 2020
+(a late listing / late vendor data, even one starting later WITHIN 2020); one COMMON helper
+`_spot_dimension_verdict_with_floor` so only symbols with the solid full-2020 history read
+`full`; read/rollup-side only — `completeness.py`, ENGINE UNCHANGED). Earlier: 2026-06-21
+(DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
 the `/db` candle-pager TOTAL (`COUNT(*)` over `read_parquet(glob)`, O(files) — a
 Parquet-footer read per file, recomputed on EVERY paging click) is now memoised behind
 a generation-stamped cache: `db_view.query_candles` gains an optional `count_cache`
@@ -212,23 +228,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/serene-hamilton-jlzt1n` (the `/completeness` + `/universe` SPOT
-  1-minute verdict is HONESTLY downgraded `full` → `partial` when the symbol's covered data
-  does NOT begin in JANUARY 2020 — DEC-SPOT-COMPLETENESS-2020-FLOOR-001, MIGRATION.md #868:
-  the spot pull starts at the 2020 `GROWW_HISTORY_FLOOR`, so a late-listed / late-data symbol
-  (JIOFIN 2023-08-21, TMPV 2025-10-24, SHRIRAMFIN 2022-12-20, and within-2020-but-late starts
-  TATACONSUM 2020-02-27 / MAXHEALTH 2020-08-21) has its empty pre-start windows RESOLVE → every
-  planned window `settled` → the prior verdict read `full` even though the data starts late. One
-  COMMON helper `_spot_dimension_verdict_with_floor` (used by BOTH the scoreboard rollup
-  `_per_symbol_spot` and the `/universe` detail `_spot_dimension_detail`) downgrades a `full`
-  whose `_from_2020(first_date)` is False to `partial`; the floor is MONTH-granular January 2020
-  (`_FROM_2020_EXCLUSIVE_UPPER = 2020-02-01`, operator decree "must have Jan-2020 data"), so only
-  symbols with the solid full-2020 history read `full` (the strong evidence the deep-drill
-  brute-force backtest needs); `partial`/`failed`/`none` unchanged. The SPOT analog of the
-  OPTIONS real-years fix #859. Read/rollup-side only — `completeness.py` at 100% line+branch
-  (43 tests, +5); NO pull/registry/engine/scope/vocab change, ENGINE UNCHANGED
-  (NIFTY/BANKNIFTY/SENSEX). Prior merged:
-  DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cache) +
+- **Active branch:** `claude/fno-moneyness-label` (the per-option moneyness +
+  strike-distance is now ONE combined cell — DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869:
+  `brutex/data/moneyness.py` `_format_label` reformatted to `"<bucket> <signed depth>"`
+  (**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"** · `"—"` future · `"?"` no spot),
+  the sign tracking the BUCKET so calls AND puts read alike (ITM negative, OTM positive,
+  depth = `|atm_offset|` strikes). The movers screen (`OptionMover.moneyness_label`,
+  `_option_row`'s `"moneyness"` key, single `movers.html` column) AND the `/db` F&O candle
+  view (`db_view._fno_moneyness_rows` single label; `FNO_MONEYNESS_COLUMNS` /
+  `fno_candle_lake.FNO_CANDLE_COLUMNS` collapse `(moneyness, atm_offset)` → one derived
+  `moneyness` column) each show ONE column reading the combined label, tinted by the leading
+  bucket. Pure DISPLAY reshape over the SAME #865 read-time-derived values; ENGINE
+  UNCHANGED, NO storage/scope/vocab/rate change. Prior merged:
+  DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, /completeness spot late-start partial) +
+  DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cached) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
   DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +

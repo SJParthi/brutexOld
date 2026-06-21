@@ -248,6 +248,10 @@ class OptionMover:
         The signed ATM±N strike-steps from spot (``0`` = the at-the-money rung,
         ``+N`` above, ``-N`` below), or ``None`` when the spot / strike grid is
         unknown.
+    moneyness_label
+        The single trader-facing string the screen shows — bucket + signed depth:
+        ``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"`` · ``"ITM"`` / ``"OTM"`` (no grid) ·
+        ``"—"`` (a future) · ``"?"`` (spot absent). DEC-FNO-MONEYNESS-001.
     """
 
     underlying: str
@@ -267,6 +271,7 @@ class OptionMover:
     value_paisa: int
     moneyness: Moneyness
     atm_offset: int | None
+    moneyness_label: str
 
     @property
     def name(self) -> str:
@@ -450,6 +455,7 @@ def compute_option_mover(
         value_paisa=value_paisa,
         moneyness=view.moneyness,
         atm_offset=view.atm_offset,
+        moneyness_label=view.label,
     )
 
 
@@ -467,9 +473,11 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "oi_chg": mover.oi_chg,
         "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
         "volume": mover.volume,
-        # Moneyness vs the snapshot spot (DEC-FNO-MONEYNESS-001). The StrEnum
-        # serialises to its bucket string ("ITM"); ATM±N is a signed int / None.
-        "moneyness": mover.moneyness.value,
+        # The ONE moneyness cell the screen shows — bucket + signed depth as a single
+        # string ("ITM -1" / "OTM +10" / "ATM"); DEC-FNO-MONEYNESS-001. The raw bucket
+        # + signed ATM±N stay in the payload for sorting / programmatic use.
+        "moneyness": mover.moneyness_label,
+        "moneyness_bucket": mover.moneyness.value,
         "atm_offset": mover.atm_offset,
     }
 

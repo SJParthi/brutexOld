@@ -140,4 +140,4 @@ class TestSchemaMetaRegistration:
         registered = {r[key_idx]: r[val_idx] for r in page["rows"]}
         assert registered["fno_candle_lake.table"] == "fno_candles"
         assert registered["fno_candle_lake.segment"] == "FNO"
-        assert registered["fno_candle_lake.schema_version"] == "1"
+        assert registered["fno_candle_lake.schema_version"] == "2"

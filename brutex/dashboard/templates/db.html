@@ -298,22 +298,17 @@ function fmtCell(col, cell) {
     const n = Number(cell);
     return Number.isFinite(n) ? n.toFixed(2) : cell;
   }
-  /* Signed ATM±N (DEC-FNO-MONEYNESS-001): show the sign so the distance from the
-     at-the-money rung reads +2 / 0 / -1. */
-  if (col === "atm_offset") {
-    const n = Number(cell);
-    return Number.isFinite(n) && n > 0 ? "+" + n : cell;
-  }
   return cell;
 }
 
-/* Moneyness colour class for a candle cell (DEC-FNO-MONEYNESS-001) — purely a
-   display tint; the value text is unchanged. "" for every non-moneyness column. */
+/* Moneyness colour class for a candle cell (DEC-FNO-MONEYNESS-001) — purely a display
+   tint; the cell reads "ITM -1" / "OTM +10" / "ATM" / "?" so tint by the leading bucket
+   ("" for every non-moneyness column or an ATM/"?"/"—" cell). */
 function moneynessClass(col, cell) {
-  if (col !== "moneyness") return "";
-  if (cell === "ITM") return " mny-itm";
-  if (cell === "OTM") return " mny-otm";
-  if (cell === "UNKNOWN" || cell === "NA") return " mny-na";
+  if (col !== "moneyness" || typeof cell !== "string") return "";
+  if (cell.startsWith("ITM")) return " mny-itm";
+  if (cell.startsWith("OTM")) return " mny-otm";
+  if (cell === "?" || cell === "—") return " mny-na";
   return "";
 }
 
@@ -324,7 +319,7 @@ function moneynessClass(col, cell) {
 const NUM_COLS = new Set([
   "open", "high", "low", "close", "volume", "open_interest", "oi",
   "strike", "spot", "iv", "lot_size", "tick_size", "sm_freeze_qty",
-  "security_id", "row_count", "underlying_security_id", "atm_offset",
+  "security_id", "row_count", "underlying_security_id",
 ]);
 function colType(col) {
   const c = String(col).toLowerCase();

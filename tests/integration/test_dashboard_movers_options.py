@@ -350,8 +350,10 @@ class TestRunOptionsSnapshot:
         # 23600 CE: |23622.90 - 23600| = 22.90 <= step/2 (25) → ATM, offset 0.
         assert by_name["NIFTY 27Jun24 23600 CE"]["moneyness"] == "ATM"
         assert by_name["NIFTY 27Jun24 23600 CE"]["atm_offset"] == 0
-        # 24000 CE: spot below strike → OTM; round((24000-23622.90)/50) = 8.
-        assert by_name["NIFTY 27Jun24 24000 CE"]["moneyness"] == "OTM"
+        # 24000 CE: spot below strike → OTM by 8 strikes; the shown cell is the combined
+        # label "OTM +8" (round((24000-23622.90)/50) = 8), the raw offset stays in payload.
+        assert by_name["NIFTY 27Jun24 24000 CE"]["moneyness"] == "OTM +8"
+        assert by_name["NIFTY 27Jun24 24000 CE"]["moneyness_bucket"] == "OTM"
         assert by_name["NIFTY 27Jun24 24000 CE"]["atm_offset"] == 8
 
     def test_no_underlying_spot_nulls_spot(self, tmp_path: Path) -> None:
