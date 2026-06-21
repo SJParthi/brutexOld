@@ -1248,7 +1248,7 @@ class CandleCountCache(Protocol):
 
     def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], int]) -> int:
         """Return *key*'s cached count for *generation*, running *compute* on a miss."""
-        ...  # pragma: no cover - structural protocol declaration
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def candle_count_key(
