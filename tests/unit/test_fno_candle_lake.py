@@ -27,7 +27,7 @@ class TestDescriptorConstants:
     def test_table_segment_version(self) -> None:
         assert FNO_CANDLE_LAKE_TABLE == "fno_candles"
         assert FNO_CANDLE_LAKE_SEGMENT == "FNO"
-        assert FNO_CANDLE_LAKE_SCHEMA_VERSION == 1
+        assert FNO_CANDLE_LAKE_SCHEMA_VERSION == 2
 
     def test_path_template_is_the_canonical_bars_layout(self) -> None:
         rendered = FNO_CANDLE_LAKE_PATH_TEMPLATE.format(
@@ -98,7 +98,7 @@ class TestSchemaMetaMapping:
         meta = fno_candle_lake_schema_meta()
         assert meta["fno_candle_lake.table"] == "fno_candles"
         assert meta["fno_candle_lake.segment"] == "FNO"
-        assert meta["fno_candle_lake.schema_version"] == "1"
+        assert meta["fno_candle_lake.schema_version"] == "2"
         assert meta["fno_candle_lake.instrument_types"] == "CE,FUT,PE"
         assert meta["fno_candle_lake.columns"].split(",") == [c.name for c in FNO_CANDLE_COLUMNS]
         assert all(isinstance(v, str) for v in meta.values())

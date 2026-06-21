@@ -263,7 +263,7 @@ function renderRows() {
        Purely a display tint; the text is unchanged. */
     if (field==="moneyness" && typeof v === "string") {
       if (v.startsWith("ITM")) cls = "pos"; else if (v.startsWith("OTM")) cls = "neg";
-      else if (v==="?"||v==="—"||v==="NA") cls = "muted";
+      else if (v==="?"||v==="—") cls = "muted";
     }
     return `<td class="${cls}">${v}</td>`;
   }).join("") + "</tr>").join("");
