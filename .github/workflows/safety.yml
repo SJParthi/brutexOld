@@ -37,7 +37,7 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,7 +84,7 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -133,7 +133,7 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@stable
         with:
