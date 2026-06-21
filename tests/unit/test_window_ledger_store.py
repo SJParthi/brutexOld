@@ -30,6 +30,7 @@ from brutex.data.window_ledger_store import (
     load_or_migrate_window_ledger,
     load_window_ledger,
     make_live_ledger_flush,
+    make_locked_flush,
     plan_windows,
     reconcile_ledger_windows,
     reconcile_ledger_with_lake,
@@ -599,6 +600,56 @@ class TestLiveFlush:
         clock[0] += 25.0  # well past 20 s → writes again
         flush()
         assert len(saves) == 2
+
+
+class TestMakeLockedFlush:
+    """``make_locked_flush`` — the thread-safe single-flight wrapper for the CLI
+    per-window ledger checkpoint (DEC-CLI-LEDGER-CHECKPOINT-001)."""
+
+    def test_forwards_every_call_to_the_wrapped_flush(self) -> None:
+        """Each fire forwards once to the wrapped 0-arg flush (no swallowing)."""
+        calls = {"n": 0}
+
+        def _flush() -> None:
+            calls["n"] += 1
+
+        locked = make_locked_flush(_flush)
+        locked()
+        locked()
+        assert calls["n"] == 2
+
+    def test_concurrent_fires_never_overlap(self) -> None:
+        """Under parallel worker-thread fires the wrapped flush runs strictly serially.
+
+        Models the ingest engine firing ``on_window`` from many worker threads at
+        once: the single-flight lock must guarantee the (non-thread-safe) ledger
+        write never has two fires in flight simultaneously.
+        """
+        import threading
+        import time
+
+        depth = {"now": 0, "max": 0}
+        barrier = threading.Barrier(8)
+
+        def _flush() -> None:
+            depth["now"] += 1
+            depth["max"] = max(depth["max"], depth["now"])
+            time.sleep(0.0005)  # widen the window so an unserialised fire would overlap
+            depth["now"] -= 1
+
+        locked = make_locked_flush(_flush)
+
+        def _worker() -> None:
+            barrier.wait()  # release all threads together to maximise contention
+            for _ in range(25):
+                locked()
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert depth["max"] == 1  # the lock kept every flush single-flight
 
 
 class TestBeginEnd:

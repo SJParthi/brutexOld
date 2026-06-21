@@ -228,9 +228,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-5xx-retry-jlzt1n` (a transient Groww 5xx server error is now a RETRYABLE
-  `GrowwServerError`, not a terminal quarantine — DEC-GROWW-SERVER-ERROR-RETRY-001, MIGRATION.md #883, gap #1
-  of the operator's critical-risks resilience-hardening batch: NEW `GrowwServerError(GrowwError)` in
+- **Active branch:** `claude/cli-ledger-checkpoint-jlzt1n` (the `brutex fetch` CLI now checkpoints the durable
+  window ledger MID-pull per window, not only at pull end, so a crash recovers in seconds instead of
+  re-pulling the whole span — DEC-CLI-LEDGER-CHECKPOINT-001, MIGRATION.md #884, gap #2 of the operator's
+  critical-risks resilience-hardening batch: `cmd_fetch` threads the SAME throttled `make_live_ledger_flush`
+  the dashboard uses as the ingest engine's per-WINDOW `on_window` hook, wrapped in a NEW single-flight
+  `window_ledger_store.make_locked_flush` (the `on_window` fires from PARALLEL worker threads + the throttled
+  flush is not itself thread-safe); the CLI wants the flush ONLY so it does NOT use `make_live_sync` (which
+  no-ops without an `on_ledger_sync`). A `None` ledger (`--dry-run`/`--inspect`) → no-op (the lock wraps a
+  no-op), persistence-free contract preserved. Recovery bounded to one throttle interval (NOT bit-for-bit
+  mid-window — a re-pull re-fetches; tmp→atomic-rename + keep-first sink absorb the duplicate). O(1) lock
+  per window; the adaptive flush throttle still bounds the write rate. `window_ledger_store.py` 100%
+  line+branch (177/50, incl. an 8-thread single-flight test); CLI fetch + window-ledger suites (72) green;
+  ruff/mypy --strict/pyright clean. CLI/ledger-store only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-GROWW-SERVER-ERROR-RETRY-001, MIGRATION.md #883 (a transient
+  Groww 5xx server error is now a RETRYABLE `GrowwServerError`, not a terminal quarantine — gap #1: NEW
+  `GrowwServerError(GrowwError)` in
   `brutex/adapters/groww/errors.py`; `_CODE_TO_ERROR` maps `500`/`502`/`503` → it (504 deliberately stays a
   retryable `GrowwTimeoutError` — the timeout ladder already governs it) + a phrase-only `_SERVER_ERROR_HINTS`
   checked AFTER the rate-limit/timeout hints (priority preserved); added to `is_retryable` but NOT
@@ -568,7 +581,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-5xx-retry-jlzt1n`
+- **Active feature branch:** `claude/cli-ledger-checkpoint-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

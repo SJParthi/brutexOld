@@ -501,6 +501,156 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
     assert (tmp_path / "audit" / "spot-ingest.jsonl").exists()
 
 
+def test_cmd_fetch_checkpoints_ledger_mid_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live persisting pull flushes the durable ledger MID-pull, not only at end.
+
+    DEC-CLI-LEDGER-CHECKPOINT-001 — before this, ``cmd_fetch`` saved the ledger
+    SOLELY via ``end_pull_ledger``, so a crash after N windows lost every completed
+    window's SUCCESS row → a full re-pull. The CLI now threads
+    ``make_live_sync(ledger, make_live_ledger_flush(...), None)`` as the ingest
+    engine's per-WINDOW ``on_window`` hook (the SAME helpers the dashboard uses,
+    CLAUDE.md §11 COMMON). The fake ingest fires that hook once (a window landing)
+    and we assert a durable save happened DURING the pull — before the end save.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.data import window_ledger_store
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    # Count durable-ledger saves so we can prove one fired MID-pull (from the
+    # on_window checkpoint) rather than only at end_pull_ledger. begin/plan/reconcile
+    # do not save (load + in-memory mutate), so the first save is the mid-pull flush.
+    saves = {"n": 0}
+    real_save = window_ledger_store.save_window_ledger
+
+    def counting_save(led: Any, root: Any, *a: Any, **kw: Any) -> Any:
+        saves["n"] += 1
+        return real_save(led, root, *a, **kw)
+
+    monkeypatch.setattr(window_ledger_store, "save_window_ledger", counting_save)
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    result = _FakeIngestResult(
+        report=_FakeIngestReport(
+            windows=1,
+            bars_appended=375,
+            failed_pairs=0,
+            transient_failures=0,
+            still_failed_windows=0,
+        ),
+        retry=None,
+    )
+    seen: dict[str, Any] = {}
+    saves_during_ingest: list[int] = []
+
+    def fake_ingest(adapter_arg: Any, sink_arg: Any, **kwargs: Any) -> _FakeIngestResult:
+        """Record the wiring; fire the per-window checkpoint as the engine would."""
+        seen.update(kwargs)
+        on_window = kwargs["on_window"]
+        assert callable(on_window)
+        on_window()  # first fire → both throttles open → durable ledger flushed
+        saves_during_ingest.append(saves["n"])
+        return result
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+    # The checkpoint hook was threaded into the ingest engine…
+    assert callable(seen["on_window"])
+    # …and firing it once persisted the durable ledger DURING the pull (before the
+    # end_pull_ledger save) — exactly one mid-pull flush observed inside the ingest.
+    assert saves_during_ingest == [1]
+    assert window_ledger_store.load_window_ledger(tmp_path).records()
+
+
+def test_cmd_fetch_inspect_ledger_checkpoint_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under ``--inspect`` (ledger None) the per-window checkpoint never touches disk.
+
+    The checkpoint is built unconditionally, but a ``None`` ledger makes BOTH
+    ``make_live_ledger_flush`` and ``make_live_sync`` no-ops, so firing ``on_window``
+    saves nothing — the persistence-free contract of ``--inspect`` is preserved.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    from brutex.data import window_ledger_store
+
+    monkeypatch.setattr(
+        cli, "_resolve_brute_force_instruments", lambda lake: [FakeInstrument("NIFTY")]
+    )
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    saves = {"n": 0}
+    real_save = window_ledger_store.save_window_ledger
+
+    def counting_save(led: Any, root: Any, *a: Any, **kw: Any) -> Any:
+        saves["n"] += 1
+        return real_save(led, root, *a, **kw)
+
+    monkeypatch.setattr(window_ledger_store, "save_window_ledger", counting_save)
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    result = _FakeIngestResult(
+        report=_FakeIngestReport(
+            windows=1,
+            bars_appended=0,
+            failed_pairs=0,
+            transient_failures=0,
+            still_failed_windows=0,
+        ),
+        retry=None,
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_ingest(adapter_arg: Any, sink_arg: Any, **kwargs: Any) -> _FakeIngestResult:
+        seen.update(kwargs)
+        kwargs["on_window"]()  # firing the checkpoint with a None ledger is a no-op
+        return result
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=True,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+    assert seen["ledger"] is None
+    assert callable(seen["on_window"])  # built even when there is no ledger
+    assert saves["n"] == 0  # …but a None-ledger checkpoint never saves
+
+
 def test_cmd_fetch_live_persisting_pull_seeds_groww_ledger_namespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
