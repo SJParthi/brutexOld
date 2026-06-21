@@ -543,6 +543,26 @@ class TestMoversApi:
         assert Decimal(body["price_gainers"][0]["pct_change"]) == Decimal("10")
         assert {r["symbol"] for r in body["volume"]} == {"NIFTY", "BANKNIFTY"}
 
+    def test_topn_default_is_100_and_cap_is_500(self, store: InstrumentStore) -> None:
+        # DEC-MOVERS-COMPLETENESS-001: the operator-directed deeper default + cap. The
+        # cap boundary is enforced by the route (≤ 500 ok, > 500 → 422), never silently
+        # clamped — so a deep markets screen is honest about its limit.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # No explicit top_n → the new 100 default is echoed back in the payload.
+        assert client.get("/api/v1/movers").json()["top_n"] == 100
+        assert client.get("/api/v1/movers", params={"top_n": 500}).status_code == 200
+        assert client.get("/api/v1/movers", params={"top_n": 501}).status_code == 422
+
+    def test_non_default_timeframe_resolves_not_422(self, store: InstrumentStore) -> None:
+        # Every one of the 21 canonical TFs is a valid movers interval (derived from
+        # 1-minute on-the-fly) — a 2hour/3hour request degrades to an honest empty
+        # payload on an empty lake, never a 422/500 (DEC-MOVERS-COMPLETENESS-001).
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        for interval in ("2hour", "3hour", "7minute", "14minute"):
+            resp = client.get("/api/v1/movers", params={"interval": interval, "time": "09:30"})
+            assert resp.status_code == 200, f"{interval} must not 422"
+            assert resp.json()["interval"] == interval
+
 
 class TestMoversPage:
     def test_movers_page_renders(self, store: InstrumentStore) -> None:
@@ -565,6 +585,34 @@ class TestMoversPage:
         again = client.get("/movers")
         assert again.status_code == 200
         assert again.text == resp.text
+
+    def test_movers_page_lists_all_21_timeframes(self, store: InstrumentStore) -> None:
+        # DEC-MOVERS-COMPLETENESS-001: the Timeframe dropdown lists EXACTLY the 21 canonical
+        # lake interval labels — none missing AND no stray/dead extra option (an exact-set
+        # check, so a dead `value=` can never sneak in). The labels mirror LAKE_INTERVAL_LABELS
+        # (single source of truth). Top-N defaults to 100 and the input + the route cap allow
+        # up to 500 — and the syncControls() handler must NOT clobber that back to 200 (the
+        # hostile-review MAJOR: a 500 cap unreachable through the UI is exactly the illusion
+        # the operator forbids).
+        import re
+
+        from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        text = client.get("/movers").text
+        select = re.search(r'<select id="interval">(.*?)</select>', text, re.DOTALL)
+        assert select is not None, "interval <select> not found"
+        dropdown_values = set(re.findall(r'<option value="([^"]+)"', select.group(1)))
+        assert dropdown_values == set(LAKE_INTERVAL_LABELS.values())
+        assert len(dropdown_values) == 21
+        # Top-N default 100, reachable up to 500, and NEVER clobbered to 200 by syncControls()
+        # (the hostile-review MAJOR — precisely target the JS `.max = "200"` assignment so an
+        # unrelated "200" elsewhere can't false-pass/fail this guard).
+        assert 'id="topn"' in text and 'value="100"' in text and 'max="500"' in text
+        assert '.max = "200"' not in text, (
+            "topn max must not be reset to 200 by syncControls (DEC-MOVERS-COMPLETENESS-001)"
+        )
+        assert '.max = "500"' in text, "syncControls must set the topn max to 500"
 
     def test_movers_link_in_every_pages_nav(self, store: InstrumentStore) -> None:
         # DEC-INDEX-CONSTITUENTS-COVERAGE-001: the /movers page must be reachable
