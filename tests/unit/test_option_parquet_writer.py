@@ -182,20 +182,40 @@ class TestAtomicWriteCleanup:
         # Force os.replace to fail AFTER the tmp parquet is written → the cleanup
         # must unlink the orphan tmp so no .tmp leaks. _atomic_write_parquet now
         # delegates to the shared atomic_io helper (DEC-LAKE-WRITE-HALT-001), so the
-        # rename happens there — patch os.replace at that module. A generic OSError
+        # rename happens there — patch os.replace via the module path. A generic OSError
         # (no ENOSPC errno) re-raises as-is (it is NOT escalated to a LakeWriteHalt).
-        import brutex.data.atomic_io as mod
-
         def _boom(src: object, dst: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(mod.os, "replace", _boom)
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _boom)
         w = _writer(tmp_path)
         with pytest.raises(OSError, match="disk full"):
             w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
         # No orphan tmp file left behind.
         leftovers = list((tmp_path / "options").rglob("*.tmp"))
         assert leftovers == []
+
+    def test_merge_read_oom_halts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A MemoryError during the merge READ (steady-state re-pull) → LakeWriteHalt.
+
+        The merge read loads the WHOLE existing partition; an OOM there must become a
+        graceful LakeWriteHalt pull-wide stop, not a raw worker crash
+        (DEC-LAKE-WRITE-HALT-001 — the merge-read guard).
+        """
+        from brutex.data.errors import LakeWriteHalt
+
+        w = _writer(tmp_path)
+        # First write creates the partition (no merge read).
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+
+        def _oom(*_a: object, **_k: object) -> object:
+            raise MemoryError("merge read OOM")
+
+        monkeypatch.setattr(pl, "read_parquet", _oom)
+        # The SECOND write merges → reads the existing partition → OOM → LakeWriteHalt.
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=1)])
+        assert exc_info.value.reason == "out_of_memory"
 
 
 class TestPartitionLock:

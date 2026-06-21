@@ -36,7 +36,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from brutex.data.atomic_io import atomic_write_via
+from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.models import OptionBar
 from brutex.data.partition import partition_for_timestamp
 from brutex.models import BruteXError
@@ -213,10 +213,16 @@ class OptionParquetWriter:
         so the stored bytes are identical regardless of which window acquires the lock
         first (order-independent — CLAUDE.md §2 Rule 7).
         """
-        new_df = _render_df(coordinate, new_bars)  # validates the polars import
         import polars as pl
 
-        with _partition_lock(dest):
+        # The render + merge READ + concat are the option lake-write allocation sites
+        # (the merge read loads the WHOLE existing partition — the steady-state re-pull
+        # case), so they run inside lake_write_guard: a MemoryError / ENOSPC anywhere
+        # in the read-modify-write becomes a LakeWriteHalt pull-wide stop, not a raw
+        # mid-merge crash (DEC-LAKE-WRITE-HALT-001). The partition lock still serialises
+        # same-path writers (DEC-OPTION-PARTITION-LOCK-001).
+        with _partition_lock(dest), lake_write_guard():
+            new_df = _render_df(coordinate, new_bars)  # validates the polars import
             if dest.exists():
                 existing = pl.read_parquet(dest)
                 # int() coercion keeps the return concretely int even in the CI

@@ -77,17 +77,21 @@ def atomic_write_via(dest: Path, write_to: Callable[[Path], object]) -> None:
     and the OS flush can never leave *dest* pointing at a truncated Parquet. The
     temp file is ALWAYS removed if the rename did not consume it (any error path).
 
-    The write + rename run inside :func:`lake_write_guard`, so a full disk / OOM
-    becomes a :class:`LakeWriteHalt` (pull-wide stop) with the half-written temp
-    already cleaned up — never a half-written partition left on disk.
+    The temp CREATION + write + rename ALL run inside :func:`lake_write_guard`, so a
+    full disk / OOM at ANY step — including ``mkstemp`` itself (on a full volume the
+    inode/first-block allocation is frequently the FIRST call to fail with ``ENOSPC``)
+    — becomes a :class:`LakeWriteHalt` (pull-wide stop) with any half-written temp
+    already cleaned up; ``dest`` is untouched until the atomic ``os.replace``, so a
+    half-written partition is impossible (only a temp can be orphaned, and it isn't).
     """
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(dest.parent), prefix=".brutex-write-", suffix=".parquet.tmp"
-    )
-    os.close(fd)
-    tmp = Path(tmp_name)
+    tmp: Path | None = None
     try:
         with lake_write_guard():
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(dest.parent), prefix=".brutex-write-", suffix=".parquet.tmp"
+            )
+            os.close(fd)
+            tmp = Path(tmp_name)
             write_to(tmp)
             flush_fd = os.open(tmp, os.O_RDONLY)
             try:
@@ -96,8 +100,10 @@ def atomic_write_via(dest: Path, write_to: Callable[[Path], object]) -> None:
                 os.close(flush_fd)
             os.replace(tmp, dest)
     finally:
-        # On success `os.replace` consumed tmp (it no longer exists → no-op); on any
-        # error path remove the half-written temp. Suppress a concurrent/own unlink
-        # race so cleanup never masks the original error.
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
+        # `tmp is None` → `mkstemp` itself failed (nothing to clean). Otherwise: on
+        # success `os.replace` consumed tmp (no-op), on any error path remove the
+        # half-written temp. Suppress a concurrent/own unlink race so cleanup never
+        # masks the original error.
+        if tmp is not None:
+            with contextlib.suppress(FileNotFoundError):
+                tmp.unlink()

@@ -234,12 +234,14 @@ hostile-review pass._
   critical-risks resilience-hardening batch: NEW `brutex/data/errors.py` `LakeWriteHalt(DataLakeError)`
   (`reason` = `disk_full`/`out_of_memory`) + NEW `brutex/data/atomic_io.py` (`lake_write_guard` maps
   `ENOSPC`/`MemoryError`→`LakeWriteHalt`, every other error UNCHANGED; `atomic_write_via` = the ONE
-  tmp→fsync→`os.replace`→cleanup). BOTH lake writers delegate to it (spot `_render_bytes` polars alloc also
-  guarded) + `LakeWriteHalt` added to BOTH ingest spines' `_GLOBAL_STOP_ERRORS` so a full disk propagates
-  past the per-symbol/contract quarantine and halts (temp always cleaned first — no half-written partition,
-  no fabricated data). HONEST: graceful DETECTION + halt, NOT a memory CAP (a true RSS ceiling needs
-  setrlimit/cgroups — OUT OF SCOPE); a non-`ENOSPC` `OSError` re-raises as-is (never mis-escalated); only the
-  2 data-lake writers consolidated (the other 5 atomic-write copies remain noted COMMON debt). `atomic_io.py`
+  tmp→fsync→`os.replace`→cleanup). BOTH lake writers delegate to it; every allocation/failure site is guarded
+  (a 4-agent hostile review folded two MAJORs — the spot FRESH render + the steady-state MERGE READ are both
+  guarded, and `mkstemp` itself runs inside the guard) + `LakeWriteHalt` added to BOTH ingest spines'
+  `_GLOBAL_STOP_ERRORS` so a full disk propagates past the per-symbol/contract quarantine and halts (temp
+  always cleaned first — no half-written partition, no fabricated data). HONEST: graceful DETECTION + halt,
+  NOT a memory CAP (a true RSS ceiling needs setrlimit/cgroups — OUT OF SCOPE); a non-`ENOSPC` `OSError`
+  re-raises as-is (never mis-escalated); only the 2 data-lake writers consolidated (the other 5 atomic-write
+  copies remain noted COMMON debt). `atomic_io.py`
   + `errors.py` 100% line+branch; the 2 writers + 2 ingest spines stay 100%; ruff/mypy --strict/pyright clean.
   ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged:
   DEC-CLI-LEDGER-CHECKPOINT-001, MIGRATION.md #884 (the `brutex fetch` CLI now checkpoints the durable

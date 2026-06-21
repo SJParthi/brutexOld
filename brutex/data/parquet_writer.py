@@ -454,23 +454,28 @@ class ParquetWriter:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
-        df = pl.read_parquet(dest)
-        out: dict[datetime, CandleBar] = {}
-        for row in df.iter_rows(named=True):
-            oi = row["open_interest"]
-            bar = _tick_round(
-                CandleBar(
-                    timestamp=row["timestamp"],
-                    open=Decimal(str(row["open"])),
-                    high=Decimal(str(row["high"])),
-                    low=Decimal(str(row["low"])),
-                    close=Decimal(str(row["close"])),
-                    volume=int(row["volume"]),
-                    open_interest=None if oi is None else int(oi),
+        # The merge READ is the steady-state re-pull's largest allocation (it loads
+        # the WHOLE existing month partition), so it runs inside lake_write_guard too:
+        # a MemoryError here (or an ENOSPC, defensively) becomes a LakeWriteHalt
+        # pull-wide stop, not a raw mid-merge crash (DEC-LAKE-WRITE-HALT-001).
+        with lake_write_guard():
+            df = pl.read_parquet(dest)
+            out: dict[datetime, CandleBar] = {}
+            for row in df.iter_rows(named=True):
+                oi = row["open_interest"]
+                bar = _tick_round(
+                    CandleBar(
+                        timestamp=row["timestamp"],
+                        open=Decimal(str(row["open"])),
+                        high=Decimal(str(row["high"])),
+                        low=Decimal(str(row["low"])),
+                        close=Decimal(str(row["close"])),
+                        volume=int(row["volume"]),
+                        open_interest=None if oi is None else int(oi),
+                    )
                 )
-            )
-            out[bar.timestamp] = bar
-        return out
+                out[bar.timestamp] = bar
+            return out
 
     @staticmethod
     def _bar_values_equal(a: CandleBar, b: CandleBar) -> bool:
@@ -506,11 +511,11 @@ class ParquetWriter:
             ) from exc
 
         # Build columns from the bars + render to a Parquet byte blob. The polars
-        # allocations (the DataFrame build + write_parquet) are the lake-write OOM
-        # site, so they run inside lake_write_guard: a MemoryError here becomes a
-        # LakeWriteHalt pull-wide stop instead of a raw mid-render crash
-        # (DEC-LAKE-WRITE-HALT-001). Decimal → float conversion is explicit so the
-        # cast is visible in audit logs.
+        # allocations (the DataFrame build + write_parquet) are the FRESH-write OOM
+        # site (the merge READ in `_read_existing_bars` is guarded separately), so
+        # they run inside lake_write_guard: a MemoryError here becomes a LakeWriteHalt
+        # pull-wide stop instead of a raw mid-render crash (DEC-LAKE-WRITE-HALT-001).
+        # Decimal → float conversion is explicit so the cast is visible in audit logs.
         import io
 
         with lake_write_guard():
