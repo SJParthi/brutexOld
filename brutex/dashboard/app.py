@@ -2192,8 +2192,16 @@ def build_app(
                 generation, so the operator's first /movers open is an O(1) cache hit. Reuses
                 the EXACT candidate_key + compute the /api/v1/movers route uses (no drift,
                 CLAUDE.md §11 COMMON). Returns how many of spot/futures/options warmed non-empty.
+
+                Whole-body best-effort: the date resolution + every job is wrapped so a
+                transient lake-read race NEVER propagates to fail the already-successful pull
+                (Correctness of the pull > the warm's latency benefit, DEC-PULL-MOVERS-WARM-001).
                 """
-                warm_date = latest_movers_date(lake_root)
+                try:
+                    warm_date = latest_movers_date(lake_root)
+                except Exception as exc:  # pylint: disable=broad-except - best-effort warm
+                    _LOG.warning("movers.warm.latest_date_failed", error=str(exc))
+                    return 0
                 if warm_date is None:
                     return 0
                 gen = _summary_cache.generation  # post-pull generation (the pull bumped it)
@@ -3129,10 +3137,17 @@ def build_app(
                     )
                 )
             lake_root = store_path.parent
-            # Normalise the date once so the cache key is canonical (``None`` ⇒
-            # today maps to the same key as the explicit ISO day). A malformed date
-            # raises HERE (synchronously) → 400, before any threadpool work.
-            date_str = parse_snapshot_date(date).isoformat()
+            # Normalise the date once so the cache key is canonical. With NO explicit
+            # date, default to the LATEST available spot day (DEC-PULL-MOVERS-WARM-001),
+            # NOT today: a historical pull fills the lake only to the previous trading
+            # day, so a today-default would show an EMPTY snapshot on open (and miss the
+            # post-pull warm, which keys on that same latest day). Falls back to today
+            # only when the lake has no spot data yet (an honest empty payload). An
+            # EXPLICIT malformed date still raises HERE (synchronously) → 400.
+            if date is None:
+                date_str = latest_movers_date(lake_root) or parse_snapshot_date(None).isoformat()
+            else:
+                date_str = parse_snapshot_date(date).isoformat()
             # The current write-generation — a pull/materialize bumps it, so every
             # cached candidate set computed at an older generation is dirty (the
             # page never serves pre-pull data). Reused from the coverage cache.
