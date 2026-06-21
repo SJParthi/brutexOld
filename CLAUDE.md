@@ -228,8 +228,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fno-window-plan-jlzt1n` (pre-plan F&O coverage windows —
-  DEC-FNO-WINDOW-PLAN-001, MIGRATION.md #879: the F&O (options + futures) pull now PRE-PLANS every
+- **Active branch:** `claude/db-fno-cascade-jlzt1n` (the `/db` F&O picker is now a lazy
+  symbol→expiry→contract cascade — DEC-DB-FNO-CASCADE-001, MIGRATION.md #880: the `/db` F&O dataset
+  selector was ONE flat dropdown of thousands of contract partitions (impossible to find a precise strike —
+  the operator's screenshot). NEW pure `brutex/dashboard/fno_cascade.py` `build_fno_cascade` groups the
+  decoded F&O datasets into a 3-level `FnoCascadeIndex` (O(1) `underlyings`/`expiries`/`contracts`,
+  futures-first then numeric-strike sort, interval-aggregated, `unparsed` surfaced) + a generation-stamped
+  `FnoCascadeCache` + 3 lazy routes `GET /api/v1/db/fno/{underlyings,expiries,contracts}` (COMMON
+  `_fno_cascade_or_none` helper) + the `db.html` 3 dependent selects (the contract pick materialises the
+  dataset so the SHARED candle query path is byte-unchanged; spot/option keep the flat dropdown). Derived
+  from the LAKE partitions (not the empty `contracts` registry). `fno_cascade.py` at 100% line+branch
+  (14 unit + 8 route/frontend integration); broader `/db` suite (229) green; ruff/pyright/mypy --strict
+  clean. READ-ONLY viewer; richer F&O columns (days_to_expiry/spot/intrinsic/time_value) are the stated NEXT
+  PR. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged: DEC-FNO-WINDOW-PLAN-001, MIGRATION.md #879
+  (PR #833: the F&O (options + futures) pull now PRE-PLANS every
   `(contract, interval)` window as `PLANNED` BEFORE any fetch, so the `/coverage/windows` Options +
   Futures tabs show a real planned total + units, exactly like spot — the operator's "why no planned
   items + units for futures and options?". Root cause: a `PLANNED` row was only ever seeded by spot's
@@ -525,7 +537,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/fno-window-plan-jlzt1n`
+- **Active feature branch:** `claude/db-fno-cascade-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
