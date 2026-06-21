@@ -228,18 +228,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/mapping-integrity-jlzt1n` (a real-time GREEN/RED audit that PROVES
-  the core spot↔options mapping is precise — DEC-MAPPING-INTEGRITY-RECONCILE-001, MIGRATION.md #870:
-  the new PURE `brutex/data/mapping_integrity.py` reconciles every options-eligible spot underlying
-  (`store.fno_eligible_underlyings`) against the coverage ledger (`store.list_coverage`) in ONE
-  O(eligible) pass / O(1) per spot — flagging each that pulled ZERO expiries (`none`, the GATING
-  red, e.g. M&M) or only PART of the 2020→today span (`partial`, amber, e.g. BAJAJ-AUTO's
-  2024-only). Surfaced as `GET /api/v1/universe/mapping-integrity` + a green/red `/universe`
-  `#mappanel` (15s live). The DETECTOR only — M&M reads RED until **F2** normalises the
-  options-fetch symbol (encode `&`; the instrument.csv confirms the mapping is already exact,
-  so M&M's `&` is an HTTP-encoding bug, not a symbol mismatch), after which the panel flips GREEN.
-  `mapping_integrity.py` at 100% line+branch (13 unit + 3 integration); NO pull/engine/scope/vocab
-  change, ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+- **Active branch:** `claude/futures-pull-enable-jlzt1n` (formally ENABLE futures pulling —
+  DEC-FUTURES-PULL-ENABLE-001, MIGRATION.md #871: the HONEST finding is futures pulling was
+  ALREADY built + wired by DEC-GROWW-FUTURE-INGEST-001 #707 (`future_contracts`,
+  `ingest_underlying_futures`, the `groww-future` coverage namespace, `composite_pull` pulls
+  FUT+CE/PE) — the only gap was a Golden-Rule-#3 CONTRADICTION: the `build_options_eligible_underlyings`
+  docstring still quoted the retired prior-vendor "we will NEVER pull futures" decree (#602) and the
+  Futures-tab hint implied a phantom "Type: futures" selector. This DOCS-only reconciliation
+  rewrites that docstring (the set is the OPT-badge DETECTOR, NOT a pull gate; futures ARE pulled),
+  fixes the Futures-tab hint, amends #602 as pull-scope-SUPERSEDED, and formally records the
+  operator's enable. The empty Futures tab was a DATA/run gap (no FUT candle pull yet), not code —
+  proven by the pre-existing FUT tests (future_contracts FUT-only filter, FUT ingest, groww-future
+  window namespace, `_contract_market(FUT)→groww-future`). Futures = LAKE/REFERENCE_ONLY; ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), NO 52-vocab change. Prior merged:
+  DEC-MAPPING-INTEGRITY-RECONCILE-001 #870 (PR #823, real-time spot↔options mapping-integrity audit) +
   DEC-FNO-MONEYNESS-LABEL-001 #869 (PR #824, /movers + /db moneyness + strike-distance as one cell) +
   DEC-SPOT-COMPLETENESS-2020-FLOOR-001 #868 (PR #822, spot late-start → partial, Jan-2020 floor) +
   DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cache) +
@@ -479,7 +481,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/mapping-integrity-jlzt1n`
+- **Active feature branch:** `claude/futures-pull-enable-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
