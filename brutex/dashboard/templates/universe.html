@@ -625,6 +625,20 @@
        style="margin-left:10px;color:var(--blue);text-decoration:none;font-size:12px;">⤓ CSV</a>
   </div>
 
+  <!-- Economics integrity (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001): lot_size uniform per
+       (underlying, expiry). VERIFIED = no within-expiry lot mismatch; RED = a mismatch.
+       Cross-expiry lot revisions (NSE quarterly) are shown as informational, never RED. -->
+  <div id="econpanel" role="status" aria-live="polite"
+       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Economics integrity (lot size)</b>
+    <span id="econverdict" style="font-weight:600;"></span>
+    <span id="econdetail" style="color:var(--muted);"></span>
+    <a href="/api/v1/universe/economics-integrity.csv" download
+       title="Download the lot_size-per-(underlying,expiry) economics audit as a CSV"
+       style="margin-left:10px;color:var(--blue);text-decoration:none;font-size:12px;">⤓ CSV</a>
+  </div>
+
   <main class="grid" aria-label="Instrument drill-down">
     <section class="col" aria-labelledby="h-instruments">
       <h3 id="h-instruments">Instruments</h3>
@@ -1009,6 +1023,35 @@ async function loadMasterIntegrity() {
       verdict.style.color = "#f87171";
       detail.textContent = " · orphan " + m.orphan_count + " · ambiguous " + m.ambiguous_count +
         " · disagreement " + m.disagreement_count + " · empty " + m.empty_underlying_count;
+    }
+  } catch (e) { /* transient — keep the last shown verdict */ }
+}
+
+async function loadEconomicsIntegrity() {
+  /* Read-only: the green/red lot-economics verdict (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
+     VERIFIED when lot_size is uniform per (underlying, expiry); RED counts within-expiry
+     mismatches. Cross-expiry lot revisions (legit NSE quarterly) are shown informational,
+     never RED. Reads the persisted snapshot. Never throws — keeps last shown. */
+  try {
+    const r = await fetch("/api/v1/universe/economics-integrity");
+    if (!r.ok) return;
+    const m = await r.json();
+    const panel = document.getElementById("econpanel");
+    const verdict = document.getElementById("econverdict");
+    const detail = document.getElementById("econdetail");
+    if (!panel || !m.present) return;
+    panel.style.display = "block";
+    if (m.is_green) {
+      verdict.textContent = " ✅ VERIFIED";
+      verdict.style.color = "#4ade80";
+      detail.textContent = " · " + (m.total_legs || 0) + " legs · " + (m.expiry_groups || 0) +
+        " (underlying,expiry) groups, lot uniform per expiry · " +
+        (m.underlyings_with_lot_revisions || 0) + " legit cross-expiry revisions";
+    } else {
+      verdict.textContent = " ❌ " + m.lot_mismatch_expiries + " within-expiry lot mismatch(es)";
+      verdict.style.color = "#f87171";
+      detail.textContent = " · " + (m.underlyings_with_lot_revisions || 0) +
+        " cross-expiry revisions (informational)";
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1897,6 +1940,8 @@ async function bootstrap() {
   setInterval(loadMappingIntegrity, 15000);
   loadMasterIntegrity();
   setInterval(loadMasterIntegrity, 15000);
+  loadEconomicsIntegrity();
+  setInterval(loadEconomicsIntegrity, 15000);
 }
 bootstrap();
 </script>

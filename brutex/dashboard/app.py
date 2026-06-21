@@ -87,6 +87,7 @@ from brutex.dashboard.db_view import (
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
+from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -140,6 +141,8 @@ from brutex.dashboard.universe_cache import UniverseSnapshotCache
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
+from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
+from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.mapping_integrity import (
     EligibleSpot,
@@ -2758,6 +2761,54 @@ def build_app(
             media_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": 'attachment; filename="master_integrity.csv"',
+            },
+        )
+
+    def _read_economics_integrity() -> dict[str, Any] | None:
+        """Read the persisted economics-integrity snapshot (``None`` if never loaded)."""
+        raw = _require_store().get_meta(ECONOMICS_INTEGRITY_META_KEY)
+        if raw is None:
+            return None
+        parsed: dict[str, Any] = json.loads(raw)
+        return parsed
+
+    @app.get("/api/v1/universe/economics-integrity")
+    async def api_universe_economics_integrity() -> JSONResponse:
+        """GET /api/v1/universe/economics-integrity — the green/red lot-economics verdict.
+
+        DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001. Returns the economics snapshot the ingest hook
+        persisted to ``schema_meta``: lot_size must be uniform per (underlying, expiry) — a
+        within-expiry mismatch is RED; cross-expiry lot revisions are informational. READ-ONLY;
+        ``{"present": false}`` until the master has been loaded once. No store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_economics_integrity)
+        if snapshot is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **snapshot})
+
+    @app.get("/api/v1/universe/economics-integrity.csv")
+    async def api_universe_economics_integrity_csv() -> Response:
+        """GET /api/v1/universe/economics-integrity.csv — the lot-economics audit as a download.
+
+        DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001 — re-renders the persisted snapshot via
+        :func:`brutex.data.economics_integrity.report_from_dict` →
+        :func:`brutex.dashboard.economics_integrity_csv.economics_integrity_to_csv` (every cell
+        formula-injection-safe). READ-ONLY; a one-line placeholder until the master is loaded;
+        no store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_economics_integrity)
+        if snapshot is None:
+            content = (
+                "BruteX — Instrument-Master Economics Integrity Audit\n"
+                "no audit recorded yet — load the instrument master first\n"
+            )
+        else:
+            content = economics_integrity_to_csv(economics_report_from_dict(snapshot))
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="economics_integrity.csv"',
             },
         )
 

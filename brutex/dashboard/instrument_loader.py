@@ -99,6 +99,15 @@ from brutex.dashboard.ntm_cache import (
     save_constituent_csv,
 )
 from brutex.dashboard.universe_query import universe_summary
+from brutex.data.economics_integrity import (
+    META_KEY as _ECONOMICS_INTEGRITY_META_KEY,
+)
+from brutex.data.economics_integrity import (
+    audit_economics_integrity,
+)
+from brutex.data.economics_integrity import (
+    report_to_dict as _economics_report_to_dict,
+)
 from brutex.data.master_integrity import (
     META_KEY as _MASTER_INTEGRITY_META_KEY,
 )
@@ -849,6 +858,35 @@ def _persist_master_integrity(
     return payload
 
 
+def _persist_economics_integrity(
+    index: InstrumentIndex, store: Any, *, run_id: str, csv_sha256: str
+) -> dict[str, Any]:
+    """Run the parse-time economics (lot per-expiry) audit, log + persist it, return the summary.
+
+    DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001 — the economics sibling of the mapping audit. Runs
+    against the FULL leg-bearing ``index.universe`` while it is still in memory (the lean store
+    discards the legs), emits a structlog counts line, and persists the bounded JSON summary to
+    ``schema_meta`` (read by the dashboard economics panel + CSV). Pure audit + one INSERT.
+    """
+    report = audit_economics_integrity(
+        index.universe,
+        now=datetime.now(UTC),
+        run_id=run_id,
+        csv_source_sha256=csv_sha256,
+    )
+    payload = _economics_report_to_dict(report)
+    store.set_meta(_ECONOMICS_INTEGRITY_META_KEY, json.dumps(payload))
+    _LOG.info(
+        "universe.load.economics_integrity",
+        is_green=report.is_green,
+        lot_mismatch_expiries=report.lot_mismatch_expiries,
+        revisions=report.underlyings_with_lot_revisions,
+        total_legs=report.total_legs,
+        expiry_groups=report.expiry_groups,
+    )
+    return payload
+
+
 def load_instrument_master(
     store: Any,
     *,
@@ -1017,6 +1055,11 @@ def load_instrument_master(
         master_integrity = _persist_master_integrity(
             index, store, run_id=run_id, csv_sha256=csv_sha256
         )
+        # Economics audit (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001): lot_size uniform per
+        # (underlying, expiry); same full-leg-bearing universe, same fail-safe pattern.
+        economics_integrity = _persist_economics_integrity(
+            index, store, run_id=run_id, csv_sha256=csv_sha256
+        )
         summary = _summarise_stored(store)
 
     _LOG.info(
@@ -1049,6 +1092,8 @@ def load_instrument_master(
         # Instrument-master structural integrity audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001)
         # — the green/red leg↔spot mapping verdict, also persisted to schema_meta.
         "master_integrity": master_integrity,
+        # Economics (lot-per-expiry) integrity audit (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
+        "economics_integrity": economics_integrity,
     }
 
 
