@@ -228,8 +228,19 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/options-lake-reader-jlzt1n` (the options executor's `OptionBarSource` seam now
-  has a PRODUCTION lake reader — DEC-OPTIONS-LAKE-READER-001, MIGRATION.md #882, gap-analysis item 1: NEW
+- **Active branch:** `claude/groww-5xx-retry-jlzt1n` (a transient Groww 5xx server error is now a RETRYABLE
+  `GrowwServerError`, not a terminal quarantine — DEC-GROWW-SERVER-ERROR-RETRY-001, MIGRATION.md #883, gap #1
+  of the operator's critical-risks resilience-hardening batch: NEW `GrowwServerError(GrowwError)` in
+  `brutex/adapters/groww/errors.py`; `_CODE_TO_ERROR` maps `500`/`502`/`503` → it (504 deliberately stays a
+  retryable `GrowwTimeoutError` — the timeout ladder already governs it) + a phrase-only `_SERVER_ERROR_HINTS`
+  checked AFTER the rate-limit/timeout hints (priority preserved); added to `is_retryable` but NOT
+  `is_rate_limit` (a 5xx is no quota signal — it rides the GENTLE timeout ladder, never steps the per-second
+  rate ceiling down). The three consumption sites (`client.py`/`ingest.py`/`option_ingest.py`) pick it up via
+  `is_retryable`/`is_rate_limit` with ZERO extra code; a real `404` stays terminal. `errors.py` 100%
+  line+branch (48 stmts/16 branches); groww client/ingest/retry suites (140) green; ruff/mypy --strict/pyright
+  clean. Adapter-only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior
+  merged: DEC-OPTIONS-LAKE-READER-001, MIGRATION.md #882 (the options executor's `OptionBarSource` seam now
+  has a PRODUCTION lake reader — gap-analysis item 1: NEW
   `brutex/options/lake_source.py` `LakeOptionBarSource` resolves a leg's `(instrument, expiry, strike,
   option_type, entry_ts, exit_ts)` to its F&O-candle-lake contract — DISCOVERED by scanning +
   `parse_fno_symbol`-matching the `bars/<exch>/FNO/` dirs (cached per underlying, robust, not a reconstructed
@@ -557,7 +568,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/options-lake-reader-jlzt1n`
+- **Active feature branch:** `claude/groww-5xx-retry-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

@@ -23,9 +23,14 @@ rather than importing the SDK classes, so this module imports + tests cleanly
 without ``growwapi`` installed.
 
 :func:`is_retryable` is the single source of truth the orchestrator's retry
-policy consults (CLAUDE.md §11 COMMON). Only rate-limit + timeout are retryable;
-the Groww hierarchy has no distinct server-error class, so 5xx is not separately
-classified here (Golden Rule #1 — no invented vendor error code).
+policy consults (CLAUDE.md §11 COMMON). Rate-limit + timeout + empty-body +
+transient 5xx server errors are retryable. The Groww SDK has no distinct
+server-error CLASS (only a generic ``GrowwAPIException(msg, code)``), so a 5xx is
+mapped to the neutral :class:`GrowwServerError` by its HTTP ``code``
+(``500``/``502``/``503``) or an unambiguous message signature — never by inventing
+an SDK class (DEC-GROWW-SERVER-ERROR-RETRY-001; Golden Rule #1). A ``504``
+gateway-timeout stays a :class:`GrowwTimeoutError` (already retryable) so the
+gentle timeout ladder, not a new path, governs it.
 """
 
 from __future__ import annotations
@@ -57,6 +62,26 @@ class GrowwRateLimitError(GrowwError):
 
 class GrowwTimeoutError(GrowwError):
     """Network read/connect timeout (retry)."""
+
+
+class GrowwServerError(GrowwError):
+    """Transient vendor server error (HTTP 5xx) — RETRYABLE.
+
+    The Groww SDK has no dedicated server-error subclass; a 5xx surfaces as a
+    generic ``GrowwAPIException`` carrying a ``500``/``502``/``503`` ``code`` (or an
+    "internal server error" / "bad gateway" / "service unavailable" message). The
+    old classifier let that fall to the terminal base :class:`GrowwError`, so a
+    momentary upstream blip TERMINALLY quarantined a real symbol instead of
+    re-pulling it. This maps such a failure to a RETRYABLE error
+    (DEC-GROWW-SERVER-ERROR-RETRY-001): the in-call fast-retry re-issues it and any
+    residual is re-queued by the until-clean loop — never dropped, never faked.
+
+    It is deliberately NOT a :class:`GrowwRateLimitError`: a 5xx is not a quota
+    signal, so it must not step the per-second rate ladder down — it rides the
+    gentler timeout ladder (:func:`is_rate_limit` stays ``False`` for it). A genuine
+    ``404`` still maps to a terminal :class:`GrowwNotFoundError`, so this never
+    makes a real "not on Groww" retryable.
+    """
 
 
 class GrowwEmptyResponseError(GrowwError):
@@ -99,12 +124,18 @@ _SDK_NAME_TO_ERROR: dict[str, type[GrowwError]] = {
 
 #: HTTP-ish status codes the SDK may carry on a GENERIC ``GrowwAPIException(msg,
 #: code)`` when it does NOT raise the typed subclass — mapped to the retryable
-#: neutral error. ``429`` = rate-limit; ``408``/``504`` = timeout
+#: neutral error. ``429`` = rate-limit; ``408``/``504`` = timeout; ``500``/``502``/
+#: ``503`` = transient server error (DEC-GROWW-SERVER-ERROR-RETRY-001). ``504`` is a
+#: gateway-timeout and intentionally stays a TimeoutError (already retryable — the
+#: timeout ladder governs it, not a new path).
 #: (``docs/groww/api-reference/05-exceptions.md``; the SDK's ``GrowwAPIException``
 #: carries ``code``).
 _CODE_TO_ERROR: dict[int, type[GrowwError]] = {
     429: GrowwRateLimitError,
     408: GrowwTimeoutError,
+    500: GrowwServerError,
+    502: GrowwServerError,
+    503: GrowwServerError,
     504: GrowwTimeoutError,
 }
 
@@ -117,6 +148,16 @@ _CODE_TO_ERROR: dict[int, type[GrowwError]] = {
 #: unknown failure is never blindly retried (Golden Rule #1).
 _RATE_LIMIT_HINTS: tuple[str, ...] = ("rate limit", "too many request", "429")
 _TIMEOUT_HINTS: tuple[str, ...] = ("timed out", "timeout", "deadline exceeded")
+#: Unambiguous 5xx signatures for a GENERIC exception with no recognised ``code``
+#: (DEC-GROWW-SERVER-ERROR-RETRY-001). Phrase-only — NO bare ``"500"``/``"503"``
+#: numeric substrings (they would false-match unrelated numbers). Checked AFTER the
+#: rate-limit + timeout hints so a 429/timeout never reads as a server error.
+_SERVER_ERROR_HINTS: tuple[str, ...] = (
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "server error",
+)
 
 
 def _classify_generic(exc: Exception) -> type[GrowwError]:
@@ -124,10 +165,13 @@ def _classify_generic(exc: Exception) -> type[GrowwError]:
 
     Used only when the class name is NOT a known typed subclass — i.e. the SDK
     raised a bare ``GrowwAPIException`` / ``GrowwBaseException``. Checks the
-    HTTP-ish ``code`` first (``429``→rate-limit, ``408``/``504``→timeout, int or
-    digit-string), then sniffs the message for the two transient classes. Anything
-    unrecognised stays the terminal base :class:`GrowwError` (conservative — an
-    unknown failure is never retried, Golden Rule #1).
+    HTTP-ish ``code`` first (``429``→rate-limit, ``408``/``504``→timeout,
+    ``500``/``502``/``503``→server-error, int or digit-string), then sniffs the
+    message for the transient classes in priority order (rate-limit, then timeout,
+    then 5xx server error — so a 429 or timeout that also mentions a server never
+    mis-reads as a plain server error). Anything unrecognised stays the terminal
+    base :class:`GrowwError` (conservative — an unknown failure is never retried,
+    Golden Rule #1).
     """
     code = getattr(exc, "code", None)
     if isinstance(code, bool):  # bool is an int subclass — never a status code
@@ -141,6 +185,8 @@ def _classify_generic(exc: Exception) -> type[GrowwError]:
         return GrowwRateLimitError
     if any(hint in message for hint in _TIMEOUT_HINTS):
         return GrowwTimeoutError
+    if any(hint in message for hint in _SERVER_ERROR_HINTS):
+        return GrowwServerError
     return GrowwError
 
 
@@ -189,10 +235,15 @@ def is_retryable(exc: GrowwError) -> bool:
     """True if *exc* is transient and the orchestrator should retry it.
 
     Retryable: rate-limit + timeout + empty/non-JSON body (a transient throttle —
-    DEC-GROWW-EMPTY-BODY-RETRY-001). Terminal: bad-request, not-found, auth (needs
-    re-auth), feed (out of scope), and any bare :class:`GrowwError`.
+    DEC-GROWW-EMPTY-BODY-RETRY-001) + transient 5xx server error (a momentary
+    upstream blip — DEC-GROWW-SERVER-ERROR-RETRY-001). Terminal: bad-request,
+    not-found, auth (needs re-auth), feed (out of scope), and any bare
+    :class:`GrowwError`.
     """
-    return isinstance(exc, (GrowwRateLimitError, GrowwTimeoutError, GrowwEmptyResponseError))
+    return isinstance(
+        exc,
+        (GrowwRateLimitError, GrowwTimeoutError, GrowwEmptyResponseError, GrowwServerError),
+    )
 
 
 __all__ = [
@@ -203,6 +254,7 @@ __all__ = [
     "GrowwFeedError",
     "GrowwNotFoundError",
     "GrowwRateLimitError",
+    "GrowwServerError",
     "GrowwTimeoutError",
     "from_groww_exception",
     "is_auth_failure",
