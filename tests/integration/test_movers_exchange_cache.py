@@ -169,6 +169,48 @@ class TestSpotExchangeScope:
         assert {s.instrument.symbol for s in bse.snapshots} == {"SENSEX"}
         assert {s.instrument.symbol for s in both.snapshots} == {"NIFTY", "SENSEX"}
 
+    def test_corrupt_partition_is_skipped_not_500(self, tmp_path: Path) -> None:
+        """A single corrupt Parquet for ONE symbol is SKIPPED (logged + counted), never
+        500-ing the whole spot screen (DEC-MOVERS-CORRUPT-SKIP-001).
+
+        Seeds a good NIFTY + a SENSEX whose on-disk Parquet is then overwritten with
+        garbage so the REAL ``pl.read_parquet`` raises a ``ComputeError``; the screen
+        still ranks NIFTY, reports SENSEX skipped, and logs ``movers.parquet_skip``.
+        """
+        from structlog.testing import capture_logs
+
+        _write(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[_day_bar(close="22000", volume=500)],
+        )
+        _write(
+            tmp_path,
+            exchange="BSE",
+            segment="INDEX",
+            symbol="SENSEX",
+            interval="1day",
+            bars=[_day_bar(close="77000", volume=300)],
+        )
+        corrupt = list((tmp_path / "bars" / "BSE" / "INDEX" / "SENSEX" / "1day").rglob("*.parquet"))
+        assert corrupt, "expected the SENSEX 1day partition to exist"
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+
+        with capture_logs() as logs:
+            result = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange=None
+            )
+        # NIFTY still ranks; the unreadable SENSEX is skipped — the screen did NOT 500.
+        assert {s.instrument.symbol for s in result.snapshots} == {"NIFTY"}
+        assert result.skipped == 1
+        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
+        assert len(skips) == 1
+        assert skips[0]["source"] == "spot" and skips[0]["symbol"] == "SENSEX"
+
     def test_route_exchange_param_filters(self, store: InstrumentStore, tmp_path: Path) -> None:
         _seed_two_exchange_spot(tmp_path)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
@@ -291,6 +333,95 @@ class TestDerivativeExchangeScope:
             exchange="NSE",
         )
         assert {m.underlying for m in nse.movers} == {"NIFTY"}  # BSE option filtered out
+
+    def test_futures_corrupt_partition_is_skipped_not_500(self, tmp_path: Path) -> None:
+        """A corrupt future Parquet is SKIPPED (logged + counted), never 500-ing the
+        futures screen (DEC-MOVERS-CORRUPT-SKIP-001)."""
+        from structlog.testing import capture_logs
+
+        _write(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-FUT",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="22010", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-BANKNIFTY-27Jun24-FUT",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="48010", volume=80, oi=900)],
+        )
+        corrupt = list(
+            (tmp_path / "bars" / "NSE" / "FNO" / "NSE-BANKNIFTY-27Jun24-FUT" / "1minute").rglob(
+                "*.parquet"
+            )
+        )
+        assert corrupt, "expected the BANKNIFTY future 1minute partition to exist"
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+
+        with capture_logs() as logs:
+            result = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        assert {m.underlying for m in result.movers} == {"NIFTY"}
+        assert result.skipped == 1
+        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
+        assert len(skips) == 1
+        assert skips[0]["source"] == "futures"
+        assert skips[0]["symbol"] == "NSE-BANKNIFTY-27Jun24-FUT"
+
+    def test_options_corrupt_partition_is_skipped_not_500(self, tmp_path: Path) -> None:
+        """A corrupt option Parquet is SKIPPED (logged + counted), never 500-ing the
+        options screen (DEC-MOVERS-CORRUPT-SKIP-001)."""
+        from structlog.testing import capture_logs
+
+        _write(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-24000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-25000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="60", volume=80, oi=700)],
+        )
+        corrupt = list(
+            (tmp_path / "bars" / "NSE" / "FNO" / "NSE-NIFTY-27Jun24-25000-CE" / "1minute").rglob(
+                "*.parquet"
+            )
+        )
+        assert corrupt, "expected the 25000-CE 1minute partition to exist"
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+
+        with capture_logs() as logs:
+            result = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+                exchange="NSE",
+            )
+        # The good 24000-CE ranks; the corrupt 25000-CE is skipped — the screen did NOT 500.
+        assert len(result.movers) == 1
+        assert result.skipped == 1
+        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
+        assert len(skips) == 1
+        assert skips[0]["source"] == "options"
+        assert skips[0]["symbol"] == "NSE-NIFTY-27Jun24-25000-CE"
 
 
 # ── session-exempt (GIFT Nifty) month-boundary regression ──────────────────

@@ -104,6 +104,7 @@ from brutex.dashboard.movers_futures import (
     _read_future_session,
     _underlying_spot_ltp,
 )
+from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
     _IST,
@@ -907,38 +908,46 @@ def compute_options_candidates(
 
     movers: list[OptionMover] = []
     skipped = 0
+    skip_errors = movers_read_skip_errors()
     for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
-        read = _read_future_session(
-            lake_root,
-            exchange=contract_exchange,
-            segment=_FNO_SEGMENT,
-            symbol=symbol,
-            day=day,
-            cutoff_min=cutoff_min,
-        )
-        if read is None:  # no session bar on the selected day/time → skip, never faked.
+        try:
+            read = _read_future_session(
+                lake_root,
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                day=day,
+                cutoff_min=cutoff_min,
+            )
+            if read is None:  # no session bar on the selected day/time → skip, never faked.
+                skipped += 1
+                continue
+            ltp, volume, oi = read
+            value_paisa = _session_value_paisa(
+                lake_root, exchange=contract_exchange, symbol=symbol, day=day, cutoff_min=cutoff_min
+            )
+            prev_close = _prev_day_close(
+                lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
+            )
+            prev_oi = _prev_day_oi(
+                lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
+            )
+            # The underlying spot is probed under the PARSED underlying (NIFTY); the
+            # row's display name keeps the parsed underlying (the strike/type are in
+            # `OptionMover.name`), optionally renamed via `names`.
+            spot_ltp = _underlying_spot_ltp(
+                lake_root,
+                exchange=contract_exchange,
+                underlying=underlying,
+                day=day,
+                cutoff_min=cutoff_min,
+            )
+        except skip_errors as exc:
+            # A corrupt / unreadable Parquet for ONE option must not 500 the screen —
+            # skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
+            log_movers_skip(source="options", symbol=symbol, error=str(exc))
             skipped += 1
             continue
-        ltp, volume, oi = read
-        value_paisa = _session_value_paisa(
-            lake_root, exchange=contract_exchange, symbol=symbol, day=day, cutoff_min=cutoff_min
-        )
-        prev_close = _prev_day_close(
-            lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
-        )
-        prev_oi = _prev_day_oi(
-            lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
-        )
-        # The underlying spot is probed under the PARSED underlying (NIFTY); the
-        # row's display name keeps the parsed underlying (the strike/type are in
-        # `OptionMover.name`), optionally renamed via `names`.
-        spot_ltp = _underlying_spot_ltp(
-            lake_root,
-            exchange=contract_exchange,
-            underlying=underlying,
-            day=day,
-            cutoff_min=cutoff_min,
-        )
         movers.append(
             compute_option_mover(
                 underlying=resolved_names.get(underlying, underlying),

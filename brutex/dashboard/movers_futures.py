@@ -60,6 +60,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
     _IST,
@@ -753,33 +754,41 @@ def compute_futures_candidates(
 
     movers: list[FuturesMover] = []
     skipped = 0
+    skip_errors = movers_read_skip_errors()
     for underlying, contracts in by_underlying.items():
         chosen = select_near_month([(sym, exp) for sym, _exch, exp in contracts], on_date=day)
         if chosen is None:  # every contract has expired → no live future, honest skip.
             skipped += 1
             continue
         exchange = next(exch for sym, exch, _exp in contracts if sym == chosen)
-        read = _read_future_session(
-            lake_root,
-            exchange=exchange,
-            segment=_FNO_SEGMENT,
-            symbol=chosen,
-            day=day,
-            cutoff_min=cutoff_min,
-        )
-        if read is None:  # no session bar on the selected day/time → skip, never faked.
+        try:
+            read = _read_future_session(
+                lake_root,
+                exchange=exchange,
+                segment=_FNO_SEGMENT,
+                symbol=chosen,
+                day=day,
+                cutoff_min=cutoff_min,
+            )
+            if read is None:  # no session bar on the selected day/time → skip, never faked.
+                skipped += 1
+                continue
+            ltp, volume, oi = read
+            prev_close = _prev_day_close(
+                lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
+            )
+            prev_oi = _prev_day_oi(
+                lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
+            )
+            spot_ltp = _underlying_spot_ltp(
+                lake_root, exchange=exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
+            )
+        except skip_errors as exc:
+            # A corrupt / unreadable Parquet for ONE future must not 500 the screen —
+            # skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
+            log_movers_skip(source="futures", symbol=chosen, error=str(exc))
             skipped += 1
             continue
-        ltp, volume, oi = read
-        prev_close = _prev_day_close(
-            lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
-        )
-        prev_oi = _prev_day_oi(
-            lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
-        )
-        spot_ltp = _underlying_spot_ltp(
-            lake_root, exchange=exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
-        )
         movers.append(
             compute_futures_mover(
                 underlying=resolved_names.get(underlying, underlying),
