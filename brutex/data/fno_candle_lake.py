@@ -112,21 +112,16 @@ FNO_CANDLE_COLUMNS: Final[tuple[FnoCandleColumn, ...]] = (
     FnoCandleColumn("interval", "string", "partition", False, "Candle interval (1minute fetched)."),
     # READ-time derived (never stored) — moneyness of THIS option vs the underlying
     # spot at each bar's instant (DEC-FNO-MONEYNESS-001). Time-varying (the strike is
-    # fixed but the spot moves), so it must be derived, never persisted. NA for a
-    # future, UNKNOWN when the underlying spot is absent from the lake.
+    # fixed but the spot moves), so it must be derived, never persisted. One combined
+    # cell: bucket + signed strike-depth ("ITM -1" / "OTM +10" / "ATM"); "—" for a
+    # future, "?" when the underlying spot is absent from the lake.
     FnoCandleColumn(
         "moneyness",
         "string",
         "derived",
         True,
-        "ITM / ATM / OTM vs the per-bar underlying spot (NA future · UNKNOWN if no spot).",
-    ),
-    FnoCandleColumn(
-        "atm_offset",
-        "int",
-        "derived",
-        True,
-        "Signed ATM±N strike-steps from spot; None when the strike grid / spot is unknown.",
+        'ITM/ATM/OTM + signed strike-depth vs the per-bar spot ("ITM -1" / "OTM +10"; '
+        "— future · ? if no spot).",
     ),
 )
 

@@ -18,7 +18,17 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-21 (DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
+_Last updated: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #868 — the
+per-option moneyness + strike-distance is now shown as ONE combined cell
+(**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"**) instead of the split
+bucket + ATM±N columns of #865 — `brutex/data/moneyness.py` `_format_label`
+reformatted to `"<bucket> <signed depth>"` (sign tracks the BUCKET: ITM negative,
+OTM positive, so calls AND puts read alike; depth = `|atm_offset|` strikes). The
+movers screen + the `/db` F&O candle view each collapse the two columns into one
+"moneyness" column (`OptionMover.moneyness_label`; `FNO_CANDLE_COLUMNS` /
+`FNO_MONEYNESS_COLUMNS` now a single derived `moneyness` label). Pure DISPLAY reshape
+over the SAME read-time-derived values; ENGINE stays NIFTY/BANKNIFTY/SENSEX, NO
+storage/scope/vocab/rate change. Earlier: 2026-06-21 (DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867 —
 the `/db` candle-pager TOTAL (`COUNT(*)` over `read_parquet(glob)`, O(files) — a
 Parquet-footer read per file, recomputed on EVERY paging click) is now memoised behind
 a generation-stamped cache: `db_view.query_candles` gains an optional `count_cache`
@@ -212,19 +222,19 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-candle-count-cache` (the `/db` candle-pager TOTAL is now
-  an O(1) cached-hit per paging click — DEC-DB-CANDLE-COUNT-CACHE-001, MIGRATION.md #867:
-  `db_view.query_candles`'s page `COUNT(*)` over `read_parquet(glob)` is O(files) — a
-  Parquet-footer read per file, recomputed on EVERY click — and is now memoised behind an
-  optional injected `count_cache` (`CandleCountCache` Protocol) + `generation`, keyed by
-  `candle_count_key(coords,start,end)` (excludes limit/offset/sort/columns); `build_app`
-  REUSES the COMMON `MoversSnapshotCache` LRU and the `/api/v1/db/candles` route passes
-  `_summary_cache.generation` (a pull bumps it → recount, never stale). HONEST envelope: the
-  cached-total HIT is O(1) in depth (bench flat; COUNT runs once per dataset+generation) but
-  paging is NOT O(1) overall — the page DATA query is itself O(files) and ~2.4× larger, so
-  this removes only ONE of two O(files) footer scans (~16% on a deep partition); true O(page)
-  needs a write-time lake manifest (FUTURE work, NOT claimed). `db_view.py` at 100%
-  line+branch; read-only viewer, ENGINE UNCHANGED. Prior merged:
+- **Active branch:** `claude/relaxed-keller-6b7pzx` (the per-option moneyness +
+  strike-distance is now ONE combined cell — DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #868:
+  `brutex/data/moneyness.py` `_format_label` reformatted to `"<bucket> <signed depth>"`
+  (**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"** · `"—"` future · `"?"` no spot),
+  the sign tracking the BUCKET so calls AND puts read alike (ITM negative, OTM positive,
+  depth = `|atm_offset|` strikes). The movers screen (`OptionMover.moneyness_label`,
+  `_option_row`'s `"moneyness"` key, single `movers.html` column) AND the `/db` F&O candle
+  view (`db_view._fno_moneyness_rows` single label; `FNO_MONEYNESS_COLUMNS` /
+  `fno_candle_lake.FNO_CANDLE_COLUMNS` collapse `(moneyness, atm_offset)` → one derived
+  `moneyness` column) each show ONE column reading the combined label, tinted by the leading
+  bucket. Pure DISPLAY reshape over the SAME #865 read-time-derived values; ENGINE
+  UNCHANGED, NO storage/scope/vocab/rate change. Prior merged:
+  DEC-DB-CANDLE-COUNT-CACHE-001 #867 (PR #821, /db candle-pager total cached) +
   DEC-UNIVERSE-BACKEND-CACHE-001 #866 (PR #820, /universe backend O(1) content-token cache) +
   DEC-FNO-MONEYNESS-001 #865 (PR #819, per-option moneyness ITM/ATM/OTM + signed ATM±N) +
   DEC-DB-VIEWER-PAGINATE-ALL-001 #864 (PR #818, every /db tab O(page)) +

@@ -262,8 +262,8 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp", "close"],
         )
-        # T1 spot 23900 < 24000 CE → OTM, offset +2; T2 spot 24200 > 24000 → ITM, offset −4.
-        assert rows == [("OTM", 2), ("ITM", -4)]
+        # T1 spot 23900 < 24000 CE → OTM +2; T2 spot 24200 > 24000 → ITM -4 (combined label).
+        assert rows == [("OTM +2",), ("ITM -4",)]
 
     def test_future_is_na_on_every_bar(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -278,7 +278,7 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp"],
         )
-        assert rows == [("NA", None), ("NA", None)]
+        assert rows == [("—",), ("—",)]
 
     def test_undecodable_symbol_is_na(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -293,7 +293,7 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp"],
         )
-        assert rows == [("NA", None)]
+        assert rows == [("—",)]
 
     def test_option_without_spot_is_unknown(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -312,7 +312,7 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["timestamp", "close"],
         )
-        assert rows == [("UNKNOWN", None)]
+        assert rows == [("?",)]
 
     def test_no_timestamp_projection_is_unknown(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -329,7 +329,7 @@ class TestFnoMoneynessRows:
             raw_rows=raw,
             out_columns=["close"],
         )
-        assert rows == [("UNKNOWN", None), ("UNKNOWN", None)]
+        assert rows == [("?",), ("?",)]
 
 
 # ── query_candles integration ───────────────────────────────────────────────
@@ -350,10 +350,9 @@ class TestQueryCandlesFnoMoneyness:
             limit=50,
         )
         assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS, *FNO_MONEYNESS_COLUMNS]
-        # Two derived spot cols then moneyness + atm_offset; values per bar against spot.
+        # Two derived spot cols then the ONE combined moneyness label per bar vs spot.
         m_idx = out["columns"].index("moneyness")
-        o_idx = out["columns"].index("atm_offset")
-        assert [(r[m_idx], r[o_idx]) for r in out["rows"]] == [("OTM", 2), ("ITM", -4)]
+        assert [r[m_idx] for r in out["rows"]] == ["OTM +2", "ITM -4"]
 
     def test_fno_empty_page_still_has_moneyness_columns(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path

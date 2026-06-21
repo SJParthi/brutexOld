@@ -171,7 +171,6 @@ class TestDbCandleDatasetsApi:
             "strike",
             "option_type",
             "interval",
-            # READ-time derived moneyness pair (DEC-FNO-MONEYNESS-001).
+            # READ-time derived combined moneyness label (DEC-FNO-MONEYNESS-001).
             "moneyness",
-            "atm_offset",
         ]

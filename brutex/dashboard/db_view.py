@@ -307,13 +307,14 @@ _SESSION_OPEN_IST: Final[time] = time(9, 15)
 SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
 
 #: The two server-computed derived columns appended to every **F&O** candle page on
-#: TOP of :data:`SPOT_DERIVED_COLUMNS` (DEC-FNO-MONEYNESS-001): the option's moneyness
-#: (ITM/ATM/OTM vs the per-bar underlying spot) + the signed ATM±N strike offset. Like
-#: the spot derived pair these are NOT real Parquet columns — the viewer classifies them
-#: per bar from ``(option_type, strike, spot[, strike_step])`` (:mod:`brutex.data.moneyness`),
-#: so a fixed-strike contract reads OTM then ITM as the spot moves through the day. A FUTURE
-#: reads ``NA``; an option whose underlying spot is absent reads ``UNKNOWN`` (never faked).
-FNO_MONEYNESS_COLUMNS: Final = ("moneyness", "atm_offset")
+#: TOP of :data:`SPOT_DERIVED_COLUMNS` (DEC-FNO-MONEYNESS-001): the ONE moneyness cell the
+#: viewer shows per bar — the bucket + signed strike-depth as a single label
+#: (``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"``), classified against the per-bar underlying
+#: spot. NOT a real Parquet column — the viewer derives it per bar from
+#: ``(option_type, strike, spot[, strike_step])`` (:mod:`brutex.data.moneyness`), so a
+#: fixed-strike contract reads ``OTM +N`` then ``ITM -N`` as the spot moves through the day.
+#: A FUTURE reads ``—``; an option whose underlying spot is absent reads ``?`` (never faked).
+FNO_MONEYNESS_COLUMNS: Final = ("moneyness",)
 
 #: Spot segments probed (in order) to resolve an F&O contract's UNDERLYING spot series —
 #: an index underlying rides ``INDEX``, a single-stock underlying rides ``CASH``. The
@@ -1926,14 +1927,16 @@ def _fno_moneyness_rows(
     interval: str,
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],
-) -> list[tuple[str, int | None]]:
-    """Compute the per-bar ``(moneyness, atm_offset)`` pair for an F&O candle page.
+) -> list[tuple[str]]:
+    """Compute the per-bar combined moneyness label for an F&O candle page.
 
+    Each row is a 1-tuple ``(label,)`` — the bucket + signed strike-depth as ONE string
+    (``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"``), matching :data:`FNO_MONEYNESS_COLUMNS`.
     For an OPTION contract each bar is classified against the underlying spot at THAT
     bar's instant (DEC-FNO-MONEYNESS-001) — time-varying, so a fixed-strike contract
-    reads OTM then ITM as the spot moves. A FUTURE (or an undecodable symbol) reads
-    ``NA`` on every bar (no spot read attempted); an option whose underlying spot is
-    absent reads ``UNKNOWN``. Never raises — a per-bar browse never crashes on one
+    reads ``OTM +N`` then ``ITM -N`` as the spot moves. A FUTURE (or an undecodable
+    symbol) reads ``—`` on every bar (no spot read attempted); an option whose underlying
+    spot is absent reads ``?``. Never raises — a per-bar browse never crashes on one
     contract whose spot was not pulled (Golden Rule #1).
 
     The per-bar spot join keys on the bar ``timestamp``, so moneyness needs the
@@ -1946,10 +1949,10 @@ def _fno_moneyness_rows(
     option_type = parts.option_type if parts is not None else None
     strike = parts.strike if parts is not None else None
     underlying = parts.underlying if parts is not None else None
-    # A future / undecodable contract has no moneyness — NA on every bar, no spot read.
+    # A future / undecodable contract has no moneyness — "—" on every bar, no spot read.
     if option_type is None or underlying is None:
         na = moneyness_view(option_type, strike, None, None)
-        return [(na.moneyness.value, na.atm_offset)] * len(raw_rows)
+        return [(na.label,)] * len(raw_rows)
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     ts_values = [
         row[ts_idx] for row in raw_rows if ts_idx >= 0 and isinstance(row[ts_idx], datetime)
@@ -1963,12 +1966,12 @@ def _fno_moneyness_rows(
         interval=interval,
         ts_values=ts_values,
     )
-    rows: list[tuple[str, int | None]] = []
+    rows: list[tuple[str]] = []
     for row in raw_rows:
         ts = row[ts_idx] if ts_idx >= 0 else None
         spot = spot_by_ts.get(_utc_instant(ts)) if isinstance(ts, datetime) else None
         view = moneyness_view(option_type, strike, spot, step)
-        rows.append((view.moneyness.value, view.atm_offset))
+        rows.append((view.label,))
     return rows
 
 

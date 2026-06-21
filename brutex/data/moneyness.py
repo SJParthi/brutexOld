@@ -161,11 +161,10 @@ class MoneynessView:
     atm_offset
         The signed ATM±N (``None`` when no grid could be derived, or N/A / UNKNOWN).
     label
-        A compact human label: ``"ATM"`` (offset 0) · ``"ATM+2 (OTM)"`` ·
-        ``"ATM-1 (ITM)"`` · ``"—"`` (a future) · ``"?"`` (spot unavailable). Because
-        :func:`atm_offset` rounds half toward zero, a bar bucketed :attr:`Moneyness.ATM`
-        always carries offset ``0`` (the two never disagree), so ``"ATM"`` never gains a
-        ``(ITM)``/``(OTM)`` suffix from :func:`moneyness_view`.
+        The trader-facing ``"<bucket> <signed depth>"`` string: ``"ITM -1"`` /
+        ``"OTM +10"`` / ``"ATM"`` · ``"ITM"`` / ``"OTM"`` (no grid) · ``"—"`` (a
+        future) · ``"?"`` (spot unavailable). ITM is shown negative, OTM positive,
+        depth = ``|atm_offset|`` strikes — see :func:`_format_label`.
     """
 
     moneyness: Moneyness
@@ -174,15 +173,27 @@ class MoneynessView:
 
 
 def _format_label(moneyness: Moneyness, offset: int | None) -> str:
-    """Compose the compact ATM±N + bucket label (display-only)."""
+    """Compose the trader-facing ``"<bucket> <signed depth>"`` label (display-only).
+
+    Bucket first, then HOW FAR in/out of the money the contract is, in strikes:
+    ``"ITM -1"`` / ``"ITM -10"`` (in the money by N strikes) · ``"OTM +1"`` /
+    ``"OTM +10"`` (out of the money by N strikes) · ``"ATM"`` (at the money) ·
+    ``"ITM"`` / ``"OTM"`` (no strike grid derivable → bucket only) · ``"—"`` (a
+    future) · ``"?"`` (spot unavailable). The sign tracks the BUCKET — ITM negative,
+    OTM positive — so it reads the same for calls AND puts (a deep-ITM put is still
+    ``"ITM -N"``, not ``"ITM +N"``); the depth is ``|offset|`` strikes from the
+    at-the-money rung.
+    """
     if moneyness is Moneyness.NA:
         return "—"
     if moneyness is Moneyness.UNKNOWN:
         return "?"
+    if moneyness is Moneyness.ATM:
+        return "ATM"
     if offset is None:
-        return moneyness.value  # no grid — just ITM / ATM / OTM
-    rung = "ATM" if offset == 0 else (f"ATM+{offset}" if offset > 0 else f"ATM{offset}")
-    return rung if moneyness is Moneyness.ATM else f"{rung} ({moneyness.value})"
+        return moneyness.value  # no grid — just ITM / OTM
+    sign = "-" if moneyness is Moneyness.ITM else "+"
+    return f"{moneyness.value} {sign}{abs(offset)}"
 
 
 #: The buckets for which a signed ATM±N offset is meaningful (an option with a real spot).
