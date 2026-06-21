@@ -39,6 +39,7 @@ from brutex.adapters.groww.option_ingest import (
     ingest_option_contract,
     ingest_underlying_futures,
     ingest_underlying_options,
+    plan_contract_windows,
     run_groww_option_ingest,
 )
 from brutex.adapters.protocol import DerivativeContract
@@ -1289,3 +1290,210 @@ def test_ingest_underlying_futures_forwards_contract_windows() -> None:
         contract_windows={sym: _BOUND},
     )
     assert _record_window(ledger, interval="1minute") == ("2024-12-02", "2024-12-20")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# plan_contract_windows — pre-seed PLANNED for /coverage/windows (DEC-FNO-WINDOW-PLAN-001)
+# ─────────────────────────────────────────────────────────────────────────
+def _fut(symbol: str = "NSE-NIFTY-02Jan25-FUT") -> DerivativeContract:
+    return DerivativeContract(
+        underlying_symbol="NIFTY", expiry=date(2025, 1, 2), symbol=symbol, contract_type="FUT"
+    )
+
+
+def test_plan_contract_windows_seeds_planned_rows() -> None:
+    from brutex.data.window_ledger import PLANNED
+
+    ledger = WindowLedger()
+    planned = plan_contract_windows(
+        ledger,
+        contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE"), _ce("NSE-NIFTY-02Jan25-28600-PE")],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    assert planned == 2
+    recs = ledger.records()
+    assert [r.status for r in recs] == [PLANNED, PLANNED]
+    assert {r.security_id for r in recs} == {
+        "NSE-NIFTY-02Jan25-28500-CE",
+        "NSE-NIFTY-02Jan25-28600-PE",
+    }
+    assert all(r.market == GROWW_OPTION_COVERAGE_MARKET for r in recs)
+
+
+def test_plan_contract_windows_default_clock_plans_past_range() -> None:
+    # ``now_ist`` omitted → the real-IST default clock; a fully-PAST range still plans
+    # (clamp leaves a past end unchanged), covering the `_now_ist` default branch.
+    from brutex.data.window_ledger import PLANNED
+
+    ledger = WindowLedger()
+    planned = plan_contract_windows(
+        ledger,
+        contracts=[_ce()],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        market=GROWW_OPTION_COVERAGE_MARKET,
+    )
+    assert planned == 1
+    assert ledger.records()[0].status == PLANNED
+
+
+def test_plan_contract_windows_empty_range_not_planned() -> None:
+    ledger = WindowLedger()
+    planned = plan_contract_windows(
+        ledger,
+        contracts=[_ce()],
+        intervals=("1day",),
+        start=date(2024, 1, 2),
+        end=date(2024, 1, 1),  # start >= end → empty clamped range → no key
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    assert planned == 0
+    assert ledger.records() == []
+
+
+def test_plan_contract_windows_key_is_byte_identical_to_fetch() -> None:
+    """The planned key EQUALS the fetched key — plan then fetch leaves ONE row (no ghost)."""
+    ledger = WindowLedger()
+    plan_contract_windows(
+        ledger,
+        contracts=[_ce()],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    assert ledger.count == 1  # one PLANNED row
+    # Fetch the SAME contract/interval/range: a divergent key would add a SECOND row.
+    ingest_option_contract(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    recs = ledger.records()
+    assert len(recs) == 1  # the PLANNED row was settled IN PLACE — no orphan ghost
+    assert recs[0].status == "SUCCESS"
+
+
+def test_plan_contract_windows_idempotent_keeps_settled() -> None:
+    """Planning never resets a settled row from a prior pull (idempotent)."""
+    ledger = WindowLedger()
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    ledger.record(key, raw_bars=5, error_type=None, bars_appended=5, now=datetime.now(UTC))
+    plan_contract_windows(
+        ledger,
+        contracts=[_ce()],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    assert ledger.is_skippable(key)  # still SUCCESS — NOT reset to PLANNED
+    assert ledger.records()[0].status == "SUCCESS"
+
+
+def test_plan_contract_windows_prunes_superseded_shorter_end() -> None:
+    """A prior shorter-end row of the planned series is pruned when the new end is longer."""
+    from brutex.data.window_ledger import PLANNED
+
+    ledger = WindowLedger()
+    stale = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),  # SHORTER end — superseded by the longer plan below
+    )
+    ledger.plan(stale, now=datetime.now(UTC))
+    planned = plan_contract_windows(
+        ledger,
+        contracts=[_ce()],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),  # LONGER end supersedes the stale [.., 1-02) row
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    assert planned == 1
+    recs = ledger.records()
+    assert len(recs) == 1  # the shorter-end orphan was pruned (one O(rows) prune scan)
+    assert recs[0].window_end == "2024-01-05" and recs[0].status == PLANNED
+
+
+def test_plan_contract_windows_futures_namespace() -> None:
+    from brutex.data.window_ledger import PLANNED
+
+    ledger = WindowLedger()
+    plan_contract_windows(
+        ledger,
+        contracts=[_fut()],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        market=GROWW_FUTURE_COVERAGE_MARKET,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.market == GROWW_FUTURE_COVERAGE_MARKET and rec.status == PLANNED
+
+
+def test_run_option_ingest_pre_plans_quarantined_contract_stays_planned() -> None:
+    """The driver pre-plans every pair; a quarantined contract keeps its PLANNED row.
+
+    A contract that hits a TERMINAL error is quarantined BEFORE it records an outcome, so
+    its pre-seeded PLANNED row survives — exactly the "genuinely-outstanding, never silently
+    missing" guarantee the spot planner gives, now visible on the Options tab.
+    """
+    from brutex.data.window_ledger import PLANNED
+
+    good = _ce("NSE-NIFTY-02Jan25-28500-CE")
+    bad = _ce("NSE-NIFTY-02Jan25-99999-PE")
+    sdk = _FakeSDK(payload=_candles(), raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
+    ledger = WindowLedger()
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[good, bad],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.failed_pairs == 1
+    by_sym = {r.security_id: r.status for r in ledger.records()}
+    assert by_sym["NSE-NIFTY-02Jan25-28500-CE"] == "SUCCESS"  # fetched + settled in place
+    assert by_sym["NSE-NIFTY-02Jan25-99999-PE"] == PLANNED  # quarantined → still planned
+
+
+def test_run_option_ingest_no_ledger_does_not_plan() -> None:
+    # ``ledger=None`` (a dry-run) skips planning entirely — byte-identical to the prior path.
+    sdk = _FakeSDK(payload=_candles())
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[_ce()],
+        intervals=("1minute",),
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1

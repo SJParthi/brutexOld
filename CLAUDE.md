@@ -228,8 +228,21 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-warm-after-pull-jlzt1n` (bind the gated movers warmer —
-  DEC-PULL-MOVERS-WARM-001, MIGRATION.md #878: closes the #877 follow-up by BINDING the gated phase-4
+- **Active branch:** `claude/fno-window-plan-jlzt1n` (pre-plan F&O coverage windows —
+  DEC-FNO-WINDOW-PLAN-001, MIGRATION.md #879: the F&O (options + futures) pull now PRE-PLANS every
+  `(contract, interval)` window as `PLANNED` BEFORE any fetch, so the `/coverage/windows` Options +
+  Futures tabs show a real planned total + units, exactly like spot — the operator's "why no planned
+  items + units for futures and options?". Root cause: a `PLANNED` row was only ever seeded by spot's
+  `plan_windows` (all 4 call sites are `market=GROWW_COVERAGE_MARKET`); F&O wrote a row ONLY at fetch
+  time, so both tabs read 0. NEW shared `option_ingest._clamped_window_key` (ONE source of truth for the
+  derivative ledger key — `ingest_option_contract` refactored onto it so the planned key is BYTE-IDENTICAL
+  to the fetched key: the "planned == fetched" no-ghost invariant) + NEW `plan_contract_windows` (the F&O
+  twin of spot `plan_windows`: idempotent plan + `prune_superseded`) WIRED into `run_groww_option_ingest`
+  (auto-covers options `groww-option` + futures `groww-future`). The VIEW needed ZERO change —
+  `build_window_payload` already buckets + counts PLANNED per namespace. `option_ingest.py` at 100%
+  line+branch (50 pre-existing + 9 new + 1 e2e integration); ruff/pyright/mypy --strict clean. READ-ONLY
+  F&O lake (REFERENCE_ONLY); ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-PULL-MOVERS-WARM-001, MIGRATION.md #878 (PR #832: BINDING the gated phase-4
   warmer in the `/pull-pipeline` route. After a fully-successful fetch it pre-computes the default
   spot/futures/options movers snapshots for the LATEST AVAILABLE day (`latest_movers_date` — never
   'today', so never an empty illusion) into the SAME `MoversSnapshotCache` at the post-pull generation,
@@ -512,7 +525,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/one-click-pipeline-jlzt1n`
+- **Active feature branch:** `claude/fno-window-plan-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
