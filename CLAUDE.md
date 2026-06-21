@@ -228,21 +228,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/instrument-master-integrity-jlzt1n` (instrument-master structural mapping audit —
-  DEC-INSTRUMENT-MASTER-INTEGRITY-001, MIGRATION.md #874: a parse-time audit over the WHOLE `instrument.csv`
-  master proving every FUT/CE/PE leg maps to exactly ONE IDX/EQ spot — cross-checked by BOTH `underlying_symbol`
-  AND the numeric `underlying_security_id` token-join — captured at INGEST before the lean store discards the
-  ~89k legs (DEC-INSTRUMENT-UNIVERSE-FAST-001). NEW pure `brutex/data/master_integrity.py`
-  `audit_master_integrity` (two O(rows) sweeps, O(1) lookups, O(spots) space; buckets every leg into
-  resolved_both / symbol_only / token_only / orphan / ambiguous / disagreement / empty_underlying + dedup +
-  spots-with-no-legs + capped orphan sample); an ingest hook `_persist_master_integrity` (structlog + persist
-  bounded JSON to `schema_meta` via NEW `InstrumentStore.set_meta`/`get_meta`); routes
-  `GET /api/v1/universe/master-integrity[.csv]` (CSV via NEW `master_integrity_csv.py` reusing #873's shared
-  `FormulaSafeWriter`) + a green/red `/universe` "Master mapping integrity" panel. STRUCTURAL sibling of #870
-  (the COVERAGE audit). Both new modules at 100% line+branch (17 unit + 3 property + 6 CSV + 1 golden + 4
-  integration); instrument_loader stays 100%; ruff/pyright/mypy --strict clean. READ-ONLY, DETECT-only — legs
-  SUMMARISED, never re-stored (lean-store decree stands); never crashes a keyless load. NO pull/engine/scope/vocab
-  change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+- **Active branch:** `claude/instrument-economics-integrity-jlzt1n` (instrument-master ECONOMICS audit —
+  DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001, MIGRATION.md #875: the economics sibling of #874 — a parse-time
+  audit proving `lot_size` is uniform PER (underlying, expiry) across the whole `instrument.csv` (a within-expiry
+  mismatch is RED), with cross-expiry lot revisions (legit NSE quarterly — AMBUJACEM 1050→1200) shown as
+  INFORMATIONAL, never RED. The HONEST design (real-CSV-grounded, no illusion): lot/tick POSITIVITY is already
+  upstream-guaranteed by `Instrument.__post_init__` (not re-checked — dead code), and tick_size legitimately
+  varies by strike/premium band within an expiry (NOT checked — would false-flag 350 groups). NEW pure
+  `brutex/data/economics_integrity.py` `audit_economics_integrity` (one O(legs) sweep, O(1) lookups,
+  O(expiry-groups) space; excludes `*NSETEST*`; capped samples) + an ingest hook `_persist_economics_integrity`
+  (structlog + persist to `schema_meta`) + routes `GET /api/v1/universe/economics-integrity[.csv]` (CSV via NEW
+  `economics_integrity_csv.py` reusing #873's `FormulaSafeWriter`) + a green/red `/universe` "Economics integrity
+  (lot size)" panel. Both new modules at 100% line+branch (8 unit + 2 property + 3 CSV + 1 golden + 3 integration);
+  instrument_loader stays 100%; ruff/pyright/mypy --strict clean. REAL-FILE PROOF: the actual 164,248-row
+  `instrument.csv` → GREEN, 101,792 legs over 684 (underlying,expiry) groups, 0 within-expiry mismatches, 45
+  legit cross-expiry revisions surfaced informational. READ-ONLY, DETECT-only — assurance/observability, NOT a
+  backtest-pull blocker. NO pull/engine/scope/vocab change — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior merged:
+  DEC-INSTRUMENT-MASTER-INTEGRITY-001 #874 (PR #828, parse-time leg↔spot mapping audit, real-CSV-verified) +
   DEC-MAPPING-INTEGRITY-EXPORT-001 #873 (PR #827, downloadable mapping-integrity CSV + golden gate + shared CSV guard) +
   DEC-ONE-CLICK-PIPELINE-001 #872 (PR #826, one-click full-universe pull pipeline spot→metadata→historical, gated) +
   DEC-FUTURES-PULL-ENABLE-001 #871 (PR #825, formally enable futures pulling, supersede never-pull decree) +

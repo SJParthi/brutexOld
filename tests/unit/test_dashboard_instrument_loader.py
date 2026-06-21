@@ -265,6 +265,11 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     assert mi["type_counts"]["ce"] == 1
     assert mi["is_green"] is True and mi["gating_failures"] == 0
     assert store.get_meta("master_integrity") is not None  # persisted to schema_meta
+    # Economics audit also ran end-to-end (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001): the lone
+    # WIPRO CE leg is trivially lot-uniform → green; persisted to schema_meta.
+    ei = result["economics_integrity"]
+    assert ei["is_green"] is True and ei["total_legs"] == 1
+    assert store.get_meta("economics_integrity") is not None
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
@@ -303,6 +308,9 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     mi = result.pop("master_integrity")
     assert mi["is_green"] is True
     assert mi["type_counts"]["legs"] == 0 and mi["gating_failures"] == 0
+    # Empty master → economics audit green with zero legs (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
+    ei = result.pop("economics_integrity")
+    assert ei["is_green"] is True and ei["total_legs"] == 0
     assert result == {
         "parsed": 0,
         "persisted": 0,
