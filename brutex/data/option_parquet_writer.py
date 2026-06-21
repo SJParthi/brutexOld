@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.models import OptionBar
 from brutex.data.partition import partition_for_timestamp
+from brutex.data.partition_lock import partition_write_lock
 from brutex.models import BruteXError
 from brutex.money import round_money
 
@@ -220,8 +221,16 @@ class OptionParquetWriter:
         # case), so they run inside lake_write_guard: a MemoryError / ENOSPC anywhere
         # in the read-modify-write becomes a LakeWriteHalt pull-wide stop, not a raw
         # mid-merge crash (DEC-LAKE-WRITE-HALT-001). The partition lock still serialises
-        # same-path writers (DEC-OPTION-PARTITION-LOCK-001).
-        with _partition_lock(dest), lake_write_guard():
+        # same-path writers (DEC-OPTION-PARTITION-LOCK-001), and partition_write_lock
+        # extends that serialisation ACROSS PROCESSES (a concurrent CLI fetch + a
+        # dashboard pull sharing the lake) so the same month partition can't lost-update
+        # (DEC-LAKE-PARTITION-FLOCK-001); the flock is taken BEFORE the write guard so a
+        # disk-full at lock creation also maps to LakeWriteHalt.
+        with (
+            _partition_lock(dest),
+            partition_write_lock(self._lake_root, dest),
+            lake_write_guard(),
+        ):
             new_df = _render_df(coordinate, new_bars)  # validates the polars import
             if dest.exists():
                 existing = pl.read_parquet(dest)

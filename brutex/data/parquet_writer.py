@@ -69,6 +69,7 @@ from brutex.data.partition import (
     build_partition_path,
     partition_for_timestamp,
 )
+from brutex.data.partition_lock import partition_write_lock
 from brutex.money import round_money
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -322,7 +323,16 @@ class ParquetWriter:
         # parallelism; only same-file writers queue. The merge unions by
         # timestamp, so the stored bytes are identical regardless of which window
         # acquires the lock first (order-independent, Rule #7).
-        with _partition_lock(dest):
+        #
+        # `partition_write_lock` extends that same serialisation ACROSS PROCESSES
+        # (DEC-LAKE-PARTITION-FLOCK-001): the threading lock only guards threads in
+        # THIS interpreter, so a concurrent CLI `brutex fetch` + a dashboard pull
+        # sharing the lake would still lost-update the same month partition. The
+        # advisory `flock` (held across the read-modify-write) makes the later
+        # process read AFTER the earlier one's `os.replace`, so its union includes
+        # the earlier bars. Per partition + same lock ORDER as the threading lock,
+        # so no cross-partition deadlock.
+        with _partition_lock(dest), partition_write_lock(self._lake_root, dest):
             if dest.exists():
                 return self._merge_write(dest, sorted_bars, merge_mode=merge_mode)
 
