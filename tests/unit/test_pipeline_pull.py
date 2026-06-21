@@ -216,14 +216,14 @@ def test_historical_phase_ok_when_inner_metadata_absent() -> None:
 # --------------------------------------------------------------------------- #
 
 
-class _Spy:
-    """A zero-arg callable that records whether it was invoked and returns *value*."""
+class _Spy[T]:
+    """A typed zero-arg callable that records whether it was invoked, returns *value*."""
 
-    def __init__(self, value: object) -> None:
+    def __init__(self, value: T) -> None:
         self.value = value
         self.called = False
 
-    def __call__(self) -> object:
+    def __call__(self) -> T:
         self.called = True
         return self.value
 
