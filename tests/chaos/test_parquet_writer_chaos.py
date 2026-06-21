@@ -39,6 +39,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 
@@ -212,8 +213,10 @@ def test_randomized_midwrite_crash_never_corrupts_partition(
     on each round and assert the committed partition is never torn.
 
     Round 0 lands a clean partition (bars 0..K). Each later round attempts a merge
-    that adds new bars but faults mid-write; the write must raise ``OSError`` and
-    leave the partition EXACTLY as the last successful commit — same bytes, same
+    that adds new bars but faults mid-write; the write must raise — ``LakeWriteHalt``
+    on the injected ``ENOSPC`` (the disk-full global stop, DEC-LAKE-WRITE-HALT-001) or
+    a raw ``OSError`` on the injected ``EIO`` (unchanged — only ``ENOSPC`` is mapped) —
+    and leave the partition EXACTLY as the last successful commit — same bytes, same
     bars — with no ``.tmp`` leak. A clean write after every fault still succeeds and
     advances the committed set, proving the writer is not wedged by the fault.
     """
@@ -247,7 +250,9 @@ def test_randomized_midwrite_crash_never_corrupts_partition(
         else:
             monkeypatch.setattr(os, "fsync", _boom_fsync)
         try:
-            with pytest.raises(OSError):
+            # ENOSPC → LakeWriteHalt (disk-full global stop); EIO → raw OSError
+            # (unchanged — only ENOSPC is mapped). Either way the partition is intact.
+            with pytest.raises((OSError, LakeWriteHalt)):
                 _write(writer, new_bars)
         finally:
             monkeypatch.setattr(os, "fsync", real_fsync)
@@ -282,9 +287,12 @@ def test_enospc_on_first_write_leaves_no_partition(
         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
     monkeypatch.setattr(os, "fsync", _boom_fsync)
-    with pytest.raises(OSError) as excinfo:
+    # ENOSPC at the lake-write boundary is now a graceful LakeWriteHalt global stop
+    # (DEC-LAKE-WRITE-HALT-001), not a raw OSError — the partition invariant is the
+    # same (all-or-nothing), only the exception type changed.
+    with pytest.raises(LakeWriteHalt) as excinfo:
         _write(writer, [_bar(i) for i in range(5)])
-    assert excinfo.value.errno == errno.ENOSPC
+    assert excinfo.value.reason == "disk_full"
 
     monkeypatch.undo()
     assert not list(lake_root.rglob("*.parquet")), "a torn first-write partition was left behind"

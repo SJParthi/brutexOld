@@ -32,6 +32,7 @@ from brutex.adapters.groww.run_ingest import (
     run_groww_spot_ingest_with_retry,
 )
 from brutex.data.candle_fields import CandleParseError
+from brutex.data.errors import LakeWriteHalt
 from brutex.models import (
     BruteXError,
     Exchange,
@@ -727,6 +728,8 @@ def test_out_of_scope_error_quarantines_pair_not_crashes_pull(
     [
         DailyQuotaExceeded("daily quota of 100000 calls spent"),
         QuotaInvariantError("quota ledger invariant broke"),
+        LakeWriteHalt("disk_full"),  # DEC-LAKE-WRITE-HALT-001 — disk full halts the pull
+        LakeWriteHalt("out_of_memory"),
     ],
 )
 def test_global_stop_quota_error_propagates_not_quarantined(

@@ -29,8 +29,6 @@ follow-up.
 
 from __future__ import annotations
 
-import os
-import tempfile
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -38,6 +36,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.models import OptionBar
 from brutex.data.partition import partition_for_timestamp
 from brutex.models import BruteXError
@@ -214,10 +213,16 @@ class OptionParquetWriter:
         so the stored bytes are identical regardless of which window acquires the lock
         first (order-independent — CLAUDE.md §2 Rule 7).
         """
-        new_df = _render_df(coordinate, new_bars)  # validates the polars import
         import polars as pl
 
-        with _partition_lock(dest):
+        # The render + merge READ + concat are the option lake-write allocation sites
+        # (the merge read loads the WHOLE existing partition — the steady-state re-pull
+        # case), so they run inside lake_write_guard: a MemoryError / ENOSPC anywhere
+        # in the read-modify-write becomes a LakeWriteHalt pull-wide stop, not a raw
+        # mid-merge crash (DEC-LAKE-WRITE-HALT-001). The partition lock still serialises
+        # same-path writers (DEC-OPTION-PARTITION-LOCK-001).
+        with _partition_lock(dest), lake_write_guard():
+            new_df = _render_df(coordinate, new_bars)  # validates the polars import
             if dest.exists():
                 existing = pl.read_parquet(dest)
                 # int() coercion keeps the return concretely int even in the CI
@@ -309,30 +314,18 @@ def _render_df(coordinate: OptionSeriesCoordinate, bars: Sequence[OptionBar]) ->
 
 
 def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
-    """Write *df* to *dest* atomically (tmp file in the same dir + ``os.replace``).
+    """Write *df* to *dest* atomically via the shared atomic_io helper.
 
-    The tmp file's bytes are flushed to stable storage with ``os.fsync`` BEFORE the
-    rename (mirroring the spot :class:`~brutex.data.parquet_writer.ParquetWriter`'s
-    ``_atomic_write``, DEC-OPTION-PARTITION-LOCK-001): without it a crash between the
-    rename and the OS flushing the page cache could leave ``dest`` pointing at a
-    zero-length / truncated parquet — ``os.replace`` only orders the metadata, not the
-    data. ``polars`` owns the write, so the fd is re-opened read-only purely to fsync
-    its data (Linux allows fsync on an ``O_RDONLY`` fd).
+    Delegates to :func:`~brutex.data.atomic_io.atomic_write_via` (CLAUDE.md §11
+    COMMON — one tmp→fsync→``os.replace``→cleanup implementation shared with the spot
+    :class:`~brutex.data.parquet_writer.ParquetWriter`): the tmp file is ``fsync``-ed
+    to stable storage BEFORE the rename (``os.replace`` orders only the metadata, not
+    the page cache, so a crash between the two could otherwise leave ``dest`` pointing
+    at a truncated parquet). The helper additionally maps a full disk (``ENOSPC``) or
+    an OOM (``MemoryError`` from ``df.write_parquet``) to a
+    :class:`~brutex.data.errors.LakeWriteHalt` pull-wide stop (DEC-LAKE-WRITE-HALT-001).
     """
-    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, suffix=".parquet.tmp")
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        df.write_parquet(tmp)
-        flush_fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(flush_fd)
-        finally:
-            os.close(flush_fd)
-        os.replace(tmp, dest)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+    atomic_write_via(dest, df.write_parquet)
 
 
 __all__ = [

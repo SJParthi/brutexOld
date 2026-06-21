@@ -53,6 +53,7 @@ from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import BruteXError, Instrument
@@ -68,10 +69,17 @@ from brutex.orchestrator.universe_phases import RunParallel
 #: (``QuotaInvariantError``), so every REMAINING symbol would fail identically;
 #: ``DailyQuotaExceeded`` in particular must reach the controller's
 #: ``except DailyQuotaExceeded`` to raise the loud ``quota_exhausted`` verdict +
-#: resume after the IST-midnight reset (DEC-SPOT-QUOTA-MIDROUND-001). This is the
-#: carve-out that keeps the broad ``BruteXError`` per-symbol quarantine
+#: resume after the IST-midnight reset (DEC-SPOT-QUOTA-MIDROUND-001). ``LakeWriteHalt``
+#: (disk-full / OOM at the lake-write boundary, DEC-LAKE-WRITE-HALT-001) joins it: a
+#: full disk fails every remaining window identically, so it must halt the pull
+#: instead of being quarantined per-symbol (which would keep hammering a full disk).
+#: This is the carve-out that keeps the broad ``BruteXError`` per-symbol quarantine
 #: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
-_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (DailyQuotaExceeded, QuotaInvariantError)
+_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
+    DailyQuotaExceeded,
+    QuotaInvariantError,
+    LakeWriteHalt,
+)
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
 #: + the terminal-failure cause at WARNING (``ingest.quarantine``), both carrying
