@@ -130,8 +130,8 @@ STEP_DOWN_TIMEOUT_HITS: int = 5
 #: → step UP 1 r/s (the INCREMENTAL half of the AIMD ladder). Set to ONE
 #: :data:`STEP_DOWN_WINDOW` (60 s) — symmetric with the rolling window the step-DOWN
 #: ladder watches: after a single clean 60 s window the controller probes up one rung,
-#: so it climbs the soft floor (3) back to the operator-DIRECTED 8 r/s ceiling
-#: (``GROWW_RATE_LIMIT_RPS_CEILING``) in ~5 clean windows (~5 min) instead of the prior
+#: so it climbs the soft floor (3) back to the operator-DIRECTED 5 r/s ceiling
+#: (``GROWW_RATE_LIMIT_RPS_CEILING``) in ~2 clean windows (~2 min) instead of the prior
 #: 300 s/rung (~25 min — longer than a whole pull, so a stepped-down pull never reached
 #: the ceiling; the operator-observed "stuck at ~3 r/s with 2.4x headroom",
 #: DEC-GROWW-RATE-RECOVER-8-001). SAFETY is unchanged: the DECREMENTAL ladder still steps

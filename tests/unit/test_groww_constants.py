@@ -65,14 +65,17 @@ def test_unverified_gates_are_flagged() -> None:
 
 
 def test_operator_directed_per_second_ceiling_stays_under_the_per_minute_governor() -> None:
-    # DEC-GROWW-RATE-CEILING-8-001: the production per-second ceiling is the
-    # operator-DIRECTED 8 r/s — the per-second backtesting cap itself stays officially
-    # UNVERIFIED. 8 is chosen because 8×60 = 480/min sits just UNDER the 500/min
-    # governor, so the per-second ceiling is the binding gate yet never overshoots
-    # the per-minute cap (GROWW_RATE_LIMIT_PER_MIN).
-    assert c.GROWW_RATE_LIMIT_RPS_CEILING == 8.0
+    # The production per-second ceiling is the operator-DIRECTED 5 r/s (lowered 8 → 5
+    # on 2026-06-22) — the per-second backtesting cap itself stays officially
+    # UNVERIFIED. 5 is chosen because 5×60 = 300/min stays well UNDER the 500/min
+    # governor (the safety property: the per-second ceiling never overshoots the
+    # per-minute cap GROWW_RATE_LIMIT_PER_MIN), and a live-log audit showed the vendor
+    # 429s even at 3–5 r/s so probing up to 8 only wasted ~870 429-retries.
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING == 5.0
     assert c.GROWW_RATE_LIMIT_PER_MIN == 500
-    assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 < c.GROWW_RATE_LIMIT_PER_MIN
+    # The 300 ≤ 500 invariant — the per-second ceiling stays under the per-minute governor.
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 == 300
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 <= c.GROWW_RATE_LIMIT_PER_MIN
 
 
 def test_instrument_master_url_matches_allowlist_host() -> None:
