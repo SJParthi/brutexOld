@@ -530,9 +530,11 @@ class TestFailurePaths:
         def _boom(_src: str, _dst: str) -> None:
             raise OSError("simulated rename failure")
 
-        monkeypatch.setattr("brutex.engine.results_store.os.replace", _boom)
+        # The atomic write is now the shared atomic_io core
+        # (DEC-ATOMIC-WRITE-CONSOLIDATE-001), so os.replace + the temp prefix live there.
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _boom)
         with pytest.raises(OSError, match="simulated rename failure"):
             store.flush()
         # No half-written temp file is left behind in the destination dir.
-        assert not list(tmp_path.glob(".brutex-results-*"))
+        assert not list(tmp_path.glob(".brutex-write-*"))
         assert not path.exists()

@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from brutex.data.atomic_io import atomic_write_via, lake_write_guard
+from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.errors import DataLakeError, LakeWriteHalt
 from brutex.models import BruteXError
 
@@ -131,5 +131,44 @@ def test_atomic_write_via_maps_mkstemp_enospc(
     with pytest.raises(LakeWriteHalt) as exc_info:
         atomic_write_via(dest, lambda tmp: tmp.write_bytes(b"never reached"))
     assert exc_info.value.reason == "disk_full"
+    assert not dest.exists()
+    assert list(tmp_path.glob(".brutex-write-*")) == []
+
+
+# ── atomic_write_simple (guard-free variant) ─────────────────────────────────
+def test_atomic_write_simple_writes_renames_and_leaves_no_tmp(tmp_path: Path) -> None:
+    dest = tmp_path / "out.json"
+    atomic_write_simple(dest, lambda tmp: tmp.write_bytes(b"engine-bytes"))
+    assert dest.read_bytes() == b"engine-bytes"
+    assert list(tmp_path.glob(".brutex-write-*")) == []  # temp consumed by os.replace
+
+
+def test_atomic_write_simple_propagates_raw_enospc_not_halt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard-FREE: an ENOSPC propagates as a RAW OSError, NOT a LakeWriteHalt.
+
+    This is the whole point of the simple variant — non-lake callers (engine
+    sidecars / config / cache) keep their own domain-error contract and must NOT
+    have a disk-full mis-escalated into the lake-specific pull-wide halt.
+    """
+
+    def _enospc(_src: str, _dst: str) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+    with pytest.raises(OSError) as exc_info:
+        atomic_write_simple(dest=tmp_path / "x", write_to=lambda tmp: tmp.write_bytes(b"d"))
+    assert not isinstance(exc_info.value, LakeWriteHalt)  # NOT escalated
+    assert exc_info.value.errno == errno.ENOSPC
+    assert list(tmp_path.glob(".brutex-write-*")) == []  # temp still cleaned on the error path
+
+
+def test_atomic_write_simple_cleans_tmp_and_propagates_generic_error(tmp_path: Path) -> None:
+    """A non-OSError in *write_to* propagates as-is AND the half-written temp is removed."""
+    dest = tmp_path / "x"
+
+    with pytest.raises(ValueError, match="render bug"):
+        atomic_write_simple(dest, lambda _tmp: _raise(ValueError("render bug")))
     assert not dest.exists()
     assert list(tmp_path.glob(".brutex-write-*")) == []
