@@ -894,6 +894,13 @@ def build_app(
     # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
     # generic keyed cache; no movers coupling, just the shared implementation).
     _candle_count_cache = MoversSnapshotCache()
+    # The /coverage/windows counts cache (DEC-COVERAGE-WINDOWS-O1-001): the
+    # `GROUP BY market, status` bucketed counts over the window ledger are invariant
+    # across which tab/filter is clicked, so they are memoised behind the SAME
+    # generation signal — a repeat click within one generation is O(1), a pull bumps
+    # the generation → recompute. Dedicated instance so the (counts, total) tuples
+    # never share a key namespace with the candle int-totals above.
+    _window_counts_cache = MoversSnapshotCache()
     # The /db F&O cascade cache (DEC-DB-FNO-CASCADE-001): the underlying→expiry→contract
     # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
     # write-generation as the caches above so a pull rebuilds it but every cascade click
@@ -2938,6 +2945,7 @@ def build_app(
         market: str | None = Query(default=None),
         status: str | None = Query(default=None),
         limit: int = Query(default=20_000, ge=1),
+        offset: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         """GET /api/v1/coverage/windows — per-window PLANNED / SUCCESS / EMPTY / FAILED / SKIPPED.
 
@@ -2983,6 +2991,13 @@ def build_app(
                 market=market,
                 status=status,
                 limit=limit,
+                offset=offset,
+                # DEC-COVERAGE-WINDOWS-O1-001: inject the store's DuckDB connection +
+                # the generation-stamped counts cache so the payload is O(page) (DuckDB
+                # LIMIT/OFFSET + cached GROUP BY) instead of an O(N) Python scan per poll.
+                conn=store.connection,
+                count_cache=_window_counts_cache,
+                generation=_summary_cache.generation,
             )
 
         return JSONResponse(await run_in_threadpool(_payload))

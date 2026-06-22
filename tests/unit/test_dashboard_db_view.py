@@ -17,10 +17,13 @@ Target: 100% line + branch coverage of ``brutex/dashboard/db_view.py``.
 
 from __future__ import annotations
 
+# Whitebox viewer tests read module-private helpers by design (DEC-P0-017 convention).
+# pyright: reportPrivateUsage=false
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 import pytest
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -29,13 +32,17 @@ from brutex.adapters.groww.constants import (
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.db_view import (
     KNOWN_TABLES,
+    _build_window_payload_duckdb,
     _json_safe,
+    _window_counts_total,
+    _window_severity_order_sql,
     build_window_payload,
     clamp_limit,
     clamp_offset,
     sample_rows,
     table_summary,
 )
+from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.session import IST
@@ -740,3 +747,203 @@ class TestSpotWindowRollup:
         without_map = build_window_payload(tmp_path)
         assert with_map == without_map
         assert with_map["windows"][0]["symbol"] == "NIFTY"
+
+
+# ── build_window_payload DuckDB fast path (DEC-COVERAGE-WINDOWS-O1-001) ──────────
+def _save_mixed_ledger(tmp_path: Path) -> None:
+    """Save a ledger spanning spot + option + future markets and several statuses."""
+    ledger = WindowLedger()
+    # spot rows: SUCCESS, FAILED (last_error set), PLANNED, EMPTY (streak ≥ 1)
+    ledger.record(
+        _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+    )
+    ledger.record(
+        _window_key("BANKNIFTY"),
+        raw_bars=0,
+        error_type="GrowwTimeoutError",
+        bars_appended=0,
+        now=_WINDOW_NOW,
+    )
+    ledger.plan(_window_key("SENSEX"), now=_WINDOW_NOW)
+    ledger.record(
+        _window_key("INFY"), raw_bars=0, error_type=None, bars_appended=0, now=_WINDOW_NOW
+    )
+    # option + future SUCCESS rows (interval kept simple — bucket keys on `market`).
+    ledger.record(
+        WindowKey(
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            security_id="OPT1",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 4, 1),
+        ),
+        raw_bars=3,
+        error_type=None,
+        bars_appended=3,
+        now=_WINDOW_NOW,
+    )
+    ledger.record(
+        WindowKey(
+            market=GROWW_FUTURE_COVERAGE_MARKET,
+            security_id="FUT1",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 4, 1),
+        ),
+        raw_bars=4,
+        error_type=None,
+        bars_appended=4,
+        now=_WINDOW_NOW,
+    )
+    save_window_ledger(ledger, tmp_path)
+
+
+def _win_key(w: dict[str, object]) -> tuple[object, ...]:
+    return (w["market"], w["symbol"], w["status"], w["window_start"], w["window_end"])
+
+
+class TestBuildWindowPayloadDuckDB:
+    """The O(page) DuckDB fast path equals the legacy pyarrow path + adds pagination."""
+
+    def test_fast_path_matches_legacy_path(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        fast = build_window_payload(tmp_path, conn=conn)
+        legacy = build_window_payload(tmp_path)
+        assert fast["source"] == legacy["source"] == "ledger"
+        assert fast["count"] == legacy["count"] == 6
+        assert fast["counts"] == legacy["counts"]
+        assert fast["matched"] == legacy["matched"] == 5  # 6 total minus the 1 PLANNED
+        assert fast["empty_threshold"] == legacy["empty_threshold"]
+        assert fast["capped"] is False
+        # Same window SET (both severity-first; compare order-independently).
+        assert sorted(fast["windows"], key=_win_key) == sorted(legacy["windows"], key=_win_key)
+
+    def test_severity_first_order(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        statuses = [w["status"] for w in payload["windows"]]
+        # FAILED then EMPTY must precede the bulk SUCCESS rows (cap can't hide them).
+        assert statuses[0] == "FAILED"
+        assert statuses[1] == "EMPTY"
+        assert set(statuses[2:]) == {"SUCCESS"}
+
+    def test_market_filter_options(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), market="options")
+        assert payload["matched"] == 1
+        assert {w["symbol"] for w in payload["windows"]} == {"OPT1"}
+
+    def test_market_filter_futures(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), market="futures")
+        assert {w["symbol"] for w in payload["windows"]} == {"FUT1"}
+
+    def test_market_filter_spot_excludes_derivatives(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), market="spot")
+        symbols = {w["symbol"] for w in payload["windows"]}
+        assert "OPT1" not in symbols and "FUT1" not in symbols
+        assert symbols == {"NIFTY", "BANKNIFTY", "INFY"}  # the spot non-PLANNED rows
+
+    def test_status_filter_failed(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), status="FAILED")
+        assert [w["symbol"] for w in payload["windows"]] == ["BANKNIFTY"]
+        assert payload["matched"] == 1
+
+    def test_planned_only_on_explicit_request(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        default = build_window_payload(tmp_path, conn=conn)
+        assert "SENSEX" not in {w["symbol"] for w in default["windows"]}
+        planned = build_window_payload(tmp_path, conn=conn, status="PLANNED")
+        assert [w["symbol"] for w in planned["windows"]] == ["SENSEX"]
+
+    def test_offset_paging_is_disjoint_and_capped(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        page0 = build_window_payload(tmp_path, conn=conn, limit=1, offset=0)
+        page1 = build_window_payload(tmp_path, conn=conn, limit=1, offset=1)
+        assert page0["returned"] == page1["returned"] == 1
+        assert page0["capped"] is True  # matched (5) > limit (1)
+        assert page0["windows"][0]["status"] == "FAILED"  # severity-first page 1
+        assert page1["windows"][0]["status"] == "EMPTY"  # severity-first page 2
+        assert page0["windows"][0] != page1["windows"][0]
+
+    def test_count_cache_memoises_and_invalidates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        cache = MoversSnapshotCache()
+        calls = {"n": 0}
+        import brutex.dashboard.db_view as dbv
+
+        real = dbv._window_counts_total
+
+        def _counting(c: object, glob: str) -> tuple[dict[str, dict[str, int]], int]:
+            calls["n"] += 1
+            return real(c, glob)
+
+        monkeypatch.setattr(dbv, "_window_counts_total", _counting)
+        # Two calls at the SAME generation → counts computed ONCE (the cache HIT).
+        a = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=1)
+        b = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=1)
+        assert a["counts"] == b["counts"]
+        assert calls["n"] == 1
+        # A new generation (a pull) → recompute (never a stale total).
+        build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=2)
+        assert calls["n"] == 2
+
+    def test_empty_ledger_parquet(self, tmp_path: Path) -> None:
+        save_window_ledger(WindowLedger(), tmp_path)  # writes a 0-row Parquet
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        assert payload["count"] == 0
+        assert payload["matched"] == 0
+        assert payload["returned"] == 0
+        assert payload["capped"] is False
+        assert payload["counts"] == {"spot": {}, "options": {}, "futures": {}}
+        assert payload["windows"] == []
+
+    def test_no_conn_uses_legacy_path(self, tmp_path: Path) -> None:
+        # conn=None (an existing caller) must keep the pyarrow path, not the fast path.
+        _save_mixed_ledger(tmp_path)
+        assert build_window_payload(tmp_path, conn=None)["source"] == "ledger"
+
+    def test_window_counts_total_helper(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        from brutex.data.window_ledger_store import ledger_path
+
+        counts, total = _window_counts_total(duckdb.connect(), ledger_path(tmp_path).as_posix())
+        assert total == 6
+        assert counts["options"] == {"SUCCESS": 1}
+        assert counts["futures"] == {"SUCCESS": 1}
+        assert counts["spot"] == {"SUCCESS": 1, "FAILED": 1, "PLANNED": 1, "EMPTY": 1}
+
+    def test_severity_order_sql_is_built_from_the_status_order(self) -> None:
+        sql = _window_severity_order_sql()
+        assert sql.startswith("CASE status ")
+        assert "WHEN 'FAILED' THEN 0" in sql
+        assert "WHEN 'EMPTY' THEN 1" in sql
+        assert sql.endswith("ELSE 9 END")
+
+    def test_direct_duckdb_builder_with_symbol_map(self, tmp_path: Path) -> None:
+        # Exercise _build_window_payload_duckdb directly (the option symbol_for_id decode
+        # path is shared with the legacy projection via _window_row).
+        _save_mixed_ledger(tmp_path)
+        from brutex.data.window_ledger_store import ledger_path
+
+        payload = _build_window_payload_duckdb(
+            duckdb.connect(),
+            ledger_path(tmp_path),
+            symbol_for_id={"OPT1": "BANKNIFTY"},
+            market=None,
+            status=None,
+            limit=20_000,
+            offset=0,
+            count_cache=None,
+            generation=0,
+        )
+        assert payload["count"] == 6
+        assert payload["matched"] == 5

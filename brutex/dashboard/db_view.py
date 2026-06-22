@@ -2411,6 +2411,179 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     return rollup
 
 
+class WindowCountsCache(Protocol):
+    """Generation-stamped cache contract for the ``/coverage/windows`` GROUP BY counts.
+
+    Structural (``Protocol``) so this module never hard-imports a concrete cache — the
+    dashboard injects the COMMON generation-stamped LRU
+    (:class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`, reused per CLAUDE.md
+    §11, DEC-COVERAGE-WINDOWS-O1-001). Mirrors :class:`CandleCountCache` but memoises
+    the ``(bucketed_counts, total)`` tuple, not a bare int.
+    """
+
+    def get_or_compute(
+        self,
+        key: str,
+        *,
+        generation: int,
+        compute: Callable[[], tuple[dict[str, dict[str, int]], int]],
+    ) -> tuple[dict[str, dict[str, int]], int]:
+        """Return *key*'s cached ``(counts, total)`` for *generation*, computing on a miss."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+def _window_severity_order_sql() -> str:
+    """Build the severity-first ``ORDER BY`` CASE from :data:`_WINDOW_STATUS_ORDER`.
+
+    ONE source of truth for the row order (FAILED, then EMPTY, … — actionable rows can
+    never be hidden by the page cap), shared with the legacy Python sort. The status
+    literals are TRUSTED module constants (never user input), so interpolating them is
+    injection-safe.
+    """
+    whens = " ".join(
+        f"WHEN '{status}' THEN {rank}"
+        for status, rank in sorted(_WINDOW_STATUS_ORDER.items(), key=lambda kv: kv[1])
+    )
+    return f"CASE status {whens} ELSE 9 END"
+
+
+def _window_counts_total(conn: Any, ledger_glob: str) -> tuple[dict[str, dict[str, int]], int]:
+    """ONE DuckDB ``GROUP BY market, status`` → bucketed counts + grand total.
+
+    Replaces the O(N) Python count loop with a single columnar aggregate over the ledger
+    Parquet (O(files-footer + groups), milliseconds at 340k rows). The ``market``
+    namespace is folded to the page's spot/options/futures bucket via the shared
+    :func:`_window_market_bucket` (CLAUDE.md §11 COMMON). An empty Parquet yields all-zero
+    buckets + ``total=0`` (the GROUP BY returns no rows).
+    """
+    counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}, "futures": {}}
+    total = 0
+    cursor = conn.execute(
+        "SELECT market, status, COUNT(*) FROM read_parquet(?) GROUP BY market, status",
+        [ledger_glob],
+    )
+    for market_value, status_value, n in cursor.fetchall():
+        count = int(n)
+        total += count
+        bucket = counts[_window_market_bucket(str(market_value))]
+        bucket[str(status_value)] = bucket.get(str(status_value), 0) + count
+    return counts, total
+
+
+def _build_window_payload_duckdb(
+    conn: Any,
+    ledger_file: Path,
+    *,
+    symbol_for_id: Mapping[str, str] | None,
+    market: str | None,
+    status: str | None,
+    limit: int,
+    offset: int,
+    count_cache: WindowCountsCache | None,
+    generation: int,
+) -> dict[str, Any]:
+    """O(page) ``/coverage/windows`` payload via DuckDB (DEC-COVERAGE-WINDOWS-O1-001).
+
+    Counts come from ONE generation-cached ``GROUP BY`` (:func:`_window_counts_total`);
+    the row page is a ``WHERE``-filtered, severity-ordered ``LIMIT``/``OFFSET`` query — so
+    a tab/filter click reads only the page (O(page)) instead of re-running an O(N) Python
+    count+filter+sort over every window on every click + 4 s poll (the root cause). The
+    ``matched`` total is DERIVED from the cached counts (no extra scan); the per-row
+    projection reuses the shared :func:`_window_row` (ONE shape with the legacy path).
+    Returns the SAME payload dict the pyarrow path returns.
+    """
+    from types import SimpleNamespace
+
+    ledger_glob = ledger_file.as_posix()
+    if count_cache is None:
+        counts, total = _window_counts_total(conn, ledger_glob)
+    else:
+        counts, total = count_cache.get_or_compute(
+            f"window-counts|{ledger_glob}",
+            generation=generation,
+            compute=lambda: _window_counts_total(conn, ledger_glob),
+        )
+
+    wanted_status = status.upper() if status else None
+    buckets = (
+        [market] if market in ("spot", "options", "futures") else ["spot", "options", "futures"]
+    )
+    if wanted_status:
+        matched = sum(counts[b].get(wanted_status, 0) for b in buckets)
+    else:
+        # PLANNED rows ship ONLY on an explicit ?status=PLANNED (they are the bulk of a
+        # freshly-planned pull and carry no per-row info beyond their count).
+        matched = sum(v for b in buckets for s, v in counts[b].items() if s != "PLANNED")
+
+    where: list[str] = []
+    params: list[Any] = [ledger_glob]
+    if market == "options":
+        where.append("market = ?")
+        params.append(_OPTION_WINDOW_MARKET)
+    elif market == "futures":
+        where.append("market = ?")
+        params.append(_FUTURE_WINDOW_MARKET)
+    elif market == "spot":
+        where.append("market NOT IN (?, ?)")
+        params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
+    if wanted_status:
+        where.append("status = ?")
+        params.append(wanted_status)
+    else:
+        where.append("status != ?")
+        params.append("PLANNED")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    order_sql = (
+        f" ORDER BY {_window_severity_order_sql()}, "
+        '"security_id", "interval", "window_start", "window_end"'
+    )
+    params.extend((limit, offset))
+    cursor = conn.execute(
+        f"SELECT * FROM read_parquet(?){where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a bound path; filters/page/order are bound or trusted constants
+        params,
+    )
+    out_columns = [str(col[0]) for col in (cursor.description or [])]
+    rows: list[dict[str, Any]] = []
+    for raw in cursor.fetchall():
+        # DuckDB returns native Python values (str for the string columns, int for the
+        # int64 ones, None for a null) — pass them straight to the shared `_window_row`
+        # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
+        # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
+        # already str()/None-handle each field). `empty_streak`/`in_pull_fetches` were
+        # appended LAST to the schema, so a legacy Parquet that lacks them defaults to 0
+        # (a cosmetic display field).
+        cell = dict(zip(out_columns, raw, strict=True))
+        record = SimpleNamespace(
+            market=cell["market"],
+            security_id=cell["security_id"],
+            interval=cell["interval"],
+            window_start=cell["window_start"],
+            window_end=cell["window_end"],
+            status=cell["status"],
+            bars=cell["bars"],
+            attempts=cell["attempts"],
+            last_error=cell["last_error"],
+            last_attempt_at=cell["last_attempt_at"],
+            empty_streak=cell.get("empty_streak") or 0,
+            in_pull_fetches=cell.get("in_pull_fetches") or 0,
+        )
+        rows.append(
+            _window_row(
+                record, first_seen_at=cell.get("first_seen_at"), symbol_for_id=symbol_for_id
+            )
+        )
+    return {
+        "source": "ledger",
+        "count": total,
+        "counts": counts,
+        "empty_threshold": EMPTY_TERMINAL_THRESHOLD,
+        "matched": matched,
+        "returned": len(rows),
+        "capped": matched > limit,
+        "windows": rows,
+    }
+
+
 def build_window_payload(
     lake_root: Path,
     *,
@@ -2418,6 +2591,10 @@ def build_window_payload(
     market: str | None = None,
     status: str | None = None,
     limit: int = WINDOW_ROWS_CAP,
+    offset: int = 0,
+    conn: Any = None,
+    count_cache: WindowCountsCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -2471,7 +2648,26 @@ def build_window_payload(
     from brutex.data.window_ledger_store import ledger_path
 
     limit = max(1, min(int(limit), WINDOW_ROWS_CAP))
-    if ledger_path(lake_root).is_file():
+    ledger_file = ledger_path(lake_root)
+    # FAST PATH (DEC-COVERAGE-WINDOWS-O1-001): with a DuckDB *conn* injected and the
+    # ledger Parquet present, push count/filter/sort/page DOWN into DuckDB — O(page)
+    # rows + a generation-cached GROUP BY — instead of the O(N) Python count+filter+sort
+    # that ran on EVERY click/poll (the 1.5–4 s root cause at 340k windows). A ``None``
+    # *conn* (or no Parquet) keeps the legacy pyarrow path below byte-for-byte
+    # (back-compat for existing callers + the ``window_status.json`` fallback).
+    if conn is not None and ledger_file.is_file():
+        return _build_window_payload_duckdb(
+            conn,
+            ledger_file,
+            symbol_for_id=symbol_for_id,
+            market=market,
+            status=status,
+            limit=limit,
+            offset=clamp_offset(offset),
+            count_cache=count_cache,
+            generation=generation,
+        )
+    if ledger_file.is_file():
         source = "ledger"
         records: tuple[Any, ...] = _ledger_records_cached(lake_root)
     else:
