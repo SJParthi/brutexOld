@@ -32,7 +32,12 @@ from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.client import GrowwClient
-from brutex.adapters.groww.constants import OPTION_SEGMENT
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+    OPTION_SEGMENT,
+)
+from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport
 from brutex.adapters.protocol import DerivativeContract
 from brutex.dashboard import historical_pull as hp
 from brutex.dashboard.historical_pull import (
@@ -258,6 +263,73 @@ def test_option_and_future_split_distinct_markets(registry: RegistryStore) -> No
     )
     assert report.bars_appended == 3  # one canned bar per contract (one window each)
     assert report.windows == 3
+
+
+def _empty_ingest_report() -> GrowwOptionIngestReport:
+    """A clean (no pairs, no failures) ingest report — inert for an order spy."""
+    return GrowwOptionIngestReport(pairs={}, failures=())
+
+
+def test_futures_market_pulled_before_options(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FUT (groww-future) is ingested BEFORE CE/PE (groww-option) — futures-first order.
+
+    A NIFTY selection spans BOTH market buckets (CE/PE → groww-option, FUT →
+    groww-future). A spy records the ``market`` kwarg of every
+    ``run_groww_option_ingest`` call in invocation order; the futures-market call MUST
+    precede the options-market call regardless of dict insertion order.
+    """
+    markets_seen: list[str] = []
+
+    def _spy_ingest(*_args: object, market: str, **_kw: object) -> GrowwOptionIngestReport:
+        markets_seen.append(market)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert markets_seen == [GROWW_FUTURE_COVERAGE_MARKET, GROWW_OPTION_COVERAGE_MARKET]
+    assert markets_seen.index(GROWW_FUTURE_COVERAGE_MARKET) < markets_seen.index(
+        GROWW_OPTION_COVERAGE_MARKET
+    )
+
+
+def test_market_pull_order_sorts_unknown_market_last() -> None:
+    """The order key sorts the two known markets futures-first, an unknown market LAST.
+
+    Covers the ``.get(..., 99)`` deterministic tie-break: an unrecognised market namespace
+    sorts after both known ones, and equal-rank markets fall back to a stable name sort.
+    """
+    buckets = {
+        GROWW_OPTION_COVERAGE_MARKET: 1,
+        "zzz-unknown-market": 2,
+        GROWW_FUTURE_COVERAGE_MARKET: 0,
+    }
+    ordered = [
+        market
+        for market, _rank in sorted(
+            buckets.items(),
+            key=lambda kv: (hp._MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
+        )
+    ]
+    assert ordered == [
+        GROWW_FUTURE_COVERAGE_MARKET,
+        GROWW_OPTION_COVERAGE_MARKET,
+        "zzz-unknown-market",
+    ]
 
 
 # ── empty selection: honest 0-bar no-op ──────────────────────────────────────
@@ -680,11 +752,6 @@ def test_pull_contract_candles_live_derives_pool(registry: RegistryStore, tmp_la
 
 def test_contract_market_split() -> None:
     """A FUT row maps to the future market; CE/PE map to the option market."""
-    from brutex.adapters.groww.constants import (
-        GROWW_FUTURE_COVERAGE_MARKET,
-        GROWW_OPTION_COVERAGE_MARKET,
-    )
-
     fetched = datetime(2026, 1, 1, tzinfo=UTC)
     fut = ContractRow(
         "NSE",

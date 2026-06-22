@@ -138,6 +138,16 @@ _ONE_DAY: Final[timedelta] = timedelta(days=1)
 #: collide on the same expiry.
 _FUTURE_SIDE: Final[str] = "FUT"
 
+#: Deterministic pull ORDER over the per-market buckets: the FUTURES market is processed
+#: BEFORE the OPTIONS market (futures-first), with any unknown market sorted LAST. Without
+#: this the buckets were iterated in ``dict`` insertion order, which (options inserted
+#: first) pulled CE/PE before FUT. Pure ordering — the per-contract windows + the ingest
+#: driver are untouched (DEC-FNO-LOOKBACK-SPLIT-001).
+_MARKET_PULL_ORDER: Final[dict[str, int]] = {
+    GROWW_FUTURE_COVERAGE_MARKET: 0,
+    GROWW_OPTION_COVERAGE_MARKET: 1,
+}
+
 #: Factory: ``(lake_root) -> (client, sink)`` — injected in tests; the default picks the
 #: honest dry-run pair or the live ``(GrowwClient, ParquetBarSink)``. Re-uses the SAME
 #: shape the bulk derivatives pull declares (CLAUDE.md §11 COMMON).
@@ -591,7 +601,12 @@ def _run_phase(
         pass_still_failed = 0
         pass_auth = False
         clean: set[str] = set()
-        for market, bucket in by_market.items():
+        # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
+        # a STABLE, deterministic order independent of dict insertion order.
+        for market, bucket in sorted(
+            by_market.items(),
+            key=lambda kv: (_MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
+        ):
             report: GrowwOptionIngestReport = run_groww_option_ingest(
                 client,
                 sink,
