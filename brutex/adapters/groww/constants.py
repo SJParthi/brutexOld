@@ -154,16 +154,19 @@ GROWW_DAILY_QUOTA_UNVERIFIED: Final[int | None] = None
 GROWW_RATE_LIMIT_PER_MIN: Final[int] = 500
 
 #: Operator-DIRECTED per-second ceiling for the production Groww backtesting pull
-#: (DEC-GROWW-RATE-CEILING-8-001, operator-approved 2026-06-14). NOT vendor-documented —
-#: the per-second backtesting cap stays officially UNVERIFIED (see
-#: GROWW_RATE_LIMIT_RPS_UNVERIFIED). 8 r/s is chosen because 8×60 = 480/min sits just
-#: under the operator-confirmed 500/min governor (GROWW_RATE_LIMIT_PER_MIN), so the
-#: per-second ceiling is the binding gate yet never overshoots the per-minute cap. The
-#: adaptive AIMD ladder is UNCHANGED: a 429 burst still steps 8→…→3 (soft floor) and a
-#: sustained storm eases to 1, recovering back to 8 — so the raised ceiling is bounded
-#: and self-correcting. Supersedes the prior split ceilings (dashboard implicit 5 via
-#: rate_common.CEILING_RPS; CLI 10 via GROWW_RATE_LIMIT_RPS_UNVERIFIED).
-GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
+#: (operator-approved 2026-06-22, lowered 8 → 5). NOT vendor-documented — the
+#: per-second backtesting cap stays officially UNVERIFIED (see
+#: GROWW_RATE_LIMIT_RPS_UNVERIFIED); 5 is operator-directed, NOT vendor-confirmed.
+#: 5 r/s is chosen because 5×60 = 300/min stays well under the operator-confirmed
+#: 500/min governor (GROWW_RATE_LIMIT_PER_MIN), and a live-log audit showed the vendor
+#: 429s even at 3–5 r/s — so probing up to 8 only wasted ~870 429-retries with no
+#: throughput gain. A ceiling of 5 REDUCES those wasted 429-retries while keeping the
+#: adaptive AIMD ladder UNCHANGED: a 429 burst still steps the rate DOWN (soft floor 3,
+#: deep floor 1 under sustained pressure) and recovers back UP to this 5 r/s ceiling
+#: once it clears. Lowering the ceiling only ever REDUCES the issue rate (it caps; it
+#: never raises a ceiling), so it is a safe change (CLAUDE.md §2 Rule 6). Supersedes the
+#: prior operator-directed 8 r/s ceiling (DEC-GROWW-RATE-CEILING-8-001).
+GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 5.0
 
 #: Hard per-call wall-clock deadline (seconds) for a single historical-candles SDK
 #: call — the pull FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001). The Groww
@@ -181,8 +184,8 @@ GROWW_PULL_CALL_TIMEOUT_S: Final[float] = 45.0
 #: :class:`~brutex.adapters.groww.pool.ClientPool`). 1 = today's exact single-connection
 #: behaviour; 2 lets the worker threads stop serialising on one socket (the measured
 #: avg-0.49-in-flight starve) so the achieved rate can approach the rate-controller ceiling.
-#: Little's Law says ~1.2 concurrent calls reach 8 r/s at the ~150 ms observed latency, so 2
-#: is sufficient AND gentle. The SHARED rate controller still caps the AGGREGATE issue rate
+#: Little's Law says ~0.75 concurrent calls reach the 5 r/s ceiling at the ~150 ms observed
+#: latency, so 2 is sufficient AND gentle. The SHARED rate controller still caps the AGGREGATE issue rate
 #: (CLAUDE.md §2 Rule 6 untouched — K connections add concurrency, never extra rate); the
 #: achieved-rate meter proves the real number. Override per environment via
 #: ``BRUTEX_GROWW_POOL_SIZE`` (clamped to ``[1, GROWW_CLIENT_POOL_MAX]``).

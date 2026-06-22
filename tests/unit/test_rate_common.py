@@ -757,11 +757,14 @@ def test_rate_snapshot_reflects_a_stepped_down_holding_rate() -> None:
 
 def test_recovers_from_floor_up_to_the_injected_8_ceiling() -> None:
     """DEC-GROWW-RATE-RECOVER-8-001: the INCREMENTAL ladder climbs the soft floor back to
-    the injected 8 r/s ceiling — one rung per clean STEP_UP_WINDOW — and clamps at 8.
+    WHATEVER ceiling is injected — one rung per clean STEP_UP_WINDOW — and clamps there.
 
-    The operator-DIRECTED ceiling is 8 r/s; before this change the 300 s/rung recovery
-    meant a stepped-down pull never reached it within its wall time (stuck at ~3). With
-    STEP_UP_WINDOW == STEP_DOWN_WINDOW (60 s) the climb 3→8 takes ~5 clean windows.
+    This is a generic AIMD-ladder mechanism test: 8.0 is an arbitrary INJECTED fixture
+    (deliberately decoupled from the production ``GROWW_RATE_LIMIT_RPS_CEILING``, which the
+    operator lowered 8 → 5 on 2026-06-22), proving the climb tracks the injected ceiling.
+    Before the STEP_UP fix the 300 s/rung recovery meant a stepped-down pull never reached
+    the ceiling within its wall time (stuck at ~3). With STEP_UP_WINDOW == STEP_DOWN_WINDOW
+    (60 s) the climb 3→8 takes ~5 clean windows.
     """
     clock = _Clock()
     ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_rps=8.0)
