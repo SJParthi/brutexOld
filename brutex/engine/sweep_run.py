@@ -89,6 +89,7 @@ from brutex.engine.tuple_complete import (
     write_completion_sentinel,
 )
 from brutex.metrics.compute import ResultMetrics
+from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
@@ -116,6 +117,17 @@ _ACTION_START: Final[str] = "SWEEP_START"
 _ACTION_FLUSH: Final[str] = "SWEEP_FLUSH"
 _ACTION_COMPLETE: Final[str] = "SWEEP_COMPLETE"
 _ACTION_RESUMED: Final[str] = "SWEEP_RESUMED"
+
+
+class SweepComboError(BruteXError):
+    """One combo's metric evaluation raised — names the offending mask + run-id + tuple.
+
+    A raise here is treated CONSERVATIVELY as tuple-wide (the safe redo-everything
+    choice): the only per-combo-varying input to `metrics_for_mask` is the mask, so a
+    mask-specific edge cannot be ruled out — skipping the whole tuple is the conservative
+    response. The grid drivers SKIP the whole tuple (deterministic redo next run), never
+    the one mask.
+    """
 
 
 def _direction_label(direction: Side) -> str:
@@ -895,10 +907,21 @@ def run_persisted_sweep(
     evaluated = len(survivors)
 
     run_id_by_mask = dict(survivors)
-    pairs: list[tuple[int, ResultMetrics]] = [
-        (
-            mask,
-            metrics_for_mask(
+    # Combo evaluation (fail-loud-with-fingerprint): each `metrics_for_mask` is
+    # wrapped so a raise is re-thrown as a `SweepComboError` naming the exact
+    # offending combo (mask hex + run-id + tuple coordinate). Per
+    # "Resilient: skip + continue", the grid drivers catch THIS error and skip
+    # the WHOLE tuple — treated CONSERVATIVELY as tuple-wide (the safe
+    # redo-everything choice): the only per-combo-varying input is the mask, so a
+    # mask-specific edge cannot be ruled out; the tuple is left un-sentineled /
+    # un-cached so it redoes next run. A MemoryError is re-raised bare (OOM is a
+    # GLOBAL stop, DEC-LAKE-WRITE-HALT-001, never a per-tuple skip). On the success
+    # path `pairs` is byte-identical to the prior list comprehension (same order,
+    # same tuples).
+    pairs: list[tuple[int, ResultMetrics]] = []
+    for mask, _ in kept:
+        try:
+            metrics = metrics_for_mask(
                 bars,
                 bar_bits,
                 mask,
@@ -907,10 +930,18 @@ def run_persisted_sweep(
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
-            ),
-        )
-        for mask, _ in kept
-    ]
+            )
+        except MemoryError:
+            # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a per-tuple
+            # skip — re-raise bare so it aborts the whole sweep instead of being
+            # downgraded into a SweepComboError tuple-skip below.
+            raise
+        except Exception as exc:
+            raise SweepComboError(
+                f"combo 0x{mask:016x} (run_id={run_id_by_mask[mask]}) in "
+                f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: {exc}"
+            ) from exc
+        pairs.append((mask, metrics))
     ranked = rank_combos(pairs, overfit=cfg.overfit)
     finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
 
@@ -1024,6 +1055,7 @@ def run_persisted_sweep(
 
 __all__ = [
     "ComboDedup",
+    "SweepComboError",
     "SweepRunConfig",
     "SweepRunSummary",
     "canonical_trade_params",

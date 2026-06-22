@@ -538,3 +538,63 @@ def test_main_unknown_command_falls_back_to_user_error(
     rc = cli.main([])
     assert rc == cli.EXIT_USER_ERROR
     assert parser.errors == ["unknown command: results"]
+
+
+# ── sweep-all "Resilient: skip + continue" verdict ───────────────────────
+
+
+def test_sweep_all_exit_code_clean_run_is_ok() -> None:
+    """A fully clean grid (no failed tuples) exits EXIT_OK."""
+    assert cli.sweep_all_exit_code(0) == cli.EXIT_OK
+
+
+@pytest.mark.parametrize("failed", [1, 3, 42])
+def test_sweep_all_exit_code_failures_are_non_zero(failed: int) -> None:
+    """Any skipped tuple makes the verdict NON-ZERO (Golden Rule #10 — no silent skip)."""
+    assert cli.sweep_all_exit_code(failed) == cli.EXIT_SWEEP_TUPLE_FAILED
+    assert cli.EXIT_SWEEP_TUPLE_FAILED != cli.EXIT_OK
+
+
+@pytest.mark.parametrize("total", [1, 4, 100])
+def test_sweep_all_exit_code_all_tuples_failed_is_non_zero(total: int) -> None:
+    """The all-fail grid (tuples_failed == total > 0) exits NON-ZERO, never EXIT_OK.
+
+    The whole-grid failure is the harshest skip case; the verdict still surfaces
+    it (no silent green illusion) — the CLI counterpart of the engine all-fail
+    hardening tests.
+    """
+    assert total > 0
+    assert cli.sweep_all_exit_code(total) == cli.EXIT_SWEEP_TUPLE_FAILED
+    assert cli.sweep_all_exit_code(total) != cli.EXIT_OK
+
+
+# ── sweep-verify verdict (partial shadow re-sweep → INCONCLUSIVE) ─────────
+
+
+def test_sweep_verify_exit_code_findings_dominate() -> None:
+    """Corruption findings dominate even when the run is also inconclusive."""
+    assert cli.sweep_verify_exit_code(has_findings=True, inconclusive=False) == (
+        cli.EXIT_VERIFY_FINDINGS
+    )
+    assert cli.sweep_verify_exit_code(has_findings=True, inconclusive=True) == (
+        cli.EXIT_VERIFY_FINDINGS
+    )
+
+
+def test_sweep_verify_exit_code_inconclusive_when_no_findings() -> None:
+    """No findings but inconclusive (e.g. a PARTIAL shadow re-sweep that skipped a tuple).
+
+    DEC-ENGINE-TUPLE-SKIP-RESILIENT-001: ``run_sweep_grid`` now skips a raising
+    tuple, so a recount with ``tuples_failed > 0`` is a PARTIAL re-sweep — the
+    byte-diff cannot be trusted, so the verdict downgrades to INCONCLUSIVE rather
+    than emitting a pass/fail over an incomplete sweep.
+    """
+    assert cli.sweep_verify_exit_code(has_findings=False, inconclusive=True) == (
+        cli.EXIT_VERIFY_INCONCLUSIVE
+    )
+    assert cli.EXIT_VERIFY_INCONCLUSIVE != cli.EXIT_OK
+
+
+def test_sweep_verify_exit_code_clean_run_is_ok() -> None:
+    """No findings + conclusive → a clean OK verdict."""
+    assert cli.sweep_verify_exit_code(has_findings=False, inconclusive=False) == cli.EXIT_OK

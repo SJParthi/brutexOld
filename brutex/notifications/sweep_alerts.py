@@ -218,6 +218,11 @@ class SweepSummaryLike(Protocol):
         """Finalists persisted across the run."""
         ...
 
+    @property
+    def tuples_failed(self) -> int:
+        """Tuples that raised mid-evaluation and were skipped this run."""
+        ...
+
 
 class SweepAlerter:
     """Best-effort Telegram alert emitter for the sweep supervisor + live pull.
@@ -398,10 +403,22 @@ class SweepAlerter:
         )
 
     def sweep_complete(self, summary: SweepSummaryLike) -> bool:
-        """Alert that the supervised grid finished (INFO), with the run funnel tally."""
+        """Alert that the supervised grid finished (INFO), with the run funnel tally.
+
+        When ``summary.tuples_failed > 0`` ("Resilient: skip + continue" hit at
+        least one tuple), the ✅ is downgraded to ⚠️ and a ``N tuples FAILED``
+        clause is appended — an honest signal that the run's verdict is non-zero
+        and those tuples are pending a redo (CLAUDE.md Golden Rule #10).
+        """
+        if summary.tuples_failed > 0:
+            head = (
+                f"⚠️ Sweep complete with failures — {summary.tuples_run}/{summary.tuples_total} "
+                f"tuples run; {summary.tuples_failed} tuples FAILED (skipped, will redo)"
+            )
+        else:
+            head = f"✅ Sweep complete — {summary.tuples_run}/{summary.tuples_total} tuples run"
         message = escape_markdown_v2(
-            f"✅ Sweep complete — {summary.tuples_run}/{summary.tuples_total} tuples run; "
-            f"evaluated={summary.evaluated}, ranked={summary.ranked}, "
+            f"{head}; evaluated={summary.evaluated}, ranked={summary.ranked}, "
             f"persisted={summary.persisted} (sweep {summary.sweep_id[:12]})."
         )
         return self._publish(

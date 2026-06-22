@@ -230,23 +230,32 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-options-value-dedup-jlzt1n` (the `/movers` Options screen now reads each
-  contract's 1-minute session frame ONCE — it reuses the HLC3 turnover the SHARED `_read_future_session` already
-  returns instead of a second `_session_value_paisa` read — DEC-MOVERS-OPTIONS-VALUE-DEDUP-001, MIGRATION.md
-  #903, the COMMON dedup deferred in #900 + the operator's "work on everything else". ROOT: #900 made
-  `movers_futures._read_future_session` return `(ltp, volume, value_paisa, oi)` for ANY F&O contract, but the
-  options caller IGNORED that `value_paisa` field and re-read the SAME frame via its own `_session_value_paisa`
-  (a deliberately-minimal touch) — so every option frame was read TWICE. FIX (READ-ONLY): `compute_options_candidates`
-  unpacks `ltp, volume, value_paisa, oi = read` (was `_, oi` + a separate value read); `_session_value_paisa` is
-  DELETED (now dead) with its now-unused `_IST` + `session_traded_value_paisa` imports + its dedicated tests.
-  HONEST: BYTE-IDENTICAL turnover on the only path it's used (same lake path / reader / day+cutoff filter / HLC3
-  reduction; the `None`-vs-0 difference is inert behind the `read is None` skip guard) — a pure I/O win (half the
-  per-contract reads), NOT a numeric change; the HLC3/cutoff/empty correctness stays covered by the shared
-  reader's OWN test (218660 ≠ 220000 distinguisher) + the options value path by the snapshot ranking-order test.
-  `movers_options.py` stays 100% line+branch (200/40, 3 covering files); `movers_futures.py` + `movers_snapshot.py`
-  stay 100%; 205 movers tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer SHIP (NIT folded),
-  workspace-health HEALTHY. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior
-  merged: DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902 (a plain-English customer-facing "Product Scoreboard" —
+- **Active branch:** `claude/engine-tuple-skip-resilient-jlzt1n` (when one grid TUPLE errors mid-sweep the
+  brute-force engine now SKIPS it, finishes every remaining tuple, and exits NON-ZERO with a `tuples_failed`
+  count + a `TUPLE_FAILED` audit line naming the exact offending combo — DEC-ENGINE-TUPLE-SKIP-RESILIENT-001,
+  MIGRATION.md #904, the operator-chosen "Resilient: skip + continue" of the "work on everything else"
+  resilience batch. ROOT: the per-combo eval loop in `sweep_run.run_persisted_sweep` was a comprehension with
+  NO exception isolation — one `metrics_for_mask` raise aborted the WHOLE grid (propagating uncaught through
+  both `run_sweep_grid` + `run_supervised_grid`). A 4-agent hostile DESIGN review proved every input to
+  `metrics_for_mask` is TUPLE-INVARIANT, so a raising combo is provably a tuple-wide BUG/corrupt-data, NEVER a
+  transient single combo → per-COMBO isolation REJECTED (it would be an illusion, Golden Rule #1 + non-reproducible,
+  Rule #4); the operator chose the RESILIENT tuple blast-radius (vs strict abort). FIX (failure-path only; success
+  path BYTE-IDENTICAL, scope still NIFTY/BANKNIFTY/SENSEX): NEW `SweepComboError(BruteXError)` re-raised with the
+  offending mask-hex + run_id + tuple (fail-loud-WITH-fingerprint, NOT swallowing); BOTH grid drivers catch ONLY
+  `SweepComboError` → bump a NEW `tuples_failed` summary field + `TUPLE_FAILED` audit + continue; the supervisor
+  does NOT `cache.record`/`checkpoint.record` a failed tuple (the sweep_heal C5 lesson — a resume RE-RUNS it);
+  honesty surface = `cli.EXIT_SWEEP_TUPLE_FAILED=6` + pure `sweep_all_exit_code` (non-zero exit + loud WARNING) +
+  a ⚠️ `sweep_complete` alert. HONEST: a failed tuple is UN-sentineled + UN-cached → DETERMINISTIC redo next run;
+  never silent (count + audit + WARNING + non-zero exit + ⚠️ alert); a genuine infra error (disk-full/OOM/audit)
+  is NOT a `SweepComboError` and still ABORTS globally. `sweep_run.py` 100% line+branch (246/70), `sweep_orchestrator.py`
+  100% (217/66), `sweep_supervisor.py` 100% (167/20), `sweep_alerts.py` 100% (119/10), `cli.py` 100% (539/102);
+  golden suite 42/42 green (success path byte-identical); 374+278+123 broad engine/golden/cli/alerts passes,
+  no regression; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer + workspace-health PENDING. ENGINE
+  failure-path resilience (NIFTY/BANKNIFTY/SENSEX scope UNCHANGED), no scope/vocab/rate-cap change. Prior merged:
+  DEC-MOVERS-OPTIONS-VALUE-DEDUP-001, MIGRATION.md #903 (the `/movers` Options screen reads each contract's
+  1-minute frame ONCE — it reuses the HLC3 turnover the SHARED `_read_future_session` already returns instead of
+  a second `_session_value_paisa` read; byte-identical value, half the per-contract I/O; `movers_options.py` 100%
+  line+branch). Prior merged: DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902 (a plain-English customer-facing "Product Scoreboard" —
   `docs/PRODUCT_SCOREBOARD.md` + a self-contained shareable `docs/product_scoreboard.html` one-pager — of
   finished / current / future work, themed what-it-does → why-you-care → PR, every claim traced to the ledger;
   docs only). Prior merged: DEC-WINDOW-LEDGER-WRITE-HALT-001, MIGRATION.md #901 (a disk-full /
@@ -870,7 +879,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-options-value-dedup-jlzt1n`
+- **Active feature branch:** `claude/engine-tuple-skip-resilient-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
