@@ -907,6 +907,14 @@ def build_app(
     # (underlyings / expiries / contracts) is an O(1) handoff — tiny lazy payloads, never
     # the flat thousand-row dropdown.
     _fno_cascade_cache = FnoCascadeCache()
+    # The /db candle-datasets discovery cache (DEC-DB-TAB-SWITCH-O1-001): the
+    # `/api/v1/db/candles/datasets` endpoint walks the WHOLE `bars/` tree THREE times
+    # (spot + F&O + options, each an O(files) `rglob("*.parquet")`) — and it fires on
+    # EVERY `/db` candle tab switch (spot↔F&O↔option). The three lists are invariant
+    # between lake writes, so they are memoised behind the SAME generation signal as the
+    # caches above (a pull bumps it → rediscover; otherwise a tab switch is an O(1) handoff
+    # of the cached lists). REUSES the COMMON `MoversSnapshotCache` (one dataset key).
+    _db_datasets_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -3985,7 +3993,19 @@ def build_app(
                 "options": list_option_datasets(lake, symbol_for_id=symbol_for_id),
             }
 
-        return JSONResponse(await run_in_threadpool(_datasets))
+        # DEC-DB-TAB-SWITCH-O1-001: the three O(files) dir-walks above are invariant
+        # between lake writes, so memoise the discovered lists behind the shared write
+        # generation — a tab switch within one generation is an O(1) cached handoff, a
+        # pull bumps the generation → rediscover. The build still runs on the threadpool
+        # worker (the store read + dir-walks stay off the event loop) on a cache miss.
+        gen = _summary_cache.generation
+        return JSONResponse(
+            await run_in_threadpool(
+                lambda: _db_datasets_cache.get_or_compute(
+                    "db_candle_datasets", generation=gen, compute=_datasets
+                )
+            )
+        )
 
     async def _fno_cascade_or_none() -> FnoCascadeIndex | None:
         """Resolve the cached F&O cascade index (DEC-DB-FNO-CASCADE-001), or ``None``.
