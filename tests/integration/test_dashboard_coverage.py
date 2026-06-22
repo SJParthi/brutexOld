@@ -36,12 +36,14 @@ from brutex.dashboard.app import (
     _render_spot_coverage_html,
     build_app,
 )
+from brutex.dashboard.completeness import RECONCILE_MISMATCH_EVENT
 from brutex.data.coverage_ledger import CoverageRecord, classify_cell
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 
 def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
@@ -55,6 +57,28 @@ def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
         series=None,
         isin=None,
         underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _eq(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
+    """An F&O-eligible cash-equity row (scored as ``equity``), e.g. ``M&M``."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=symbol,
         underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
@@ -560,6 +584,80 @@ class TestCompletenessScoreboard:
         csv_resp = client.get("/api/v1/completeness/scoreboard.csv")
         assert csv_resp.status_code == 200
         assert "SUMMARY — spot" in csv_resp.text  # section skeleton still renders
+
+    def test_reconcile_diagnostic_pinpoints_mnm_lake_key_divergence(self, tmp_path: Path) -> None:
+        """DEC-COMPLETENESS-RECONCILE-DIAG-001 e2e: a scored ``M&M`` whose lake partition keys
+        on the DIVERGENT ``NSE-M&M`` makes ``M&M`` read ``none`` on the board — and the
+        reconciliation diagnostic logs ONE structured WARNING naming BOTH ``repr()`` strings,
+        PINPOINTING the exact key drift. This is the confirmed real-box M&M failure mode; it
+        does NOT log on origin/main (no diagnostic) and DOES with this change, WITHOUT
+        altering the scoreboard payload (observability only)."""
+        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        s.upsert_many(
+            [_eq("M&M")],  # the scored universe keys on the clean engine symbol_name ``M&M``
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-mnm",
+            csv_source_sha256="0" * 64,
+        )
+        # The lake partition is written under the DIVERGENT ``NSE-M&M`` — the stored key drift.
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-M&M",
+            interval="1minute",
+            bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=s))
+        try:
+            with capture_logs() as logs:
+                body = client.get("/api/v1/completeness/scoreboard").json()
+        finally:
+            s.close()
+
+        # The board behaviour is UNCHANGED by the diagnostic: the divergent ``NSE-M&M`` lake
+        # partition is SILENTLY DROPPED (not in the scored map), and the scored ``M&M`` gets NO
+        # spot row at all (no matching lake key) — so neither key appears on the board. This IS
+        # the invisible failure the WARNING below surfaces; nothing is added/altered/fabricated.
+        board_symbols = {row["symbol"] for row in body["spot"]["per_symbol"]}
+        assert "NSE-M&M" not in board_symbols  # the stray lake key is dropped (data invisible)
+        assert "M&M" not in board_symbols  # the scored M&M has no lake row → not scored
+
+        # ONE structured WARNING fires, naming BOTH repr() strings — the pinpointed divergence.
+        warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+        assert len(warnings) == 1
+        entry = warnings[0]
+        assert entry["log_level"] == "warning"
+        assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
+        assert entry["unmatched_scored_symbols"] == [repr("M&M")]
+
+    def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(self, tmp_path: Path) -> None:
+        """The clean counterpart: when the lake partition key EQUALS the scored ``symbol_name``
+        (``M&M`` on both sides) the symbol scores normally and NO reconciliation WARNING fires —
+        the diagnostic is silent in the healthy steady state."""
+        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        s.upsert_many(
+            [_eq("M&M")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-mnm-clean",
+            csv_source_sha256="0" * 64,
+        )
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="M&M",  # CONSISTENT with the scored symbol_name → no divergence
+            interval="1minute",
+            bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=s))
+        try:
+            with capture_logs() as logs:
+                body = client.get("/api/v1/completeness/scoreboard").json()
+        finally:
+            s.close()
+
+        per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
+        assert "M&M" in per_symbol  # scored normally (not dropped, not ``none`` for no-key)
+        assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
 
     def test_universe_completeness_map_has_seeded_underlying(self, store: InstrumentStore) -> None:
         # DEC-COMPLETENESS-UNIVERSE-001: the per-symbol map (for the /universe strip) carries

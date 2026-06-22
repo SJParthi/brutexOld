@@ -36,7 +36,10 @@ from __future__ import annotations
 import csv
 import io
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any, Final
+
+import structlog
 
 from brutex.dashboard._csv_utils import FormulaSafeWriter as _FormulaSafeWriter
 from brutex.dashboard.coverage_view import (
@@ -44,6 +47,8 @@ from brutex.dashboard.coverage_view import (
     COMPLETENESS_PENDING,
     COMPLETENESS_SETTLED,
 )
+
+_LOG = structlog.get_logger("brutex.dashboard.completeness")
 
 #: The ONE physically-fetched spot dimension the scoreboard reports. 1-minute is the SINGLE
 #: granularity fetched from Groww (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); ``1day`` (the PDH/PDL
@@ -105,6 +110,154 @@ _CELL_FAILED: Final[str] = "failed"
 #: January 2020 the vendor serves (Jan-1 is a market holiday; the first session varies), never a
 #: brittle single-date magic threshold.
 _FROM_2020_EXCLUSIVE_UPPER: Final[str] = "2020-02-01"
+
+#: Cap on the number of offending symbols inlined into the
+#: ``completeness.symbol_reconcile_mismatch`` structlog WARNING so one badly-diverged
+#: master can never flood the log. The full counts are always emitted; only the inlined
+#: SAMPLE lists are truncated to this many entries (DEC-COMPLETENESS-RECONCILE-DIAG-001).
+_RECONCILE_SAMPLE_CAP: Final[int] = 10
+
+#: The structlog event name for the reconciliation diagnostic — the SINGLE WARNING that
+#: PINPOINTS a lake-symbol-key ↔ scored-symbol-key divergence (e.g. ``M&M`` reading ``none``
+#: while its lake partition keys on a divergent form like ``"M&M "`` / ``"NSE-M&M"``).
+RECONCILE_MISMATCH_EVENT: Final[str] = "completeness.symbol_reconcile_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolReconcileReport:
+    """OBSERVE-ONLY reconciliation of lake-coverage keys ↔ scored-universe keys.
+
+    DEC-COMPLETENESS-RECONCILE-DIAG-001 — the structured result of
+    :func:`reconcile_symbol_coverage`. It SURFACES the silent divergence the scoreboard
+    otherwise hides two ways (and never repairs it — Golden Rule #1):
+
+    * a LAKE coverage scan whose ``symbol`` key is NOT in the scored ``categories`` map is
+      dropped by :func:`_per_symbol_spot` (``category = categories.get(symbol); if category
+      is None: continue``) — it has data but is INVISIBLE on the board (a *stray lake
+      partition*); and
+    * conversely a scored symbol with NO matching lake row reads ``none`` even though a lake
+      partition for a near-identical key (``"M&M "`` with a trailing space, ``"NSE-M&M"``)
+      exists — the confirmed ``M&M`` failure mode.
+
+    Either side alone is invisible; together they PINPOINT the exact key drift. The fields
+    carry the full COUNTS plus capped SAMPLE lists (≤ :data:`_RECONCILE_SAMPLE_CAP`) so the
+    log line can name the offending keys without flooding.
+
+    Attributes
+    ----------
+    stray_lake_symbols
+        Lake-scan keys present in the coverage scan but absent from the scored map — they
+        HAVE data yet are not scored. Sorted, capped to :data:`_RECONCILE_SAMPLE_CAP`.
+    stray_lake_count
+        The FULL count of stray-lake keys (may exceed ``len(stray_lake_symbols)``).
+    unmatched_scored_symbols
+        Scored symbols with NO lake-coverage key at all — they read ``none`` on the board.
+        Sorted, capped to :data:`_RECONCILE_SAMPLE_CAP`.
+    unmatched_scored_count
+        The FULL count of unmatched scored symbols.
+    """
+
+    stray_lake_symbols: tuple[str, ...] = ()
+    stray_lake_count: int = 0
+    unmatched_scored_symbols: tuple[str, ...] = ()
+    unmatched_scored_count: int = 0
+
+    def has_mismatch(self) -> bool:
+        """True iff EITHER side diverged (a stray lake key OR an unmatched scored symbol).
+
+        The healthy steady state — every lake key scored AND every scored symbol backed by a
+        lake key — returns False, so the diagnostic stays SILENT (no log line).
+        """
+        return self.stray_lake_count > 0 or self.unmatched_scored_count > 0
+
+
+def reconcile_symbol_coverage(
+    *, lake_symbols: Iterable[str], scored_symbols: Iterable[str]
+) -> SymbolReconcileReport:
+    """Reconcile lake-coverage keys against scored-universe keys → a structured report.
+
+    DEC-COMPLETENESS-RECONCILE-DIAG-001 — a PURE, OBSERVE-ONLY diagnostic (it changes no
+    scoreboard output; see :func:`_log_symbol_reconcile_mismatch` for the sink). O(symbols)
+    via two :class:`set` builds + two difference scans; every membership test is O(1).
+
+    *lake_symbols* are the ``symbol`` keys the lake coverage scan emits (the keys
+    :func:`_per_symbol_spot` looks UP in *categories*); *scored_symbols* are the keys of the
+    scored ``categories`` map (the engine ``symbol_name`` the board iterates). The report
+    carries:
+
+    * ``stray_lake_symbols`` — lake keys NOT in the scored set (data present, not scored);
+    * ``unmatched_scored_symbols`` — scored keys with NO lake key (they read ``none``).
+
+    Both sides are needed: when ``M&M`` reads ``none`` because its lake partition keys on a
+    divergent form (``"M&M "`` / ``"NSE-M&M"``), the lake form appears in
+    ``stray_lake_symbols`` AND ``"M&M"`` appears in ``unmatched_scored_symbols`` — the pair
+    PINPOINTS the exact drift. Samples are sorted + capped to :data:`_RECONCILE_SAMPLE_CAP`;
+    the counts are always the FULL totals. Duplicates collapse via the sets.
+    """
+    lake_set = {str(symbol) for symbol in lake_symbols}
+    scored_set = {str(symbol) for symbol in scored_symbols}
+    stray = sorted(lake_set - scored_set)
+    unmatched = sorted(scored_set - lake_set)
+    return SymbolReconcileReport(
+        stray_lake_symbols=tuple(stray[:_RECONCILE_SAMPLE_CAP]),
+        stray_lake_count=len(stray),
+        unmatched_scored_symbols=tuple(unmatched[:_RECONCILE_SAMPLE_CAP]),
+        unmatched_scored_count=len(unmatched),
+    )
+
+
+def _log_symbol_reconcile_mismatch(report: SymbolReconcileReport) -> None:
+    """Emit ONE :data:`RECONCILE_MISMATCH_EVENT` WARNING when *report* has a mismatch.
+
+    DEC-COMPLETENESS-RECONCILE-DIAG-001 — the observe-only SINK for
+    :func:`reconcile_symbol_coverage`. When either side diverged it logs ONE structured
+    ``structlog`` WARNING carrying the full counts plus the ``repr()`` of the capped sample
+    keys on BOTH sides, so whitespace / encoding differences are visible — for the confirmed
+    ``M&M`` case the line reads e.g. ``stray_lake_symbols=["'M&M '"]`` (trailing space) AND
+    ``unmatched_scored_symbols=["'M&M'"]``, PINPOINTING the exact divergence. ``repr()`` is
+    used on every sampled key so an invisible trailing space / non-ASCII byte is rendered
+    literally; the counts are the full totals (the samples are truncated, not the counts).
+    Nothing is logged when *report* has no mismatch — the healthy steady state stays SILENT.
+
+    It changes NO classification and adds / removes / alters NO scoreboard row (Golden Rule
+    #1) — pure observability. The caller :func:`log_symbol_reconcile_from_board` wraps this
+    so a diagnostic failure can never break the page.
+    """
+    if not report.has_mismatch():
+        return
+    _LOG.warning(
+        RECONCILE_MISMATCH_EVENT,
+        stray_lake_count=report.stray_lake_count,
+        unmatched_scored_count=report.unmatched_scored_count,
+        stray_lake_symbols=[repr(symbol) for symbol in report.stray_lake_symbols],
+        unmatched_scored_symbols=[repr(symbol) for symbol in report.unmatched_scored_symbols],
+    )
+
+
+def log_symbol_reconcile_from_board(
+    spot_rows: Iterable[Mapping[str, Any]], spot_categories: Mapping[str, str]
+) -> SymbolReconcileReport:
+    """Reconcile the scoreboard's OWN spot inputs + log ONE WARNING on a mismatch.
+
+    DEC-COMPLETENESS-RECONCILE-DIAG-001 — the COMMON wiring point the build path calls. It
+    derives the lake-symbol set from the SAME annotated *spot_rows* the scoreboard scores
+    (filtered to the single fetched :data:`SPOT_DIMENSIONS` — a derived intraday-TF row is
+    NOT a distinct lake symbol) and the scored set from *spot_categories* (the engine
+    ``symbol_name`` map the board iterates), runs :func:`reconcile_symbol_coverage`, and
+    emits the diagnostic via :func:`_log_symbol_reconcile_mismatch`. Returns the report (so a
+    caller / test can inspect it) but is itself BEST-EFFORT + OBSERVE-ONLY — it returns the
+    structured report and logs at most one WARNING; it never raises into, nor mutates, the
+    scoreboard payload. The build wrapper additionally guards it so a diagnostic failure can
+    never break the page. O(spot_rows).
+    """
+    lake_symbols = [
+        str(row["symbol"]) for row in spot_rows if str(row["interval"]) in SPOT_DIMENSIONS
+    ]
+    report = reconcile_symbol_coverage(
+        lake_symbols=lake_symbols, scored_symbols=spot_categories.keys()
+    )
+    _log_symbol_reconcile_mismatch(report)
+    return report
 
 
 def _spot_dimension_verdict(completeness: str | None) -> str:
@@ -774,9 +927,13 @@ __all__ = [
     "OPT_NONE",
     "OPT_PARTIAL",
     "OPT_STABLE",
+    "RECONCILE_MISMATCH_EVENT",
     "SPOT_DIMENSIONS",
+    "SymbolReconcileReport",
     "build_completeness_scoreboard",
     "categorize_instruments",
+    "log_symbol_reconcile_from_board",
     "per_symbol_completeness",
+    "reconcile_symbol_coverage",
     "scoreboard_to_csv",
 ]
