@@ -878,15 +878,13 @@ class TestBuildWindowPayloadDuckDB:
         conn = duckdb.connect()
         cache = MoversSnapshotCache()
         calls = {"n": 0}
-        import brutex.dashboard.db_view as dbv
-
-        real = dbv._window_counts_total
+        original = _window_counts_total  # the top-level import (no second `import` form)
 
         def _counting(c: object, glob: str) -> tuple[dict[str, dict[str, int]], int]:
             calls["n"] += 1
-            return real(c, glob)
+            return original(c, glob)
 
-        monkeypatch.setattr(dbv, "_window_counts_total", _counting)
+        monkeypatch.setattr("brutex.dashboard.db_view._window_counts_total", _counting)
         # Two calls at the SAME generation → counts computed ONCE (the cache HIT).
         a = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=1)
         b = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=1)

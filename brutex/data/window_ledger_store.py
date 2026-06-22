@@ -99,7 +99,7 @@ def ledger_path(lake_root: Path) -> Path:
     return ledger_dir(lake_root) / LEDGER_FILENAME
 
 
-def derive_empty_streak(status: str, attempts: int) -> int:
+def _derive_empty_streak(status: str, attempts: int) -> int:
     """Best-effort ``empty_streak`` for a LEGACY row that predates the column (R1).
 
     A pre-R1 Parquet has no ``empty_streak``; reconstruct it from the row's terminal
@@ -116,7 +116,7 @@ def derive_empty_streak(status: str, attempts: int) -> int:
     return 0
 
 
-def derive_in_pull_fetches(status: str) -> int:
+def _derive_in_pull_fetches(status: str) -> int:
     """Best-effort ``in_pull_fetches`` for a LEGACY row that predates the column.
 
     DEC-WINDOW-INPULL-FETCHES-001. A pre-column Parquet has no in-pull fetch count;
@@ -135,8 +135,8 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
     Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
     plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001). A ``None`` optional column
     (a legacy file written before that column) is derived: ``empty_streak`` from
-    ``(status, attempts)`` via :func:`derive_empty_streak`; ``in_pull_fetches`` from
-    ``status`` via :func:`derive_in_pull_fetches`. A wrong arity / non-coercible element
+    ``(status, attempts)`` via :func:`_derive_empty_streak`; ``in_pull_fetches`` from
+    ``status`` via :func:`_derive_in_pull_fetches`. A wrong arity / non-coercible element
     raises here (``ValueError`` / ``TypeError``) and is caught by the caller, degrading
     to an empty ledger.
     """
@@ -159,10 +159,12 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         status_s = str(status)
         attempts_i = int(attempts)
         streak = (
-            derive_empty_streak(status_s, attempts_i) if empty_streak is None else int(empty_streak)
+            _derive_empty_streak(status_s, attempts_i)
+            if empty_streak is None
+            else int(empty_streak)
         )
         fetches = (
-            derive_in_pull_fetches(status_s) if in_pull_fetches is None else int(in_pull_fetches)
+            _derive_in_pull_fetches(status_s) if in_pull_fetches is None else int(in_pull_fetches)
         )
         coerced.append(
             (
@@ -307,10 +309,10 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # The legacy status log has no streak column; derive it (R1) so the
                 # migrated ledger keeps the EMPTY-terminal behaviour the old
                 # reconcile_empty_terminal gave (status-log attempts == EMPTY count).
-                empty_streak=derive_empty_streak(status, r.attempts),
+                empty_streak=_derive_empty_streak(status, r.attempts),
                 # The legacy status log has no in-pull fetch count either; derive the
                 # honest floor from the (settled) status (DEC-WINDOW-INPULL-FETCHES-001).
-                in_pull_fetches=derive_in_pull_fetches(status),
+                in_pull_fetches=_derive_in_pull_fetches(status),
             )
         )
 
@@ -765,8 +767,6 @@ __all__ = [
     "LEDGER_FILENAME",
     "LIVE_FLUSH_MIN_INTERVAL_S",
     "begin_pull_ledger",
-    "derive_empty_streak",
-    "derive_in_pull_fetches",
     "end_pull_ledger",
     "ledger_dir",
     "ledger_path",

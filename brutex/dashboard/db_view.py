@@ -2496,9 +2496,21 @@ def _build_window_payload_duckdb(
     """
     from types import SimpleNamespace
 
-    from brutex.data.window_ledger_store import derive_empty_streak, derive_in_pull_fetches
-
     ledger_glob = ledger_file.as_posix()
+    # A LEGACY pre-R1 Parquet lacks the empty_streak/in_pull_fetches columns; the legacy
+    # pyarrow path DERIVES them faithfully (window_ledger_store derive helpers), so DEFER
+    # the whole payload to it — the raise lands in build_window_payload's fallback — rather
+    # than re-deriving here, which would add a db_view → window_ledger_store import cycle
+    # (CodeQL py/cyclic-import). The probe is a metadata-only ``LIMIT 0`` describe (no data
+    # read); a wrong-shape Parquet (missing a core column) also fails the subset → defers.
+    available = {
+        str(col[0])
+        for col in (
+            conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description or []
+        )
+    }
+    if not {"empty_streak", "in_pull_fetches"}.issubset(available):
+        raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     if count_cache is None:
         counts, total = _window_counts_total(conn, ledger_glob)
     else:
@@ -2568,11 +2580,9 @@ def _build_window_payload_duckdb(
         # int64 ones, None for a null) — pass them straight to the shared `_window_row`
         # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
         # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
-        # already str()/None-handle each field). `empty_streak`/`in_pull_fetches` were
-        # appended LAST to the schema, so a legacy pre-R1 Parquet lacks them — DERIVE them
-        # with the SAME helpers the legacy load applies (window_ledger_store.derive_*), so
-        # the two paths agree byte-for-byte even on a legacy-shape ledger (these are NOT
-        # cosmetic — empty_streak shows how close an EMPTY row is to SKIPPED promotion).
+        # already str()/None-handle each field). The upfront schema probe guarantees this
+        # page carries empty_streak/in_pull_fetches (a legacy pre-R1 Parquet that lacks them
+        # was already deferred to the pyarrow derive path), so read them directly.
         cell = dict(zip(out_columns, raw, strict=True))
         record = SimpleNamespace(
             market=cell["market"],
@@ -2585,16 +2595,8 @@ def _build_window_payload_duckdb(
             attempts=cell["attempts"],
             last_error=cell["last_error"],
             last_attempt_at=cell["last_attempt_at"],
-            empty_streak=(
-                derive_empty_streak(str(cell["status"]), int(cell["attempts"]))
-                if cell.get("empty_streak") is None
-                else int(cell["empty_streak"])
-            ),
-            in_pull_fetches=(
-                derive_in_pull_fetches(str(cell["status"]))
-                if cell.get("in_pull_fetches") is None
-                else int(cell["in_pull_fetches"])
-            ),
+            empty_streak=int(cell["empty_streak"]),
+            in_pull_fetches=int(cell["in_pull_fetches"]),
         )
         rows.append(
             _window_row(
