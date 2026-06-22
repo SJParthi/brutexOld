@@ -230,27 +230,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/window-ledger-write-halt-jlzt1n` (a disk-full / OOM during the durable
-  window-ledger save now HALTS the pull gracefully (a pull-wide `LakeWriteHalt`) instead of propagating a raw
-  `OSError` — DEC-WINDOW-LEDGER-WRITE-HALT-001, MIGRATION.md #901, the resilience half of the operator's "along
-  with resilience hardening take futures top value tab also". ROOT: the durable ledger lives under
-  `<lake_root>/window_ledger/` — it IS a lake write — yet `save_window_ledger` used the guard-FREE
-  `atomic_write_simple`, so a disk-full there propagated a raw `OSError` (NOT a `BruteXError`) that the per-symbol
-  quarantine could mis-handle / keep hammering a full disk. FIX (lake-write resilience): `save_window_ledger` now
-  writes through the lake-guarded `atomic_write_via` (`atomic_io.py`), so `ENOSPC`→`LakeWriteHalt("disk_full")` /
-  `MemoryError`→`LakeWriteHalt("out_of_memory")` while EVERY other error is UNCHANGED (a non-`ENOSPC` `OSError`
-  like `EACCES` still propagates raw — never mis-escalated); the `atomic_write_simple` docstring drops the ledger
-  from its non-lake list. CALL-PATH VERIFIED (the deferral blocker of #890/#891, now complete): `LakeWriteHalt`
-  is already in BOTH ingest spines' `_GLOBAL_STOP_ERRORS`, so it reaches the CLI `_pull_halt_errors` (#888) +
-  dashboard `_is_pull_halt` (#889) halt handlers + their CRITICAL Telegram alert; all 3 save sites propagate
-  cleanly (un-wrapped `on_window()` flush, a `make_live_sync` lock that never suppresses, `end_pull_ledger` in a
-  `finally`); the dry-run/`None`-ledger path never reaches the save. HONEST: graceful DETECT+halt, NOT an RSS cap
-  (out of scope, unchanged from #885); only `ENOSPC`+`MemoryError` mapped; recovery = clean re-pull.
-  `window_ledger_store.py` 100% line+branch (177/50, 53 tests) + `atomic_io.py` stays 100% (42/6, 13 tests); NEW
-  `TestSaveDiskFullHalts` — ENOSPC→disk_full (+ no .tmp leak), MemoryError→out_of_memory, EACCES propagates raw —
-  drives the REAL guard via a patched `pyarrow.parquet.write_table`; 127 ledger/atomic/cli/coverage/option tests
-  green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer SHIP, workspace-health HEALTHY. ENGINE UNCHANGED
-  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-MOVERS-FUTURES-VALUE-001,
+- **Active branch:** `claude/product-scoreboard-jlzt1n` (a plain-English customer-facing "Product
+  Scoreboard" of finished / current / future work is committed as a repo doc + a self-contained shareable
+  HTML one-pager, generated from the decision ledger — DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902, the
+  operator's "automated easy table-level comparison view where even any human can understand … attract even
+  millions of customers". DOCS ONLY (no code/engine/scope/vocab/rate change): NEW `docs/PRODUCT_SCOREBOARD.md`
+  (themed what-it-does → why-you-care → PR tables across the recent merged batch #842–#860 + an honest
+  near/mid/major roadmap + the per-change quality bar) + `docs/product_scoreboard.html` (zero-dependency
+  inline-CSS one-pager for direct browser sharing). HONEST: every claim traces to the ledger / CLAUDE.md facts
+  (~750 lake names, 21 TFs, 2020→today depth, the §8 ~33B-trial / 2–4-day SLA — no invented numbers); the
+  engine-vs-lake scope is stated explicitly (the ~750 names are reference, the engine trades the 3 indices); the
+  ledger stays authoritative if the two ever disagree. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-WINDOW-LEDGER-WRITE-HALT-001, MIGRATION.md #901 (a disk-full /
+  OOM during the durable window-ledger save now HALTS the pull gracefully via the lake-guarded `atomic_write_via`
+  — ENOSPC→`LakeWriteHalt("disk_full")` / MemoryError→out_of_memory, every other error raw — reaching the
+  CLI/dashboard halt handlers + their CRITICAL Telegram alert; `window_ledger_store.py` + `atomic_io.py` both
+  100% line+branch, hostile-reviewer SHIP). Prior merged: DEC-MOVERS-FUTURES-VALUE-001,
   MIGRATION.md #900 (the `/movers` Futures tab gained a "Top Value" (turnover) ranking + a "Value (Cr)" column via
   the SHARED HLC3 `session_traded_value_paisa`, completing the value metric across spot+options+futures;
   `movers_futures.py`+`movers_options.py`+`movers_snapshot.py` all 100% line+branch, 307 movers tests green).
@@ -867,7 +862,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/window-ledger-write-halt-jlzt1n`
+- **Active feature branch:** `claude/product-scoreboard-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

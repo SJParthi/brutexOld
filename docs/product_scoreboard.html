@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BruteX — Product Scoreboard</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#121a33; --panel2:#0f1730; --ink:#e8edff; --muted:#9fb0d8;
+    --line:#26345e; --green:#28d17c; --amber:#ffb43a; --red:#ff6a6a; --blue:#5aa2ff;
+    --chip:#1b2950; --shadow:0 10px 30px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0b1020,#0a0e1c);color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1140px;margin:0 auto;padding:32px 22px 64px}
+  .hero{text-align:center;padding:34px 18px 8px}
+  .badge{display:inline-block;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--blue);background:var(--chip);border:1px solid var(--line);
+    padding:6px 12px;border-radius:999px;margin-bottom:16px}
+  h1{font-size:40px;margin:8px 0 6px;letter-spacing:-.5px}
+  .tag{color:var(--muted);font-size:18px;max-width:760px;margin:0 auto}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:30px 0 8px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center;box-shadow:var(--shadow)}
+  .kpi b{display:block;font-size:26px}
+  .kpi span{color:var(--muted);font-size:13px}
+  h2{font-size:24px;margin:42px 0 6px;display:flex;align-items:center;gap:10px}
+  h2 small{font-weight:400;color:var(--muted);font-size:14px}
+  .theme{color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.12em;margin:26px 0 8px}
+  table{width:100%;border-collapse:separate;border-spacing:0;background:var(--panel);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);margin:8px 0 4px}
+  th,td{padding:13px 15px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+  th{background:var(--panel2);color:var(--muted);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+  tr:last-child td{border-bottom:none}
+  td.feat{font-weight:600;width:24%}
+  td.why{color:#cdd8ff}
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap}
+  .live{background:rgba(40,209,124,.14);color:var(--green);border:1px solid rgba(40,209,124,.4)}
+  .ship{background:rgba(90,162,255,.14);color:var(--blue);border:1px solid rgba(90,162,255,.4)}
+  .near{background:rgba(40,209,124,.10);color:var(--green);border:1px solid rgba(40,209,124,.3)}
+  .mid{background:rgba(255,180,58,.12);color:var(--amber);border:1px solid rgba(255,180,58,.4)}
+  .big{background:rgba(255,106,106,.12);color:var(--red);border:1px solid rgba(255,106,106,.4)}
+  .ref{color:var(--muted);font-size:12px;white-space:nowrap}
+  .trust{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:var(--shadow)}
+  .card b{color:var(--green)}
+  .foot{color:var(--muted);font-size:13px;text-align:center;margin-top:40px}
+  .legend{color:var(--muted);font-size:13px;margin:10px 0 0}
+  @media(max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}.trust{grid-template-columns:1fr}
+    td.feat{width:auto}h1{font-size:30px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="badge">Product Scoreboard · June 2026</div>
+    <h1>BruteX</h1>
+    <p class="tag">A research engine that captures <b>every minute</b> of India's index &amp; F&amp;O market history,
+      shows you <b>what's actually moving</b> in real time, and brute-force tests trading ideas at massive scale —
+      built so <b>nothing is ever slow, nothing is ever lost, and you always know what's happening.</b></p>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><b>~750</b><span>tradable names in the data lake</span></div>
+    <div class="kpi"><b>21</b><span>timeframes, all from 1-minute data</span></div>
+    <div class="kpi"><b>100%</b><span>test coverage on every change</span></div>
+    <div class="kpi"><b>2020→today</b><span>minute-by-minute history</span></div>
+  </div>
+
+  <h2>✅ Finished &amp; Live <small>— already merged into the product</small></h2>
+
+  <div class="theme">⚡ Theme 1 — "Nothing is ever slow"</div>
+  <table>
+    <tr><th>Feature</th><th>Before → After</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Instant view switching</td><td class="why">Re-scanned the whole multi-year data tree on every click → cached instant handoff</td><td class="why">No waiting when you change candle views</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Instant Universe page</td><td class="why">Waited 30–160s on a slow external site every visit → served from cache</td><td class="why">The list of ~750 names opens immediately</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Instant Completeness page</td><td class="why">Re-scanned the whole lake each load → O(1) on repeat</td><td class="why">"How complete is my data?" answers instantly</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Fast "Fetch Windows"</td><td class="why">Counted 340,000+ rows in Python per click → database-paginated</td><td class="why">Stays snappy no matter how big history grows</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Clean symbol picker</td><td class="why">One unusable 750-item dropdown → tidy symbol → timeframe menu</td><td class="why">You can actually find what you want</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
+  <div class="theme">📊 Theme 2 — "See what's actually moving"</div>
+  <table>
+    <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">"Top Value" on Futures</td><td class="why">Ranks futures by money traded (turnover), not just contract count — now across spot + options + futures</td><td class="why">Follow the real money, full parity across asset types</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Broker-accurate turnover</td><td class="why">Prices each minute at its typical price (H+L+C)/3 × volume instead of the closing tick alone</td><td class="why">Rankings track your broker's turnover far more closely</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
+  <div class="theme">🛡️ Theme 3 — "Nothing is ever lost"</div>
+  <table>
+    <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Crash-safe writes</td><td class="why">Every file is written-then-atomically-swapped, via one shared tested core</td><td class="why">A crash mid-write never corrupts your data</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">No silent data loss</td><td class="why">Two downloads sharing a lake can't overwrite each other (cross-process locking)</td><td class="why">Run CLI + dashboard pulls at once, safely</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">One bad file ≠ broken page</td><td class="why">A corrupt file skips that one instrument (logged) instead of crashing the screen</td><td class="why">Your dashboard never goes down over one bad file</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Graceful disk-full halt</td><td class="why">If the disk fills mid-download, the pull stops cleanly + alerts you — no corrupt partial data</td><td class="why">A full disk can never corrupt or runaway-fail your data</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
+  <div class="theme">📡 Theme 4 — "You always know what's happening"</div>
+  <table>
+    <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Instant phone alerts</td><td class="why">A CRITICAL Telegram alert fires when a download halts (disk-full / out-of-memory / quota) — from CLI and dashboard</td><td class="why">You hear about a stopped pull in real time, not hours later</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
+  <div class="theme">🎯 Theme 5 — "The data is right"</div>
+  <table>
+    <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">"&amp;"-name stocks fixed</td><td class="why">M&amp;M, L&amp;TFH, J&amp;KBANK etc. now retry an encoded form so their full options chains download</td><td class="why">No whole stocks silently missing from F&amp;O data</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Smarter default downloads</td><td class="why">Futures default to 3 months, options to 30 days</td><td class="why">Stops wasting time/quota on illiquid early option bars</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Honest completeness</td><td class="why">Late-listed names + missing years marked "partial" instead of faking a full span</td><td class="why">The completeness screen never lies to you</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
+  <h2>🚀 Current <small>— just shipped / in motion</small></h2>
+  <table>
+    <tr><th>Item</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Disk-full ledger halt</td><td class="why">The download progress-ledger — the last file not protected against a full disk — now halts the pull cleanly + texts you instead of crashing</td><td class="why">Completes the "nothing is ever lost" guarantee end-to-end</td><td><span class="pill live">MERGED</span></td></tr>
+  </table>
+
+  <h2>🔮 Future <small>— planned next (honest roadmap)</small></h2>
+  <table>
+    <tr><th>Priority</th><th>Plan</th><th>What it'll give you</th><th>Stage</th></tr>
+    <tr><td><span class="pill near">NEAR</span></td><td class="feat">In-place candle refresh</td><td class="why">Candle view updates its grid in place on tab-switch (no full rebuild)</td><td class="ref">fast-follow</td></tr>
+    <tr><td><span class="pill near">NEAR</span></td><td class="feat">Shared turnover reader</td><td class="why">Options reuses the one shared turnover reader — less duplicate work</td><td class="ref">cleanup</td></tr>
+    <tr><td><span class="pill mid">MID</span></td><td class="feat">True O(page) paging</td><td class="why">Candle pager reads only the visible page via a write-time manifest</td><td class="ref">documented</td></tr>
+    <tr><td><span class="pill mid">MID</span></td><td class="feat">Confirm vendor limits</td><td class="why">Lock in real rate limits + data boundaries with live probes</td><td class="ref">probe gate</td></tr>
+    <tr><td><span class="pill big">MAJOR</span></td><td class="feat">Brute-force sweep</td><td class="why">Test ~33 billion strategy combinations across all 21 timeframes (~2–4 days on reference hardware)</td><td class="ref">core mission</td></tr>
+    <tr><td><span class="pill big">MAJOR</span></td><td class="feat">Options execution track</td><td class="why">Translate winning index signals into real options trades for execution realism</td><td class="ref">Track 2</td></tr>
+  </table>
+  <p class="legend"><b>Legend:</b> <span class="pill live">LIVE</span> shipped ·
+    <span class="pill near">NEAR</span> near-term · <span class="pill mid">MID</span> mid-term ·
+    <span class="pill big">MAJOR</span> major initiative</p>
+
+  <h2>🛡️ The bar every change clears</h2>
+  <div class="trust">
+    <div class="card"><b>100% tested</b><br>100% line + branch coverage on every touched module, plus property, golden, stress &amp; mutation tests.</div>
+    <div class="card"><b>Hostile-reviewed</b><br>An independent adversarial reviewer hunts defects before anything merges.</div>
+    <div class="card"><b>Workspace-verified</b><br>Full-repo health check (255-file type-check + full suite) on every change.</div>
+    <div class="card"><b>No hype, no illusion</b><br>Every limit is stated plainly — unverified things are labelled "unverified".</div>
+    <div class="card"><b>Fast everywhere</b><br>O(1) / O(page) discipline — "nowhere in the product is ever slow."</div>
+    <div class="card"><b>Scope-locked</b><br>The engine's market scope is never changed silently.</div>
+  </div>
+
+  <p class="foot">BruteX — Extreme brute-force backtesting engine for Indian index &amp; F&amp;O markets.<br>
+    Every row above is real, merged, and verified. Generated from the live decision ledger.</p>
+
+</div>
+</body>
+</html>
