@@ -47,6 +47,7 @@ from brutex.dashboard.coverage_view import (
     COMPLETENESS_PENDING,
     COMPLETENESS_SETTLED,
 )
+from brutex.data.partition import SPOT_PROBE_SEGMENTS
 
 _LOG = structlog.get_logger("brutex.dashboard.completeness")
 
@@ -136,8 +137,17 @@ class SymbolReconcileReport:
       is None: continue``) — it has data but is INVISIBLE on the board (a *stray lake
       partition*); and
     * conversely a scored symbol with NO matching lake row reads ``none`` even though a lake
-      partition for a near-identical key (``"M&M "`` with a trailing space, ``"NSE-M&M"``)
-      exists — the confirmed ``M&M`` failure mode.
+      partition for a near-identical key exists — the ``M&M``-empty symptom the operator
+      reported.
+
+    HONEST (Golden Rule #1/#10): the EXACT divergent on-disk form is UNVERIFIED — the
+    production pull keys BOTH the lake partition and the scored map on the same stripped
+    ``instrument.symbol_name`` (``adapters/groww/ingest.py`` / ``instruments.py``), so a
+    same-pull divergence should not occur; a real drift would come from a legacy / foreign /
+    regression partition or an encoding artefact. This diagnostic does NOT assert a specific
+    form (e.g. a trailing-space ``"M&M "`` or an exchange-prefixed ``"NSE-M&M"`` — those are
+    ILLUSTRATIVE) — it SURFACES whatever drift actually exists, and the ``repr()`` of the
+    offending keys in the WARNING names the true on-disk form in the live box.
 
     Either side alone is invisible; together they PINPOINT the exact key drift. The fields
     carry the full COUNTS plus capped SAMPLE lists (≤ :data:`_RECONCILE_SAMPLE_CAP`) so the
@@ -212,9 +222,10 @@ def _log_symbol_reconcile_mismatch(report: SymbolReconcileReport) -> None:
     DEC-COMPLETENESS-RECONCILE-DIAG-001 — the observe-only SINK for
     :func:`reconcile_symbol_coverage`. When either side diverged it logs ONE structured
     ``structlog`` WARNING carrying the full counts plus the ``repr()`` of the capped sample
-    keys on BOTH sides, so whitespace / encoding differences are visible — for the confirmed
-    ``M&M`` case the line reads e.g. ``stray_lake_symbols=["'M&M '"]`` (trailing space) AND
-    ``unmatched_scored_symbols=["'M&M'"]``, PINPOINTING the exact divergence. ``repr()`` is
+    keys on BOTH sides, so whitespace / encoding differences are visible — for the
+    ``M&M``-empty symptom the line would read e.g. ``stray_lake_symbols=["'M&M '"]`` (an
+    ILLUSTRATIVE trailing space) AND ``unmatched_scored_symbols=["'M&M'"]``, PINPOINTING the
+    exact (live-box-`repr()`-named, not assumed) divergence. ``repr()`` is
     used on every sampled key so an invisible trailing space / non-ASCII byte is rendered
     literally; the counts are the full totals (the samples are truncated, not the counts).
     Nothing is logged when *report* has no mismatch — the healthy steady state stays SILENT.
@@ -241,23 +252,36 @@ def log_symbol_reconcile_from_board(
 
     DEC-COMPLETENESS-RECONCILE-DIAG-001 — the COMMON wiring point the build path calls. It
     derives the lake-symbol set from the SAME annotated *spot_rows* the scoreboard scores
-    (filtered to the single fetched :data:`SPOT_DIMENSIONS` — a derived intraday-TF row is
-    NOT a distinct lake symbol) and the scored set from *spot_categories* (the engine
-    ``symbol_name`` map the board iterates), runs :func:`reconcile_symbol_coverage`, and
-    emits the diagnostic via :func:`_log_symbol_reconcile_mismatch`. Returns the report (so a
-    caller / test can inspect it) but is itself BEST-EFFORT + OBSERVE-ONLY — it returns the
-    structured report and logs at most one WARNING; it never raises into, nor mutates, the
-    scoreboard payload. The build wrapper additionally guards it so a diagnostic failure can
-    never break the page. O(spot_rows).
+    (filtered to the single fetched :data:`SPOT_DIMENSIONS` AND to the spot segments
+    :data:`~brutex.data.partition.SPOT_PROBE_SEGMENTS` (``INDEX`` / ``CASH``) — a derived
+    intraday-TF row is NOT a distinct lake symbol, and an F&O contract partition is ALSO
+    stored at ``1minute`` but is NEVER a scored spot underlying, so it must be excluded or it
+    would mis-count every backfilled F&O contract as a stray and drown the real signal) and
+    the scored set from *spot_categories* (the engine ``symbol_name`` map the board iterates),
+    runs :func:`reconcile_symbol_coverage`, and emits the diagnostic via
+    :func:`_log_symbol_reconcile_mismatch`. Returns the report (so a caller / test can inspect
+    it). It is BEST-EFFORT + OBSERVE-ONLY: the whole body is wrapped so it NEVER raises into,
+    nor mutates, the scoreboard payload — a malformed row logs ONE
+    ``completeness.symbol_reconcile_error`` WARNING and returns an empty report rather than
+    breaking the page. O(spot_rows).
     """
-    lake_symbols = [
-        str(row["symbol"]) for row in spot_rows if str(row["interval"]) in SPOT_DIMENSIONS
-    ]
-    report = reconcile_symbol_coverage(
-        lake_symbols=lake_symbols, scored_symbols=spot_categories.keys()
-    )
-    _log_symbol_reconcile_mismatch(report)
-    return report
+    try:
+        lake_symbols = [
+            str(row["symbol"])
+            for row in spot_rows
+            if str(row["interval"]) in SPOT_DIMENSIONS
+            and str(row.get("segment", "")) in SPOT_PROBE_SEGMENTS
+        ]
+        report = reconcile_symbol_coverage(
+            lake_symbols=lake_symbols, scored_symbols=spot_categories.keys()
+        )
+        _log_symbol_reconcile_mismatch(report)
+        return report
+    except Exception as exc:
+        # Observe-only diagnostic must NEVER break the page: any error (e.g. a malformed row)
+        # is caught, logged ONCE, and an empty report returned instead of propagating.
+        _LOG.warning("completeness.symbol_reconcile_error", error=str(exc))
+        return SymbolReconcileReport()
 
 
 def _spot_dimension_verdict(completeness: str | None) -> str:

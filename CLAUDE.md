@@ -242,15 +242,18 @@ hostile-review pass._
   payload BYTE-UNCHANGED): NEW pure `reconcile_symbol_coverage` (two set-diffs, O(symbols), O(1) lookups) → a
   `SymbolReconcileReport` (full counts + `_RECONCILE_SAMPLE_CAP=10` sorted samples); a sink that emits ONE
   `completeness.symbol_reconcile_mismatch` structlog WARNING ONLY on a mismatch, naming each key via `repr()` (so a
-  trailing space / non-ASCII byte renders literally — `stray_lake_symbols=["'M&M '"]` vs
-  `unmatched_scored_symbols=["'M&M'"]`); SILENT in the healthy state; wired into `app.py` `_completeness_inputs`
-  AFTER scoring, guarded so a diagnostic failure can never break the page. HONEST: it DIAGNOSES the root cause, it
-  does NOT yet FIX the empty M&M — the confirmed `repr()` strings the WARNING prints in the LIVE box enable a correct
-  key-normalization FIX as the explicit NEXT follow-up (grounded in evidence, not a guess — the earlier
-  `.replace("&amp;","&")` guess was rejected as illusion, Golden Rule #1); OBSERVE-ONLY (clean-case test asserts
-  `board == build_again`). `completeness.py` 100% line+branch (252/86) + `app.py` stays 100%; 83 completeness+coverage
-  tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer + workspace-health PENDING. ENGINE UNCHANGED,
-  no scope/vocab/rate change. Prior merged: DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906 (the production Groww
+  trailing space / non-ASCII byte renders literally); SILENT in the healthy state AND on a pure F&O backfill — the
+  lake set is filtered to the spot segments `SPOT_PROBE_SEGMENTS` (INDEX/CASH) so an F&O `1minute` contract partition
+  (also stored at 1minute, never a scored underlying) is NOT mis-counted as a stray (the hostile-review MAJOR, folded);
+  wired into `app.py` `_completeness_inputs` AFTER scoring, the function INTERNALLY GUARDED (best-effort — a malformed
+  row logs one error WARNING + returns empty, never breaks the page). HONEST: it DIAGNOSES the root cause, it does NOT
+  yet FIX the empty M&M — the live-box `repr()` (the EXACT, currently-UNVERIFIED form; production keys both sides on
+  stripped `symbol_name`, so `NSE-M&M`/`"M&M "` are ILLUSTRATIVE not confirmed) enables a correct key-normalization FIX
+  as the NEXT follow-up (grounded in evidence, not a guess — the earlier `.replace("&amp;","&")` guess was rejected as
+  illusion, Golden Rule #1); OBSERVE-ONLY (clean-case test runs the diagnostic BETWEEN two builds → byte-identical).
+  `completeness.py` 100% line+branch (257/86) + `app.py` stays 100%; 85 completeness+coverage tests green;
+  ruff/`mypy --strict`/`pyright` clean; hostile-reviewer FIX-FIRST (1 MAJOR + 3 MINOR/NIT) → ALL FOLDED + re-verified
+  100%, workspace-health re-run PENDING. ENGINE UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906 (the production Groww
   per-second rate ceiling LOWERED 8 → 5 r/s — a live-log audit showed the controller pinned at the ~3 r/s soft floor
   absorbing ~870 vendor 429-retries while the 5–8 headroom was never usable throughput; single source-of-truth
   constant `GROWW_RATE_LIMIT_RPS_CEILING` `8.0`→`5.0`, both injection sites read it, AIMD ladder/governor/floors

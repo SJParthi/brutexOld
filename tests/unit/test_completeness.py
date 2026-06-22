@@ -62,12 +62,18 @@ def _spot_row(
     completeness: str,
     *,
     exchange: str = "NSE",
+    segment: str = "CASH",
     first_date: str | None = None,
     last_date: str | None = None,
 ) -> dict[str, Any]:
+    # Production rows from ``summarize_spot_datasets`` always carry ``segment``; the
+    # reconciliation diagnostic filters on it (spot segments only — F&O ``1minute``
+    # contract partitions are NOT scored underlyings). Default ``CASH`` keeps every
+    # pre-existing row a scored spot symbol.
     return {
         "symbol": symbol,
         "exchange": exchange,
+        "segment": segment,
         "interval": interval,
         "completeness": completeness,
         "first_date": first_date,
@@ -827,19 +833,22 @@ def test_log_reconcile_from_board_silent_and_scoreboard_unchanged_when_clean() -
     ]
     cats = {"M&M": CATEGORY_EQUITY, "NSE-NIFTY": CATEGORY_INDEX}
 
+    # Build the board BEFORE running the diagnostic over the SAME mutable inputs ...
+    board_before = build_completeness_scoreboard(spot_rows, cats, [], {})
+
     # The diagnostic stays SILENT — every scored symbol is backed by a lake key and vice versa.
     with capture_logs() as logs:
         report = log_symbol_reconcile_from_board(spot_rows, cats)
     assert report.has_mismatch() is False
     assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
 
+    # ... then build AGAIN from those SAME inputs: byte-identical proves the diagnostic
+    # mutated NEITHER ``spot_rows`` NOR ``cats`` (true non-interference, not just determinism).
+    board_after = build_completeness_scoreboard(spot_rows, cats, [], {})
+    assert board_after == board_before
     # The scoreboard scores ``M&M`` normally (DIM_FULL, not ``none``) — the consistent case.
-    board = build_completeness_scoreboard(spot_rows, cats, [], {})
-    per_symbol = {row["symbol"]: row for row in board["spot"]["per_symbol"]}
+    per_symbol = {row["symbol"]: row for row in board_after["spot"]["per_symbol"]}
     assert per_symbol["M&M"]["1minute"] == DIM_FULL
-    # Observability ONLY: the diagnostic NEVER mutates the board (it took the SAME rows above).
-    board_again = build_completeness_scoreboard(spot_rows, cats, [], {})
-    assert board == board_again
 
 
 def test_log_reconcile_does_not_log_when_a_derived_row_is_the_only_extra() -> None:
@@ -857,3 +866,48 @@ def test_log_reconcile_does_not_log_when_a_derived_row_is_the_only_extra() -> No
         report = log_symbol_reconcile_from_board(spot_rows, cats)
     assert report.has_mismatch() is False
     assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
+
+
+def test_log_reconcile_excludes_fno_contract_partitions() -> None:
+    """An F&O contract partition is ALSO stored at ``1minute`` but is NEVER a scored spot
+    underlying — the lake-symbol set is filtered to spot segments (``SPOT_PROBE_SEGMENTS`` =
+    INDEX/CASH), so a ``segment="FNO"`` 1-minute partition is NOT counted as a stray. Without
+    this filter every backfilled F&O contract would fire the WARNING on EVERY load and drown
+    the real signal; the diagnostic must stay SILENT here (covers the segment-filter False
+    branch)."""
+    spot_rows = [
+        _spot_row(
+            "NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, segment="INDEX", first_date="2020-01-01"
+        ),
+        # An F&O contract partition at 1minute — present on disk, NOT a scored underlying.
+        _spot_row(
+            "NSE-NIFTY25JAN24000CE",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            segment="FNO",
+            first_date="2025-01-01",
+        ),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX}
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, cats)
+    # The FNO partition is excluded by the spot-segment filter → no stray, no mismatch, silent.
+    assert report.stray_lake_count == 0
+    assert report.has_mismatch() is False
+    assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
+
+
+def test_log_reconcile_from_board_is_guarded_against_a_malformed_row() -> None:
+    """OBSERVE-ONLY must NEVER break the page: a malformed row (missing ``symbol``) raises
+    inside the comprehension; the body is wrapped so the error is caught, logged ONCE as
+    ``completeness.symbol_reconcile_error``, and an empty report returned — no raise (covers the
+    defensive except branch)."""
+    spot_rows = [{"interval": "1minute", "segment": "CASH"}]  # no "symbol" → KeyError
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, {"NSE-NIFTY": CATEGORY_INDEX})
+    assert report.has_mismatch() is False
+    assert report.stray_lake_count == 0
+    assert report.unmatched_scored_count == 0
+    errors = [e for e in logs if e.get("event") == "completeness.symbol_reconcile_error"]
+    assert len(errors) == 1
+    assert errors[0]["log_level"] == "warning"

@@ -2730,11 +2730,12 @@ def build_app(
             spot_window_rollup(lake),
         )["rows"]
         # OBSERVE-ONLY reconciliation diagnostic (DEC-COMPLETENESS-RECONCILE-DIAG-001): on a
-        # lake-symbol-key ↔ scored-symbol-key divergence (e.g. ``M&M`` reads ``none`` because
-        # its lake partition keys on a near-identical form) this logs ONE structured WARNING
-        # naming the offending keys via ``repr()``. It NEITHER alters the returned inputs NOR
-        # the scoreboard payload — it only logs over the SAME rows scored just below, so it is
-        # consistent with the unguarded scoreboard build and adds no new failure surface.
+        # lake-symbol-key ↔ scored-symbol-key divergence (the ``M&M``-empty symptom — a spot
+        # underlying reads ``none`` while a near-identical lake key carries the data) this logs
+        # ONE structured WARNING naming the offending keys via ``repr()``. It NEITHER alters the
+        # returned inputs NOR the scoreboard payload (it only reads the SAME rows scored just
+        # below), and is itself best-effort + internally guarded, so it adds no new failure
+        # surface — a malformed row logs a warning and returns empty rather than break the page.
         log_symbol_reconcile_from_board(spot_rows, categories)
         return spot_rows, categories, store.list_coverage()
 
