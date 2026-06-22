@@ -57,7 +57,7 @@ jobs:
     # Nightly default ~5 min; manual soak gets the full 60 min budget.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
