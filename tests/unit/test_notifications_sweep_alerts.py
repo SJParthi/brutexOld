@@ -219,6 +219,17 @@ class TestAlerts:
         assert ev.dedupe_key == "auth-renew"
         assert "token expired" in ev.message
 
+    def test_pull_halted(self) -> None:
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).pull_halted(reason="disk_full")
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "pull-halt:disk_full"  # reason-scoped dedupe (RAW, unescaped)
+        # The body is MarkdownV2-escaped (underscore → `\_`), so assert the escaped forms.
+        assert escape_markdown_v2("disk_full") in ev.message
+        assert escape_markdown_v2("Pull HALTED") in ev.message
+
     def test_sweep_complete(self) -> None:
         fake = FakeNotifier()
         summary = FakeSummary(
