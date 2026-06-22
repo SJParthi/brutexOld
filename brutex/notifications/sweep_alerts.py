@@ -343,6 +343,35 @@ class SweepAlerter:
             dedupe_key="auth-renew",
         )
 
+    def pull_halted(self, *, reason: str) -> bool:
+        """Alert that the pull HALTED on an unrecoverable, pull-wide condition (CRITICAL).
+
+        Fired when a pull-wide global-stop propagates out of the ingest spine — a
+        full disk / OOM (:class:`~brutex.data.errors.LakeWriteHalt`,
+        ``reason="disk_full"`` / ``"out_of_memory"``, DEC-LAKE-WRITE-HALT-001) or a
+        daily-quota / quota-invariant stop. Unlike a per-symbol quarantine this aborts
+        EVERY remaining window identically, so the operator must act (free disk, wait
+        for the quota window) before re-running — hence CRITICAL. The ``dedupe_key`` is
+        the reason so a repeated halt of the SAME cause coalesces.
+
+        Parameters
+        ----------
+        reason
+            A short, non-secret cause token (e.g. ``"disk_full"``,
+            ``"out_of_memory"``, ``"DailyQuotaExceeded"``).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Pull HALTED: {reason}. The pull stopped — no further bars will be "
+            "fetched until you resolve it (e.g. free disk space) and re-run. Bars "
+            "already written are safe (atomic + idempotent); a re-pull resumes."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"pull-halt:{reason}",
+        )
+
     def symbol_window_failure(
         self,
         *,
@@ -446,6 +475,37 @@ class SweepAlerter:
         return _on_rate_limit
 
 
+def emit_pull_halt_alert(exc: Exception) -> None:
+    """Fire a best-effort CRITICAL Telegram alert that the pull HALTED (DEC-TELEGRAM-PULL-HALT-001).
+
+    The COMMON helper shared by BOTH the CLI fetch path (``brutex.cli`` ``cmd_fetch``)
+    and the dashboard background pull (:class:`brutex.dashboard.pull_jobs.BackgroundPullJob`),
+    so the pull-halt alert has ONE source of truth (CLAUDE.md §11). Called when a
+    pull-wide global-stop (a full-disk / OOM :class:`~brutex.data.errors.LakeWriteHalt`,
+    or a daily-quota / quota-invariant stop) propagates out of the ingest spine. Unlike
+    a per-symbol quarantine this aborts EVERY remaining window, so the operator must act
+    — hence a CRITICAL push. The ``LakeWriteHalt.reason`` (``disk_full`` / ``out_of_memory``)
+    is surfaced verbatim; any other stop uses its class name.
+
+    The whole body is wrapped in a blanket ``try/except`` so the fire-and-forget
+    contract is STRUCTURAL, not merely circumstantial: even a future import-time or
+    construction failure here is swallowed + logged and can NEVER replace the halt the
+    caller re-raises (``structlog`` is a core dep, so the logger import itself cannot
+    newly fail). When Telegram is disabled (the default), the publish is a silent no-op.
+    """
+    import structlog
+
+    try:
+        from brutex.data.errors import LakeWriteHalt
+
+        reason = exc.reason if isinstance(exc, LakeWriteHalt) else type(exc).__name__
+        SweepAlerter().pull_halted(reason=reason)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the halt
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "pull_halt_alert_failed"
+        )
+
+
 __all__ = [
     "NotifierResolver",
     "RateControllerLike",
@@ -453,5 +513,6 @@ __all__ = [
     "SweepSummaryLike",
     "SymbolFailureLike",
     "WorkerEventLike",
+    "emit_pull_halt_alert",
     "escape_markdown_v2",
 ]

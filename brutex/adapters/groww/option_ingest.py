@@ -90,6 +90,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.session import filter_intraday_session
@@ -137,9 +138,16 @@ _MAX_BACKOFF_S: float = 8.0
 #: (:data:`~brutex.adapters.groww.run_ingest._GLOBAL_STOP_ERRORS`): a quota signal
 #: means the day's budget is spent (``DailyQuotaExceeded``) or a quota-ledger
 #: invariant broke (``QuotaInvariantError``), so every REMAINING contract would
-#: fail identically. This keeps the broad ``BruteXError`` per-contract quarantine
+#: fail identically; ``LakeWriteHalt`` (disk-full / OOM at the lake-write boundary,
+#: DEC-LAKE-WRITE-HALT-001) joins it for the same reason — a full disk fails every
+#: remaining contract identically and must halt, not quarantine per-contract. This
+#: keeps the broad ``BruteXError`` per-contract quarantine
 #: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
-_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (DailyQuotaExceeded, QuotaInvariantError)
+_GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
+    DailyQuotaExceeded,
+    QuotaInvariantError,
+    LakeWriteHalt,
+)
 
 #: One unit of OUTER-loop work for the parallel fan-out: a derivative
 #: ``(contract, interval)`` pair. Each maps to a DISTINCT lake partition (the

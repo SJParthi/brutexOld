@@ -13,6 +13,8 @@ DEC-P0-017 convention the file silences ``reportPrivateUsage`` at the top.
 
 from __future__ import annotations
 
+import fcntl
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +22,26 @@ from pathlib import Path
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter, _tick_round
+from brutex.data.partition_lock import partition_lock_path
+
+
+def _partition_lock_is_held(lock_path: Path) -> bool:
+    """True iff a SEPARATE fd cannot take the partition's exclusive lock (it is held).
+
+    A second ``open`` of the lock path is a distinct open file description, so
+    ``flock`` treats it like another PROCESS — the exact cross-process contention
+    the lake's partition lock must win (DEC-LAKE-PARTITION-FLOCK-001).
+    """
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _bar(
@@ -153,37 +175,63 @@ class TestWriterErrors:
                 bars=[jan_bar, feb_bar],
             )
 
-    def test_atomic_write_cleans_up_on_error(self, tmp_path: Path) -> None:
-        """_atomic_write must unlink the tempfile and re-raise on write failure."""
-        from brutex.data.parquet_writer import ParquetWriter
+    def test_atomic_write_cleans_up_on_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_atomic_write must unlink the tempfile and re-raise on write failure.
 
-        # We trigger the exception by monkeypatching os.replace after the
-        # tempfile is written, so the cleanup path (os.unlink) is exercised.
+        _atomic_write delegates to the shared atomic_io helper (DEC-LAKE-WRITE-HALT-001),
+        so the rename happens there — patch os.replace via the module path. A generic
+        OSError (no ENOSPC errno) is NOT mapped to LakeWriteHalt; it re-raises as-is.
+        """
+        pytest.importorskip("polars")
+        from brutex.data.parquet_writer import ParquetWriter
 
         def _fail_replace(src: str, dst: str) -> None:
             raise OSError("simulated replace failure")
 
-        # Patch at the module level so the writer sees our fake.
-        import brutex.data.parquet_writer as _pw
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _fail_replace)
+        writer = ParquetWriter(lake_root=tmp_path)
+        with pytest.raises(OSError, match="simulated"):
+            writer.write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                bars=[_bar(0, open_="100", high="110", low="90", close="105")],
+            )
+        # The tempfile was cleaned up — no leftover .tmp files.
+        assert list(tmp_path.rglob("*.tmp")) == []
 
-        original = _pw.os.replace
-        _pw.os.replace = _fail_replace  # type: ignore[assignment]
-        try:
-            pytest.importorskip("polars")
-            writer = ParquetWriter(lake_root=tmp_path)
-            with pytest.raises(OSError, match="simulated"):
-                writer.write(
-                    exchange="NSE",
-                    segment="CASH",
-                    symbol="NSE-NIFTY",
-                    interval="1minute",
-                    bars=[_bar(0, open_="100", high="110", low="90", close="105")],
-                )
-            # The tempfile was cleaned up — no leftover .tmp files.
-            tmp_files = list(tmp_path.rglob("*.tmp"))
-            assert tmp_files == []
-        finally:
-            _pw.os.replace = original
+    def test_merge_read_oom_halts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A MemoryError during the merge READ (steady-state re-pull) → LakeWriteHalt.
+
+        The merge read loads the WHOLE existing partition; an OOM there must become a
+        graceful LakeWriteHalt pull-wide stop, not a raw worker crash
+        (DEC-LAKE-WRITE-HALT-001 — the merge-read guard).
+        """
+        pl = pytest.importorskip("polars")
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        # First write creates the partition (no merge read).
+        writer.write(bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords)
+
+        def _oom(*_a: object, **_k: object) -> object:
+            raise MemoryError("merge read OOM")
+
+        monkeypatch.setattr(pl, "read_parquet", _oom)
+        # The SECOND write merges → reads the existing partition → OOM → LakeWriteHalt.
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
+        assert exc_info.value.reason == "out_of_memory"
 
     def test_render_bytes_raises_on_missing_polars(self, tmp_path: Path) -> None:
         """_render_bytes raises WriterError with install hint when polars is absent."""
@@ -199,7 +247,7 @@ class TestWriterErrors:
             unittest.mock.patch.dict(sys.modules, {"polars": None}),
             pytest.raises(WriterError, match="polars"),
         ):
-            writer._render_bytes(  # type: ignore[reportPrivateUsage]
+            writer._render_bytes(  # pyright: ignore[reportPrivateUsage]
                 [_bar(0, open_="100", high="110", low="90", close="105")]
             )
 
@@ -506,3 +554,53 @@ class TestPartitionLock:
         assert df.height == n_threads
         minutes = sorted(ts.minute for ts in df["timestamp"].to_list())
         assert minutes == list(range(n_threads))
+
+
+class TestCrossProcessPartitionLock:
+    """Cross-process partition write-lock (DEC-LAKE-PARTITION-FLOCK-001).
+
+    The intra-process ``threading.Lock`` above only serialises threads in ONE
+    interpreter; a concurrent CLI ``brutex fetch`` + a dashboard pull sharing the
+    lake are SEPARATE processes and would still lost-update the same month
+    partition (both read the old file, the later ``os.replace`` clobbers the
+    earlier writer's new bars). The advisory ``flock`` must be HELD across the
+    whole read-modify-write so the later process reads AFTER the earlier rename.
+    """
+
+    def test_flock_is_held_across_the_merge_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The partition flock is held while the writer reads the existing partition.
+
+        Regression for the silent cross-process lost-update: a separate fd (≈ another
+        process) is probed DURING the merge read and must find the lock HELD. WITHOUT
+        the cross-process flock the probe would succeed and this assertion fails.
+        """
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        # First write creates the partition so the SECOND write takes the merge
+        # (read-modify-write) path that reads the existing file.
+        writer.write(bars=[_bar(0, open_="100", high="100", low="100", close="100")], **coords)
+
+        observed: dict[str, bool] = {}
+        original_read = writer._read_existing_bars
+
+        def _spy_read(dest: Path) -> dict[datetime, CandleBar]:
+            observed["held_during_read"] = _partition_lock_is_held(
+                partition_lock_path(tmp_path, dest)
+            )
+            return original_read(dest)
+
+        monkeypatch.setattr(writer, "_read_existing_bars", _spy_read)
+        writer.write(bars=[_bar(1, open_="101", high="101", low="101", close="101")], **coords)
+
+        assert observed["held_during_read"] is True
+        # And released afterwards (a fresh acquire succeeds) — no leaked lock.
+        (only,) = tmp_path.rglob("*.parquet")
+        assert _partition_lock_is_held(partition_lock_path(tmp_path, only)) is False

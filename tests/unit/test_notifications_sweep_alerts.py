@@ -18,8 +18,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
 from brutex.notifications.sweep_alerts import (
     SweepAlerter,
+    emit_pull_halt_alert,
     escape_markdown_v2,
 )
 from brutex.notifications.telegram import (
@@ -219,6 +221,17 @@ class TestAlerts:
         assert ev.dedupe_key == "auth-renew"
         assert "token expired" in ev.message
 
+    def test_pull_halted(self) -> None:
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).pull_halted(reason="disk_full")
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "pull-halt:disk_full"  # reason-scoped dedupe (RAW, unescaped)
+        # The body is MarkdownV2-escaped (underscore → `\_`), so assert the escaped forms.
+        assert escape_markdown_v2("disk_full") in ev.message
+        assert escape_markdown_v2("Pull HALTED") in ev.message
+
     def test_sweep_complete(self) -> None:
         fake = FakeNotifier()
         summary = FakeSummary(
@@ -262,10 +275,57 @@ class TestAlerts:
         assert alerter.rate_breach(current_rps=3.0, recent_hits=1) is False
         assert alerter.auth_renew_failed(reason="x") is False
         assert alerter.symbol_window_failure(symbol="s", failed_windows=1, total_windows=1) is False
+        assert alerter.pull_halted(reason="disk_full") is False
         summary = FakeSummary(
             sweep_id="s", tuples_run=1, tuples_total=1, evaluated=1, ranked=1, persisted=1
         )
         assert alerter.sweep_complete(summary) is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# emit_pull_halt_alert — the COMMON best-effort helper (CLI + dashboard)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEmitPullHaltAlert:
+    """The shared `emit_pull_halt_alert(exc)` used by both cmd_fetch and the dashboard job."""
+
+    def test_surfaces_lake_write_halt_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data.errors import LakeWriteHalt
+
+        captured: list[str] = []
+
+        class _FakeAlerter:
+            def pull_halted(self, *, reason: str) -> bool:
+                captured.append(reason)
+                return True
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+        emit_pull_halt_alert(LakeWriteHalt("disk_full"))
+        assert captured == ["disk_full"]  # LakeWriteHalt.reason surfaced verbatim
+
+    def test_other_stop_uses_class_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[str] = []
+
+        class _FakeAlerter:
+            def pull_halted(self, *, reason: str) -> bool:
+                captured.append(reason)
+                return True
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+        emit_pull_halt_alert(RuntimeError("boom"))
+        assert captured == ["RuntimeError"]  # non-LakeWriteHalt → class name
+
+    def test_swallows_its_own_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failure CONSTRUCTING/publishing the alert is swallowed — never propagates."""
+
+        class _BoomAlerter:
+            def __init__(self) -> None:
+                raise RuntimeError("notifier construction blew up")
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
+        # The no-raise IS the assertion (the blanket except swallows + logs it).
+        emit_pull_halt_alert(RuntimeError("halt"))
 
 
 # ────────────────────────────────────────────────────────────────────────

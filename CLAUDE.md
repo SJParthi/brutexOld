@@ -228,8 +228,158 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/options-lake-reader-jlzt1n` (the options executor's `OptionBarSource` seam now
-  has a PRODUCTION lake reader — DEC-OPTIONS-LAKE-READER-001, MIGRATION.md #882, gap-analysis item 1: NEW
+- **Active branch:** `claude/atomic-write-finish-jlzt1n` (the LAST hand-rolled atomic-write copies — config runtime
+  + credentials + NTM cache + window-ledger — now share the ONE core too; the atomic-write COMMON consolidation is
+  COMPLETE — DEC-ATOMIC-WRITE-FINISH-001, MIGRATION.md #891: #890 did the ENGINE sidecars, this finishes the four
+  remaining genuine `tmp→write→os.replace` copies. (1) `atomic_io._atomic_write_core`/`atomic_write_simple` gain an
+  optional `chmod` (set on the temp before rename; mkstemp temp is already 0600 → a secret is never world-readable)
+  for the credential 0600 save. (2) FOUR sites delegate to the guard-free `atomic_write_simple`, each preserving its
+  OWN error contract: `runtime.write_runtime_file` (raw OSError → `RuntimeFileError`), `credentials._atomic_write`
+  (`chmod=0o600`, parent 0700, raw OSError), `ntm_cache.save_constituent_csv` (catches OSError → returns False,
+  best-effort), `window_ledger_store.save_window_ledger` (named inner fn keeps the pyarrow type-ignore); unused
+  `tempfile`/`os` imports removed. HONEST: ZERO error-semantics change at every site (no LakeWriteHalt
+  mis-escalation); TWO free wins everywhere — an `fsync` before rename (none had one) + temp-cleanup on ANY error
+  (the window-ledger copy previously LEAKED its .tmp); credential 0600 boundary preserved. DEFERRED (not claimed):
+  the window_ledger ENOSPC→`LakeWriteHalt` graceful-halt guard-EXTEND (it changes error semantics + the
+  end_pull_ledger call-path's halt handling needs verification) — kept the SAFE guard-free dedup here. `atomic_io` +
+  `runtime` + `ntm_cache` + `window_ledger_store` at 100% line+branch; `credentials` 100% (via its + groww-creds
+  test files); 165+93 tests green; ruff/`mypy --strict brutex` (254 files)/pyright clean. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-ATOMIC-WRITE-CONSOLIDATE-001,
+  MIGRATION.md #890 (the engine sidecar writers share the ONE atomic-write
+  core via a NEW guard-free `atomic_write_simple`, killing the hand-rolled `mkstemp`/`fsync`/`os.replace`/cleanup
+  copies — the #885 COMMON follow-up: #885 centralised the
+  LAKE writers' atomic write but left the others as noted debt. `results_store._atomic_write` +
+  `sweep_checkpoint._atomic_write` were byte-near-identical copies (and `trial_stats`/`tuple_complete`/`sweep_heal`
+  delegate to results_store, so 5 engine writers rode 2 copies). The blocker to reusing `atomic_write_via`: it bakes
+  in `lake_write_guard` (ENOSPC/OOM → `LakeWriteHalt`), SEMANTICALLY WRONG for the engine (which wraps raw `OSError`
+  into its OWN `ResultsStoreError`/`SweepCheckpointError` + is NOT wired for the lake global-stop). FIX: `atomic_io.py`
+  refactored to a shared `_atomic_write_core` exposed as `atomic_write_via` (lake-guarded, the 2 Parquet writers,
+  byte-unchanged) + a NEW `atomic_write_simple` (guard-FREE — every error incl. raw ENOSPC propagates as-is); the 2
+  engine writers delegate to `atomic_write_simple`. HONEST: ZERO engine error-semantics change (same raw OSError →
+  same domain-error contracts/tests preserved; disk-full NOT mis-escalated to LakeWriteHalt); a tiny durability win
+  (core `finally` cleans the temp on ANY error vs the old `except OSError`); lake `atomic_write_via` byte-equivalent
+  (#885 invariants re-verified); consolidates the ENGINE copies ONLY — the non-lake `runtime`/`credentials`(+chmod)/
+  `ntm_cache`(returns False) + the `window_ledger` guard-extend remain the EXPLICIT next follow-up, NOT claimed.
+  `atomic_io.py` at 100% line+branch (new atomic_write_simple tests); results_store/sweep_checkpoint stay 100%
+  (cleanup tests repointed to `atomic_io.os.replace` + `.brutex-write-*` prefix); 268 engine+atomic_io+lake-writer
+  tests green; ruff/`mypy --strict brutex` (254 files)/pyright clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-TELEGRAM-PULL-HALT-DASHBOARD-001, MIGRATION.md #889 (the DASHBOARD
+  pull path ALSO fires the CRITICAL
+  pull-halt Telegram alert — the dashboard twin of #888 — so a halt reaches the operator regardless of which
+  entrypoint pulls: #888 wired ONLY the CLI `cmd_fetch`
+  path; the dashboard `/pull-pipeline` (primary pull UI) had no halt alert. A `LakeWriteHalt`/`QuotaInvariantError`
+  propagates uncaught out of `pull_all_spot` to the ONE chokepoint `BackgroundPullJob._run`'s `except Exception`
+  (`brutex/dashboard/pull_jobs.py`) where every backgrounded dashboard pull lands. (1) the CLI's `_emit_pull_halt_alert`
+  body is MOVED to a COMMON `emit_pull_halt_alert(exc)` in `sweep_alerts.py` (ONE source of truth — `cli._emit_pull_halt_alert`
+  is now a thin delegating wrapper, CLI byte-unchanged); (2) `_run`'s except now calls it GUARDED by a NEW `_is_pull_halt(exc)`
+  (isinstance of the spine's global-stop set), so it fires ONLY for a pull-wide halt — a generic per-symbol worker error
+  NEVER alerts — and the reported error state is byte-unchanged. HONEST: best-effort/silent-no-op-when-disabled;
+  `pull_jobs.py` stays WHEEL-FREE at import (heavy `quota_tracker`/`data.errors` classes lazy-imported inside `_is_pull_halt`);
+  the dashboard QUOTA stop is a VERDICT not a raise so it does NOT fire this hook (operator already sees it on the UI) —
+  a verdict-driven phone alert is a flagged FOLLOW-UP (route bodies are pragma-no-cover), NOT claimed. `sweep_alerts.py`
+  + `pull_jobs.py` both at 100% line+branch (new emit_pull_halt_alert + halt-fires-once / generic-no-alert tests); 147
+  notifications+dashboard+CLI tests green; ruff/mypy --strict/pyright clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX),
+  no scope/vocab/rate-cap change. Prior merged: DEC-TELEGRAM-PULL-HALT-001, MIGRATION.md #888 (a pull-wide HALT —
+  disk-full / OOM / quota — fires
+  a CRITICAL Telegram alert so the operator is told in REAL TIME, not just in a log; the observability capstone of
+  the resilience batch: the just-shipped batch makes a pull HALT
+  gracefully on a full disk / OOM (`LakeWriteHalt` #885) or a quota stop, but the operator only learned of it from a
+  log line (§11 AUTOMATED wants it ALERTED, "ZERO clicks per day"). NEW `SweepAlerter.pull_halted(*, reason)` alert
+  (CRITICAL `PHASE_BLOCKED`, reason-scoped dedupe), wired into the CLI `cmd_fetch` pull path: `_one_fetch_pass` wraps
+  the `run_groww_spot_ingest_with_retry` call in `try/except (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError)`
+  (the SAME global-stop set the spine carves out) that fires a NEW `_emit_pull_halt_alert(exc)` then RE-RAISES — so
+  the existing halt handling + non-zero exit is byte-unchanged. HONEST: fire-and-forget, best-effort — the alerter
+  swallows every error + is a silent no-op when Telegram is DISABLED (the default), so it can NEVER block/mask/crash
+  the pull; the notifier is async (no network I/O on the pull thread); body is MarkdownV2-escaped; this wires the CLI
+  pull path ONLY — the DASHBOARD pull path's Telegram wiring is an explicit FOLLOW-UP, NOT claimed done.
+  `sweep_alerts.py` at 100% line+branch (new `pull_halted` unit + a real-notifier wire test); the CLI wiring covered
+  by 3 new `test_cli_retry_storm.py` tests (LakeWriteHalt-raising fake ingest proves alert-once-then-re-raise +
+  `_emit_pull_halt_alert` both branches); 137 notifications + CLI tests green; ruff/mypy --strict/pyright clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-LAKE-PARTITION-FLOCK-001,
+  MIGRATION.md #887 (a cross-process advisory `fcntl.flock` now serialises
+  concurrent writers to the SAME lake month partition, closing a SILENT data-LOSS race,
+  gap #5 of the operator's critical-risks resilience-hardening
+  batch: the two lake Parquet writers do a READ-modify-WRITE on a month partition guarded ONLY by a per-partition
+  `threading.Lock` (intra-process), so two pulls sharing `BRUTEX_LAKE_ROOT` — a CLI `brutex fetch` + a dashboard
+  pull — writing the same partition lost-update SILENTLY: P1 reads `[T1,T2,T3]`, P2 reads `[T1,T2,T3]`, P1 writes
+  `[…,T4]`, P2's `os.replace` clobbers it → T4 gone, no error (keep-first only dedups WITHIN one process; across
+  processes the last `os.replace` wins). NEW `brutex/data/partition_lock.py` (`partition_write_lock(lake_root,
+  dest)` + `partition_lock_path`) takes a blocking exclusive `flock` held ACROSS the whole read-modify-write so
+  the later process reads AFTER the earlier `os.replace`; BOTH writers nest it inside their existing per-partition
+  `threading.Lock` (same lock ORDER everywhere → no cross-partition deadlock). HONEST envelope: the lock is on a
+  STABLE sidecar `<lake_root>/.locks/<sha256(dest)>.lock` (NEVER the partition file — `os.replace` swaps its
+  inode; `.locks` is outside `bars/`+`options/` and not a `*.parquet`, so no scanner sees it); PER PARTITION
+  (different partitions never contend — fan-out parallelism kept); NO stale-lock recovery needed (the kernel
+  releases an flock on fd-close/process death); O(1) per partition write (one open+flock+close, NOT per bar); a
+  disk-full at lock creation maps to `LakeWriteHalt` (reuses #885's `lake_write_guard`); POSIX (Linux+macOS),
+  Windows OUT OF SCOPE; it serialises CONCURRENT writers, NOT a cross-partition transaction. `partition_lock.py`
+  at 100% line+branch; both writers stay 100% line+branch with NEW deterministic regression tests probing a
+  SEPARATE fd DURING the merge READ to assert the lock is HELD (FAIL without the flock); chaos/sink/ingest/
+  lake-scan suites green; ruff/mypy --strict/pyright clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-MOVERS-CORRUPT-SKIP-001, MIGRATION.md #886 (a single corrupt /
+  unreadable Parquet file now SKIPS
+  that one instrument on the `/movers` screens — logged + counted — instead of 500-ing the WHOLE page,
+  gap #4 of the operator's critical-risks resilience-hardening
+  batch: a multi-agent audit flagged this the MOST production-likely HIGH — the spot/futures/options candidate
+  loops (`movers_snapshot.compute_spot_candidates`, `movers_futures.compute_futures_candidates`,
+  `movers_options.compute_options_candidates`) read each instrument's Parquet with NO per-instrument guard, so
+  ONE corrupt / version-incompatible file raised out of the loop and — since the route recomputes per call —
+  re-500'd EVERY `/movers` open until the file was manually quarantined. NEW `brutex/dashboard/movers_resilient.py`
+  with `movers_read_skip_errors()` (the ONE place defining the unreadable-file set — empirically confirmed
+  `polars.exceptions.PolarsError` + `OSError`, COMMON) + `log_movers_skip()`; each of the THREE candidate loops
+  wraps its per-instrument read in `try/except` that on an unreadable file logs `movers.parquet_skip`
+  (source+symbol+reason), increments the screen's existing `skipped` tally, and `continue`s — mirroring
+  `db_view._aggregate_parquet_resilient` (the proven coverage-side pattern). HONEST envelope: NARROW catch — a
+  genuine code bug (`ValueError`/`KeyError`/…) STILL propagates, never silently swallowed; a skipped instrument
+  is OMITTED + counted, never a fabricated price (the file stays for the operator to quarantine); pure
+  read-time DETECT-and-skip — no write surface, no engine/lake/scope change. `movers_resilient.py` at 100%
+  line+branch; the 3 candidate readers all stay 100% line+branch with NEW integration tests writing a GOOD
+  symbol + a SECOND whose on-disk Parquet is overwritten with garbage so the REAL `pl.read_parquet` raises a
+  `ComputeError` — the screen still ranks the good one, reports the corrupt one `skipped`, logs the skip, and
+  does NOT 500 (one per spot/futures/options); ruff/mypy --strict/pyright clean. READ-ONLY dashboard — ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-LAKE-WRITE-HALT-001,
+  MIGRATION.md #885 (disk-full / OOM at the lake-write boundary now HALTS the
+  pull gracefully — a `LakeWriteHalt` global stop — instead of crashing raw or quarantining per-symbol, via a
+  shared `atomic_io` write helper, gap #3 of the operator's
+  critical-risks resilience-hardening batch: NEW `brutex/data/errors.py` `LakeWriteHalt(DataLakeError)`
+  (`reason` = `disk_full`/`out_of_memory`) + NEW `brutex/data/atomic_io.py` (`lake_write_guard` maps
+  `ENOSPC`/`MemoryError`→`LakeWriteHalt`, every other error UNCHANGED; `atomic_write_via` = the ONE
+  tmp→fsync→`os.replace`→cleanup). BOTH lake writers delegate to it; every allocation/failure site is guarded
+  (a 4-agent hostile review folded two MAJORs — the spot FRESH render + the steady-state MERGE READ are both
+  guarded, and `mkstemp` itself runs inside the guard) + `LakeWriteHalt` added to BOTH ingest spines'
+  `_GLOBAL_STOP_ERRORS` so a full disk propagates past the per-symbol/contract quarantine and halts (temp
+  always cleaned first — no half-written partition, no fabricated data). HONEST: graceful DETECTION + halt,
+  NOT a memory CAP (a true RSS ceiling needs setrlimit/cgroups — OUT OF SCOPE); a non-`ENOSPC` `OSError`
+  re-raises as-is (never mis-escalated); only the 2 data-lake writers consolidated (the other 5 atomic-write
+  copies remain noted COMMON debt). `atomic_io.py`
+  + `errors.py` 100% line+branch; the 2 writers + 2 ingest spines stay 100%; ruff/mypy --strict/pyright clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged:
+  DEC-CLI-LEDGER-CHECKPOINT-001, MIGRATION.md #884 (the `brutex fetch` CLI now checkpoints the durable
+  window ledger MID-pull per window, not only at pull end, so a crash recovers in seconds instead of
+  re-pulling the whole span — gap #2 of the operator's
+  critical-risks resilience-hardening batch: `cmd_fetch` threads the SAME throttled `make_live_ledger_flush`
+  the dashboard uses as the ingest engine's per-WINDOW `on_window` hook, wrapped in a NEW single-flight
+  `window_ledger_store.make_locked_flush` (the `on_window` fires from PARALLEL worker threads + the throttled
+  flush is not itself thread-safe); the CLI wants the flush ONLY so it does NOT use `make_live_sync` (which
+  no-ops without an `on_ledger_sync`). A `None` ledger (`--dry-run`/`--inspect`) → no-op (the lock wraps a
+  no-op), persistence-free contract preserved. Recovery bounded to one throttle interval (NOT bit-for-bit
+  mid-window — a re-pull re-fetches; tmp→atomic-rename + keep-first sink absorb the duplicate). O(1) lock
+  per window; the adaptive flush throttle still bounds the write rate. `window_ledger_store.py` 100%
+  line+branch (177/50, incl. an 8-thread single-flight test); CLI fetch + window-ledger suites (72) green;
+  ruff/mypy --strict/pyright clean. CLI/ledger-store only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-GROWW-SERVER-ERROR-RETRY-001, MIGRATION.md #883 (a transient
+  Groww 5xx server error is now a RETRYABLE `GrowwServerError`, not a terminal quarantine — gap #1: NEW
+  `GrowwServerError(GrowwError)` in
+  `brutex/adapters/groww/errors.py`; `_CODE_TO_ERROR` maps `500`/`502`/`503` → it (504 deliberately stays a
+  retryable `GrowwTimeoutError` — the timeout ladder already governs it) + a phrase-only `_SERVER_ERROR_HINTS`
+  checked AFTER the rate-limit/timeout hints (priority preserved); added to `is_retryable` but NOT
+  `is_rate_limit` (a 5xx is no quota signal — it rides the GENTLE timeout ladder, never steps the per-second
+  rate ceiling down). The three consumption sites (`client.py`/`ingest.py`/`option_ingest.py`) pick it up via
+  `is_retryable`/`is_rate_limit` with ZERO extra code; a real `404` stays terminal. `errors.py` 100%
+  line+branch (48 stmts/16 branches); groww client/ingest/retry suites (140) green; ruff/mypy --strict/pyright
+  clean. Adapter-only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior
+  merged: DEC-OPTIONS-LAKE-READER-001, MIGRATION.md #882 (the options executor's `OptionBarSource` seam now
+  has a PRODUCTION lake reader — gap-analysis item 1: NEW
   `brutex/options/lake_source.py` `LakeOptionBarSource` resolves a leg's `(instrument, expiry, strike,
   option_type, entry_ts, exit_ts)` to its F&O-candle-lake contract — DISCOVERED by scanning +
   `parse_fno_symbol`-matching the `bars/<exch>/FNO/` dirs (cached per underlying, robust, not a reconstructed
@@ -557,7 +707,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/options-lake-reader-jlzt1n`
+- **Active feature branch:** `claude/atomic-write-finish-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

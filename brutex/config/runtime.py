@@ -39,12 +39,12 @@ import errno
 import json
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 
 # ────────────────────────────────────────────────────────────────────────
@@ -255,19 +255,14 @@ def write_runtime_file(info: RuntimeInfo, *, path: Path | None = None) -> Path:
     target = path if path is not None else runtime_file_path()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write to a sibling temp file in the same directory, then rename.
-    # Rename is atomic on the same filesystem (POSIX guarantee).
-    fd, tmp_path_str = tempfile.mkstemp(
-        prefix=".runtime.", suffix=".json.tmp", dir=str(target.parent)
-    )
-    tmp_path = Path(tmp_path_str)
+    # The COMMON crash-safe atomic write (tmp→fsync→os.replace→cleanup), guard-free so
+    # a runtime-file failure surfaces as RuntimeFileError — NOT the lake's LakeWriteHalt
+    # (CLAUDE.md §11, DEC-ATOMIC-WRITE-CONSOLIDATE-001). Readers never observe a partial.
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(info.to_json())
-            f.write("\n")
-        tmp_path.replace(target)
+        atomic_write_simple(
+            target, lambda tmp: tmp.write_text(info.to_json() + "\n", encoding="utf-8")
+        )
     except OSError as exc:
-        tmp_path.unlink(missing_ok=True)
         raise RuntimeFileError(f"Failed to write {target}: {exc}") from exc
     return target
 

@@ -45,6 +45,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.data.models import CandleBar
 from brutex.data.spot_features import pct_change
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
@@ -563,7 +564,9 @@ class SpotCandidates:
         Every screened instrument's :class:`MoverSnapshot` (those with a bar on
         the day); ranked per category at build time.
     skipped
-        Count of instruments with no bar on the selected day/time — reported
+        Count of instruments OMITTED from the ranking — either no bar on the
+        selected day/time OR an unreadable Parquet file (logged as
+        ``movers.parquet_skip``; DEC-MOVERS-CORRUPT-SKIP-001) — reported
         honestly, never fabricated (Golden Rule #1).
     date
         The normalised ISO ``YYYY-MM-DD`` snapshot day (``date=None`` ⇒ today).
@@ -654,38 +657,46 @@ def compute_spot_candidates(
 
     snapshots: list[MoverSnapshot] = []
     skipped = 0
+    skip_errors = movers_read_skip_errors()
     for dataset in datasets:
-        if is_daily:
-            bars = _read_daily_bars(
-                lake_root,
-                exchange=dataset["exchange"],
-                segment=dataset["segment"],
-                symbol=dataset["symbol"],
-                day=day,
+        try:
+            if is_daily:
+                bars = _read_daily_bars(
+                    lake_root,
+                    exchange=dataset["exchange"],
+                    segment=dataset["segment"],
+                    symbol=dataset["symbol"],
+                    day=day,
+                )
+            else:
+                bars = _read_session_bars(
+                    lake_root,
+                    exchange=dataset["exchange"],
+                    segment=dataset["segment"],
+                    symbol=dataset["symbol"],
+                    day=day,
+                    minutes=minutes,
+                    cutoff_min=cutoff_min,
+                )
+            # Skip the prior-day 1-day read entirely when the symbol had no bars on
+            # the selected day (no point computing a baseline for nothing).
+            prev_close = (
+                _prev_day_close(
+                    lake_root,
+                    exchange=dataset["exchange"],
+                    segment=dataset["segment"],
+                    symbol=dataset["symbol"],
+                    day=day,
+                )
+                if bars
+                else None
             )
-        else:
-            bars = _read_session_bars(
-                lake_root,
-                exchange=dataset["exchange"],
-                segment=dataset["segment"],
-                symbol=dataset["symbol"],
-                day=day,
-                minutes=minutes,
-                cutoff_min=cutoff_min,
-            )
-        # Skip the prior-day 1-day read entirely when the symbol had no bars on
-        # the selected day (no point computing a baseline for nothing).
-        prev_close = (
-            _prev_day_close(
-                lake_root,
-                exchange=dataset["exchange"],
-                segment=dataset["segment"],
-                symbol=dataset["symbol"],
-                day=day,
-            )
-            if bars
-            else None
-        )
+        except skip_errors as exc:
+            # A corrupt / unreadable Parquet for ONE symbol must not 500 the whole
+            # screen — skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
+            log_movers_skip(source="spot", symbol=dataset["symbol"], error=str(exc))
+            skipped += 1
+            continue
         instrument = ScreenInstrument(
             symbol=dataset["symbol"],
             exchange=dataset["exchange"],

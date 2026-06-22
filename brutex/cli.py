@@ -1806,6 +1806,29 @@ def _arm_retry_storm_guard(
     return _groww_progress
 
 
+def _emit_pull_halt_alert(exc: Exception) -> None:
+    """Fire a best-effort CRITICAL Telegram alert that the pull HALTED (DEC-TELEGRAM-PULL-HALT-001).
+
+    Called when a pull-wide global-stop (a full-disk / OOM
+    :class:`~brutex.data.errors.LakeWriteHalt`, or a daily-quota / quota-invariant
+    stop) propagates out of the ingest spine. Unlike a per-symbol quarantine this
+    aborts EVERY remaining window, so the operator must act — hence a CRITICAL push.
+    Fire-and-forget: a disabled or failing notifier is a silent no-op (the
+    :class:`~brutex.notifications.sweep_alerts.SweepAlerter` swallows every publish
+    error), so the alert NEVER masks the halt, which the caller re-raises so the CLI
+    still exits non-zero. The ``LakeWriteHalt.reason`` (``disk_full`` /
+    ``out_of_memory``) is surfaced verbatim; any other stop uses its class name.
+
+    Thin wrapper delegating to the COMMON
+    :func:`brutex.notifications.sweep_alerts.emit_pull_halt_alert` (CLAUDE.md §11 —
+    the SAME helper the dashboard ``BackgroundPullJob`` uses, no copy-paste); that
+    function carries the blanket try/except so this never raises into the halt path.
+    """
+    from brutex.notifications.sweep_alerts import emit_pull_halt_alert
+
+    emit_pull_halt_alert(exc)
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -1885,15 +1908,25 @@ def cmd_fetch(
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
+    from brutex.data.errors import LakeWriteHalt
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
     from brutex.data.window_ledger_store import (
         begin_pull_ledger,
         end_pull_ledger,
+        make_live_ledger_flush,
+        make_locked_flush,
         plan_windows,
         reconcile_ledger_with_lake,
     )
+    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
     from brutex.universe import BRUTE_FORCE_INDICES
+
+    # The pull-wide global stops that HALT every remaining window (disk-full/OOM, or a
+    # quota stop) — distinct from a per-symbol quarantine. Mirrors the ingest spine's
+    # `_GLOBAL_STOP_ERRORS` carve-out (DEC-LAKE-WRITE-HALT-001 / quota); each fires a
+    # best-effort CRITICAL Telegram pull-halt alert then re-raises (DEC-TELEGRAM-PULL-HALT-001).
+    _pull_halt_errors = (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError)
 
     resolved = _resolve_lake_root(lake_root)
     try:
@@ -2097,23 +2130,50 @@ def cmd_fetch(
             stack=storm_stack,
         )
 
+        # Mid-pull ledger checkpoint (DEC-CLI-LEDGER-CHECKPOINT-001): the CLI fetch
+        # path saved the durable ledger ONLY at pull END (`end_pull_ledger`), so a
+        # crash after N windows lost every completed window's SUCCESS row and the
+        # next run re-pulled the whole span. This threads the SAME throttled
+        # `make_live_ledger_flush` helper the dashboard uses (CLAUDE.md §11 COMMON,
+        # no copy-paste) as the ingest engine's `on_window` hook (fires per WINDOW
+        # from the PARALLEL worker threads) so the durable ledger is flushed mid-pull.
+        # `on_window` is concurrent and the throttled flush is not itself thread-safe,
+        # so it is wrapped in `make_locked_flush` (single-flight lock). The CLI wants
+        # the flush ONLY — not the dashboard bar push — so it deliberately does NOT
+        # use `make_live_sync` (which no-ops without an `on_ledger_sync`). A `None`
+        # ledger (`--dry-run` / `--inspect`) makes the flush a no-op, so the lock
+        # wraps a no-op and nothing touches disk. The save is tmp→atomic-rename and
+        # the keep-first sink is idempotent, so a re-pull of an un-flushed window is
+        # safe; loss is bounded to one throttle interval, not the whole pull.
+        ledger_checkpoint = make_locked_flush(make_live_ledger_flush(ledger, resolved))
+
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
-            return run_groww_spot_ingest_with_retry(
-                adapter,
-                sink,
-                instruments=fetch_instruments,
-                intervals=intervals,
-                start=start_dt.date(),
-                end=end_dt.date(),
-                pace=pace,
-                ledger=ledger,
-                on_rate_limit=on_rate_limit,
-                on_success=on_success,
-                on_progress=storm_progress,
-                auto_retry=do_retry_flag,
-                audit=ingest_audit,
-            )
+            try:
+                return run_groww_spot_ingest_with_retry(
+                    adapter,
+                    sink,
+                    instruments=fetch_instruments,
+                    intervals=intervals,
+                    start=start_dt.date(),
+                    end=end_dt.date(),
+                    pace=pace,
+                    ledger=ledger,
+                    on_rate_limit=on_rate_limit,
+                    on_success=on_success,
+                    on_progress=storm_progress,
+                    on_window=ledger_checkpoint,
+                    auto_retry=do_retry_flag,
+                    audit=ingest_audit,
+                )
+            except _pull_halt_errors as exc:
+                # A pull-wide global stop (disk-full/OOM LakeWriteHalt, or a quota stop)
+                # HALTS every remaining window, unlike a per-symbol quarantine — fire a
+                # best-effort CRITICAL Telegram alert so the operator knows the pull
+                # STOPPED, then re-raise so the existing halt handling (controller
+                # verdict / non-zero exit) is byte-unchanged (DEC-TELEGRAM-PULL-HALT-001).
+                _emit_pull_halt_alert(exc)
+                raise
 
         until_outcome = None
         if until_clean:

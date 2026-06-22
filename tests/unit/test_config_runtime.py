@@ -268,25 +268,23 @@ class TestOSErrorPaths:
         monkeypatch: pytest.MonkeyPatch,
         sample_info: RuntimeInfo,
     ) -> None:
-        """Cover lines 269-271: tmp_path.replace() raises OSError ⇒
-        the temp file is unlinked and RuntimeFileError is raised."""
+        """An OSError on the atomic rename ⇒ the temp is cleaned and RuntimeFileError is raised.
+
+        The atomic write is now the shared atomic_io core (DEC-ATOMIC-WRITE-CONSOLIDATE-001),
+        so the rename + temp prefix live there; a raw OSError propagates and
+        ``write_runtime_file`` wraps it into RuntimeFileError.
+        """
         target = tmp_path / "runtime.json"
         monkeypatch.setenv(ENV_RUNTIME_FILE, str(target))
 
-        # Make Path.replace raise OSError to simulate a cross-device move
-        # or permission failure on the atomic-rename step.
-        real_replace = Path.replace
-
-        def fail_replace(self, *args, **kwargs):
+        def fail_replace(_src: str, _dst: str) -> None:
             raise OSError("simulated atomic-rename failure")
 
-        monkeypatch.setattr(Path, "replace", fail_replace)
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", fail_replace)
         with pytest.raises(RuntimeFileError, match="Failed to write"):
             write_runtime_file(sample_info)
-        # Verify no leftover *.tmp files in the target directory.
-        assert not list(tmp_path.glob(".runtime.*.json.tmp"))
-        # Restore for safety even though monkeypatch handles teardown.
-        monkeypatch.setattr(Path, "replace", real_replace)
+        # Verify no leftover temp files in the target directory (cleaned by the core).
+        assert not list(tmp_path.glob(".brutex-write-*"))
 
     def test_read_oserror_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_info: RuntimeInfo

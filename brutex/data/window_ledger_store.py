@@ -33,7 +33,7 @@ one-shot load (run start) + save (run end) are O(N) over the recorded windows.
 
 from __future__ import annotations
 
-import os
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -41,6 +41,7 @@ from typing import Any
 
 import structlog
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY,
@@ -261,9 +262,17 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     )
     table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
     path = ledger_path(lake_root)
-    tmp = path.with_name(f"{LEDGER_FILENAME}.tmp")
-    pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
-    os.replace(tmp, path)
+
+    def _write_parquet(tmp: Path) -> None:
+        pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+
+    # COMMON guard-free atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
+    # DEC-ATOMIC-WRITE-CONSOLIDATE-001): adds an fsync (durability for the durable
+    # ledger) + temp cleanup on error (the hand-rolled version LEAKED the .tmp on a
+    # mid-write failure), with the raw OSError preserved. The ENOSPC→LakeWriteHalt
+    # graceful-halt upgrade is a deliberately-deferred follow-up (it changes error
+    # semantics and the end_pull_ledger call-path's halt handling needs verification).
+    atomic_write_simple(path, _write_parquet)
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:
@@ -704,6 +713,32 @@ def make_live_ledger_flush(
         last_duration[0] = max(tick() - now, 0.0)
 
     return _flush
+
+
+def make_locked_flush(flush: Callable[[], None]) -> Callable[[], None]:
+    """Serialise concurrent fires of *flush* behind one lock (thread-safe checkpoint).
+
+    The ingest engine fires its per-window ``on_window`` hook from PARALLEL worker
+    threads (:class:`~brutex.orchestrator.parallel.PoolRunParallel`), but the
+    per-pull ledger flush (:func:`make_live_ledger_flush`) — though throttled — is
+    NOT thread-safe: two threads writing the ledger Parquet at once could clobber a
+    half-written temp file. This wraps any 0-arg *flush* so the writes serialise,
+    single-flight, under one lock; the wrapped flush's own throttle still bounds the
+    write RATE (the lock only bounds CONCURRENCY). O(1) lock acquire per fire.
+
+    The dashboard's :func:`~brutex.dashboard.pull_controller.make_live_sync` keeps
+    its OWN lock because that critical section also reads ``ledger.progress_counts``
+    atomically with the flush for the live bar push; this helper is the minimal
+    "just make a flush thread-safe" primitive for the flush-only CLI checkpoint
+    (CLAUDE.md §11 COMMON — one lock-wrap primitive, not copy-pasted per caller).
+    """
+    lock = threading.Lock()
+
+    def _locked() -> None:
+        with lock:
+            flush()
+
+    return _locked
 
 
 def begin_pull_ledger(

@@ -103,6 +103,18 @@ class TestSyncWire:
         for _cfg, event in transport.sends:
             assert event.message == escape_markdown_v2(_unescape_roundtrip(event.message))
 
+    def test_pull_halt_alert_reaches_the_wire(
+        self, sync_notifier: TelegramNotifier, transport: RecordingTransport
+    ) -> None:
+        # A pull-wide halt (disk-full/OOM/quota) fires a CRITICAL PHASE_BLOCKED push
+        # through the real notifier, MarkdownV2-safe (DEC-TELEGRAM-PULL-HALT-001).
+        assert SweepAlerter(notifier=sync_notifier).pull_halted(reason="disk_full") is True
+        assert len(transport.sends) == 1
+        _cfg, event = transport.sends[0]
+        assert event.kind == TelegramEventKind.PHASE_BLOCKED
+        assert event.severity == TelegramSeverity.CRITICAL
+        assert event.message == escape_markdown_v2(_unescape_roundtrip(event.message))
+
     def test_manual_test_digest_reaches_the_wire(
         self, sync_notifier: TelegramNotifier, transport: RecordingTransport
     ) -> None:

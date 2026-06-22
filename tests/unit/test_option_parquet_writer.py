@@ -8,6 +8,8 @@ path-safety guards.
 
 from __future__ import annotations
 
+import fcntl
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +22,27 @@ from brutex.data.option_parquet_writer import (
     OptionSeriesCoordinate,
     OptionWriterError,
 )
+from brutex.data.partition_lock import partition_lock_path
+
+
+def _partition_lock_is_held(lock_path: Path) -> bool:
+    """True iff a SEPARATE fd cannot take the partition's exclusive lock (it is held).
+
+    A second ``open`` is a distinct open file description, so ``flock`` treats it
+    like another PROCESS — the cross-process contention the lake lock must win
+    (DEC-LAKE-PARTITION-FLOCK-001).
+    """
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
 
 _PK = "NSE_FNO|13|WEEK|0|ATM|CALL"
 
@@ -179,20 +202,43 @@ class TestAtomicWriteCleanup:
     def test_tmp_file_cleaned_up_on_replace_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Force os.replace to fail AFTER the tmp parquet is written → the
-        # finally-branch must unlink the orphan tmp so no .tmp leaks.
-        import brutex.data.option_parquet_writer as mod
-
+        # Force os.replace to fail AFTER the tmp parquet is written → the cleanup
+        # must unlink the orphan tmp so no .tmp leaks. _atomic_write_parquet now
+        # delegates to the shared atomic_io helper (DEC-LAKE-WRITE-HALT-001), so the
+        # rename happens there — patch os.replace via the module path. A generic OSError
+        # (no ENOSPC errno) re-raises as-is (it is NOT escalated to a LakeWriteHalt).
         def _boom(src: object, dst: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(mod.os, "replace", _boom)
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _boom)
         w = _writer(tmp_path)
         with pytest.raises(OSError, match="disk full"):
             w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
         # No orphan tmp file left behind.
         leftovers = list((tmp_path / "options").rglob("*.tmp"))
         assert leftovers == []
+
+    def test_merge_read_oom_halts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A MemoryError during the merge READ (steady-state re-pull) → LakeWriteHalt.
+
+        The merge read loads the WHOLE existing partition; an OOM there must become a
+        graceful LakeWriteHalt pull-wide stop, not a raw worker crash
+        (DEC-LAKE-WRITE-HALT-001 — the merge-read guard).
+        """
+        from brutex.data.errors import LakeWriteHalt
+
+        w = _writer(tmp_path)
+        # First write creates the partition (no merge read).
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+
+        def _oom(*_a: object, **_k: object) -> object:
+            raise MemoryError("merge read OOM")
+
+        monkeypatch.setattr(pl, "read_parquet", _oom)
+        # The SECOND write merges → reads the existing partition → OOM → LakeWriteHalt.
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=1)])
+        assert exc_info.value.reason == "out_of_memory"
 
 
 class TestPartitionLock:
@@ -274,3 +320,44 @@ class TestPathSafety:
 
     def test_lake_root_property(self, tmp_path: Path) -> None:
         assert _writer(tmp_path).lake_root == tmp_path
+
+
+class TestCrossProcessPartitionLock:
+    """Cross-process partition write-lock (DEC-LAKE-PARTITION-FLOCK-001).
+
+    The intra-process ``threading.Lock`` only serialises threads in ONE
+    interpreter; a concurrent CLI fetch + a dashboard pull sharing the lake are
+    SEPARATE processes and would still lost-update the same option month
+    partition. The advisory ``flock`` must be HELD across the read-modify-write.
+    """
+
+    def test_flock_is_held_across_the_merge_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The partition flock is held while the writer reads the existing partition.
+
+        Regression for the silent cross-process lost-update: a separate fd (≈ another
+        process) is probed DURING the merge read and must find the lock HELD. WITHOUT
+        the cross-process flock the probe would succeed and this assertion fails.
+        """
+        w = _writer(tmp_path)
+        # First write creates the partition so the SECOND write takes the merge
+        # (read-modify-write) path that calls ``pl.read_parquet(dest)``.
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+
+        observed: dict[str, bool] = {}
+        original_read = pl.read_parquet
+
+        def _spy_read(source: object, *args: object, **kwargs: object) -> pl.DataFrame:
+            observed["held_during_read"] = _partition_lock_is_held(
+                partition_lock_path(tmp_path, Path(str(source)))
+            )
+            return original_read(source, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pl, "read_parquet", _spy_read)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=1)])
+
+        assert observed["held_during_read"] is True
+        # And released afterwards (a fresh acquire succeeds) — no leaked lock.
+        (only,) = (tmp_path / "options").rglob("*.parquet")
+        assert _partition_lock_is_held(partition_lock_path(tmp_path, only)) is False

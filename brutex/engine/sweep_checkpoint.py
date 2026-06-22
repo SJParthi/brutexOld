@@ -38,15 +38,13 @@ that fixed order, not a content address.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
 from typing import Any, Final
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 
 #: Schema version stamped on every checkpoint so a future format change is
@@ -314,22 +312,13 @@ class SweepCheckpointStore:
 def _atomic_write(dest: Path, content: bytes) -> None:
     """Atomically write *content* to *dest* via tempfile + fsync + ``os.replace``.
 
-    Mirrors :func:`brutex.engine.results_store._atomic_write`: a kill mid-write
-    leaves either the old file or the new one — never a partial.
+    Delegates to the COMMON guard-free :func:`brutex.data.atomic_io.atomic_write_simple`
+    (the ONE tmp→``fsync``→``os.replace``→cleanup, CLAUDE.md §11,
+    DEC-ATOMIC-WRITE-CONSOLIDATE-001): a kill mid-write leaves either the old file or
+    the new one — never a partial. Guard-FREE on purpose — a raw ``OSError`` propagates
+    unchanged so the caller's ``SweepCheckpointError`` contract is preserved.
     """
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(dest.parent), prefix=".brutex-ckpt-", suffix=".json.tmp"
-    )
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, dest)
-    except OSError:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_path)
-        raise
+    atomic_write_simple(dest, lambda tmp: tmp.write_bytes(content))
 
 
 __all__ = [

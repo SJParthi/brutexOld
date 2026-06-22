@@ -43,6 +43,7 @@ from brutex.adapters.groww.option_ingest import (
     run_groww_option_ingest,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
@@ -833,6 +834,8 @@ def test_run_out_of_scope_error_quarantines_contract_not_crashes(
     [
         DailyQuotaExceeded("daily quota of 100000 calls spent"),
         QuotaInvariantError("quota ledger invariant broke"),
+        LakeWriteHalt("disk_full"),  # DEC-LAKE-WRITE-HALT-001 — disk full halts the F&O pull
+        LakeWriteHalt("out_of_memory"),
     ],
 )
 def test_run_global_stop_quota_error_propagates_not_quarantined(
