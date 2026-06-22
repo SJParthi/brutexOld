@@ -212,8 +212,10 @@ hostile-review pass._
   Expired options + futures (Options Track / lake) use the same
   `get_historical_candles` after resolving contracts via
   `groww.get_expiries(...)` → `groww.get_contracts(...)`, also at **`1minute`
-  ONLY** with a DEFAULT window of per-contract `expiry − 3 calendar months →
-  expiry` (explicit operator dates override); the F&O `1day` is likewise
+  ONLY** with a DEFAULT window SPLIT by contract type — FUTURES `expiry −
+  3 calendar months → expiry`, OPTIONS `expiry − 30 days → expiry`
+  (DEC-FNO-LOOKBACK-SPLIT-001, MIGRATION.md #894; explicit operator dates
+  override either default); the F&O `1day` is likewise
   DERIVED from the pulled 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001). See §6
   for the full verified fact table.
 - **Out of scope (Track 1 engine):** Live feed, WebSocket, order
@@ -228,9 +230,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/coverage-windows-o1-jlzt1n` (the `/coverage/windows` "Fetch windows" page is now O(page):
+- **Active branch:** `claude/fno-lookback-split-jlzt1n` (the F&O default historical-pull lookback is now SPLIT by
+  contract type: FUTURES default to 3 calendar months, OPTIONS to a tighter 30 days — DEC-FNO-LOOKBACK-SPLIT-001,
+  MIGRATION.md #894, the operator's "only for futures by default try to fetch it for 3 months but for options only
+  one month, that is max 30 days". When no explicit from/to dates are given, `default_fno_minute_window` defaulted
+  EVERY F&O contract to the last `DEFAULT_FNO_LOOKBACK_MONTHS = 3` months of its trading life; an option's liquid life
+  is short + the chain is huge (every strike × CE/PE), so 3 months over-pulls illiquid early-life option bars. FIX
+  (pull-PLANNING window only, F&O lake stays REFERENCE_ONLY): NEW `DEFAULT_OPTION_LOOKBACK_DAYS = 30` (a fixed 30-DAY
+  cap per "max 30 days", NOT a calendar month) + `default_fno_minute_window` gains `is_option: bool = False` branching
+  the lookback START — `expiry − 30 days` for an option vs `subtract_calendar_months(expiry, 3)` for a future — with
+  the SAME `max(full_start, …)` / `min(full_end, expiry + 1 day)` clamp + the SAME empty-window + `None`-expiry guards;
+  `historical_pull._resolve_minute_windows` passes `is_option=contract.contract_type in {"CE","PE"}` (types are exactly
+  FUT/CE/PE; explicit operator dates still override via the `explicit_dates` branch). HONEST: changes ONLY the DEFAULT
+  planning window when no dates are given (an explicit from/to range is byte-for-byte unchanged); 30 is a fixed
+  day-count not one calendar month; both bounds stay clamped into `[full_start, full_end)`; pull-side only — no lake
+  schema / stored-bar / rate / vocab / engine change. `contract_bounds.py` at 100% line+branch (87/20, 32 tests) +
+  `historical_pull.py` at 100% line+branch (210/46, 40 tests); ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-COVERAGE-WINDOWS-O1-001, MIGRATION.md #893
+  (the `/coverage/windows` "Fetch windows" page is now O(page):
   DuckDB `LIMIT`/`OFFSET` + a generation-cached `GROUP BY` replace the unconditional O(340,330) Python
-  count+filter+sort that ran on EVERY tab/filter click + 4 s poll — DEC-COVERAGE-WINDOWS-O1-001, MIGRATION.md #893,
+  count+filter+sort that ran on EVERY tab/filter click + 4 s poll —
   the operator's "navigating section to section is very slow / O(1) latency everywhere" fix. A 3-agent investigation +
   the attached `brutex.log` proved the server `latency_ms` degraded tens-of-ms → 1.5–4 s as the ledger grew, because
   `build_window_payload` looped over every record for counts, then filtered every record, then sorted, then sliced —
@@ -743,7 +762,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/coverage-windows-o1-jlzt1n`
+- **Active feature branch:** `claude/fno-lookback-split-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -893,7 +912,7 @@ bruteX/
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
-| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window of per-contract `expiry − 3 calendar months → expiry` (explicit operator dates override; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`); `dashboard/historical_pull.py` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — FUTURES `expiry − 3 calendar months → expiry`, OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`); `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |

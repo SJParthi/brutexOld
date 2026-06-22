@@ -822,8 +822,12 @@ def test_fno_pulls_minute_only_never_day(registry: RegistryStore) -> None:
     assert report.phase1_clean is True
 
 
-def test_minute_window_defaults_to_expiry_minus_3mo(registry: RegistryStore) -> None:
-    """No explicit dates → each contract's 1-minute window STARTS at expiry − 3 months."""
+def test_minute_window_defaults_split_by_contract_type(registry: RegistryStore) -> None:
+    """No explicit dates → FUTURES start at expiry − 3 months, OPTIONS at expiry − 30 days.
+
+    DEC-FNO-LOOKBACK-SPLIT-001: the per-contract default lookback is now split by type
+    (the NIFTY chain is CE + PE + FUT, all expiry 2024-01-25).
+    """
     sdk = _FakeSDK()
     sink = _RecordingSink()
     selected = registry.list_contracts(underlying="NIFTY")
@@ -839,12 +843,16 @@ def test_minute_window_defaults_to_expiry_minus_3mo(registry: RegistryStore) -> 
         client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # NIFTY chain expiry is 2024-01-25 → 2024-01-25 − 3 calendar months = 2023-10-25.
-    for symbol in (r.contract_symbol for r in selected):
-        assert report.start_dates[symbol] == "2023-10-25"
-    # The EARLIEST recorded fetch start is the default window start (2023-10-25, the
-    # first 30-day chunk), never blindly 2020. The 3-month window tiles into several
-    # 30-day chunks, so later chunk-starts are after it (all within the window).
+    # expiry 2024-01-25 → future − 3 calendar months = 2023-10-25; option − 30 days = 2023-12-26.
+    expected_start = {
+        "NSE-NIFTY-25Jan24-21000-CE": "2023-12-26",  # option → 30 days
+        "NSE-NIFTY-25Jan24-21000-PE": "2023-12-26",  # option → 30 days
+        "NSE-NIFTY-25Jan24-FUT": "2023-10-25",  # future → 3 months
+    }
+    for r in selected:
+        assert report.start_dates[r.contract_symbol] == expected_start[r.contract_symbol]
+    # The EARLIEST recorded fetch start is the FUTURE's 3-month window start (2023-10-25,
+    # its first 30-day chunk), never blindly 2020; every chunk-start is within a window.
     starts = [start[:10] for _sym, start in sdk.starts]
     assert min(starts) == "2023-10-25"
     assert all("2023-10-25" <= s <= "2024-01-25" for s in starts)
@@ -904,13 +912,29 @@ def test_resolve_minute_windows_explicit_uses_full_range(registry: RegistryStore
 
 
 def test_resolve_minute_windows_default_is_per_contract_expiry(registry: RegistryStore) -> None:
-    """``_resolve_minute_windows(explicit_dates=False)`` → expiry−3mo per contract."""
+    """``_resolve_minute_windows(explicit_dates=False)`` → futures expiry−3mo, options expiry−30d.
+
+    DEC-FNO-LOOKBACK-SPLIT-001: the NIFTY chain is CE + PE + FUT (expiry 2024-01-25), so the
+    FUT window starts 3 months back and the CE/PE windows 30 days back.
+    """
     rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
     out = hp._resolve_minute_windows(
         rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 6, 13)
     )
-    # NIFTY expiry 2024-01-25 → [2023-10-25, 2024-01-26).
-    assert set(out.values()) == {(date(2023, 10, 25), date(2024, 1, 26))}
+    # FUT → [2023-10-25, 2024-01-26) (3 months); CE/PE → [2023-12-26, 2024-01-26) (30 days).
+    assert set(out.values()) == {
+        (date(2023, 10, 25), date(2024, 1, 26)),
+        (date(2023, 12, 26), date(2024, 1, 26)),
+    }
+    by_symbol = {c.symbol: c for _r, c in rebuilt}
+    assert out[next(s for s, c in by_symbol.items() if c.contract_type == "FUT")] == (
+        date(2023, 10, 25),
+        date(2024, 1, 26),
+    )
+    assert out[next(s for s, c in by_symbol.items() if c.contract_type == "CE")] == (
+        date(2023, 12, 26),
+        date(2024, 1, 26),
+    )
 
 
 def test_derive_daily_from_minute_writes_one_day_partition(
