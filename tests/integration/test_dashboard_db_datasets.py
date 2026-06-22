@@ -155,18 +155,21 @@ class TestDbCandleDatasetsApi:
         # `list_fno_candle_datasets` (called exactly once per build) to prove BOTH the
         # cached-hit (one discovery across tab switches) and the invalidation half (a
         # `mark_dirty` → rediscover) at THIS call site, with an INJECTED SummaryCache.
-        import brutex.dashboard.app as app_module
+        # The spy is installed by DOTTED-PATH string (CodeQL py/import-and-import-from:
+        # `brutex.dashboard.app` is already imported via `from … import` above, so we do
+        # NOT also `import` it as a module — the `real` fn comes from its db_view source,
+        # which is the SAME object app's namespace holds).
+        from brutex.dashboard.db_view import list_fno_candle_datasets
         from brutex.dashboard.summary_cache import SummaryCache
 
         _write_option_series(tmp_path, "NSE_FNO|25|MONTH|1|ATM-10|CALL")
         calls = {"n": 0}
-        real = app_module.list_fno_candle_datasets
 
         def _counting(lake: Path) -> list[dict[str, object]]:
             calls["n"] += 1
-            return real(lake)
+            return list_fno_candle_datasets(lake)
 
-        monkeypatch.setattr(app_module, "list_fno_candle_datasets", _counting)
+        monkeypatch.setattr("brutex.dashboard.app.list_fno_candle_datasets", _counting)
         summary_cache = SummaryCache()
         client = TestClient(
             build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)

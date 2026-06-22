@@ -244,7 +244,7 @@ hostile-review pass._
   threadpool worker on a miss. HONEST: O(1) on repeat, NOT a literal O(1) total (first switch after a pull pays one
   real triple walk); same `_datasets()` output, only discovery ORDERING changed (spy test: `list_fno_candle_datasets`
   runs ONCE across three loads, payloads byte-identical); the frontend full-DOM-rebuild + the spot symbol→interval
-  CASCADE picker (#4b, DEC-DB-SPOT-CASCADE-001) are flagged FAST-FOLLOWS. `app.py` stays 100% line+branch; NEW
+  CASCADE picker (#4b, the F&O-cascade twin) are flagged FAST-FOLLOWS. `app.py` stays 100% line+branch; NEW
   integration test; ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
   scope/vocab/rate-cap change. Prior merged: DEC-COMPLETENESS-O1-LATENCY-001,
   MIGRATION.md #895 (the `/completeness` endpoints — scoreboard + CSV +
