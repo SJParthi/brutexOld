@@ -25,8 +25,9 @@ exactly ONE place each. This module IMPORTS:
   (its canonical home — the Futures reader re-imports the same one);
 * from :mod:`brutex.dashboard.movers_futures` — the GENERIC raw-1-minute
   session reader :func:`~brutex.dashboard.movers_futures._read_future_session`
-  (it returns ``(ltp, volume, oi)`` for ANY FNO contract, futures OR options —
-  reused verbatim for an option contract), the prior-day OI reader
+  (it returns ``(ltp, volume, value_paisa, oi)`` for ANY FNO contract, futures OR
+  options — reused for an option contract; options ignores the ``value_paisa`` field
+  and keeps its own ``_session_value_paisa`` reader), the prior-day OI reader
   :func:`~brutex.dashboard.movers_futures._prev_day_oi`, and the underlying spot
   resolver :func:`~brutex.dashboard.movers_futures._underlying_spot_ltp`.
 
@@ -589,10 +590,12 @@ def _session_value_paisa(
     """Cumulative traded value over *day*'s 1-minute bars, as int64 paisa.
 
     Reads the contract's ``<lake>/bars/<exchange>/FNO/<symbol>/1minute/**`` raw
-    1-minute parquet DIRECTLY (the same path
-    :func:`~brutex.dashboard.movers_futures._read_future_session` reads — but it
-    returns only ``(ltp, volume, oi)``, NOT the cumulative turnover, and
-    ``movers_futures`` must not be modified). Computes the turnover
+    1-minute parquet DIRECTLY (the same path + the same day-frame
+    :func:`~brutex.dashboard.movers_futures._read_future_session` reads — which since
+    DEC-MOVERS-FUTURES-VALUE-001 ALSO returns the turnover as its 3rd field; the options
+    caller keeps this separate reader as the deliberately-minimal touch — that change did
+    NOT rewire the options value path, so options re-reads the frame here). Computes the
+    turnover
     ``Σ round_money((high+low+close)/3) × volume`` over the kept bars (sliced to
     ``≤ cutoff_min`` for an intraday timeframe with the same Int32-cast minute
     math the Spot reader uses) via the SHARED
@@ -936,7 +939,10 @@ def compute_options_candidates(
             if read is None:  # no session bar on the selected day/time → skip, never faked.
                 skipped += 1
                 continue
-            ltp, volume, oi = read
+            # `_read_future_session` now also returns the HLC3 turnover (the futures
+            # caller needs it, DEC-MOVERS-VWAP-VALUE-001); options keeps its OWN
+            # `_session_value_paisa` value reader, so that 3rd field is ignored here.
+            ltp, volume, _, oi = read
             value_paisa = _session_value_paisa(
                 lake_root, exchange=contract_exchange, symbol=symbol, day=day, cutoff_min=cutoff_min
             )

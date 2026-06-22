@@ -61,16 +61,28 @@ _FAR_FUT = "NSE-NIFTY-25Jul24-FUT"
 
 
 def _min_bar(
-    *, hour: int, minute: int, close: str, volume: int, oi: int | None, day: date = _DAY
+    *,
+    hour: int,
+    minute: int,
+    close: str,
+    volume: int,
+    oi: int | None,
+    day: date = _DAY,
+    high: str | None = None,
+    low: str | None = None,
 ) -> CandleBar:
-    """A flat 1-minute bar at ``HH:MM`` **IST** on *day* (IST = UTC + 05:30), with OI."""
+    """A 1-minute bar at ``HH:MM`` **IST** on *day* (IST = UTC + 05:30), with OI.
+
+    *high*/*low* default to *close* (a flat zero-range bar) so existing callers are
+    unchanged; pass them to exercise the HLC3 typical-price turnover.
+    """
     c = Decimal(close)
     total = hour * 60 + minute - (5 * 60 + 30)
     return CandleBar(
         timestamp=datetime(day.year, day.month, day.day, total // 60, total % 60, tzinfo=UTC),
         open=c,
-        high=c,
-        low=c,
+        high=Decimal(high) if high is not None else c,
+        low=Decimal(low) if low is not None else c,
         close=c,
         volume=volume,
         open_interest=oi,
@@ -166,9 +178,12 @@ class TestReadFutureSession:
             tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_NEAR_FUT, day=_DAY, cutoff_min=None
         )
         assert read is not None
-        ltp, volume, oi = read
+        ltp, volume, value_paisa, oi = read
         assert ltp == Decimal("20100.00")
         assert volume == 500
+        # Zero-range seed bars → HLC3 == close: 20050×100 + 20100×400 = ₹1,00,45,000
+        # → 1_004_500_000 paisa (DEC-MOVERS-VWAP-VALUE-001).
+        assert value_paisa == 1_004_500_000
         assert oi == 1100  # last bar's OI, preserved (make_lake_read_1m would drop it)
 
     def test_intraday_cutoff_slices(self, tmp_path: Path) -> None:
@@ -178,9 +193,10 @@ class TestReadFutureSession:
             tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_NEAR_FUT, day=_DAY, cutoff_min=555
         )
         assert read is not None
-        ltp, volume, oi = read
+        ltp, volume, value_paisa, oi = read
         assert ltp == Decimal("20050.00")
         assert volume == 100
+        assert value_paisa == 200_500_000  # only bar1: 20050×100 = ₹20,05,000 → 200_500_000 paisa
         assert oi == 1050
 
     def test_cutoff_before_session_is_none(self, tmp_path: Path) -> None:
@@ -229,7 +245,25 @@ class TestReadFutureSession:
             tmp_path, exchange=_EXCHANGE, segment="INDEX", symbol="NIFTY", day=_DAY, cutoff_min=None
         )
         assert read is not None
-        assert read[2] is None
+        assert read[3] is None  # oi is now the 4th element (ltp, volume, value, oi)
+
+    def test_value_uses_hlc3_typical_price(self, tmp_path: Path) -> None:
+        # DEC-MOVERS-VWAP-VALUE-001: a REAL intrabar range proves the turnover uses the
+        # HLC3 typical price, NOT close × volume (which a zero-range seed can't distinguish).
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_NEAR_FUT,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, high="112", low="106", close="110", volume=20, oi=5)],
+        )
+        read = _read_future_session(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_NEAR_FUT, day=_DAY, cutoff_min=None
+        )
+        assert read is not None
+        # typical=(112+106+110)/3=109.3333…→round_money 109.33 → 109.33×20=₹2186.60 → 218660 paisa
+        # (the OLD close×volume would give 110×20=2200 → 220000 — genuinely distinct).
+        assert read[2] == 218660
 
 
 # ── _underlying_spot_ltp (INDEX then CASH) ────────────────────────────────

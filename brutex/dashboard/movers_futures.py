@@ -28,10 +28,12 @@ near-month contract):
 * **Near-month** = the contract with the earliest expiry ``>= snapshot_date``
   (front month). All-expired underlyings are SKIPPED (no live contract — honest,
   Golden Rule #1), never faked.
-* **LTP / volume / OI** come from the future's own session bars (raw 1-minute,
-  resampled by the same minute math the Spot reader uses, sliced to the selected
-  ``time``). ``ltp`` is the last bar's close (2dp money), ``volume`` is the
-  cumulative session quantity, ``oi`` is the last bar's open interest.
+* **LTP / volume / value / OI** come from the future's own session bars (raw
+  1-minute, resampled by the same minute math the Spot reader uses, sliced to the
+  selected ``time``). ``ltp`` is the last bar's close (2dp money), ``volume`` is the
+  cumulative session quantity, ``value`` is the HLC3 typical-price × volume turnover
+  (the "Top Value" metric, DEC-MOVERS-VWAP-VALUE-001), ``oi`` is the last bar's
+  open interest.
 * **% change** is vs the future's OWN previous trading-day 1-day close.
 * **Premium / discount** = ``ltp − underlying_spot_ltp`` (the underlying's spot
   read the SAME way — its INDEX or CASH 1-minute bars). ``None`` when the
@@ -68,6 +70,8 @@ from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
     interval_minutes,
     parse_snapshot_date,
+    session_traded_value_paisa,
+    value_crore_str,
 )
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -257,6 +261,11 @@ class FuturesMover:
         missing current OI.
     volume
         Cumulative fresh-session traded quantity 09:15 → the selected bar.
+    value_paisa
+        Cumulative traded value (turnover) over the session bars as int64 paisa —
+        ``Σ round_money((high+low+close)/3) × volume`` (the per-bar HLC3 typical
+        price × volume VWAP-proxy turnover, DEC-MOVERS-VWAP-VALUE-001), shared with
+        the spot + options screens via ``session_traded_value_paisa``.
     """
 
     underlying: str
@@ -270,11 +279,17 @@ class FuturesMover:
     oi: int | None
     oi_chg_pct: Decimal | None
     volume: int
+    value_paisa: int
 
     @property
     def ltp_inr(self) -> str:
         """The future's LTP as a 2dp ``₹`` display string."""
         return format_inr(rupees_to_paisa(self.ltp))
+
+    @property
+    def value_crore(self) -> str:
+        """Cumulative traded value rendered in ₹ crore (2dp) — shares the COMMON formatter."""
+        return value_crore_str(self.value_paisa)
 
     @property
     def spot_inr(self) -> str | None:
@@ -327,6 +342,18 @@ def rank_volume(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover
     return pool[:top_n]
 
 
+def rank_value(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
+    """Top-``n`` futures by cumulative fresh-session traded value (turnover), descending.
+
+    Ranks the HLC3 typical-price turnover (``value_paisa``, DEC-MOVERS-VWAP-VALUE-001)
+    — the futures twin of the spot/options "Top Value" ranking; a zero-turnover future
+    is excluded (mirrors :func:`rank_volume`).
+    """
+    pool = [m for m in movers if m.value_paisa > 0]
+    pool.sort(key=lambda m: (-m.value_paisa, _sort_key(m)))
+    return pool[:top_n]
+
+
 def rank_oi_gainers(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
     """Top-``n`` futures with ``oi_chg_pct > 0``, descending (stable tiebreak)."""
     pool = [m for m in movers if m.oi_chg_pct is not None and m.oi_chg_pct > 0]
@@ -349,6 +376,7 @@ _FUTURES_CATEGORIES: Final[dict[str, Any]] = {
     "premium": rank_premium,
     "discount": rank_discount,
     "volume": rank_volume,
+    "value": rank_value,
     "oi_gainers": rank_oi_gainers,
     "oi_losers": rank_oi_losers,
 }
@@ -361,6 +389,7 @@ def compute_futures_mover(
     exchange: str,
     ltp: Decimal,
     volume: int,
+    value_paisa: int,
     oi: int | None,
     prev_close: Decimal | None,
     spot_ltp: Decimal | None,
@@ -380,8 +409,9 @@ def compute_futures_mover(
         Underlying symbol (the display name).
     symbol, exchange
         The future's contract symbol + exchange (segment is always ``FNO``).
-    ltp, volume, oi
-        The future's session LTP (rupees), cumulative volume, last OI (or ``None``).
+    ltp, volume, value_paisa, oi
+        The future's session LTP (rupees), cumulative volume, traded value (turnover,
+        int64 paisa — DEC-MOVERS-VWAP-VALUE-001), and last OI (or ``None``).
     prev_close
         The future's previous trading-day 1-day close (rupees), or ``None``.
     spot_ltp
@@ -416,6 +446,7 @@ def compute_futures_mover(
         oi=oi,
         oi_chg_pct=oi_chg_pct,
         volume=volume,
+        value_paisa=value_paisa,
     )
 
 
@@ -433,6 +464,7 @@ def _futures_row(mover: FuturesMover) -> dict[str, Any]:
         "oi": mover.oi,
         "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
         "volume": mover.volume,
+        "value_cr": mover.value_crore,
     }
 
 
@@ -448,8 +480,8 @@ def build_futures_payload(
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
     Builds one ranked list **per futures category** (``price_gainers`` /
-    ``price_losers`` / ``premium`` / ``discount`` / ``volume`` / ``oi_gainers`` /
-    ``oi_losers`` — the Futures tab's pills), keyed by the category name so the
+    ``price_losers`` / ``premium`` / ``discount`` / ``volume`` / ``value`` /
+    ``oi_gainers`` / ``oi_losers`` — the Futures tab's pills), keyed by the category name so the
     page's ``j[category]`` lookup picks the active one. Adds the echo of the
     chosen ``date`` / ``interval`` / ``time`` and an honest ``note``. Every value
     is JSON-native (money is a ``₹`` string, statistical metrics are
@@ -471,7 +503,7 @@ def build_futures_payload(
     Returns
     -------
     dict[str, Any]
-        The Futures-tab payload: the seven ranked category lists + the echo +
+        The Futures-tab payload: the eight ranked category lists + the echo +
         ``instrument_count`` / ``skipped_count`` / ``note``.
     """
     ranked: dict[str, list[dict[str, Any]]] = {
@@ -519,7 +551,7 @@ def _read_future_session(
     symbol: str,
     day: date_cls,
     cutoff_min: int | None,
-) -> tuple[Decimal, int, int | None] | None:
+) -> tuple[Decimal, int, int, int | None] | None:
     """Read *day*'s raw 1-minute bars for one series, preserving open interest.
 
     Reads ``<lake>/bars/<exchange>/<segment>/<symbol>/1minute/**/*.parquet`` with
@@ -530,10 +562,12 @@ def _read_future_session(
     reader uses — ``dt.hour()`` / ``dt.minute()`` are narrow Int8 and overflow
     otherwise). A daily timeframe passes ``cutoff_min=None`` ⇒ no cutoff. From
     the kept bars: the LTP is the last close (2dp money), the volume is the sum,
-    and the OI is the last bar's ``open_interest`` (``None`` when the column is
-    null). Returns ``None`` when the directory is missing or no bar falls on the
-    day / within the cutoff (the caller counts it skipped, never fabricated —
-    Golden Rule #1).
+    the VALUE (turnover) is the HLC3 typical-price × volume sum via the shared
+    :func:`~brutex.dashboard.movers_snapshot.session_traded_value_paisa`
+    (DEC-MOVERS-VWAP-VALUE-001), and the OI is the last bar's ``open_interest``
+    (``None`` when the column is null). Returns ``None`` when the directory is
+    missing or no bar falls on the day / within the cutoff (the caller counts it
+    skipped, never fabricated — Golden Rule #1).
 
     Parameters
     ----------
@@ -549,8 +583,9 @@ def _read_future_session(
 
     Returns
     -------
-    tuple[Decimal, int, int | None] | None
-        ``(ltp, volume, oi)`` for the kept bars, or ``None`` when there are none.
+    tuple[Decimal, int, int, int | None] | None
+        ``(ltp, volume, value_paisa, oi)`` for the kept bars, or ``None`` when there
+        are none.
     """
     import polars as pl
 
@@ -581,9 +616,21 @@ def _read_future_session(
     last = day_df.tail(1)
     ltp = round_money(Decimal(str(last.get_column("close")[0])))
     volume = int(day_df.get_column("volume").sum())
+    # DEC-MOVERS-VWAP-VALUE-001: turnover is the per-bar HLC3 typical-price × volume sum,
+    # via the ONE shared helper (spot + options + futures share it — CLAUDE.md §11 COMMON).
+    value_paisa = session_traded_value_paisa(
+        (Decimal(str(high)), Decimal(str(low)), Decimal(str(close)), int(vol))
+        for high, low, close, vol in zip(
+            day_df.get_column("high").to_list(),
+            day_df.get_column("low").to_list(),
+            day_df.get_column("close").to_list(),
+            day_df.get_column("volume").to_list(),
+            strict=True,
+        )
+    )
     raw_oi = last.get_column("open_interest")[0]
     oi = None if raw_oi is None else int(raw_oi)
-    return ltp, volume, oi
+    return ltp, volume, value_paisa, oi
 
 
 def _prev_day_oi(
@@ -776,7 +823,7 @@ def compute_futures_candidates(
             if read is None:  # no session bar on the selected day/time → skip, never faked.
                 skipped += 1
                 continue
-            ltp, volume, oi = read
+            ltp, volume, value_paisa, oi = read
             prev_close = _prev_day_close(
                 lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
             )
@@ -799,6 +846,7 @@ def compute_futures_candidates(
                 exchange=exchange,
                 ltp=ltp,
                 volume=volume,
+                value_paisa=value_paisa,
                 oi=oi,
                 prev_close=prev_close,
                 spot_ltp=spot_ltp,
