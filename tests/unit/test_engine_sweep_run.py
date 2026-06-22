@@ -1274,3 +1274,46 @@ class TestSweepComboError:
         assert not completion_sentinel_path(store.path).exists()
         # The dedup was never marked, so a re-run re-evaluates the masks.
         assert not dedup.seen(first_rid)
+
+    def test_memory_error_propagates_bare_not_a_combo_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A MemoryError is a GLOBAL abort, NOT a per-tuple SweepComboError skip.
+
+        OOM is treated as a global stop everywhere in the codebase
+        (DEC-LAKE-WRITE-HALT-001), so the combo loop must re-raise it BARE instead
+        of wrapping it into a SweepComboError that the grid drivers would downgrade
+        to a single-tuple skip. The store / sidecar / sentinel stay unwritten.
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _oom(*_args: object, **_kwargs: object) -> object:
+            raise MemoryError("out of memory")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _oom)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(MemoryError, match="out of memory") as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # It is NOT downgraded to a SweepComboError (the per-tuple skip path).
+        assert not isinstance(excinfo.value, SweepComboError)
+        # Bare re-raise: no SweepComboError wrap chained around it.
+        assert excinfo.value.__cause__ is None
+        # No artifact was written (the raise is before flush/mark/sentinel).
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()

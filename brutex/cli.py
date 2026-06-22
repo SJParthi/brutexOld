@@ -111,6 +111,38 @@ def sweep_all_exit_code(tuples_failed: int) -> int:
     return EXIT_SWEEP_TUPLE_FAILED if tuples_failed > 0 else EXIT_OK
 
 
+def sweep_verify_exit_code(*, has_findings: bool, inconclusive: bool) -> int:
+    """Map a completed ``sweep-verify`` run's outcome flags to its exit code.
+
+    Corruption findings dominate: any non-clean report exits
+    :data:`EXIT_VERIFY_FINDINGS`. Absent findings, an inconclusive-only run (a
+    recount refused/uncertain under a context mismatch, OR — DEC-SWEEP-VERIFY
+    "Resilient: skip + continue" — a shadow re-sweep that skipped >=1 tuple, so
+    the byte-diff would be against a PARTIAL re-sweep) exits
+    :data:`EXIT_VERIFY_INCONCLUSIVE`; otherwise :data:`EXIT_OK`. The
+    findings-before-inconclusive ordering matches the inline verdict it replaces.
+
+    Parameters
+    ----------
+    has_findings
+        ``True`` when any verify report is not clean (corruption / divergence).
+    inconclusive
+        ``True`` when the run is inconclusive-only (no findings, but the verdict
+        cannot be trusted — e.g. a partial recount).
+
+    Returns
+    -------
+    int
+        :data:`EXIT_VERIFY_FINDINGS`, :data:`EXIT_VERIFY_INCONCLUSIVE`, or
+        :data:`EXIT_OK`.
+    """
+    if has_findings:
+        return EXIT_VERIFY_FINDINGS
+    if inconclusive:
+        return EXIT_VERIFY_INCONCLUSIVE
+    return EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Argparse builder
 # ────────────────────────────────────────────────────────────────────────
@@ -3573,7 +3605,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             train_hash_ok = True
             with AuditWriter.open(audit_path) as audit:
-                run_sweep_grid(
+                resweep_summary = run_sweep_grid(
                     grid,
                     bars_for=lambda s, i: slices.get((s, i), []),
                     store_for=make_store_for(scratch, grid),
@@ -3582,6 +3614,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     ),
                     audit=audit,
                 )
+                # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
+                # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
+                # re-sweep. A byte-diff against an incomplete re-sweep is meaningless,
+                # so the verdict is downgraded to INCONCLUSIVE (never a pass/fail over
+                # a partial sweep) naming the failed-tuple count.
+                if resweep_summary.tuples_failed > 0:
+                    inconclusive_only = True
+                    print(
+                        "[brutex] sweep-verify INCONCLUSIVE: the shadow re-sweep "
+                        f"SKIPPED {resweep_summary.tuples_failed} tuple(s) "
+                        "(SweepComboError) — the recount is partial, so the byte-diff "
+                        "cannot be trusted; re-run after the failing tuple(s) redo",
+                        file=sys.stderr,
+                    )
                 if stage3_grid is not None:
                     from brutex.engine.stage3_wire import run_stage3_pass
 
@@ -3669,11 +3715,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 else:
                     print("[brutex] no heal plan emitted: recount found no corruption")
 
-    if any(not report.clean for report in reports):
-        return EXIT_VERIFY_FINDINGS
-    if inconclusive_only:
-        return EXIT_VERIFY_INCONCLUSIVE
-    return EXIT_OK
+    return sweep_verify_exit_code(
+        has_findings=any(not report.clean for report in reports),
+        inconclusive=inconclusive_only,
+    )
 
 
 def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tested sweep_heal core

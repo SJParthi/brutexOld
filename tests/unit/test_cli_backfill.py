@@ -553,3 +553,35 @@ def test_sweep_all_exit_code_failures_are_non_zero(failed: int) -> None:
     """Any skipped tuple makes the verdict NON-ZERO (Golden Rule #10 — no silent skip)."""
     assert cli.sweep_all_exit_code(failed) == cli.EXIT_SWEEP_TUPLE_FAILED
     assert cli.EXIT_SWEEP_TUPLE_FAILED != cli.EXIT_OK
+
+
+# ── sweep-verify verdict (partial shadow re-sweep → INCONCLUSIVE) ─────────
+
+
+def test_sweep_verify_exit_code_findings_dominate() -> None:
+    """Corruption findings dominate even when the run is also inconclusive."""
+    assert cli.sweep_verify_exit_code(has_findings=True, inconclusive=False) == (
+        cli.EXIT_VERIFY_FINDINGS
+    )
+    assert cli.sweep_verify_exit_code(has_findings=True, inconclusive=True) == (
+        cli.EXIT_VERIFY_FINDINGS
+    )
+
+
+def test_sweep_verify_exit_code_inconclusive_when_no_findings() -> None:
+    """No findings but inconclusive (e.g. a PARTIAL shadow re-sweep that skipped a tuple).
+
+    DEC-ENGINE-TUPLE-SKIP-RESILIENT-001: ``run_sweep_grid`` now skips a raising
+    tuple, so a recount with ``tuples_failed > 0`` is a PARTIAL re-sweep — the
+    byte-diff cannot be trusted, so the verdict downgrades to INCONCLUSIVE rather
+    than emitting a pass/fail over an incomplete sweep.
+    """
+    assert cli.sweep_verify_exit_code(has_findings=False, inconclusive=True) == (
+        cli.EXIT_VERIFY_INCONCLUSIVE
+    )
+    assert cli.EXIT_VERIFY_INCONCLUSIVE != cli.EXIT_OK
+
+
+def test_sweep_verify_exit_code_clean_run_is_ok() -> None:
+    """No findings + conclusive → a clean OK verdict."""
+    assert cli.sweep_verify_exit_code(has_findings=False, inconclusive=False) == cli.EXIT_OK

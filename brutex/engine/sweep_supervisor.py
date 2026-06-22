@@ -562,6 +562,14 @@ def run_supervised_grid(
     evaluated = 0
     ranked = 0
     persisted = 0
+    # The monotonic checkpoint is a CONTIGUOUS-CLEAN-PREFIX mark: it must only ever
+    # advance past tuples that ALL succeeded. Once ANY tuple fails this run we stop
+    # recording the checkpoint, freezing it at the last clean index BEFORE the first
+    # failure so a resume re-runs the failed tuple (the sweep_heal "C5" lesson +
+    # Golden Rules #4/#7 — a failed tuple must never be permanently skipped). Tuples
+    # that succeeded AFTER the failure are short-circuited on resume by the CACHE tier
+    # (guards.cache.record still runs on success), not re-evaluated, so resume stays cheap.
+    had_failure = False
 
     # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): reuse one
     # Stage-1A bar window per distinct (instrument, tf, proximity, prior_n) across
@@ -608,7 +616,8 @@ def run_supervised_grid(
                 _tuple_cache_params(tuple_, grid),
             ):
                 skipped_cache += 1
-                guards.checkpoint.record(index)
+                if not had_failure:
+                    guards.checkpoint.record(index)
                 _advance(current=label, survived=False, skipped=True)
                 guards.audit.append(
                     action=_ACTION_TUPLE_CACHE,
@@ -639,6 +648,7 @@ def run_supervised_grid(
                 )
             except SweepComboError as exc:
                 tuples_failed += 1
+                had_failure = True
                 _advance(current=label, survived=False, skipped=False)
                 guards.audit.append(
                     action=_ACTION_TUPLE_FAILED,
@@ -659,7 +669,8 @@ def run_supervised_grid(
                 continue
             if summary is None:
                 tuples_skipped_no_bars += 1
-                guards.checkpoint.record(index)
+                if not had_failure:
+                    guards.checkpoint.record(index)
                 _advance(current=label, survived=False, skipped=True)
                 guards.audit.append(
                     action=_ACTION_TUPLE_NO_BARS,
@@ -683,7 +694,8 @@ def run_supervised_grid(
                 _direction_label(tuple_.direction),
                 _tuple_cache_params(tuple_, grid),
             )
-            guards.checkpoint.record(index)
+            if not had_failure:
+                guards.checkpoint.record(index)
             _advance(current=label, survived=summary.persisted > 0, skipped=False)
             guards.audit.append(
                 action=_ACTION_TUPLE_DONE,
@@ -719,7 +731,10 @@ def run_supervised_grid(
             "persisted": persisted,
         }
         guards.progress.finish(
-            detail=f"{tuples_run} run · {skipped_cache} cached · {skipped_resume} resumed"
+            detail=(
+                f"{tuples_run} run · {skipped_cache} cached · "
+                f"{skipped_resume} resumed · {tuples_failed} failed"
+            )
         )
         if on_progress is not None:
             on_progress(guards.progress.snapshot())

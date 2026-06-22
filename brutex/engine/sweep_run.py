@@ -122,9 +122,11 @@ _ACTION_RESUMED: Final[str] = "SWEEP_RESUMED"
 class SweepComboError(BruteXError):
     """One combo's metric evaluation raised — names the offending mask + run-id + tuple.
 
-    A raise here is a tuple-wide bug or corrupt bar window (every input to
-    `metrics_for_mask` is tuple-invariant), never a transient single combo, so the
-    grid drivers SKIP the whole tuple (deterministic redo next run), never the one mask.
+    A raise here is treated CONSERVATIVELY as tuple-wide (the safe redo-everything
+    choice): the only per-combo-varying input to `metrics_for_mask` is the mask, so a
+    mask-specific edge cannot be ruled out — skipping the whole tuple is the conservative
+    response. The grid drivers SKIP the whole tuple (deterministic redo next run), never
+    the one mask.
     """
 
 
@@ -909,11 +911,13 @@ def run_persisted_sweep(
     # wrapped so a raise is re-thrown as a `SweepComboError` naming the exact
     # offending combo (mask hex + run-id + tuple coordinate). Per
     # "Resilient: skip + continue", the grid drivers catch THIS error and skip
-    # the WHOLE tuple (every input to `metrics_for_mask` is tuple-invariant, so a
-    # raise is a tuple-wide bug / corrupt bar window, never a transient one combo);
-    # the tuple is left un-sentineled / un-cached so it redoes next run. On the
-    # success path `pairs` is byte-identical to the prior list comprehension
-    # (same order, same tuples).
+    # the WHOLE tuple — treated CONSERVATIVELY as tuple-wide (the safe
+    # redo-everything choice): the only per-combo-varying input is the mask, so a
+    # mask-specific edge cannot be ruled out; the tuple is left un-sentineled /
+    # un-cached so it redoes next run. A MemoryError is re-raised bare (OOM is a
+    # GLOBAL stop, DEC-LAKE-WRITE-HALT-001, never a per-tuple skip). On the success
+    # path `pairs` is byte-identical to the prior list comprehension (same order,
+    # same tuples).
     pairs: list[tuple[int, ResultMetrics]] = []
     for mask, _ in kept:
         try:
@@ -927,6 +931,11 @@ def run_persisted_sweep(
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
             )
+        except MemoryError:
+            # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a per-tuple
+            # skip — re-raise bare so it aborts the whole sweep instead of being
+            # downgraded into a SweepComboError tuple-skip below.
+            raise
         except Exception as exc:
             raise SweepComboError(
                 f"combo 0x{mask:016x} (run_id={run_id_by_mask[mask]}) in "

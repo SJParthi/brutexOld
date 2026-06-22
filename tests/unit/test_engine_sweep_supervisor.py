@@ -500,7 +500,10 @@ class TestRunSupervisedGrid:
             assert not guards.cache.seen_digest(tuple_cache_key(tuples[1], grid))
             assert guards.checkpoint.last_completed_index == 0  # never advanced to 1
             # The run is not a clean done illusion: it finished but with a failure.
-            assert guards.progress.snapshot().state == STATE_DONE
+            snap = guards.progress.snapshot()
+            assert snap.state == STATE_DONE
+            # The finish detail surfaces the failed count (never reads green-only).
+            assert snap.detail == "1 run · 0 cached · 0 resumed · 1 failed"
         assert seen == ["NIFTY"]  # on_tuple never fired for the failed tuple
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_FAILED" in actions
@@ -513,6 +516,133 @@ class TestRunSupervisedGrid:
         )
         assert complete.payload["tuples_failed"] == 1
         assert verify_chain(tmp_path / "sup.jsonl") > 0
+
+    def test_failed_tuple_reruns_on_resume_when_later_tuple_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BLOCKER regression: a FAILED tuple is RE-RUN on resume, never skipped.
+
+        The checkpoint is a CONTIGUOUS-CLEAN-PREFIX mark. When tuple index 0 FAILS
+        but a LATER tuple (index 1) SUCCEEDS, the checkpoint must NOT advance past
+        the failure (it stays at the last clean index before it) — so on a resume
+        run ``resume_from`` lands on the failed index 0 and it RE-RUNS, instead of
+        being silently ``skipped_resume`` forever (the sweep_heal C5 lesson +
+        Golden Rules #4/#7). Without the fix this test FAILS: index 1's success
+        would record(1) → next_index=2 → index 0 resume-skipped, never re-run.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
+
+        # 2 tuples: index 0 NIFTY, index 1 BANKNIFTY.
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        tuples = list(iter_sweep_tuples(grid))
+
+        # On the FIRST run NIFTY (index 0) raises; on the resume it succeeds.
+        fail_nifty = {"on": True}
+
+        def _maybe_raise(grid_: object, tuple_: object, **kwargs: object) -> object:
+            if tuple_.instrument == "NIFTY" and fail_nifty["on"]:  # type: ignore[attr-defined]
+                raise SweepComboError("combo 0x0000000000000001 (run_id=dead) boom")
+            return real_run_one(grid_, tuple_, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _maybe_raise)
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            # ── First run: index 0 fails, index 1 succeeds. ──
+            first_ran: list[str] = []
+            first = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                on_tuple=lambda t, _s: first_ran.append(t.instrument),
+            )
+            assert first.tuples_failed == 1
+            assert first.tuples_run == 1
+            assert first_ran == ["BANKNIFTY"]  # the LATER tuple ran
+            # The checkpoint must be FROZEN before the failure — NOT advanced to 1
+            # by index 1's success (the BLOCKER: without the fix it would be 1).
+            assert guards.checkpoint.last_completed_index == -1
+            # Index 1 (succeeded) IS cached so the resume short-circuits it via the
+            # cache tier; index 0 (failed) is NOT cached so the resume re-evaluates.
+            assert guards.cache.seen_digest(tuple_cache_key(tuples[1], grid))
+            assert not guards.cache.seen_digest(tuple_cache_key(tuples[0], grid))
+
+            # ── Resume run (SAME guards): NIFTY now succeeds. ──
+            fail_nifty["on"] = False
+            second_ran: list[str] = []
+            second = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                on_tuple=lambda t, _s: second_ran.append(t.instrument),
+            )
+            # The previously-FAILED tuple 0 was RE-RUN (not skipped_resume); the
+            # already-succeeded tuple 1 is short-circuited by the cache tier.
+            assert second.tuples_failed == 0
+            assert second.tuples_run == 1
+            assert second.skipped_resume == 0  # NOT resume-skipped — the BLOCKER fix
+            assert second.skipped_cache == 1  # tuple 1 short-circuited via cache
+            assert second_ran == ["NIFTY"]  # the failed tuple genuinely re-ran
+            # Both tuples now clean → the checkpoint advanced to the full prefix.
+            assert guards.checkpoint.last_completed_index == 1
+
+    def test_checkpoint_frozen_for_cache_and_nobars_tuples_after_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a failure the checkpoint stays frozen even past cache-hit / no-bars tuples.
+
+        Covers the ``if not had_failure`` FALSE branch on BOTH the cache-skip and
+        the no-bars paths: a later cache-HIT or no-bars tuple must NOT advance the
+        checkpoint past the earlier failed tuple (else that failed tuple would be
+        resume-skipped — the BLOCKER). 3 tuples: index 0 FAILS, index 1 is a
+        pre-cached cache-hit, index 2 has no bars.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
+
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY", "SENSEX"])
+        bars = _trending_bars()
+        tuples = list(iter_sweep_tuples(grid))
+
+        def _bars_for(instrument: str, _t: str) -> Sequence[CandleBar]:
+            return [] if instrument == "SENSEX" else bars  # index 2 has no bars
+
+        def _maybe_raise(grid_: object, tuple_: object, **kwargs: object) -> object:
+            if tuple_.instrument == "NIFTY":  # type: ignore[attr-defined]  # index 0 fails
+                raise SweepComboError("combo 0x0000000000000001 (run_id=dead) boom")
+            return real_run_one(grid_, tuple_, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _maybe_raise)
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            guards.cache.record_digest(tuple_cache_key(tuples[1], grid))  # pre-cache index 1
+            summary = run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+            assert summary.tuples_failed == 1  # index 0
+            assert summary.skipped_cache == 1  # index 1
+            assert summary.tuples_skipped_no_bars == 1  # index 2
+            # The checkpoint is FROZEN before the failure — neither the cache-hit
+            # (index 1) nor the no-bars (index 2) tuple advanced it past index 0.
+            assert guards.checkpoint.last_completed_index == -1
 
     def test_combo_error_real_raise_leaves_store_unsentineled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
