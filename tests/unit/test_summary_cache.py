@@ -211,6 +211,36 @@ def test_in_flight_refresh_serves_current_entry_no_double_scan() -> None:
     assert final == [{"call": "fresh"}]
 
 
+def test_cold_concurrent_refresh_recomputes_instead_of_keyerror() -> None:
+    """A concurrent read on a COLD cache (no entry yet) recomputes — never KeyError.
+
+    DEC-COMPLETENESS-O1-LATENCY-001 (hostile-review MAJOR): when reader A is
+    mid-recompute on a kind that has NEVER been populated, reader B used to hit the
+    ``kind in self._refreshing`` branch, return ``None``, and then dereference the
+    absent ``self._entries[kind]`` → ``KeyError`` → a 500. Sharing the SPOT entry
+    across two concurrently-polled routes widened that cold-start exposure. With the
+    cold-cache fall-through, B recomputes too (a transient, idempotent double-scan),
+    so no ``KeyError`` can occur. Driven deterministically: the FIRST-EVER refresh
+    re-enters ``get_or_refresh`` for the SAME kind while the cache is still cold (NO
+    prior seed), so the re-entrant ``self._refreshing`` membership is hit with
+    ``entry is None``.
+    """
+    cache = SummaryCache(ttl_floor_s=0.0)
+    reentrant_result: list[list[dict[str, object]]] = []
+    inner = _CountingRecompute()
+
+    def outer_recompute() -> list[dict[str, object]]:
+        # While THIS first-ever refresh is in flight (cache still cold), a second
+        # reader asks for the same kind. It must recompute, NOT KeyError.
+        reentrant_result.append(cache.get_or_refresh(SPOT, recompute=inner))
+        return [{"call": "outer"}]
+
+    final = cache.get_or_refresh(SPOT, recompute=outer_recompute)
+    assert inner.calls == 1  # the cold re-entrant reader recomputed (no KeyError)
+    assert reentrant_result == [[{"call": 1}]]  # it got its OWN fresh scan, not a 500
+    assert final == [{"call": "outer"}]
+
+
 def test_recompute_exception_clears_in_flight_guard() -> None:
     """If ``recompute`` raises, the in-flight guard is cleared so retries work."""
     clock = _FakeClock()

@@ -230,9 +230,32 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fno-lookback-split-jlzt1n` (the F&O default historical-pull lookback is now SPLIT by
-  contract type: FUTURES default to 3 calendar months, OPTIONS to a tighter 30 days — DEC-FNO-LOOKBACK-SPLIT-001,
-  MIGRATION.md #894, the operator's "only for futures by default try to fetch it for 3 months but for options only
+- **Active branch:** `claude/completeness-o1-jlzt1n` (the `/completeness` endpoints — scoreboard + CSV +
+  `/universe/completeness` — are now O(1) on a repeat load: the O(datasets) full-lake spot scan is routed through the
+  SAME generation-stamped `_summary_cache` SPOT entry `/coverage/spot` already uses, instead of the prior UNCACHED
+  direct call that re-ran the whole Parquet-footer aggregate on every load — DEC-COMPLETENESS-O1-LATENCY-001,
+  MIGRATION.md #895, the operator's 7–9 s page + the flagged FAST-FOLLOW of #893. ROOT CAUSE: the three completeness
+  endpoints share `app._completeness_inputs`, which called `summarize_spot_datasets(store.connection, lake)` (a
+  per-dataset `COUNT(*)`/`MIN`/`MAX` `read_parquet` footer aggregate, O(datasets)) DIRECTLY with NO cache — yet the
+  sibling `/coverage/spot` wraps the BYTE-IDENTICAL call in `_summary_cache.get_or_refresh(SPOT, …)`. FIX (READ-ONLY
+  dashboard): a one-expression DRY change — the scan now goes through `_summary_cache.get_or_refresh(SPOT, …)`, sharing
+  the SAME SPOT cache entry (open either page → the other is warm); the ledger rollup `spot_window_rollup` (its OWN
+  mtime cache) stays PER-REQUEST + OUTSIDE the SummaryCache (the C8 freshness contract — a ledger flush still refreshes
+  the chips); the cheap `list_index_equity_instruments`/`list_coverage` SELECTs stay per-request (never stale). HONEST:
+  repeat load is O(1) on the SPOT scan, NOT a literal O(1) total — the first read after a pull still pays one real
+  O(datasets) scan + the cheap SELECTs run every request; correctness unchanged (same scan → same projection, only the
+  cache ORDERING). `app.py` stays 100% line+branch (no new app branch — the hit/miss/throttle decision lives in the
+  100%-covered `SummaryCache`); NEW integration test proves the scan runs ONCE across two completeness loads + one
+  `/coverage/spot` load with identical payloads; coverage route suites green; ruff/`mypy --strict`/`pyright` clean.
+  FOLDED hostile-review MAJOR: sharing the SPOT entry across two concurrently-polled routes widened a LATENT cold-start
+  race in `SummaryCache._plan` (the `kind in self._refreshing` branch returned `None` → `self._entries[kind]` KeyError
+  → 500 on a never-yet-populated kind); FIX gates the short-circuit on `entry is not None` so a cold reader recomputes
+  (a transient idempotent double-scan, never a 500) — `summary_cache.py` stays 100% line+branch with a new
+  cold-concurrent regression test, the warm fast path byte-unchanged.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-FNO-LOOKBACK-SPLIT-001,
+  MIGRATION.md #894 (the F&O default historical-pull lookback is SPLIT by
+  contract type: FUTURES default to 3 calendar months, OPTIONS to a tighter 30 days —
+  the operator's "only for futures by default try to fetch it for 3 months but for options only
   one month, that is max 30 days". When no explicit from/to dates are given, `default_fno_minute_window` defaulted
   EVERY F&O contract to the last `DEFAULT_FNO_LOOKBACK_MONTHS = 3` months of its trading life; an option's liquid life
   is short + the chain is huge (every strike × CE/PE), so 3 months over-pulls illiquid early-life option bars. FIX
@@ -762,7 +785,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/fno-lookback-split-jlzt1n`
+- **Active feature branch:** `claude/completeness-o1-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

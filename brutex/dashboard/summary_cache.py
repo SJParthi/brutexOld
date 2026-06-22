@@ -223,9 +223,17 @@ class SummaryCache:
         if entry is not None and entry.generation == self._generation:
             # Clean hit — fast path, no scan.
             return None
-        if kind in self._refreshing:
-            # Another reader is already paying the scan; serve the current entry
-            # (present whenever a refresh is in flight) instead of double-scanning.
+        if entry is not None and kind in self._refreshing:
+            # Another reader is already paying the scan AND a prior entry exists
+            # to serve: return it instead of double-scanning (the warm in-flight
+            # fast path). On a COLD cache (entry is None) we deliberately fall
+            # THROUGH so this reader recomputes too — a transient double-scan on
+            # first concurrent access is correct and idempotent, far better than
+            # the `self._entries[kind]` KeyError → 500 that returning ``None``
+            # here would cause when no entry has ever been written
+            # (DEC-COMPLETENESS-O1-LATENCY-001 hostile-review MAJOR: this PR is
+            # the first to SHARE the SPOT entry across two concurrently-polled
+            # routes, widening the cold-start exposure of the latent race).
             return None
         if (
             entry is not None
