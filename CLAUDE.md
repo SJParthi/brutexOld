@@ -230,11 +230,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/completeness-o1-jlzt1n` (the `/completeness` endpoints — scoreboard + CSV +
+- **Active branch:** `claude/db-tab-switch-o1-jlzt1n` (the `/db` candle tab switch (spot ↔ F&O ↔ option) is now O(1):
+  the `/api/v1/db/candles/datasets` discovery endpoint — which walked the WHOLE `bars/` tree THREE times on EVERY tab
+  switch — is memoised behind the shared write generation, so a switch within one generation is a cached handoff
+  instead of a triple full-lake dir-walk — DEC-DB-TAB-SWITCH-O1-001, MIGRATION.md #896, the operator's "to navigate
+  from F&O candles to candles also taking so much time". ROOT CAUSE (Explore-agent diagnosis): `_datasets()` ran THREE
+  O(files) `bars/` dir-walks with NO cache (`list_candle_datasets` spot + `list_fno_candle_datasets` + `list_option_datasets`)
+  on every tab switch; the merged O(page) work (#817/#818/#821) fixed within-tab PAGING but never the tab-SWITCH
+  discovery. FIX (READ-ONLY viewer): wrap `_datasets()` in `_db_datasets_cache.get_or_compute("db_candle_datasets",
+  generation=_summary_cache.generation, compute=_datasets)` — REUSING the COMMON generation-stamped `MoversSnapshotCache`
+  (the SAME generic memo `_candle_count_cache`/`_window_counts_cache` use; NO new class, NO copy of `FnoCascadeCache`).
+  Repeat switch within one generation = O(1) handoff; a pull bumps the generation → rediscover; build still runs on the
+  threadpool worker on a miss. HONEST: O(1) on repeat, NOT a literal O(1) total (first switch after a pull pays one
+  real triple walk); same `_datasets()` output, only discovery ORDERING changed (spy test: `list_fno_candle_datasets`
+  runs ONCE across three loads, payloads byte-identical); the frontend full-DOM-rebuild + the spot symbol→interval
+  CASCADE picker (#4b, the F&O-cascade twin) are flagged FAST-FOLLOWS. `app.py` stays 100% line+branch; NEW
+  integration test; ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-COMPLETENESS-O1-LATENCY-001,
+  MIGRATION.md #895 (the `/completeness` endpoints — scoreboard + CSV +
   `/universe/completeness` — are now O(1) on a repeat load: the O(datasets) full-lake spot scan is routed through the
   SAME generation-stamped `_summary_cache` SPOT entry `/coverage/spot` already uses, instead of the prior UNCACHED
-  direct call that re-ran the whole Parquet-footer aggregate on every load — DEC-COMPLETENESS-O1-LATENCY-001,
-  MIGRATION.md #895, the operator's 7–9 s page + the flagged FAST-FOLLOW of #893. ROOT CAUSE: the three completeness
+  direct call that re-ran the whole Parquet-footer aggregate on every load —
+  the operator's 7–9 s page + the flagged FAST-FOLLOW of #893. ROOT CAUSE: the three completeness
   endpoints share `app._completeness_inputs`, which called `summarize_spot_datasets(store.connection, lake)` (a
   per-dataset `COUNT(*)`/`MIN`/`MAX` `read_parquet` footer aggregate, O(datasets)) DIRECTLY with NO cache — yet the
   sibling `/coverage/spot` wraps the BYTE-IDENTICAL call in `_summary_cache.get_or_refresh(SPOT, …)`. FIX (READ-ONLY
@@ -785,7 +802,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/completeness-o1-jlzt1n`
+- **Active feature branch:** `claude/db-tab-switch-o1-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

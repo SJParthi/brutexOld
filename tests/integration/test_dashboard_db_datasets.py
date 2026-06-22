@@ -144,6 +144,50 @@ class TestDbCandleDatasetsApi:
         page = client.get("/api/v1/db/options", params={"series": entry["series"]}).json()
         assert page["total"] == 2
 
+    def test_datasets_discovery_cached_across_tab_switches(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-DB-TAB-SWITCH-O1-001: the 3× O(files) `bars/` dir-walk behind
+        # /api/v1/db/candles/datasets fires on EVERY /db candle tab switch
+        # (spot↔F&O↔option). It is now memoised behind the write generation, so
+        # repeated tab switches share ONE discovery instead of re-walking the whole
+        # lake every time, AND a pull (generation bump) correctly busts it. Spy on
+        # `list_fno_candle_datasets` (called exactly once per build) to prove BOTH the
+        # cached-hit (one discovery across tab switches) and the invalidation half (a
+        # `mark_dirty` → rediscover) at THIS call site, with an INJECTED SummaryCache.
+        # The spy is installed by DOTTED-PATH string (CodeQL py/import-and-import-from:
+        # `brutex.dashboard.app` is already imported via `from … import` above, so we do
+        # NOT also `import` it as a module — the `real` fn comes from its db_view source,
+        # which is the SAME object app's namespace holds).
+        from brutex.dashboard.db_view import list_fno_candle_datasets
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        _write_option_series(tmp_path, "NSE_FNO|25|MONTH|1|ATM-10|CALL")
+        calls = {"n": 0}
+
+        def _counting(lake: Path) -> list[dict[str, object]]:
+            calls["n"] += 1
+            return list_fno_candle_datasets(lake)
+
+        monkeypatch.setattr("brutex.dashboard.app.list_fno_candle_datasets", _counting)
+        summary_cache = SummaryCache()
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
+        )
+        first = client.get("/api/v1/db/candles/datasets").json()
+        second = client.get("/api/v1/db/candles/datasets").json()
+        third = client.get("/api/v1/db/candles/datasets").json()
+        # The O(files) discovery ran EXACTLY ONCE across three tab-switch loads.
+        assert calls["n"] == 1
+        # The cache serves consistent discovery — every load is byte-identical.
+        assert first == second == third
+        # Invalidation half: a pull bumps the generation → the next switch rediscovers
+        # (never serves a stale dataset list — the no-illusion guarantee at this site).
+        summary_cache.mark_dirty()
+        after_pull = client.get("/api/v1/db/candles/datasets").json()
+        assert calls["n"] == 2  # the bumped generation forced exactly one re-discovery
+        assert after_pull == first  # same lake → same payload, just freshly discovered
+
     def test_no_lake_root_returns_empty_payload(self) -> None:
         from types import SimpleNamespace
 
