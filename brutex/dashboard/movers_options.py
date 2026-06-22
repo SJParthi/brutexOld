@@ -19,21 +19,21 @@ exactly ONE place each. This module IMPORTS:
   :func:`~brutex.dashboard.movers_snapshot.interval_minutes`,
   :func:`~brutex.dashboard.movers_snapshot.parse_snapshot_date`,
   :func:`~brutex.dashboard.movers_snapshot._cutoff_minute`,
-  :data:`~brutex.dashboard.movers_snapshot._IST`,
   :data:`~brutex.dashboard.movers_snapshot._DAILY_MIN_FLOOR`, and the prior-day
   1-day close reader :func:`~brutex.dashboard.movers_snapshot._prev_day_close`
   (its canonical home — the Futures reader re-imports the same one);
 * from :mod:`brutex.dashboard.movers_futures` — the GENERIC raw-1-minute
   session reader :func:`~brutex.dashboard.movers_futures._read_future_session`
   (it returns ``(ltp, volume, value_paisa, oi)`` for ANY FNO contract, futures OR
-  options — reused for an option contract; options ignores the ``value_paisa`` field
-  and keeps its own ``_session_value_paisa`` reader), the prior-day OI reader
+  options — reused for an option contract; since DEC-MOVERS-OPTIONS-VALUE-DEDUP-001
+  options uses the ``value_paisa`` field DIRECTLY, so the option's session frame is
+  read ONCE — no separate value reader), the prior-day OI reader
   :func:`~brutex.dashboard.movers_futures._prev_day_oi`, and the underlying spot
   resolver :func:`~brutex.dashboard.movers_futures._underlying_spot_ltp`.
 
 It adds only what options need: the contract-symbol parser (strike + CE/PE), the
-per-contract value reader, the options ranking (highest OI / OI gainers / OI
-losers / volume / value / price gainers / price losers), and the options payload.
+options ranking (highest OI / OI gainers / OI losers / volume / value / price
+gainers / price losers), and the options payload.
 
 ## The locked calculation rules (operator-confirmed 2026-06-13)
 
@@ -45,8 +45,10 @@ For each option contract (strike × CE/PE × expiry) found in the lake:
   fresh-session quantity, ``oi`` is the last bar's open interest (``None``-safe).
 * **Value (₹)** is the cumulative traded value (turnover) over those session bars
   (``Σ round_money((high+low+close)/3) × volume`` — the per-bar HLC3 typical-price ×
-  volume VWAP-proxy turnover of DEC-MOVERS-VWAP-VALUE-001), kept as int64 paisa via
-  :mod:`brutex.money` — shares ``movers_snapshot.session_traded_value_paisa``.
+  volume VWAP-proxy turnover of DEC-MOVERS-VWAP-VALUE-001), kept as int64 paisa. It
+  comes from the SAME ``_read_future_session`` read as ltp/volume/oi (the ``value_paisa``
+  field), so the option's frame is read once (DEC-MOVERS-OPTIONS-VALUE-DEDUP-001); that
+  shared reader computes it via ``movers_snapshot.session_traded_value_paisa``.
 * **% change** is vs the contract's OWN previous trading-day 1-day close
   (``None`` when there is no prior day).
 * **OI change** is ``oi − prev_oi`` (a signed int) and ``oi_chg_pct`` is the
@@ -109,12 +111,10 @@ from brutex.dashboard.movers_futures import (
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
-    _IST,
     _cutoff_minute,
     _prev_day_close,
     interval_minutes,
     parse_snapshot_date,
-    session_traded_value_paisa,
 )
 from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
 from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
@@ -579,88 +579,6 @@ def build_options_payload(
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _session_value_paisa(
-    lake_root: Path,
-    *,
-    exchange: str,
-    symbol: str,
-    day: date_cls,
-    cutoff_min: int | None,
-) -> int:
-    """Cumulative traded value over *day*'s 1-minute bars, as int64 paisa.
-
-    Reads the contract's ``<lake>/bars/<exchange>/FNO/<symbol>/1minute/**`` raw
-    1-minute parquet DIRECTLY (the same path + the same day-frame
-    :func:`~brutex.dashboard.movers_futures._read_future_session` reads — which since
-    DEC-MOVERS-FUTURES-VALUE-001 ALSO returns the turnover as its 3rd field; the options
-    caller keeps this separate reader as the deliberately-minimal touch — that change did
-    NOT rewire the options value path, so options re-reads the frame here). Computes the
-    turnover
-    ``Σ round_money((high+low+close)/3) × volume`` over the kept bars (sliced to
-    ``≤ cutoff_min`` for an intraday timeframe with the same Int32-cast minute
-    math the Spot reader uses) via the SHARED
-    :func:`~brutex.dashboard.movers_snapshot.session_traded_value_paisa` (the per-bar
-    HLC3 typical-price × volume VWAP-proxy turnover, DEC-MOVERS-VWAP-VALUE-001) and
-    returns it as int64 paisa — sharing the spot formula. Returns ``0`` when the
-    directory is missing or no bar falls on the day / within the cutoff (the
-    caller only reaches here for a contract that already produced a session read,
-    so a missing-dir path is defensive but kept honest).
-
-    Parameters
-    ----------
-    lake_root
-        Top-level lake directory (the parent of ``bars/``).
-    exchange, symbol
-        The option contract's partition coordinates (segment is always ``FNO``).
-    day
-        The IST trading day to total.
-    cutoff_min
-        Intraday minute-of-day cutoff, or ``None`` for the whole day.
-
-    Returns
-    -------
-    int
-        The cumulative traded value over the kept bars, in int64 paisa.
-    """
-    import polars as pl
-
-    from brutex.data.lake_day_glob import read_day_intraday_frame
-
-    # Read the day's bars via the symbol-aware reader — see
-    # movers_futures._read_future_session: an option CONTRACT symbol is
-    # session-filtered unconditionally at ingest, so it takes the fast month-bound
-    # path (O(one month) not O(all-bars), DEC-MOVERS-O1-LATENCY-001); the
-    # session-exempt fallback exists for consistency but never triggers for a
-    # full contract groww_symbol.
-    base = lake_root / "bars" / exchange / _FNO_SEGMENT / symbol / "1minute"
-    df = read_day_intraday_frame(base, day, symbol=symbol)
-    if df is None:
-        return 0
-    ist = pl.col("timestamp").dt.convert_time_zone(_IST)
-    day_df = df.filter(ist.dt.date() == day).sort("timestamp")
-    if cutoff_min is not None:
-        # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-        # narrow Int8 (15*60 overflows), so the cast gives the true minute-of-day
-        # (mirrors movers_snapshot._read_session_bars — CLAUDE.md §11 COMMON).
-        minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-        day_df = day_df.filter(minute_of_day <= cutoff_min)
-    if day_df.is_empty():
-        return 0
-    # DEC-MOVERS-VWAP-VALUE-001: turnover is the per-bar HLC3 typical-price × volume sum,
-    # via the ONE shared helper (spot + options share it — CLAUDE.md §11 COMMON). Select
-    # high/low alongside close/volume so the typical price (high+low+close)/3 is available.
-    return session_traded_value_paisa(
-        (Decimal(str(high)), Decimal(str(low)), Decimal(str(close)), int(volume))
-        for high, low, close, volume in zip(
-            day_df.get_column("high").to_list(),
-            day_df.get_column("low").to_list(),
-            day_df.get_column("close").to_list(),
-            day_df.get_column("volume").to_list(),
-            strict=True,
-        )
-    )
-
-
 def _discover_options(
     lake_root: Path, *, exchange: str | None = None
 ) -> list[tuple[str, str, str, date_cls, Decimal, str]]:
@@ -939,13 +857,10 @@ def compute_options_candidates(
             if read is None:  # no session bar on the selected day/time → skip, never faked.
                 skipped += 1
                 continue
-            # `_read_future_session` now also returns the HLC3 turnover (the futures
-            # caller needs it, DEC-MOVERS-VWAP-VALUE-001); options keeps its OWN
-            # `_session_value_paisa` value reader, so that 3rd field is ignored here.
-            ltp, volume, _, oi = read
-            value_paisa = _session_value_paisa(
-                lake_root, exchange=contract_exchange, symbol=symbol, day=day, cutoff_min=cutoff_min
-            )
+            # `_read_future_session` returns the HLC3 turnover as its 3rd field for ANY
+            # FNO contract (DEC-MOVERS-VWAP-VALUE-001); options uses it DIRECTLY so the
+            # contract's session frame is read ONCE (DEC-MOVERS-OPTIONS-VALUE-DEDUP-001).
+            ltp, volume, value_paisa, oi = read
             prev_close = _prev_day_close(
                 lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
             )

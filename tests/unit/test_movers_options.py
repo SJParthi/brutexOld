@@ -9,7 +9,7 @@ builder (every per-category key + the empty / no-mover / pull-first notes), and
 the :class:`OptionMover` display ``name`` + ``₹`` rendering.
 
 The lake-reading orchestration (``run_options_snapshot`` /
-``_session_value_paisa`` / ``_discover_options``) is covered by the integration
+``_discover_options``) is covered by the integration
 suite (``tests/integration/test_dashboard_movers_options.py``) against a real
 Parquet lake.
 """
