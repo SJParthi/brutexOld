@@ -23,11 +23,15 @@ usage follows ``tests/integration/test_universe_explorer_store.py``.
 
 from __future__ import annotations
 
+# Whitebox tests of the cache-first TTL helper (_ntm_cache_ttl_seconds) read
+# module-private names by design (DEC-P0-017 convention).
+# pyright: reportPrivateUsage=false
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
+from brutex.dashboard import instrument_loader as il
 from brutex.dashboard.instrument_loader import (
     FNO_INDEX_ALIASES_OVERRIDE_ENV,
     load_instrument_master,
@@ -223,6 +227,18 @@ def _empty_opener(_url: str) -> str:
 def _boom_opener(_url: str) -> str:
     """A constituent opener that fails like a niftyindices timeout / bot-block."""
     raise OSError("niftyindices read timed out")
+
+
+def _must_not_fetch_opener(_url: str) -> str:
+    """A constituent opener that FAILS LOUDLY if called.
+
+    Pins the cache-first hot path (DEC-NTM-CACHE-FIRST-001): a fresh cache must be
+    served with ZERO network calls, so this raising opener proves the live fetch was
+    never invoked. ``AssertionError`` (not ``OSError``) so a regression that DID call
+    the network surfaces as a hard test failure, never silently caught by a
+    fail-soft handler.
+    """
+    raise AssertionError("live niftyindices fetch must not be called when the cache is fresh")
 
 
 def _store(tmp_path: Path) -> InstrumentStore:
@@ -540,8 +556,15 @@ def test_spot_only_indices_tagged_reference_options_indices_pullable(tmp_path: P
     assert is_option_pullable(sensex, reference_only_ids=refs) is True
 
 
-def test_ntm_uses_cache_when_live_empty(tmp_path: Path) -> None:
-    """An empty live fetch falls back to the last-good cache (universe stays full)."""
+def test_ntm_fresh_cache_served_without_any_network(tmp_path: Path) -> None:
+    """A FRESH cache is served instantly with ZERO network calls (the fast hot path).
+
+    DEC-NTM-CACHE-FIRST-001 — the operator's "why is this slow EVERY time" fix. The
+    just-saved cache is younger than the (default 7-day) TTL, so the load serves it
+    WITHOUT touching niftyindices: the opener raises ``AssertionError`` if called, so
+    a regression that re-introduced LIVE-FIRST fetching fails this test loudly. The
+    universe still grows to include the cached SMALLCO constituent.
+    """
     cache_dir = tmp_path / "cache"
     constituents = _constituents_csv([("SMALLCO", "INE999A01010")])
     assert save_constituent_csv(constituents, cache_dir=cache_dir) is True
@@ -549,19 +572,79 @@ def test_ntm_uses_cache_when_live_empty(tmp_path: Path) -> None:
     result = load_instrument_master(
         store,
         http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
-        constituent_opener=_empty_opener,  # live returns nothing → cache covers it
+        constituent_opener=_must_not_fetch_opener,  # fresh cache → live MUST NOT be called
         constituent_cache_dir=cache_dir,
     )
     ntm = result["ntm"]
     assert ntm["admitted"] is True
     assert ntm["reference"] == 1
     assert ntm["from_cache"] is True
+    assert ntm["source"] == "cache_fresh"
+    assert "fast path" in ntm["constituent_note"]
+    assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
+
+
+def test_ntm_stale_cache_refreshed_by_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A STALE cache (TTL=0) triggers a live refresh that REWRITES the cache.
+
+    DEC-NTM-CACHE-FIRST-001 — the rare cold/post-TTL path: with the fast path disabled
+    (``BRUTEX_NTM_CACHE_TTL_SECONDS=0`` ⇒ every cache treated stale), the bounded live
+    fetch runs, succeeds with a DIFFERENT constituent list, and persists it as the new
+    last-good cache (so the NEXT load is a ``cache_fresh`` hit on the refreshed data).
+    """
+    monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
+    cache_dir = tmp_path / "cache"
+    stale = _constituents_csv([("OLDCO", "INE111A01011")])  # the now-stale cache
+    assert save_constituent_csv(stale, cache_dir=cache_dir) is True
+    fresh = _constituents_csv([("SMALLCO", "INE999A01010")])  # what the live source returns
+    store = _store(tmp_path)
+    result = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
+        constituent_opener=lambda _url: fresh,  # stale ⇒ live is attempted and wins
+        constituent_cache_dir=cache_dir,
+    )
+    ntm = result["ntm"]
+    assert ntm["source"] == "live"
+    assert ntm["from_cache"] is False
+    assert ntm["reference"] == 1  # SMALLCO from the LIVE list, not OLDCO
+    # The live refresh overwrote the stale cache with the freshly-fetched list.
+    assert load_cached_constituent_csv(cache_dir=cache_dir) == fresh
+    assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
+
+
+def test_ntm_stale_cache_covers_live_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A STALE cache + an EMPTY live fetch falls back to the cache (universe stays full).
+
+    DEC-NTM-CACHE-FIRST-001 — fast path disabled (TTL=0), live returns nothing, so the
+    stale cache covers it: ``source == "cache_stale"``, the universe keeps the cached
+    SMALLCO constituent rather than cratering to the base set.
+    """
+    monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
+    cache_dir = tmp_path / "cache"
+    constituents = _constituents_csv([("SMALLCO", "INE999A01010")])
+    assert save_constituent_csv(constituents, cache_dir=cache_dir) is True
+    store = _store(tmp_path)
+    result = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
+        constituent_opener=_empty_opener,  # stale cache + empty live → cache covers it
+        constituent_cache_dir=cache_dir,
+    )
+    ntm = result["ntm"]
+    assert ntm["admitted"] is True
+    assert ntm["reference"] == 1
+    assert ntm["from_cache"] is True
+    assert ntm["source"] == "cache_stale"
     assert "last-good cache" in ntm["constituent_note"]
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
 
 
-def test_ntm_uses_cache_when_live_raises(tmp_path: Path) -> None:
-    """A niftyindices timeout falls back to the last-good cache, not the base set."""
+def test_ntm_stale_cache_covers_live_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A STALE cache + a niftyindices timeout falls back to the cache, not the base set."""
+    monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
     cache_dir = tmp_path / "cache"
     constituents = _constituents_csv([("SMALLCO", "INE999A01010")])
     save_constituent_csv(constituents, cache_dir=cache_dir)
@@ -569,14 +652,37 @@ def test_ntm_uses_cache_when_live_raises(tmp_path: Path) -> None:
     result = load_instrument_master(
         store,
         http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
-        constituent_opener=_boom_opener,  # live raises → cache covers it
+        constituent_opener=_boom_opener,  # stale cache + live raises → cache covers it
         constituent_cache_dir=cache_dir,
     )
     ntm = result["ntm"]
     assert ntm["admitted"] is True
     assert ntm["reference"] == 1
     assert ntm["from_cache"] is True
+    assert ntm["source"] == "cache_stale"
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
+
+
+def test_ntm_no_cache_empty_live_degrades_to_base(tmp_path: Path) -> None:
+    """No cache AND an empty live fetch → honest degrade to the base set (source 'none').
+
+    DEC-NTM-CACHE-FIRST-001 — the ``("", "none")`` branch: an empty cache dir with a
+    live source that returns nothing admits no constituents and notes the honest "no
+    CSV available" reason, never a crash and never invented constituents (Golden Rule #1).
+    """
+    store = _store(tmp_path)
+    result = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
+        constituent_opener=_empty_opener,  # no cache + empty live → "none"
+        constituent_cache_dir=tmp_path / "cache",
+    )
+    assert result["persisted"] == 3  # SMALLCO not admitted — base set only
+    assert result["stock_count"] == 1
+    ntm = result["ntm"]
+    assert ntm["admitted"] is False
+    assert "no NIFTY Total Market constituent CSV available" in ntm["reason"]
+    assert store.reference_only_security_ids() == frozenset()
 
 
 def test_ntm_degrades_when_unreachable_and_no_cache(tmp_path: Path) -> None:
@@ -881,3 +987,30 @@ def test_spot_only_index_stays_reference_and_audit_reports_it(
     assert audit["alias"] == []
     assert audit["symbol_bridge"] == []
     assert audit["token_join_diagnostic"] == []
+
+
+# ── _ntm_cache_ttl_seconds (DEC-NTM-CACHE-FIRST-001) ──────────────────────────
+class TestNtmCacheTtlSeconds:
+    """The env-tunable NTM cache freshness TTL (PURE; never crashes on a bad value)."""
+
+    def test_absent_env_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_NTM_CACHE_TTL_SECONDS", raising=False)
+        assert il._ntm_cache_ttl_seconds() == il._NTM_CACHE_TTL_DEFAULT_SECONDS
+
+    def test_valid_override_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "3600")
+        assert il._ntm_cache_ttl_seconds() == 3600.0
+
+    def test_non_numeric_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "never")
+        assert il._ntm_cache_ttl_seconds() == il._NTM_CACHE_TTL_DEFAULT_SECONDS
+
+    def test_non_positive_returned_as_is_to_disable_fast_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A non-positive TTL is returned verbatim so the cache-first comparison treats
+        # every (non-negative-age) cache as stale → always refresh.
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
+        assert il._ntm_cache_ttl_seconds() == 0.0
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "-1")
+        assert il._ntm_cache_ttl_seconds() == -1.0

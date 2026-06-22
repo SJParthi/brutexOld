@@ -31,12 +31,28 @@ Design (CLAUDE.md §11 COMMON + Golden Rule #10):
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from brutex.data.atomic_io import atomic_write_simple
 
 #: The cache filename under the cache dir. One file, the raw last-good CSV text.
 _CACHE_FILENAME = "ntm_constituents.csv"
+
+
+@dataclass(frozen=True, slots=True)
+class CachedConstituents:
+    """A loaded last-good constituent CSV plus its age on disk.
+
+    ``age_seconds`` is ``now - mtime`` of the cache file, **clamped at 0.0** so a
+    future mtime (clock skew / a copied file) never yields a negative age. The
+    cache-first instrument load (``instrument_loader._resolve_constituent_csv``)
+    compares it against the TTL to decide the instant-serve hot path vs a refresh.
+    """
+
+    csv_text: str
+    age_seconds: float
 
 
 def default_cache_dir() -> Path:
@@ -115,8 +131,54 @@ def load_cached_constituent_csv(*, cache_dir: Path) -> str | None:
     return text or None
 
 
+def load_cached_constituent_with_age(
+    *, cache_dir: Path, now: float | None = None
+) -> CachedConstituents | None:
+    """Return the cached CSV **and its age in seconds**, or ``None`` when unavailable.
+
+    The age-aware sibling of :func:`load_cached_constituent_csv`, powering the
+    cache-first instrument load (DEC-NTM-CACHE-FIRST-001): the loader serves a cache
+    YOUNGER than the TTL instantly without any network call (the ultra-fast O(1) hot
+    path), and only refreshes an older/absent one.
+
+    Best-effort, NEVER raises (same contract as :func:`load_cached_constituent_csv`):
+    a missing file, an unreadable file (permission), or an empty file all return
+    ``None`` so the caller degrades cleanly. A single ``read_text``+``stat`` reads the
+    body and its mtime; ``now`` is injectable for deterministic tests (defaults to
+    :func:`time.time`). The age is clamped at ``0.0`` (a future mtime never goes
+    negative).
+
+    Parameters
+    ----------
+    cache_dir
+        The directory the cache was written into.
+    now
+        Override the "current time" (epoch seconds) for tests. ``None`` ⇒
+        :func:`time.time`.
+
+    Returns
+    -------
+    CachedConstituents | None
+        The cached CSV text + its age in seconds, or ``None`` when there is no usable
+        cache.
+    """
+    file = _cache_file(cache_dir)
+    try:
+        text = file.read_text(encoding="utf-8")
+        mtime = file.stat().st_mtime
+    except OSError:
+        return None
+    if not text:
+        return None
+    current = time.time() if now is None else now
+    age = current - mtime
+    return CachedConstituents(csv_text=text, age_seconds=age if age > 0.0 else 0.0)
+
+
 __all__ = [
+    "CachedConstituents",
     "default_cache_dir",
     "load_cached_constituent_csv",
+    "load_cached_constituent_with_age",
     "save_constituent_csv",
 ]

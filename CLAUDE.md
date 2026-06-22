@@ -228,23 +228,37 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/atomic-write-finish-jlzt1n` (the LAST hand-rolled atomic-write copies — config runtime
-  + credentials + NTM cache + window-ledger — now share the ONE core too; the atomic-write COMMON consolidation is
-  COMPLETE — DEC-ATOMIC-WRITE-FINISH-001, MIGRATION.md #891: #890 did the ENGINE sidecars, this finishes the four
-  remaining genuine `tmp→write→os.replace` copies. (1) `atomic_io._atomic_write_core`/`atomic_write_simple` gain an
-  optional `chmod` (set on the temp before rename; mkstemp temp is already 0600 → a secret is never world-readable)
-  for the credential 0600 save. (2) FOUR sites delegate to the guard-free `atomic_write_simple`, each preserving its
-  OWN error contract: `runtime.write_runtime_file` (raw OSError → `RuntimeFileError`), `credentials._atomic_write`
-  (`chmod=0o600`, parent 0700, raw OSError), `ntm_cache.save_constituent_csv` (catches OSError → returns False,
-  best-effort), `window_ledger_store.save_window_ledger` (named inner fn keeps the pyarrow type-ignore); unused
-  `tempfile`/`os` imports removed. HONEST: ZERO error-semantics change at every site (no LakeWriteHalt
-  mis-escalation); TWO free wins everywhere — an `fsync` before rename (none had one) + temp-cleanup on ANY error
-  (the window-ledger copy previously LEAKED its .tmp); credential 0600 boundary preserved. DEFERRED (not claimed):
-  the window_ledger ENOSPC→`LakeWriteHalt` graceful-halt guard-EXTEND (it changes error semantics + the
-  end_pull_ledger call-path's halt handling needs verification) — kept the SAFE guard-free dedup here. `atomic_io` +
-  `runtime` + `ntm_cache` + `window_ledger_store` at 100% line+branch; `credentials` 100% (via its + groww-creds
-  test files); 165+93 tests green; ruff/`mypy --strict brutex` (254 files)/pyright clean. ENGINE UNCHANGED
-  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-ATOMIC-WRITE-CONSOLIDATE-001,
+- **Active branch:** `claude/ntm-cache-first-jlzt1n` (the `/universe` NTM-constituent load is now CACHE-FIRST +
+  fail-fast, so every load after the first is INSTANT instead of re-blocking ~30–160 s on the slow niftyindices.com
+  host — DEC-NTM-CACHE-FIRST-001, MIGRATION.md #892, the operator's "why is this taking so much time / why AGAIN"
+  fix. Root cause: `instrument_loader._resolve_constituent_csv` was LIVE-FIRST — it ALWAYS attempted the slow live
+  niftyindices fetch (`_default_opener`, 30 s × 3 retries ≈ 90 s) and used the on-disk last-good cache ONLY on a live
+  FAILURE, so EVERY `/universe` load re-paid the full slow fetch even with a good cache present, all under
+  `_LOAD_LOCK` (the operator's `latency_ms=162854.5` ≈ 163 s "stuck" page). FIX (READ-ONLY load): rewrite
+  `_resolve_constituent_csv` CACHE-FIRST returning `(csv_text, source ∈ {cache_fresh, live, cache_stale, none})` — a
+  cache YOUNGER than a TTL (`_ntm_cache_ttl_seconds`, env `BRUTEX_NTM_CACHE_TTL_SECONDS`, default 7 days; NTM
+  rebalances only semi-annually CLAUDE.md §7) is served INSTANTLY with ZERO network call (the O(1) hot path); only a
+  cold/stale cache hits ONE bounded fail-fast live fetch (env-tunable `BRUTEX_NSE_FETCH_TIMEOUT_SECONDS` /
+  `BRUTEX_NSE_FETCH_MAX_RETRIES`, default 15 s × 2 ≈ 31 s worst, far below the old 90 s, kept patient enough to
+  succeed-once + seed the cache → instant forever); a live fail/empty with a stale cache falls back to it; nothing
+  available → honest `none` degrade to the F&O base set. NEW `ntm_cache.load_cached_constituent_with_age` (+
+  `CachedConstituents`) reads body+mtime once (age clamped ≥ 0 for clock skew); the `_ntm_admission` note carries the
+  honest `source`/`from_cache`. HONEST: O(1)-latency on the STEADY-STATE load (fresh-cache hit = one stat+read, no
+  network), NOT a literal O(1) first-ever boot (the cold/post-TTL refresh pays the bounded fetch ONCE); correctness
+  unchanged (same CSV parsed/matched, only the ORDER + the live bound changed); a non-positive TTL explicitly
+  DISABLES the fast path (always refresh) yet still serves a stale cache, so worst case is "as patient as before",
+  never worse; no background threads / no new global state — fully synchronous + deterministic; the operator's manual
+  "drop the CSV at ~/.brutex/cache/ntm_constituents.csv" now makes the very next load instant. `ntm_cache` +
+  `nse_constituents` at 100% line+branch; `instrument_loader` 100% across its covering files; NEW tests — fresh-cache
+  served with a `_must_not_fetch_opener` that ASSERTS the network is never called, stale-cache refreshed/empty/raise
+  fallbacks (TTL=0 forces stale), no-cache+empty→`none`, the age helper edge-cases, the 3 env-tunable bound helpers;
+  262 universe/constituents/loader tests green; ruff/`mypy --strict brutex`/`pyright brutex tests` clean. ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-ATOMIC-WRITE-FINISH-001,
+  MIGRATION.md #891 (the LAST hand-rolled atomic-write copies — config runtime + credentials + NTM cache +
+  window-ledger — share the ONE `atomic_write_simple` core (gaining an optional `chmod` for the credential 0600
+  save), each preserving its OWN error contract (no LakeWriteHalt mis-escalation); +`fsync`-before-rename +
+  temp-cleanup-on-any-error wins; the atomic-write COMMON consolidation is COMPLETE; deferred: the window_ledger
+  ENOSPC→LakeWriteHalt graceful-halt guard-EXTEND). Prior merged: DEC-ATOMIC-WRITE-CONSOLIDATE-001,
   MIGRATION.md #890 (the engine sidecar writers share the ONE atomic-write
   core via a NEW guard-free `atomic_write_simple`, killing the hand-rolled `mkstemp`/`fsync`/`os.replace`/cleanup
   copies — the #885 COMMON follow-up: #885 centralised the
@@ -707,7 +721,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/atomic-write-finish-jlzt1n`
+- **Active feature branch:** `claude/ntm-cache-first-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

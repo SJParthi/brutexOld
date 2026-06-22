@@ -95,7 +95,7 @@ from brutex.adapters.groww.instruments import InstrumentIndex, index_symbol_of
 from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
 from brutex.dashboard.ntm_cache import (
     default_cache_dir,
-    load_cached_constituent_csv,
+    load_cached_constituent_with_age,
     save_constituent_csv,
 )
 from brutex.dashboard.universe_query import universe_summary
@@ -176,6 +176,40 @@ _SOURCED_FNO_INDEX_ALIASES: Final[dict[str, str]] = {
 #: (CLAUDE.md §11 DYNAMIC). Parsed defensively — absent / malformed → ignored.
 FNO_INDEX_ALIASES_OVERRIDE_ENV: Final[str] = "BRUTEX_FNO_INDEX_ALIASES"
 
+#: NTM constituent-cache freshness TTL (seconds) for the CACHE-FIRST load
+#: (DEC-NTM-CACHE-FIRST-001). A cache YOUNGER than this is served INSTANTLY with NO
+#: network call — the ultra-fast O(1) hot path that keeps every ``/universe`` load
+#: after the first instant (the operator's "why is this slow EVERY time" was the old
+#: LIVE-FIRST path re-hitting the slow niftyindices.com host on every load even with
+#: a good cache on disk). An older/absent cache triggers ONE bounded fail-fast live
+#: refresh. NTM constituents rebalance only semi-annually (CLAUDE.md §7), so a 7-day
+#: default is amply fresh while making the slow path rare. Env-tunable
+#: (``BRUTEX_NTM_CACHE_TTL_SECONDS``); a non-numeric value falls back to the default
+#: (never crashes). A non-positive value disables the fast path (always refresh) yet
+#: still serves a stale cache as a fallback — so worst case is "patient as before",
+#: never worse.
+_NTM_CACHE_TTL_ENV: Final[str] = "BRUTEX_NTM_CACHE_TTL_SECONDS"
+_NTM_CACHE_TTL_DEFAULT_SECONDS: Final[float] = 7 * 24 * 60 * 60  # 7 days
+
+
+def _ntm_cache_ttl_seconds() -> float:
+    """Return the NTM cache freshness TTL (seconds) — env-tunable, malformed → default. PURE.
+
+    Reads :data:`_NTM_CACHE_TTL_ENV`. Absent or non-numeric falls back to
+    :data:`_NTM_CACHE_TTL_DEFAULT_SECONDS` (a garbled override costs only the tuning,
+    never a crash — reliability). A non-positive value is returned as-is so the
+    cache-first comparison (``age < ttl`` with a clamped non-negative age) treats every
+    cache as stale → always refresh (the explicit "disable the fast path" lever).
+    """
+    raw = os.environ.get(_NTM_CACHE_TTL_ENV)
+    if not raw:
+        return _NTM_CACHE_TTL_DEFAULT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return _NTM_CACHE_TTL_DEFAULT_SECONDS
+
+
 #: Serialises concurrent keyless loads (DEC-UNDERLYING-ECONOMICS-001). Two
 #: overlapping ``load-instruments`` POSTs each do a full-snapshot upsert which
 #: wipes the whole snapshot_date before re-inserting; interleaving a wipe
@@ -192,33 +226,51 @@ def _resolve_constituent_csv(
     opener: Callable[[str], str] | None,
     *,
     cache_dir: Path,
-) -> tuple[str, bool]:
-    """Live NTM constituent fetch with a last-good disk-cache fallback.
+) -> tuple[str, str]:
+    """Resolve the NTM constituent CSV — **CACHE-FIRST**, fail-fast, never blocks on a fresh cache.
 
-    DEC-NTM-CONSTITUENT-CACHE-001. Returns ``(csv_text, from_cache)``:
+    DEC-NTM-CACHE-FIRST-001 (supersedes the LIVE-FIRST DEC-NTM-CONSTITUENT-CACHE-001
+    ordering). The old path re-hit the SLOW niftyindices.com host on EVERY load (a
+    live fetch was always tried first, the cache used only on failure), so the
+    ``/universe`` page blocked ~30–160 s on every refresh even with a good cache on
+    disk. This serves a FRESH cache instantly with NO network call, and only the
+    rare cold/stale path touches the (now bounded, fail-fast) live fetch.
 
-    * a successful NON-EMPTY live fetch → ``(live, False)`` and REFRESHES the cache
-      (so the next outage has a fresh fallback);
-    * a live failure (``niftyindices`` timeout / bot-block) OR an empty live result
-      → fall back to the cache → ``(cached, True)`` when a cache exists, else
-      ``("", False)`` (no live source AND no cache).
+    Returns ``(csv_text, source)`` where ``source`` is one of:
 
-    The live ``OSError`` is swallowed ONLY when a cache can cover it; with NO cache
-    the exception PROPAGATES so the caller's single fail-soft handler notes why
-    (keeping one tested except site instead of a provably-dead nested one).
+    * ``"cache_fresh"`` — a cache younger than the TTL (:func:`_ntm_cache_ttl_seconds`)
+      was served WITHOUT any network call (the O(1) ultra-fast hot path — every load
+      after the first is instant);
+    * ``"live"`` — no fresh cache, so ONE bounded fail-fast live fetch succeeded; the
+      cache is refreshed (so the next load is a ``cache_fresh`` hit);
+    * ``"cache_stale"`` — no fresh cache and the live refresh failed (timeout /
+      bot-block) OR returned empty, but a STALE cache covered it (universe stays full);
+    * ``"none"`` — no fresh cache, live failed/empty, AND no stale cache to fall back
+      on → ``("", "none")``.
+
+    The live ``OSError`` is swallowed ONLY when a (stale) cache can cover it; with NO
+    cache at all it PROPAGATES so the caller's single fail-soft handler notes the
+    honest "unreachable, no cache" reason (one tested except site, not a dead nested
+    one).
     """
+    cached = load_cached_constituent_with_age(cache_dir=cache_dir)
+    # 1. FRESH cache → serve instantly, NO network (the ultra-fast hot path).
+    if cached is not None and cached.age_seconds < _ntm_cache_ttl_seconds():
+        return cached.csv_text, "cache_fresh"
+    # 2. No fresh cache → ONE bounded fail-fast live fetch (cold boot / post-TTL refresh).
     try:
         live = fetch_constituent_csv(_NTM_INDEX_NAME, opener=opener) or ""
     except OSError:
-        cached = load_cached_constituent_csv(cache_dir=cache_dir)
-        if cached:
-            return cached, True
-        raise  # no cache to cover it → let the caller's fail-soft handler note why
+        if cached is not None:
+            return cached.csv_text, "cache_stale"  # a stale cache still covers the outage
+        raise  # no cache at all → caller's fail-soft handler notes why
     if live:
         save_constituent_csv(live, cache_dir=cache_dir)
-        return live, False
-    cached = load_cached_constituent_csv(cache_dir=cache_dir)
-    return (cached, True) if cached else ("", False)
+        return live, "live"
+    # 3. Live returned empty → serve a stale cache if present, else nothing.
+    if cached is not None:
+        return cached.csv_text, "cache_stale"
+    return "", "none"
 
 
 def _ntm_admission(
@@ -240,7 +292,9 @@ def _ntm_admission(
     Returns ``(reference_security_ids, note)``. ``note`` always carries
     ``"admitted"``; on a skip it adds a ``"reason"``; on success it adds the
     coverage counts (``constituents`` / ``matched`` / ``reference`` / ``unmatched``
-    / ``from_cache``) for the operator's at-a-glance audit.
+    / ``from_cache`` / ``source``) for the operator's at-a-glance audit. ``source`` ∈
+    ``{"cache_fresh", "live", "cache_stale"}`` records WHY the CSV was served (the
+    cache-first fast path vs a live refresh vs a stale fallback — DEC-NTM-CACHE-FIRST-001).
 
     **Fail-soft (Golden Rule #1 + #10):** any miss (no equities to match,
     niftyindices unreachable with no cache, an empty CSV) returns an EMPTY set + an
@@ -278,7 +332,7 @@ def _ntm_admission(
     # (niftyindices.com bot-blocks / times out plain HTTP clients — a live failure
     # would otherwise crater the universe from ~750 to the F&O-eligible base set).
     try:
-        csv_text, from_cache = _resolve_constituent_csv(constituent_opener, cache_dir=cache_dir)
+        csv_text, source = _resolve_constituent_csv(constituent_opener, cache_dir=cache_dir)
     except OSError as exc:
         note["reason"] = (
             "NIFTY Total Market constituents need niftyindices.com, currently "
@@ -313,11 +367,19 @@ def _ntm_admission(
         matched=len(report.matched),
         reference=len(reference_security_ids),
         unmatched=len(report.unmatched),
-        from_cache=from_cache,
+        # ``from_cache`` is True for BOTH cache arms (fresh hot path + stale fallback);
+        # ``source`` carries the honest, specific origin for the operator's audit.
+        from_cache=source != "live",
+        source=source,
     )
-    if from_cache:
+    if source == "cache_fresh":
         note["constituent_note"] = (
-            "live NTM constituent source unavailable — used last-good cache "
+            "served the fresh last-good NTM constituent cache "
+            "(~/.brutex/cache/ntm_constituents.csv) — no network call (fast path)"
+        )
+    elif source == "cache_stale":
+        note["constituent_note"] = (
+            "live NTM constituent source unavailable — used the last-good cache "
             "(~/.brutex/cache/ntm_constituents.csv)"
         )
     return reference_security_ids, note
