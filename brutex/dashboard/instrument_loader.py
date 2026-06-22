@@ -239,8 +239,9 @@ def _resolve_constituent_csv(
     Returns ``(csv_text, source)`` where ``source`` is one of:
 
     * ``"cache_fresh"`` — a cache younger than the TTL (:func:`_ntm_cache_ttl_seconds`)
-      was served WITHOUT any network call (the O(1) ultra-fast hot path — every load
-      after the first is instant);
+      was served WITHOUT any network call (the fast hot path: one small ``stat``+read,
+      no network — constant w.r.t. the slow niftyindices host, so every load after the
+      first is instant; NOT a literal O(1) over the CSV, which is still parsed);
     * ``"live"`` — no fresh cache, so ONE bounded fail-fast live fetch succeeded; the
       cache is refreshed (so the next load is a ``cache_fresh`` hit);
     * ``"cache_stale"`` — no fresh cache and the live refresh failed (timeout /

@@ -110,6 +110,11 @@ def save_constituent_csv(csv_text: str, *, cache_dir: Path) -> bool:
 def load_cached_constituent_csv(*, cache_dir: Path) -> str | None:
     """Return the last-good cached constituent CSV, or ``None`` when unavailable.
 
+    The age-agnostic public read API: callers that just need the cached text (and not
+    its freshness) use this; the cache-first instrument load uses the age-aware sibling
+    :func:`load_cached_constituent_with_age` instead (DEC-NTM-CACHE-FIRST-001). Retained
+    as the simple convenience read (it does not ``stat`` for an mtime).
+
     Best-effort: a missing file, an unreadable file (permission), or an empty file
     all return ``None`` so the caller cleanly degrades to the base universe. NEVER
     raises.

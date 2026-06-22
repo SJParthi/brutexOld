@@ -238,9 +238,11 @@ hostile-review pass._
   `_resolve_constituent_csv` CACHE-FIRST returning `(csv_text, source ∈ {cache_fresh, live, cache_stale, none})` — a
   cache YOUNGER than a TTL (`_ntm_cache_ttl_seconds`, env `BRUTEX_NTM_CACHE_TTL_SECONDS`, default 7 days; NTM
   rebalances only semi-annually CLAUDE.md §7) is served INSTANTLY with ZERO network call (the O(1) hot path); only a
-  cold/stale cache hits ONE bounded fail-fast live fetch (env-tunable `BRUTEX_NSE_FETCH_TIMEOUT_SECONDS` /
-  `BRUTEX_NSE_FETCH_MAX_RETRIES`, default 15 s × 2 ≈ 31 s worst, far below the old 90 s, kept patient enough to
-  succeed-once + seed the cache → instant forever); a live fail/empty with a stale cache falls back to it; nothing
+  cold/stale cache hits ONE bounded live fetch (env-tunable `BRUTEX_NSE_FETCH_TIMEOUT_SECONDS` /
+  `BRUTEX_NSE_FETCH_MAX_RETRIES`), now paid AT MOST ONCE per TTL not every load — the headline win is the cache-first
+  ORDERING, NOT a timeout cut: the per-attempt default stays the operator-validated 30 s (a 10 s attempt previously
+  read-timed-out on this host; 30 s was the deliberate fix) with retries trimmed 3 → 2 (30 s × 2 ≈ 61.5 s worst, down
+  from 90 s), patient enough to succeed-once + seed the cache → instant forever; a live fail/empty with a stale cache falls back to it; nothing
   available → honest `none` degrade to the F&O base set. NEW `ntm_cache.load_cached_constituent_with_age` (+
   `CachedConstituents`) reads body+mtime once (age clamped ≥ 0 for clock skew); the `_ntm_admission` note carries the
   honest `source`/`from_cache`. HONEST: O(1)-latency on the STEADY-STATE load (fresh-cache hit = one stat+read, no

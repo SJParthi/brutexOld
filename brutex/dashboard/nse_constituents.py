@@ -304,19 +304,28 @@ def convention_constituent_url(index_symbol: str) -> str | None:
     return f"{NSE_CONSTITUENTS_BASE_URL}/ind_{safe}list.csv"
 
 
-#: Live-fetch tuning — BOUNDED + fail-fast + env-tunable (CLAUDE.md §11 DYNAMIC).
-#: This live path is reached ONLY on a cold cache (first-ever boot) or a post-TTL
-#: refresh: the steady-state ``/universe`` load is CACHE-FIRST
+#: Live-fetch tuning — BOUNDED + env-tunable (CLAUDE.md §11 DYNAMIC). This live path
+#: is reached ONLY on a cold cache (first-ever boot) or a post-TTL refresh: the
+#: steady-state ``/universe`` load is CACHE-FIRST
 #: (``instrument_loader._resolve_constituent_csv``, DEC-NTM-CACHE-FIRST-001) and
 #: serves a fresh cache with NO network call at all, so these defaults govern only
-#: the rare refresh — never the hot path. The defaults stay patient enough to
-#: SUCCEED on a slow-first-byte niftyindices (so the one cold fetch seeds the cache
-#: → instant forever) while bounding the worst case far below the old 30 s × 3 = 90 s
-#: (default 15 s × 2 ≈ 31 s worst, typically <5 s). An operator who prefers a harder
-#: fail-fast lowers ``BRUTEX_NSE_FETCH_TIMEOUT_SECONDS`` / ``BRUTEX_NSE_FETCH_MAX_RETRIES``.
+#: the rare refresh — never the hot path, and they are paid AT MOST ONCE per TTL,
+#: not on every load as before.
+#:
+#: The per-attempt timeout DEFAULT stays the operator-validated **30 s** — the prior
+#: code's comment recorded that a single 10 s attempt read-TIMED-OUT for the operator
+#: on this exact host and 30 s was the deliberate fix — so the headline win here is the
+#: cache-first ORDERING (the live fetch now happens at most once per TTL), NOT a
+#: timeout cut: keeping 30 s maximises the chance that the ONE cold fetch SUCCEEDS and
+#: seeds the cache → instant forever (a cut-and-FAILED fetch would crater a cold boot
+#: to the ~211 F&O base set — the worse outcome). Retries are trimmed 3 → 2, so the
+#: worst case is **30 s × 2 ≈ 61.5 s** (down from the old 30 s × 3 ≈ 90 s) for that
+#: single cold fetch. An operator who prefers a HARDER fail-fast lowers
+#: ``BRUTEX_NSE_FETCH_TIMEOUT_SECONDS`` / ``BRUTEX_NSE_FETCH_MAX_RETRIES`` (accepting a
+#: higher chance the cold fetch fails → base set until the cache is seeded).
 _FETCH_TIMEOUT_ENV: Final[str] = "BRUTEX_NSE_FETCH_TIMEOUT_SECONDS"
 _FETCH_RETRIES_ENV: Final[str] = "BRUTEX_NSE_FETCH_MAX_RETRIES"
-_FETCH_TIMEOUT_DEFAULT: Final[float] = 15.0
+_FETCH_TIMEOUT_DEFAULT: Final[float] = 30.0
 _FETCH_RETRIES_DEFAULT: Final[int] = 2
 
 
