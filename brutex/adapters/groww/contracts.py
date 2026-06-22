@@ -27,7 +27,7 @@ pure.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -133,6 +133,59 @@ def _expiries_array(payload: Mapping[str, object]) -> list[object]:
     return list(raw)
 
 
+def underlying_symbol_forms(underlying_symbol: str) -> tuple[str, ...]:
+    """The underlying-symbol forms to try, in order, for the F&O expiries/contracts fetch.
+
+    DEC-GROWW-AMPERSAND-FALLBACK-001. An ``&`` in the NSE trading symbol (``M&M``,
+    ``M&MFIN``, ``L&TFH``, ``GVT&D``, ``J&KBANK``, ``ARE&M``, ``GMRP&UI``) is the
+    HTTP query-string separator; the ``growwapi`` SDK's request builder sends it
+    UN-ENCODED, so ``get_expiries`` / ``get_contracts`` return a clean-but-EMPTY ``200`` and
+    the WHOLE underlying's expiry/contract chain is silently missed (the operator's "M&M
+    fails for entire expiries and contracts" — root-caused in MIGRATION.md #870). We try the
+    PLAIN symbol FIRST — zero behaviour change for the common no-``&`` case AND for any vendor
+    that already handles ``&`` correctly — then the percent-encoded ``%26`` variant as the
+    fallback (the standard encoding of ``&``).
+
+    **Honest envelope (Golden Rule #1/#10):** the EXACT correct encoding is an UNVERIFIED
+    vendor/SDK behaviour (the SDK's internal URL construction needs a live Groww probe —
+    CLAUDE.md §6 Phase-0 probe discipline). Try-both is the no-worse-than-before approach: a
+    non-``&`` symbol yields ONE form (no extra call); an ``&`` symbol yields two and uses the
+    FIRST non-empty — so if the vendor handles plain ``&`` we never regress, and if neither
+    form yields data we record the same empty as today (never a fabricated chain). If the SDK
+    double-encodes (``%26`` → ``%2526``) the ``%26`` form simply also returns empty and we are
+    no worse off; a confirmed encoding can replace this hypothesis once the probe lands.
+    """
+    if "&" not in underlying_symbol:
+        return (underlying_symbol,)
+    return (underlying_symbol, underlying_symbol.replace("&", "%26"))
+
+
+def _fetch_first_nonempty_form[T](
+    forms: tuple[str, ...],
+    fetch: Callable[[str], T],
+    *,
+    is_empty: Callable[[T], bool],
+) -> T:
+    """Try each underlying-symbol *form* in order; return the first non-empty *fetch* result.
+
+    DEC-GROWW-AMPERSAND-FALLBACK-001 — the symbol-form axis of the empty-retry (distinct from
+    the transient-glitch :func:`~brutex.adapters.ingest_common.fetch_until_nonempty`, which
+    re-fetches the SAME args). The first form (the plain symbol) is ALWAYS called; a later
+    form is tried ONLY when every prior form was empty, and the LAST form's (empty) result is
+    returned when all are empty — so the existing empty-record behaviour is preserved.
+    O(forms): exactly 1 call for the common single-form (no-``&``) symbol, at most 2 for an
+    ``&`` symbol. (Composed with the outer ``fetch_until_nonempty`` transient-retry budget of
+    ``empty_retry_attempts``, a genuinely-all-empty ``&`` symbol fires at most
+    ``2 × empty_retry_attempts`` SDK calls — bounded, rate-paced, and the rare worst case.)
+    """
+    result = fetch(forms[0])
+    for form in forms[1:]:
+        if not is_empty(result):
+            return result
+        result = fetch(form)
+    return result
+
+
 def resolve_expiries(
     client: GrowwClientProtocol,
     *,
@@ -162,9 +215,9 @@ def resolve_expiries(
         ISO date string (fail-loud — Golden Rule #1).
     """
 
-    def _fetch() -> list[date]:
+    def _fetch_form(symbol_form: str) -> list[date]:
         payload = client.expiries(
-            exchange=exchange, underlying_symbol=underlying_symbol, year=year, month=month
+            exchange=exchange, underlying_symbol=symbol_form, year=year, month=month
         )
         out: set[date] = set()
         for item in _expiries_array(payload):
@@ -177,6 +230,13 @@ def resolve_expiries(
             except ValueError as exc:
                 raise ValueError(f"unparseable Groww expiry: {item!r}") from exc
         return sorted(out)
+
+    # DEC-GROWW-AMPERSAND-FALLBACK-001: try the plain symbol, then the `%26`-encoded `&`
+    # variant on an empty reply, BEFORE the transient-glitch empty-retry budget.
+    def _fetch() -> list[date]:
+        return _fetch_first_nonempty_form(
+            underlying_symbol_forms(underlying_symbol), _fetch_form, is_empty=lambda r: not r
+        )
 
     return fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=empty_retry_attempts)
 
@@ -209,9 +269,9 @@ def resolve_contracts(
         a symbol fails :func:`parse_contract_symbol` (fail-loud).
     """
 
-    def _fetch() -> list[DerivativeContract]:
+    def _fetch_form(symbol_form: str) -> list[DerivativeContract]:
         payload = client.contracts(
-            exchange=exchange, underlying_symbol=underlying_symbol, expiry_date=expiry.isoformat()
+            exchange=exchange, underlying_symbol=symbol_form, expiry_date=expiry.isoformat()
         )
         raw = payload.get("contracts", [])
         if not isinstance(raw, (list, tuple)):
@@ -228,10 +288,19 @@ def resolve_contracts(
             if item in seen:
                 continue
             seen.add(item)
+            # The vendor returns the canonical symbol (real `&`), so parse against the
+            # ORIGINAL underlying_symbol — only the FETCH arg uses the encoded form.
             contracts.append(
                 parse_contract_symbol(item, underlying_symbol=underlying_symbol, expiry=expiry)
             )
         return contracts
+
+    # DEC-GROWW-AMPERSAND-FALLBACK-001: try the plain symbol, then the `%26`-encoded `&`
+    # variant on an empty reply, BEFORE the transient-glitch empty-retry budget.
+    def _fetch() -> list[DerivativeContract]:
+        return _fetch_first_nonempty_form(
+            underlying_symbol_forms(underlying_symbol), _fetch_form, is_empty=lambda r: not r
+        )
 
     return fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=empty_retry_attempts)
 
@@ -294,4 +363,5 @@ __all__ = [
     "parse_contract_symbol",
     "resolve_contracts",
     "resolve_expiries",
+    "underlying_symbol_forms",
 ]

@@ -230,9 +230,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-spot-cascade-jlzt1n` (the `/db` SPOT candle picker is now a symbol→interval CASCADE
+- **Active branch:** `claude/groww-ampersand-jlzt1n` (F&O expiries/contracts for `&`-containing underlyings (M&M,
+  M&MFIN, L&TFH, GVT&D, J&KBANK) now TRY a second `%26`-encoded symbol form when the plain form returns empty, so the
+  whole-underlying chain failure (the operator's "M&M fails for entire expiries and contracts") is recovered —
+  DEC-GROWW-AMPERSAND-FALLBACK-001, MIGRATION.md #898. ROOT CAUSE (deep investigation + #870): the NSE `trading_symbol`
+  `M&M` is handed verbatim to the `growwapi` SDK's `get_expiries`/`get_contracts`; the `&` is the HTTP query-string
+  separator, sent UN-ENCODED, so the vendor returns a clean-but-EMPTY 200 — and because the break is at the
+  chain-discovery ROOT (0 expiries → 0 `get_contracts` → 0 contracts) the ENTIRE underlying is missed (not a
+  master-lookup miss + not a parse failure — both ruled out with code evidence). FIX (adapter resolution-layer,
+  operator-chosen "try-both-forms"): NEW pure `underlying_symbol_forms` (plain FIRST, then `replace("&","%26")` for an
+  `&` symbol) + generic `_fetch_first_nonempty_form` (first non-empty wins, returns the last empty if all empty);
+  `resolve_expiries`/`resolve_contracts` wrap their per-form fetch in it BEFORE the transient `fetch_until_nonempty`
+  budget, keeping `parse_contract_symbol` on the ORIGINAL symbol (the vendor returns the canonical `&` symbol — only
+  the FETCH arg is encoded). HONEST: the exact encoding is UNVERIFIED (needs a live Groww probe, CLAUDE.md §6) — a
+  HYPOTHESIS grounded in #870, NOT probe-confirmed; try-both is no-worse-than-before (a no-`&` symbol is byte-unchanged
+  one call; a plain-`&`-that-works never regresses; all-empty records the same empty, never a fabricated chain). This
+  is the OPTIONS-path twin of the SPOT-only #845. `contracts.py` 100% line+branch (92/34, 37 tests); 148 F&O-path
+  tests green; ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap
+  change. Prior merged: DEC-DB-SPOT-CASCADE-001, MIGRATION.md #897 (the `/db` SPOT candle picker is now a symbol→interval CASCADE
   (the spot twin of the F&O cascade), replacing the flat ~750-row dropdown so the operator can pick an underlying
-  symbol + a stored timeframe — DEC-DB-SPOT-CASCADE-001, MIGRATION.md #897, the operator's "even for candles i can't
+  symbol + a stored timeframe — the operator's "even for candles i can't
   select the underlying symbol or timeframe … we need the same as fno candle". NEW pure `spot_cascade.py`
   (`build_spot_cascade` → `SpotCascadeIndex.symbols()` O(1); `SpotSymbol` leaf carrying its STORED intervals inline;
   `symbol_to_json`) groups the non-F&O datasets by `(exchange, segment, symbol)`, sorted indices-first then alpha
@@ -819,7 +836,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-spot-cascade-jlzt1n`
+- **Active feature branch:** `claude/groww-ampersand-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
