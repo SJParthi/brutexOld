@@ -30,6 +30,7 @@ from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import metrics_for_mask
 from brutex.engine.sweep_run import (
     ComboDedup,
+    SweepComboError,
     SweepRunConfig,
     SweepRunSummary,
     canonical_trade_params,
@@ -1160,3 +1161,116 @@ class TestRunPersistedSweep:
         assert mask_run_id(mask=1, params=prox_params, **_CTX) != mask_run_id(
             mask=1, params=default_params, **_CTX
         )
+
+
+# ────── SweepComboError — fail-loud-with-fingerprint (Resilient: skip+continue) ──────
+
+
+class TestSweepComboError:
+    """A combo that raises mid-evaluation surfaces a fingerprinted SweepComboError.
+
+    The error names the exact offending combo (mask hex + run-id + tuple
+    coordinate), and — critically — NO store flush / sidecar / completion
+    sentinel is written, so the tuple redoes deterministically next run.
+    """
+
+    def test_is_a_brutex_error_subclass(self) -> None:
+        from brutex.models import BruteXError
+
+        assert issubclass(SweepComboError, BruteXError)
+
+    def test_raises_naming_the_offending_combo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
+
+        bars = _trending_bars()
+        cfg = _make_config()  # k=1, condition_bits=[0,1,2,3,4] → masks 1,2,4,8,16
+        boom_mask = 0b100  # 1 << 2
+
+        def _raising_metrics(*args: object, **kwargs: object) -> object:
+            mask = args[2]  # (bars, bar_bits, mask, ...)
+            if mask == boom_mask:
+                raise ValueError("corrupt bar window")
+            return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
+
+        # Patch the name as resolved inside run_persisted_sweep (the sweep_run
+        # module namespace) — the string target avoids the re-export attr check.
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _raising_metrics)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        msg = str(excinfo.value)
+        # The message names the mask hex, the run-id, the tuple coordinate, and k.
+        assert f"0x{boom_mask:016x}" in msg
+        assert "NIFTY/1m/bull" in msg
+        assert "k=1" in msg
+        assert "run_id=" in msg
+        assert "corrupt bar window" in msg  # the original error is chained in
+        # The raise is chained from the original exception (`from exc`).
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+    def test_no_store_or_sentinel_written_on_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _always_raise(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("kernel exploded")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _always_raise)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        dedup = _dedup()
+        first_rid = mask_run_id(
+            mask=1,
+            direction="bull",
+            instrument=cfg.instrument,
+            tf=cfg.tf,
+            mode=cfg.mode,
+            params=canonical_trade_params(
+                sl_paisa=cfg.sl_paisa,
+                tp_paisa=cfg.tp_paisa,
+                prior_n=cfg.prior_n,
+                proximity=cfg.proximity,
+                start_equity_paisa=cfg.start_equity_paisa,
+            ),
+            data_snapshot_hash=cfg.data_snapshot_hash,
+            indicator_version=cfg.indicator_version,
+            code_commit_sha=cfg.code_commit_sha,
+        )
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The store Parquet, the trial-stats sidecar, and the completion sentinel
+        # were ALL left unwritten (the raise is BEFORE flush/mark/sentinel), so the
+        # tuple redoes next run (un-sentineled, reproducible).
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+        # The dedup was never marked, so a re-run re-evaluates the masks.
+        assert not dedup.seen(first_rid)

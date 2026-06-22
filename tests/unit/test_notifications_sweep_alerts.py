@@ -61,6 +61,7 @@ class FakeSummary:
     evaluated: int
     ranked: int
     persisted: int
+    tuples_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -249,6 +250,31 @@ class TestAlerts:
         assert ev.dedupe_key == "abcdef0123456789"
         assert "10/12" in ev.message
         assert "abcdef012345" in ev.message  # sweep_id[:12]
+        # No failures → the ✅ headline, no FAILED clause (clean run).
+        assert "✅" in ev.message
+        assert "FAILED" not in ev.message
+
+    def test_sweep_complete_with_failures_warns(self) -> None:
+        """tuples_failed > 0 downgrades ✅ → ⚠️ and names the FAILED count (Golden Rule #10)."""
+        fake = FakeNotifier()
+        summary = FakeSummary(
+            sweep_id="abcdef0123456789",
+            tuples_run=9,
+            tuples_total=12,
+            evaluated=4096,
+            ranked=20,
+            persisted=15,
+            tuples_failed=3,
+        )
+        SweepAlerter(notifier=fake).sweep_complete(summary)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.RUN_COMPLETE
+        assert ev.severity == TelegramSeverity.INFO
+        assert ev.dedupe_key == "abcdef0123456789"
+        assert "⚠️" in ev.message
+        assert "✅" not in ev.message
+        # The escaped MarkdownV2 form of "3 tuples FAILED" appears.
+        assert escape_markdown_v2("3 tuples FAILED") in ev.message
 
     def test_symbol_window_failure(self) -> None:
         fake = FakeNotifier()

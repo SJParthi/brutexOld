@@ -75,6 +75,7 @@ from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
+    SweepComboError,
     SweepRunConfig,
     SweepRunSummary,
     run_persisted_sweep,
@@ -98,6 +99,10 @@ _LOG = structlog.get_logger("brutex.engine.sweep_orchestrator")
 #: Audit action labels — the two lines the grid emits around the per-tuple lines.
 _ACTION_GRID_START: Final[str] = "GRID_SWEEP_START"
 _ACTION_GRID_COMPLETE: Final[str] = "GRID_SWEEP_COMPLETE"
+
+#: Audit action for a tuple that raised mid-evaluation and was SKIPPED
+#: ("Resilient: skip + continue") — names the exact offending combo + error.
+_ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
 
 #: Default ceiling on the number of tuples a grid may enumerate (the honest
 #: opt-in guard — a grid this large is a conscious choice, raise it explicitly).
@@ -448,6 +453,13 @@ class SweepGridSummary:
     enumerated, conflict_pruned, skipped_dedup, evaluated, ranked, persisted
         The per-tuple :class:`~brutex.engine.sweep_run.SweepRunSummary` fields,
         summed across every tuple that ran.
+    tuples_failed
+        Tuples whose combo evaluation raised a
+        :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep and were
+        SKIPPED ("Resilient: skip + continue"): the remaining tuples still ran,
+        but a non-zero count makes the grid verdict NON-ZERO and leaves each
+        failed tuple un-sentineled / un-cached for a deterministic redo next run.
+        NOT counted as run or skipped-no-bars.
     """
 
     tuples_total: int
@@ -459,6 +471,7 @@ class SweepGridSummary:
     evaluated: int
     ranked: int
     persisted: int
+    tuples_failed: int
 
 
 def _dedup_seq[T](seq: Sequence[T]) -> tuple[T, ...]:
@@ -807,6 +820,14 @@ def run_sweep_grid(
     ``tuples_skipped_no_bars``) or raises a clear, tuple-named error
     (``skip_empty=False``) — never an opaque mid-grid traceback.
 
+    "Resilient: skip + continue": a tuple whose combo evaluation raises a
+    :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep is SKIPPED (its
+    store is left un-sentineled so it redoes next run), counted in
+    ``tuples_failed``, and recorded as a ``TUPLE_FAILED`` audit line naming the
+    exact offending combo; the grid finishes the remaining tuples and a non-zero
+    ``tuples_failed`` makes the run's verdict NON-ZERO. Every OTHER exception
+    still propagates uncaught (global abort) — only ``SweepComboError`` is caught.
+
     Honest envelope (Golden Rule #10): the loop is O(T) tuples, each O(N) masks;
     no part is O(1) total. This function's own memory is O(1) in ``T`` (scalar
     tallies only).
@@ -877,6 +898,7 @@ def run_sweep_grid(
 
     tuples_run = 0
     tuples_skipped_no_bars = 0
+    tuples_failed = 0
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -891,16 +913,39 @@ def run_sweep_grid(
     kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
 
     for tuple_ in iter_sweep_tuples(grid):
-        summary = run_one_tuple(
-            grid,
-            tuple_,
-            bars_for=bars_for,
-            store_for=store_for,
-            dedup=dedup,
-            audit=audit,
-            skip_empty=skip_empty,
-            kernel_cache=kernel_cache,
-        )
+        # "Resilient: skip + continue" — a combo that raises mid-evaluation
+        # surfaces as a SweepComboError naming the exact offending combo. Skip
+        # the WHOLE tuple (it is provably a tuple-wide bug / corrupt bar window,
+        # not a transient single combo), count it, audit the fingerprint, and
+        # finish the remaining tuples; the failed tuple is left un-sentineled
+        # (run_persisted_sweep raised before its flush/mark/sentinel writes) so
+        # it redoes deterministically next run. Only SweepComboError is caught —
+        # every other exception still propagates (global abort).
+        try:
+            summary = run_one_tuple(
+                grid,
+                tuple_,
+                bars_for=bars_for,
+                store_for=store_for,
+                dedup=dedup,
+                audit=audit,
+                skip_empty=skip_empty,
+                kernel_cache=kernel_cache,
+            )
+        except SweepComboError as exc:
+            tuples_failed += 1
+            label = (
+                f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
+                f"/k={tuple_.k}/sl={tuple_.sl_paisa}/tp={tuple_.tp_paisa}"
+            )
+            error = f"{type(exc).__name__}: {exc}"
+            audit.append(
+                action=_ACTION_TUPLE_FAILED,
+                subject=subject,
+                payload={"tuple": label, "error": error},
+            )
+            _LOG.warning("sweep_grid.tuple_failed", subject=subject, tuple=label, error=error)
+            continue
         if summary is None:
             tuples_skipped_no_bars += 1
             continue
@@ -924,11 +969,13 @@ def run_sweep_grid(
         evaluated=evaluated,
         ranked=ranked,
         persisted=persisted,
+        tuples_failed=tuples_failed,
     )
     payload = {
         "tuples_total": total,
         "tuples_run": tuples_run,
         "tuples_skipped_no_bars": tuples_skipped_no_bars,
+        "tuples_failed": tuples_failed,
         "enumerated": enumerated,
         "conflict_pruned": conflict_pruned,
         "skipped_dedup": skipped_dedup,

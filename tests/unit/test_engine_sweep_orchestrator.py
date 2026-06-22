@@ -44,7 +44,7 @@ from brutex.engine.sweep_orchestrator import (
     run_sweep_grid,
     tuple_store_path,
 )
-from brutex.engine.sweep_run import ComboDedup, SweepRunConfig
+from brutex.engine.sweep_run import ComboDedup, SweepComboError, SweepRunConfig
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
@@ -528,7 +528,115 @@ class TestRunSweepGrid:
             evaluated=0,
             ranked=0,
             persisted=0,
+            tuples_failed=0,
         )
+
+
+class TestRunSweepGridResilientSkip:
+    """A tuple that raises SweepComboError is SKIPPED; the grid finishes the rest.
+
+    "Resilient: skip + continue": ``tuples_failed`` counts it, a ``TUPLE_FAILED``
+    audit line names the offending combo, and the failed tuple's store is never
+    sentineled (so it redoes next run). Only ``SweepComboError`` is caught.
+    """
+
+    def test_one_tuple_fails_others_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
+
+        bars = _trending_bars()
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])  # 2 tuples (index 0, 1)
+
+        def _maybe_raise(grid_: object, tuple_: object, **kwargs: object) -> object:
+            if tuple_.instrument == "BANKNIFTY":  # type: ignore[attr-defined]
+                raise SweepComboError("combo 0x0000000000000004 (run_id=deadbeef) boom")
+            return real_run_one(grid_, tuple_, **kwargs)  # type: ignore[arg-type]
+
+        # Patch the name as resolved inside run_sweep_grid (string target avoids
+        # the re-export attr check).
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _maybe_raise)
+
+        seen: list[str] = []
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+                on_tuple=lambda t, _s: seen.append(t.instrument),
+            )
+        # NIFTY ran; BANKNIFTY was skipped as failed.
+        assert summary.tuples_run == 1
+        assert summary.tuples_failed == 1
+        assert summary.tuples_skipped_no_bars == 0
+        assert seen == ["NIFTY"]  # on_tuple never fired for the failed tuple
+        actions = [e.action for e in read_entries(audit_path)]
+        assert "TUPLE_FAILED" in actions
+        # The TUPLE_FAILED payload names the tuple coordinate + the error string.
+        failed = next(e for e in read_entries(audit_path) if e.action == "TUPLE_FAILED")
+        assert "BANKNIFTY" in failed.payload["tuple"]
+        assert "SweepComboError" in failed.payload["error"]
+        # The GRID_SWEEP_COMPLETE payload carries the failed count.
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert complete.payload["tuples_failed"] == 1
+        assert verify_chain(audit_path) > 0
+
+    def test_real_raise_leaves_failed_store_unsentineled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL combo raise skips the tuple WITHOUT sentineling its store (redo next run)."""
+        pytest.importorskip("polars")
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        grid = _grid()  # single NIFTY tuple
+        results_root = tmp_path / "results"
+
+        def _always_raise(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("corrupt window")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _always_raise)
+
+        with AuditWriter.open(tmp_path / "grid.jsonl") as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results_root, grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 0
+        # The failed tuple's store + completion sentinel were never written.
+        store_path = tuple_store_path(results_root, next(iter_sweep_tuples(grid)), grid)
+        assert not store_path.exists()
+        assert not completion_sentinel_path(store_path).exists()
+
+    def test_non_combo_error_still_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-SweepComboError raised by run_one_tuple is NOT caught (global abort)."""
+        grid = _grid()
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("genuinely fatal")
+
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _boom)
+        with (
+            AuditWriter.open(tmp_path / "grid.jsonl") as audit,
+            pytest.raises(RuntimeError, match="genuinely fatal"),
+        ):
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
 
 
 def test_default_max_tuples_is_exposed() -> None:

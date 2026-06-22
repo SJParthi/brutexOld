@@ -104,7 +104,7 @@ from brutex.engine.sweep_orchestrator import (
     run_one_tuple,
 )
 from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
-from brutex.engine.sweep_run import _direction_label
+from brutex.engine.sweep_run import SweepComboError, _direction_label
 from brutex.engine.sweep_watchdog import SweepWatchdog
 
 if TYPE_CHECKING:
@@ -130,6 +130,10 @@ _ACTION_TUPLE_DONE: Final[str] = "TUPLE_DONE"
 _ACTION_TUPLE_CACHE: Final[str] = "TUPLE_SKIPPED_CACHE"
 _ACTION_TUPLE_RESUME: Final[str] = "TUPLE_SKIPPED_RESUME"
 _ACTION_TUPLE_NO_BARS: Final[str] = "TUPLE_NO_BARS"
+#: A tuple that raised mid-evaluation and was SKIPPED ("Resilient: skip +
+#: continue") — its cache/checkpoint are DELIBERATELY not recorded so a resume
+#: re-runs it (the sweep_heal "C5" lesson).
+_ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
 _ACTION_COMPLETE: Final[str] = "SUPERVISOR_COMPLETE"
 _ACTION_ABORT: Final[str] = "SUPERVISOR_ABORT"
 
@@ -226,6 +230,16 @@ class SupervisedGridSummary:
     enumerated, conflict_pruned, skipped_dedup, evaluated, ranked, persisted
         The per-tuple :class:`~brutex.engine.sweep_run.SweepRunSummary` fields,
         summed across every tuple that ran this run.
+    tuples_failed
+        Tuples whose combo evaluation raised a
+        :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep and were
+        SKIPPED ("Resilient: skip + continue"): the supervisor finished the
+        remaining tuples but a non-zero count makes the run's verdict NON-ZERO.
+        CRITICALLY, a failed tuple's :class:`SweepCache` entry +
+        :class:`~brutex.engine.sweep_checkpoint.SweepCheckpointStore` index are
+        DELIBERATELY not recorded, so a resume/cache re-runs it (the sweep_heal
+        "C5" lesson — a failed tuple must never be permanently skipped). NOT
+        counted as run, skipped-no-bars, cache, or resume.
     """
 
     sweep_id: str
@@ -240,6 +254,7 @@ class SupervisedGridSummary:
     evaluated: int
     ranked: int
     persisted: int
+    tuples_failed: int
 
 
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
@@ -429,12 +444,19 @@ def run_supervised_grid(
        **resumed** (progress + audit, no store touched, no re-record).
     3. Elif ``guards.cache.seen(tuple key)``: skip as **cached** (progress + audit
        + ``checkpoint.record``).
-    4. Else ``run_one_tuple``: ``None`` → **no-bars** skip (progress + audit +
-       ``checkpoint.record``); a summary → accumulate, ``cache.record``,
-       ``checkpoint.record``, ``progress.advance``, audit ``TUPLE_DONE``,
-       fire ``on_tuple``.
+    4. Else ``run_one_tuple``: a :class:`~brutex.engine.sweep_run.SweepComboError`
+       → **failed** skip ("Resilient: skip + continue" — progress.advance
+       (processed-but-failed) + audit ``TUPLE_FAILED`` naming the offending combo,
+       ``tuples_failed`` bumped, but DELIBERATELY **no** ``cache.record`` /
+       ``checkpoint.record`` so a resume re-runs it; the sweep_heal "C5" lesson);
+       ``None`` → **no-bars** skip (progress + audit + ``checkpoint.record``); a
+       summary → accumulate, ``cache.record``, ``checkpoint.record``,
+       ``progress.advance``, audit ``TUPLE_DONE``, fire ``on_tuple``.
 
-    Bracketed by ``progress.start`` + a BLAKE3 ``SUPERVISOR_START`` line and, on
+    A non-zero ``tuples_failed`` makes the run's verdict NON-ZERO; only
+    ``SweepComboError`` is caught here — every other exception still propagates to
+    the abort handler below. Bracketed by ``progress.start`` + a BLAKE3
+    ``SUPERVISOR_START`` line and, on
     clean exit, ``progress.finish`` + ``SUPERVISOR_COMPLETE``. On any
     :class:`Exception`: best-effort ``progress.fail`` + a ``SUPERVISOR_ABORT``
     line, then the original exception is re-raised unchanged (the secondary audit
@@ -533,6 +555,7 @@ def run_supervised_grid(
     tuples_skipped_no_bars = 0
     skipped_cache = 0
     skipped_resume = 0
+    tuples_failed = 0
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -594,16 +617,46 @@ def run_supervised_grid(
                 )
                 continue
 
-            summary = run_one_tuple(
-                grid,
-                tuple_,
-                bars_for=bars_for,
-                store_for=store_for,
-                dedup=dedup,
-                audit=ingest_audit,
-                skip_empty=skip_empty,
-                kernel_cache=kernel_cache,
-            )
+            # "Resilient: skip + continue" — a combo that raises mid-evaluation
+            # surfaces as a SweepComboError. Skip the WHOLE tuple, count it,
+            # audit the fingerprint, advance progress (processed-but-failed), and
+            # continue to the remaining tuples. CRITICALLY, the cache + checkpoint
+            # are DELIBERATELY NOT recorded for a failed tuple, so a resume/cache
+            # re-runs it (the sweep_heal "C5" lesson — a failed tuple must never
+            # be permanently skipped). Only SweepComboError is caught; the outer
+            # `except Exception` (record-then-reraise ABORT) still handles every
+            # genuinely-fatal error.
+            try:
+                summary = run_one_tuple(
+                    grid,
+                    tuple_,
+                    bars_for=bars_for,
+                    store_for=store_for,
+                    dedup=dedup,
+                    audit=ingest_audit,
+                    skip_empty=skip_empty,
+                    kernel_cache=kernel_cache,
+                )
+            except SweepComboError as exc:
+                tuples_failed += 1
+                _advance(current=label, survived=False, skipped=False)
+                guards.audit.append(
+                    action=_ACTION_TUPLE_FAILED,
+                    subject=subject,
+                    payload={
+                        "index": index,
+                        "tuple": label,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                _LOG.warning(
+                    "sweep_supervisor.tuple_failed",
+                    subject=subject,
+                    index=index,
+                    tuple=label,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
             if summary is None:
                 tuples_skipped_no_bars += 1
                 guards.checkpoint.record(index)
@@ -657,6 +710,7 @@ def run_supervised_grid(
             "tuples_skipped_no_bars": tuples_skipped_no_bars,
             "skipped_cache": skipped_cache,
             "skipped_resume": skipped_resume,
+            "tuples_failed": tuples_failed,
             "enumerated": enumerated,
             "conflict_pruned": conflict_pruned,
             "skipped_dedup": skipped_dedup,
@@ -699,6 +753,7 @@ def run_supervised_grid(
         evaluated=evaluated,
         ranked=ranked,
         persisted=persisted,
+        tuples_failed=tuples_failed,
     )
 
 

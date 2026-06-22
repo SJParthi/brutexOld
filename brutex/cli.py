@@ -82,6 +82,33 @@ EXIT_VERIFY_INCONCLUSIVE = 4
 #: threshold / concurrent sweep — distinct from the verify codes so operator
 #: scripts can tell "found corruption" from "refused to act".
 EXIT_HEAL_REFUSED = 5
+#: sweep-all completed but >=1 grid tuple raised mid-evaluation and was SKIPPED
+#: ("Resilient: skip + continue"): the remaining tuples ran, but the verdict is
+#: NON-ZERO so an operator script never mistakes a partial sweep for a clean one
+#: (the failed tuples are un-sentineled and will redo next run).
+EXIT_SWEEP_TUPLE_FAILED = 6
+
+
+def sweep_all_exit_code(tuples_failed: int) -> int:
+    """Map a completed ``sweep-all`` run's ``tuples_failed`` to its exit code.
+
+    The honest verdict for "Resilient: skip + continue" (Golden Rule #10): a
+    fully clean grid exits :data:`EXIT_OK`; one or more tuples skipped after a
+    :class:`~brutex.engine.sweep_run.SweepComboError` makes the verdict NON-ZERO
+    (:data:`EXIT_SWEEP_TUPLE_FAILED`) so a skip is never a silent illusion.
+
+    Parameters
+    ----------
+    tuples_failed
+        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when ``tuples_failed == 0``, else
+        :data:`EXIT_SWEEP_TUPLE_FAILED`.
+    """
+    return EXIT_SWEEP_TUPLE_FAILED if tuples_failed > 0 else EXIT_OK
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -2801,9 +2828,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     print(
         f"[brutex] sweep-all done — tuples={result.tuples_run}/{result.tuples_total} "
         f"(no_bars={result.tuples_skipped_no_bars} cached={result.skipped_cache} "
-        f"resumed={result.skipped_resume}) evaluated={result.evaluated} "
-        f"ranked={result.ranked} persisted={result.persisted}"
+        f"resumed={result.skipped_resume} failed={result.tuples_failed}) "
+        f"evaluated={result.evaluated} ranked={result.ranked} persisted={result.persisted}"
     )
+    if result.tuples_failed > 0:
+        # "Resilient: skip + continue" — surface the non-zero verdict loudly so a
+        # skip is never a silent illusion (Golden Rule #10). The failed tuples are
+        # un-sentineled / un-cached and will redo on the next run; the offending
+        # combos are named on the TUPLE_FAILED audit lines + the structured log.
+        print(
+            f"[brutex] WARNING: {result.tuples_failed} tuple(s) FAILED mid-sweep and were "
+            f"SKIPPED — see the TUPLE_FAILED audit lines in {sup_audit_path}; they will "
+            "redo on the next run (exit code non-zero).",
+            file=sys.stderr,
+        )
     if stage3_report.enabled:
         print(
             f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
@@ -2917,7 +2955,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
             f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
         )
-    return EXIT_OK
+    # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
+    # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
+    return sweep_all_exit_code(result.tuples_failed)
 
 
 def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler

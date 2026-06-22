@@ -50,6 +50,7 @@ class FakeSummary:
     evaluated: int
     ranked: int
     persisted: int
+    tuples_failed: int = 0
 
 
 @pytest.fixture

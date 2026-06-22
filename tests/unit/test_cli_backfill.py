@@ -538,3 +538,18 @@ def test_main_unknown_command_falls_back_to_user_error(
     rc = cli.main([])
     assert rc == cli.EXIT_USER_ERROR
     assert parser.errors == ["unknown command: results"]
+
+
+# ── sweep-all "Resilient: skip + continue" verdict ───────────────────────
+
+
+def test_sweep_all_exit_code_clean_run_is_ok() -> None:
+    """A fully clean grid (no failed tuples) exits EXIT_OK."""
+    assert cli.sweep_all_exit_code(0) == cli.EXIT_OK
+
+
+@pytest.mark.parametrize("failed", [1, 3, 42])
+def test_sweep_all_exit_code_failures_are_non_zero(failed: int) -> None:
+    """Any skipped tuple makes the verdict NON-ZERO (Golden Rule #10 — no silent skip)."""
+    assert cli.sweep_all_exit_code(failed) == cli.EXIT_SWEEP_TUPLE_FAILED
+    assert cli.EXIT_SWEEP_TUPLE_FAILED != cli.EXIT_OK
