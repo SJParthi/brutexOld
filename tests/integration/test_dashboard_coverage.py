@@ -10,11 +10,14 @@ Skipped when ``fastapi`` / ``duckdb`` are absent — matches the existing
 ``test_dashboard_instruments.py`` convention.
 """
 
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,6 +25,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+from brutex.dashboard import app as _app_module
 from brutex.dashboard.app import (
     DashboardState,
     _coverage_years,
@@ -482,6 +486,40 @@ class TestCompletenessScoreboard:
         # The seeded NIFTY option-coverage row is rolled up into the per-underlying list.
         underlyings = {r["underlying"] for r in body["options"]["per_underlying"]}
         assert "NIFTY" in underlyings
+
+    def test_spot_scan_shared_cache_across_completeness_and_coverage(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-COMPLETENESS-O1-LATENCY-001: the O(datasets) spot lake scan is now routed
+        # through the SAME _summary_cache SPOT entry /coverage/spot uses, so repeat
+        # completeness loads — and a /coverage/spot load — SHARE ONE scan instead of
+        # re-running the full Parquet-footer aggregate on every request (the 7-9 s page).
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+        )
+        calls = {"n": 0}
+        real = _app_module.summarize_spot_datasets
+
+        def _counting(conn: object, lake: Path) -> list[dict[str, Any]]:
+            calls["n"] += 1
+            return real(conn, lake)
+
+        monkeypatch.setattr(_app_module, "summarize_spot_datasets", _counting)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # Three reads that each USED to re-run the full scan; now they share one.
+        first = client.get("/api/v1/completeness/scoreboard")
+        second = client.get("/api/v1/completeness/scoreboard")
+        spot = client.get("/api/v1/coverage/spot")
+        assert first.status_code == second.status_code == spot.status_code == 200
+        # The expensive lake scan ran EXACTLY ONCE across all three loads (shared cache).
+        assert calls["n"] == 1
+        # Correctness preserved — the cached scan serves a consistent, well-shaped board.
+        assert set(first.json()) == {"spot", "options"}
+        assert first.json() == second.json()
 
     def test_csv_scoreboard_is_attachment_with_sections(self, store: InstrumentStore) -> None:
         years = _coverage_years()

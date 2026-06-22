@@ -2680,6 +2680,17 @@ def build_app(
         ``/universe`` map (CLAUDE.md §11 COMMON — one source, three projections). Runs on a
         threadpool worker, building ``store.connection`` here so the store RLock stays on one
         thread (DEC-DASHBOARD-FASTREAD-001).
+
+        DEC-COMPLETENESS-O1-LATENCY-001: the O(datasets) full-lake spot scan
+        (:func:`summarize_spot_datasets`, a per-dataset ``COUNT(*)``/``MIN``/``MAX`` Parquet
+        footer read) is routed through the SHARED ``_summary_cache`` SPOT entry — the SAME
+        cache ``/coverage/spot`` populates — instead of the prior UNCACHED direct call that
+        re-ran the whole scan on every scoreboard / CSV / ``/universe`` completeness load
+        (the operator's 7–9 s page). A repeat load is now O(1) on that scan; a pull/lake
+        write marks the cache dirty so the next eligible read recomputes. The ledger rollup
+        (:func:`spot_window_rollup`, its OWN mtime cache) stays PER-REQUEST and OUTSIDE the
+        SummaryCache — exactly the hostile-C8 freshness contract ``/coverage/spot`` uses — so
+        a ledger flush (no lake write) still refreshes the chips between scans.
         """
         categories = categorize_instruments(
             store.list_index_equity_instruments(),
@@ -2693,7 +2704,10 @@ def build_app(
             is_reference=is_reference_only,
         )
         spot_rows = build_spot_coverage_payload(
-            summarize_spot_datasets(store.connection, lake), spot_window_rollup(lake)
+            _summary_cache.get_or_refresh(
+                SPOT, recompute=lambda: summarize_spot_datasets(store.connection, lake)
+            ),
+            spot_window_rollup(lake),
         )["rows"]
         return spot_rows, categories, store.list_coverage()
 
