@@ -21,6 +21,7 @@ from brutex.adapters.groww.contracts import (
     parse_contract_symbol,
     resolve_contracts,
     resolve_expiries,
+    underlying_symbol_forms,
 )
 from brutex.adapters.protocol import DerivativeContract
 
@@ -165,6 +166,46 @@ class TestResolveExpiries:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# underlying_symbol_forms + the `&` try-both fallback (DEC-GROWW-AMPERSAND-FALLBACK-001)
+# ─────────────────────────────────────────────────────────────────────────
+class TestUnderlyingSymbolForms:
+    def test_plain_symbol_is_single_form(self) -> None:
+        # No `&` → exactly ONE form (zero extra call for the common case).
+        assert underlying_symbol_forms("NIFTY") == ("NIFTY",)
+
+    def test_ampersand_symbol_adds_percent_encoded_form(self) -> None:
+        # `&` → plain FIRST, then the `%26`-encoded fallback (only the `&` is encoded).
+        assert underlying_symbol_forms("M&M") == ("M&M", "M%26M")
+        assert underlying_symbol_forms("L&TFH") == ("L&TFH", "L%26TFH")
+
+
+class TestAmpersandExpiriesFallback:
+    def test_empty_plain_then_encoded_form_returns_data(self) -> None:
+        # The bug case: `M&M` (plain) returns clean-but-empty; the `%26` form returns the
+        # real expiries. resolve_expiries tries plain FIRST, then the encoded fallback.
+        def _expiries(kw: Mapping[str, object]) -> Mapping[str, object]:
+            return (
+                {"expiries": ["2024-01-25"]}
+                if kw["underlying_symbol"] == "M%26M"
+                else {"expiries": []}
+            )
+
+        sdk = _FakeSDK(expiries=_expiries)
+        out = resolve_expiries(_client(sdk), exchange="NSE", underlying_symbol="M&M", year=2024)
+        assert out == [date(2024, 1, 25)]
+        # Plain tried first (empty), then the encoded form (data) — exactly two calls.
+        assert [c["underlying_symbol"] for c in sdk.expiry_calls] == ["M&M", "M%26M"]
+
+    def test_plain_form_with_data_does_not_try_encoded(self) -> None:
+        # Defensive: if the vendor DOES handle a plain `&`, the plain form returns data and
+        # the encoded form is NEVER tried (no regression / no wasted call).
+        sdk = _FakeSDK(expiries=lambda _kw: {"expiries": ["2024-01-25"]})
+        out = resolve_expiries(_client(sdk), exchange="NSE", underlying_symbol="M&M", year=2024)
+        assert out == [date(2024, 1, 25)]
+        assert [c["underlying_symbol"] for c in sdk.expiry_calls] == ["M&M"]  # encoded NOT tried
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # resolve_contracts
 # ─────────────────────────────────────────────────────────────────────────
 class TestResolveContracts:
@@ -214,6 +255,26 @@ class TestResolveContracts:
         sdk = _FakeSDK(contracts=lambda _kw: {"contracts": ["GARBAGE"]})
         with pytest.raises(ValueError, match="not a Groww derivative symbol"):
             resolve_contracts(_client(sdk), exchange="NSE", underlying_symbol="X", expiry=_EXPIRY)
+
+    def test_ampersand_empty_plain_then_encoded_form_returns_chain(self) -> None:
+        # DEC-GROWW-AMPERSAND-FALLBACK-001: `M&M` (plain) returns empty; the `%26` form
+        # returns the real chain. The vendor returns the CANONICAL `&` symbol, so the leg
+        # parses against the ORIGINAL underlying ("M&M"), only the FETCH arg is encoded.
+        def _contracts(kw: Mapping[str, object]) -> Mapping[str, object]:
+            return (
+                {"contracts": ["NSE-M&M-02Jan25-2800-CE"]}
+                if kw["underlying_symbol"] == "M%26M"
+                else {"contracts": []}
+            )
+
+        sdk = _FakeSDK(contracts=_contracts)
+        out = resolve_contracts(
+            _client(sdk), exchange="NSE", underlying_symbol="M&M", expiry=_EXPIRY
+        )
+        assert [c.contract_type for c in out] == ["CE"]
+        assert out[0].symbol == "NSE-M&M-02Jan25-2800-CE"  # parsed off the real `&` symbol
+        # Plain tried first (empty), then the encoded form (data) — exactly two calls.
+        assert [c["underlying_symbol"] for c in sdk.contract_calls] == ["M&M", "M%26M"]
 
 
 # ─────────────────────────────────────────────────────────────────────────
