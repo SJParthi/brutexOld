@@ -138,6 +138,11 @@ from brutex.dashboard.pull_controller import (
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
+from brutex.dashboard.spot_cascade import (
+    SpotCascadeIndex,
+    build_spot_cascade,
+    symbol_to_json,
+)
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_runner import (
     default_results_root,
@@ -915,6 +920,12 @@ def build_app(
     # caches above (a pull bumps it → rediscover; otherwise a tab switch is an O(1) handoff
     # of the cached lists). REUSES the COMMON `MoversSnapshotCache` (one dataset key).
     _db_datasets_cache = MoversSnapshotCache()
+    # The /db SPOT cascade cache (DEC-DB-SPOT-CASCADE-001): the symbol→interval index is
+    # an O(datasets) build over the non-F&O lake partitions; memoised behind the SAME
+    # write-generation as the caches above (the spot twin of `_fno_cascade_cache`), so a
+    # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
+    # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
+    _spot_cascade_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -4080,6 +4091,54 @@ def build_app(
                 "contracts": [contract_to_json(c) for c in idx.contracts(underlying, expiry)],
             }
         )
+
+    async def _spot_cascade_or_none() -> SpotCascadeIndex | None:
+        """Resolve the cached SPOT cascade index (DEC-DB-SPOT-CASCADE-001), or ``None``.
+
+        The spot twin of :func:`_fno_cascade_or_none` (CLAUDE.md §11 COMMON): resolves the
+        lake, then hands the ``O(datasets)`` dir-walk + grouping to a threadpool worker
+        MEMOISED behind ``_summary_cache.generation`` via the shared ``MoversSnapshotCache``
+        — so a pull rebuilds the index but every symbol-picker open is an O(1) cached
+        handoff. The datasets are filtered to the non-F&O segments (``INDEX`` / ``CASH``),
+        exactly the ``spot`` list the datasets endpoint builds (DEC-FNO-CANDLE-LAKE-001).
+        Returns ``None`` when no lake path is configured (the route then ships an empty
+        shape, never a 500 — mirrors the F&O cascade + datasets endpoints).
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return None
+        lake = lake_root.parent
+        gen = _summary_cache.generation
+
+        def _build() -> SpotCascadeIndex:
+            spot = [
+                d for d in list_candle_datasets(lake) if d["segment"] != FNO_CANDLE_LAKE_SEGMENT
+            ]
+            return build_spot_cascade(spot)
+
+        return await run_in_threadpool(
+            lambda: _spot_cascade_cache.get_or_compute(
+                "db_spot_cascade", generation=gen, compute=_build
+            )
+        )
+
+    @app.get("/api/v1/db/spot/symbols")
+    async def api_db_spot_symbols() -> JSONResponse:
+        """GET /api/v1/db/spot/symbols — the SPOT cascade picker (DEC-DB-SPOT-CASCADE-001).
+
+        Every spot symbol that has candle data — the brute-force indices (``INDEX``
+        segment) first, then the ``CASH`` reference equities alphabetically — each carrying
+        its query coordinates (``exchange`` / ``segment`` / ``symbol``) + display ``label``
+        + the STORED ``intervals`` (inline, so the picker needs no second fetch; only
+        intervals with a real on-disk partition, never a phantom TF). O(1) cached read; a
+        small symbols-with-intervals payload instead of the flat ~750-row dropdown. An
+        empty list when no lake is wired (never a 500).
+        """
+        idx = await _spot_cascade_or_none()
+        if idx is None:
+            return JSONResponse({"symbols": []})
+        return JSONResponse({"symbols": [symbol_to_json(s) for s in idx.symbols()]})
 
     @app.get("/api/v1/db/candles")
     async def api_db_candles(
