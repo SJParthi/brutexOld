@@ -644,6 +644,175 @@ class TestRunSupervisedGrid:
             # (index 1) nor the no-bars (index 2) tuple advanced it past index 0.
             assert guards.checkpoint.last_completed_index == -1
 
+    def test_all_tuples_fail(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """EVERY tuple raises SweepComboError: tuples_failed == total, run == 0.
+
+        The supervisor finishes the whole grid (no global abort), audits one
+        ``TUPLE_FAILED`` per tuple, the chain still verifies, the checkpoint NEVER
+        advances (every tuple un-recorded so a resume re-runs all), and NO tuple
+        is cache-recorded.
+        """
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"], directions=[Side.BUY, Side.SELL])
+        total = count_sweep_tuples(grid)
+        assert total == 4
+        tuples = list(iter_sweep_tuples(grid))
+
+        def _always_raise(*_args: object, **_kwargs: object) -> object:
+            raise SweepComboError("combo 0x0000000000000004 (run_id=dead) boom")
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _always_raise)
+
+        seen: list[str] = []
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                on_tuple=lambda t, _s: seen.append(t.instrument),
+            )
+            assert summary.tuples_failed == total
+            assert summary.tuples_run == 0
+            assert summary.tuples_skipped_no_bars == 0
+            assert summary.skipped_cache == 0
+            assert summary.skipped_resume == 0
+            # Checkpoint frozen at the start: every tuple re-runs on resume.
+            assert guards.checkpoint.last_completed_index == -1
+            # No tuple was cache-recorded (a failed tuple must never be cached).
+            for t in tuples:
+                assert not guards.cache.seen_digest(tuple_cache_key(t, grid))
+        assert seen == []  # on_tuple never fires for a failed tuple
+        actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
+        assert actions.count("TUPLE_FAILED") == total
+        assert actions[0] == "SUPERVISOR_START"
+        assert actions[-1] == "SUPERVISOR_COMPLETE"
+        assert verify_chain(tmp_path / "sup.jsonl") == total + 2
+        complete = next(
+            e for e in read_entries(tmp_path / "sup.jsonl") if e.action == "SUPERVISOR_COMPLETE"
+        )
+        assert complete.payload["tuples_failed"] == total
+
+    def test_buckets_reconcile_to_total(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No-tuple-silently-lost: run + no_bars + cache + resume + failed == total.
+
+        A mixed 5-tuple grid touching EVERY disposition: index 0 resume-skipped
+        (pre-checkpointed), index 1 cache-skipped (pre-cached), index 2 RUNS,
+        index 3 NO BARS, index 4 FAILS.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
+
+        # 5 instruments → 5 tuples in enumeration order.
+        instruments = ["I0", "I1", "I2", "I3", "I4"]
+        grid = _grid(instruments=instruments)
+        total = count_sweep_tuples(grid)
+        assert total == 5
+        bars = _trending_bars()
+        tuples = list(iter_sweep_tuples(grid))
+
+        def _bars_for(instrument: str, _t: str) -> Sequence[CandleBar]:
+            return [] if instrument == "I3" else bars  # index 3 has no bars
+
+        def _maybe_raise(grid_: object, tuple_: object, **kwargs: object) -> object:
+            if tuple_.instrument == "I4":  # type: ignore[attr-defined]  # index 4 fails
+                raise SweepComboError("combo 0x0000000000000004 (run_id=dead) boom")
+            return real_run_one(grid_, tuple_, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _maybe_raise)
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            guards.checkpoint.record(0)  # index 0 completed on a prior life → resume-skip
+            guards.cache.record_digest(tuple_cache_key(tuples[1], grid))  # index 1 pre-cached
+            summary = run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+            assert summary.skipped_resume == 1  # index 0
+            assert summary.skipped_cache == 1  # index 1
+            assert summary.tuples_run == 1  # index 2
+            assert summary.tuples_skipped_no_bars == 1  # index 3
+            assert summary.tuples_failed == 1  # index 4
+            # Every tuple lands in exactly one bucket — the reconciliation invariant.
+            assert (
+                summary.tuples_run
+                + summary.tuples_skipped_no_bars
+                + summary.skipped_cache
+                + summary.skipped_resume
+                + summary.tuples_failed
+                == summary.tuples_total
+                == total
+            )
+
+    def test_two_consecutive_failures_freeze_checkpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two ADJACENT failing tuples (i, i+1) both re-run on resume.
+
+        Index 0 + 1 run clean; index 2 + 3 BOTH raise. The checkpoint must freeze
+        at the last clean index BEFORE the first failure (index 1), so a resume
+        re-runs BOTH failed tuples, and NEITHER failed tuple was cache-recorded.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
+
+        # 4 instruments → 4 tuples; indices 2 and 3 are the consecutive failures.
+        grid = _grid(instruments=["I0", "I1", "I2", "I3"])
+        total = count_sweep_tuples(grid)
+        assert total == 4
+        bars = _trending_bars()
+        tuples = list(iter_sweep_tuples(grid))
+
+        def _maybe_raise(grid_: object, tuple_: object, **kwargs: object) -> object:
+            if tuple_.instrument in {"I2", "I3"}:  # type: ignore[attr-defined]
+                raise SweepComboError("combo 0x0000000000000004 (run_id=dead) boom")
+            return real_run_one(grid_, tuple_, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _maybe_raise)
+
+        seen: list[str] = []
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                on_tuple=lambda t, _s: seen.append(t.instrument),
+            )
+            assert summary.tuples_failed == 2
+            assert summary.tuples_run == 2  # indices 0, 1
+            # The checkpoint froze at the last CLEAN index (1) before the first
+            # failure (2) — so on resume `next_index == 2` re-runs BOTH failures.
+            assert guards.checkpoint.last_completed_index == 1
+            # The two clean tuples are cached; NEITHER failed tuple is.
+            assert guards.cache.seen_digest(tuple_cache_key(tuples[0], grid))
+            assert guards.cache.seen_digest(tuple_cache_key(tuples[1], grid))
+            assert not guards.cache.seen_digest(tuple_cache_key(tuples[2], grid))
+            assert not guards.cache.seen_digest(tuple_cache_key(tuples[3], grid))
+        assert seen == ["I0", "I1"]  # on_tuple only for the clean tuples
+        # Two TUPLE_FAILED audit lines, at indices 2 and 3.
+        failed = [e for e in read_entries(tmp_path / "sup.jsonl") if e.action == "TUPLE_FAILED"]
+        assert [e.payload["index"] for e in failed] == [2, 3]
+        assert verify_chain(tmp_path / "sup.jsonl") > 0
+
     def test_combo_error_real_raise_leaves_store_unsentineled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

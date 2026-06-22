@@ -1317,3 +1317,46 @@ class TestSweepComboError:
         assert not store.path.exists()
         assert not trial_stats_sidecar_path(store.path).exists()
         assert not completion_sentinel_path(store.path).exists()
+
+    def test_store_flush_error_aborts_not_a_combo_skip(self, tmp_path: Path) -> None:
+        """A ResultsStoreError from store.flush() propagates OUT — NOT a tuple skip.
+
+        The flush happens AFTER the combo loop, so a genuine infra/store failure
+        must NOT be caught by the ``except SweepComboError`` (which only wraps the
+        per-combo ``metrics_for_mask`` raise). It propagates unchanged as a
+        ``ResultsStoreError`` (a ``BruteXError`` subclass) so the grid drivers
+        ABORT globally instead of downgrading it to a single-tuple skip — proving
+        the combo-loop catch is narrow.
+        """
+        from brutex.engine.results_store import FlushResult, ResultsStoreError
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        class _FlushFailsStore(ResultsStore):
+            """A real store whose flush() (post-combo-loop) raises infra failure."""
+
+            def flush(self) -> FlushResult:
+                raise ResultsStoreError("simulated disk failure during flush")
+
+        store = _FlushFailsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ResultsStoreError, match="simulated disk failure during flush") as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # It is NOT wrapped as a SweepComboError tuple-skip — it is the raw store
+        # error, with no SweepComboError anywhere in the chain.
+        assert not isinstance(exc.value, SweepComboError)
+        assert exc.value.__cause__ is None
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__

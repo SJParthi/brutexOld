@@ -555,6 +555,19 @@ def test_sweep_all_exit_code_failures_are_non_zero(failed: int) -> None:
     assert cli.EXIT_SWEEP_TUPLE_FAILED != cli.EXIT_OK
 
 
+@pytest.mark.parametrize("total", [1, 4, 100])
+def test_sweep_all_exit_code_all_tuples_failed_is_non_zero(total: int) -> None:
+    """The all-fail grid (tuples_failed == total > 0) exits NON-ZERO, never EXIT_OK.
+
+    The whole-grid failure is the harshest skip case; the verdict still surfaces
+    it (no silent green illusion) — the CLI counterpart of the engine all-fail
+    hardening tests.
+    """
+    assert total > 0
+    assert cli.sweep_all_exit_code(total) == cli.EXIT_SWEEP_TUPLE_FAILED
+    assert cli.sweep_all_exit_code(total) != cli.EXIT_OK
+
+
 # ── sweep-verify verdict (partial shadow re-sweep → INCONCLUSIVE) ─────────
 
 
