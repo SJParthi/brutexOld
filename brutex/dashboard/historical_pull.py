@@ -118,7 +118,7 @@ if TYPE_CHECKING:
 #: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
 #: from this (never vendor-fetched), so the prior two-phase "1-day-first to pin the
 #: listing date" barrier (DEC-HISTORICAL-1DAY-FIRST-001) is RETIRED: there is one vendor
-#: phase, bounded per contract to its ``expiry − 3mo → expiry`` default window.
+#: phase, bounded per contract to its ``expiry − 30 days → expiry`` default window.
 _MINUTE_INTERVAL: Final[str] = TRACK1_SPOT_INTERVAL
 
 #: Structured logger — the start-date discovery degrade paths (catalog unavailable /
@@ -170,7 +170,7 @@ class HistoricalPullReport:
       contract, every window — the completion barrier)?
     * :attr:`phase1_complete` — the contract symbols whose 1-minute pull landed clean.
     * :attr:`start_dates` — each contract's RESOLVED 1-minute window start (the explicit
-      operator start, or the per-contract ``expiry − 3mo`` default, clamped into range).
+      operator start, or the per-contract ``expiry − 30 days`` default, clamped into range).
     * :attr:`minute_requested` — always ``True`` (1-minute is the only granularity).
     * :attr:`minute_skipped` — always ``False`` (one phase; there is no barrier to skip).
 
@@ -858,7 +858,7 @@ def pull_contract_candles(
     is a SINGLE vendor phase (the prior two-phase 1-day-first barrier is RETIRED):
 
     1. **Per-contract window.** When the operator passes NO explicit from/to dates, each
-       contract's 1-minute window DEFAULTS to ``expiry − 3 calendar months → expiry`` (its
+       contract's 1-minute window DEFAULTS to ``expiry − 30 days → expiry`` (its
        own expiry; ``expiry+1day`` end-exclusive so the expiry day's intraday bars land),
        clamped into the resolved envelope. Explicit operator dates OVERRIDE — every contract
        then uses the resolved ``[start, end)`` range verbatim.
@@ -952,7 +952,7 @@ def pull_contract_candles(
 
     # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
     # dates OVERRIDE (every contract uses the resolved range); else each contract's DEFAULT
-    # ``expiry − 3mo → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
+    # ``expiry − 30 days → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
     # but IGNORED for granularity — F&O always fetches 1-minute only.
     explicit_dates = from_date is not None or to_date is not None
     minute_windows = _resolve_minute_windows(
