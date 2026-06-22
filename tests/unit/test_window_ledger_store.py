@@ -9,12 +9,14 @@ flush, and the begin/end dry-run rule.
 
 from __future__ import annotations
 
+import errno
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY_TERMINAL_THRESHOLD,
@@ -118,6 +120,66 @@ def test_load_honours_threshold(tmp_path: Path) -> None:
     assert (
         restored.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW) == SKIPPED
     )
+
+
+class TestSaveDiskFullHalts:
+    """DEC-WINDOW-LEDGER-WRITE-HALT-001 — a disk-full / OOM during the ledger save is a
+    pull-wide :class:`LakeWriteHalt`, not a raw error (the ledger is a LAKE write, so a
+    full disk fails every remaining window identically and must halt the pull, never be
+    mis-quarantined per-symbol). A non-ENOSPC OSError still propagates UNCHANGED (the
+    guard never over-escalates). ``pyarrow.parquet.write_table`` is the boundary that
+    raises in the real failure (the temp's first byte write on a full volume), so we
+    patch it to drive the deterministic regression.
+    """
+
+    @staticmethod
+    def _ledger() -> WindowLedger:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        return ledger
+
+    def test_disk_full_maps_to_lake_write_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pyarrow.parquet as pq
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(pq, "write_table", _boom)
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            save_window_ledger(self._ledger(), tmp_path)
+        assert exc_info.value.reason == "disk_full"
+        # The half-written temp is cleaned up before the halt — no .tmp leak.
+        assert list((tmp_path / "window_ledger").glob("*.tmp")) == []
+
+    def test_out_of_memory_maps_to_lake_write_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pyarrow.parquet as pq
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise MemoryError("heap exhausted")
+
+        monkeypatch.setattr(pq, "write_table", _boom)
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            save_window_ledger(self._ledger(), tmp_path)
+        assert exc_info.value.reason == "out_of_memory"
+
+    def test_other_oserror_propagates_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-ENOSPC OSError (e.g. EACCES) is NOT escalated to a halt — propagates raw."""
+        import pyarrow.parquet as pq
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError(errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(pq, "write_table", _boom)
+        with pytest.raises(OSError) as exc_info:
+            save_window_ledger(self._ledger(), tmp_path)
+        assert not isinstance(exc_info.value, LakeWriteHalt)
+        assert exc_info.value.errno == errno.EACCES
 
 
 class TestMigration:

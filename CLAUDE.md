@@ -230,22 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-futures-value-jlzt1n` (the `/movers` Futures tab gains a "Top Value" (turnover)
-  ranking + a "Value (Cr)" column, completing the value metric across all three asset tabs — DEC-MOVERS-FUTURES-VALUE-001,
-  MIGRATION.md #900, the operator's "along with resilience hardening take futures top value tab also". Spot + options
-  already ranked by value; futures had none (its session reader returned only ltp/volume/oi). FIX (READ-ONLY ranking):
-  `FuturesMover` gains `value_paisa` + a `value_crore` property; NEW `rank_value` + `"value"` in `_FUTURES_CATEGORIES`;
-  `_read_future_session` now ALSO computes the turnover from the SAME day-frame it already reads (one read) via the
-  SHARED `session_traded_value_paisa` (HLC3 typical-price × volume, DEC-MOVERS-VWAP-VALUE-001), returning
-  `(ltp, volume, value_paisa, oi)`; `_futures_row` emits `value_cr`; `movers.html` Futures tab gains the "Top Value"
-  pill + "Value (Cr)" column (mirroring spot). COMMON: the ₹-crore formatter is extracted to ONE shared
-  `movers_snapshot.value_crore_str` (spot + futures share it, no 2nd copy); the options caller of the shared reader
-  unpacks the 4-tuple + ignores the value field (keeps its own `_session_value_paisa` — a minimal touch). HONEST: same
-  envelope as #899 — closest-to-broker from 1-minute OHLCV, NOT tick-exact; degenerates to close×volume for a
-  zero-range bar; value now spans spot+options+futures. `movers_futures.py` + `movers_options.py` + `movers_snapshot.py`
-  ALL 100% line+branch (226/48 + 216/46 + 212/46); NEW HLC3 distinguisher (218660 ≠ old 220000); 307 movers tests
-  green; ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap
-  change. Prior merged: DEC-MOVERS-VWAP-VALUE-001, MIGRATION.md #899 (the `/movers` "Top Value" (turnover) metric now uses the
+- **Active branch:** `claude/window-ledger-write-halt-jlzt1n` (a disk-full / OOM during the durable
+  window-ledger save now HALTS the pull gracefully (a pull-wide `LakeWriteHalt`) instead of propagating a raw
+  `OSError` — DEC-WINDOW-LEDGER-WRITE-HALT-001, MIGRATION.md #901, the resilience half of the operator's "along
+  with resilience hardening take futures top value tab also". ROOT: the durable ledger lives under
+  `<lake_root>/window_ledger/` — it IS a lake write — yet `save_window_ledger` used the guard-FREE
+  `atomic_write_simple`, so a disk-full there propagated a raw `OSError` (NOT a `BruteXError`) that the per-symbol
+  quarantine could mis-handle / keep hammering a full disk. FIX (lake-write resilience): `save_window_ledger` now
+  writes through the lake-guarded `atomic_write_via` (`atomic_io.py`), so `ENOSPC`→`LakeWriteHalt("disk_full")` /
+  `MemoryError`→`LakeWriteHalt("out_of_memory")` while EVERY other error is UNCHANGED (a non-`ENOSPC` `OSError`
+  like `EACCES` still propagates raw — never mis-escalated); the `atomic_write_simple` docstring drops the ledger
+  from its non-lake list. CALL-PATH VERIFIED (the deferral blocker of #890/#891, now complete): `LakeWriteHalt`
+  is already in BOTH ingest spines' `_GLOBAL_STOP_ERRORS`, so it reaches the CLI `_pull_halt_errors` (#888) +
+  dashboard `_is_pull_halt` (#889) halt handlers + their CRITICAL Telegram alert; all 3 save sites propagate
+  cleanly (un-wrapped `on_window()` flush, a `make_live_sync` lock that never suppresses, `end_pull_ledger` in a
+  `finally`); the dry-run/`None`-ledger path never reaches the save. HONEST: graceful DETECT+halt, NOT an RSS cap
+  (out of scope, unchanged from #885); only `ENOSPC`+`MemoryError` mapped; recovery = clean re-pull.
+  `window_ledger_store.py` 100% line+branch (177/50, 53 tests) + `atomic_io.py` stays 100% (42/6, 13 tests); NEW
+  `TestSaveDiskFullHalts` — ENOSPC→disk_full (+ no .tmp leak), MemoryError→out_of_memory, EACCES propagates raw —
+  drives the REAL guard via a patched `pyarrow.parquet.write_table`; 127 ledger/atomic/cli/coverage/option tests
+  green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer SHIP, workspace-health HEALTHY. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-MOVERS-FUTURES-VALUE-001,
+  MIGRATION.md #900 (the `/movers` Futures tab gained a "Top Value" (turnover) ranking + a "Value (Cr)" column via
+  the SHARED HLC3 `session_traded_value_paisa`, completing the value metric across spot+options+futures;
+  `movers_futures.py`+`movers_options.py`+`movers_snapshot.py` all 100% line+branch, 307 movers tests green).
+  Prior merged: DEC-MOVERS-VWAP-VALUE-001, MIGRATION.md #899 (the `/movers` "Top Value" (turnover) metric now uses the
   per-bar HLC3 typical price `(high+low+close)/3 × volume` instead of `close × volume`, so the ranking tracks a
   broker's intraday turnover far more closely — the operator's "for top
   value alone it is not precise to broker right? if yes then solve this". ROOT: the old `Σ round_money(close) × volume`
@@ -858,7 +867,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-futures-value-jlzt1n`
+- **Active feature branch:** `claude/window-ledger-write-halt-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

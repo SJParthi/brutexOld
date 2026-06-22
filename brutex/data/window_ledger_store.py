@@ -20,8 +20,16 @@ Design (priority law — Correctness > Reliability > … > Performance):
   EMPTY ledger (a structured WARNING, never an exception) on a missing /
   unreadable / malformed / wrong-shaped file — a lost ledger costs a re-pull
   (idempotent keep-first sink), never data.
-* **Reliability — crash-safe write.** :func:`save_window_ledger` writes a sibling
-  ``*.tmp`` then :func:`os.replace` (atomic on POSIX within one filesystem).
+* **Reliability — crash-safe write + graceful disk-full halt.**
+  :func:`save_window_ledger` writes a sibling ``*.tmp`` then :func:`os.replace`
+  (atomic on POSIX within one filesystem) via the COMMON
+  :func:`~brutex.data.atomic_io.atomic_write_via`, which maps a disk-full
+  (``ENOSPC``) / out-of-memory to a :class:`~brutex.data.errors.LakeWriteHalt` —
+  a pull-wide global stop (a member of both ingest spines'
+  ``_GLOBAL_STOP_ERRORS``), so a full disk HALTS the pull gracefully instead of
+  being mis-quarantined as one symbol's problem (which would keep hammering a full
+  disk). The ledger lives under ``<lake_root>/window_ledger/`` — it IS a lake write
+  (DEC-WINDOW-LEDGER-WRITE-HALT-001).
 * **Migration (one-shot).** :func:`load_or_migrate_window_ledger` folds the
   legacy ``window_status.json`` sidecar into the ledger the first time, so no
   history is lost when the unified ledger supersedes it. (The ``fetch_coverage.json``
@@ -41,7 +49,7 @@ from typing import Any
 
 import structlog
 
-from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.atomic_io import atomic_write_via
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY,
@@ -266,13 +274,19 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     def _write_parquet(tmp: Path) -> None:
         pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
 
-    # COMMON guard-free atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
-    # DEC-ATOMIC-WRITE-CONSOLIDATE-001): adds an fsync (durability for the durable
-    # ledger) + temp cleanup on error (the hand-rolled version LEAKED the .tmp on a
-    # mid-write failure), with the raw OSError preserved. The ENOSPC→LakeWriteHalt
-    # graceful-halt upgrade is a deliberately-deferred follow-up (it changes error
-    # semantics and the end_pull_ledger call-path's halt handling needs verification).
-    atomic_write_simple(path, _write_parquet)
+    # COMMON lake-safe atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
+    # DEC-WINDOW-LEDGER-WRITE-HALT-001): the ledger is a LAKE write (it lives under
+    # <lake_root>/window_ledger/), so a disk-full (ENOSPC) / OOM here fails every
+    # remaining window identically — it must HALT the pull gracefully, not be
+    # mis-quarantined per-symbol (which would keep hammering a full disk). `atomic_write_via`
+    # maps ENOSPC→LakeWriteHalt("disk_full") / MemoryError→LakeWriteHalt("out_of_memory")
+    # (every other error UNCHANGED — a non-ENOSPC OSError such as EACCES propagates raw,
+    # never mis-escalated). LakeWriteHalt is a member of BOTH ingest spines'
+    # _GLOBAL_STOP_ERRORS, so it propagates past the per-symbol/per-contract quarantine
+    # to the CLI `_pull_halt_errors` / dashboard `_is_pull_halt` halt handling already in
+    # place (the call-path verification the prior deferral flagged — now complete). The
+    # fsync (durability for the durable ledger) + temp cleanup on any error are unchanged.
+    atomic_write_via(path, _write_parquet)
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:

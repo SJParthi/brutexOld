@@ -142,10 +142,12 @@ def atomic_write_simple(
     """Guard-free atomic write: the same crash-safe core, but EVERY error propagates as-is.
 
     For non-data-lake callers — the engine results/checkpoint sidecars, ``config``
-    runtime/credentials, the NTM cache, the window ledger — that wrap or suppress their
+    runtime/credentials, the NTM cache — that wrap or suppress their
     OWN errors (``ResultsStoreError`` / ``SweepCheckpointError`` / ``RuntimeFileError`` /
     a best-effort ``False`` / a raw ``OSError``) and must NOT have a disk-full
-    mis-escalated into the lake-specific :class:`LakeWriteHalt`. Shares the ONE
+    mis-escalated into the lake-specific :class:`LakeWriteHalt`. (The window ledger,
+    once a caller of this variant, was promoted to :func:`atomic_write_via` — it lives
+    under the lake root and a disk-full there SHOULD halt the pull, DEC-WINDOW-LEDGER-WRITE-HALT-001.) Shares the ONE
     tmp→``fsync``→``os.replace``→cleanup implementation (CLAUDE.md §11) so these sites
     stop hand-rolling it; a raw ``OSError`` (e.g. ``ENOSPC``) propagates unchanged for
     the caller to map. *chmod* (e.g. ``0o600`` for the credential store) sets the final
