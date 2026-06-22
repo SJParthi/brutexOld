@@ -230,24 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-ampersand-jlzt1n` (F&O expiries/contracts for `&`-containing underlyings (M&M,
+- **Active branch:** `claude/movers-vwap-value-jlzt1n` (the `/movers` "Top Value" (turnover) metric now uses the
+  per-bar HLC3 typical price `(high+low+close)/3 × volume` instead of `close × volume`, so the ranking tracks a
+  broker's intraday turnover far more closely — DEC-MOVERS-VWAP-VALUE-001, MIGRATION.md #899, the operator's "for top
+  value alone it is not precise to broker right? if yes then solve this". ROOT: the old `Σ round_money(close) × volume`
+  priced a whole minute's volume at its CLOSING tick, systematically diverging from a broker's tick-summed turnover
+  whenever the close sat away from the minute's VWAP. FIX (READ-ONLY ranking): NEW ONE COMMON helper
+  `movers_snapshot.session_traded_value_paisa(rows)` (`Σ round_money((high+low+close)/3) × volume` → paisa) shared by
+  BOTH the spot snapshot (`compute_snapshot`) AND the options screen (`_session_value_paisa`, which now also selects
+  high/low) — killing the two duplicated close×volume loops; each bar's typical price is round_money-snapped to 2dp
+  BEFORE × volume (DEC-MONEY-2DP-001); ranking/display unchanged. HONEST: a precision IMPROVEMENT (closest-to-broker
+  from 1-minute OHLCV), NOT a bit-exact match (a broker sums actual trade price×qty per TICK — without ticks the HLC3
+  ×volume sum is the best VWAP proxy, residual divergence remains); degenerates to the old answer for a zero-range bar;
+  Spot+Options only (futures has no value tab). `movers_snapshot.py` + `movers_options.py` BOTH 100% line+branch
+  (210/46 + 216/46); NEW golden proves HLC3 (318660 ≠ old 320000); 304 movers tests green; ruff/`mypy --strict`/
+  `pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged:
+  DEC-GROWW-AMPERSAND-FALLBACK-001, MIGRATION.md #898 (F&O expiries/contracts for `&`-containing underlyings (M&M,
   M&MFIN, L&TFH, GVT&D, J&KBANK) now TRY a second `%26`-encoded symbol form when the plain form returns empty, so the
-  whole-underlying chain failure (the operator's "M&M fails for entire expiries and contracts") is recovered —
-  DEC-GROWW-AMPERSAND-FALLBACK-001, MIGRATION.md #898. ROOT CAUSE (deep investigation + #870): the NSE `trading_symbol`
-  `M&M` is handed verbatim to the `growwapi` SDK's `get_expiries`/`get_contracts`; the `&` is the HTTP query-string
+  whole-underlying chain failure is recovered. ROOT CAUSE (deep investigation + #870): the NSE `trading_symbol` `M&M`
+  is handed verbatim to the `growwapi` SDK's `get_expiries`/`get_contracts`; the `&` is the HTTP query-string
   separator, sent UN-ENCODED, so the vendor returns a clean-but-EMPTY 200 — and because the break is at the
-  chain-discovery ROOT (0 expiries → 0 `get_contracts` → 0 contracts) the ENTIRE underlying is missed (not a
-  master-lookup miss + not a parse failure — both ruled out with code evidence). FIX (adapter resolution-layer,
-  operator-chosen "try-both-forms"): NEW pure `underlying_symbol_forms` (plain FIRST, then `replace("&","%26")` for an
-  `&` symbol) + generic `_fetch_first_nonempty_form` (first non-empty wins, returns the last empty if all empty);
-  `resolve_expiries`/`resolve_contracts` wrap their per-form fetch in it BEFORE the transient `fetch_until_nonempty`
-  budget, keeping `parse_contract_symbol` on the ORIGINAL symbol (the vendor returns the canonical `&` symbol — only
-  the FETCH arg is encoded). HONEST: the exact encoding is UNVERIFIED (needs a live Groww probe, CLAUDE.md §6) — a
-  HYPOTHESIS grounded in #870, NOT probe-confirmed; try-both is no-worse-than-before (a no-`&` symbol is byte-unchanged
-  one call; a plain-`&`-that-works never regresses; all-empty records the same empty, never a fabricated chain). This
-  is the OPTIONS-path twin of the SPOT-only #845. `contracts.py` 100% line+branch (92/34, 37 tests); 148 F&O-path
-  tests green; ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap
-  change. Prior merged: DEC-DB-SPOT-CASCADE-001, MIGRATION.md #897 (the `/db` SPOT candle picker is now a symbol→interval CASCADE
+  chain-discovery ROOT (0 expiries → 0 `get_contracts` → 0 contracts) the ENTIRE underlying is missed. FIX
+  (operator-chosen "try-both-forms"): NEW pure `underlying_symbol_forms` (plain FIRST, then `replace("&","%26")`) +
+  generic `_fetch_first_nonempty_form`; the exact encoding is UNVERIFIED (needs a live Groww probe) — a HYPOTHESIS,
+  NOT probe-confirmed; try-both is no-worse-than-before. The OPTIONS-path twin of the SPOT-only #845. `contracts.py`
+  100% line+branch (92/34). Prior merged: DEC-DB-SPOT-CASCADE-001, MIGRATION.md #897 (the `/db` SPOT candle picker is now a symbol→interval CASCADE
   (the spot twin of the F&O cascade), replacing the flat ~750-row dropdown so the operator can pick an underlying
   symbol + a stored timeframe — the operator's "even for candles i can't
   select the underlying symbol or timeframe … we need the same as fno candle". NEW pure `spot_cascade.py`
@@ -836,7 +843,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-ampersand-jlzt1n`
+- **Active feature branch:** `claude/movers-vwap-value-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

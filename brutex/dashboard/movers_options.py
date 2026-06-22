@@ -42,9 +42,10 @@ For each option contract (strike × CE/PE × expiry) found in the lake:
   sliced to the selected ``time`` by the SAME minute math the Spot reader uses).
   ``ltp`` is the last bar's close (2dp money), ``volume`` is the cumulative
   fresh-session quantity, ``oi`` is the last bar's open interest (``None``-safe).
-* **Value (₹)** is the cumulative traded value over those session bars
-  (``Σ round_money(close) × volume``), kept as int64 paisa via
-  :mod:`brutex.money` — mirrors ``movers_snapshot.MoverSnapshot.value_paisa``.
+* **Value (₹)** is the cumulative traded value (turnover) over those session bars
+  (``Σ round_money((high+low+close)/3) × volume`` — the per-bar HLC3 typical-price ×
+  volume VWAP-proxy turnover of DEC-MOVERS-VWAP-VALUE-001), kept as int64 paisa via
+  :mod:`brutex.money` — shares ``movers_snapshot.session_traded_value_paisa``.
 * **% change** is vs the contract's OWN previous trading-day 1-day close
   (``None`` when there is no prior day).
 * **OI change** is ``oi − prev_oi`` (a signed int) and ``oi_chg_pct`` is the
@@ -112,6 +113,7 @@ from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
     interval_minutes,
     parse_snapshot_date,
+    session_traded_value_paisa,
 )
 from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
 from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
@@ -241,8 +243,9 @@ class OptionMover:
     volume
         Cumulative fresh-session traded quantity 09:15 → the selected bar.
     value_paisa
-        Cumulative traded value over those session bars as int64 paisa
-        (``Σ round_money(close) × volume``).
+        Cumulative traded value (turnover) over those session bars as int64 paisa
+        (``Σ round_money((high+low+close)/3) × volume`` — the HLC3 typical-price ×
+        volume VWAP-proxy turnover, DEC-MOVERS-VWAP-VALUE-001).
     moneyness
         The contract's moneyness vs the underlying spot as of the snapshot
         (:class:`~brutex.data.moneyness.Moneyness` — ITM/ATM/OTM, or UNKNOWN when
@@ -588,13 +591,14 @@ def _session_value_paisa(
     Reads the contract's ``<lake>/bars/<exchange>/FNO/<symbol>/1minute/**`` raw
     1-minute parquet DIRECTLY (the same path
     :func:`~brutex.dashboard.movers_futures._read_future_session` reads — but it
-    returns only ``(ltp, volume, oi)``, NOT the cumulative ``Σ close×volume``,
-    and ``movers_futures`` must not be modified). Computes
-    ``Σ round_money(close) × volume`` over the kept bars (sliced to
+    returns only ``(ltp, volume, oi)``, NOT the cumulative turnover, and
+    ``movers_futures`` must not be modified). Computes the turnover
+    ``Σ round_money((high+low+close)/3) × volume`` over the kept bars (sliced to
     ``≤ cutoff_min`` for an intraday timeframe with the same Int32-cast minute
-    math the Spot reader uses) and returns it as int64 paisa via
-    :func:`~brutex.money.rupees_to_paisa` — mirroring
-    ``movers_snapshot.MoverSnapshot.value_paisa``. Returns ``0`` when the
+    math the Spot reader uses) via the SHARED
+    :func:`~brutex.dashboard.movers_snapshot.session_traded_value_paisa` (the per-bar
+    HLC3 typical-price × volume VWAP-proxy turnover, DEC-MOVERS-VWAP-VALUE-001) and
+    returns it as int64 paisa — sharing the spot formula. Returns ``0`` when the
     directory is missing or no bar falls on the day / within the cutoff (the
     caller only reaches here for a contract that already produced a session read,
     so a missing-dir path is defensive but kept honest).
@@ -639,12 +643,19 @@ def _session_value_paisa(
         day_df = day_df.filter(minute_of_day <= cutoff_min)
     if day_df.is_empty():
         return 0
-    value_rupees = Decimal(0)
-    for close, volume in zip(
-        day_df.get_column("close").to_list(), day_df.get_column("volume").to_list(), strict=True
-    ):
-        value_rupees += round_money(Decimal(str(close))) * int(volume)
-    return rupees_to_paisa(value_rupees)
+    # DEC-MOVERS-VWAP-VALUE-001: turnover is the per-bar HLC3 typical-price × volume sum,
+    # via the ONE shared helper (spot + options share it — CLAUDE.md §11 COMMON). Select
+    # high/low alongside close/volume so the typical price (high+low+close)/3 is available.
+    return session_traded_value_paisa(
+        (Decimal(str(high)), Decimal(str(low)), Decimal(str(close)), int(volume))
+        for high, low, close, volume in zip(
+            day_df.get_column("high").to_list(),
+            day_df.get_column("low").to_list(),
+            day_df.get_column("close").to_list(),
+            day_df.get_column("volume").to_list(),
+            strict=True,
+        )
+    )
 
 
 def _discover_options(

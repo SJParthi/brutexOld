@@ -58,16 +58,28 @@ _FUT = "NSE-NIFTY-27Jun24-FUT"
 
 
 def _min_bar(
-    *, hour: int, minute: int, close: str, volume: int, oi: int | None, day: date = _DAY
+    *,
+    hour: int,
+    minute: int,
+    close: str,
+    volume: int,
+    oi: int | None,
+    day: date = _DAY,
+    high: str | None = None,
+    low: str | None = None,
 ) -> CandleBar:
-    """A flat 1-minute bar at ``HH:MM`` **IST** on *day* (IST = UTC + 05:30), with OI."""
+    """A 1-minute bar at ``HH:MM`` **IST** on *day* (IST = UTC + 05:30), with OI.
+
+    *high*/*low* default to *close* (a flat zero-range bar) so existing callers are
+    unchanged; pass them to exercise the HLC3 typical-price turnover.
+    """
     c = Decimal(close)
     total = hour * 60 + minute - (5 * 60 + 30)
     return CandleBar(
         timestamp=datetime(day.year, day.month, day.day, total // 60, total % 60, tzinfo=UTC),
         open=c,
-        high=c,
-        low=c,
+        high=Decimal(high) if high is not None else c,
+        low=Decimal(low) if low is not None else c,
         close=c,
         volume=volume,
         open_interest=oi,
@@ -179,17 +191,40 @@ class TestDiscoverOptions:
         assert _discover_options(tmp_path) == []
 
 
-# ── _session_value_paisa (raw 1m cumulative Σ close×volume) ────────────────
+# ── _session_value_paisa (cumulative HLC3 typical-price × volume turnover) ──
+# DEC-MOVERS-VWAP-VALUE-001: the seeded bars below are zero-range (high=low=close),
+# so HLC3 == close and the asserted values coincide with the old close×volume; the
+# `test_hlc3_typical_price_distinguishes_from_close` test below uses a real range to
+# prove the high/low columns are actually read (not close twice / not transposed).
 
 
 class TestSessionValuePaisa:
     def test_cumulative_value(self, tmp_path: Path) -> None:
         _seed_options_lake(tmp_path)
-        # CE: 150*100 + 164*400 = 15000 + 65600 = 80600 rupees → 8_060_000 paisa.
+        # CE bars are zero-range → HLC3==close: 150*100 + 164*400 = 80600 rupees → 8_060_000 paisa.
         got = _session_value_paisa(
             tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=None
         )
         assert got == 8_060_000
+
+    def test_hlc3_typical_price_distinguishes_from_close(self, tmp_path: Path) -> None:
+        # A REAL intrabar range proves _session_value_paisa reads high+low+close (not
+        # close twice, not high/low transposed) and applies the HLC3 turnover.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, high="112", low="106", close="110", volume=20, oi=5),
+            ],
+        )
+        got = _session_value_paisa(
+            tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=None
+        )
+        # typical=(112+106+110)/3=109.3333…→round_money 109.33 → 109.33*20=₹2186.60 → 218660 paisa
+        # (the OLD close×volume would give 110*20=2200 → 220000 — genuinely distinct).
+        assert got == 218660
 
     def test_missing_dir_is_zero(self, tmp_path: Path) -> None:
         assert (

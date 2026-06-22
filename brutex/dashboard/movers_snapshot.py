@@ -23,9 +23,10 @@ metric anchors at the 09:15 open.
   **cumulative** traded quantity from 09:15 up to the selected bar
   (``Σ bar.volume``). Volume resets to 0 each morning, so there is no
   "previous-close" baseline for it (the operator's exact ask).
-* **Value (₹)** is the cumulative traded value over those same bars
-  (``Σ round_money(close) × volume``), kept as int64 paisa via
-  :mod:`brutex.money` and rendered in ₹ crore for the table.
+* **Value (₹)** is the cumulative traded value (turnover) over those same bars
+  (``Σ round_money((high+low+close)/3) × volume`` — the per-bar HLC3 typical price ×
+  volume, the closest-to-broker VWAP-proxy turnover of DEC-MOVERS-VWAP-VALUE-001),
+  kept as int64 paisa via :mod:`brutex.money` and rendered in ₹ crore for the table.
 
 ## Honesty (Golden Rule #1 / #10)
 
@@ -37,7 +38,7 @@ pulled**, NOT a live feed (Track-1 has no live feed — CLAUDE.md §1). Prices a
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from datetime import date as date_cls
@@ -68,6 +69,7 @@ __all__ = [
     "pending_asset_payload",
     "run_movers_snapshot",
     "session_bar_times",
+    "session_traded_value_paisa",
 ]
 
 #: The page opens on the coarse 1-day timeframe (cheapest, always populated if
@@ -162,8 +164,9 @@ class MoverSnapshot:
     volume
         Cumulative FRESH-session traded quantity 09:15 → selected bar.
     value_paisa
-        Cumulative traded value over those bars as int64 paisa
-        (``Σ round_money(close) × volume``).
+        Cumulative traded value (turnover) over those bars as int64 paisa —
+        ``Σ round_money((high+low+close)/3) × volume`` (the per-bar HLC3 typical
+        price × volume, the VWAP-proxy turnover of DEC-MOVERS-VWAP-VALUE-001).
     bar_count
         Number of session bars up to (and including) the selected bar.
     """
@@ -192,6 +195,45 @@ class MoverSnapshot:
         return str(round_money(Decimal(self.value_paisa) / Decimal(10**9)))
 
 
+#: The HLC3 "typical price" divisor — ``(high + low + close) / 3``, the standard
+#: per-bar VWAP proxy for turnover (DEC-MOVERS-VWAP-VALUE-001).
+_HLC3_DIVISOR: Final = Decimal(3)
+
+
+def session_traded_value_paisa(rows: Iterable[tuple[Decimal, Decimal, Decimal, int]]) -> int:
+    """Cumulative session traded VALUE (turnover) over OHLCV bars, as int64 paisa.
+
+    DEC-MOVERS-VWAP-VALUE-001 — the ONE COMMON "Top Value" formula (CLAUDE.md §11),
+    shared by the spot snapshot AND the options screen so the two never drift. The
+    turnover is::
+
+        Σ over bars ( round_money((high + low + close) / 3) × volume )
+
+    i.e. each bar's **typical price** (HLC3, the standard VWAP proxy) × that bar's
+    volume, summed. This supersedes the prior ``Σ round_money(close) × volume``
+    (last-print × volume), which priced a whole minute's volume at its CLOSING tick
+    and so systematically diverged from a broker's true intraday turnover whenever
+    the close sat away from the minute's volume-weighted average.
+
+    Each *rows* entry is ``(high, low, close, volume)`` — ``Decimal`` rupees + an
+    ``int`` quantity. The per-bar typical price is :func:`~brutex.money.round_money`
+    -snapped to the 2dp tick grid BEFORE the ``× volume`` (DEC-MONEY-2DP-001), so each
+    bar's contribution stays on the grid and the paisa total is exact (never a
+    truncated float).
+
+    **Honest envelope (Golden Rule #10):** this is the CLOSEST-to-broker turnover
+    obtainable from 1-minute OHLCV — NOT a bit-exact match. A broker sums actual trade
+    price × qty per TICK; without tick data the HLC3 × volume sum is the best
+    volume-weighted-price approximation, and a residual divergence (the unknown
+    intrabar volume distribution) remains. It degenerates to the old answer for a
+    zero-range bar (``high == low == close``).
+    """
+    value_rupees = Decimal(0)
+    for high, low, close, volume in rows:
+        value_rupees += round_money((high + low + close) / _HLC3_DIVISOR) * volume
+    return rupees_to_paisa(value_rupees)
+
+
 def compute_snapshot(
     instrument: ScreenInstrument,
     bars: Sequence[CandleBar],
@@ -212,11 +254,12 @@ def compute_snapshot(
     if not bars:
         return None
     ltp = round_money(bars[-1].close)
-    volume = 0
-    value_rupees = Decimal(0)
-    for bar in bars:
-        volume += bar.volume
-        value_rupees += round_money(bar.close) * bar.volume
+    volume = sum(bar.volume for bar in bars)
+    # DEC-MOVERS-VWAP-VALUE-001: turnover is the per-bar typical-price (HLC3) × volume
+    # sum, via the ONE shared helper (spot + options share it — CLAUDE.md §11 COMMON).
+    value_paisa = session_traded_value_paisa(
+        (bar.high, bar.low, bar.close, bar.volume) for bar in bars
+    )
     snapped_prev = round_money(prev_close) if prev_close is not None else None
     change = (ltp - snapped_prev) if snapped_prev is not None else None
     pct = pct_change(ltp, snapped_prev) if snapped_prev is not None else None
@@ -227,7 +270,7 @@ def compute_snapshot(
         change=change,
         pct_change=pct,
         volume=volume,
-        value_paisa=rupees_to_paisa(value_rupees),
+        value_paisa=value_paisa,
         bar_count=len(bars),
     )
 

@@ -36,14 +36,20 @@ _BANK = ScreenInstrument(
 )
 
 
-def _bar(*, minute: int, close: str, volume: int) -> CandleBar:
-    """A valid 1-min bar on 2024-06-13 at 09:<minute> UTC (test fixture)."""
+def _bar(
+    *, minute: int, close: str, volume: int, high: str | None = None, low: str | None = None
+) -> CandleBar:
+    """A valid 1-min bar on 2024-06-13 at 09:<minute> UTC (test fixture).
+
+    *high*/*low* default to *close* (a zero-range bar) so existing callers are
+    unchanged; pass them to exercise the HLC3 typical-price turnover.
+    """
     c = Decimal(close)
     return CandleBar(
         timestamp=datetime(2024, 6, 13, 9, minute, tzinfo=UTC),
         open=c,
-        high=c,
-        low=c,
+        high=Decimal(high) if high is not None else c,
+        low=Decimal(low) if low is not None else c,
         close=c,
         volume=volume,
         open_interest=None,
@@ -99,10 +105,28 @@ def test_compute_snapshot_full_metrics_vs_prev_close() -> None:
     assert snap.change == Decimal("10.00")
     assert snap.pct_change == Decimal("10")  # vs PREVIOUS-day close
     assert snap.volume == 30  # cumulative fresh session
-    # value = 100*10 + 110*20 = 3200 rupees → 320000 paisa.
+    # Zero-range bars (high=low=close) → HLC3 typical == close, so the turnover
+    # degenerates to 100*10 + 110*20 = 3200 rupees → 320000 paisa.
     assert snap.value_paisa == 320000
     assert snap.bar_count == 2
     assert snap.ltp_inr == "₹110.00"
+
+
+def test_compute_snapshot_value_uses_hlc3_typical_price() -> None:
+    # DEC-MOVERS-VWAP-VALUE-001: turnover is Σ round_money((high+low+close)/3) × volume,
+    # NOT close × volume — proven with bars that have a real intrabar range.
+    bars = [
+        _bar(minute=15, high="102", low="98", close="100", volume=10),
+        _bar(minute=16, high="112", low="106", close="110", volume=20),
+    ]
+    snap = compute_snapshot(_NIFTY, bars, prev_close=Decimal("100"))
+    assert snap is not None
+    # Bar1 typical=(102+98+100)/3=100.00 → 100.00*10=₹1000.00;
+    # Bar2 typical=(112+106+110)/3=109.3333…→round_money 109.33 → 109.33*20=₹2186.60;
+    # Σ=₹3186.60 → 318660 paisa (the OLD close×volume formula would give 320000).
+    assert snap.value_paisa == 318660
+    # The LTP / volume are unaffected by the turnover formula.
+    assert snap.ltp == Decimal("110.00") and snap.volume == 30
 
 
 def test_compute_snapshot_no_previous_day_leaves_change_none() -> None:
