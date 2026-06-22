@@ -304,9 +304,64 @@ def convention_constituent_url(index_symbol: str) -> str | None:
     return f"{NSE_CONSTITUENTS_BASE_URL}/ind_{safe}list.csv"
 
 
-#: Bounded retry budget for the live niftyindices fetch — a single 10 s attempt
-#: read-timed-out for the operator; 3 attempts × 30 s clears a slow first-byte.
-_FETCH_MAX_RETRIES: int = 3
+#: Live-fetch tuning — BOUNDED + env-tunable (CLAUDE.md §11 DYNAMIC). This live path
+#: is reached ONLY on a cold cache (first-ever boot) or a post-TTL refresh: the
+#: steady-state ``/universe`` load is CACHE-FIRST
+#: (``instrument_loader._resolve_constituent_csv``, DEC-NTM-CACHE-FIRST-001) and
+#: serves a fresh cache with NO network call at all, so these defaults govern only
+#: the rare refresh — never the hot path, and they are paid AT MOST ONCE per TTL,
+#: not on every load as before.
+#:
+#: The per-attempt timeout DEFAULT stays the operator-validated **30 s** — the prior
+#: code's comment recorded that a single 10 s attempt read-TIMED-OUT for the operator
+#: on this exact host and 30 s was the deliberate fix — so the headline win here is the
+#: cache-first ORDERING (the live fetch now happens at most once per TTL), NOT a
+#: timeout cut: keeping 30 s maximises the chance that the ONE cold fetch SUCCEEDS and
+#: seeds the cache → instant forever (a cut-and-FAILED fetch would crater a cold boot
+#: to the ~211 F&O base set — the worse outcome). Retries are trimmed 3 → 2, so the
+#: worst case is **30 s × 2 ≈ 61.5 s** (down from the old 30 s × 3 ≈ 90 s) for that
+#: single cold fetch. An operator who prefers a HARDER fail-fast lowers
+#: ``BRUTEX_NSE_FETCH_TIMEOUT_SECONDS`` / ``BRUTEX_NSE_FETCH_MAX_RETRIES`` (accepting a
+#: higher chance the cold fetch fails → base set until the cache is seeded).
+_FETCH_TIMEOUT_ENV: Final[str] = "BRUTEX_NSE_FETCH_TIMEOUT_SECONDS"
+_FETCH_RETRIES_ENV: Final[str] = "BRUTEX_NSE_FETCH_MAX_RETRIES"
+_FETCH_TIMEOUT_DEFAULT: Final[float] = 30.0
+_FETCH_RETRIES_DEFAULT: Final[int] = 2
+
+
+def _fetch_timeout_seconds() -> float:
+    """Per-attempt read timeout (seconds) — env-tunable, malformed/≤0 → default. PURE.
+
+    Reads :data:`_FETCH_TIMEOUT_ENV`. Absent, non-numeric, or a non-positive value all
+    fall back to :data:`_FETCH_TIMEOUT_DEFAULT` (a lost/garbled override costs only the
+    tuning, never a crash — reliability). 100% unit-tested; the opener that USES it is
+    the ``# pragma: no cover`` live surface.
+    """
+    raw = os.environ.get(_FETCH_TIMEOUT_ENV)
+    if not raw:
+        return _FETCH_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _FETCH_TIMEOUT_DEFAULT
+    return value if value > 0.0 else _FETCH_TIMEOUT_DEFAULT
+
+
+def _fetch_max_retries() -> int:
+    """Bounded attempt count — env-tunable, malformed/<1 → default. PURE.
+
+    Reads :data:`_FETCH_RETRIES_ENV`. Absent, non-integer, or a value below 1 all fall
+    back to :data:`_FETCH_RETRIES_DEFAULT` (so the live path always makes at least one
+    attempt). 100% unit-tested.
+    """
+    raw = os.environ.get(_FETCH_RETRIES_ENV)
+    if not raw:
+        return _FETCH_RETRIES_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _FETCH_RETRIES_DEFAULT
+    return value if value >= 1 else _FETCH_RETRIES_DEFAULT
 
 
 def _default_opener(url: str) -> str:  # pragma: no cover - live network only
@@ -315,11 +370,14 @@ def _default_opener(url: str) -> str:  # pragma: no cover - live network only
     LIVE ONLY (``# pragma: no cover``): NSE bot-blocks these endpoints
     and this build environment network-blocks ``nseindia.com``, so this
     cannot be exercised in CI. A browser-like ``User-Agent`` + ``Accept``
-    + a generous timeout + a few bounded retries give the best-effort
-    fetch its best chance on the operator's machine (niftyindices.com is
-    SLOW to first-byte for non-browser clients — a single 10 s attempt
-    read-timed-out for the operator; 30 s × 3 tries clears that). Callers
-    inject a fake ``opener`` in tests.
+    + a BOUNDED, env-tunable timeout + a few bounded retries give the
+    best-effort fetch its best chance on the operator's machine
+    (niftyindices.com is SLOW to first-byte for non-browser clients).
+    Reached ONLY on a cold cache / post-TTL refresh — the steady-state
+    load is cache-first and never calls this. Callers inject a fake
+    ``opener`` in tests; the bound + retries come from the
+    100%-tested pure helpers :func:`_fetch_timeout_seconds` /
+    :func:`_fetch_max_retries`.
     """
     import time
 
@@ -339,18 +397,20 @@ def _default_opener(url: str) -> str:  # pragma: no cover - live network only
     # The S310 (ruff) + B310 (bandit) suppressions are honest: the URL is a fixed
     # https NSE host built by ``constituent_url`` (never file:/ or a custom
     # scheme); the whole opener is live-network-only glue (``# pragma: no cover``).
-    # Bounded retry (3 attempts, 30 s read timeout, short backoff) so a slow
-    # first-byte / transient throttle recovers instead of cratering the universe
-    # to the ~211 base set on a single 10 s timeout.
+    # Bounded retry (env-tunable attempts, env-tunable read timeout, short backoff)
+    # so a slow first-byte / transient throttle recovers instead of cratering the
+    # universe — but bounded far below the old fixed 90 s.
+    timeout = _fetch_timeout_seconds()
+    max_retries = _fetch_max_retries()
     last_exc: Exception | None = None
-    for attempt in range(_FETCH_MAX_RETRIES):
+    for attempt in range(max_retries):
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310  # nosec B310
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
                 body: bytes = response.read()
             return body.decode("utf-8")
         except OSError as exc:  # timeout / transport — retry the bounded budget
             last_exc = exc
-            if attempt < _FETCH_MAX_RETRIES - 1:
+            if attempt < max_retries - 1:
                 time.sleep(1.5 * (attempt + 1))
     raise last_exc if last_exc is not None else OSError("constituent fetch failed")
 

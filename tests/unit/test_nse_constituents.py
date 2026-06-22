@@ -10,6 +10,9 @@ fixture + an injected fake opener (no network).
 
 from __future__ import annotations
 
+# Whitebox tests of the env-tunable fetch-bound helpers (_fetch_timeout_seconds /
+# _fetch_max_retries) read module-private names by design (DEC-P0-017 convention).
+# pyright: reportPrivateUsage=false
 import json
 
 import pytest
@@ -403,3 +406,46 @@ class TestFetchSymbolsAtUrl:
         assert rows[0] == ConstituentRow(symbol="RELIANCE", isin="INE002A01018")
         assert rows[1] == ConstituentRow(symbol="M&M", isin="INE101A01026")
         assert calls == ["https://x/ind_niftypharmalist.csv"]
+
+
+# ── env-tunable live-fetch bounds (DEC-NTM-CACHE-FIRST-001) ───────────────────
+class TestFetchTimeoutSeconds:
+    """The bounded, env-tunable per-attempt read timeout (PURE; the opener stays pragma)."""
+
+    def test_absent_env_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_NSE_FETCH_TIMEOUT_SECONDS", raising=False)
+        assert nc._fetch_timeout_seconds() == nc._FETCH_TIMEOUT_DEFAULT
+
+    def test_valid_override_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_TIMEOUT_SECONDS", "4.5")
+        assert nc._fetch_timeout_seconds() == 4.5
+
+    def test_non_numeric_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_TIMEOUT_SECONDS", "soon")
+        assert nc._fetch_timeout_seconds() == nc._FETCH_TIMEOUT_DEFAULT
+
+    def test_non_positive_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_TIMEOUT_SECONDS", "0")
+        assert nc._fetch_timeout_seconds() == nc._FETCH_TIMEOUT_DEFAULT
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_TIMEOUT_SECONDS", "-3")
+        assert nc._fetch_timeout_seconds() == nc._FETCH_TIMEOUT_DEFAULT
+
+
+class TestFetchMaxRetries:
+    """The bounded, env-tunable attempt count (PURE; always at least one attempt)."""
+
+    def test_absent_env_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_NSE_FETCH_MAX_RETRIES", raising=False)
+        assert nc._fetch_max_retries() == nc._FETCH_RETRIES_DEFAULT
+
+    def test_valid_override_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_MAX_RETRIES", "5")
+        assert nc._fetch_max_retries() == 5
+
+    def test_non_integer_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_MAX_RETRIES", "two")
+        assert nc._fetch_max_retries() == nc._FETCH_RETRIES_DEFAULT
+
+    def test_below_one_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_NSE_FETCH_MAX_RETRIES", "0")
+        assert nc._fetch_max_retries() == nc._FETCH_RETRIES_DEFAULT
