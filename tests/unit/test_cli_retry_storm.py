@@ -925,3 +925,20 @@ def test_emit_pull_halt_alert_other_stop_uses_class_name(
     monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
     cli._emit_pull_halt_alert(RuntimeError("boom"))
     assert captured == ["RuntimeError"]
+
+
+def test_emit_pull_halt_alert_swallows_its_own_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The alert is fire-and-forget — its OWN failure NEVER propagates (masks the halt).
+
+    A construction/publish failure inside ``_emit_pull_halt_alert`` is swallowed +
+    logged, so the caller's re-raise of the real halt is the only exception that
+    surfaces (DEC-TELEGRAM-PULL-HALT-001, structural fire-and-forget).
+    """
+
+    class _BoomAlerter:
+        def __init__(self) -> None:
+            raise RuntimeError("notifier construction blew up")
+
+    monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
+    # Must NOT raise — the blanket except swallows + logs it (the no-raise IS the assertion).
+    cli._emit_pull_halt_alert(RuntimeError("halt"))

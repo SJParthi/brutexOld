@@ -1818,12 +1818,23 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     error), so the alert NEVER masks the halt, which the caller re-raises so the CLI
     still exits non-zero. The ``LakeWriteHalt.reason`` (``disk_full`` /
     ``out_of_memory``) is surfaced verbatim; any other stop uses its class name.
-    """
-    from brutex.data.errors import LakeWriteHalt
-    from brutex.notifications.sweep_alerts import SweepAlerter
 
-    reason = exc.reason if isinstance(exc, LakeWriteHalt) else type(exc).__name__
-    SweepAlerter().pull_halted(reason=reason)
+    The whole body is wrapped in a blanket ``try/except`` so the fire-and-forget
+    contract is STRUCTURAL, not merely circumstantial: even a future import-time or
+    construction failure here is swallowed + logged and can NEVER replace the halt
+    the caller re-raises (``structlog`` is a core dep, so the logger import itself
+    cannot newly fail).
+    """
+    import structlog
+
+    try:
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.notifications.sweep_alerts import SweepAlerter
+
+        reason = exc.reason if isinstance(exc, LakeWriteHalt) else type(exc).__name__
+        SweepAlerter().pull_halted(reason=reason)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the halt
+        structlog.get_logger("brutex.cli").exception("pull_halt_alert_failed")
 
 
 def cmd_fetch(
