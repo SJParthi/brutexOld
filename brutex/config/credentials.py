@@ -44,7 +44,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +51,7 @@ from typing import Final
 
 from brutex.adapters.groww.auth import ENV_API_KEY as ENV_GROWW_API_KEY
 from brutex.adapters.groww.auth import ENV_TOTP_SECRET as ENV_GROWW_TOTP_SECRET
+from brutex.data.atomic_io import atomic_write_simple
 
 #: Env var that overrides the credentials file location (path, not a secret).
 ENV_CREDENTIALS_FILE: Final[str] = "BRUTEX_CREDENTIALS_FILE"
@@ -280,26 +280,17 @@ def _atomic_write(target: Path, payload: str) -> None:
     """Atomically write *payload* to *target* at mode 0600 (parent dir 0700).
 
     The WRITE half of the read-merge-write, shared by the token-style + Groww
-    saves. A :func:`tempfile.NamedTemporaryFile` in the destination directory is
-    ``chmod``-ed 0600, then ``os.replace``-d over *target* — so the file never
-    exists world-readable, even briefly. On any failure the temp file is removed.
+    saves. Delegates to the COMMON guard-free
+    :func:`brutex.data.atomic_io.atomic_write_simple` (the ONE
+    tmp→``fsync``→``os.replace``→cleanup, CLAUDE.md §11, DEC-ATOMIC-WRITE-CONSOLIDATE-001)
+    with ``chmod=0o600`` — the ``mkstemp`` temp is already 0600 and the explicit
+    ``chmod`` pins the final file's mode, so the secret is NEVER world-readable, even
+    briefly. Guard-FREE so a raw ``OSError`` propagates (the credential store maps its
+    own errors), never the lake's ``LakeWriteHalt``.
     """
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        mode="w", dir=parent, prefix=".credentials-", suffix=".tmp", delete=False
-    )
-    tmp_path = Path(tmp.name)
-    try:
-        tmp.write(payload)
-        tmp.flush()
-        tmp.close()
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, target)
-    except OSError:
-        tmp.close()
-        tmp_path.unlink(missing_ok=True)
-        raise
+    atomic_write_simple(target, lambda tmp: tmp.write_text(payload, encoding="utf-8"), chmod=0o600)
 
 
 def _save_section(target: Path, section: str, values: dict[str, str]) -> None:

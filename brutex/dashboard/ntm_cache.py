@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from brutex.data.atomic_io import atomic_write_simple
+
 #: The cache filename under the cache dir. One file, the raw last-good CSV text.
 _CACHE_FILENAME = "ntm_constituents.csv"
 
@@ -79,9 +81,11 @@ def save_constituent_csv(csv_text: str, *, cache_dir: Path) -> bool:
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         target = _cache_file(cache_dir)
-        tmp = target.with_name(target.name + ".tmp")
-        tmp.write_text(csv_text, encoding="utf-8")
-        tmp.replace(target)
+        # COMMON guard-free atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
+        # DEC-ATOMIC-WRITE-CONSOLIDATE-001) — best-effort: a raw OSError is caught below
+        # and returns False (a cache hiccup never breaks the instrument load), NOT the
+        # lake's LakeWriteHalt.
+        atomic_write_simple(target, lambda tmp: tmp.write_text(csv_text, encoding="utf-8"))
     except OSError:
         return False
     return True
