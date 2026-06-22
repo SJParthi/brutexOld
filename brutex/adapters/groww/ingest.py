@@ -159,7 +159,7 @@ _DEFAULT_EMPTY_RETRY_ATTEMPTS: int = 3
 def _noop_empty_backoff(_attempt: int) -> None:
     """Default pause between EMPTY retries: a **no-op** (``_attempt`` intentionally unused).
 
-    The shared rate bucket already spaces every physical call (~125 ms at the 8 r/s
+    The shared rate bucket already spaces every physical call (~200 ms at the 5 r/s
     ceiling), so the empty re-fetches are naturally spread without an extra sleep — and
     on a bulk historical pull with thousands of genuinely-empty windows an added per-
     window sleep would be a large, pointless wall-time cost. Kept as an INJECTABLE hook

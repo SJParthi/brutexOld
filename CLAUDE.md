@@ -230,23 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/futures-first-pull-order-jlzt1n` (the historical F&O pull now pulls every FUTURES
-  (FUT) contract BEFORE the CE/PE options, AND defaults ALL F&O to a UNIFORM 30-day lookback — futures dropped
-  from 3 months to 30 days, matching options — DEC-FNO-PULL-ORDER-LOOKBACK-001, MIGRATION.md #905, the operator's
-  "always try to pull the futures at first one and only then options" + "even for futures also make it as only
-  one month". ROOT: the contract phase iterated `by_market.items()` in dict-insertion order (OPTIONS inserted
-  first → pulled first; the live /coverage Futures tab read 0 windows), and `default_fno_minute_window` SPLIT the
-  lookback (FUT 3mo / OPT 30d, #894). FIX (pull-PLANNING + ORDER only; NO lake/schema/rate/vocab/engine change,
-  ENGINE stays NIFTY/BANKNIFTY/SENSEX): (1) NEW `_MARKET_PULL_ORDER` map + `sorted(by_market.items(), key=…)` →
-  FUTURES bucket first, OPTIONS second, unknown LAST (reorders only the buckets, never contracts within; both leg
-  types still pulled); (2) `default_fno_minute_window` drops `is_option` → a single `expiry −
-  DEFAULT_FNO_LOOKBACK_DAYS` (=30) for ALL F&O; the now-dead `subtract_calendar_months` + `DEFAULT_FNO_LOOKBACK_MONTHS`
-  + the `monthrange` import are REMOVED. HONEST: the OPTIONS path was already 30d (byte-unchanged) — only the
-  FUTURES default narrows 3mo→30d; per-contract (each own expiry); explicit operator dates still override; still
-  1-minute-only (#853). SUPERSEDES the futures-3-month half of DEC-FNO-LOOKBACK-SPLIT-001 #894. `historical_pull.py`
-  100% line+branch (211/46) + `contract_bounds.py` 100% (79/20); NEW FUT-before-OPT spy test + uniform-30-day
-  window tests; 132 F&O pull tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer + workspace-health
-  PENDING. ENGINE UNCHANGED, no scope/vocab/rate-cap change. Prior merged: DEC-ENGINE-TUPLE-SKIP-RESILIENT-001,
+- **Active branch:** `claude/rate-ceiling-8-to-5-jlzt1n` (the production Groww per-second rate ceiling is LOWERED
+  8 → 5 r/s — DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906, the operator's "add Rate-ceiling tuning (8→5?)".
+  ROOT: a live-log audit of a full F&O backfill showed the adaptive controller spent the whole pull stepped DOWN
+  at the soft floor (~3 r/s) absorbing ~870 vendor 429-retries (0 data loss) while the ceiling sat at 8; the
+  vendor 429s even at 3–5 r/s so the 5–8 headroom was never usable throughput — it only let the controller probe
+  UP into a wall and pay another wasted 429 ladder. An in-repo note already said "vendor 429s above ~5 r/s anyway",
+  so 8 already contradicted the repo's own measurement. FIX (adapter + dashboard CONFIG + tests only; NO
+  engine/lake/vocab/scope change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): the single source-of-truth constant
+  `GROWW_RATE_LIMIT_RPS_CEILING` drops `8.0` → `5.0`; BOTH production injection sites already read the CONSTANT
+  (dashboard `_build_live_controller` + CLI `cmd_fetch`), so no wiring changed; all surrounding prose reconciled
+  (5×60 = 300/min < the 500/min governor; ~2-window/~2-min recovery; ~200 ms spacing; Little's-Law ~0.75 concurrent),
+  genuinely-historical past-run measurements LEFT INTACT (Golden Rule #1). HONEST: a cap-LOWERING is intrinsically
+  safe (only ever lowers the issue rate — §2 Rule 6 satisfied); the per-second cap STAYS officially UNVERIFIED (5
+  is an operator decision, NOT vendor-confirmed); the `5×60 = 300 ≤ 500` safety invariant is property-TESTED; the
+  AIMD ladder + governor + floors (3.0/1.0) are PROVABLY unchanged (rate_common diff comment-only). `constants.py`
+  100% line+branch (49/4) + `rate_common.py` 100% (140/36) + `pull_controller.py` 100%; 191 rate/constants/
+  pull-controller/cli-retry tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer SHIP (2 cosmetic
+  NITs — a stale "8 r/s" docstring in the generic AIMD-ladder test FOLDED, a harmless `<`→`<=` left as the correct
+  safety boundary), workspace-health HEALTHY. SUPERSEDES DEC-GROWW-RATE-CEILING-8-001. ENGINE UNCHANGED, no
+  scope/vocab change. Prior merged: DEC-FNO-PULL-ORDER-LOOKBACK-001, MIGRATION.md #905 (the historical F&O pull
+  now pulls every FUTURES (FUT) contract BEFORE the CE/PE options AND defaults ALL F&O to a UNIFORM 30-day lookback
+  — futures dropped from 3 months to 30 days; pull-PLANNING + ORDER only, NEW `_MARKET_PULL_ORDER` map +
+  `sorted(by_market.items())`, `default_fno_minute_window` collapsed to one `DEFAULT_FNO_LOOKBACK_DAYS`=30, dead
+  `subtract_calendar_months` removed; `historical_pull.py` 100% (211/46) + `contract_bounds.py` 100% (79/20)).
+  Prior merged: DEC-ENGINE-TUPLE-SKIP-RESILIENT-001,
   MIGRATION.md #904 (when one grid TUPLE errors mid-sweep the engine SKIPS it, finishes the rest, exits NON-ZERO
   with a `tuples_failed` count + `TUPLE_FAILED` audit naming the combo — never silent, deterministic redo;
   per-combo isolation rejected as an illusion; BLOCKER-fixed + 3-agent-verified, 100% line+branch). Prior merged:
@@ -767,15 +775,17 @@ hostile-review pass._
    never raise the per-second ceiling OR the per-minute cap without
    explicit user approval. The PRODUCTION per-second ceiling injected at
    BOTH live build sites (dashboard `_build_live_controller` + CLI live
-   pull) is now the operator-DIRECTED **8 r/s**
-   (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-14,
-   DEC-GROWW-RATE-CEILING-8-001) — chosen because 8×60 = 480/min stays just
-   under the 500/min governor, so the per-second ceiling is the binding gate
-   without overshooting the per-minute cap. This is the satisfied "explicit
-   user approval" gate to raise the ceiling; the per-second backtesting cap
-   itself stays officially UNVERIFIED (`GROWW_RATE_LIMIT_RPS_UNVERIFIED`) and
-   the adaptive ladder still steps DOWN on 429s. (The vendor-neutral
-   `rate_common.CEILING_RPS=5` DEFAULT is unchanged.)
+   pull) is now the operator-DIRECTED **5 r/s**
+   (`GROWW_RATE_LIMIT_RPS_CEILING=5.0`, operator-approved 2026-06-22, LOWERED
+   8 → 5, DEC-GROWW-RATE-CEILING-5-001 — supersedes DEC-GROWW-RATE-CEILING-8-001)
+   — chosen because 5×60 = 300/min stays well under the 500/min governor, AND a
+   live-log audit showed the vendor 429s even at 3–5 r/s, so the 5–8 headroom was
+   never usable throughput and only wasted ~870 429-retries probing into a wall.
+   A cap-LOWERING is intrinsically safe (it only ever LOWERS the issue rate, never
+   raises a ceiling); the per-second backtesting cap itself stays officially
+   UNVERIFIED (`GROWW_RATE_LIMIT_RPS_UNVERIFIED`) and the adaptive ladder still
+   steps DOWN on 429s. (The vendor-neutral `rate_common.CEILING_RPS=5` DEFAULT is
+   unchanged.)
 7. **Idempotence.** Every ingest chunk and every backtest combo must be
    rerun-safe. Same inputs → same outputs, bit-for-bit. The audit-log
    replay test is the oracle.
@@ -877,7 +887,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/futures-first-pull-order-jlzt1n`
+- **Active feature branch:** `claude/rate-ceiling-8-to-5-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -1041,8 +1051,8 @@ bruteX/
 | Symbol/key format | **`groww_symbol` string** `EXCH-SYMBOL[-…]` (e.g. `NSE-NIFTY`, `BSE-SENSEX`) — O(1) resolution: a BARE trading symbol (incl. a hyphenated stock like `BAJAJ-AUTO` / a verbose-symbol index like `MIDCPNIFTY`) resolves via `by_exchange_symbol` + the master's `groww_symbol_by_pair` (the real groww_symbol, never reconstructed); an already-prefixed FUT/CE/PE contract resolves via `by_groww_symbol`. NOT a numeric ID (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001, MIGRATION.md entry #845) | `groww/instruments.py:190-201`; `groww/adapter.py:162-174`; `groww/api-reference/02-instruments.md:119`, `03-backtesting.md:10-37` |
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
-| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-14, DEC-GROWW-RATE-CEILING-8-001 — 8×60 = 480/min stays under the 500/min governor; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118,165` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-001; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198`; `groww/constants.py:165`; `dashboard/pull_controller.py:776`; `cli.py:2020` + this file §2 rule 6 |
+| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **5 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=5.0`, operator-approved 2026-06-22, LOWERED 8 → 5, DEC-GROWW-RATE-CEILING-5-001 supersedes DEC-GROWW-RATE-CEILING-8-001 — 5×60 = 300/min stays well under the 500/min governor; a live-log audit showed the vendor 429s even at 3–5 r/s so the 5–8 headroom only wasted 429-retries; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118,165` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=5.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **5 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-5-001; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198`; `groww/constants.py:165`; `dashboard/pull_controller.py:776`; `cli.py:2020` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds via `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET`. The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED) | `groww/auth.py:28-31,94-114`; `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
