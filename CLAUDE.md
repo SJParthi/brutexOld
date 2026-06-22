@@ -230,18 +230,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/product-scoreboard-jlzt1n` (a plain-English customer-facing "Product
-  Scoreboard" of finished / current / future work is committed as a repo doc + a self-contained shareable
-  HTML one-pager, generated from the decision ledger — DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902, the
-  operator's "automated easy table-level comparison view where even any human can understand … attract even
-  millions of customers". DOCS ONLY (no code/engine/scope/vocab/rate change): NEW `docs/PRODUCT_SCOREBOARD.md`
-  (themed what-it-does → why-you-care → PR tables across the recent merged batch #842–#860 + an honest
-  near/mid/major roadmap + the per-change quality bar) + `docs/product_scoreboard.html` (zero-dependency
-  inline-CSS one-pager for direct browser sharing). HONEST: every claim traces to the ledger / CLAUDE.md facts
-  (~750 lake names, 21 TFs, 2020→today depth, the §8 ~33B-trial / 2–4-day SLA — no invented numbers); the
-  engine-vs-lake scope is stated explicitly (the ~750 names are reference, the engine trades the 3 indices); the
-  ledger stays authoritative if the two ever disagree. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
-  scope/vocab/rate-cap change. Prior merged: DEC-WINDOW-LEDGER-WRITE-HALT-001, MIGRATION.md #901 (a disk-full /
+- **Active branch:** `claude/movers-options-value-dedup-jlzt1n` (the `/movers` Options screen now reads each
+  contract's 1-minute session frame ONCE — it reuses the HLC3 turnover the SHARED `_read_future_session` already
+  returns instead of a second `_session_value_paisa` read — DEC-MOVERS-OPTIONS-VALUE-DEDUP-001, MIGRATION.md
+  #903, the COMMON dedup deferred in #900 + the operator's "work on everything else". ROOT: #900 made
+  `movers_futures._read_future_session` return `(ltp, volume, value_paisa, oi)` for ANY F&O contract, but the
+  options caller IGNORED that `value_paisa` field and re-read the SAME frame via its own `_session_value_paisa`
+  (a deliberately-minimal touch) — so every option frame was read TWICE. FIX (READ-ONLY): `compute_options_candidates`
+  unpacks `ltp, volume, value_paisa, oi = read` (was `_, oi` + a separate value read); `_session_value_paisa` is
+  DELETED (now dead) with its now-unused `_IST` + `session_traded_value_paisa` imports + its dedicated tests.
+  HONEST: BYTE-IDENTICAL turnover on the only path it's used (same lake path / reader / day+cutoff filter / HLC3
+  reduction; the `None`-vs-0 difference is inert behind the `read is None` skip guard) — a pure I/O win (half the
+  per-contract reads), NOT a numeric change; the HLC3/cutoff/empty correctness stays covered by the shared
+  reader's OWN test (218660 ≠ 220000 distinguisher) + the options value path by the snapshot ranking-order test.
+  `movers_options.py` stays 100% line+branch (200/40, 3 covering files); `movers_futures.py` + `movers_snapshot.py`
+  stay 100%; 205 movers tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer SHIP (NIT folded),
+  workspace-health HEALTHY. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior
+  merged: DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902 (a plain-English customer-facing "Product Scoreboard" —
+  `docs/PRODUCT_SCOREBOARD.md` + a self-contained shareable `docs/product_scoreboard.html` one-pager — of
+  finished / current / future work, themed what-it-does → why-you-care → PR, every claim traced to the ledger;
+  docs only). Prior merged: DEC-WINDOW-LEDGER-WRITE-HALT-001, MIGRATION.md #901 (a disk-full /
   OOM during the durable window-ledger save now HALTS the pull gracefully via the lake-guarded `atomic_write_via`
   — ENOSPC→`LakeWriteHalt("disk_full")` / MemoryError→out_of_memory, every other error raw — reaching the
   CLI/dashboard halt handlers + their CRITICAL Telegram alert; `window_ledger_store.py` + `atomic_io.py` both
@@ -862,7 +870,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/product-scoreboard-jlzt1n`
+- **Active feature branch:** `claude/movers-options-value-dedup-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
