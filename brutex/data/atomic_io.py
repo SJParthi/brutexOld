@@ -70,7 +70,9 @@ def lake_write_guard() -> Generator[None, None, None]:
         raise
 
 
-def _atomic_write_core(dest: Path, write_to: Callable[[Path], object]) -> None:
+def _atomic_write_core(
+    dest: Path, write_to: Callable[[Path], object], *, chmod: int | None = None
+) -> None:
     """The shared tmp→write→``fsync``→``os.replace``→cleanup dance (NO error mapping).
 
     *write_to* receives the temp :class:`~pathlib.Path` and must write the final
@@ -81,6 +83,11 @@ def _atomic_write_core(dest: Path, write_to: Callable[[Path], object]) -> None:
     pointing at a truncated file. The temp is ALWAYS removed if the rename did not
     consume it (every error path); ``dest`` is untouched until the atomic ``os.replace``,
     so a half-written *dest* is impossible.
+
+    When *chmod* is given, the temp's mode is set to it BEFORE the rename, so *dest*
+    lands at that mode and is NEVER briefly world-readable (the ``mkstemp`` temp is
+    already created 0600, so the secret never leaks even before the explicit
+    ``chmod`` — used by the credential store's 0600 save).
 
     EVERY error propagates UNCHANGED — this core does NOT map disk-full/OOM.
     :func:`atomic_write_via` adds the lake ``LakeWriteHalt`` policy on top; the
@@ -96,6 +103,8 @@ def _atomic_write_core(dest: Path, write_to: Callable[[Path], object]) -> None:
         os.close(fd)
         tmp = Path(tmp_name)
         write_to(tmp)
+        if chmod is not None:
+            os.chmod(tmp, chmod)
         flush_fd = os.open(tmp, os.O_RDONLY)
         try:
             os.fsync(flush_fd)
@@ -127,15 +136,19 @@ def atomic_write_via(dest: Path, write_to: Callable[[Path], object]) -> None:
         _atomic_write_core(dest, write_to)
 
 
-def atomic_write_simple(dest: Path, write_to: Callable[[Path], object]) -> None:
+def atomic_write_simple(
+    dest: Path, write_to: Callable[[Path], object], *, chmod: int | None = None
+) -> None:
     """Guard-free atomic write: the same crash-safe core, but EVERY error propagates as-is.
 
     For non-data-lake callers — the engine results/checkpoint sidecars, ``config``
-    runtime/credentials, the NTM cache — that wrap or suppress their OWN errors
-    (``ResultsStoreError`` / ``SweepCheckpointError`` / ``RuntimeFileError`` / a
-    best-effort ``False``) and must NOT have a disk-full mis-escalated into the
-    lake-specific :class:`LakeWriteHalt`. Shares the ONE tmp→``fsync``→``os.replace``→
-    cleanup implementation (CLAUDE.md §11) so these sites stop hand-rolling it; a raw
-    ``OSError`` (e.g. ``ENOSPC``) propagates unchanged for the caller to map.
+    runtime/credentials, the NTM cache, the window ledger — that wrap or suppress their
+    OWN errors (``ResultsStoreError`` / ``SweepCheckpointError`` / ``RuntimeFileError`` /
+    a best-effort ``False`` / a raw ``OSError``) and must NOT have a disk-full
+    mis-escalated into the lake-specific :class:`LakeWriteHalt`. Shares the ONE
+    tmp→``fsync``→``os.replace``→cleanup implementation (CLAUDE.md §11) so these sites
+    stop hand-rolling it; a raw ``OSError`` (e.g. ``ENOSPC``) propagates unchanged for
+    the caller to map. *chmod* (e.g. ``0o600`` for the credential store) sets the final
+    file's mode without it ever being briefly world-readable.
     """
-    _atomic_write_core(dest, write_to)
+    _atomic_write_core(dest, write_to, chmod=chmod)

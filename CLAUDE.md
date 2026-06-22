@@ -228,9 +228,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/atomic-write-common-jlzt1n` (the engine sidecar writers now share the ONE atomic-write
+- **Active branch:** `claude/atomic-write-finish-jlzt1n` (the LAST hand-rolled atomic-write copies — config runtime
+  + credentials + NTM cache + window-ledger — now share the ONE core too; the atomic-write COMMON consolidation is
+  COMPLETE — DEC-ATOMIC-WRITE-FINISH-001, MIGRATION.md #891: #890 did the ENGINE sidecars, this finishes the four
+  remaining genuine `tmp→write→os.replace` copies. (1) `atomic_io._atomic_write_core`/`atomic_write_simple` gain an
+  optional `chmod` (set on the temp before rename; mkstemp temp is already 0600 → a secret is never world-readable)
+  for the credential 0600 save. (2) FOUR sites delegate to the guard-free `atomic_write_simple`, each preserving its
+  OWN error contract: `runtime.write_runtime_file` (raw OSError → `RuntimeFileError`), `credentials._atomic_write`
+  (`chmod=0o600`, parent 0700, raw OSError), `ntm_cache.save_constituent_csv` (catches OSError → returns False,
+  best-effort), `window_ledger_store.save_window_ledger` (named inner fn keeps the pyarrow type-ignore); unused
+  `tempfile`/`os` imports removed. HONEST: ZERO error-semantics change at every site (no LakeWriteHalt
+  mis-escalation); TWO free wins everywhere — an `fsync` before rename (none had one) + temp-cleanup on ANY error
+  (the window-ledger copy previously LEAKED its .tmp); credential 0600 boundary preserved. DEFERRED (not claimed):
+  the window_ledger ENOSPC→`LakeWriteHalt` graceful-halt guard-EXTEND (it changes error semantics + the
+  end_pull_ledger call-path's halt handling needs verification) — kept the SAFE guard-free dedup here. `atomic_io` +
+  `runtime` + `ntm_cache` + `window_ledger_store` at 100% line+branch; `credentials` 100% (via its + groww-creds
+  test files); 165+93 tests green; ruff/`mypy --strict brutex` (254 files)/pyright clean. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-ATOMIC-WRITE-CONSOLIDATE-001,
+  MIGRATION.md #890 (the engine sidecar writers share the ONE atomic-write
   core via a NEW guard-free `atomic_write_simple`, killing the hand-rolled `mkstemp`/`fsync`/`os.replace`/cleanup
-  copies — the #885 COMMON follow-up — DEC-ATOMIC-WRITE-CONSOLIDATE-001, MIGRATION.md #890: #885 centralised the
+  copies — the #885 COMMON follow-up: #885 centralised the
   LAKE writers' atomic write but left the others as noted debt. `results_store._atomic_write` +
   `sweep_checkpoint._atomic_write` were byte-near-identical copies (and `trial_stats`/`tuple_complete`/`sweep_heal`
   delegate to results_store, so 5 engine writers rode 2 copies). The blocker to reusing `atomic_write_via`: it bakes
@@ -690,7 +707,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/atomic-write-common-jlzt1n`
+- **Active feature branch:** `claude/atomic-write-finish-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

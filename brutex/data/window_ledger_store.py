@@ -33,7 +33,6 @@ one-shot load (run start) + save (run end) are O(N) over the recorded windows.
 
 from __future__ import annotations
 
-import os
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -42,6 +41,7 @@ from typing import Any
 
 import structlog
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY,
@@ -262,9 +262,17 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     )
     table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
     path = ledger_path(lake_root)
-    tmp = path.with_name(f"{LEDGER_FILENAME}.tmp")
-    pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
-    os.replace(tmp, path)
+
+    def _write_parquet(tmp: Path) -> None:
+        pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+
+    # COMMON guard-free atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
+    # DEC-ATOMIC-WRITE-CONSOLIDATE-001): adds an fsync (durability for the durable
+    # ledger) + temp cleanup on error (the hand-rolled version LEAKED the .tmp on a
+    # mid-write failure), with the raw OSError preserved. The ENOSPC→LakeWriteHalt
+    # graceful-halt upgrade is a deliberately-deferred follow-up (it changes error
+    # semantics and the end_pull_ledger call-path's halt handling needs verification).
+    atomic_write_simple(path, _write_parquet)
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:

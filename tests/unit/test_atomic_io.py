@@ -172,3 +172,13 @@ def test_atomic_write_simple_cleans_tmp_and_propagates_generic_error(tmp_path: P
         atomic_write_simple(dest, lambda _tmp: _raise(ValueError("render bug")))
     assert not dest.exists()
     assert list(tmp_path.glob(".brutex-write-*")) == []
+
+
+def test_atomic_write_simple_applies_chmod(tmp_path: Path) -> None:
+    """`chmod` pins the final file's mode (the credential store's 0600 save path)."""
+    import stat
+
+    dest = tmp_path / "secret.json"
+    atomic_write_simple(dest, lambda tmp: tmp.write_text("token"), chmod=0o600)
+    assert dest.read_text() == "token"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600  # owner-only, never world-readable
