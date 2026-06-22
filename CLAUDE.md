@@ -228,9 +228,25 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-partition-flock-jlzt1n` (a cross-process advisory `fcntl.flock` now serialises
-  concurrent writers to the SAME lake month partition, closing a SILENT data-LOSS race —
-  DEC-LAKE-PARTITION-FLOCK-001, MIGRATION.md #887, gap #5 of the operator's critical-risks resilience-hardening
+- **Active branch:** `claude/telegram-critical-alerts-jlzt1n` (a pull-wide HALT — disk-full / OOM / quota — now fires
+  a CRITICAL Telegram alert so the operator is told in REAL TIME, not just in a log; the observability capstone of
+  the resilience batch — DEC-TELEGRAM-PULL-HALT-001, MIGRATION.md #888: the just-shipped batch makes a pull HALT
+  gracefully on a full disk / OOM (`LakeWriteHalt` #885) or a quota stop, but the operator only learned of it from a
+  log line (§11 AUTOMATED wants it ALERTED, "ZERO clicks per day"). NEW `SweepAlerter.pull_halted(*, reason)` alert
+  (CRITICAL `PHASE_BLOCKED`, reason-scoped dedupe), wired into the CLI `cmd_fetch` pull path: `_one_fetch_pass` wraps
+  the `run_groww_spot_ingest_with_retry` call in `try/except (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError)`
+  (the SAME global-stop set the spine carves out) that fires a NEW `_emit_pull_halt_alert(exc)` then RE-RAISES — so
+  the existing halt handling + non-zero exit is byte-unchanged. HONEST: fire-and-forget, best-effort — the alerter
+  swallows every error + is a silent no-op when Telegram is DISABLED (the default), so it can NEVER block/mask/crash
+  the pull; the notifier is async (no network I/O on the pull thread); body is MarkdownV2-escaped; this wires the CLI
+  pull path ONLY — the DASHBOARD pull path's Telegram wiring is an explicit FOLLOW-UP, NOT claimed done.
+  `sweep_alerts.py` at 100% line+branch (new `pull_halted` unit + a real-notifier wire test); the CLI wiring covered
+  by 3 new `test_cli_retry_storm.py` tests (LakeWriteHalt-raising fake ingest proves alert-once-then-re-raise +
+  `_emit_pull_halt_alert` both branches); 137 notifications + CLI tests green; ruff/mypy --strict/pyright clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-LAKE-PARTITION-FLOCK-001,
+  MIGRATION.md #887 (a cross-process advisory `fcntl.flock` now serialises
+  concurrent writers to the SAME lake month partition, closing a SILENT data-LOSS race,
+  gap #5 of the operator's critical-risks resilience-hardening
   batch: the two lake Parquet writers do a READ-modify-WRITE on a month partition guarded ONLY by a per-partition
   `threading.Lock` (intra-process), so two pulls sharing `BRUTEX_LAKE_ROOT` — a CLI `brutex fetch` + a dashboard
   pull — writing the same partition lost-update SILENTLY: P1 reads `[T1,T2,T3]`, P2 reads `[T1,T2,T3]`, P1 writes
@@ -639,7 +655,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/lake-partition-flock-jlzt1n`
+- **Active feature branch:** `claude/telegram-critical-alerts-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

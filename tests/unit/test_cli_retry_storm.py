@@ -836,3 +836,109 @@ def test_cmd_fetch_until_clean_dead_token_needs_operator(
     assert "[brutex] until-clean — verdict=stop_dead rounds=1 still_failed=4" in captured.out
     assert "Groww auth failed mid-pull" in captured.err
     assert "Re-check the Groww API key" in captured.err
+
+
+# ── Pull-halt Telegram alert (DEC-TELEGRAM-PULL-HALT-001) ────────────────
+
+
+def test_cmd_fetch_alerts_then_reraises_on_lake_write_halt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pull-wide ``LakeWriteHalt`` fires the CRITICAL pull-halt alert, then re-raises.
+
+    DEC-TELEGRAM-PULL-HALT-001 — ``_one_fetch_pass`` wraps the ingest so a disk-full /
+    OOM / quota global-stop pushes a best-effort Telegram alert (the operator must
+    act) and RE-RAISES, so the CLI's existing halt handling / non-zero exit is
+    byte-unchanged. Fakes only (no network, no creds).
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+
+    def fake_ingest(*_a: Any, **_k: Any) -> Any:
+        """Simulate a full disk halting the pull mid-ingest."""
+        raise LakeWriteHalt("disk_full")
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    halts: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", halts.append)
+
+    with pytest.raises(LakeWriteHalt):
+        cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=False,
+            rows_per_chunk=5,
+        )
+    # The alert fired exactly once with the propagating halt, then it re-raised.
+    assert len(halts) == 1
+    assert isinstance(halts[0], LakeWriteHalt)
+    assert halts[0].reason == "disk_full"
+
+
+def test_emit_pull_halt_alert_surfaces_lake_write_halt_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_emit_pull_halt_alert`` passes ``LakeWriteHalt.reason`` verbatim to the alerter."""
+    from brutex.data.errors import LakeWriteHalt
+
+    captured: list[str] = []
+
+    class _FakeAlerter:
+        def pull_halted(self, *, reason: str) -> bool:
+            captured.append(reason)
+            return True
+
+    monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+    cli._emit_pull_halt_alert(LakeWriteHalt("out_of_memory"))
+    assert captured == ["out_of_memory"]
+
+
+def test_emit_pull_halt_alert_other_stop_uses_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-``LakeWriteHalt`` global-stop reports its class name as the halt reason."""
+    captured: list[str] = []
+
+    class _FakeAlerter:
+        def pull_halted(self, *, reason: str) -> bool:
+            captured.append(reason)
+            return True
+
+    monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+    cli._emit_pull_halt_alert(RuntimeError("boom"))
+    assert captured == ["RuntimeError"]
+
+
+def test_emit_pull_halt_alert_swallows_its_own_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The alert is fire-and-forget — its OWN failure NEVER propagates (masks the halt).
+
+    A construction/publish failure inside ``_emit_pull_halt_alert`` is swallowed +
+    logged, so the caller's re-raise of the real halt is the only exception that
+    surfaces (DEC-TELEGRAM-PULL-HALT-001, structural fire-and-forget).
+    """
+
+    class _BoomAlerter:
+        def __init__(self) -> None:
+            raise RuntimeError("notifier construction blew up")
+
+    monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
+    # Must NOT raise — the blanket except swallows + logs it (the no-raise IS the assertion).
+    cli._emit_pull_halt_alert(RuntimeError("halt"))
