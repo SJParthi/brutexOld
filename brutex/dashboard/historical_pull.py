@@ -118,7 +118,7 @@ if TYPE_CHECKING:
 #: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
 #: from this (never vendor-fetched), so the prior two-phase "1-day-first to pin the
 #: listing date" barrier (DEC-HISTORICAL-1DAY-FIRST-001) is RETIRED: there is one vendor
-#: phase, bounded per contract to its ``expiry − 3mo → expiry`` default window.
+#: phase, bounded per contract to its ``expiry − 30 days → expiry`` default window.
 _MINUTE_INTERVAL: Final[str] = TRACK1_SPOT_INTERVAL
 
 #: Structured logger — the start-date discovery degrade paths (catalog unavailable /
@@ -137,6 +137,16 @@ _ONE_DAY: Final[timedelta] = timedelta(days=1)
 #: SAME discipline the bulk pull uses (DEC-GROWW-FUTURE-INGEST-001) so the two never
 #: collide on the same expiry.
 _FUTURE_SIDE: Final[str] = "FUT"
+
+#: Deterministic pull ORDER over the per-market buckets: the FUTURES market is processed
+#: BEFORE the OPTIONS market (futures-first), with any unknown market sorted LAST. Without
+#: this the buckets were iterated in ``dict`` insertion order, which (options inserted
+#: first) pulled CE/PE before FUT. Pure ordering — the per-contract windows + the ingest
+#: driver are untouched (DEC-FNO-LOOKBACK-SPLIT-001).
+_MARKET_PULL_ORDER: Final[dict[str, int]] = {
+    GROWW_FUTURE_COVERAGE_MARKET: 0,
+    GROWW_OPTION_COVERAGE_MARKET: 1,
+}
 
 #: Factory: ``(lake_root) -> (client, sink)`` — injected in tests; the default picks the
 #: honest dry-run pair or the live ``(GrowwClient, ParquetBarSink)``. Re-uses the SAME
@@ -160,7 +170,7 @@ class HistoricalPullReport:
       contract, every window — the completion barrier)?
     * :attr:`phase1_complete` — the contract symbols whose 1-minute pull landed clean.
     * :attr:`start_dates` — each contract's RESOLVED 1-minute window start (the explicit
-      operator start, or the per-contract ``expiry − 3mo`` default, clamped into range).
+      operator start, or the per-contract ``expiry − 30 days`` default, clamped into range).
     * :attr:`minute_requested` — always ``True`` (1-minute is the only granularity).
     * :attr:`minute_skipped` — always ``False`` (one phase; there is no barrier to skip).
 
@@ -591,7 +601,12 @@ def _run_phase(
         pass_still_failed = 0
         pass_auth = False
         clean: set[str] = set()
-        for market, bucket in by_market.items():
+        # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
+        # a STABLE, deterministic order independent of dict insertion order.
+        for market, bucket in sorted(
+            by_market.items(),
+            key=lambda kv: (_MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
+        ):
             report: GrowwOptionIngestReport = run_groww_option_ingest(
                 client,
                 sink,
@@ -689,16 +704,15 @@ def _resolve_minute_windows(
 ) -> dict[str, tuple[date, date]]:
     """Resolve each contract's half-open ``[start, end)`` 1-minute fetch window — pure.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001 → DEC-FNO-LOOKBACK-SPLIT-001. When the operator
-    passed explicit from/to dates (*explicit_dates* True) EVERY contract uses the
-    resolved ``[start, end)`` envelope verbatim (the dates OVERRIDE). Otherwise each
-    contract gets its OWN per-contract DEFAULT, SPLIT by type — futures
-    ``expiry − 3 calendar months → expiry+1day``, options ``expiry − 30 days →
-    expiry+1day`` — clamped into ``[start, end)``
-    (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`, passed
-    ``is_option`` for a ``CE``/``PE`` leg) — so the 1-minute fill targets the recent life
-    of each contract, not blindly from 2020. A contract with no ``expiry`` falls back to
-    the full range (the helper's never-skip choice). Pure + O(contracts); no lake I/O.
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. When the operator passed explicit from/to dates
+    (*explicit_dates* True) EVERY contract uses the resolved ``[start, end)`` envelope
+    verbatim (the dates OVERRIDE). Otherwise each contract gets its OWN per-contract
+    DEFAULT — a UNIFORM ``expiry − 30 days → expiry+1day`` window for ALL F&O
+    (futures AND options) — clamped into ``[start, end)``
+    (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`) — so the
+    1-minute fill targets the recent life of each contract, not blindly from 2020. A
+    contract with no ``expiry`` falls back to the full range (the helper's never-skip
+    choice). Pure + O(contracts); no lake I/O.
 
     Returns
     -------
@@ -714,9 +728,6 @@ def _resolve_minute_windows(
                 contract.expiry,
                 full_start=start,
                 full_end=end,
-                # DEC-FNO-LOOKBACK-SPLIT-001: options default to a tighter 30-day
-                # lookback, futures to 3 months. CE/PE → option; FUT → future.
-                is_option=contract.contract_type in {"CE", "PE"},
             )
     return windows
 
@@ -847,7 +858,7 @@ def pull_contract_candles(
     is a SINGLE vendor phase (the prior two-phase 1-day-first barrier is RETIRED):
 
     1. **Per-contract window.** When the operator passes NO explicit from/to dates, each
-       contract's 1-minute window DEFAULTS to ``expiry − 3 calendar months → expiry`` (its
+       contract's 1-minute window DEFAULTS to ``expiry − 30 days → expiry`` (its
        own expiry; ``expiry+1day`` end-exclusive so the expiry day's intraday bars land),
        clamped into the resolved envelope. Explicit operator dates OVERRIDE — every contract
        then uses the resolved ``[start, end)`` range verbatim.
@@ -941,7 +952,7 @@ def pull_contract_candles(
 
     # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
     # dates OVERRIDE (every contract uses the resolved range); else each contract's DEFAULT
-    # ``expiry − 3mo → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
+    # ``expiry − 30 days → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
     # but IGNORED for granularity — F&O always fetches 1-minute only.
     explicit_dates = from_date is not None or to_date is not None
     minute_windows = _resolve_minute_windows(

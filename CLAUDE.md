@@ -230,28 +230,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/engine-tuple-skip-resilient-jlzt1n` (when one grid TUPLE errors mid-sweep the
-  brute-force engine now SKIPS it, finishes every remaining tuple, and exits NON-ZERO with a `tuples_failed`
-  count + a `TUPLE_FAILED` audit line naming the exact offending combo — DEC-ENGINE-TUPLE-SKIP-RESILIENT-001,
-  MIGRATION.md #904, the operator-chosen "Resilient: skip + continue" of the "work on everything else"
-  resilience batch. ROOT: the per-combo eval loop in `sweep_run.run_persisted_sweep` was a comprehension with
-  NO exception isolation — one `metrics_for_mask` raise aborted the WHOLE grid (propagating uncaught through
-  both `run_sweep_grid` + `run_supervised_grid`). A 4-agent hostile DESIGN review proved every input to
-  `metrics_for_mask` is TUPLE-INVARIANT, so a raising combo is provably a tuple-wide BUG/corrupt-data, NEVER a
-  transient single combo → per-COMBO isolation REJECTED (it would be an illusion, Golden Rule #1 + non-reproducible,
-  Rule #4); the operator chose the RESILIENT tuple blast-radius (vs strict abort). FIX (failure-path only; success
-  path BYTE-IDENTICAL, scope still NIFTY/BANKNIFTY/SENSEX): NEW `SweepComboError(BruteXError)` re-raised with the
-  offending mask-hex + run_id + tuple (fail-loud-WITH-fingerprint, NOT swallowing); BOTH grid drivers catch ONLY
-  `SweepComboError` → bump a NEW `tuples_failed` summary field + `TUPLE_FAILED` audit + continue; the supervisor
-  does NOT `cache.record`/`checkpoint.record` a failed tuple (the sweep_heal C5 lesson — a resume RE-RUNS it);
-  honesty surface = `cli.EXIT_SWEEP_TUPLE_FAILED=6` + pure `sweep_all_exit_code` (non-zero exit + loud WARNING) +
-  a ⚠️ `sweep_complete` alert. HONEST: a failed tuple is UN-sentineled + UN-cached → DETERMINISTIC redo next run;
-  never silent (count + audit + WARNING + non-zero exit + ⚠️ alert); a genuine infra error (disk-full/OOM/audit)
-  is NOT a `SweepComboError` and still ABORTS globally. `sweep_run.py` 100% line+branch (246/70), `sweep_orchestrator.py`
-  100% (217/66), `sweep_supervisor.py` 100% (167/20), `sweep_alerts.py` 100% (119/10), `cli.py` 100% (539/102);
-  golden suite 42/42 green (success path byte-identical); 374+278+123 broad engine/golden/cli/alerts passes,
-  no regression; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer + workspace-health PENDING. ENGINE
-  failure-path resilience (NIFTY/BANKNIFTY/SENSEX scope UNCHANGED), no scope/vocab/rate-cap change. Prior merged:
+- **Active branch:** `claude/futures-first-pull-order-jlzt1n` (the historical F&O pull now pulls every FUTURES
+  (FUT) contract BEFORE the CE/PE options, AND defaults ALL F&O to a UNIFORM 30-day lookback — futures dropped
+  from 3 months to 30 days, matching options — DEC-FNO-PULL-ORDER-LOOKBACK-001, MIGRATION.md #905, the operator's
+  "always try to pull the futures at first one and only then options" + "even for futures also make it as only
+  one month". ROOT: the contract phase iterated `by_market.items()` in dict-insertion order (OPTIONS inserted
+  first → pulled first; the live /coverage Futures tab read 0 windows), and `default_fno_minute_window` SPLIT the
+  lookback (FUT 3mo / OPT 30d, #894). FIX (pull-PLANNING + ORDER only; NO lake/schema/rate/vocab/engine change,
+  ENGINE stays NIFTY/BANKNIFTY/SENSEX): (1) NEW `_MARKET_PULL_ORDER` map + `sorted(by_market.items(), key=…)` →
+  FUTURES bucket first, OPTIONS second, unknown LAST (reorders only the buckets, never contracts within; both leg
+  types still pulled); (2) `default_fno_minute_window` drops `is_option` → a single `expiry −
+  DEFAULT_FNO_LOOKBACK_DAYS` (=30) for ALL F&O; the now-dead `subtract_calendar_months` + `DEFAULT_FNO_LOOKBACK_MONTHS`
+  + the `monthrange` import are REMOVED. HONEST: the OPTIONS path was already 30d (byte-unchanged) — only the
+  FUTURES default narrows 3mo→30d; per-contract (each own expiry); explicit operator dates still override; still
+  1-minute-only (#853). SUPERSEDES the futures-3-month half of DEC-FNO-LOOKBACK-SPLIT-001 #894. `historical_pull.py`
+  100% line+branch (211/46) + `contract_bounds.py` 100% (79/20); NEW FUT-before-OPT spy test + uniform-30-day
+  window tests; 132 F&O pull tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer + workspace-health
+  PENDING. ENGINE UNCHANGED, no scope/vocab/rate-cap change. Prior merged: DEC-ENGINE-TUPLE-SKIP-RESILIENT-001,
+  MIGRATION.md #904 (when one grid TUPLE errors mid-sweep the engine SKIPS it, finishes the rest, exits NON-ZERO
+  with a `tuples_failed` count + `TUPLE_FAILED` audit naming the combo — never silent, deterministic redo;
+  per-combo isolation rejected as an illusion; BLOCKER-fixed + 3-agent-verified, 100% line+branch). Prior merged:
   DEC-MOVERS-OPTIONS-VALUE-DEDUP-001, MIGRATION.md #903 (the `/movers` Options screen reads each contract's
   1-minute frame ONCE — it reuses the HLC3 turnover the SHARED `_read_future_session` already returns instead of
   a second `_session_value_paisa` read; byte-identical value, half the per-contract I/O; `movers_options.py` 100%
@@ -879,7 +877,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/engine-tuple-skip-resilient-jlzt1n`
+- **Active feature branch:** `claude/futures-first-pull-order-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

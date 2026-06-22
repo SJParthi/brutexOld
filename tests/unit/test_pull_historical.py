@@ -32,7 +32,12 @@ from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.client import GrowwClient
-from brutex.adapters.groww.constants import OPTION_SEGMENT
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+    OPTION_SEGMENT,
+)
+from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport
 from brutex.adapters.protocol import DerivativeContract
 from brutex.dashboard import historical_pull as hp
 from brutex.dashboard.historical_pull import (
@@ -258,6 +263,73 @@ def test_option_and_future_split_distinct_markets(registry: RegistryStore) -> No
     )
     assert report.bars_appended == 3  # one canned bar per contract (one window each)
     assert report.windows == 3
+
+
+def _empty_ingest_report() -> GrowwOptionIngestReport:
+    """A clean (no pairs, no failures) ingest report — inert for an order spy."""
+    return GrowwOptionIngestReport(pairs={}, failures=())
+
+
+def test_futures_market_pulled_before_options(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FUT (groww-future) is ingested BEFORE CE/PE (groww-option) — futures-first order.
+
+    A NIFTY selection spans BOTH market buckets (CE/PE → groww-option, FUT →
+    groww-future). A spy records the ``market`` kwarg of every
+    ``run_groww_option_ingest`` call in invocation order; the futures-market call MUST
+    precede the options-market call regardless of dict insertion order.
+    """
+    markets_seen: list[str] = []
+
+    def _spy_ingest(*_args: object, market: str, **_kw: object) -> GrowwOptionIngestReport:
+        markets_seen.append(market)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert markets_seen == [GROWW_FUTURE_COVERAGE_MARKET, GROWW_OPTION_COVERAGE_MARKET]
+    assert markets_seen.index(GROWW_FUTURE_COVERAGE_MARKET) < markets_seen.index(
+        GROWW_OPTION_COVERAGE_MARKET
+    )
+
+
+def test_market_pull_order_sorts_unknown_market_last() -> None:
+    """The order key sorts the two known markets futures-first, an unknown market LAST.
+
+    Covers the ``.get(..., 99)`` deterministic tie-break: an unrecognised market namespace
+    sorts after both known ones, and equal-rank markets fall back to a stable name sort.
+    """
+    buckets = {
+        GROWW_OPTION_COVERAGE_MARKET: 1,
+        "zzz-unknown-market": 2,
+        GROWW_FUTURE_COVERAGE_MARKET: 0,
+    }
+    ordered = [
+        market
+        for market, _rank in sorted(
+            buckets.items(),
+            key=lambda kv: (hp._MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
+        )
+    ]
+    assert ordered == [
+        GROWW_FUTURE_COVERAGE_MARKET,
+        GROWW_OPTION_COVERAGE_MARKET,
+        "zzz-unknown-market",
+    ]
 
 
 # ── empty selection: honest 0-bar no-op ──────────────────────────────────────
@@ -680,11 +752,6 @@ def test_pull_contract_candles_live_derives_pool(registry: RegistryStore, tmp_la
 
 def test_contract_market_split() -> None:
     """A FUT row maps to the future market; CE/PE map to the option market."""
-    from brutex.adapters.groww.constants import (
-        GROWW_FUTURE_COVERAGE_MARKET,
-        GROWW_OPTION_COVERAGE_MARKET,
-    )
-
     fetched = datetime(2026, 1, 1, tzinfo=UTC)
     fut = ContractRow(
         "NSE",
@@ -793,7 +860,8 @@ def test_clean_symbols_excludes_quarantine_and_still_failing() -> None:
 # 1-minute is the ONLY granularity fetched from Groww for F&O; 1-day is DERIVED
 # from it (never vendor-fetched), so the prior two-phase 1-day-first barrier is
 # RETIRED. These tests assert the single 1-minute phase, the per-contract default
-# window (expiry − 3 calendar months → expiry), and the explicit-dates override.
+# window (a UNIFORM expiry − 30 days → expiry for ALL F&O), and the explicit-dates
+# override.
 
 
 def test_fno_pulls_minute_only_never_day(registry: RegistryStore) -> None:
@@ -822,11 +890,12 @@ def test_fno_pulls_minute_only_never_day(registry: RegistryStore) -> None:
     assert report.phase1_clean is True
 
 
-def test_minute_window_defaults_split_by_contract_type(registry: RegistryStore) -> None:
-    """No explicit dates → FUTURES start at expiry − 3 months, OPTIONS at expiry − 30 days.
+def test_minute_window_defaults_uniform_30_days(registry: RegistryStore) -> None:
+    """No explicit dates → ALL F&O (FUT/CE/PE) start at expiry − 30 days.
 
-    DEC-FNO-LOOKBACK-SPLIT-001: the per-contract default lookback is now split by type
-    (the NIFTY chain is CE + PE + FUT, all expiry 2024-01-25).
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: the per-contract default lookback is a UNIFORM
+    30 days for every F&O contract (the NIFTY chain is CE + PE + FUT, all expiry
+    2024-01-25).
     """
     sdk = _FakeSDK()
     sink = _RecordingSink()
@@ -843,19 +912,14 @@ def test_minute_window_defaults_split_by_contract_type(registry: RegistryStore) 
         client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # expiry 2024-01-25 → future − 3 calendar months = 2023-10-25; option − 30 days = 2023-12-26.
-    expected_start = {
-        "NSE-NIFTY-25Jan24-21000-CE": "2023-12-26",  # option → 30 days
-        "NSE-NIFTY-25Jan24-21000-PE": "2023-12-26",  # option → 30 days
-        "NSE-NIFTY-25Jan24-FUT": "2023-10-25",  # future → 3 months
-    }
+    # expiry 2024-01-25 − 30 days = 2023-12-26, uniform for FUT/CE/PE.
     for r in selected:
-        assert report.start_dates[r.contract_symbol] == expected_start[r.contract_symbol]
-    # The EARLIEST recorded fetch start is the FUTURE's 3-month window start (2023-10-25,
-    # its first 30-day chunk), never blindly 2020; every chunk-start is within a window.
+        assert report.start_dates[r.contract_symbol] == "2023-12-26"
+    # The EARLIEST recorded fetch start is the uniform 30-day window start (2023-12-26),
+    # never blindly 2020; every chunk-start is within a window.
     starts = [start[:10] for _sym, start in sdk.starts]
-    assert min(starts) == "2023-10-25"
-    assert all("2023-10-25" <= s <= "2024-01-25" for s in starts)
+    assert min(starts) == "2023-12-26"
+    assert all("2023-12-26" <= s <= "2024-01-25" for s in starts)
 
 
 def test_explicit_dates_override_default_window(registry: RegistryStore) -> None:
@@ -874,7 +938,7 @@ def test_explicit_dates_override_default_window(registry: RegistryStore) -> None
         client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # All contracts share the explicit start (the default expiry−3mo is OVERRIDDEN).
+    # All contracts share the explicit start (the default expiry−30d is OVERRIDDEN).
     assert set(report.start_dates.values()) == {"2024-01-01"}
     assert {start[:10] for _sym, start in sdk.starts} == {"2024-01-01"}
 
@@ -912,23 +976,20 @@ def test_resolve_minute_windows_explicit_uses_full_range(registry: RegistryStore
 
 
 def test_resolve_minute_windows_default_is_per_contract_expiry(registry: RegistryStore) -> None:
-    """``_resolve_minute_windows(explicit_dates=False)`` → futures expiry−3mo, options expiry−30d.
+    """``_resolve_minute_windows(explicit_dates=False)`` → a UNIFORM expiry−30d for all F&O.
 
-    DEC-FNO-LOOKBACK-SPLIT-001: the NIFTY chain is CE + PE + FUT (expiry 2024-01-25), so the
-    FUT window starts 3 months back and the CE/PE windows 30 days back.
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: the NIFTY chain is CE + PE + FUT (expiry 2024-01-25),
+    so EVERY contract's window starts a uniform 30 days back.
     """
     rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
     out = hp._resolve_minute_windows(
         rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 6, 13)
     )
-    # FUT → [2023-10-25, 2024-01-26) (3 months); CE/PE → [2023-12-26, 2024-01-26) (30 days).
-    assert set(out.values()) == {
-        (date(2023, 10, 25), date(2024, 1, 26)),
-        (date(2023, 12, 26), date(2024, 1, 26)),
-    }
+    # FUT and CE/PE alike → [2023-12-26, 2024-01-26) (a uniform 30-day lookback).
+    assert set(out.values()) == {(date(2023, 12, 26), date(2024, 1, 26))}
     by_symbol = {c.symbol: c for _r, c in rebuilt}
     assert out[next(s for s, c in by_symbol.items() if c.contract_type == "FUT")] == (
-        date(2023, 10, 25),
+        date(2023, 12, 26),
         date(2024, 1, 26),
     )
     assert out[next(s for s, c in by_symbol.items() if c.contract_type == "CE")] == (
