@@ -342,6 +342,57 @@ class TestWindowStatusApi:
         assert row["attempts"] == 1
         assert row["last_error"] is None
 
+    def test_windows_ledger_fast_path_through_real_connection(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The DuckDB O(page) fast path drives the route via the REAL store.connection.
+
+        DEC-COVERAGE-WINDOWS-O1-001 (hostile-review MAJOR): the other window tests use the
+        legacy ``window_status.json`` sidecar, so this is the ONLY end-to-end proof that
+        ``build_window_payload``'s DuckDB branch works through the real ``_LockedReadConn``
+        wrapper (lock-hold across ``description``+``fetchall``) + the generation counts
+        cache wired in ``build_app`` — exercising the SHIPPED route path, not a bare
+        ``duckdb.connect()``. Asserts ``source=="ledger"`` (not the sidecar), the always-
+        complete counts, the status filter, and offset paging.
+        """
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        def _key(symbol: str) -> WindowKey:
+            return WindowKey(
+                market="groww",
+                security_id=symbol,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 4, 1),
+            )
+
+        now = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=now)
+        ledger.record(
+            _key("BANKNIFTY"), raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=now
+        )
+        ledger.plan(_key("SENSEX"), now=now)  # PLANNED — excluded from the default list
+        save_window_ledger(ledger, tmp_path)  # store.path parent (tmp_path) is the lake root
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/coverage/windows").json()
+        assert body["source"] == "ledger"  # the DuckDB fast path, NOT the status_log sidecar
+        assert body["count"] == 3
+        assert body["counts"]["spot"] == {"SUCCESS": 1, "FAILED": 1, "PLANNED": 1}
+        symbols = {w["symbol"] for w in body["windows"]}
+        assert symbols == {"NIFTY", "BANKNIFTY"}  # PLANNED (SENSEX) excluded by default
+        assert body["windows"][0]["status"] == "FAILED"  # severity-first
+
+        failed = client.get("/api/v1/coverage/windows?status=FAILED").json()
+        assert [w["symbol"] for w in failed["windows"]] == ["BANKNIFTY"]
+
+        page = client.get("/api/v1/coverage/windows?limit=1&offset=1").json()
+        assert page["returned"] == 1
+        assert page["capped"] is True  # matched (2) > limit (1)
+
     def test_windows_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))
         assert client.get("/api/v1/coverage/windows").status_code == 503

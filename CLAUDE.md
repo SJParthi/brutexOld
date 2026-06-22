@@ -228,9 +228,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/ntm-cache-first-jlzt1n` (the `/universe` NTM-constituent load is now CACHE-FIRST +
+- **Active branch:** `claude/coverage-windows-o1-jlzt1n` (the `/coverage/windows` "Fetch windows" page is now O(page):
+  DuckDB `LIMIT`/`OFFSET` + a generation-cached `GROUP BY` replace the unconditional O(340,330) Python
+  count+filter+sort that ran on EVERY tab/filter click + 4 s poll — DEC-COVERAGE-WINDOWS-O1-001, MIGRATION.md #893,
+  the operator's "navigating section to section is very slow / O(1) latency everywhere" fix. A 3-agent investigation +
+  the attached `brutex.log` proved the server `latency_ms` degraded tens-of-ms → 1.5–4 s as the ledger grew, because
+  `build_window_payload` looped over every record for counts, then filtered every record, then sorted, then sliced —
+  no SQL pushdown (the mtime cache saved the READ, not the PROCESSING). FIX (READ-ONLY viewer, modelled on the proven
+  `/db`+`/movers`+`/universe` patterns): NEW `_build_window_payload_duckdb` reads the ledger Parquet via DuckDB — the
+  ROW page is a `WHERE` (market-bucket + status, PLANNED excluded unless `?status=PLANNED`) + severity-first `ORDER BY`
+  (CASE from `_WINDOW_STATUS_ORDER`) + `LIMIT`/`OFFSET` (O(page)); `counts` come from ONE `GROUP BY market, status`
+  (`_window_counts_total`) memoised behind the COMMON generation-stamped `MoversSnapshotCache` (`_window_counts_cache`,
+  keyed by `_summary_cache.generation`), and `matched` is DERIVED from the cached counts (no extra scan).
+  `build_window_payload` gains optional `conn`/`offset`/`count_cache`/`generation`; the route injects them + a NEW
+  `offset` param. HONEST: a cached-counts HIT is O(1) in partition depth + the page is O(page) (DuckDB still reads
+  footers, NOT a literal O(1) total); a `None` conn / no Parquet keeps the LEGACY pyarrow path byte-for-byte
+  (back-compat + the `window_status.json` fallback); the DuckDB path returns the SAME payload (fast-path-equals-legacy
+  test); fixes the SERVER latency the log measured — a frontend in-place-`<tbody>`/debounce pager + the even-slower
+  `/completeness` 7–9 s endpoints are flagged FAST-FOLLOWS, NOT claimed. `db_view.py` at 100% line+branch (NEW
+  `TestBuildWindowPayloadDuckDB`); 322 covering-file + 31 route tests green; ruff/`mypy --strict`/`pyright` clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-NTM-CACHE-FIRST-001,
+  MIGRATION.md #892 (the `/universe` NTM-constituent load is now CACHE-FIRST +
   fail-fast, so every load after the first is INSTANT instead of re-blocking ~30–160 s on the slow niftyindices.com
-  host — DEC-NTM-CACHE-FIRST-001, MIGRATION.md #892, the operator's "why is this taking so much time / why AGAIN"
+  host, the operator's "why is this taking so much time / why AGAIN"
   fix. Root cause: `instrument_loader._resolve_constituent_csv` was LIVE-FIRST — it ALWAYS attempted the slow live
   niftyindices fetch (`_default_opener`, 30 s × 3 retries ≈ 90 s) and used the on-disk last-good cache ONLY on a live
   FAILURE, so EVERY `/universe` load re-paid the full slow fetch even with a good cache present, all under
@@ -723,7 +743,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/ntm-cache-first-jlzt1n`
+- **Active feature branch:** `claude/coverage-windows-o1-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
