@@ -22,12 +22,14 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww.constants import OPTION_SEGMENT, TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.contract_bounds import (
-    DEFAULT_FNO_LOOKBACK_DAYS,
+    DEFAULT_FNO_LOOKBACK_MONTHS,
+    DEFAULT_OPTION_LOOKBACK_DAYS,
     ContractCoverage,
     contract_daily_coverage,
     coverage_to_minute_window,
     default_fno_minute_window,
     derive_contract_minute_windows,
+    subtract_calendar_months,
 )
 from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.nse import IST
@@ -176,28 +178,47 @@ def test_window_disjoint_after_range_falls_back_to_full() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# default_fno_minute_window (pure — DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+# subtract_calendar_months + default_fno_minute_window (pure — DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
 # ─────────────────────────────────────────────────────────────────────────
-# Uniform 30-day lookback for ALL F&O (FUT/CE/PE) — the operator's direction.
-def test_default_fno_lookback_is_30_days() -> None:
-    assert DEFAULT_FNO_LOOKBACK_DAYS == 30
+def test_default_fno_lookback_is_three_months() -> None:
+    assert DEFAULT_FNO_LOOKBACK_MONTHS == 3
 
 
-def test_default_fno_window_uses_expiry_minus_30_days() -> None:
+def test_subtract_calendar_months_exact_month_ends() -> None:
+    # Target month has >= the anchor day → exact (no clamp).
+    assert subtract_calendar_months(date(2020, 1, 31), 3) == date(2019, 10, 31)
+    assert subtract_calendar_months(date(2020, 3, 31), 3) == date(2019, 12, 31)
+
+
+def test_subtract_calendar_months_feb_leap_and_nonleap_clamp() -> None:
+    # Day 31 → February: clamp to the month's last valid day (leap vs non-leap).
+    assert subtract_calendar_months(date(2020, 5, 31), 3) == date(2020, 2, 29)  # leap year
+    assert subtract_calendar_months(date(2021, 5, 31), 3) == date(2021, 2, 28)  # non-leap
+
+
+def test_subtract_calendar_months_within_year_no_clamp() -> None:
+    assert subtract_calendar_months(date(2024, 1, 25), 3) == date(2023, 10, 25)
+
+
+def test_subtract_calendar_months_year_borrow() -> None:
+    # Anchor month 2 − 3 → previous year month 11 (the divmod borrow path).
+    assert subtract_calendar_months(date(2024, 2, 15), 3) == date(2023, 11, 15)
+
+
+def test_default_fno_window_uses_expiry_minus_3mo() -> None:
     win = default_fno_minute_window(
         date(2024, 1, 25), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
     )
-    # [expiry−30 days, expiry+1day) — end-exclusive includes the expiry day's intraday
-    # bars. 2024-01-25 − 30 days = 2023-12-26; expiry+1 day = 2024-01-26.
-    assert win == (date(2023, 12, 26), date(2024, 1, 26))
+    # [expiry−3mo, expiry+1day) — end-exclusive includes the expiry day's intraday bars.
+    assert win == (date(2023, 10, 25), date(2024, 1, 26))
 
 
 def test_default_fno_window_clamps_start_to_full_start() -> None:
-    # expiry−30 days (2020-01-16) is BEFORE the floor → start clamps up to full_start.
+    # expiry−3mo (2019-11-15) is BEFORE the floor → start clamps up to full_start.
     win = default_fno_minute_window(
-        date(2020, 2, 15), full_start=date(2020, 1, 20), full_end=date(2026, 6, 13)
+        date(2020, 2, 15), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
     )
-    assert win == (date(2020, 1, 20), date(2020, 2, 16))
+    assert win == (date(2020, 1, 1), date(2020, 2, 16))
 
 
 def test_default_fno_window_clamps_end_to_full_end() -> None:
@@ -205,7 +226,7 @@ def test_default_fno_window_clamps_end_to_full_end() -> None:
     win = default_fno_minute_window(
         date(2026, 6, 30), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
     )
-    assert win == (date(2026, 5, 31), date(2026, 6, 13))
+    assert win == (date(2026, 3, 30), date(2026, 6, 13))
 
 
 def test_default_fno_window_none_expiry_is_full_range() -> None:
@@ -219,6 +240,48 @@ def test_default_fno_window_collapsed_span_falls_back_to_full() -> None:
     full = (date(2024, 1, 1), date(2026, 6, 13))
     win = default_fno_minute_window(date(2023, 6, 1), full_start=full[0], full_end=full[1])
     assert win == full
+
+
+# DEC-FNO-LOOKBACK-SPLIT-001 — options default to 30 days, futures stay 3 months.
+def test_default_option_lookback_is_30_days() -> None:
+    assert DEFAULT_OPTION_LOOKBACK_DAYS == 30
+
+
+def test_default_window_option_uses_expiry_minus_30_days() -> None:
+    # is_option=True → start = expiry − 30 days (NOT 3 calendar months).
+    win = default_fno_minute_window(
+        date(2024, 1, 25),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=True,
+    )
+    # 2024-01-25 − 30 days = 2023-12-26; end-exclusive expiry+1 day = 2024-01-26.
+    assert win == (date(2023, 12, 26), date(2024, 1, 26))
+
+
+def test_default_window_future_and_option_differ_for_same_expiry() -> None:
+    # The SAME expiry yields a 3-month future window but only a 30-day option window.
+    expiry, full_start, full_end = date(2024, 1, 25), date(2020, 1, 1), date(2026, 6, 13)
+    future = default_fno_minute_window(
+        expiry, full_start=full_start, full_end=full_end, is_option=False
+    )
+    option = default_fno_minute_window(
+        expiry, full_start=full_start, full_end=full_end, is_option=True
+    )
+    assert future == (date(2023, 10, 25), date(2024, 1, 26))  # 3 calendar months
+    assert option == (date(2023, 12, 26), date(2024, 1, 26))  # 30 days — tighter
+    assert option[0] > future[0]  # the option window starts later (shorter lookback)
+
+
+def test_default_window_option_clamps_start_to_full_start() -> None:
+    # An option whose expiry−30d predates the floor still clamps up to full_start.
+    win = default_fno_minute_window(
+        date(2020, 1, 10),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=True,
+    )
+    assert win == (date(2020, 1, 1), date(2020, 1, 11))
 
 
 # ─────────────────────────────────────────────────────────────────────────

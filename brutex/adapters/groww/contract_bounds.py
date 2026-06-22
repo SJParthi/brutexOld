@@ -70,6 +70,7 @@ derivatives PR (this module is the adapter-layer building block it consumes).
 
 from __future__ import annotations
 
+from calendar import monthrange
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -94,21 +95,27 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only (duckdb stays lazy, mirror
 _LOG = structlog.get_logger("brutex.adapters.groww.contract_bounds")
 
 #: Default F&O minute-window lookback — the per-contract DEFAULT span when the
-#: operator passes no explicit from/to dates (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
-#: ALL F&O (``FUT`` / ``CE`` / ``PE``) default to a fixed 30-day lookback
-#: (``expiry − 30 days → expiry``): an option's liquid life is short and the chain
-#: is huge, and the operator directs futures to the same recent tail, so a uniform
-#: tighter default keeps the pull bounded. The operator's explicit from/to dates
-#: still override it.
-DEFAULT_FNO_LOOKBACK_DAYS: Final[int] = 30
+#: operator passes no explicit from/to dates (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 →
+#: DEC-FNO-LOOKBACK-SPLIT-001). The lookback is SPLIT by contract type:
+#:
+#: * FUTURES (``FUT``) → ``expiry − DEFAULT_FNO_LOOKBACK_MONTHS`` calendar
+#:   months → ``expiry`` (3 months of "recent life of the contract").
+#: * OPTIONS (``CE`` / ``PE``) → ``expiry − DEFAULT_OPTION_LOOKBACK_DAYS`` days →
+#:   ``expiry`` — a fixed 30-DAY cap (an option's liquid life is short and the chain is
+#:   huge, so a tighter default keeps the pull bounded). The operator's explicit
+#:   from/to dates still override either default.
+DEFAULT_FNO_LOOKBACK_MONTHS: Final[int] = 3
+DEFAULT_OPTION_LOOKBACK_DAYS: Final[int] = 30
 
 __all__ = [
-    "DEFAULT_FNO_LOOKBACK_DAYS",
+    "DEFAULT_FNO_LOOKBACK_MONTHS",
+    "DEFAULT_OPTION_LOOKBACK_DAYS",
     "ContractCoverage",
     "contract_daily_coverage",
     "coverage_to_minute_window",
     "default_fno_minute_window",
     "derive_contract_minute_windows",
+    "subtract_calendar_months",
 ]
 
 
@@ -249,21 +256,63 @@ def coverage_to_minute_window(
     return (start, end)
 
 
+def subtract_calendar_months(anchor: date, months: int) -> date:
+    """Subtract *months* CALENDAR months from *anchor*, clamping the day to month-end.
+
+    Pure, dependency-free month arithmetic (``python-dateutil`` is NOT a declared BruteX
+    dependency — only a transitive build-tool import — so the lookback is hand-rolled,
+    Golden Rule #1 no hidden deps). The day-of-month is CLAMPED to the target month's
+    last valid day, so a month-end anchor lands on the target month-end, never overflows
+    into the next month:
+
+    * ``2020-01-31 − 3mo`` → ``2019-10-31`` (Oct has 31 days — exact)
+    * ``2020-03-31 − 3mo`` → ``2019-12-31`` (Dec has 31 days — exact)
+    * ``2020-05-31 − 3mo`` → ``2020-02-29`` (Feb 2020 is a leap year → clamp to 29)
+    * ``2021-05-31 − 3mo`` → ``2021-02-28`` (Feb 2021 → clamp to 28)
+
+    Parameters
+    ----------
+    anchor
+        The date to subtract from (an F&O contract's expiry).
+    months
+        The number of calendar months to subtract (``>= 0``).
+
+    Returns
+    -------
+    date
+        ``anchor`` shifted back *months* calendar months, day-clamped to the target
+        month's last valid day.
+    """
+    # Zero-based month index arithmetic, then back to 1-based. ``divmod`` carries the
+    # year borrow correctly for any month count (e.g. anchor month 2 − 3 → prev year
+    # month 11).
+    total = (anchor.year * 12 + (anchor.month - 1)) - months
+    year, month0 = divmod(total, 12)
+    month = month0 + 1
+    last_day = monthrange(year, month)[1]
+    return date(year, month, min(anchor.day, last_day))
+
+
 def default_fno_minute_window(
     expiry: date | None,
     *,
     full_start: date,
     full_end: date,
+    is_option: bool = False,
 ) -> tuple[date, date]:
     """The DEFAULT half-open ``[start, end)`` 1-minute window for an F&O contract.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. When the operator passes NO explicit from/to
-    dates, an F&O contract's 1-minute pull defaults to the recent tail of its trading
-    life: ``expiry − DEFAULT_FNO_LOOKBACK_DAYS`` days → ``min(full_end, expiry +
-    1 day)`` (the ``+ 1 day`` end is end-EXCLUSIVE so the expiry day's own intraday
-    bars are INCLUDED — the SAME ceiling convention :func:`coverage_to_minute_window`
-    uses). The lookback is UNIFORM across ALL F&O (``FUT`` / ``CE`` / ``PE``) — a
-    fixed 30-day window per the operator's direction.
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001 → DEC-FNO-LOOKBACK-SPLIT-001. When the operator
+    passes NO explicit from/to dates, an F&O contract's 1-minute pull defaults to the
+    recent tail of its trading life, ending at ``min(full_end, expiry + 1 day)`` (the
+    ``+ 1 day`` end is end-EXCLUSIVE so the expiry day's own intraday bars are INCLUDED
+    — the SAME ceiling convention :func:`coverage_to_minute_window` uses). The lookback
+    START is SPLIT by contract type:
+
+    * a FUTURE (*is_option* ``False`` — ``FUT``) → ``expiry −
+      DEFAULT_FNO_LOOKBACK_MONTHS`` calendar months (3 months);
+    * an OPTION (*is_option* ``True`` — ``CE`` / ``PE``) → ``expiry −
+      DEFAULT_OPTION_LOOKBACK_DAYS`` days (a fixed 30-day cap).
 
     Both bounds are clamped INTO the operator's resolved ``[full_start, full_end)``
     range (the historical floor → previous-day envelope), so the default never widens
@@ -279,6 +328,9 @@ def default_fno_minute_window(
     full_start, full_end
         The half-open ``[full_start, full_end)`` range the operator resolved (the
         explicit-dates-or-default envelope from ``_resolve_range``).
+    is_option
+        ``True`` for an OPTION (``CE`` / ``PE``) → the tighter 30-day default;
+        ``False`` (the default) for a FUTURE (``FUT``) → the 3-month default.
 
     Returns
     -------
@@ -288,7 +340,11 @@ def default_fno_minute_window(
     """
     if expiry is None:
         return (full_start, full_end)
-    lookback_start = expiry - timedelta(days=DEFAULT_FNO_LOOKBACK_DAYS)
+    lookback_start = (
+        expiry - timedelta(days=DEFAULT_OPTION_LOOKBACK_DAYS)
+        if is_option
+        else subtract_calendar_months(expiry, DEFAULT_FNO_LOOKBACK_MONTHS)
+    )
     start = max(full_start, lookback_start)
     end = min(full_end, expiry + timedelta(days=1))
     if start >= end:
