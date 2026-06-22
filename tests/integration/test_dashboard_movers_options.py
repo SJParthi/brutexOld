@@ -4,8 +4,9 @@ Two layers, both against a REAL Parquet + DuckDB lake (mirrors
 ``test_dashboard_movers_futures.py``):
 
 1. The lake-reading core (:func:`~brutex.dashboard.movers_options.run_options_snapshot`
-   + ``_session_value_paisa`` + ``_discover_options``, reusing the futures
-   ``_read_future_session`` / ``_prev_day_oi`` / ``_prev_day_close`` /
+   + ``_discover_options``, reusing the futures ``_read_future_session`` (whose
+   ``value_paisa`` field is now the options turnover, DEC-MOVERS-OPTIONS-VALUE-DEDUP-001)
+   / ``_prev_day_oi`` / ``_prev_day_close`` /
    ``_underlying_spot_ltp``) is exercised directly over a ``tmp_path`` lake
    seeded with :class:`~brutex.data.parquet_writer.ParquetWriter` — the OI / OI%
    / pct / value math, the spot pairing, the per-contract rows (NOT collapsed per
@@ -38,7 +39,6 @@ pytest.importorskip("pyarrow")
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_options import (
     _discover_options,
-    _session_value_paisa,
     run_options_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -189,82 +189,6 @@ class TestDiscoverOptions:
             bars=[_min_bar(hour=9, minute=15, close="10", volume=1, oi=5)],
         )
         assert _discover_options(tmp_path) == []
-
-
-# ── _session_value_paisa (cumulative HLC3 typical-price × volume turnover) ──
-# DEC-MOVERS-VWAP-VALUE-001: the seeded bars below are zero-range (high=low=close),
-# so HLC3 == close and the asserted values coincide with the old close×volume; the
-# `test_hlc3_typical_price_distinguishes_from_close` test below uses a real range to
-# prove the high/low columns are actually read (not close twice / not transposed).
-
-
-class TestSessionValuePaisa:
-    def test_cumulative_value(self, tmp_path: Path) -> None:
-        _seed_options_lake(tmp_path)
-        # CE bars are zero-range → HLC3==close: 150*100 + 164*400 = 80600 rupees → 8_060_000 paisa.
-        got = _session_value_paisa(
-            tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=None
-        )
-        assert got == 8_060_000
-
-    def test_hlc3_typical_price_distinguishes_from_close(self, tmp_path: Path) -> None:
-        # A REAL intrabar range proves _session_value_paisa reads high+low+close (not
-        # close twice, not high/low transposed) and applies the HLC3 turnover.
-        _write(
-            tmp_path,
-            segment="FNO",
-            symbol=_CE,
-            interval="1minute",
-            bars=[
-                _min_bar(hour=9, minute=15, high="112", low="106", close="110", volume=20, oi=5),
-            ],
-        )
-        got = _session_value_paisa(
-            tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=None
-        )
-        # typical=(112+106+110)/3=109.3333…→round_money 109.33 → 109.33*20=₹2186.60 → 218660 paisa
-        # (the OLD close×volume would give 110*20=2200 → 220000 — genuinely distinct).
-        assert got == 218660
-
-    def test_missing_dir_is_zero(self, tmp_path: Path) -> None:
-        assert (
-            _session_value_paisa(
-                tmp_path,
-                exchange=_EXCHANGE,
-                symbol="NSE-GHOST-27Jun24-1-CE",
-                day=_DAY,
-                cutoff_min=None,
-            )
-            == 0
-        )
-
-    def test_cutoff_slices_value(self, tmp_path: Path) -> None:
-        _seed_options_lake(tmp_path)
-        # cutoff 09:15 (555) keeps only the first CE bar: 150*100 = 15000 → 1_500_000.
-        got = _session_value_paisa(
-            tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=555
-        )
-        assert got == 1_500_000
-
-    def test_cutoff_before_session_is_zero(self, tmp_path: Path) -> None:
-        _seed_options_lake(tmp_path)
-        got = _session_value_paisa(tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=0)
-        assert got == 0
-
-    def test_wrong_day_is_zero(self, tmp_path: Path) -> None:
-        _write(
-            tmp_path,
-            segment="FNO",
-            symbol=_CE,
-            interval="1minute",
-            bars=[_min_bar(hour=9, minute=15, close="10", volume=1, oi=5, day=date(2024, 6, 10))],
-        )
-        assert (
-            _session_value_paisa(
-                tmp_path, exchange=_EXCHANGE, symbol=_CE, day=_DAY, cutoff_min=None
-            )
-            == 0
-        )
 
 
 # ── run_options_snapshot (direct, every branch) ───────────────────────────
