@@ -717,7 +717,7 @@ class TestLegacyBackwardCompat:
     """A pre-R1 Parquet (no ``empty_streak``) loads cleanly with a derived streak (never a re-pull)."""
 
     def test_legacy_rows_derive_empty_streak(self, tmp_path: Path) -> None:
-        # One row per _derive_empty_streak branch: SUCCESS→0, EMPTY→attempts, SKIPPED→threshold.
+        # One row per derive_empty_streak branch: SUCCESS→0, EMPTY→attempts, SKIPPED→threshold.
         _write_legacy_ledger_parquet(
             tmp_path,
             {
@@ -750,7 +750,7 @@ class TestLegacyBackwardCompat:
         assert by_symbol["BANKNIFTY"].in_pull_fetches == 1
 
     def test_legacy_rows_derive_in_pull_fetches_both_branches(self, tmp_path: Path) -> None:
-        # Both _derive_in_pull_fetches branches: PLANNED→0 (never fetched), SUCCESS→1.
+        # Both derive_in_pull_fetches branches: PLANNED→0 (never fetched), SUCCESS→1.
         _write_legacy_ledger_parquet(
             tmp_path,
             {

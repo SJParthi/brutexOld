@@ -2490,24 +2490,41 @@ def _build_window_payload_duckdb(
     count+filter+sort over every window on every click + 4 s poll (the root cause). The
     ``matched`` total is DERIVED from the cached counts (no extra scan); the per-row
     projection reuses the shared :func:`_window_row` (ONE shape with the legacy path).
-    Returns the SAME payload dict the pyarrow path returns.
+    Returns the same payload dict shape + values as the pyarrow path — severity-first,
+    with within-a-status-tier rows ordered deterministically by ``(security_id,
+    interval, window_start, window_end)``.
     """
     from types import SimpleNamespace
+
+    from brutex.data.window_ledger_store import derive_empty_streak, derive_in_pull_fetches
 
     ledger_glob = ledger_file.as_posix()
     if count_cache is None:
         counts, total = _window_counts_total(conn, ledger_glob)
     else:
+        # Key the cache on the ledger's mtime AS WELL as the generation so a CROSS-PROCESS
+        # write (a CLI `brutex fetch` while the dashboard is open — which does NOT bump the
+        # dashboard's own in-process generation) still invalidates the cached counts (the
+        # mtime-invalidation fidelity the legacy `_ledger_records_cached` read had). A repeat
+        # click within one (generation, mtime) stays an O(1) hit.
+        mtime_ns = ledger_file.stat().st_mtime_ns
         counts, total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}",
+            f"window-counts|{ledger_glob}|{mtime_ns}",
             generation=generation,
             compute=lambda: _window_counts_total(conn, ledger_glob),
         )
 
     wanted_status = status.upper() if status else None
-    buckets = (
-        [market] if market in ("spot", "options", "futures") else ["spot", "options", "futures"]
-    )
+    valid_buckets = ("spot", "options", "futures")
+    if market is None:
+        buckets = list(valid_buckets)
+    elif market in valid_buckets:
+        buckets = [market]
+    else:
+        # An unrecognized non-null market matches NO bucket — mirror the legacy filter
+        # (which compares each record's bucket to `market`) so matched=0 + no rows, rather
+        # than the fast path silently returning every row (hostile-review MINOR).
+        buckets = []
     if wanted_status:
         matched = sum(counts[b].get(wanted_status, 0) for b in buckets)
     else:
@@ -2526,6 +2543,8 @@ def _build_window_payload_duckdb(
     elif market == "spot":
         where.append("market NOT IN (?, ?)")
         params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
+    elif market is not None:
+        where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
     if wanted_status:
         where.append("status = ?")
         params.append(wanted_status)
@@ -2550,8 +2569,10 @@ def _build_window_payload_duckdb(
         # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
         # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
         # already str()/None-handle each field). `empty_streak`/`in_pull_fetches` were
-        # appended LAST to the schema, so a legacy Parquet that lacks them defaults to 0
-        # (a cosmetic display field).
+        # appended LAST to the schema, so a legacy pre-R1 Parquet lacks them — DERIVE them
+        # with the SAME helpers the legacy load applies (window_ledger_store.derive_*), so
+        # the two paths agree byte-for-byte even on a legacy-shape ledger (these are NOT
+        # cosmetic — empty_streak shows how close an EMPTY row is to SKIPPED promotion).
         cell = dict(zip(out_columns, raw, strict=True))
         record = SimpleNamespace(
             market=cell["market"],
@@ -2564,8 +2585,16 @@ def _build_window_payload_duckdb(
             attempts=cell["attempts"],
             last_error=cell["last_error"],
             last_attempt_at=cell["last_attempt_at"],
-            empty_streak=cell.get("empty_streak") or 0,
-            in_pull_fetches=cell.get("in_pull_fetches") or 0,
+            empty_streak=(
+                derive_empty_streak(str(cell["status"]), int(cell["attempts"]))
+                if cell.get("empty_streak") is None
+                else int(cell["empty_streak"])
+            ),
+            in_pull_fetches=(
+                derive_in_pull_fetches(str(cell["status"]))
+                if cell.get("in_pull_fetches") is None
+                else int(cell["in_pull_fetches"])
+            ),
         )
         rows.append(
             _window_row(
@@ -2656,17 +2685,25 @@ def build_window_payload(
     # *conn* (or no Parquet) keeps the legacy pyarrow path below byte-for-byte
     # (back-compat for existing callers + the ``window_status.json`` fallback).
     if conn is not None and ledger_file.is_file():
-        return _build_window_payload_duckdb(
-            conn,
-            ledger_file,
-            symbol_for_id=symbol_for_id,
-            market=market,
-            status=status,
-            limit=limit,
-            offset=clamp_offset(offset),
-            count_cache=count_cache,
-            generation=generation,
-        )
+        try:
+            return _build_window_payload_duckdb(
+                conn,
+                ledger_file,
+                symbol_for_id=symbol_for_id,
+                market=market,
+                status=status,
+                limit=limit,
+                offset=clamp_offset(offset),
+                count_cache=count_cache,
+                generation=generation,
+            )
+        except (duckdb.Error, KeyError, ValueError) as exc:
+            # A wrong-shape / corrupt ledger Parquet (a missing core column → a DuckDB
+            # binder error, or a KeyError on the row projection) must NOT 500 the page:
+            # fall THROUGH to the legacy pyarrow path below, which guards the core columns
+            # and degrades to an empty ledger (the route's "never a 500" promise — the
+            # fidelity the fast path would otherwise lose, hostile-review MINOR).
+            _LOG.warning("window_payload.duckdb_fallback", error=str(exc))
     if ledger_file.is_file():
         source = "ledger"
         records: tuple[Any, ...] = _ledger_records_cached(lake_root)

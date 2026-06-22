@@ -947,3 +947,87 @@ class TestBuildWindowPayloadDuckDB:
         )
         assert payload["count"] == 6
         assert payload["matched"] == 5
+
+    def test_legacy_shape_parquet_derives_streaks(self, tmp_path: Path) -> None:
+        # A LEGACY pre-R1 Parquet lacks empty_streak/in_pull_fetches; BOTH the fast path
+        # and the legacy load must DERIVE them identically (hostile-review MAJOR: NOT
+        # cosmetic — empty_streak tracks EMPTY→SKIPPED promotion).
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from brutex.data.window_ledger_store import ledger_dir, ledger_path
+
+        core = (
+            "market",
+            "security_id",
+            "interval",
+            "window_start",
+            "window_end",
+            "status",
+            "bars",
+            "attempts",
+            "last_error",
+            "first_seen_at",
+            "last_attempt_at",
+        )
+        schema = pa.schema(
+            [
+                ("market", pa.string()),
+                ("security_id", pa.string()),
+                ("interval", pa.string()),
+                ("window_start", pa.string()),
+                ("window_end", pa.string()),
+                ("status", pa.string()),
+                ("bars", pa.int64()),
+                ("attempts", pa.int64()),
+                ("last_error", pa.string()),
+                ("first_seen_at", pa.string()),
+                ("last_attempt_at", pa.string()),
+            ]
+        )
+        row = {
+            "market": "groww",
+            "security_id": "EMPTYCO",
+            "interval": "1minute",
+            "window_start": "2021-01-01",
+            "window_end": "2021-04-01",
+            "status": "EMPTY",
+            "bars": 0,
+            "attempts": 5,
+            "last_error": None,
+            "first_seen_at": "2026-06-08T12:00:00Z",
+            "last_attempt_at": "2026-06-08T12:00:00Z",
+        }
+        ledger_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({c: [row[c]] for c in core}, schema=schema), ledger_path(tmp_path))
+
+        fast = build_window_payload(tmp_path, conn=duckdb.connect(), status="EMPTY")
+        legacy = build_window_payload(tmp_path, status="EMPTY")
+        (fw,) = fast["windows"]
+        (lw,) = legacy["windows"]
+        assert fw["empty_streak"] == lw["empty_streak"] == 5  # EMPTY → attempts (derived)
+        assert fw["in_pull_fetches"] == lw["in_pull_fetches"] == 1  # non-PLANNED → 1 (derived)
+        assert fast["windows"] == legacy["windows"]  # byte-for-byte on a legacy-shape ledger
+
+    def test_invalid_market_returns_no_rows(self, tmp_path: Path) -> None:
+        # An unrecognized non-null market matches NO bucket — matched 0 + no rows (legacy
+        # parity), NOT every row; counts stay complete.
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), market="junk")
+        assert payload["matched"] == 0
+        assert payload["windows"] == []
+        assert payload["count"] == 6  # the always-complete counts are unaffected
+
+    def test_wrong_shape_parquet_falls_back_to_legacy_empty(self, tmp_path: Path) -> None:
+        # A corrupt / wrong-shape ledger Parquet (missing the `status` core column) makes
+        # the DuckDB GROUP BY raise — it must NOT 500, but fall through to the legacy path
+        # which guards core columns and degrades to an empty ledger (route "never a 500").
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from brutex.data.window_ledger_store import ledger_dir, ledger_path
+
+        ledger_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"market": ["groww"], "security_id": ["X"]}), ledger_path(tmp_path))
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        assert payload["source"] == "ledger"
+        assert payload["count"] == 0
+        assert payload["windows"] == []
