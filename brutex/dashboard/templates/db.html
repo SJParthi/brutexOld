@@ -272,7 +272,12 @@ const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: 
   /* F&O cascade substate (DEC-DB-FNO-CASCADE-001): lazy symbol→expiry→contract picker.
      `unds`/`exps`/`cons` are the three level lists; `und`/`exp`/`con` the current
      selections. Only used when kind === "fno"; spot/option keep the flat dropdown. */
-  fno: { unds: [], und: "", exps: [], exp: "", cons: [], con: "" } };
+  fno: { unds: [], und: "", exps: [], exp: "", cons: [], con: "" },
+  /* SPOT cascade substate (DEC-DB-SPOT-CASCADE-001): symbol→interval picker.
+     `syms` is the symbols-with-intervals list; `sym` the current selection
+     (an "exchange|segment|symbol" composite). Only used when kind === "spot";
+     option keeps the flat dropdown. */
+  spot: { syms: [], sym: "" } };
 /* F&O registry-viewer state (DEC-DERIV-REGISTRY-DB-VIEW-001). `kind` is the
    active registry row ("expiries"|"contracts"); the registry is a SEPARATE
    `registry.duckdb` cache surfaced read-only as a grid (columns/rows/total). */
@@ -913,24 +918,22 @@ async function selectCandles(kind) {
   const isFno = cstate.kind === "fno";
   const lakeLabel = isOpt ? "expired-option" : isFno ? "F&O candle" : "candle";
   dataEl.innerHTML = '<div class="empty">loading ' + lakeLabel + ' datasets…</div>';
-  /* F&O uses the lazy symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001) —
-     O(1) tiny payloads, not the flat thousand-row contract dropdown. */
+  /* F&O uses the lazy symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001);
+     SPOT uses the symbol→interval cascade (DEC-DB-SPOT-CASCADE-001) — both O(1)
+     tiny payloads, not a flat thousand/750-row dropdown. Only the expired-options
+     lake keeps the flat dataset dropdown below. */
   if (isFno) { await loadFnoCascade(); return; }
+  if (!isOpt) { await loadSpotCascade(); return; }
   try {
     const r = await fetch("/api/v1/db/candles/datasets");
     const body = await r.json();
-    /* This row browses ONE lake — keep only the active kind's datasets,
-       each tagged so curCols()/buildCandleUrl() pick the right schema + query path
-       (F&O reuses the spot segment=FNO candle path). */
-    /* F&O returned early above (its own cascade), so only spot + option reach here. */
-    cstate.datasets = isOpt
-      ? (body.options || []).map(d => ({ kind: "option", ...d }))
-      : (body.datasets || []).map(d => ({ kind: "spot", ...d }));
+    /* Only the expired-options lake reaches here (spot + F&O returned early to their
+       cascades) — tag each so curCols()/buildCandleUrl() pick the option schema. */
+    cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery(false);
     else renderCandleView(null,
-      isOpt ? "No expired-option data yet — pull an instrument's options on /universe first."
-      : "No spot candle data yet — pull an instrument's timeframes on /universe first.");
+      "No expired-option data yet — pull an instrument's options on /universe first.");
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
   }
@@ -991,6 +994,39 @@ function onFnoContractChange(symbol) {
   const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a contract");
+}
+
+/* ── SPOT symbol→interval cascade (DEC-DB-SPOT-CASCADE-001) ──
+   The spot twin of the F&O cascade: ONE O(1)-cached fetch of the symbols (each
+   carrying its STORED intervals inline), then a symbol pick materialises the
+   per-interval dataset descriptors so curDataset()/buildCandleUrl() work exactly
+   as the flat dropdown did — the cascade is purely the picker, the query path is
+   shared. A symbol is keyed by its "exchange|segment|symbol" composite so two
+   exchanges' same-named symbols never alias. */
+function _spotKey(s) { return [s.exchange, s.segment, s.symbol].join("|"); }
+async function loadSpotCascade() {
+  const body = await _fnoFetch("/api/v1/db/spot/symbols");
+  cstate.spot = { syms: (body && body.symbols) || [], sym: "" };
+  cstate.datasets = []; cstate.key = null;
+  if (!cstate.spot.syms.length) {
+    renderCandleView(null, "No spot candle data yet — pull an instrument's timeframes on /universe first.");
+    return;
+  }
+  renderCandleView(null, "pick a symbol → interval");
+}
+/* A symbol carries its available STORED intervals; materialise ONE spot dataset
+   descriptor per interval so the shared candle query path can address it, then
+   default to 1-minute and run the page. */
+function onSpotSymbolChange(key) {
+  cstate.spot.sym = key;
+  const s = cstate.spot.syms.find(x => _spotKey(x) === key) || null;
+  if (!s) { cstate.datasets = []; cstate.key = null; renderCandleView(null, "pick a symbol"); return; }
+  cstate.datasets = (s.intervals || []).map(iv => ({
+    kind: "spot", exchange: s.exchange, segment: s.segment, symbol: s.symbol, interval: iv }));
+  cstate.cols = null; cstate.offset = 0;
+  const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
+  cstate.key = pref ? dsKey(pref) : null;
+  if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a symbol");
 }
 
 function buildCandleUrl() {
@@ -1055,10 +1091,13 @@ function candleControlsHtml() {
     const on = cstate.cols === null || cstate.cols.has(c);
     return '<label><input type="checkbox" class="ccol" value="' + c + '"' + (on ? " checked" : "") + '>' + c + '</label>';
   }).join("");
-  /* F&O shows the symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001); spot &
-     option keep the single flat dataset dropdown. */
+  /* F&O shows the symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001); SPOT shows
+     the symbol→interval cascade (DEC-DB-SPOT-CASCADE-001); only the expired-options
+     lake keeps the single flat dataset dropdown. */
   const picker = cstate.kind === "fno"
     ? fnoCascadeHtml()
+    : cstate.kind === "spot"
+    ? spotCascadeHtml()
     : '<span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>';
   return '<div class="qbar">'
     + '<div class="qrow">' + picker
@@ -1086,6 +1125,27 @@ function fnoCascadeHtml() {
   let h = '<span class="lab">Underlying</span><select id="cund">' + undOpts + '</select>'
     + '<span class="lab">Expiry</span><select id="cexp"' + (f.und ? "" : " disabled") + '>' + expOpts + '</select>'
     + '<span class="lab">Contract</span><select id="ccon"' + (f.exp ? "" : " disabled") + '>' + conOpts + '</select>';
+  const d = curDataset();
+  const intervals = cstate.datasets.map(x => x.interval);
+  if (intervals.length > 1) {
+    h += '<span class="lab">Interval</span><select id="cintv">'
+      + intervals.map(iv => '<option value="' + esc(iv) + '"'
+        + (d && iv === d.interval ? " selected" : "") + '>' + esc(iv) + '</option>').join("")
+      + '</select>';
+  }
+  return h;
+}
+
+/* The SPOT cascade picker markup: a symbol select + an interval sub-pick when the
+   chosen symbol has more than one STORED interval (DEC-DB-SPOT-CASCADE-001). The
+   indices float to the top of the symbol list (server-sorted). The interval pick
+   reuses the shared `cintv` handler. */
+function spotCascadeHtml() {
+  const sp = cstate.spot;
+  const symOpts = '<option value="">— symbol —</option>'
+    + sp.syms.map(s => '<option value="' + esc(_spotKey(s)) + '"'
+      + (_spotKey(s) === sp.sym ? " selected" : "") + '>' + esc(s.label) + '</option>').join("");
+  let h = '<span class="lab">Symbol</span><select id="csym">' + symOpts + '</select>';
   const d = curDataset();
   const intervals = cstate.datasets.map(x => x.interval);
   if (intervals.length > 1) {
@@ -1164,6 +1224,10 @@ function renderCandleView(body, err) {
   if (cexp) cexp.addEventListener("change", () => onFnoExpiryChange(cexp.value));
   const ccon = document.getElementById("ccon");
   if (ccon) ccon.addEventListener("change", () => onFnoContractChange(ccon.value));
+  /* SPOT cascade handler (DEC-DB-SPOT-CASCADE-001): the symbol pick materialises the
+     per-interval descriptors + runs the page; the interval sub-pick below is shared. */
+  const csym = document.getElementById("csym");
+  if (csym) csym.addEventListener("change", () => onSpotSymbolChange(csym.value));
   const cintv = document.getElementById("cintv");
   if (cintv) cintv.addEventListener("change", () => {
     const pick = cstate.datasets.find(x => x.interval === cintv.value);

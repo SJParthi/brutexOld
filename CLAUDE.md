@@ -230,7 +230,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-tab-switch-o1-jlzt1n` (the `/db` candle tab switch (spot ↔ F&O ↔ option) is now O(1):
+- **Active branch:** `claude/db-spot-cascade-jlzt1n` (the `/db` SPOT candle picker is now a symbol→interval CASCADE
+  (the spot twin of the F&O cascade), replacing the flat ~750-row dropdown so the operator can pick an underlying
+  symbol + a stored timeframe — DEC-DB-SPOT-CASCADE-001, MIGRATION.md #897, the operator's "even for candles i can't
+  select the underlying symbol or timeframe … we need the same as fno candle". NEW pure `spot_cascade.py`
+  (`build_spot_cascade` → `SpotCascadeIndex.symbols()` O(1); `SpotSymbol` leaf carrying its STORED intervals inline;
+  `symbol_to_json`) groups the non-F&O datasets by `(exchange, segment, symbol)`, sorted indices-first then alpha
+  (the `INDEX` segment floats NIFTY/BANKNIFTY/SENSEX to the top, DATA-DRIVEN); ONE route `GET /api/v1/db/spot/symbols`
+  via `_spot_cascade_or_none()` memoised behind `_summary_cache.generation` in a dedicated `_spot_cascade_cache`
+  (REUSES the COMMON `MoversSnapshotCache` — no copy of `FnoCascadeCache`); the `db.html` frontend gains
+  `cstate.spot` + `loadSpotCascade`/`onSpotSymbolChange`/`spotCascadeHtml` + a `csym` select, a symbol pick
+  MATERIALISES the per-interval descriptors so the SHARED `query_candles` path is byte-unchanged. STORED-ONLY
+  intervals (1m + derived 1d) — `query_candles` reads a physical partition + returns empty for an absent one, so
+  offering all 21 TFs would be a phantom (mirrors F&O). HONEST: O(1)-cached per generation (cold build is one
+  O(datasets) walk); picker-only (query path unchanged); only the expired-OPTIONS lake keeps the flat dropdown;
+  `spot_cascade.py` imports nothing from `dashboard.*`/`data.*` (no import cycle). `spot_cascade.py` 100% line+branch
+  (32/2, 6 unit); `app.py` stays 100%; NEW 4 integration tests; ruff/`mypy --strict`/`pyright` clean. ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap change. Prior merged: DEC-DB-TAB-SWITCH-O1-001,
+  MIGRATION.md #896 (the `/db` candle tab switch (spot ↔ F&O ↔ option) is now O(1):
   the `/api/v1/db/candles/datasets` discovery endpoint — which walked the WHOLE `bars/` tree THREE times on EVERY tab
   switch — is memoised behind the shared write generation, so a switch within one generation is a cached handoff
   instead of a triple full-lake dir-walk — DEC-DB-TAB-SWITCH-O1-001, MIGRATION.md #896, the operator's "to navigate
@@ -802,7 +819,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-tab-switch-o1-jlzt1n`
+- **Active feature branch:** `claude/db-spot-cascade-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
