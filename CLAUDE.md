@@ -228,9 +228,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/telegram-dashboard-halt-jlzt1n` (the DASHBOARD pull path now ALSO fires the CRITICAL
+- **Active branch:** `claude/atomic-write-common-jlzt1n` (the engine sidecar writers now share the ONE atomic-write
+  core via a NEW guard-free `atomic_write_simple`, killing the hand-rolled `mkstemp`/`fsync`/`os.replace`/cleanup
+  copies — the #885 COMMON follow-up — DEC-ATOMIC-WRITE-CONSOLIDATE-001, MIGRATION.md #890: #885 centralised the
+  LAKE writers' atomic write but left the others as noted debt. `results_store._atomic_write` +
+  `sweep_checkpoint._atomic_write` were byte-near-identical copies (and `trial_stats`/`tuple_complete`/`sweep_heal`
+  delegate to results_store, so 5 engine writers rode 2 copies). The blocker to reusing `atomic_write_via`: it bakes
+  in `lake_write_guard` (ENOSPC/OOM → `LakeWriteHalt`), SEMANTICALLY WRONG for the engine (which wraps raw `OSError`
+  into its OWN `ResultsStoreError`/`SweepCheckpointError` + is NOT wired for the lake global-stop). FIX: `atomic_io.py`
+  refactored to a shared `_atomic_write_core` exposed as `atomic_write_via` (lake-guarded, the 2 Parquet writers,
+  byte-unchanged) + a NEW `atomic_write_simple` (guard-FREE — every error incl. raw ENOSPC propagates as-is); the 2
+  engine writers delegate to `atomic_write_simple`. HONEST: ZERO engine error-semantics change (same raw OSError →
+  same domain-error contracts/tests preserved; disk-full NOT mis-escalated to LakeWriteHalt); a tiny durability win
+  (core `finally` cleans the temp on ANY error vs the old `except OSError`); lake `atomic_write_via` byte-equivalent
+  (#885 invariants re-verified); consolidates the ENGINE copies ONLY — the non-lake `runtime`/`credentials`(+chmod)/
+  `ntm_cache`(returns False) + the `window_ledger` guard-extend remain the EXPLICIT next follow-up, NOT claimed.
+  `atomic_io.py` at 100% line+branch (new atomic_write_simple tests); results_store/sweep_checkpoint stay 100%
+  (cleanup tests repointed to `atomic_io.os.replace` + `.brutex-write-*` prefix); 268 engine+atomic_io+lake-writer
+  tests green; ruff/`mypy --strict brutex` (254 files)/pyright clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no
+  scope/vocab/rate-cap change. Prior merged: DEC-TELEGRAM-PULL-HALT-DASHBOARD-001, MIGRATION.md #889 (the DASHBOARD
+  pull path ALSO fires the CRITICAL
   pull-halt Telegram alert — the dashboard twin of #888 — so a halt reaches the operator regardless of which
-  entrypoint pulls — DEC-TELEGRAM-PULL-HALT-DASHBOARD-001, MIGRATION.md #889: #888 wired ONLY the CLI `cmd_fetch`
+  entrypoint pulls: #888 wired ONLY the CLI `cmd_fetch`
   path; the dashboard `/pull-pipeline` (primary pull UI) had no halt alert. A `LakeWriteHalt`/`QuotaInvariantError`
   propagates uncaught out of `pull_all_spot` to the ONE chokepoint `BackgroundPullJob._run`'s `except Exception`
   (`brutex/dashboard/pull_jobs.py`) where every backgrounded dashboard pull lands. (1) the CLI's `_emit_pull_halt_alert`
@@ -671,7 +690,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/telegram-dashboard-halt-jlzt1n`
+- **Active feature branch:** `claude/atomic-write-common-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

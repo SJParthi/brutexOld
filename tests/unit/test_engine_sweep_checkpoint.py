@@ -234,11 +234,13 @@ def test_atomic_write_cleanup_on_replace_failure(
     def _boom(*_a: Any, **_k: Any) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(ckpt.os, "replace", _boom)
+    # The atomic write is now the shared atomic_io core (DEC-ATOMIC-WRITE-CONSOLIDATE-001),
+    # so os.replace + the temp prefix live there.
+    monkeypatch.setattr("brutex.data.atomic_io.os.replace", _boom)
     with pytest.raises(OSError, match="replace failed"):
         ckpt._atomic_write(dest, b"data")
     # No temp files left behind in the directory.
-    assert list(tmp_path.glob(".brutex-ckpt-*")) == []
+    assert list(tmp_path.glob(".brutex-write-*")) == []
     assert not dest.exists()
 
 
