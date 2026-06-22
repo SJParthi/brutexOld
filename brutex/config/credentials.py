@@ -17,10 +17,11 @@ every dashboard pull to dry-run.
 * **Never logged.** No secret VALUE is ever passed to ``structlog`` /
   ``print`` / ``logging``. Error messages name WHICH field is missing,
   never its value.
-* **Mode 0600, atomic write.** The credentials file is written to a temp
-  file in the same directory, ``chmod`` 0600, then ``os.replace``-d into
-  place — there is never a window where it exists world-readable. The
-  parent dir is created mode 0700.
+* **Mode 0600, atomic write.** The credentials file is written via the COMMON
+  :func:`brutex.data.atomic_io.atomic_write_simple` with ``chmod=0o600`` — a temp
+  in the same directory (created 0600 by ``mkstemp``) is ``chmod``-ed 0600, then
+  ``os.replace``-d into place — so there is never a window where it exists
+  world-readable. The parent dir is created mode 0700.
 * **Insecure-perms refusal on read.** A file whose mode has any group /
   world bits (``mode & 0o077 != 0``) is REFUSED with a
   :class:`CredentialsError` telling the operator to ``chmod 600``.
@@ -330,10 +331,10 @@ def save_token_credentials(creds: TokenFileCredentials, *, path: Path | None = N
     -----
     The write is a **read-merge-write** (:func:`_save_section`): the existing
     file is read first so a stored Groww section is preserved, then only the
-    ``token`` section is replaced and the whole object written atomically — a
-    :func:`tempfile.NamedTemporaryFile` ``chmod``-ed 0600 then ``os.replace``-d
-    over *path*, so the file never exists world-readable. On any failure the
-    temp file is removed.
+    ``token`` section is replaced and the whole object written atomically — via
+    the COMMON :func:`brutex.data.atomic_io.atomic_write_simple` with
+    ``chmod=0o600`` (temp in the same dir, ``chmod`` 0600, then ``os.replace``),
+    so the file never exists world-readable. On any failure the temp is removed.
     """
     if not creds.access_token.strip():
         raise CredentialsError("access_token must not be blank")
