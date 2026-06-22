@@ -689,14 +689,16 @@ def _resolve_minute_windows(
 ) -> dict[str, tuple[date, date]]:
     """Resolve each contract's half-open ``[start, end)`` 1-minute fetch window — pure.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. When the operator passed explicit from/to dates
-    (*explicit_dates* True) EVERY contract uses the resolved ``[start, end)`` envelope
-    verbatim (the dates OVERRIDE). Otherwise each contract gets its OWN per-contract
-    DEFAULT — ``expiry − 3 calendar months → expiry+1day`` clamped into ``[start, end)``
-    (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`) — so the
-    1-minute fill targets the recent life of each contract, not blindly from 2020. A
-    contract with no ``expiry`` falls back to the full range (the helper's never-skip
-    choice). Pure + O(contracts); no lake I/O.
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001 → DEC-FNO-LOOKBACK-SPLIT-001. When the operator
+    passed explicit from/to dates (*explicit_dates* True) EVERY contract uses the
+    resolved ``[start, end)`` envelope verbatim (the dates OVERRIDE). Otherwise each
+    contract gets its OWN per-contract DEFAULT, SPLIT by type — futures
+    ``expiry − 3 calendar months → expiry+1day``, options ``expiry − 30 days →
+    expiry+1day`` — clamped into ``[start, end)``
+    (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`, passed
+    ``is_option`` for a ``CE``/``PE`` leg) — so the 1-minute fill targets the recent life
+    of each contract, not blindly from 2020. A contract with no ``expiry`` falls back to
+    the full range (the helper's never-skip choice). Pure + O(contracts); no lake I/O.
 
     Returns
     -------
@@ -709,7 +711,12 @@ def _resolve_minute_windows(
             windows[contract.symbol] = (start, end)
         else:
             windows[contract.symbol] = default_fno_minute_window(
-                contract.expiry, full_start=start, full_end=end
+                contract.expiry,
+                full_start=start,
+                full_end=end,
+                # DEC-FNO-LOOKBACK-SPLIT-001: options default to a tighter 30-day
+                # lookback, futures to 3 months. CE/PE → option; FUT → future.
+                is_option=contract.contract_type in {"CE", "PE"},
             )
     return windows
 

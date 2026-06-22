@@ -23,6 +23,7 @@ import pytest
 from brutex.adapters.groww.constants import OPTION_SEGMENT, TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.contract_bounds import (
     DEFAULT_FNO_LOOKBACK_MONTHS,
+    DEFAULT_OPTION_LOOKBACK_DAYS,
     ContractCoverage,
     contract_daily_coverage,
     coverage_to_minute_window,
@@ -239,6 +240,48 @@ def test_default_fno_window_collapsed_span_falls_back_to_full() -> None:
     full = (date(2024, 1, 1), date(2026, 6, 13))
     win = default_fno_minute_window(date(2023, 6, 1), full_start=full[0], full_end=full[1])
     assert win == full
+
+
+# DEC-FNO-LOOKBACK-SPLIT-001 — options default to 30 days, futures stay 3 months.
+def test_default_option_lookback_is_30_days() -> None:
+    assert DEFAULT_OPTION_LOOKBACK_DAYS == 30
+
+
+def test_default_window_option_uses_expiry_minus_30_days() -> None:
+    # is_option=True → start = expiry − 30 days (NOT 3 calendar months).
+    win = default_fno_minute_window(
+        date(2024, 1, 25),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=True,
+    )
+    # 2024-01-25 − 30 days = 2023-12-26; end-exclusive expiry+1 day = 2024-01-26.
+    assert win == (date(2023, 12, 26), date(2024, 1, 26))
+
+
+def test_default_window_future_and_option_differ_for_same_expiry() -> None:
+    # The SAME expiry yields a 3-month future window but only a 30-day option window.
+    expiry, full_start, full_end = date(2024, 1, 25), date(2020, 1, 1), date(2026, 6, 13)
+    future = default_fno_minute_window(
+        expiry, full_start=full_start, full_end=full_end, is_option=False
+    )
+    option = default_fno_minute_window(
+        expiry, full_start=full_start, full_end=full_end, is_option=True
+    )
+    assert future == (date(2023, 10, 25), date(2024, 1, 26))  # 3 calendar months
+    assert option == (date(2023, 12, 26), date(2024, 1, 26))  # 30 days — tighter
+    assert option[0] > future[0]  # the option window starts later (shorter lookback)
+
+
+def test_default_window_option_clamps_start_to_full_start() -> None:
+    # An option whose expiry−30d predates the floor still clamps up to full_start.
+    win = default_fno_minute_window(
+        date(2020, 1, 10),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=True,
+    )
+    assert win == (date(2020, 1, 1), date(2020, 1, 11))
 
 
 # ─────────────────────────────────────────────────────────────────────────
