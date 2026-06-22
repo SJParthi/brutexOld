@@ -15,6 +15,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
+import pytest
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.pull_progress import STATE_DONE, STATE_ERROR, STATE_RUNNING, PullProgress
 from brutex.dashboard.summary_cache import CoverageCounters
@@ -69,6 +70,47 @@ def test_worker_exception_becomes_error_state() -> None:
     assert snap.state == STATE_ERROR
     assert snap.detail == "RuntimeError: boom"
     assert job.running is False  # flag reset even on failure
+
+
+def test_pull_halt_global_stop_fires_alert_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pull-wide LakeWriteHalt → error state AND a best-effort halt alert fires once.
+
+    DEC-TELEGRAM-PULL-HALT-DASHBOARD-001 — the dashboard twin of the CLI cmd_fetch
+    wiring: a disk-full/OOM/quota global-stop halts EVERY remaining window, so the
+    operator gets a CRITICAL Telegram alert. The error state already reported is
+    unchanged; the alert is best-effort (the emit is monkeypatched here).
+    """
+    from brutex.data.errors import LakeWriteHalt
+
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+
+    def work(_on_progress: ProgressHook) -> None:
+        raise LakeWriteHalt("disk_full")
+
+    assert job.start(work, total=1) is True
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR  # error state byte-unchanged
+    assert "LakeWriteHalt" in snap.detail
+    assert len(halts) == 1  # alert fired EXACTLY once for the global stop
+    assert isinstance(halts[0], LakeWriteHalt)
+
+
+def test_generic_worker_error_does_not_fire_pull_halt_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-symbol / generic worker error → error state but NO pull-halt alert."""
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+
+    def work(_on_progress: ProgressHook) -> None:
+        raise RuntimeError("boom")
+
+    assert job.start(work, total=1) is True
+    assert job.snapshot().state == STATE_ERROR
+    assert halts == []  # a generic worker error NEVER fires the pull-halt alert
 
 
 def test_failed_unit_flag_is_forwarded() -> None:

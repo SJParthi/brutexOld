@@ -228,9 +228,25 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/telegram-critical-alerts-jlzt1n` (a pull-wide HALT — disk-full / OOM / quota — now fires
+- **Active branch:** `claude/telegram-dashboard-halt-jlzt1n` (the DASHBOARD pull path now ALSO fires the CRITICAL
+  pull-halt Telegram alert — the dashboard twin of #888 — so a halt reaches the operator regardless of which
+  entrypoint pulls — DEC-TELEGRAM-PULL-HALT-DASHBOARD-001, MIGRATION.md #889: #888 wired ONLY the CLI `cmd_fetch`
+  path; the dashboard `/pull-pipeline` (primary pull UI) had no halt alert. A `LakeWriteHalt`/`QuotaInvariantError`
+  propagates uncaught out of `pull_all_spot` to the ONE chokepoint `BackgroundPullJob._run`'s `except Exception`
+  (`brutex/dashboard/pull_jobs.py`) where every backgrounded dashboard pull lands. (1) the CLI's `_emit_pull_halt_alert`
+  body is MOVED to a COMMON `emit_pull_halt_alert(exc)` in `sweep_alerts.py` (ONE source of truth — `cli._emit_pull_halt_alert`
+  is now a thin delegating wrapper, CLI byte-unchanged); (2) `_run`'s except now calls it GUARDED by a NEW `_is_pull_halt(exc)`
+  (isinstance of the spine's global-stop set), so it fires ONLY for a pull-wide halt — a generic per-symbol worker error
+  NEVER alerts — and the reported error state is byte-unchanged. HONEST: best-effort/silent-no-op-when-disabled;
+  `pull_jobs.py` stays WHEEL-FREE at import (heavy `quota_tracker`/`data.errors` classes lazy-imported inside `_is_pull_halt`);
+  the dashboard QUOTA stop is a VERDICT not a raise so it does NOT fire this hook (operator already sees it on the UI) —
+  a verdict-driven phone alert is a flagged FOLLOW-UP (route bodies are pragma-no-cover), NOT claimed. `sweep_alerts.py`
+  + `pull_jobs.py` both at 100% line+branch (new emit_pull_halt_alert + halt-fires-once / generic-no-alert tests); 147
+  notifications+dashboard+CLI tests green; ruff/mypy --strict/pyright clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX),
+  no scope/vocab/rate-cap change. Prior merged: DEC-TELEGRAM-PULL-HALT-001, MIGRATION.md #888 (a pull-wide HALT —
+  disk-full / OOM / quota — fires
   a CRITICAL Telegram alert so the operator is told in REAL TIME, not just in a log; the observability capstone of
-  the resilience batch — DEC-TELEGRAM-PULL-HALT-001, MIGRATION.md #888: the just-shipped batch makes a pull HALT
+  the resilience batch: the just-shipped batch makes a pull HALT
   gracefully on a full disk / OOM (`LakeWriteHalt` #885) or a quota stop, but the operator only learned of it from a
   log line (§11 AUTOMATED wants it ALERTED, "ZERO clicks per day"). NEW `SweepAlerter.pull_halted(*, reason)` alert
   (CRITICAL `PHASE_BLOCKED`, reason-scoped dedupe), wired into the CLI `cmd_fetch` pull path: `_one_fetch_pass` wraps
@@ -655,7 +671,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/telegram-critical-alerts-jlzt1n`
+- **Active feature branch:** `claude/telegram-dashboard-halt-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
