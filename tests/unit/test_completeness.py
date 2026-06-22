@@ -26,13 +26,17 @@ from brutex.dashboard.completeness import (
     OPT_NONE,
     OPT_PARTIAL,
     OPT_STABLE,
+    RECONCILE_MISMATCH_EVENT,
+    SymbolReconcileReport,
     _aggregate_options,
     _contracts_note,
     _option_verdict,
     _overall_spot,
     build_completeness_scoreboard,
     categorize_instruments,
+    log_symbol_reconcile_from_board,
     per_symbol_completeness,
+    reconcile_symbol_coverage,
     scoreboard_to_csv,
 )
 from brutex.dashboard.coverage_view import (
@@ -49,6 +53,7 @@ from brutex.data.coverage_ledger import (
     STATUS_PENDING,
     CoverageRecord,
 )
+from structlog.testing import capture_logs
 
 
 def _spot_row(
@@ -57,12 +62,18 @@ def _spot_row(
     completeness: str,
     *,
     exchange: str = "NSE",
+    segment: str = "CASH",
     first_date: str | None = None,
     last_date: str | None = None,
 ) -> dict[str, Any]:
+    # Production rows from ``summarize_spot_datasets`` always carry ``segment``; the
+    # reconciliation diagnostic filters on it (spot segments only — F&O ``1minute``
+    # contract partitions are NOT scored underlyings). Default ``CASH`` keeps every
+    # pre-existing row a scored spot symbol.
     return {
         "symbol": symbol,
         "exchange": exchange,
+        "segment": segment,
         "interval": interval,
         "completeness": completeness,
         "first_date": first_date,
@@ -721,3 +732,182 @@ def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> Non
     # _csv_yes_no False).
     finnifty = by_symbol["NSE-FINNIFTY"]
     assert finnifty[4] == "" and finnifty[5] == "" and finnifty[6] == "no"
+
+
+# ---------------------------------------------------------------------------
+# DEC-COMPLETENESS-RECONCILE-DIAG-001 — the OBSERVE-ONLY lake↔scored reconciliation
+# diagnostic that PINPOINTS why a symbol like ``M&M`` reads ``none`` despite having lake
+# data (a stored lake/ledger key that diverges from the scored ``symbol_name`` it is looked
+# up by). It logs ONE structured WARNING and changes NO scoreboard output.
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_clean_when_keys_match() -> None:
+    """No divergence → an empty report with ``has_mismatch()`` False (the healthy state)."""
+    report = reconcile_symbol_coverage(
+        lake_symbols=["M&M", "NSE-NIFTY"], scored_symbols=["M&M", "NSE-NIFTY"]
+    )
+    assert report == SymbolReconcileReport(
+        stray_lake_symbols=(),
+        stray_lake_count=0,
+        unmatched_scored_symbols=(),
+        unmatched_scored_count=0,
+    )
+    assert report.has_mismatch() is False
+
+
+def test_reconcile_surfaces_both_sides_of_a_trailing_space_divergence() -> None:
+    """The CONFIRMED ``M&M`` failure: the lake key carries a trailing space (``'M&M '``) so the
+    scored ``'M&M'`` matches no lake row (reads ``none``) AND the lake key is unscored — BOTH
+    sides are surfaced, with duplicates collapsed and the sample SORTED."""
+    report = reconcile_symbol_coverage(
+        # A divergent ``"M&M "`` (trailing space) + a clean match + a duplicate stray.
+        lake_symbols=["M&M ", "M&M ", "NSE-NIFTY"],
+        scored_symbols=["M&M", "NSE-NIFTY"],
+    )
+    assert report.stray_lake_symbols == ("M&M ",)  # NSE-NIFTY matched → not stray
+    assert report.stray_lake_count == 1
+    assert report.unmatched_scored_symbols == ("M&M",)  # the scored M&M has no lake key
+    assert report.unmatched_scored_count == 1
+    assert report.has_mismatch() is True
+
+
+def test_reconcile_caps_samples_but_keeps_full_counts() -> None:
+    """A flood of stray / unmatched keys truncates the SAMPLE lists to the cap while the COUNTS
+    stay the full totals (so one badly-diverged master can never bloat the log line)."""
+    # 12 stray lake keys (none scored) and 15 scored keys (none in the lake) — both exceed the
+    # 10-entry sample cap, proving the counts are full but the samples truncated + sorted.
+    lake = [f"L{i:02d}" for i in range(12)]
+    scored = [f"S{i:02d}" for i in range(15)]
+    report = reconcile_symbol_coverage(lake_symbols=lake, scored_symbols=scored)
+    assert report.stray_lake_count == 12
+    assert report.unmatched_scored_count == 15
+    assert len(report.stray_lake_symbols) == 10
+    assert len(report.unmatched_scored_symbols) == 10
+    # Sorted + capped: the first ten of each sorted set.
+    assert report.stray_lake_symbols == tuple(sorted(lake)[:10])
+    assert report.unmatched_scored_symbols == tuple(sorted(scored)[:10])
+
+
+def test_log_reconcile_from_board_fires_warning_naming_both_repr_strings() -> None:
+    """The build-path wiring: a scored ``M&M`` + a lake row keyed on the DIVERGENT ``'M&M '``
+    (trailing space) → ``M&M`` reads ``none`` on the board AND the diagnostic logs ONE WARNING
+    naming BOTH ``repr()`` strings, so the invisible trailing space is visible. This is the
+    regression that does NOT log on origin/main (no diagnostic) and DOES with this change."""
+    spot_rows = [
+        # The lake partition's key — a TRAILING SPACE the scored map lacks.
+        _spot_row("M&M ", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+    ]
+    # The scored universe keys on the CLEAN ``M&M`` (the engine ``symbol_name``).
+    cats = {"M&M": CATEGORY_EQUITY, "NSE-NIFTY": CATEGORY_INDEX}
+
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, cats)
+
+    assert report.has_mismatch() is True
+    warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+    assert len(warnings) == 1
+    entry = warnings[0]
+    assert entry["log_level"] == "warning"
+    assert entry["stray_lake_count"] == 1
+    assert entry["unmatched_scored_count"] == 1
+    # repr() makes the trailing space VISIBLE on BOTH sides — the exact divergence.
+    assert entry["stray_lake_symbols"] == [repr("M&M ")]
+    assert entry["unmatched_scored_symbols"] == [repr("M&M")]
+    # repr() literally renders the trailing-space form (the pinpointed key drift).
+    assert "'M&M '" in entry["stray_lake_symbols"][0]
+    assert entry["unmatched_scored_symbols"][0] == "'M&M'"
+
+
+def test_log_reconcile_from_board_silent_and_scoreboard_unchanged_when_clean() -> None:
+    """The clean case: a CONSISTENT ``M&M`` on both the lake row AND the scored map reads
+    normally and fires NO warning — AND the scoreboard payload is byte-identical with vs
+    without the diagnostic (observability ONLY, no row added / removed / altered)."""
+    spot_rows = [
+        _spot_row("M&M", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+        # A DERIVED intraday TF row for the SAME symbol — NOT a distinct lake symbol, so it
+        # must NOT be treated as a stray key (covers the SPOT_DIMENSIONS interval filter).
+        _spot_row("M&M", "5minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+    ]
+    cats = {"M&M": CATEGORY_EQUITY, "NSE-NIFTY": CATEGORY_INDEX}
+
+    # Build the board BEFORE running the diagnostic over the SAME mutable inputs ...
+    board_before = build_completeness_scoreboard(spot_rows, cats, [], {})
+
+    # The diagnostic stays SILENT — every scored symbol is backed by a lake key and vice versa.
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, cats)
+    assert report.has_mismatch() is False
+    assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
+
+    # ... then build AGAIN from those SAME inputs: byte-identical proves the diagnostic
+    # mutated NEITHER ``spot_rows`` NOR ``cats`` (true non-interference, not just determinism).
+    board_after = build_completeness_scoreboard(spot_rows, cats, [], {})
+    assert board_after == board_before
+    # The scoreboard scores ``M&M`` normally (DIM_FULL, not ``none``) — the consistent case.
+    per_symbol = {row["symbol"]: row for row in board_after["spot"]["per_symbol"]}
+    assert per_symbol["M&M"]["1minute"] == DIM_FULL
+
+
+def test_log_reconcile_does_not_log_when_a_derived_row_is_the_only_extra() -> None:
+    """A derived intraday-TF row for a scored symbol is filtered out by SPOT_DIMENSIONS, so it
+    is NOT counted as a stray lake key — the diagnostic stays silent (covers the interval-skip
+    branch of the lake-symbol comprehension)."""
+    spot_rows = [
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+        # Only a derived 1-day row exists for FINNIFTY — NOT the fetched 1-minute dimension,
+        # so FINNIFTY is neither a stray lake key (filtered) nor scored.
+        _spot_row("NSE-FINNIFTY", "1day", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX}
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, cats)
+    assert report.has_mismatch() is False
+    assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
+
+
+def test_log_reconcile_excludes_fno_contract_partitions() -> None:
+    """An F&O contract partition is ALSO stored at ``1minute`` but is NEVER a scored spot
+    underlying — the lake-symbol set is filtered to spot segments (``SPOT_PROBE_SEGMENTS`` =
+    INDEX/CASH), so a ``segment="FNO"`` 1-minute partition is NOT counted as a stray. Without
+    this filter every backfilled F&O contract would fire the WARNING on EVERY load and drown
+    the real signal; the diagnostic must stay SILENT here (covers the segment-filter False
+    branch)."""
+    spot_rows = [
+        _spot_row(
+            "NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, segment="INDEX", first_date="2020-01-01"
+        ),
+        # An F&O contract partition at 1minute — present on disk, NOT a scored underlying.
+        _spot_row(
+            "NSE-NIFTY25JAN24000CE",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            segment="FNO",
+            first_date="2025-01-01",
+        ),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX}
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, cats)
+    # The FNO partition is excluded by the spot-segment filter → no stray, no mismatch, silent.
+    assert report.stray_lake_count == 0
+    assert report.has_mismatch() is False
+    assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
+
+
+def test_log_reconcile_from_board_is_guarded_against_a_malformed_row() -> None:
+    """OBSERVE-ONLY must NEVER break the page: a malformed row (missing ``symbol``) raises
+    inside the comprehension; the body is wrapped so the error is caught, logged ONCE as
+    ``completeness.symbol_reconcile_error``, and an empty report returned — no raise (covers the
+    defensive except branch)."""
+    spot_rows = [{"interval": "1minute", "segment": "CASH"}]  # no "symbol" → KeyError
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, {"NSE-NIFTY": CATEGORY_INDEX})
+    assert report.has_mismatch() is False
+    assert report.stray_lake_count == 0
+    assert report.unmatched_scored_count == 0
+    errors = [e for e in logs if e.get("event") == "completeness.symbol_reconcile_error"]
+    assert len(errors) == 1
+    assert errors[0]["log_level"] == "warning"

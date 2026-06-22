@@ -230,26 +230,35 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rate-ceiling-8-to-5-jlzt1n` (the production Groww per-second rate ceiling is LOWERED
-  8 → 5 r/s — DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906, the operator's "add Rate-ceiling tuning (8→5?)".
-  ROOT: a live-log audit of a full F&O backfill showed the adaptive controller spent the whole pull stepped DOWN
-  at the soft floor (~3 r/s) absorbing ~870 vendor 429-retries (0 data loss) while the ceiling sat at 8; the
-  vendor 429s even at 3–5 r/s so the 5–8 headroom was never usable throughput — it only let the controller probe
-  UP into a wall and pay another wasted 429 ladder. An in-repo note already said "vendor 429s above ~5 r/s anyway",
-  so 8 already contradicted the repo's own measurement. FIX (adapter + dashboard CONFIG + tests only; NO
-  engine/lake/vocab/scope change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): the single source-of-truth constant
-  `GROWW_RATE_LIMIT_RPS_CEILING` drops `8.0` → `5.0`; BOTH production injection sites already read the CONSTANT
-  (dashboard `_build_live_controller` + CLI `cmd_fetch`), so no wiring changed; all surrounding prose reconciled
-  (5×60 = 300/min < the 500/min governor; ~2-window/~2-min recovery; ~200 ms spacing; Little's-Law ~0.75 concurrent),
-  genuinely-historical past-run measurements LEFT INTACT (Golden Rule #1). HONEST: a cap-LOWERING is intrinsically
-  safe (only ever lowers the issue rate — §2 Rule 6 satisfied); the per-second cap STAYS officially UNVERIFIED (5
-  is an operator decision, NOT vendor-confirmed); the `5×60 = 300 ≤ 500` safety invariant is property-TESTED; the
-  AIMD ladder + governor + floors (3.0/1.0) are PROVABLY unchanged (rate_common diff comment-only). `constants.py`
-  100% line+branch (49/4) + `rate_common.py` 100% (140/36) + `pull_controller.py` 100%; 191 rate/constants/
-  pull-controller/cli-retry tests green; ruff/`mypy --strict`/`pyright` clean; hostile-reviewer SHIP (2 cosmetic
-  NITs — a stale "8 r/s" docstring in the generic AIMD-ladder test FOLDED, a harmless `<`→`<=` left as the correct
-  safety boundary), workspace-health HEALTHY. SUPERSEDES DEC-GROWW-RATE-CEILING-8-001. ENGINE UNCHANGED, no
-  scope/vocab change. Prior merged: DEC-FNO-PULL-ORDER-LOOKBACK-001, MIGRATION.md #905 (the historical F&O pull
+- **Active branch:** `claude/mnm-completeness-diagnostic-jlzt1n` (an OBSERVE-ONLY `/completeness` diagnostic that
+  PINPOINTS why a stock — the operator's "M&M" — reads empty on the scoreboard — DEC-COMPLETENESS-RECONCILE-DIAG-001,
+  MIGRATION.md #907, the operator's "see still why M&M is still empty … thoroughly check this" + AskUserQuestion
+  "Ship a diagnostic to pinpoint it". ROOT MECHANISM (now made visible, NOT yet repaired): `_per_symbol_spot` drops
+  any lake-coverage row whose `symbol` key is absent from the scored `categories` map (`category =
+  categories.get(symbol); if category is None: continue`) — so a lake partition keyed on a near-identical form (a
+  trailing-space `"M&M "`, an exchange-prefixed `"NSE-M&M"`, a non-ASCII byte) has DATA yet is INVISIBLE on the
+  board while the scored `M&M` reads `none`; either side alone is invisible, together they pinpoint the drift. FIX
+  (READ-ONLY observability; NO engine/lake/vocab/rate/scope change, ENGINE stays NIFTY/BANKNIFTY/SENSEX; scoreboard
+  payload BYTE-UNCHANGED): NEW pure `reconcile_symbol_coverage` (two set-diffs, O(symbols), O(1) lookups) → a
+  `SymbolReconcileReport` (full counts + `_RECONCILE_SAMPLE_CAP=10` sorted samples); a sink that emits ONE
+  `completeness.symbol_reconcile_mismatch` structlog WARNING ONLY on a mismatch, naming each key via `repr()` (so a
+  trailing space / non-ASCII byte renders literally); SILENT in the healthy state AND on a pure F&O backfill — the
+  lake set is filtered to the spot segments `SPOT_PROBE_SEGMENTS` (INDEX/CASH) so an F&O `1minute` contract partition
+  (also stored at 1minute, never a scored underlying) is NOT mis-counted as a stray (the hostile-review MAJOR, folded);
+  wired into `app.py` `_completeness_inputs` AFTER scoring, the function INTERNALLY GUARDED (best-effort — a malformed
+  row logs one error WARNING + returns empty, never breaks the page). HONEST: it DIAGNOSES the root cause, it does NOT
+  yet FIX the empty M&M — the live-box `repr()` (the EXACT, currently-UNVERIFIED form; production keys both sides on
+  stripped `symbol_name`, so `NSE-M&M`/`"M&M "` are ILLUSTRATIVE not confirmed) enables a correct key-normalization FIX
+  as the NEXT follow-up (grounded in evidence, not a guess — the earlier `.replace("&amp;","&")` guess was rejected as
+  illusion, Golden Rule #1); OBSERVE-ONLY (clean-case test runs the diagnostic BETWEEN two builds → byte-identical).
+  `completeness.py` 100% line+branch (257/86) + `app.py` stays 100%; 85 completeness+coverage tests green;
+  ruff/`mypy --strict`/`pyright` clean; hostile-reviewer FIX-FIRST (1 MAJOR + 3 MINOR/NIT) → ALL FOLDED + re-verified
+  100%, workspace-health re-run PENDING. ENGINE UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906 (the production Groww
+  per-second rate ceiling LOWERED 8 → 5 r/s — a live-log audit showed the controller pinned at the ~3 r/s soft floor
+  absorbing ~870 vendor 429-retries while the 5–8 headroom was never usable throughput; single source-of-truth
+  constant `GROWW_RATE_LIMIT_RPS_CEILING` `8.0`→`5.0`, both injection sites read it, AIMD ladder/governor/floors
+  PROVABLY unchanged, `5×60 = 300 ≤ 500` property-tested; `constants.py` 100% (49/4) + `rate_common.py` 100%
+  (140/36); SUPERSEDES DEC-GROWW-RATE-CEILING-8-001). Prior merged: DEC-FNO-PULL-ORDER-LOOKBACK-001, MIGRATION.md #905 (the historical F&O pull
   now pulls every FUTURES (FUT) contract BEFORE the CE/PE options AND defaults ALL F&O to a UNIFORM 30-day lookback
   — futures dropped from 3 months to 30 days; pull-PLANNING + ORDER only, NEW `_MARKET_PULL_ORDER` map +
   `sorted(by_market.items())`, `default_fno_minute_window` collapsed to one `DEFAULT_FNO_LOOKBACK_DAYS`=30, dead
@@ -887,7 +896,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rate-ceiling-8-to-5-jlzt1n`
+- **Active feature branch:** `claude/mnm-completeness-diagnostic-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
