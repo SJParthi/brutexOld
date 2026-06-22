@@ -30,6 +30,7 @@ from typing import Protocol
 
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.summary_cache import CoverageCounters
+from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 
 #: The positional progress hook the ingest drivers emit
 #: (``label, bars, failed, gap``) — identical to
@@ -44,6 +45,21 @@ PullWork = Callable[[ProgressHook], object]
 #: The injected thread spawner — runs *fn* off the caller's thread. The default
 #: spawns a daemon thread; tests inject a synchronous runner for determinism.
 Spawner = Callable[[Callable[[], None]], None]
+
+
+def _is_pull_halt(exc: BaseException) -> bool:
+    """True iff *exc* is a pull-wide global-stop (halts every window), not a per-symbol failure.
+
+    Mirrors the ingest spines' ``_GLOBAL_STOP_ERRORS`` set (DEC-LAKE-WRITE-HALT-001 /
+    quota). The error classes are imported INSIDE the call — not at module top — so
+    :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
+    part of the heavy PyO3 chain), and this check only runs on the rare
+    worker-exception path.
+    """
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+    return isinstance(exc, (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError))
 
 
 class _Invalidatable(Protocol):
@@ -138,6 +154,15 @@ class BackgroundPullJob:
             work(self._on_progress)
         except Exception as exc:  # report ANY failure to the live feed, never crash the thread
             self._progress.fail(f"{type(exc).__name__}: {exc}")
+            if _is_pull_halt(exc):
+                # A pull-wide global stop (disk-full/OOM LakeWriteHalt, or a quota
+                # stop) halts EVERY remaining window, unlike a per-symbol failure —
+                # fire a best-effort CRITICAL Telegram alert so the operator knows the
+                # dashboard pull STOPPED (DEC-TELEGRAM-PULL-HALT-DASHBOARD-001, the
+                # dashboard twin of the CLI cmd_fetch wiring). Best-effort: a disabled
+                # or failing notifier is a silent no-op and never changes the error
+                # state already reported above (a generic worker error never alerts).
+                emit_pull_halt_alert(exc)
         else:
             self._progress.finish(detail="done")
         finally:
