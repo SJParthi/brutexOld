@@ -175,8 +175,8 @@ const ASSETS = {
     cols: [["Name","name","str"],["LTP","ltp","money"],["Change","change","money"],["Change %","pct_change","num"],["Value (Cr)","value_cr","num"],["Volume","volume","int"]],
   },
   futures: {
-    cats: [["price_gainers","Price Gainers"],["price_losers","Price Losers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
-    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    cats: [["price_gainers","Price Gainers"],["price_losers","Price Losers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["value","Top Value"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
+    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["Value (Cr)","value_cr","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
   options: {
     cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
@@ -209,8 +209,8 @@ const SAMPLE = {
     {name:"HDFC BANK", ltp:"₹772.45", change:"-9.60", pct_change:"-1.23", value_cr:"440.82", volume:"99,46,830"},
   ],
   futures: [
-    {name:"NIFTY 30 JUN FUT", ltp:"₹23,650.00", spot:"₹23,622.90", premium:"+27.10", pct_change:"1.99", oi:"1,12,500", oi_chg_pct:"3.2", volume:"45,62,940"},
-    {name:"RELIANCE 30 JUN FUT", ltp:"₹1,296.50", spot:"₹1,293.00", premium:"+3.50", pct_change:"2.40", oi:"2,33,500", oi_chg_pct:"-1.1", volume:"8,200"},
+    {name:"NIFTY 30 JUN FUT", ltp:"₹23,650.00", spot:"₹23,622.90", premium:"+27.10", pct_change:"1.99", value_cr:"10,790.30", oi:"1,12,500", oi_chg_pct:"3.2", volume:"45,62,940"},
+    {name:"RELIANCE 30 JUN FUT", ltp:"₹1,296.50", spot:"₹1,293.00", premium:"+3.50", pct_change:"2.40", value_cr:"106.32", oi:"2,33,500", oi_chg_pct:"-1.1", volume:"8,200"},
   ],
   options: [
     {name:"NIFTY 30 JUN 24000 CALL", spot:"₹23,622.90", ltp:"₹164.00", moneyness:"OTM +8", pct_change:"179.62", oi:"76,10,235", oi_chg:"-3,00,440", oi_chg_pct:"-3.80", volume:"1,47,65,790"},

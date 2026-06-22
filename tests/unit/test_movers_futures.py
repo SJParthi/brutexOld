@@ -34,6 +34,7 @@ from brutex.dashboard.movers_futures import (
     rank_premium,
     rank_price_gainers,
     rank_price_losers,
+    rank_value,
     rank_volume,
     select_near_month,
 )
@@ -115,6 +116,7 @@ def _mover(
     oi: int | None = 1000,
     oi_chg_pct: str | None = "3",
     volume: int = 50,
+    value_paisa: int = 0,
 ) -> FuturesMover:
     """A FuturesMover with sensible defaults for the ranking / rendering tests."""
     return FuturesMover(
@@ -129,6 +131,7 @@ def _mover(
         oi=oi,
         oi_chg_pct=Decimal(oi_chg_pct) if oi_chg_pct is not None else None,
         volume=volume,
+        value_paisa=value_paisa,
     )
 
 
@@ -158,6 +161,7 @@ class TestComputeFuturesMover:
             exchange="NSE",
             ltp=Decimal("110"),
             volume=70,
+            value_paisa=5_000_000_000,
             oi=1100,
             prev_close=Decimal("100"),
             spot_ltp=Decimal("108"),
@@ -169,6 +173,8 @@ class TestComputeFuturesMover:
         assert m.pct_change == Decimal("10")
         assert m.oi_chg_pct == Decimal("10")
         assert m.segment == "FNO"
+        assert m.value_paisa == 5_000_000_000
+        assert m.value_crore == "5.00"  # 5e9 paisa = ₹5,00,00,000 = 5.00 cr
 
     def test_none_baselines(self) -> None:
         # No prev_close → pct None; no spot → premium None; no prev_oi → oi% None.
@@ -178,6 +184,7 @@ class TestComputeFuturesMover:
             exchange="NSE",
             ltp=Decimal("100"),
             volume=0,
+            value_paisa=0,
             oi=500,
             prev_close=None,
             spot_ltp=None,
@@ -195,6 +202,7 @@ class TestComputeFuturesMover:
             exchange="NSE",
             ltp=Decimal("100"),
             volume=0,
+            value_paisa=0,
             oi=500,
             prev_close=Decimal("90"),
             spot_ltp=Decimal("99"),
@@ -209,6 +217,7 @@ class TestComputeFuturesMover:
             exchange="NSE",
             ltp=Decimal("100"),
             volume=0,
+            value_paisa=0,
             oi=None,
             prev_close=Decimal("90"),
             spot_ltp=Decimal("99"),
@@ -245,6 +254,13 @@ class TestRanking:
         b = _mover(symbol="B", volume=0)
         assert [m.symbol for m in rank_volume([a, b], 10)] == ["A"]
 
+    def test_value(self) -> None:
+        # DEC-MOVERS-VWAP-VALUE-001: rank by turnover desc; a zero-value future drops out.
+        big = _mover(symbol="BIG", value_paisa=900_000_000)
+        small = _mover(symbol="SMALL", value_paisa=100_000_000)
+        zero = _mover(symbol="ZERO", value_paisa=0)
+        assert [m.symbol for m in rank_value([small, big, zero], 10)] == ["BIG", "SMALL"]
+
     def test_oi_gainers_and_losers(self) -> None:
         up = _mover(symbol="UP", oi_chg_pct="4")
         down = _mover(symbol="DOWN", oi_chg_pct="-1")
@@ -275,6 +291,7 @@ _CATEGORY_KEYS = (
     "premium",
     "discount",
     "volume",
+    "value",
     "oi_gainers",
     "oi_losers",
 )
@@ -293,7 +310,16 @@ class TestBuildFuturesPayload:
         assert payload["skipped_count"] == 0
 
     def test_row_fields_complete(self) -> None:
-        m = _mover(ltp="100", spot="98", premium="2", pct="5", oi=1000, oi_chg_pct="3", volume=50)
+        m = _mover(
+            ltp="100",
+            spot="98",
+            premium="2",
+            pct="5",
+            oi=1000,
+            oi_chg_pct="3",
+            volume=50,
+            value_paisa=5_000_000_000,
+        )
         payload = build_futures_payload(
             [m], interval="1day", date="2025-09-01", time=None, top_n=5, skipped=0
         )
@@ -306,6 +332,7 @@ class TestBuildFuturesPayload:
         assert row["oi"] == 1000
         assert row["oi_chg_pct"] == "3"
         assert row["volume"] == 50
+        assert row["value_cr"] == "5.00"  # 5e9 paisa = 5.00 cr (DEC-MOVERS-VWAP-VALUE-001)
 
     def test_null_optional_row_fields(self) -> None:
         m = _mover(spot=None, premium=None, pct=None, oi=None, oi_chg_pct=None)

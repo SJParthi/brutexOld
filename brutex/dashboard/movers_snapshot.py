@@ -70,6 +70,7 @@ __all__ = [
     "run_movers_snapshot",
     "session_bar_times",
     "session_traded_value_paisa",
+    "value_crore_str",
 ]
 
 #: The page opens on the coarse 1-day timeframe (cheapest, always populated if
@@ -187,12 +188,19 @@ class MoverSnapshot:
 
     @property
     def value_crore(self) -> str:
-        """Cumulative traded value rendered in ₹ crore (2dp), e.g. ``"332.05"``.
+        """Cumulative traded value rendered in ₹ crore (2dp), e.g. ``"332.05"``."""
+        return value_crore_str(self.value_paisa)
 
-        1 crore rupees = 1e7 rupees = 1e9 paisa; the quotient is quantised to
-        two places so the table column is stable.
-        """
-        return str(round_money(Decimal(self.value_paisa) / Decimal(10**9)))
+
+def value_crore_str(value_paisa: int) -> str:
+    """Render an int64-paisa traded value (turnover) as a 2dp ₹-crore string.
+
+    The ONE COMMON crore formatter (CLAUDE.md §11) shared by the spot/options/futures
+    movers ``value_crore`` properties: 1 crore rupees = 1e7 rupees = 1e9 paisa, and the
+    quotient is :func:`~brutex.money.round_money`-quantised to two places so the "Value
+    (Cr)" column is stable (DEC-MONEY-2DP-001).
+    """
+    return str(round_money(Decimal(value_paisa) / Decimal(10**9)))
 
 
 #: The HLC3 "typical price" divisor — ``(high + low + close) / 3``, the standard

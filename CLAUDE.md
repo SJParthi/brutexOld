@@ -230,9 +230,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-vwap-value-jlzt1n` (the `/movers` "Top Value" (turnover) metric now uses the
+- **Active branch:** `claude/movers-futures-value-jlzt1n` (the `/movers` Futures tab gains a "Top Value" (turnover)
+  ranking + a "Value (Cr)" column, completing the value metric across all three asset tabs — DEC-MOVERS-FUTURES-VALUE-001,
+  MIGRATION.md #900, the operator's "along with resilience hardening take futures top value tab also". Spot + options
+  already ranked by value; futures had none (its session reader returned only ltp/volume/oi). FIX (READ-ONLY ranking):
+  `FuturesMover` gains `value_paisa` + a `value_crore` property; NEW `rank_value` + `"value"` in `_FUTURES_CATEGORIES`;
+  `_read_future_session` now ALSO computes the turnover from the SAME day-frame it already reads (one read) via the
+  SHARED `session_traded_value_paisa` (HLC3 typical-price × volume, DEC-MOVERS-VWAP-VALUE-001), returning
+  `(ltp, volume, value_paisa, oi)`; `_futures_row` emits `value_cr`; `movers.html` Futures tab gains the "Top Value"
+  pill + "Value (Cr)" column (mirroring spot). COMMON: the ₹-crore formatter is extracted to ONE shared
+  `movers_snapshot.value_crore_str` (spot + futures share it, no 2nd copy); the options caller of the shared reader
+  unpacks the 4-tuple + ignores the value field (keeps its own `_session_value_paisa` — a minimal touch). HONEST: same
+  envelope as #899 — closest-to-broker from 1-minute OHLCV, NOT tick-exact; degenerates to close×volume for a
+  zero-range bar; value now spans spot+options+futures. `movers_futures.py` + `movers_options.py` + `movers_snapshot.py`
+  ALL 100% line+branch (226/48 + 216/46 + 212/46); NEW HLC3 distinguisher (218660 ≠ old 220000); 307 movers tests
+  green; ruff/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap
+  change. Prior merged: DEC-MOVERS-VWAP-VALUE-001, MIGRATION.md #899 (the `/movers` "Top Value" (turnover) metric now uses the
   per-bar HLC3 typical price `(high+low+close)/3 × volume` instead of `close × volume`, so the ranking tracks a
-  broker's intraday turnover far more closely — DEC-MOVERS-VWAP-VALUE-001, MIGRATION.md #899, the operator's "for top
+  broker's intraday turnover far more closely — the operator's "for top
   value alone it is not precise to broker right? if yes then solve this". ROOT: the old `Σ round_money(close) × volume`
   priced a whole minute's volume at its CLOSING tick, systematically diverging from a broker's tick-summed turnover
   whenever the close sat away from the minute's VWAP. FIX (READ-ONLY ranking): NEW ONE COMMON helper
@@ -843,7 +858,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-vwap-value-jlzt1n`
+- **Active feature branch:** `claude/movers-futures-value-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
