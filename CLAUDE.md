@@ -230,11 +230,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-futures-tier-jlzt1n` (the `/movers` Futures tab's Near / Next / Far expiry-tier
-  selector now ACTUALLY filters — each tier selects that serial-month future per underlying (near = front month, next =
-  2nd serial, far = 3rd) and is keyed INDEPENDENTLY in the candidate cache, so a Next/Far click can never be served
-  stale Near rows — DEC-MOVERS-FUTURES-TIER-001, MIGRATION.md #917, the operator's "execute only this — Futures
-  Near/Next/Far wiring, make the expiry-tier selector actually filter", the P1 flagged follow-up of #915. ROOT
+- **Active branch:** `claude/scoreboard-refresh-jlzt1n` (the customer-facing Product Scoreboard —
+  `docs/PRODUCT_SCOREBOARD.md` + the shareable self-contained `docs/product_scoreboard.html` one-pager — is REFRESHED
+  through ledger #917 under six/seven plain-English value themes (finished / current / up-next / future), every claim
+  traced to a REAL merged ledger entry — DEC-SCOREBOARD-REFRESH-002, MIGRATION.md #918, the operator's "provide the
+  finished/current/future plans as an extreme easy-understandable table-level comparison that attracts millions". The
+  Finished themes gain the cycle's merged rows (#867/#916 speed · #915/#917 movers · #883/#912/#913 resilience); the
+  Current section is re-scoped #912→#917; a NEW "Up next" section names the in-flight suspicious-empty flag + the live
+  vendor probe; the `.html` (stalled at #911) is REGENERATED to mirror the `.md` exactly (CSS preserved verbatim,
+  tag-balance verified). HONEST: every row traces to a real ledger entry (the data-gathering agent's "#1003 GPU"
+  citation was DROPPED as a hallucination, Golden Rule #1); ENGINE scope unchanged (NIFTY/BANKNIFTY/SENSEX, stated in
+  the scoreboard); in-flight/future items labelled as such, never shipped; DOCS-ONLY — no `brutex/` code touched.
+  Prior merged: DEC-MOVERS-FUTURES-TIER-001, MIGRATION.md #917 — the `/movers` Futures tab's Near / Next / Far
+  expiry-tier selector now ACTUALLY filters: each tier selects that serial-month future per underlying (near = front
+  month, next = 2nd serial, far = 3rd) and is keyed INDEPENDENTLY in the candidate cache, so a Next/Far click can never
+  be served stale Near rows; the operator's "execute only this — Futures Near/Next/Far wiring", the P1 flagged
+  follow-up of #915. ROOT
   (file:line): the page already SHOWED the dropdown (`movers.html:243`) + SENT `?expiry=` (`:314`), but the route's
   futures branch IGNORED it — `compute_futures_candidates` always picked the front month via `select_near_month` and the
   futures `candidate_key` carried NO `expiry_tier`, so all three tiers collapsed to one cached near result (a Next/Far
@@ -928,7 +939,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-futures-tier-jlzt1n`
+- **Active feature branch:** `claude/scoreboard-refresh-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
