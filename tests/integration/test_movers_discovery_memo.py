@@ -32,7 +32,6 @@ pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
 import brutex.dashboard.app as app_module
-from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.dashboard.movers_futures import compute_futures_candidates
 from brutex.dashboard.movers_options import compute_options_candidates
@@ -201,8 +200,8 @@ class TestRouteDiscoveryMemo:
 
         summary_cache = SummaryCache(ttl_floor_s=0.0)
         client = TestClient(
-            build_app(
-                DashboardState(),
+            app_module.build_app(
+                app_module.DashboardState(),
                 instrument_store=store,
                 summary_cache=summary_cache,
                 movers_cache=MoversSnapshotCache(),
