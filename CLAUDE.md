@@ -230,27 +230,35 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-token-reauth-jlzt1n` (the Groww adapter now AUTO-RE-MINTS the daily access token
-  on an auth-expiry mid-pull, so the 06:00 IST token reset is a self-healing non-event — DEC-GROWW-TOKEN-REAUTH-001,
-  MIGRATION.md #909, the operator's "how can the token be auto-created/rotated like a human, especially overnight …
-  why is it struggling" + uploaded `brutex.log`. ROOT (PROVEN from the logs, not hypothesised): the daily access
-  token resets at **06:00 IST**; the operator's TOTP credential is CORRECT (130,069 successful calls all day) but
-  BruteX minted the token ONCE at pull start and never re-minted, so at exactly `00:30Z`=06:00 IST every call failed
-  `GrowwAPIAuthenticationException: token expired` — 3,764 quarantines, 0 successes after 06:00, the overnight pull
-  dead until a manual restart (the §11 AUTOMATED violation the operator feared). FIX (adapter-only; NO
-  engine/lake/vocab/scope/rate-cap change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): NEW `reauth.py` `SdkRefresher`
-  (thread-safe, SINGLE-FLIGHT via a generation counter — 32-thread stampede → exactly 1 re-mint — pool-aware so one
-  re-mint updates every leaf while keeping the K-way pool); `client.py` `_call` re-auths + retries on a
-  `GrowwAuthError` (bounded by `max_reauths`=1, on a SEPARATE counter so it doesn't spend the rate-limit budget;
-  total hard-bounded by `max_attempts + max_reauths` → never an infinite loop); `live.py` wires ONE shared refresher.
-  HONEST: back-compat byte-identical with `refresher=None`; secret hygiene preserved (redacting `safe_message`);
-  retry hits the FRESH SDK. KNOWN fast-follow (hostile MINOR-1, NOT a regression): the re-mint isn't yet wrapped in
-  the `run_with_deadline` freeze-guard (same unbounded property the original one-time mint always had) — deferred to
-  its own PR (the clean fix moves the deadline helper to avoid an import cycle). `reauth.py` 100% line+branch (40/2)
-  + `client.py` 100% (108/14) + `live.py` 100% (18/0); 498 groww-adapter + 7239 unit tests green; ruff/`mypy --strict`/
-  `pyright` clean; hostile-reviewer SHIP + workspace-health HEALTHY. This CLOSES the §6 "unattended TOTP token
-  lifetime" Phase-0 gate (token reset now VERIFIED 06:00 IST + auto-handled). ENGINE UNCHANGED, no scope/vocab/rate
-  change. Prior merged: DEC-SCOREBOARD-REFRESH-001, MIGRATION.md #908 (the customer-facing Product Scoreboard
+- **Active branch:** `claude/groww-reauth-deadline-jlzt1n` (the token re-mint is now WRAPPED in the freeze-guard
+  wall-clock deadline, so even a HUNG re-mint at 06:00 IST raises a retryable timeout — the window quarantines +
+  re-pulls — instead of freezing the whole pool — DEC-GROWW-REAUTH-DEADLINE-001, MIGRATION.md #910, the MINOR-1
+  fast-follow flagged in #909 + the operator's "cover all worst cases / exceptions with guarantee" mandate. ROOT: the
+  #909 re-mint ran UNDER `SdkRefresher._lock` with NO wall-clock bound, so a half-open socket DURING the 06:00 re-mint
+  would block the lock-holder forever → every pool leaf blocks on `sdk_at()` → pool FREEZES (the same hazard
+  `run_with_deadline` already guards for ordinary calls). FIX (adapter-only; NO engine/lake/vocab/scope/rate-cap
+  change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): (1) `run_with_deadline` MOVED to a NEW stdlib-only
+  `brutex/adapters/groww/deadline.py` (imports NOTHING from the package → cycle-proof; `client.py` re-exports it for
+  back-compat; PEP 695 generic `run_with_deadline[T]` bounds both the candle call + the SDK-tuple re-mint); (2)
+  `SdkRefresher.reauth` wraps the under-lock network mint in `run_with_deadline(_mint_sdks, GROWW_PULL_CALL_TIMEOUT_S)`
+  — `_mint_sdks` writes NO shared state + only RETURNS the new tuple, the publish runs ONLY after a clean return, so a
+  timeout raises a retryable `GrowwTimeoutError` out of the `with _lock` (lock RELEASED, no half-state, daemon result
+  discarded); (3) the client `_call` reauth branch is unchanged — a re-mint timeout propagates as retryable to the
+  ingest quarantine + re-pull. HONEST: NO abandoned-daemon data race (adversarially proven — a released timed-out
+  daemon built a 2nd SDK yet generation stayed 0); NO half-state; BOUNDED (8-thread forever-hang probe → all 8
+  `GrowwTimeoutError` in ~0.81 s = N×deadline, no freeze); single-flight intact; back-compat byte-identical; secret
+  hygiene preserved. NOTED follow-up (hostile NIT, not folded to keep this off the shared `errors.py`): the
+  timeout→retryable mapping relies on the `"deadline exceeded"` substring shared by `deadline.py`/`errors.py` — a
+  future shared-constant hardening, NOT required. `deadline.py` 100% line+branch (20/4) + `reauth.py` 100% (48/2) +
+  `client.py` 100% (89/10) + `live.py` 100% (18/0); 506 groww-adapter + 7247 unit tests green; ruff/`mypy --strict`
+  (258)/`pyright brutex tests` (0 errors whole-repo) clean; hostile-reviewer SHIP (0 BLOCKER/MAJOR/MINOR) +
+  workspace-health HEALTHY. CLOSES the #909 MINOR-1 fast-follow. ENGINE UNCHANGED, no scope/vocab/rate change. Prior
+  merged: DEC-GROWW-TOKEN-REAUTH-001, MIGRATION.md #909 (the Groww adapter auto-RE-MINTS the daily access token on an
+  auth-expiry mid-pull — thread-safe, single-flight via a generation counter, bounded `max_reauths` — so the 06:00 IST
+  token reset self-heals instead of killing the overnight pull; PROVEN from the operator's logs: token died at exactly
+  06:00 IST with 3,764 quarantines while the TOTP credential was correct; NEW `reauth.py` `SdkRefresher` + `client.py`
+  reauth branch + the visible `groww.token.reauth` self-heal log; CLOSES the §6 "unattended TOTP token lifetime"
+  Phase-0 gate). Prior merged: DEC-SCOREBOARD-REFRESH-001, MIGRATION.md #908 (the customer-facing Product Scoreboard
   `docs/PRODUCT_SCOREBOARD.md` + `docs/product_scoreboard.html` REFRESHED through ledger #907 under six plain-English
   value themes, citation column switched to the authoritative `MIGRATION.md #NNN` entry; DOCS ONLY). Prior merged: DEC-COMPLETENESS-RECONCILE-DIAG-001,
   MIGRATION.md #907 (an OBSERVE-ONLY `/completeness` diagnostic pinpointing why a stock — the operator's "M&M" — reads
@@ -901,7 +909,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-token-reauth-jlzt1n`
+- **Active feature branch:** `claude/groww-reauth-deadline-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
