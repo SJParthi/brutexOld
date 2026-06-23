@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -27,6 +28,7 @@ from brutex.dashboard.movers_futures import (
     _prev_day_oi,
     build_futures_payload,
     compute_futures_mover,
+    normalize_futures_tier,
     parse_future_symbol,
     rank_discount,
     rank_oi_gainers,
@@ -36,6 +38,7 @@ from brutex.dashboard.movers_futures import (
     rank_price_losers,
     rank_value,
     rank_volume,
+    select_expiry_tier,
     select_near_month,
 )
 from brutex.data.models import CandleBar
@@ -100,6 +103,71 @@ class TestSelectNearMonth:
         # Two contracts sharing the earliest live expiry → deterministic symbol pick.
         items = [("ZZZ", date(2025, 9, 30)), ("AAA", date(2025, 9, 30))]
         assert select_near_month(items, on_date=date(2025, 9, 1)) == "AAA"
+
+
+# ── select_expiry_tier (Near / Next / Far) ────────────────────────────────
+
+
+class TestSelectExpiryTier:
+    #: Three serial monthly contracts (out of expiry order, to prove sorting).
+    _ITEMS: ClassVar[list[tuple[str, date]]] = [
+        ("FAR", date(2025, 11, 27)),
+        ("NEAR", date(2025, 9, 25)),
+        ("NEXT", date(2025, 10, 30)),
+    ]
+
+    def test_near_is_front_month(self) -> None:
+        assert select_expiry_tier(self._ITEMS, on_date=date(2025, 9, 1), tier="near") == "NEAR"
+
+    def test_next_is_second_serial(self) -> None:
+        assert select_expiry_tier(self._ITEMS, on_date=date(2025, 9, 1), tier="next") == "NEXT"
+
+    def test_far_is_third_serial(self) -> None:
+        assert select_expiry_tier(self._ITEMS, on_date=date(2025, 9, 1), tier="far") == "FAR"
+
+    def test_default_tier_is_near(self) -> None:
+        assert select_expiry_tier(self._ITEMS, on_date=date(2025, 9, 1)) == "NEAR"
+
+    def test_unknown_tier_falls_back_to_near(self) -> None:
+        assert select_expiry_tier(self._ITEMS, on_date=date(2025, 9, 1), tier="zzz") == "NEAR"
+
+    def test_tier_deeper_than_available_is_none(self) -> None:
+        # Only two live contracts but the Far (index 2) is requested → honest None,
+        # never a fabricated or wrong-tier row (Golden Rule #1).
+        two = [("NEAR", date(2025, 9, 25)), ("NEXT", date(2025, 10, 30))]
+        assert select_expiry_tier(two, on_date=date(2025, 9, 1), tier="far") is None
+
+    def test_expired_contracts_excluded_then_tiered(self) -> None:
+        # An already-expired contract is dropped BEFORE tiering, so Near is the
+        # earliest LIVE one, not the expired one.
+        items = [
+            ("DEAD", date(2025, 1, 30)),
+            ("NEAR", date(2025, 9, 25)),
+            ("NEXT", date(2025, 10, 30)),
+        ]
+        assert select_expiry_tier(items, on_date=date(2025, 9, 1), tier="near") == "NEAR"
+        assert select_expiry_tier(items, on_date=date(2025, 9, 1), tier="next") == "NEXT"
+
+
+# ── normalize_futures_tier ────────────────────────────────────────────────
+
+
+class TestNormalizeFuturesTier:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Near", "near"),
+            ("Next", "next"),
+            ("Far", "far"),
+            ("NEAR", "near"),
+            ("near", "near"),
+            (None, "near"),
+            ("", "near"),
+            ("foo", "near"),
+        ],
+    )
+    def test_canonicalises(self, raw: str | None, expected: str) -> None:
+        assert normalize_futures_tier(raw) == expected
 
 
 # ── FuturesMover ₹ rendering + compute_futures_mover ──────────────────────

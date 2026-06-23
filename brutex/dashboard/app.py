@@ -103,6 +103,7 @@ from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
 from brutex.dashboard.movers_futures import (
     build_futures_payload,
     compute_futures_candidates,
+    normalize_futures_tier,
 )
 from brutex.dashboard.movers_options import (
     build_options_payload,
@@ -2274,6 +2275,7 @@ def build_app(
                             interval=DEFAULT_INTERVAL,
                             date=warm_date,
                             time=None,
+                            expiry_tier=tier,
                         ),
                         generation=gen,
                         compute=lambda: compute_futures_candidates(
@@ -2282,6 +2284,7 @@ def build_app(
                             date=warm_date,
                             time=None,
                             exchange=None,
+                            expiry_tier=tier,
                         ),
                     )
                     return len(cands.movers)
@@ -3124,8 +3127,11 @@ def build_app(
             exchange. Part of the cache key, so toggling it re-uses the cached
             scan when the coordinate was already viewed.
         expiry
-            Options only — the ``near`` / ``next`` / ``far`` expiry tier (blank /
-            unknown ⇒ ``near``); ranks only that serial expiry as-of *date*.
+            Futures + Options — the ``near`` / ``next`` / ``far`` serial-expiry
+            tier (blank / unknown ⇒ ``near``); selects that serial contract
+            as-of *date* (futures: one contract per underlying at the tier;
+            options: ranks only that serial expiry). Part of the cache key, so
+            Near / Next / Far cache + rank independently.
         track
             Options only — the ``all`` / ``monthly`` / ``weekly`` expiry cadence
             (blank / unknown ⇒ ``all``); the Near/Next/Far tier ranks within it.
@@ -3280,12 +3286,19 @@ def build_app(
                         expiry_track=opt_cands.expiry_track,
                     )
                 if asset == "futures":
+                    # Futures carries the Near/Next/Far serial-expiry tier (the
+                    # ?expiry= selector; blank/unknown ⇒ near), normalised so the
+                    # cache key and the computed set agree — so Near / Next / Far
+                    # cache + rank independently (never a stale Near row served for
+                    # a Far request) — DEC-MOVERS-FUTURES-TIER-001.
+                    fut_tier = normalize_futures_tier(expiry)
                     key = candidate_key(
                         asset="futures",
                         exchange=exch,
                         interval=interval,
                         date=date_str,
                         time=time,
+                        expiry_tier=fut_tier,
                     )
                     fut_cands = _movers_cache.get_or_compute(
                         key,
@@ -3297,6 +3310,7 @@ def build_app(
                             time=time,
                             exchange=exch,
                             datasets=movers_datasets,
+                            expiry_tier=fut_tier,
                         ),
                     )
                     return build_futures_payload(
@@ -3306,6 +3320,7 @@ def build_app(
                         time=time,
                         top_n=top_n,
                         skipped=fut_cands.skipped,
+                        expiry_tier=fut_cands.expiry_tier,
                     )
                 key = candidate_key(
                     asset="spot",
