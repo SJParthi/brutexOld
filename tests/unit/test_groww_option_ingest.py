@@ -30,9 +30,13 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
     OPTION_SEGMENT,
 )
+from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
+    UNDERLYING_ALL_EMPTY_EVENT,
+    AllEmptyScan,
     GrowwOptionIngestReport,
     OptionPairFailure,
+    UnderlyingEmptyReport,
     _default_backoff,
     contract_exchange,
     fetch_option_candles,
@@ -41,6 +45,7 @@ from brutex.adapters.groww.option_ingest import (
     ingest_underlying_options,
     plan_contract_windows,
     run_groww_option_ingest,
+    scan_underlying_all_empty,
 )
 from brutex.adapters.protocol import DerivativeContract
 from brutex.data.errors import LakeWriteHalt
@@ -1500,3 +1505,171 @@ def test_run_option_ingest_no_ledger_does_not_plan() -> None:
         now_ist=_now,
     )
     assert report.bars_appended == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# "Suspicious empty" diagnostic (DEC-SUSPICIOUS-EMPTY-FLAG-001) — observe-only
+# ─────────────────────────────────────────────────────────────────────────
+def _ireport(
+    *, windows: int = 1, bars: int = 0, skipped: int = 0, still_failed: int = 0
+) -> IngestReport:
+    """An IngestReport with the fields the all-empty scan reads (rest default).
+
+    ``transient_failures`` equals ``still_failed_windows`` (the same final-pass count,
+    per the IngestReport contract), so the two stay consistent.
+    """
+    return IngestReport(
+        windows=windows,
+        bars_appended=bars,
+        transient_failures=still_failed,
+        skipped_windows=skipped,
+        still_failed_windows=still_failed,
+    )
+
+
+def _udl_fut(symbol: str, underlying: str) -> DerivativeContract:
+    """A FUT contract carrying *underlying* (no strike — keeps the factory simple).
+
+    Named distinctly from the module's no-arg ``_fut()`` to avoid shadowing it.
+    """
+    return DerivativeContract(
+        underlying_symbol=underlying,
+        expiry=date(2025, 1, 2),
+        symbol=symbol,
+        contract_type="FUT",
+        strike=None,
+    )
+
+
+def _empty_chain(underlying: str, n: int) -> tuple[list[DerivativeContract], dict]:
+    """*n* contracts of *underlying* + a pairs map where each was a CLEAN empty fetch."""
+    contracts = [_udl_fut(f"NSE-{underlying}-{i:02d}-FUT", underlying) for i in range(n)]
+    pairs = {(c.symbol, "1day"): _ireport(windows=1, bars=0) for c in contracts}
+    return contracts, pairs
+
+
+class TestSuspiciousEmptyFlag:
+    def test_all_empty_flags_underlying(self) -> None:
+        contracts, pairs = _empty_chain("M&M", 3)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        assert scan.has_suspicious()
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(underlying="M&M", attempted_pairs=3, stored_bars=0),
+        )
+
+    def test_partial_not_flagged(self) -> None:
+        # 3 clean fetches but one stored bars → stored_bars > 0 → not suspicious.
+        contracts, pairs = _empty_chain("TCS", 3)
+        pairs[contracts[0].symbol, "1day"] = _ireport(windows=1, bars=42)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        assert not scan.has_suspicious()
+
+    def test_all_good_not_flagged(self) -> None:
+        contracts, pairs = _empty_chain("INFY", 3)
+        pairs = {k: _ireport(windows=1, bars=10) for k in pairs}
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_below_threshold_not_flagged(self) -> None:
+        # Only 2 empty contracts (< _ALL_EMPTY_MIN_CONTRACTS) → not suspicious.
+        contracts, pairs = _empty_chain("WIPRO", 2)
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_skip_only_not_flagged(self) -> None:
+        # All ledger-skips (skipped_windows=1) → 0 attempted → never-tried, not flagged.
+        contracts, _ = _empty_chain("HDFC", 3)
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, skipped=1) for c in contracts}
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_transient_residual_not_flagged(self) -> None:
+        # All still-failing transients → 0 attempted → not flagged (the transient
+        # residual verdict's job, not a clean empty).
+        contracts, _ = _empty_chain("SBIN", 3)
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, still_failed=1) for c in contracts}
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_empty_clamp_windows_zero_not_flagged(self) -> None:
+        # windows == 0 (an empty-clamped no-op range) is not a clean fetch → 0 attempted.
+        contracts, _ = _empty_chain("ITC", 3)
+        pairs = {(c.symbol, "1day"): _ireport(windows=0) for c in contracts}
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_unknown_symbol_is_skipped(self) -> None:
+        # A pair whose symbol is not in contract_list is defensively skipped (never raises).
+        contracts, _ = _empty_chain("RELIANCE", 3)
+        pairs = {("NSE-GHOST-99-FUT", "1day"): _ireport(windows=1, bars=0)}
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_multi_underlying_only_empty_flagged(self) -> None:
+        empty_c, empty_p = _empty_chain("M&M", 3)
+        good_c, good_p = _empty_chain("TCS", 3)
+        good_p = {k: _ireport(windows=1, bars=5) for k in good_p}
+        scan = scan_underlying_all_empty({**empty_p, **good_p}, [*empty_c, *good_c])
+        assert [r.underlying for r in scan.suspicious] == ["M&M"]
+
+    def test_emit_logs_one_warning_per_flagged(self) -> None:
+        contracts, pairs = _empty_chain("M&M", 4)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(scan, pull_id="pid-1")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("M&M")
+        assert warns[0]["attempted_pairs"] == 4 and warns[0]["stored_bars"] == 0
+
+    def test_emit_silent_when_clean(self) -> None:
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(AllEmptyScan(suspicious=()), pull_id="pid-1")
+        assert [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT] == []
+
+    def test_emit_caps_sampled_underlyings(self) -> None:
+        # More flagged underlyings than the sample cap → only the cap are named.
+        flagged = tuple(
+            UnderlyingEmptyReport(underlying=f"U{i:02d}", attempted_pairs=3, stored_bars=0)
+            for i in range(_oi._ALL_EMPTY_SAMPLE_CAP + 5)
+        )
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(AllEmptyScan(suspicious=flagged), pull_id=None)
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == _oi._ALL_EMPTY_SAMPLE_CAP
+
+    def test_run_ingest_fires_flag_end_to_end(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 3 NIFTY contracts that all fetch cleanly-empty → the wiring fires the WARNING.
+        cs = [
+            _ce("NSE-NIFTY-02Jan25-28500-CE"),
+            _ce("NSE-NIFTY-02Jan25-28200-CE"),
+            _ce("NSE-NIFTY-02Jan25-28150-CE"),
+        ]
+        monkeypatch.setattr(_oi, "fetch_option_candles", lambda *a, **k: [])
+        with capture_logs() as logs:
+            report = run_groww_option_ingest(
+                _client(_FakeSDK(payload=_candles())),
+                _Sink(),
+                contracts=cs,
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                now_ist=_now,
+            )
+        assert report.bars_appended == 0
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1 and warns[0]["underlying"] == repr("NIFTY")
+
+    def test_run_ingest_scan_error_is_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The observe-only scan raising must NEVER break the pull — it logs an error event
+        # and the report still returns.
+        def _boom(*_a: object, **_k: object) -> AllEmptyScan:
+            raise RuntimeError("scan blew up")
+
+        monkeypatch.setattr(_oi, "scan_underlying_all_empty", _boom)
+        with capture_logs() as logs:
+            report = run_groww_option_ingest(
+                _client(_FakeSDK(payload=_candles())),
+                _Sink(),
+                contracts=[_ce()],
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                now_ist=_now,
+            )
+        assert report.bars_appended == 1  # the pull itself is unaffected
+        assert any(r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT for r in logs)

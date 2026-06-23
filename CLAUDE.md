@@ -230,10 +230,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/scoreboard-refresh-jlzt1n` (the customer-facing Product Scoreboard —
-  `docs/PRODUCT_SCOREBOARD.md` + the shareable self-contained `docs/product_scoreboard.html` one-pager — is REFRESHED
-  through ledger #917 under six/seven plain-English value themes (finished / current / up-next / future), every claim
-  traced to a REAL merged ledger entry — DEC-SCOREBOARD-REFRESH-002, MIGRATION.md #918, the operator's "provide the
+- **Active branch:** `claude/suspicious-empty-flag-jlzt1n` (an OBSERVE-ONLY pull-side diagnostic surfaces a whole F&O
+  underlying whose every cleanly-fetched contract came back 100% EMPTY — the BAJAJ-AUTO / M&M "silent-vanish" failure
+  mode — as ONE `pull.underlying_all_empty` WARNING, so a whole stock can never silently blend into a normal no-data
+  gap again — DEC-SUSPICIOUS-EMPTY-FLAG-001, MIGRATION.md #919, the operator's "a whole stock should never silently
+  vanish". PULL-side (not read-side) because only the pull knows "tried-and-empty" vs "never-tried"; mirrors the #907
+  observe-only triad — a pure `scan_underlying_all_empty` (groups pairs by `underlying_symbol`, counts CLEAN fetches
+  via `_is_clean_fetch` = `windows≥1 ∧ skipped==0 ∧ still_failed==0`, flags `attempted≥3 ∧ stored_bars==0`) + immutable
+  `UnderlyingEmptyReport`/`AllEmptyScan` + a guarded `_log_underlying_all_empty` (capped 20, `repr()`-named) + ONE
+  best-effort `try/except` wiring line in `run_groww_option_ingest`. HONEST: pure DETECT+WARN — no return/ledger/engine
+  change, no auto-recovery; false-positive-guarded (skip/transient/empty-clamp excluded so a re-pull or a 1-2-leg
+  illiquid name never flags); ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). `option_ingest.py` 100% line+branch (247/68,
+  0 missing); NEW `TestSuspiciousEmptyFlag` (14 tests); 75 option-ingest tests green; ruff/`mypy --strict`/`pyright`
+  clean. Prior merged: DEC-SCOREBOARD-REFRESH-002, MIGRATION.md #918 — the customer-facing Product Scoreboard
+  (`docs/PRODUCT_SCOREBOARD.md` + the shareable self-contained `docs/product_scoreboard.html` one-pager) REFRESHED
+  through ledger #917 under plain-English value themes (finished / current / up-next / future), every claim
+  traced to a REAL merged ledger entry, the operator's "provide the
   finished/current/future plans as an extreme easy-understandable table-level comparison that attracts millions". The
   Finished themes gain the cycle's merged rows (#867/#916 speed · #915/#917 movers · #883/#912/#913 resilience); the
   Current section is re-scoped #912→#917; a NEW "Up next" section names the in-flight suspicious-empty flag + the live
@@ -939,7 +951,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/scoreboard-refresh-jlzt1n`
+- **Active feature branch:** `claude/suspicious-empty-flag-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
