@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · June 2026</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #907</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that captures <b>every minute</b> of India's index &amp; F&amp;O market history,
       shows you <b>what's actually moving</b> in real time, and brute-force tests trading ideas at massive scale —
@@ -64,8 +64,8 @@
   <div class="kpis">
     <div class="kpi"><b>~750</b><span>tradable names in the data lake</span></div>
     <div class="kpi"><b>21</b><span>timeframes, all from 1-minute data</span></div>
-    <div class="kpi"><b>100%</b><span>test coverage on every change</span></div>
     <div class="kpi"><b>2020→today</b><span>minute-by-minute history</span></div>
+    <div class="kpi"><b>100%</b><span>line + branch test coverage</span></div>
   </div>
 
   <h2>✅ Finished &amp; Live <small>— already merged into the product</small></h2>
@@ -74,17 +74,20 @@
   <table>
     <tr><th>Feature</th><th>Before → After</th><th>Why you care</th><th>Status</th></tr>
     <tr><td class="feat">Instant view switching</td><td class="why">Re-scanned the whole multi-year data tree on every click → cached instant handoff</td><td class="why">No waiting when you change candle views</td><td><span class="pill live">LIVE</span></td></tr>
-    <tr><td class="feat">Instant Universe page</td><td class="why">Waited 30–160s on a slow external site every visit → served from cache</td><td class="why">The list of ~750 names opens immediately</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Instant Universe page</td><td class="why">Waited 30–160s on a slow external site every visit → served from cache</td><td class="why">The ~750-name list opens immediately</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Instant Completeness page</td><td class="why">Re-scanned the whole lake each load → O(1) on repeat</td><td class="why">"How complete is my data?" answers instantly</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Fast "Fetch Windows"</td><td class="why">Counted 340,000+ rows in Python per click → database-paginated</td><td class="why">Stays snappy no matter how big history grows</td><td><span class="pill live">LIVE</span></td></tr>
-    <tr><td class="feat">Clean symbol picker</td><td class="why">One unusable 750-item dropdown → tidy symbol → timeframe menu</td><td class="why">You can actually find what you want</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Every data tab paginated</td><td class="why">The last whole-table reads → page-at-a-time database queries</td><td class="why">Browsing huge tables never stalls</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
   <div class="theme">📊 Theme 2 — "See what's actually moving"</div>
   <table>
     <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
-    <tr><td class="feat">"Top Value" on Futures</td><td class="why">Ranks futures by money traded (turnover), not just contract count — now across spot + options + futures</td><td class="why">Follow the real money, full parity across asset types</td><td><span class="pill live">LIVE</span></td></tr>
-    <tr><td class="feat">Broker-accurate turnover</td><td class="why">Prices each minute at its typical price (H+L+C)/3 × volume instead of the closing tick alone</td><td class="why">Rankings track your broker's turnover far more closely</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Top movers across everything</td><td class="why">Gainers / losers / volume / turnover across spot + futures + options, on any of 21 timeframes</td><td class="why">One screen for what's really moving</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Broker-accurate turnover</td><td class="why">Prices each minute at its typical price (H+L+C)/3 × volume, not the closing tick alone</td><td class="why">Rankings track your broker's turnover far more closely</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Per-option moneyness</td><td class="why">Shows each option's ITM / ATM / OTM and how many strikes from the money, as one clear label</td><td class="why">Read an option chain at a glance</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Full F&amp;O candle history</td><td class="why">Futures + options 1-minute history is a first-class, browsable table</td><td class="why">Inspect any contract's real history</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Find any contract fast</td><td class="why">Symbol → expiry → strike cascading pickers for F&amp;O, symbol → timeframe for spot</td><td class="why">Pinpoint the exact contract instead of a giant dropdown</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
   <div class="theme">🛡️ Theme 3 — "Nothing is ever lost"</div>
@@ -93,7 +96,9 @@
     <tr><td class="feat">Crash-safe writes</td><td class="why">Every file is written-then-atomically-swapped, via one shared tested core</td><td class="why">A crash mid-write never corrupts your data</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">No silent data loss</td><td class="why">Two downloads sharing a lake can't overwrite each other (cross-process locking)</td><td class="why">Run CLI + dashboard pulls at once, safely</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">One bad file ≠ broken page</td><td class="why">A corrupt file skips that one instrument (logged) instead of crashing the screen</td><td class="why">Your dashboard never goes down over one bad file</td><td><span class="pill live">LIVE</span></td></tr>
-    <tr><td class="feat">Graceful disk-full halt</td><td class="why">If the disk fills mid-download, the pull stops cleanly + alerts you — no corrupt partial data</td><td class="why">A full disk can never corrupt or runaway-fail your data</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Graceful disk-full halt</td><td class="why">If the disk fills mid-download, the pull stops cleanly — end to end, including the progress ledger</td><td class="why">A full disk can never corrupt or runaway-fail your data</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Resume in seconds</td><td class="why">Mid-download checkpointing means a crash re-pulls a tiny window, not the whole span</td><td class="why">Multi-day downloads survive interruptions</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">One bad combo ≠ dead sweep</td><td class="why">A single failing strategy combo is skipped + flagged (non-zero exit), the rest finish</td><td class="why">A days-long sweep isn't lost to one bad tuple</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
   <div class="theme">📡 Theme 4 — "You always know what's happening"</div>
@@ -102,25 +107,37 @@
     <tr><td class="feat">Instant phone alerts</td><td class="why">A CRITICAL Telegram alert fires when a download halts (disk-full / out-of-memory / quota) — from CLI and dashboard</td><td class="why">You hear about a stopped pull in real time, not hours later</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
-  <div class="theme">🎯 Theme 5 — "The data is right"</div>
+  <div class="theme">🎯 Theme 5 — "The data is right (and honest)"</div>
   <table>
     <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
-    <tr><td class="feat">"&amp;"-name stocks fixed</td><td class="why">M&amp;M, L&amp;TFH, J&amp;KBANK etc. now retry an encoded form so their full options chains download</td><td class="why">No whole stocks silently missing from F&amp;O data</td><td><span class="pill live">LIVE</span></td></tr>
-    <tr><td class="feat">Smarter default downloads</td><td class="why">Futures default to 3 months, options to 30 days</td><td class="why">Stops wasting time/quota on illiquid early option bars</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">"&amp;"-name stocks fixed</td><td class="why">M&amp;M, L&amp;TFH, J&amp;KBANK etc. retry an encoded form so their full options chains download</td><td class="why">No whole stocks silently missing from F&amp;O data</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Tricky symbols resolved</td><td class="why">Hyphenated / verbose vendor symbols resolve to the real master symbol</td><td class="why">Names like BAJAJ-AUTO / MIDCPNIFTY map correctly</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Mapping integrity audits</td><td class="why">Proves every option maps to the right stock + lot size; flagged, never faked</td><td class="why">Trust that the data lines up</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Honest completeness</td><td class="why">Late-listed names + missing years marked "partial" instead of faking a full span</td><td class="why">The completeness screen never lies to you</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">"Why is X empty?" diagnostic</td><td class="why">Pinpoints exactly why a symbol reads empty (a key-format drift), surfaced for a precise fix</td><td class="why">Data gaps get diagnosed, not guessed at</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
-  <h2>🚀 Current <small>— just shipped / in motion</small></h2>
+  <div class="theme">🚀 Theme 6 — "Getting the data is one click"</div>
+  <table>
+    <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">One-click full pipeline</td><td class="why">One button pulls the whole universe: spot → expiries/contracts → history</td><td class="why">Years of clean data without a manual chore</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Futures + smart ordering</td><td class="why">Futures download enabled, pulled before options, both on a 30-day default window</td><td class="why">Right data, right order, no wasted quota</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Minute-true, derived rest</td><td class="why">Only 1-minute is fetched; the daily + 19 intraday timeframes are derived from it</td><td class="why">One source of truth, 21 timeframes, no drift</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Self-tuning rate limit</td><td class="why">An adaptive limiter backs off on rejections; ceiling tuned to 5/sec (live-log proven)</td><td class="why">Fast downloads that don't get you blocked</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
+  <h2>🟡 Current <small>— just shipped this cycle</small></h2>
   <table>
     <tr><th>Item</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
-    <tr><td class="feat">Disk-full ledger halt</td><td class="why">The download progress-ledger — the last file not protected against a full disk — now halts the pull cleanly + texts you instead of crashing</td><td class="why">Completes the "nothing is ever lost" guarantee end-to-end</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Rate-limit tuning (8→5/sec)</td><td class="why">A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall</td><td class="why">Same real throughput, far fewer wasted retries</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">"Why is M&amp;M empty?" diagnostic</td><td class="why">Observe-only check that names the exact on-disk key drift behind an empty symbol</td><td class="why">Turns a mystery gap into a one-line, fixable fact</td><td><span class="pill live">MERGED</span></td></tr>
   </table>
 
   <h2>🔮 Future <small>— planned next (honest roadmap)</small></h2>
   <table>
     <tr><th>Priority</th><th>Plan</th><th>What it'll give you</th><th>Stage</th></tr>
-    <tr><td><span class="pill near">NEAR</span></td><td class="feat">In-place candle refresh</td><td class="why">Candle view updates its grid in place on tab-switch (no full rebuild)</td><td class="ref">fast-follow</td></tr>
-    <tr><td><span class="pill near">NEAR</span></td><td class="feat">Shared turnover reader</td><td class="why">Options reuses the one shared turnover reader — less duplicate work</td><td class="ref">cleanup</td></tr>
+    <tr><td><span class="pill near">NEAR</span></td><td class="feat">M&amp;M (empty-symbol) fix</td><td class="why">Normalize the lake key read-side to match the write-side, clearing the diagnosed key drift</td><td class="ref">grounded in #907</td></tr>
+    <tr><td><span class="pill near">NEAR</span></td><td class="feat">In-place candle refresh</td><td class="why">Candle view updates its grid in place on paging (no full rebuild)</td><td class="ref">fast-follow</td></tr>
     <tr><td><span class="pill mid">MID</span></td><td class="feat">True O(page) paging</td><td class="why">Candle pager reads only the visible page via a write-time manifest</td><td class="ref">documented</td></tr>
     <tr><td><span class="pill mid">MID</span></td><td class="feat">Confirm vendor limits</td><td class="why">Lock in real rate limits + data boundaries with live probes</td><td class="ref">probe gate</td></tr>
     <tr><td><span class="pill big">MAJOR</span></td><td class="feat">Brute-force sweep</td><td class="why">Test ~33 billion strategy combinations across all 21 timeframes (~2–4 days on reference hardware)</td><td class="ref">core mission</td></tr>
@@ -141,7 +158,7 @@
   </div>
 
   <p class="foot">BruteX — Extreme brute-force backtesting engine for Indian index &amp; F&amp;O markets.<br>
-    Every row above is real, merged, and verified. Generated from the live decision ledger.</p>
+    Every row above is real, merged, and verified. Generated from the live decision ledger (through #907).</p>
 
 </div>
 </body>
