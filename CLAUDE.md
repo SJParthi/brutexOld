@@ -230,30 +230,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/mnm-completeness-diagnostic-jlzt1n` (an OBSERVE-ONLY `/completeness` diagnostic that
-  PINPOINTS why a stock — the operator's "M&M" — reads empty on the scoreboard — DEC-COMPLETENESS-RECONCILE-DIAG-001,
-  MIGRATION.md #907, the operator's "see still why M&M is still empty … thoroughly check this" + AskUserQuestion
-  "Ship a diagnostic to pinpoint it". ROOT MECHANISM (now made visible, NOT yet repaired): `_per_symbol_spot` drops
-  any lake-coverage row whose `symbol` key is absent from the scored `categories` map (`category =
-  categories.get(symbol); if category is None: continue`) — so a lake partition keyed on a near-identical form (a
-  trailing-space `"M&M "`, an exchange-prefixed `"NSE-M&M"`, a non-ASCII byte) has DATA yet is INVISIBLE on the
-  board while the scored `M&M` reads `none`; either side alone is invisible, together they pinpoint the drift. FIX
-  (READ-ONLY observability; NO engine/lake/vocab/rate/scope change, ENGINE stays NIFTY/BANKNIFTY/SENSEX; scoreboard
-  payload BYTE-UNCHANGED): NEW pure `reconcile_symbol_coverage` (two set-diffs, O(symbols), O(1) lookups) → a
-  `SymbolReconcileReport` (full counts + `_RECONCILE_SAMPLE_CAP=10` sorted samples); a sink that emits ONE
-  `completeness.symbol_reconcile_mismatch` structlog WARNING ONLY on a mismatch, naming each key via `repr()` (so a
-  trailing space / non-ASCII byte renders literally); SILENT in the healthy state AND on a pure F&O backfill — the
-  lake set is filtered to the spot segments `SPOT_PROBE_SEGMENTS` (INDEX/CASH) so an F&O `1minute` contract partition
-  (also stored at 1minute, never a scored underlying) is NOT mis-counted as a stray (the hostile-review MAJOR, folded);
-  wired into `app.py` `_completeness_inputs` AFTER scoring, the function INTERNALLY GUARDED (best-effort — a malformed
-  row logs one error WARNING + returns empty, never breaks the page). HONEST: it DIAGNOSES the root cause, it does NOT
-  yet FIX the empty M&M — the live-box `repr()` (the EXACT, currently-UNVERIFIED form; production keys both sides on
-  stripped `symbol_name`, so `NSE-M&M`/`"M&M "` are ILLUSTRATIVE not confirmed) enables a correct key-normalization FIX
-  as the NEXT follow-up (grounded in evidence, not a guess — the earlier `.replace("&amp;","&")` guess was rejected as
-  illusion, Golden Rule #1); OBSERVE-ONLY (clean-case test runs the diagnostic BETWEEN two builds → byte-identical).
-  `completeness.py` 100% line+branch (257/86) + `app.py` stays 100%; 85 completeness+coverage tests green;
-  ruff/`mypy --strict`/`pyright` clean; hostile-reviewer FIX-FIRST (1 MAJOR + 3 MINOR/NIT) → ALL FOLDED + re-verified
-  100%, workspace-health re-run PENDING. ENGINE UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906 (the production Groww
+- **Active branch:** `claude/scoreboard-refresh-jlzt1n` (the customer-facing Product Scoreboard
+  `docs/PRODUCT_SCOREBOARD.md` + the shareable `docs/product_scoreboard.html` one-pager are REFRESHED to cover the
+  ledger through #907 — DEC-SCOREBOARD-REFRESH-001, MIGRATION.md #908, the operator's "provide the finished current
+  future plans … easy table-level comparison even any human can understand … attract millions of customers" →
+  "Cover everything dude". DOCS ONLY (NO code/engine/scope/vocab/rate change, ENGINE stays NIFTY/BANKNIFTY/SENSEX):
+  both files rewritten to a themed finished/current/future comparison over the full recent batch (#861–#907) under
+  SIX value themes (⚡ never slow · 📊 see what's moving · 🛡️ never lost · 📡 always informed · 🎯 data is right · 🚀
+  one-click data), each row "what it does → why you care → ledger entry"; the citation column switched from the
+  ambiguous "PR #" mix to the AUTHORITATIVE `MIGRATION.md #NNN` ledger entry (every claim traceable to the single
+  source of truth); "Current" shows the two just-merged items (#906 rate-ceiling, #907 M&M diagnostic), "Future"
+  reconciled (drops the merged #903/#904, adds the M&M read-side fix grounded in #907 + the in-place candle refresh);
+  HTML mirrors the markdown 1:1 (zero-dependency inline CSS, badged "ledger #907"). HONEST: every row traces to a
+  real merged ledger entry (no invented features/numbers); the engine-vs-lake scope distinction stated explicitly;
+  the ledger re-declared authoritative on any disagreement; future rows labelled by honest stage. DOCS ONLY — no
+  test/coverage surface (the no-hallucination PR-body scan + markdown render are the gates); ruff/mypy/pyright N/A
+  (no code). ENGINE UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-COMPLETENESS-RECONCILE-DIAG-001,
+  MIGRATION.md #907 (an OBSERVE-ONLY `/completeness` diagnostic pinpointing why a stock — the operator's "M&M" — reads
+  empty: a lake-key ↔ scored-key drift surfaced as ONE `completeness.symbol_reconcile_mismatch` WARNING naming both
+  sides via `repr()`; `SPOT_PROBE_SEGMENTS`-filtered so a pure F&O backfill stays SILENT (the hostile-review MAJOR,
+  folded) + internally guarded so a malformed row never breaks the page; scoreboard payload BYTE-UNCHANGED, DIAGNOSES
+  not yet FIXES — the live `repr()` enables an evidence-grounded key-normalization fix next; `completeness.py` 100%
+  line+branch (257/86), `app.py` stays 100%, 85 tests green). Prior merged: DEC-GROWW-RATE-CEILING-5-001, MIGRATION.md #906 (the production Groww
   per-second rate ceiling LOWERED 8 → 5 r/s — a live-log audit showed the controller pinned at the ~3 r/s soft floor
   absorbing ~870 vendor 429-retries while the 5–8 headroom was never usable throughput; single source-of-truth
   constant `GROWW_RATE_LIMIT_RPS_CEILING` `8.0`→`5.0`, both injection sites read it, AIMD ladder/governor/floors
@@ -896,7 +894,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/mnm-completeness-diagnostic-jlzt1n`
+- **Active feature branch:** `claude/scoreboard-refresh-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
