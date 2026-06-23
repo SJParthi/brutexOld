@@ -36,7 +36,7 @@ from brutex.dashboard.app import (
     _render_spot_coverage_html,
     build_app,
 )
-from brutex.dashboard.completeness import RECONCILE_MISMATCH_EVENT
+from brutex.dashboard.completeness import DIM_NONE, RECONCILE_MISMATCH_EVENT
 from brutex.data.coverage_ledger import CoverageRecord, classify_cell
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
@@ -586,12 +586,14 @@ class TestCompletenessScoreboard:
         assert "SUMMARY — spot" in csv_resp.text  # section skeleton still renders
 
     def test_reconcile_diagnostic_pinpoints_mnm_lake_key_divergence(self, tmp_path: Path) -> None:
-        """DEC-COMPLETENESS-RECONCILE-DIAG-001 e2e: a scored ``M&M`` whose lake partition keys
-        on the DIVERGENT ``NSE-M&M`` makes ``M&M`` read ``none`` on the board — and the
-        reconciliation diagnostic logs ONE structured WARNING naming BOTH ``repr()`` strings,
-        PINPOINTING the exact key drift. This is the confirmed real-box M&M failure mode; it
-        does NOT log on origin/main (no diagnostic) and DOES with this change, WITHOUT
-        altering the scoreboard payload (observability only)."""
+        """DEC-COMPLETENESS-SPOT-KEY-RECOVER-001 e2e (the FIX of #907's diagnostic): a scored
+        ``M&M`` whose lake partition keys on the DIVERGENT exchange-prefixed ``NSE-M&M`` is now
+        RECOVERED — the read-side resolver strips the row's own ``NSE-`` prefix and groups the
+        real on-disk data under the canonical ``M&M``, so ``M&M`` SHOWS on the board instead of
+        reading empty. The #907 reconciliation diagnostic STILL fires its WARNING (the raw
+        partition key is genuinely drifted and should be cleaned up), so the operator both SEES
+        the data AND is told to fix the stored key. Nothing is fabricated — only the partition's
+        physically-present bar surfaces under the clean symbol."""
         s = InstrumentStore.open(tmp_path / "instruments.duckdb")
         s.upsert_many(
             [_eq("M&M")],  # the scored universe keys on the clean engine symbol_name ``M&M``
@@ -614,15 +616,21 @@ class TestCompletenessScoreboard:
         finally:
             s.close()
 
-        # The board behaviour is UNCHANGED by the diagnostic: the divergent ``NSE-M&M`` lake
-        # partition is SILENTLY DROPPED (not in the scored map), and the scored ``M&M`` gets NO
-        # spot row at all (no matching lake key) — so neither key appears on the board. This IS
-        # the invisible failure the WARNING below surfaces; nothing is added/altered/fabricated.
-        board_symbols = {row["symbol"] for row in body["spot"]["per_symbol"]}
-        assert "NSE-M&M" not in board_symbols  # the stray lake key is dropped (data invisible)
-        assert "M&M" not in board_symbols  # the scored M&M has no lake row → not scored
+        # The board now RECOVERS the divergent partition: the exchange-prefixed ``NSE-M&M`` lake
+        # key is resolved to the canonical scored ``M&M`` (DEC-COMPLETENESS-SPOT-KEY-RECOVER-001),
+        # so ``M&M`` appears with its real on-disk data and the raw drifted key is NOT shown.
+        per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
+        assert "NSE-M&M" not in per_symbol  # the raw drifted key is never shown verbatim
+        assert "M&M" in per_symbol  # recovered + grouped under the canonical scored symbol
+        assert per_symbol["M&M"]["exchange"] == "NSE"  # carries the partition's exchange
+        # The recovered row is now VISIBLE on the board (vs silently dropped pre-fix); its spot
+        # verdict is ledger-driven (``none`` here — this e2e seeds a bar but no planned window;
+        # the real-verdict recovery path is proven by the DIM_FULL unit test). The fix surfaces
+        # the partition, not a fabricated verdict.
+        assert per_symbol["M&M"]["1minute"] == DIM_NONE
 
-        # ONE structured WARNING fires, naming BOTH repr() strings — the pinpointed divergence.
+        # ONE structured WARNING STILL fires, naming BOTH repr() strings — the partition key is
+        # genuinely drifted (clean it up) even though the board now recovers its data.
         warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
         assert len(warnings) == 1
         entry = warnings[0]

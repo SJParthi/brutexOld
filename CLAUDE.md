@@ -230,30 +230,38 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-reauth-deadline-jlzt1n` (the token re-mint is now WRAPPED in the freeze-guard
-  wall-clock deadline, so even a HUNG re-mint at 06:00 IST raises a retryable timeout — the window quarantines +
-  re-pulls — instead of freezing the whole pool — DEC-GROWW-REAUTH-DEADLINE-001, MIGRATION.md #910, the MINOR-1
-  fast-follow flagged in #909 + the operator's "cover all worst cases / exceptions with guarantee" mandate. ROOT: the
-  #909 re-mint ran UNDER `SdkRefresher._lock` with NO wall-clock bound, so a half-open socket DURING the 06:00 re-mint
-  would block the lock-holder forever → every pool leaf blocks on `sdk_at()` → pool FREEZES (the same hazard
-  `run_with_deadline` already guards for ordinary calls). FIX (adapter-only; NO engine/lake/vocab/scope/rate-cap
-  change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): (1) `run_with_deadline` MOVED to a NEW stdlib-only
-  `brutex/adapters/groww/deadline.py` (imports NOTHING from the package → cycle-proof; `client.py` re-exports it for
-  back-compat; PEP 695 generic `run_with_deadline[T]` bounds both the candle call + the SDK-tuple re-mint); (2)
-  `SdkRefresher.reauth` wraps the under-lock network mint in `run_with_deadline(_mint_sdks, GROWW_PULL_CALL_TIMEOUT_S)`
-  — `_mint_sdks` writes NO shared state + only RETURNS the new tuple, the publish runs ONLY after a clean return, so a
-  timeout raises a retryable `GrowwTimeoutError` out of the `with _lock` (lock RELEASED, no half-state, daemon result
-  discarded); (3) the client `_call` reauth branch is unchanged — a re-mint timeout propagates as retryable to the
-  ingest quarantine + re-pull. HONEST: NO abandoned-daemon data race (adversarially proven — a released timed-out
-  daemon built a 2nd SDK yet generation stayed 0); NO half-state; BOUNDED (8-thread forever-hang probe → all 8
-  `GrowwTimeoutError` in ~0.81 s = N×deadline, no freeze); single-flight intact; back-compat byte-identical; secret
-  hygiene preserved. NOTED follow-up (hostile NIT, not folded to keep this off the shared `errors.py`): the
-  timeout→retryable mapping relies on the `"deadline exceeded"` substring shared by `deadline.py`/`errors.py` — a
-  future shared-constant hardening, NOT required. `deadline.py` 100% line+branch (20/4) + `reauth.py` 100% (48/2) +
-  `client.py` 100% (89/10) + `live.py` 100% (18/0); 506 groww-adapter + 7247 unit tests green; ruff/`mypy --strict`
-  (258)/`pyright brutex tests` (0 errors whole-repo) clean; hostile-reviewer SHIP (0 BLOCKER/MAJOR/MINOR) +
-  workspace-health HEALTHY. CLOSES the #909 MINOR-1 fast-follow. ENGINE UNCHANGED, no scope/vocab/rate change. Prior
-  merged: DEC-GROWW-TOKEN-REAUTH-001, MIGRATION.md #909 (the Groww adapter auto-RE-MINTS the daily access token on an
+- **Active branch:** `claude/mnm-spot-key-recover-jlzt1n` (the read-side FIX of #907's M&M diagnostic — a lake spot
+  partition whose on-disk directory key DRIFTED from the scored `symbol_name` (a legacy `"NSE-M&M"` / `"M&M "` instead
+  of the bare `"M&M"`) is now RECOVERED to its canonical scored symbol on BOTH the `/completeness` scoreboard AND the
+  `/universe` per-row strip, so its REAL on-disk data is surfaced instead of silently dropped — DEC-COMPLETENESS-SPOT-KEY-RECOVER-001,
+  MIGRATION.md #911, the operator's "M&M empty-symbol fix" pick. EVIDENCE-GROUNDED (no guess): an Explore trace proved
+  the production WRITE path keys both sides IDENTICALLY (`ingest.py` writes the partition dir from the stripped
+  `instrument.symbol_name`; the scoreboard keys `categories` on the SAME `symbol_name`), so the operator's REAL
+  M&M-empty was the OPTIONS chain that never pulled when the overnight pull died at 06:00 IST — fixed by #909/#910, NOT
+  a key bug; a key drift can only arise from a LEGACY/foreign/regression partition. FIX (READ-ONLY dashboard; NO
+  engine/lake/vocab/rate/scope change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): ONE COMMON
+  `_resolve_spot_category(symbol, exchange, categories)` resolving exact → whitespace-stripped → the row's OWN
+  `exchange` prefix stripped (DATA-DRIVEN via `removeprefix`, never a hardcoded list, so `BAJAJ-AUTO` is never split on
+  its internal hyphen), returning the canonical scored key or `None` (a genuine stray STAYS dropped — never
+  fabricated); wired into BOTH read-side lookups (`_per_symbol_spot` + `per_symbol_completeness`). The #907 reconcile
+  diagnostic STILL warns on the raw drifted key (recover AND flag-for-cleanup). FOLDED hostile-review BLOCKER: a clean
+  `full` partition + a stale drifted `none` fragment both recover to one canonical symbol, and the SORTED scan let the
+  stale fragment CLOBBER the real `full` via blind last-write (Golden-Rule-#1 regression) — fixed by a COMMON
+  `_spot_cell_supersedes` rank-merge (`full > partial > failed > none`, ties by earlier start) at both sites, so the
+  surfaced cell is the BEST real data ORDER-INDEPENDENT (regression-proven both scan orders × both read paths). HONEST:
+  recovers only data that PHYSICALLY EXISTS (never invents a row); does NOT change the operator's current bare-`"M&M"`
+  (already matched) — DEFENSIVE hardening, NOT their cure (the #909/#910 token self-heal is); OPTIONS path out of scope
+  (keys on the structured `CoverageRecord.underlying_symbol`, not a dir name). `completeness.py` 100% line+branch
+  (293/108); 131 completeness + dashboard coverage/e2e/universe integration tests green; ruff/`mypy --strict`
+  (258)/`pyright brutex tests` (0 errors whole-repo) clean; hostile-reviewer FIX-FIRST → BLOCKER FOLDED (1 harmless
+  NIT) + workspace-health HEALTHY. COMPLETES the #907 diagnostic's "confirmed key-normalization FIX" next step. ENGINE
+  UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-GROWW-REAUTH-DEADLINE-001, MIGRATION.md #910 (the token
+  re-mint is now WRAPPED in the freeze-guard wall-clock deadline, so even a HUNG re-mint at 06:00 IST raises a
+  retryable timeout — the window quarantines + re-pulls — instead of freezing the whole pool; `run_with_deadline`
+  MOVED to a cycle-proof stdlib-only `deadline.py` + re-exported from `client.py`; `SdkRefresher.reauth` wraps the
+  under-lock mint, publish only after a clean return, timeout → retryable out of the released lock; adversarially
+  proven no abandoned-daemon data race / no half-state / bounded 8-thread hang; CLOSES the #909 MINOR-1 fast-follow).
+  Prior merged: DEC-GROWW-TOKEN-REAUTH-001, MIGRATION.md #909 (the Groww adapter auto-RE-MINTS the daily access token on an
   auth-expiry mid-pull — thread-safe, single-flight via a generation counter, bounded `max_reauths` — so the 06:00 IST
   token reset self-heals instead of killing the overnight pull; PROVEN from the operator's logs: token died at exactly
   06:00 IST with 3,764 quarantines while the TOTP credential was correct; NEW `reauth.py` `SdkRefresher` + `client.py`
@@ -909,7 +917,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-reauth-deadline-jlzt1n`
+- **Active feature branch:** `claude/mnm-spot-key-recover-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

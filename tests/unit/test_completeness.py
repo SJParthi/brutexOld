@@ -32,6 +32,8 @@ from brutex.dashboard.completeness import (
     _contracts_note,
     _option_verdict,
     _overall_spot,
+    _resolve_spot_category,
+    _spot_cell_supersedes,
     build_completeness_scoreboard,
     categorize_instruments,
     log_symbol_reconcile_from_board,
@@ -587,6 +589,111 @@ def test_per_symbol_options_folded_with_year_span() -> None:
 def test_per_symbol_options_unmapped_underlying_skipped() -> None:
     out = per_symbol_completeness([], {}, [_cov("STRAY", 2025, STATUS_COMPLETE)], {})
     assert out == {}
+
+
+# ── spot key-drift recovery (DEC-COMPLETENESS-SPOT-KEY-RECOVER-001) ───────────────────────
+
+
+def test_resolve_spot_category_exact_match_is_byte_identical() -> None:
+    """The clean steady state: an exactly-scored symbol resolves on the FIRST lookup,
+    returning itself + its category (no normalization, no behaviour change)."""
+    cats = {"M&M": CATEGORY_EQUITY}
+    assert _resolve_spot_category("M&M", "NSE", cats) == ("M&M", CATEGORY_EQUITY)
+
+
+def test_resolve_spot_category_recovers_trailing_whitespace_drift() -> None:
+    """A legacy partition keyed ``"M&M "`` (write side strips, so this is foreign/legacy) is
+    recovered to the canonical scored ``"M&M"`` so its real data is not silently dropped."""
+    cats = {"M&M": CATEGORY_EQUITY}
+    assert _resolve_spot_category("M&M ", "NSE", cats) == ("M&M", CATEGORY_EQUITY)
+
+
+def test_resolve_spot_category_recovers_exchange_prefix_drift() -> None:
+    """A partition keyed by the groww_symbol ``"NSE-M&M"`` is recovered to the bare scored
+    ``"M&M"`` by stripping the row's OWN exchange prefix (the documented #907 drift class)."""
+    cats = {"M&M": CATEGORY_EQUITY}
+    assert _resolve_spot_category("NSE-M&M", "NSE", cats) == ("M&M", CATEGORY_EQUITY)
+
+
+def test_resolve_spot_category_does_not_overstrip_hyphenated_symbol() -> None:
+    """A legitimately hyphenated symbol (``BAJAJ-AUTO``) matches exactly and is NEVER split on
+    its internal hyphen — the prefix strip keys on ``"<exchange>-"``, not any hyphen."""
+    cats = {"BAJAJ-AUTO": CATEGORY_EQUITY}
+    assert _resolve_spot_category("BAJAJ-AUTO", "NSE", cats) == ("BAJAJ-AUTO", CATEGORY_EQUITY)
+    # …and a prefixed hyphenated symbol still recovers correctly (strip only the exch prefix).
+    assert _resolve_spot_category("NSE-BAJAJ-AUTO", "NSE", cats) == (
+        "BAJAJ-AUTO",
+        CATEGORY_EQUITY,
+    )
+
+
+def test_resolve_spot_category_unscored_stray_returns_none() -> None:
+    """A genuinely unscored partition (no exact / whitespace / prefix class matches) returns
+    None and STAYS dropped — never fabricated onto the board (Golden Rule #1)."""
+    cats = {"M&M": CATEGORY_EQUITY}
+    assert _resolve_spot_category("FOOBAR", "NSE", cats) is None
+    # the prefix is present but the de-prefixed candidate is still not scored → None.
+    assert _resolve_spot_category("NSE-FOOBAR", "NSE", cats) is None
+
+
+def test_resolve_spot_category_blank_exchange_skips_prefix_strip() -> None:
+    """An empty exchange means there is no ``"<exch>-"`` prefix to strip — the prefix branch is
+    guarded off and an unmatched key returns None (no degenerate ``"-"`` prefix logic)."""
+    cats = {"M&M": CATEGORY_EQUITY}
+    assert _resolve_spot_category("NSE-M&M", "", cats) is None
+
+
+def test_resolve_spot_category_whitespace_strip_still_unscored_falls_through() -> None:
+    """A whitespace-only drift whose stripped form is STILL unscored falls through to the
+    prefix branch and then to None (exercises the stripped-but-unmatched path)."""
+    cats = {"M&M": CATEGORY_EQUITY}
+    assert _resolve_spot_category("OTHER ", "NSE", cats) is None
+
+
+def test_per_symbol_spot_groups_recovered_drift_under_canonical_symbol() -> None:
+    """End-to-end through the board: a ``NSE-M&M`` partition surfaces under the canonical
+    ``M&M`` with its real verdict + the partition's exchange — the read-side FIX of #907."""
+    rows = [_spot_row("NSE-M&M", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
+    out = per_symbol_completeness(rows, {"M&M": CATEGORY_EQUITY}, [], {})
+    assert set(out) == {"M&M"}  # grouped under the clean scored key, not "NSE-M&M"
+    entry = out["M&M"]
+    assert entry["spot"]["1minute"]["status"] == DIM_FULL  # the real on-disk data is scored
+    assert entry["exchange"] == "NSE"
+
+
+def test_spot_cell_supersedes_ranks_verdicts_and_breaks_ties_by_start() -> None:
+    """The rank-merge contract: a strictly-better verdict always wins; on a verdict TIE the
+    earlier start (wider coverage) wins; a ``None`` start ranks worst — so the merged cell is
+    order-independent (DEC-COMPLETENESS-SPOT-KEY-RECOVER-001)."""
+    # strictly-better verdict replaces — both directions of the rank comparison.
+    assert _spot_cell_supersedes(DIM_FULL, "2020-01-01", DIM_NONE, None) is True
+    assert _spot_cell_supersedes(DIM_NONE, "2024-01-01", DIM_FULL, "2020-01-01") is False
+    # tie on verdict → the earlier start wins (both directions of the ``<`` comparison).
+    assert _spot_cell_supersedes(DIM_FULL, "2020-01-01", DIM_FULL, "2021-01-01") is True
+    assert _spot_cell_supersedes(DIM_FULL, "2021-01-01", DIM_FULL, "2020-01-01") is False
+    # tie on verdict with None starts: a None new never supersedes; a None current is superseded.
+    assert _spot_cell_supersedes(DIM_PARTIAL, None, DIM_PARTIAL, "2020-01-01") is False
+    assert _spot_cell_supersedes(DIM_PARTIAL, "2020-01-01", DIM_PARTIAL, None) is True
+
+
+def test_spot_key_recovery_collision_keeps_clean_full_over_drifted_fragment() -> None:
+    """The hostile-review BLOCKER regression: a clean FULL ``M&M`` partition coexisting with a
+    drifted ``NSE-M&M`` fragment (no ledger → ``none``) — both recover to canonical ``M&M`` —
+    keeps the real FULL data and NEVER lets the stale fragment clobber it, in BOTH scan orders
+    AND across BOTH read paths (scoreboard + universe strip)."""
+    clean = _spot_row("M&M", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")
+    drifted = _spot_row("NSE-M&M", "1minute", COMPLETENESS_NO_RECORD, first_date="2024-03-01")
+    cats = {"M&M": CATEGORY_EQUITY}
+    for rows in ([clean, drifted], [drifted, clean]):  # order-INDEPENDENT
+        board = build_completeness_scoreboard(rows, cats, [], {})
+        per = {r["symbol"]: r for r in board["spot"]["per_symbol"]}
+        assert set(per) == {"M&M"}  # one canonical row, the drifted key never shown
+        assert per["M&M"]["1minute"] == DIM_FULL  # real FULL kept, not clobbered by `none`
+        assert per["M&M"]["1minute_start"] == "2020-01-01"  # the real 2020-floor start kept
+        # the /universe per-row strip holds the SAME invariant (the second wired call site).
+        out = per_symbol_completeness(rows, cats, [], {})
+        assert out["M&M"]["spot"]["1minute"]["status"] == DIM_FULL
+        assert out["M&M"]["spot"]["1minute"]["first_date"] == "2020-01-01"
 
 
 def test_per_symbol_spot_and_options_merge_on_same_symbol() -> None:
