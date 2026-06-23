@@ -275,6 +275,29 @@ class TestPrevDayOiFallback:
         )
         assert got == 999
 
+    def test_1day_present_but_null_oi_falls_back_to_minute(self, tmp_path: Path) -> None:
+        # The universal real-world F&O case: a derived 1-day bar EXISTS (with a real
+        # close) but its open_interest is null (the derive writes OI=None), so the
+        # OI must be recovered from the prior session's last 1-minute bar.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FUT,
+            interval="1day",
+            bars=[_day_bar(date(2025, 8, 29), close="100.00", oi=None)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FUT,
+            interval="1minute",
+            bars=[_min_bar(date(2025, 8, 29), hh=15, mm=29, close="100.00", oi=8765)],
+        )
+        got = _prev_day_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+        )
+        assert got == 8765
+
 
 # ── compute_spot_candidates: SPOT-only segment whitelist ───────────────────
 

@@ -600,11 +600,16 @@ def _prior_session_last_from_minute(
     the bound (the first day in the lake, or no 1-minute partition) — the caller
     then reports an honest ``None`` baseline, never a fabricated one (Golden Rule #1).
 
-    The derived ``1day`` close IS the session's last 1-minute close, 2dp-snapped by
-    the same writer, so the recovered close is byte-equal to the ``1day`` value it
-    substitutes — keeping the spot %-change unchanged where ``1day`` exists and
-    making F&O %-change work where it does not. The OI is read from the same last
-    1-minute bar (F&O 1-minute bars carry ``open_interest``; ``None`` when absent).
+    For a session-filtered symbol (every admitted instrument — index / cash /
+    F&O contract), the derived ``1day`` close IS the session's last 1-minute close,
+    2dp-snapped by the same writer, so the recovered close is byte-equal to the
+    ``1day`` value it substitutes — keeping the spot %-change unchanged where
+    ``1day`` exists and making F&O %-change work where it does not. (A
+    session-EXEMPT symbol like GIFT Nifty crosses the 09:15-IST bucket boundary so
+    its derived-daily "last bar" can differ from the IST-calendar-day last bar — it
+    is not an admitted instrument and the fallback only fires when ``1day`` is
+    absent, so this is inert today.) The OI is read from the same last 1-minute bar
+    (F&O 1-minute bars carry ``open_interest``; ``None`` when absent).
     """
     import polars as pl
 
