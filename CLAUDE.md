@@ -230,25 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rate-governor-atomic-jlzt1n` (the per-minute rate governor now RESERVES its issue slot
-  ATOMICALLY under the SAME lock that observes a free slot, instead of appending the issue instant AFTER
-  `bucket.acquire()` — closing a latent concurrent-overshoot of the HARD 500/min cap; the "no overshoot" docstring is
-  now actually TRUE for the multi-threaded path — DEC-GROWW-GOVERNOR-ATOMIC-001, MIGRATION.md #913, the operator's
-  "cover all worst cases / no illusion / parallelise" correctness-hunt, found by the parallel concurrency-audit agent.
-  ROOT (provable trace): `rate_common.py` `RateController.pace()` ran the governor as TWO separate critical sections —
-  gate-1 checked `len(_issues) < cap` + BROKE (lock released), `bucket.acquire()` ran (no lock), then the instant was
-  appended in a SEPARATE `with _lock` — so N pool workers could ALL see the SAME free slot and each append → overshoot
-  by `N-1`. HONEST SEVERITY: DORMANT today — at `ceiling_rps ≤ 5` the per-second bucket caps at `5×60 = 300/min <
-  500/min`, so the governor wait never binds; it would breach only if `ceiling_per_min < ceiling_rps × 60`. Fixed for
-  robustness + honesty (the false "no overshoot" claim is a Golden-Rule-#10 issue). FIX (adapter-only; NO
-  engine/scope/vocab/rate-cap change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): gate-1 RESERVES (`_issues.append(now)`) in
-  the same lock that saw room, making `(check, reserve)` indivisible; the post-bucket append is removed; fail-open still
-  records (honest count); the instant is stamped at admission (conservative for a HARD cap). HONEST: overshoot now
-  IMPOSSIBLE (atomic) — proven by a NEW 16-thread `Barrier` regression with a recording-deque (`max_seen ≤ cap`,
-  5×-stable); single-threaded count byte-equivalent (only the timestamp shifts post-bucket→admission, `test_blocks_at_
-  cap_then_frees` updated 59.8→59.6); no new lock, O(1) per pace. `rate_common.py` 100% line+branch (141/34); 52
-  rate_common tests green; ruff/`mypy --strict` (258)/`pyright brutex tests` (0 errors whole-repo) clean. ENGINE
-  UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-CANDLE-PARTIAL-ZERO-SKIP-001, MIGRATION.md #912 (a vendor
+- **Active branch:** `claude/movers-futures-tier-jlzt1n` (the `/movers` Futures tab's Near / Next / Far expiry-tier
+  selector now ACTUALLY filters — each tier selects that serial-month future per underlying (near = front month, next =
+  2nd serial, far = 3rd) and is keyed INDEPENDENTLY in the candidate cache, so a Next/Far click can never be served
+  stale Near rows — DEC-MOVERS-FUTURES-TIER-001, MIGRATION.md #917, the operator's "execute only this — Futures
+  Near/Next/Far wiring, make the expiry-tier selector actually filter", the P1 flagged follow-up of #915. ROOT
+  (file:line): the page already SHOWED the dropdown (`movers.html:243`) + SENT `?expiry=` (`:314`), but the route's
+  futures branch IGNORED it — `compute_futures_candidates` always picked the front month via `select_near_month` and the
+  futures `candidate_key` carried NO `expiry_tier`, so all three tiers collapsed to one cached near result (a Next/Far
+  click silently returned Near rows). FIX (READ-ONLY dashboard; NO engine/scope/vocab/rate change, ENGINE stays
+  NIFTY/BANKNIFTY/SENSEX): NEW `select_expiry_tier` (live contracts (expiry ≥ on_date) sorted earliest-first → the
+  tier's 0-based rank `{near:0,next:1,far:2}`, or honest `None` when the underlying lists fewer serial months —
+  `select_near_month` is now the `near` special case, byte-equivalent) + NEW COMMON `normalize_futures_tier` (the
+  futures twin of `normalize_options_selectors`; blank/unknown ⇒ near); the route threads the normalised tier into BOTH
+  `candidate_key(expiry_tier=)` AND `compute_futures_candidates(expiry_tier=)`, the warmer keys at near. FRONTEND
+  UNCHANGED (it already showed + sent the selector). HONEST: the stale-cache bug class is closed (the tier is part of
+  the futures cache key, proven by a Near-then-Next route test asserting a DIFFERENT contract); a tier with no live
+  contract at its rank is honestly SKIPPED (counted, never faked); default ⇒ near is byte-equivalent to the prior
+  near-month-only behaviour. `movers_futures.py` 100% line+branch (235/50, 0 missing); NEW `TestSelectExpiryTier` +
+  `TestNormalizeFuturesTier` unit tests + `TestFuturesExpiryTier` route integration (incl. the cache-independence
+  regression); 381 movers tests green; ruff/ruff-format/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED, no
+  scope/vocab/rate change. Prior merged: DEC-GROWW-GOVERNOR-ATOMIC-001, MIGRATION.md #913 (the per-minute rate governor
+  now RESERVES its issue slot ATOMICALLY under the SAME lock that observes a free slot, closing a latent
+  concurrent-overshoot of the HARD 500/min cap — DORMANT at the production 5 r/s ceiling where `5×60 = 300/min <
+  500/min`; adapter-only, overshoot now IMPOSSIBLE, proven by a 16-thread `Barrier` regression; ENGINE UNCHANGED). Prior
+  merged: DEC-CANDLE-PARTIAL-ZERO-SKIP-001, MIGRATION.md #912 (a vendor
   candle carrying a ZERO price among real prices — e.g. `open: 0` with a real high/low/close — is now gracefully
   SKIPPED instead of silently STORED as a corrupted bar (a fabricated zero price + a zero low/high clamp), the
   symmetric twin of the partial-ABSENT skip: `assemble_candle`'s all-empty guard uses `has_no_price` (absent OR zero)
@@ -922,7 +928,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rate-governor-atomic-jlzt1n`
+- **Active feature branch:** `claude/movers-futures-tier-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

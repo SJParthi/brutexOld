@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -536,6 +537,66 @@ class TestFuturesApi:
         resp = client.get("/api/v1/movers", params={"asset": "futures", "date": "not-a-date"})
         assert resp.status_code == 400
         assert "malformed date" in resp.json()["detail"]
+
+
+class TestFuturesExpiryTier:
+    """The Near / Next / Far serial-expiry selector (DEC-MOVERS-FUTURES-TIER-001).
+
+    The lake seeds ONE underlying (NIFTY) with two live serial futures:
+    ``_NEAR_FUT`` (27Jun24) and ``_FAR_FUT`` (25Jul24). Near must pick the front
+    month, Next the second serial, Far (no third contract) must honestly skip —
+    and the three must cache independently (no stale Near row served for Next).
+    """
+
+    def _client(self, store: InstrumentStore, tmp_path: Path) -> TestClient:
+        _seed_futures_lake(tmp_path)
+        return TestClient(build_app(DashboardState(), instrument_store=store))
+
+    def _get(self, client: TestClient, tier: str | None) -> dict[str, Any]:
+        params: dict[str, str] = {"asset": "futures", "interval": "1day", "date": "2024-06-13"}
+        if tier is not None:
+            params["expiry"] = tier
+        result: dict[str, Any] = client.get("/api/v1/movers", params=params).json()
+        return result
+
+    def test_near_picks_front_month(self, store: InstrumentStore, tmp_path: Path) -> None:
+        body = self._get(self._client(store, tmp_path), "Near")
+        assert body["expiry_tier"] == "near"
+        assert body["price_gainers"][0]["symbol"] == _NEAR_FUT
+
+    def test_blank_expiry_defaults_to_near(self, store: InstrumentStore, tmp_path: Path) -> None:
+        body = self._get(self._client(store, tmp_path), None)
+        assert body["expiry_tier"] == "near"
+        assert body["price_gainers"][0]["symbol"] == _NEAR_FUT
+
+    def test_next_picks_second_serial(self, store: InstrumentStore, tmp_path: Path) -> None:
+        body = self._get(self._client(store, tmp_path), "Next")
+        assert body["expiry_tier"] == "next"
+        assert body["instrument_count"] == 1
+        # The second serial (25Jul24) is selected — present in the volume ranking
+        # (it has a fresh-session 1-minute bar). This is a DIFFERENT contract than
+        # Near, proving the tier actually changes the pick.
+        assert body["volume"][0]["symbol"] == _FAR_FUT
+
+    def test_far_beyond_available_is_skipped(self, store: InstrumentStore, tmp_path: Path) -> None:
+        body = self._get(self._client(store, tmp_path), "Far")
+        assert body["expiry_tier"] == "far"
+        # No third serial contract exists → the underlying is honestly skipped,
+        # never a fabricated or wrong-tier row (Golden Rule #1).
+        assert body["instrument_count"] == 1
+        assert body["skipped_count"] == 1
+        assert body["price_gainers"] == []
+        assert body["volume"] == []
+
+    def test_tiers_cache_independently(self, store: InstrumentStore, tmp_path: Path) -> None:
+        # The stale-cache regression: Near then Next on the SAME client must NOT
+        # serve the cached Near rows for Next (the tier is part of the cache key).
+        client = self._client(store, tmp_path)
+        near = self._get(client, "Near")
+        nxt = self._get(client, "Next")
+        assert near["price_gainers"][0]["symbol"] == _NEAR_FUT
+        assert nxt["volume"][0]["symbol"] == _FAR_FUT
+        assert near["volume"][0]["symbol"] != nxt["volume"][0]["symbol"]
 
     def test_no_lake_root_futures_empty(self) -> None:
         # A store whose `path` is not a filesystem Path → empty futures payload.

@@ -15,19 +15,21 @@ module IMPORTS :func:`~brutex.dashboard.movers_snapshot.interval_minutes`,
 :func:`~brutex.dashboard.movers_snapshot.parse_snapshot_date`,
 :func:`~brutex.dashboard.movers_snapshot._cutoff_minute`, and the prior-day
 1-day-close reader :func:`~brutex.dashboard.movers_snapshot._prev_day_close`. It
-adds only what futures need: the contract-symbol parser, the near-month picker,
-the raw-1-minute reader that PRESERVES ``open_interest`` (the shared
-``make_lake_read_1m`` path drops OI), the prior-day OI reader, and the
-futures ranking + payload.
+adds only what futures need: the contract-symbol parser, the serial-expiry tier
+picker (Near / Next / Far), the raw-1-minute reader that PRESERVES
+``open_interest`` (the shared ``make_lake_read_1m`` path drops OI), the prior-day
+OI reader, and the futures ranking + payload.
 
 ## The locked calculation rules (operator-confirmed 2026-06-13)
 
 For each underlying that has a future in the lake (one row per underlying — its
-near-month contract):
+contract at the selected serial-expiry tier):
 
-* **Near-month** = the contract with the earliest expiry ``>= snapshot_date``
-  (front month). All-expired underlyings are SKIPPED (no live contract — honest,
-  Golden Rule #1), never faked.
+* **Expiry tier** = the live contracts (expiry ``>= snapshot_date``) sorted
+  earliest-first; ``near`` selects the front month, ``next`` the second serial
+  month, ``far`` the third (the operator's Near / Next / Far selector). An
+  underlying with no live contract at the requested tier's rank is SKIPPED (no
+  fabricated or wrong-tier row — honest, Golden Rule #1), never faked.
 * **LTP / volume / value / OI** come from the future's own session bars (raw
   1-minute, resampled by the same minute math the Spot reader uses, sliced to the
   selected ``time``). ``ltp`` is the last bar's close (2dp money), ``volume`` is the
@@ -87,8 +89,10 @@ __all__ = [
     "build_futures_payload",
     "compute_futures_candidates",
     "compute_futures_mover",
+    "normalize_futures_tier",
     "parse_future_symbol",
     "run_futures_snapshot",
+    "select_expiry_tier",
     "select_near_month",
 ]
 
@@ -145,6 +149,20 @@ _EXPIRY_TOKEN_LEN: Final[int] = 7
 #: vendor symbols use hyphen only as the field separator).
 _MIN_FUT_PARTS: Final[int] = 4
 
+#: The three serial-month futures expiry TIERS → the 0-based rank of the live
+#: contract (sorted earliest-expiry-first) the tier selects: ``near`` = the
+#: front month (next to expire), ``next`` = the second serial month, ``far`` =
+#: the third. NSE lists three serial monthly futures at any time; an underlying
+#: with fewer live contracts than the requested tier index is honestly dropped
+#: (Golden Rule #1 — never a fabricated row). The ONE source of truth for the
+#: tier→index mapping (CLAUDE.md §11 COMMON).
+_TIER_INDEX: Final[dict[str, int]] = {"near": 0, "next": 1, "far": 2}
+
+#: The default tier when none is selected — the front month (mirrors the prior
+#: near-month-only behaviour, so the warmer + every un-tiered caller is
+#: byte-equivalent).
+_DEFAULT_TIER: Final[str] = "near"
+
 
 def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     """Parse a FUT contract groww_symbol into ``(underlying, expiry_date)`` or ``None``.
@@ -200,15 +218,77 @@ def _parse_expiry_token(token: str) -> date_cls | None:
         return None
 
 
+def normalize_futures_tier(expiry: str | None) -> str:
+    """Normalise the raw ``?expiry=`` selector to a canonical futures tier token.
+
+    Lower-cases the value; a blank / ``None`` / unknown tier ⇒ ``near`` (the
+    front month). The single source of truth for the normalisation so the cache
+    key and the computed candidate set agree on the canonical tier (CLAUDE.md §11
+    COMMON) — the futures twin of
+    :func:`~brutex.dashboard.movers_options.normalize_options_selectors` (futures
+    carry no All/Monthly/Weekly track, only the Near/Next/Far tier). An unknown
+    value such as ``"foo"`` normalises to ``near``, never a stale split.
+
+    Parameters
+    ----------
+    expiry
+        The raw ``?expiry=`` query value (``Near`` / ``Next`` / ``Far`` from the
+        page, any case; blank / ``None`` / unknown ⇒ ``near``).
+
+    Returns
+    -------
+    str
+        A canonical lower-case tier token — one of ``near`` / ``next`` / ``far``.
+    """
+    tier = (expiry or _DEFAULT_TIER).lower()
+    return tier if tier in _TIER_INDEX else _DEFAULT_TIER
+
+
+def select_expiry_tier(
+    items: Iterable[tuple[str, date_cls]], *, on_date: date_cls, tier: str = _DEFAULT_TIER
+) -> str | None:
+    """Return the *tier*-th live contract symbol for *on_date*, or ``None``.
+
+    *items* are ``(symbol, expiry)`` pairs (the FUT contracts of ONE underlying).
+    The live contracts are those whose expiry is ``>= on_date`` (a contract
+    expiring today is still live), sorted earliest-expiry-first; ``near`` selects
+    the front month, ``next`` the second serial month, ``far`` the third (the
+    :data:`_TIER_INDEX` mapping; an unknown tier falls back to ``near``). When
+    there is no live contract at the tier's rank — every contract expired, or the
+    underlying lists fewer serial months than the requested tier — the underlying
+    is dropped (``None``, Golden Rule #1, honest — never a fabricated or
+    wrong-tier row). Ties on the expiry date break on the symbol string so the
+    pick is deterministic (Rule #4).
+
+    Parameters
+    ----------
+    items
+        ``(symbol, expiry_date)`` pairs for one underlying's FUT contracts.
+    on_date
+        The snapshot date the tier is selected as-of.
+    tier
+        The serial expiry tier — ``near`` / ``next`` / ``far`` (default ``near``;
+        an unknown value falls back to ``near`` via :data:`_TIER_INDEX`).
+
+    Returns
+    -------
+    str | None
+        The chosen contract symbol, or ``None`` when no live contract exists at
+        the requested tier's rank.
+    """
+    live = sorted((expiry, symbol) for symbol, expiry in items if expiry >= on_date)
+    index = _TIER_INDEX.get(tier, _TIER_INDEX[_DEFAULT_TIER])
+    if index >= len(live):
+        return None
+    return live[index][1]
+
+
 def select_near_month(items: Iterable[tuple[str, date_cls]], *, on_date: date_cls) -> str | None:
     """Return the front-month contract symbol for *on_date*, or ``None``.
 
-    *items* are ``(symbol, expiry)`` pairs (the FUT contracts of ONE underlying).
-    The near-month is the contract with the EARLIEST expiry that is ``>= on_date``
-    (a contract expiring today is still live). When every contract has already
-    expired (all expiries ``< on_date``) there is no live future, so the
-    underlying is dropped — ``None`` (Golden Rule #1, honest). Ties on the expiry
-    date break on the symbol string so the pick is deterministic (Rule #4).
+    The ``near``-tier special case of :func:`select_expiry_tier` (kept as a named
+    helper for the front-month callers + back-compat). See that function for the
+    live-contract + tie-break rules.
 
     Parameters
     ----------
@@ -222,11 +302,7 @@ def select_near_month(items: Iterable[tuple[str, date_cls]], *, on_date: date_cl
     str | None
         The chosen contract symbol, or ``None`` when all contracts are expired.
     """
-    live = [(expiry, symbol) for symbol, expiry in items if expiry >= on_date]
-    if not live:
-        return None
-    live.sort()
-    return live[0][1]
+    return select_expiry_tier(items, on_date=on_date, tier=_DEFAULT_TIER)
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +554,7 @@ def build_futures_payload(
     time: str | None,
     top_n: int,
     skipped: int,
+    expiry_tier: str = _DEFAULT_TIER,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -493,14 +570,17 @@ def build_futures_payload(
     Parameters
     ----------
     movers
-        The computed near-month future rows (one per live underlying).
+        The computed future rows for the selected tier (one per live underlying).
     interval, date, time, top_n
         Echoed snapshot coordinates.
+    expiry_tier
+        The serial expiry tier these rows were screened at (``near`` / ``next`` /
+        ``far``) — echoed so the page can confirm the active selector.
     skipped
-        Count of underlyings/contracts dropped — all-expired, no session bars,
-        OR an unreadable Parquet file (logged as ``movers.parquet_skip``;
-        DEC-MOVERS-CORRUPT-SKIP-001) — reported honestly, never hidden
-        (Golden Rule #1).
+        Count of underlyings/contracts dropped — no live contract at the tier,
+        no session bars, OR an unreadable Parquet file (logged as
+        ``movers.parquet_skip``; DEC-MOVERS-CORRUPT-SKIP-001) — reported honestly,
+        never hidden (Golden Rule #1).
 
     Returns
     -------
@@ -533,6 +613,7 @@ def build_futures_payload(
         "date": date,
         "time": time,
         "top_n": top_n,
+        "expiry_tier": expiry_tier,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "note": note,
@@ -765,6 +846,7 @@ class FuturesCandidates:
     movers: tuple[FuturesMover, ...]
     skipped: int
     date: str
+    expiry_tier: str = _DEFAULT_TIER
 
 
 def compute_futures_candidates(
@@ -776,17 +858,19 @@ def compute_futures_candidates(
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
+    expiry_tier: str = _DEFAULT_TIER,
 ) -> FuturesCandidates:
     """Scan the lake → the :class:`FuturesCandidates` for one snapshot coordinate.
 
     The expensive, cacheable core extracted from :func:`run_futures_snapshot`:
-    discovers every near-month FUT contract (one per underlying — the front-month
-    selected as-of *date*, optionally scoped to *exchange*), reads each future's
-    selected-day session (raw 1-minute, OI preserved) up to *time*, takes the
-    future's prior 1-day close + OI and the underlying spot's LTP, and computes
-    the per-underlying :class:`FuturesMover`. Ranking is the cheap, ``top_n``-dependent
-    step done by :func:`build_futures_payload`. An empty / futures-less lake (or an
-    unknown interval) yields an empty :class:`FuturesCandidates` (Golden Rule #1).
+    discovers each underlying's FUT contract at the selected serial expiry *tier*
+    (``near`` / ``next`` / ``far`` as-of *date*, optionally scoped to *exchange*),
+    reads each future's selected-day session (raw 1-minute, OI preserved) up to
+    *time*, takes the future's prior 1-day close + OI and the underlying spot's
+    LTP, and computes the per-underlying :class:`FuturesMover`. Ranking is the
+    cheap, ``top_n``-dependent step done by :func:`build_futures_payload`. An empty
+    / futures-less lake (or an unknown interval) yields an empty
+    :class:`FuturesCandidates` (Golden Rule #1).
 
     Parameters
     ----------
@@ -795,17 +879,25 @@ def compute_futures_candidates(
     exchange
         Restrict the screened futures to one exchange (``NSE`` / ``BSE``) for an
         exact per-exchange ranking; ``None`` screens every exchange.
+    expiry_tier
+        The serial expiry tier to screen — ``near`` (front month, default) /
+        ``next`` / ``far`` (:func:`normalize_futures_tier` canonicalises it; an
+        unknown value falls back to ``near``). It is part of the candidate cache
+        key, so Near / Next / Far each cache + rank independently (never a stale
+        Near row served for a Far request).
 
     Returns
     -------
     FuturesCandidates
-        The near-month future rows + skipped count + normalised date.
+        The selected-tier future rows + skipped count + normalised date + the
+        canonical ``expiry_tier`` echoed.
 
     Raises
     ------
     ValueError
         On a malformed *date* / *time* (the route maps it to a 400).
     """
+    tier = normalize_futures_tier(expiry_tier)
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
@@ -813,14 +905,16 @@ def compute_futures_candidates(
     resolved_names = names or {}
     by_underlying = _discover_futures(lake_root, exchange=exchange, datasets=datasets)
     if minutes is None or not by_underlying:
-        return FuturesCandidates(movers=(), skipped=0, date=date_str)
+        return FuturesCandidates(movers=(), skipped=0, date=date_str, expiry_tier=tier)
 
     movers: list[FuturesMover] = []
     skipped = 0
     skip_errors = movers_read_skip_errors()
     for underlying, contracts in by_underlying.items():
-        chosen = select_near_month([(sym, exp) for sym, _exch, exp in contracts], on_date=day)
-        if chosen is None:  # every contract has expired → no live future, honest skip.
+        chosen = select_expiry_tier(
+            [(sym, exp) for sym, _exch, exp in contracts], on_date=day, tier=tier
+        )
+        if chosen is None:  # no live contract at this tier's rank → honest skip.
             skipped += 1
             continue
         exchange = next(exch for sym, exch, _exp in contracts if sym == chosen)
@@ -867,7 +961,7 @@ def compute_futures_candidates(
             )
         )
 
-    return FuturesCandidates(movers=tuple(movers), skipped=skipped, date=date_str)
+    return FuturesCandidates(movers=tuple(movers), skipped=skipped, date=date_str, expiry_tier=tier)
 
 
 def run_futures_snapshot(
