@@ -29,15 +29,15 @@ class GrowwSDK(Protocol):
 
     def get_historical_candles(self, **_kwargs: object) -> Mapping[str, object]:
         """Return one historical-candle window (row-of-arrays payload)."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def get_expiries(self, **_kwargs: object) -> Mapping[str, object]:
         """Return the FNO expiries for an underlying."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
         """Return the contract symbols for an underlying + expiry."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
 
 __all__ = ["GrowwSDK"]
