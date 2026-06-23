@@ -32,6 +32,16 @@ leaf at once. It is:
   client.GrowwClient`'s ``max_reauths`` budget): a genuinely-bad credential re-mints
   once, the call fails again, and the client raises terminally — never an infinite
   loop.
+* **FREEZE-GUARDED** — the re-mint network call is itself wrapped by the wall-clock
+  :func:`~brutex.adapters.groww.deadline.run_with_deadline` freeze guard (MINOR-1 of
+  DEC-GROWW-TOKEN-REAUTH-001): a re-mint that HANGS on a half-open socket at exactly
+  06:00 IST would otherwise hold :attr:`_lock` forever and FREEZE every pool leaf
+  blocked on :meth:`sdk_at` / :meth:`current_sdk`. The deadline wraps ONLY the network
+  mint (it returns the new SDK tuple WITHOUT writing shared state — the lock-guarded
+  publish runs only after it returns), so a timeout raises a RETRYABLE
+  :class:`~brutex.adapters.groww.errors.GrowwTimeoutError` OUT of the locked block
+  (the lock is released, no half-state published) and the caller's resilience
+  quarantines + re-pulls that window instead of the pool freezing.
 
 Every side-effecting step is an **injected callable** (``token_factory`` /
 ``totp_minter`` flow through to :func:`~brutex.adapters.groww.auth.get_access_token`,
@@ -53,6 +63,9 @@ from brutex.adapters.groww.auth import (
     _real_totp,
     get_access_token,
 )
+from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
+from brutex.adapters.groww.deadline import run_with_deadline
+from brutex.adapters.groww.errors import from_groww_exception
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
 
 
@@ -93,6 +106,7 @@ class SdkRefresher:
     """
 
     __slots__ = (
+        "_call_timeout_seconds",
         "_creds",
         "_generation",
         "_lock",
@@ -111,12 +125,20 @@ class SdkRefresher:
         token_factory: Callable[[str, str], str] = _real_token_factory,
         totp_minter: Callable[[str], str] = _real_totp,
         sdk_factory: Callable[[str], GrowwSDK] = _real_sdk_factory,
+        call_timeout_seconds: float = GROWW_PULL_CALL_TIMEOUT_S,
     ) -> None:
         self._creds = creds
         self._size = max(1, size)
         self._token_factory = token_factory
         self._totp_minter = totp_minter
         self._sdk_factory = sdk_factory
+        #: Hard wall-clock deadline (seconds) for the network RE-MINT — the FREEZE
+        #: GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001 / MINOR-1 of DEC-GROWW-TOKEN-REAUTH-001).
+        #: A hung re-mint at 06:00 IST must NOT block the lock forever (which would freeze
+        #: every other pool leaf); it is bounded by :func:`~brutex.adapters.groww.deadline.\
+        #: run_with_deadline` so a stall raises a retryable timeout instead. Injected SHORT
+        #: in tests; the live build sites take the default ``GROWW_PULL_CALL_TIMEOUT_S``.
+        self._call_timeout_seconds = call_timeout_seconds
         self._lock = threading.Lock()
         #: Monotonically rising re-auth counter — starts at 0 for the INITIAL mint;
         #: each successful :meth:`reauth` bumps it, so a caller can prove single-flight.
@@ -198,12 +220,36 @@ class SdkRefresher:
             If the re-mint itself fails (redacting ``safe_message``) — propagated so
             the client's bounded budget eventually raises terminally for a genuinely
             bad credential (never an infinite loop).
+        GrowwTimeoutError
+            If the re-mint network call HANGS past :attr:`_call_timeout_seconds` (a
+            half-open socket at the 06:00 IST reset) — the FREEZE GUARD (MINOR-1 of
+            DEC-GROWW-TOKEN-REAUTH-001). The bounded mint raises a :class:`TimeoutError`
+            which is mapped to a RETRYABLE :class:`~brutex.adapters.groww.errors.\
+            GrowwTimeoutError`, so the caller's resilience quarantines + re-pulls THAT
+            window instead of freezing the whole pool. CRUCIALLY the deadline wraps ONLY
+            the network mint (which returns the new SDK tuple WITHOUT touching shared
+            state); the lock-guarded PUBLISH happens only AFTER it returns, so a timeout
+            propagates out of the ``with self._lock`` block (the lock is RELEASED — never
+            a permanent hold) leaving NO half-written state (the abandoned daemon's
+            eventual result is discarded).
         """
         with self._lock:
             if self._generation != seen_generation:
                 # Another thread already re-authed — single-flight: no second mint.
                 return self._generation
-            self._sdks = self._mint_sdks()
+            # FREEZE GUARD (MINOR-1): bound ONLY the network mint by the wall-clock
+            # deadline. `_mint_sdks` returns the new SDK tuple WITHOUT writing shared
+            # state, so on a timeout `run_with_deadline` raises, the exception leaves the
+            # `with self._lock` block (lock released — no permanent hold), and NOTHING was
+            # half-published. The publish (store + bump) runs only AFTER a clean return.
+            try:
+                new_sdks = run_with_deadline(self._mint_sdks, self._call_timeout_seconds)
+            except TimeoutError as exc:
+                # Map the deadline TimeoutError to a RETRYABLE GrowwTimeoutError (the
+                # "deadline exceeded" hint is recognised by from_groww_exception) so the
+                # caller treats a hung re-mint as transient, NOT a terminal auth failure.
+                raise from_groww_exception(exc) from exc
+            self._sdks = new_sdks
             self._generation += 1
             return self._generation
 

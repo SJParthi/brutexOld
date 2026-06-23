@@ -429,19 +429,18 @@ class TestCallDeadline:
         )
         assert out == {"candles": [[1, 2, 3, 4, 5, 6, None]]}
 
-    def test_run_with_deadline_propagates_the_underlying_error(self) -> None:
-        from brutex.adapters.groww.client import run_with_deadline
+    def test_run_with_deadline_re_export_is_the_deadline_module_helper(self) -> None:
+        """`client.run_with_deadline` is the SAME object moved to `deadline` (back-compat re-export).
 
-        def _boom() -> Mapping[str, object]:
-            raise ValueError("real failure, not a timeout")
+        The helper was MOVED to ``brutex.adapters.groww.deadline`` (MINOR-1: a neutral
+        stdlib-only module so ``reauth`` can use it without re-introducing the
+        client↔reauth import cycle). ``client`` re-exports it so any legacy import path
+        keeps working; the move's own behaviour is tested in ``test_groww_deadline.py``.
+        """
+        from brutex.adapters.groww.client import run_with_deadline as from_client
+        from brutex.adapters.groww.deadline import run_with_deadline as from_deadline
 
-        with pytest.raises(ValueError, match="real failure"):
-            run_with_deadline(_boom, 5.0)
-
-    def test_run_with_deadline_returns_the_value_when_fast(self) -> None:
-        from brutex.adapters.groww.client import run_with_deadline
-
-        assert run_with_deadline(lambda: {"candles": []}, 5.0) == {"candles": []}
+        assert from_client is from_deadline
 
 
 def test_with_pace_rebinds_pace_and_preserves_meter() -> None:
@@ -633,6 +632,50 @@ def test_default_max_reauths_is_one() -> None:
     with pytest.raises(GrowwAuthError):
         client.expiries(exchange="NSE", underlying_symbol="NIFTY")
     assert refresher.reauth_calls == 1  # exactly the default single re-mint
+
+
+def test_auth_error_whose_remint_times_out_surfaces_retryable_timeout() -> None:
+    """A re-mint that HANGS (freeze guard fires) surfaces a RETRYABLE timeout, not a freeze.
+
+    MINOR-1 of DEC-GROWW-TOKEN-REAUTH-001: when the 06:00 IST re-mint's network call hangs,
+    the refresher's bounded mint raises a :class:`GrowwTimeoutError`. The client must let it
+    propagate out of ``_call`` (a transient error the ingest quarantines + re-pulls) — NOT a
+    terminal auth failure and NOT a hung call that freezes the pool.
+    """
+
+    auth_sdk = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+
+    class _TimingOutRefresher:
+        """A refresher whose re-mint always times out (the hung-mint freeze guard fired)."""
+
+        def __init__(self, sdk: _FakeSDK) -> None:
+            self.reauth_calls = 0
+            self.sdk = sdk
+
+        def sdk_at(self, _index: int) -> _FakeSDK:
+            return self.sdk
+
+        def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
+            return self.sdk
+
+        def current_generation(self) -> int:
+            return 0
+
+        def reauth(self, _seen_generation: int) -> int:
+            self.reauth_calls += 1
+            raise GrowwTimeoutError("TimeoutError: Groww call deadline exceeded (45s)")
+
+    refresher = _TimingOutRefresher(auth_sdk)
+    client = GrowwClient(
+        sdk=auth_sdk,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
+    # The auth error triggers a re-mint; the re-mint times out → a retryable
+    # GrowwTimeoutError propagates (the ingest then quarantines + re-pulls the window).
+    with pytest.raises(GrowwTimeoutError):
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert refresher.reauth_calls == 1  # tried exactly one bounded re-mint, then surfaced
 
 
 def test_with_pace_carries_the_refresher_through() -> None:
