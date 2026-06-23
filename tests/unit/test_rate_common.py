@@ -662,9 +662,7 @@ class TestPerMinuteGovernor:
             with cl:  # the shared test clock advances on every sleep (thread-safe)
                 t[0] += s
 
-        ctl = RateController(
-            clock=clock, sleep=sleep, ceiling_rps=1000.0, ceiling_per_min=cap
-        )
+        ctl = RateController(clock=clock, sleep=sleep, ceiling_rps=1000.0, ceiling_per_min=cap)
         # Swap in a deque that records the post-append length AT the reservation instant —
         # the append fires inside the controller's lock, so this captures the true
         # concurrent count (deque.append can't be monkeypatched on an instance; subclass).
