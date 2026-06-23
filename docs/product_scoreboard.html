@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · Jun 2026 · ledger #910</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #911</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that captures <b>every minute</b> of India's index &amp; F&amp;O market history,
       shows you <b>what's actually moving</b> in real time, and brute-force tests trading ideas at massive scale —
@@ -114,6 +114,7 @@
     <tr><td class="feat">Tricky symbols resolved</td><td class="why">Hyphenated / verbose vendor symbols resolve to the real master symbol</td><td class="why">Names like BAJAJ-AUTO / MIDCPNIFTY map correctly</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Mapping integrity audits</td><td class="why">Proves every option maps to the right stock + lot size; flagged, never faked</td><td class="why">Trust that the data lines up</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Honest completeness</td><td class="why">Late-listed names + missing years marked "partial" instead of faking a full span</td><td class="why">The completeness screen never lies to you</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Empty-symbol recovery</td><td class="why">A stock whose stored data key drifted (e.g. <code>NSE-M&amp;M</code> vs <code>M&amp;M</code>) has its real on-disk data recovered under the clean name, never silently dropped (and the drift is flagged for cleanup)</td><td class="why">No stock with real data ever reads falsely "empty"</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">"Why is X empty?" diagnostic</td><td class="why">Pinpoints exactly why a symbol reads empty (a key-format drift), surfaced for a precise fix</td><td class="why">Data gaps get diagnosed, not guessed at</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
@@ -137,8 +138,9 @@
   <h2>🟡 Current <small>— just shipped this cycle</small></h2>
   <table>
     <tr><th>Item</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Empty-symbol recovery</td><td class="why">If a stock's stored data key drifted (a legacy <code>NSE-M&amp;M</code> vs the clean <code>M&amp;M</code>), the board now recovers its real on-disk data under the clean name — keeping the best real data even if a stale fragment coexists — instead of silently hiding it</td><td class="why">No stock with real data ever silently reads "empty"</td><td><span class="pill live">MERGED</span></td></tr>
     <tr><td class="feat">Self-renewing 6 AM login</td><td class="why">Auto re-mints the daily broker token mid-pull (single-flight, bounded) so the overnight download survives the 06:00 reset</td><td class="why"><b>The headline:</b> downloads now run unattended for days</td><td><span class="pill live">MERGED</span></td></tr>
-    <tr><td class="feat">Freeze-proof renewal</td><td class="why">Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool</td><td class="why">Covers the rare "6 AM and the network is flaky" case</td><td><span class="pill near">SHIPPING</span></td></tr>
+    <tr><td class="feat">Freeze-proof renewal</td><td class="why">Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool</td><td class="why">Covers the rare "6 AM and the network is flaky" case</td><td><span class="pill live">MERGED</span></td></tr>
     <tr><td class="feat">Rate-limit tuning (8→5/sec)</td><td class="why">A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall</td><td class="why">Same real throughput, far fewer wasted retries</td><td><span class="pill live">MERGED</span></td></tr>
     <tr><td class="feat">"Why is M&amp;M empty?" diagnostic</td><td class="why">Observe-only check that names the exact on-disk key drift behind an empty symbol</td><td class="why">Turns a mystery gap into a one-line, fixable fact</td><td><span class="pill live">MERGED</span></td></tr>
   </table>
@@ -146,7 +148,6 @@
   <h2>🔮 Future <small>— planned next (honest roadmap)</small></h2>
   <table>
     <tr><th>Priority</th><th>Plan</th><th>What it'll give you</th><th>Stage</th></tr>
-    <tr><td><span class="pill near">NEAR</span></td><td class="feat">M&amp;M (empty-symbol) fix</td><td class="why">Normalize the lake key read-side to match the write-side, clearing the diagnosed key drift</td><td class="ref">grounded in #907</td></tr>
     <tr><td><span class="pill near">NEAR</span></td><td class="feat">In-place candle refresh</td><td class="why">Candle view updates its grid in place on paging (no full rebuild)</td><td class="ref">fast-follow</td></tr>
     <tr><td><span class="pill mid">MID</span></td><td class="feat">True O(page) paging</td><td class="why">Candle pager reads only the visible page via a write-time manifest</td><td class="ref">documented</td></tr>
     <tr><td><span class="pill mid">MID</span></td><td class="feat">Confirm vendor limits</td><td class="why">Lock in real rate limits + data boundaries with live probes</td><td class="ref">probe gate</td></tr>
@@ -168,7 +169,7 @@
   </div>
 
   <p class="foot">BruteX — Extreme brute-force backtesting engine for Indian index &amp; F&amp;O markets.<br>
-    Every row above is real, merged, and verified. Generated from the live decision ledger (through #910).</p>
+    Every row above is real, merged, and verified. Generated from the live decision ledger (through #911).</p>
 
 </div>
 </body>
