@@ -42,6 +42,7 @@ from brutex.adapters.groww.errors import (
     from_groww_exception,
     is_retryable,
 )
+from brutex.adapters.groww.sdk_protocol import GrowwSDK
 
 if TYPE_CHECKING:
     from brutex.adapters.groww.reauth import SdkRefresher
@@ -107,27 +108,6 @@ def run_with_deadline(
     if "error" in failure:
         raise failure["error"]
     return result["value"]
-
-
-@runtime_checkable
-class GrowwSDK(Protocol):
-    """The subset of the ``growwapi.GrowwAPI`` surface BruteX calls.
-
-    Methods accept ``**_kwargs`` (the real SDK fixes the exact keyword names);
-    the client below always calls them with the explicit Groww keyword names.
-    """
-
-    def get_historical_candles(self, **_kwargs: object) -> Mapping[str, object]:
-        """Return one historical-candle window (row-of-arrays payload)."""
-        ...
-
-    def get_expiries(self, **_kwargs: object) -> Mapping[str, object]:
-        """Return the FNO expiries for an underlying."""
-        ...
-
-    def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
-        """Return the contract symbols for an underlying + expiry."""
-        ...
 
 
 @dataclass(frozen=True, slots=True)

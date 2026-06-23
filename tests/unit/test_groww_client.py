@@ -505,7 +505,8 @@ def test_historical_candles_normalizes_iso_t_to_space() -> None:
 
 
 # Named like the SDK exception so from_groww_exception maps it to GrowwAuthError.
-class GrowwAPIAuthenticationException(Exception): ...
+class GrowwAPIAuthenticationException(Exception):
+    """Fake SDK auth exception (named so from_groww_exception maps it to GrowwAuthError)."""
 
 
 class _FakeRefresher:

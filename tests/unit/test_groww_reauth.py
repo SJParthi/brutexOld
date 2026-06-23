@@ -9,13 +9,14 @@ and the redacting mint-failure path — with no ``growwapi`` / ``pyotp`` and no 
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
 from brutex.adapters.groww.errors import GrowwAuthError
 from brutex.adapters.groww.reauth import SdkRefresher
+from brutex.adapters.groww.sdk_protocol import GrowwSDK
 
 _CREDS = GrowwCredentials(api_key="fake_key", totp_secret="fake_secret")
 
@@ -40,7 +41,14 @@ class _FakeSDK:
         return {"contracts": []}
 
 
-def _counting_factories() -> tuple[list[str], list[str], list[str], object, object, object]:
+def _counting_factories() -> tuple[
+    list[str],
+    list[str],
+    list[str],
+    Callable[[str], str],
+    Callable[[str, str], str],
+    Callable[[str], GrowwSDK],
+]:
     """Return recording (totp_minter, token_factory, sdk_factory) + their call logs."""
     minted: list[str] = []
     tokens: list[str] = []
@@ -54,7 +62,7 @@ def _counting_factories() -> tuple[list[str], list[str], list[str], object, obje
         tokens.append(f"{api_key}:{totp}:{len(tokens)}")
         return f"ACCESS-{len(tokens)}"
 
-    def sdk_factory(token: str) -> _FakeSDK:
+    def sdk_factory(token: str) -> GrowwSDK:
         built.append(token)
         return _FakeSDK(token)
 
@@ -66,9 +74,9 @@ def test_initial_mint_builds_one_sdk_via_injected_factories() -> None:
     minted, _tokens, built, totp_minter, token_factory, sdk_factory = _counting_factories()
     refresher = SdkRefresher(
         _CREDS,
-        token_factory=token_factory,  # type: ignore[arg-type]
+        token_factory=token_factory,
         totp_minter=totp_minter,
-        sdk_factory=sdk_factory,  # type: ignore[arg-type]
+        sdk_factory=sdk_factory,
     )
     assert refresher.size == 1
     assert refresher.current_generation() == 0
@@ -84,9 +92,9 @@ def test_reauth_bumps_generation_and_returns_a_fresh_sdk() -> None:
     _minted, _tokens, built, totp_minter, token_factory, sdk_factory = _counting_factories()
     refresher = SdkRefresher(
         _CREDS,
-        token_factory=token_factory,  # type: ignore[arg-type]
+        token_factory=token_factory,
         totp_minter=totp_minter,
-        sdk_factory=sdk_factory,  # type: ignore[arg-type]
+        sdk_factory=sdk_factory,
     )
     first = refresher.current_sdk()
     assert len(built) == 1  # only the initial mint so far
@@ -96,6 +104,7 @@ def test_reauth_bumps_generation_and_returns_a_fresh_sdk() -> None:
     assert refresher.current_generation() == 1
     second = refresher.current_sdk()
     assert second is not first  # a genuinely fresh SDK instance
+    assert isinstance(second, _FakeSDK)  # narrow GrowwSDK → the fake before .token
     assert second.token == "ACCESS-2"  # a fresh token was issued
     assert len(built) == 2  # the sdk_factory was called a SECOND time (one re-mint)
 
@@ -110,9 +119,9 @@ def test_reauth_is_single_flight_two_callers_one_mint() -> None:
     _minted, _tokens, built, totp_minter, token_factory, sdk_factory = _counting_factories()
     refresher = SdkRefresher(
         _CREDS,
-        token_factory=token_factory,  # type: ignore[arg-type]
+        token_factory=token_factory,
         totp_minter=totp_minter,
-        sdk_factory=sdk_factory,  # type: ignore[arg-type]
+        sdk_factory=sdk_factory,
     )
     assert len(built) == 1  # initial mint
 
@@ -133,9 +142,9 @@ def test_reauth_concurrent_stampede_mints_exactly_once() -> None:
     _minted, _tokens, built, totp_minter, token_factory, sdk_factory = _counting_factories()
     refresher = SdkRefresher(
         _CREDS,
-        token_factory=token_factory,  # type: ignore[arg-type]
+        token_factory=token_factory,
         totp_minter=totp_minter,
-        sdk_factory=sdk_factory,  # type: ignore[arg-type]
+        sdk_factory=sdk_factory,
     )
     assert len(built) == 1  # initial mint
     n = 16
@@ -161,9 +170,9 @@ def test_pool_sized_refresher_fans_independent_sdks_and_remints_all() -> None:
     refresher = SdkRefresher(
         _CREDS,
         size=3,
-        token_factory=token_factory,  # type: ignore[arg-type]
+        token_factory=token_factory,
         totp_minter=totp_minter,
-        sdk_factory=sdk_factory,  # type: ignore[arg-type]
+        sdk_factory=sdk_factory,
     )
     assert refresher.size == 3
     initial = [refresher.sdk_at(i) for i in range(3)]

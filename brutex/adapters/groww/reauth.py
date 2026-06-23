@@ -53,7 +53,7 @@ from brutex.adapters.groww.auth import (
     _real_totp,
     get_access_token,
 )
-from brutex.adapters.groww.client import GrowwSDK
+from brutex.adapters.groww.sdk_protocol import GrowwSDK
 
 
 def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
