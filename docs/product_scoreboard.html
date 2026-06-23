@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · Jun 2026 · ledger #907</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #910</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that captures <b>every minute</b> of India's index &amp; F&amp;O market history,
       shows you <b>what's actually moving</b> in real time, and brute-force tests trading ideas at massive scale —
@@ -126,9 +126,19 @@
     <tr><td class="feat">Self-tuning rate limit</td><td class="why">An adaptive limiter backs off on rejections; ceiling tuned to 5/sec (live-log proven)</td><td class="why">Fast downloads that don't get you blocked</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
+  <div class="theme">🌙 Theme 7 — "Runs itself overnight — even the login renews itself"</div>
+  <table>
+    <tr><th>Feature</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Self-renewing login (6 AM fix)</td><td class="why">The broker's access token resets every day at 06:00. BruteX now re-mints it automatically mid-download — thread-safe, exactly once even under a stampede — so the overnight pull keeps going instead of dying at 6 AM</td><td class="why"><b>You sleep, it keeps working.</b> No manual token rotation at dawn, ever</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Visible self-heal in the log</td><td class="why">Each automatic renewal prints a <code>groww.token.reauth</code> line</td><td class="why">You can see it healed itself — proof, not a promise</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Can't freeze on a bad renewal</td><td class="why">Even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry instead of freezing the whole download</td><td class="why">A flaky network at 6 AM can never lock up your pull</td><td><span class="pill live">LIVE</span></td></tr>
+  </table>
+
   <h2>🟡 Current <small>— just shipped this cycle</small></h2>
   <table>
     <tr><th>Item</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
+    <tr><td class="feat">Self-renewing 6 AM login</td><td class="why">Auto re-mints the daily broker token mid-pull (single-flight, bounded) so the overnight download survives the 06:00 reset</td><td class="why"><b>The headline:</b> downloads now run unattended for days</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Freeze-proof renewal</td><td class="why">Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool</td><td class="why">Covers the rare "6 AM and the network is flaky" case</td><td><span class="pill near">SHIPPING</span></td></tr>
     <tr><td class="feat">Rate-limit tuning (8→5/sec)</td><td class="why">A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall</td><td class="why">Same real throughput, far fewer wasted retries</td><td><span class="pill live">MERGED</span></td></tr>
     <tr><td class="feat">"Why is M&amp;M empty?" diagnostic</td><td class="why">Observe-only check that names the exact on-disk key drift behind an empty symbol</td><td class="why">Turns a mystery gap into a one-line, fixable fact</td><td><span class="pill live">MERGED</span></td></tr>
   </table>
@@ -158,7 +168,7 @@
   </div>
 
   <p class="foot">BruteX — Extreme brute-force backtesting engine for Indian index &amp; F&amp;O markets.<br>
-    Every row above is real, merged, and verified. Generated from the live decision ledger (through #907).</p>
+    Every row above is real, merged, and verified. Generated from the live decision ledger (through #910).</p>
 
 </div>
 </body>

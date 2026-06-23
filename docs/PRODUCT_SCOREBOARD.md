@@ -5,7 +5,7 @@
 > decision ledger (`docs/MIGRATION.md`). A self-contained, shareable HTML one-pager lives next to
 > this file at [`docs/product_scoreboard.html`](./product_scoreboard.html) (open in any browser).
 >
-> _Last refreshed: 2026-06-23 — now covering the ledger through entry **#907**
+> _Last refreshed: 2026-06-23 — now covering the ledger through entry **#910**
 > (DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902; refresh under DEC-SCOREBOARD-REFRESH-001).
 > The number in the last column is the **ledger entry** (`docs/MIGRATION.md #NNN`), the
 > authoritative record of each change._
@@ -94,12 +94,26 @@ know what's happening.**
 | Minute-true, derived rest | Only 1-minute is fetched; the daily + 19 intraday timeframes are derived from it | One source of truth, 21 timeframes, no drift | #853 |
 | Self-tuning rate limit | An adaptive limiter backs off on rejections; ceiling tuned to 5/sec (live-log proven) | Fast downloads that don't get you blocked | #906 |
 
+### 🌙 Theme 7 — "Runs itself overnight — even the login renews itself"
+
+| Feature | What it does | Why you care | Ledger |
+|---|---|---|---|
+| Self-renewing login (6 AM fix) | The broker's access token resets every day at 06:00. BruteX now **re-mints it automatically** mid-download — thread-safe, exactly once even under a stampede — so the overnight pull keeps going instead of dying at 6 AM | **You sleep, it keeps working.** No manual token rotation at dawn, ever | #909 |
+| Visible self-heal in the log | Each automatic renewal prints a `groww.token.reauth` line | You can *see* it healed itself — proof, not a promise | #909 |
+| Can't freeze on a bad renewal | Even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry instead of freezing the whole download | A flaky network at 6 AM can never lock up your pull | #910 |
+
+> Why this matters most: this is the difference between *"start a download and babysit it"* and
+> *"start a download and walk away for days."* The login that used to need a human at dawn now
+> renews itself.
+
 ---
 
 ## 🟡 Current — just shipped this cycle
 
 | Item | What it does | Why you care | Status |
 |---|---|---|---|
+| **Self-renewing 6 AM login** | Auto re-mints the daily broker token mid-pull (single-flight, bounded) so the overnight download survives the 06:00 reset | **The headline:** downloads now run unattended for days | ✅ MERGED (#909) |
+| **Freeze-proof renewal** | Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool | Covers the rare "what if 6 AM *and* the network is flaky" case | 🟢 SHIPPING (#910) |
 | Rate-limit tuning (8→5/sec) | A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall | Same real throughput, far fewer wasted retries | ✅ MERGED (#906) |
 | "Why is M&M empty?" diagnostic | Observe-only check that names the exact on-disk key drift behind an empty symbol | Turns a mystery gap into a one-line, fixable fact | ✅ MERGED (#907) |
 
