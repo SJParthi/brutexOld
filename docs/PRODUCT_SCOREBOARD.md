@@ -5,7 +5,7 @@
 > decision ledger (`docs/MIGRATION.md`). A self-contained, shareable HTML one-pager lives next to
 > this file at [`docs/product_scoreboard.html`](./product_scoreboard.html) (open in any browser).
 >
-> _Last refreshed: 2026-06-23 — now covering the ledger through entry **#910**
+> _Last refreshed: 2026-06-23 — now covering the ledger through entry **#911**
 > (DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902; refresh under DEC-SCOREBOARD-REFRESH-001).
 > The number in the last column is the **ledger entry** (`docs/MIGRATION.md #NNN`), the
 > authoritative record of each change._
@@ -83,6 +83,7 @@ know what's happening.**
 | Tricky symbols resolved | Hyphenated / verbose vendor symbols resolve to the real master symbol | Names like BAJAJ-AUTO / MIDCPNIFTY map correctly | #845 |
 | Mapping integrity audits | Proves every option maps to the right stock + lot size; flagged, never faked | Trust that the data lines up | #870 / #873 / #874 / #875 |
 | Honest completeness | Late-listed names + missing years marked "partial" instead of faking a full span | The completeness screen never lies to you | #859 / #868 |
+| Empty-symbol recovery | A stock whose stored data key drifted (e.g. `NSE-M&M` vs `M&M`) has its real on-disk data recovered under the clean name, never silently dropped (and the drift is flagged for cleanup) | No stock with real data ever reads falsely "empty" | #907 / #911 |
 | "Why is X empty?" diagnostic | Pinpoints exactly why a symbol reads empty (a key-format drift), surfaced for a precise fix | Data gaps get diagnosed, not guessed at | #907 |
 
 ### 🚀 Theme 6 — "Getting the data is one click"
@@ -112,10 +113,11 @@ know what's happening.**
 
 | Item | What it does | Why you care | Status |
 |---|---|---|---|
+| **Empty-symbol recovery** | If a stock's stored data key drifted (a legacy `NSE-M&M` vs the clean `M&M`), the board now recovers its real on-disk data under the clean name — keeping the best real data even if a stale fragment coexists — instead of silently hiding it | No stock with real data ever silently reads "empty" | ✅ MERGED (#911) |
 | **Self-renewing 6 AM login** | Auto re-mints the daily broker token mid-pull (single-flight, bounded) so the overnight download survives the 06:00 reset | **The headline:** downloads now run unattended for days | ✅ MERGED (#909) |
-| **Freeze-proof renewal** | Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool | Covers the rare "what if 6 AM *and* the network is flaky" case | 🟢 SHIPPING (#910) |
+| **Freeze-proof renewal** | Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool | Covers the rare "what if 6 AM *and* the network is flaky" case | ✅ MERGED (#910) |
 | Rate-limit tuning (8→5/sec) | A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall | Same real throughput, far fewer wasted retries | ✅ MERGED (#906) |
-| "Why is M&M empty?" diagnostic | Observe-only check that names the exact on-disk key drift behind an empty symbol | Turns a mystery gap into a one-line, fixable fact | ✅ MERGED (#907) |
+| "Why is M&M empty?" diagnostic | Observe-only check that names the exact on-disk key drift behind an empty symbol — now turned into the recovery FIX above | Turns a mystery gap into a one-line, fixable fact | ✅ MERGED (#907) |
 
 ---
 
@@ -123,7 +125,6 @@ know what's happening.**
 
 | Priority | Plan | What it'll give you | Stage |
 |---|---|---|---|
-| 🟢 Near | M&M (empty-symbol) fix | Normalize the lake key read-side to match the write-side, clearing the diagnosed key drift | grounded in #907 |
 | 🟢 Near | In-place candle refresh | Candle view updates its grid in place on paging (no full rebuild) | fast-follow |
 | 🟡 Mid | True O(page) paging | Candle pager reads only the visible page via a write-time manifest | documented |
 | 🟡 Mid | Confirm vendor limits | Lock in real rate limits + data boundaries with live probes | probe gate |
