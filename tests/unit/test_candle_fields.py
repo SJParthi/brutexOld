@@ -151,6 +151,24 @@ class TestAssembleCandle:
         with pytest.raises(CandleParseError):
             self._call(open_=None)
 
+    @pytest.mark.parametrize("zero", [0, 0.0, "0", "0.0", "0.00"])
+    @pytest.mark.parametrize("field", ["open_", "high", "low", "close"])
+    def test_partial_zero_price_is_skipped(self, field: str, zero: object) -> None:
+        # DEC-CANDLE-PARTIAL-ZERO-SKIP-001: a bar that is NOT all-empty but has a REQUIRED
+        # OHLC price of ZERO among real prices (a vendor glitch — a traded Indian price is
+        # never 0, tick ≥ 0.05) is un-storable junk, the symmetric twin of the partial-ABSENT
+        # skip. Storing it would FABRICATE a zero price AND (via the high/low clamp) a zero
+        # range — the exact Golden-Rule-#1 corruption the all-empty check already guards.
+        with pytest.raises(EmptyCandleRow, match="partial vendor bar"):
+            self._call(**{field: zero})
+
+    def test_partial_zero_open_does_not_clobber_low_to_zero(self) -> None:
+        # Regression for the proven corruption: pre-fix, ``open=0`` with real high/low/close
+        # was STORED as ``open=0, low=0`` (the clamp pulled low to the junk zero). It must now
+        # be a graceful skip, never a stored bar with a fabricated zero price + zero range.
+        with pytest.raises(EmptyCandleRow):
+            self._call(open_=0, high="100", low="50", close="75")
+
     def test_present_but_unparseable_still_hard_errors(self) -> None:
         # The partial-absent skip must NOT mask a genuine malformation: a price that is
         # PRESENT but unparseable (a real shape / column problem) stays a hard error even
