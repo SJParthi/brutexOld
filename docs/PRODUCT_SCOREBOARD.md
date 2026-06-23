@@ -5,8 +5,8 @@
 > decision ledger (`docs/MIGRATION.md`). A self-contained, shareable HTML one-pager lives next to
 > this file at [`docs/product_scoreboard.html`](./product_scoreboard.html) (open in any browser).
 >
-> _Last refreshed: 2026-06-23 — now covering the ledger through entry **#911**
-> (DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902; refresh under DEC-SCOREBOARD-REFRESH-001).
+> _Last refreshed: 2026-06-23 — now covering the ledger through entry **#917**
+> (DEC-PRODUCT-SCOREBOARD-001, MIGRATION.md #902; refresh under DEC-SCOREBOARD-REFRESH-002).
 > The number in the last column is the **ledger entry** (`docs/MIGRATION.md #NNN`), the
 > authoritative record of each change._
 
@@ -46,6 +46,7 @@ know what's happening.**
 | Fast "Fetch Windows" | Counted 340,000+ rows in Python per click → database-paginated | Stays snappy no matter how big history grows | #893 |
 | Every data tab paginated | The last whole-table reads → page-at-a-time database queries | Browsing huge tables never stalls | #863 / #864 |
 | Cached page totals | Re-counted millions of rows on every paging click → memoised | Paging the candle browser is instant | #867 |
+| Instant Movers tab/section switch | Re-walked the whole 750-name lake on every tab/exchange/expiry flip → walked once per pull, shared across tabs | Spot ↔ Futures ↔ Options switches are instant | #916 |
 
 ### 📊 Theme 2 — "See what's actually moving"
 
@@ -56,6 +57,8 @@ know what's happening.**
 | Per-option moneyness | Shows each option's ITM / ATM / OTM and how many strikes from the money, as one clear label | Read an option chain at a glance | #865 / #869 |
 | Full F&O candle history | Futures + options 1-minute history is a first-class, browsable table | Inspect any contract's real history | #861 / #881 |
 | Find any contract fast | Symbol → expiry → strike cascading pickers for F&O, symbol → timeframe for spot | Pinpoint the exact contract instead of a giant dropdown | #880 / #897 |
+| Each tab stays its own market | Spot shows only spot (no futures/options leak); futures/options gainers-losers populate even without a daily partition | Clean, accurate tabs — no cross-asset pollution, no empty movers | #915 |
+| Pick your futures expiry | Near / Next / Far filters to that serial-month future per underlying (front / 2nd / 3rd), each cached independently | Focus on the liquid expiry — no stale rows, no spreadsheet juggling | #917 |
 
 ### 🛡️ Theme 3 — "Nothing is ever lost"
 
@@ -67,6 +70,8 @@ know what's happening.**
 | Graceful disk-full halt | If the disk fills mid-download, the pull stops cleanly (no corrupt partial data) — end to end, including the progress ledger | A full disk can never corrupt or runaway-fail your data | #885 / #901 |
 | Resume in seconds | Mid-download checkpointing means a crash re-pulls a tiny window, not the whole span | Multi-day downloads survive interruptions | #884 |
 | Transient errors retry | Vendor 5xx / empty blips are retried, not treated as "missing forever" | Temporary hiccups don't leave gaps | #883 |
+| Junk bars never stored | A vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero | Your backtest runs on real prices, never corrupted ones | #912 |
+| Rate cap can't be overshot | The 500/min limiter reserves its slot atomically — concurrent workers can never breach the hard cap | Your vendor limits are truly enforced, even at full parallelism | #913 |
 | One bad combo ≠ dead sweep | A single failing strategy combo is skipped + flagged (non-zero exit), the rest finish | A days-long sweep isn't lost to one bad tuple | #904 |
 
 ### 📡 Theme 4 — "You always know what's happening"
@@ -109,15 +114,25 @@ know what's happening.**
 
 ---
 
-## 🟡 Current — just shipped this cycle
+## 🟡 Current — just shipped this cycle (#912 → #917)
 
 | Item | What it does | Why you care | Status |
 |---|---|---|---|
-| **Empty-symbol recovery** | If a stock's stored data key drifted (a legacy `NSE-M&M` vs the clean `M&M`), the board now recovers its real on-disk data under the clean name — keeping the best real data even if a stale fragment coexists — instead of silently hiding it | No stock with real data ever silently reads "empty" | ✅ MERGED (#911) |
-| **Self-renewing 6 AM login** | Auto re-mints the daily broker token mid-pull (single-flight, bounded) so the overnight download survives the 06:00 reset | **The headline:** downloads now run unattended for days | ✅ MERGED (#909) |
-| **Freeze-proof renewal** | Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool | Covers the rare "what if 6 AM *and* the network is flaky" case | ✅ MERGED (#910) |
-| Rate-limit tuning (8→5/sec) | A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall | Same real throughput, far fewer wasted retries | ✅ MERGED (#906) |
-| "Why is M&M empty?" diagnostic | Observe-only check that names the exact on-disk key drift behind an empty symbol — now turned into the recovery FIX above | Turns a mystery gap into a one-line, fixable fact | ✅ MERGED (#907) |
+| **Futures Near/Next/Far filter** | The Futures tab's expiry-tier selector now actually filters — each tier picks that serial-month contract per underlying, cached independently (no stale Near rows for Next/Far) | Drill into the exact expiry you trade, instantly | ✅ MERGED (#917) |
+| **Instant Movers everywhere** | The Movers page walks the lake once per download instead of on every tab/exchange/expiry switch | Spot ↔ Futures ↔ Options is instant — no lag on any flip | ✅ MERGED (#916) |
+| **Clean, accurate Movers tabs** | Each tab stays its own market (no futures/options leaking into Spot); futures/options gainers-losers populate even without a daily partition | What you see on each tab is right — no pollution, no falsely-empty lists | ✅ MERGED (#915) |
+| **Junk bars never stored** | A vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero | Backtests run on real prices, never silently-corrupted ones | ✅ MERGED (#912) |
+| **Rate cap can't be overshot** | The 500/min limiter reserves its slot atomically so concurrent workers can never breach the hard cap | Vendor limits truly enforced, even at full parallelism | ✅ MERGED (#913) |
+| **Brute-force scaling design locked** | The plan to run the billion-combo sweep across CPU cores (bit-identical to serial) is designed + hostile-reviewed and recorded (ADR-0011) — code deferred until you scale past a pilot | The path to 2–4-day sweeps is proven on paper before a line is written | ✅ MERGED (design only) (#914) |
+
+---
+
+## 🔜 Up next — being built now
+
+| Item | What it'll do | Why you'll care | Status |
+|---|---|---|---|
+| **🚩 "Suspicious empty" flag** | Surfaces a whole F&O stock that came back **100% empty after every retry** (the BAJAJ-AUTO / M&M failure mode), instead of letting it blend into normal no-data | A whole stock can never silently vanish from your data again | designed & grounded — building next |
+| **🔬 Live vendor probe** | A ready-to-run A/B test of a suspect symbol vs a known-good one against the live vendor | Confirms whether missing data is *recoverable* or genuinely absent | recipe delivered (needs creds) |
 
 ---
 
@@ -125,11 +140,11 @@ know what's happening.**
 
 | Priority | Plan | What it'll give you | Stage |
 |---|---|---|---|
-| 🟢 Near | In-place candle refresh | Candle view updates its grid in place on paging (no full rebuild) | fast-follow |
-| 🟡 Mid | True O(page) paging | Candle pager reads only the visible page via a write-time manifest | documented |
-| 🟡 Mid | Confirm vendor limits | Lock in real rate limits + data boundaries with live probes | probe gate |
-| 🔴 Major | Brute-force sweep | Test ~33 billion strategy combinations across all 21 timeframes (~2–4 days on reference hardware) | core mission |
+| 🔴 Major | Brute-force sweep (build) | Run the ~33-billion-combo sweep across CPU cores — ~2–4 days on reference hardware, bit-identical to serial | design-locked (ADR-0011 / #914), build deferred |
 | 🔴 Major | Options execution track | Translate winning index signals into real options trades for execution realism | Track 2 |
+| 🟡 Mid | True O(page) paging | Candle/discovery reads only the visible page via a write-time lake manifest | documented follow-up (#896 / #916) |
+| 🟡 Mid | Engine → F&O stocks | Expand the brute-force engine beyond the 3 indices (the ~200-stock lake is reference-only today) | needs a scope decision (#200) |
+| 🟢 Near | Daily health cron | A dawn `brutex doctor` run posts an automated health report to Telegram | deferred (#209 follow-up) |
 
 **Legend:** 🟢 near-term · 🟡 mid-term · 🔴 major initiative.
 
@@ -141,7 +156,7 @@ know what's happening.**
 |---|---|
 | ✅ Test coverage | 100% line + 100% branch on every touched module (+ property, golden, stress & mutation tests) |
 | ✅ Code review | An independent **hostile reviewer** hunts defects before anything merges |
-| ✅ Workspace health | Full-repo verification (255-file type-check + full test suite) on every change |
+| ✅ Workspace health | Full-repo verification (258-file type-check + full test suite) on every change |
 | ✅ Honesty rule | **No hallucinations, no hype** — unverified things are labelled "unverified" |
 | ✅ Speed rule | O(1) / O(page) discipline — "nowhere in the product is ever slow" |
 | ✅ Scope safety | The engine's market scope (NIFTY / BANKNIFTY / SENSEX) is never changed silently |

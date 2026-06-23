@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · Jun 2026 · ledger #911</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #917</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that captures <b>every minute</b> of India's index &amp; F&amp;O market history,
       shows you <b>what's actually moving</b> in real time, and brute-force tests trading ideas at massive scale —
@@ -78,6 +78,8 @@
     <tr><td class="feat">Instant Completeness page</td><td class="why">Re-scanned the whole lake each load → O(1) on repeat</td><td class="why">"How complete is my data?" answers instantly</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Fast "Fetch Windows"</td><td class="why">Counted 340,000+ rows in Python per click → database-paginated</td><td class="why">Stays snappy no matter how big history grows</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Every data tab paginated</td><td class="why">The last whole-table reads → page-at-a-time database queries</td><td class="why">Browsing huge tables never stalls</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Cached page totals</td><td class="why">Re-counted millions of rows on every paging click → memoised</td><td class="why">Paging the candle browser is instant</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Instant Movers tab/section switch</td><td class="why">Re-walked the whole 750-name lake on every tab/exchange/expiry flip → walked once per pull, shared across tabs</td><td class="why">Spot ↔ Futures ↔ Options switches are instant</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
   <div class="theme">📊 Theme 2 — "See what's actually moving"</div>
@@ -88,6 +90,8 @@
     <tr><td class="feat">Per-option moneyness</td><td class="why">Shows each option's ITM / ATM / OTM and how many strikes from the money, as one clear label</td><td class="why">Read an option chain at a glance</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Full F&amp;O candle history</td><td class="why">Futures + options 1-minute history is a first-class, browsable table</td><td class="why">Inspect any contract's real history</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Find any contract fast</td><td class="why">Symbol → expiry → strike cascading pickers for F&amp;O, symbol → timeframe for spot</td><td class="why">Pinpoint the exact contract instead of a giant dropdown</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Each tab stays its own market</td><td class="why">Spot shows only spot (no futures/options leak); futures/options gainers-losers populate even without a daily partition</td><td class="why">Clean, accurate tabs — no cross-asset pollution, no empty movers</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Pick your futures expiry</td><td class="why">Near / Next / Far filters to that serial-month future per underlying (front / 2nd / 3rd), each cached independently</td><td class="why">Focus on the liquid expiry — no stale rows, no spreadsheet juggling</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
   <div class="theme">🛡️ Theme 3 — "Nothing is ever lost"</div>
@@ -98,6 +102,9 @@
     <tr><td class="feat">One bad file ≠ broken page</td><td class="why">A corrupt file skips that one instrument (logged) instead of crashing the screen</td><td class="why">Your dashboard never goes down over one bad file</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Graceful disk-full halt</td><td class="why">If the disk fills mid-download, the pull stops cleanly — end to end, including the progress ledger</td><td class="why">A full disk can never corrupt or runaway-fail your data</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">Resume in seconds</td><td class="why">Mid-download checkpointing means a crash re-pulls a tiny window, not the whole span</td><td class="why">Multi-day downloads survive interruptions</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Transient errors retry</td><td class="why">Vendor 5xx / empty blips are retried, not treated as "missing forever"</td><td class="why">Temporary hiccups don't leave gaps</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Junk bars never stored</td><td class="why">A vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero</td><td class="why">Your backtest runs on real prices, never corrupted ones</td><td><span class="pill live">LIVE</span></td></tr>
+    <tr><td class="feat">Rate cap can't be overshot</td><td class="why">The 500/min limiter reserves its slot atomically — concurrent workers can never breach the hard cap</td><td class="why">Your vendor limits are truly enforced, even at full parallelism</td><td><span class="pill live">LIVE</span></td></tr>
     <tr><td class="feat">One bad combo ≠ dead sweep</td><td class="why">A single failing strategy combo is skipped + flagged (non-zero exit), the rest finish</td><td class="why">A days-long sweep isn't lost to one bad tuple</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
@@ -135,41 +142,49 @@
     <tr><td class="feat">Can't freeze on a bad renewal</td><td class="why">Even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry instead of freezing the whole download</td><td class="why">A flaky network at 6 AM can never lock up your pull</td><td><span class="pill live">LIVE</span></td></tr>
   </table>
 
-  <h2>🟡 Current <small>— just shipped this cycle</small></h2>
+  <h2>🟡 Current <small>— just shipped this cycle (#912 → #917)</small></h2>
   <table>
     <tr><th>Item</th><th>What it does</th><th>Why you care</th><th>Status</th></tr>
-    <tr><td class="feat">Empty-symbol recovery</td><td class="why">If a stock's stored data key drifted (a legacy <code>NSE-M&amp;M</code> vs the clean <code>M&amp;M</code>), the board now recovers its real on-disk data under the clean name — keeping the best real data even if a stale fragment coexists — instead of silently hiding it</td><td class="why">No stock with real data ever silently reads "empty"</td><td><span class="pill live">MERGED</span></td></tr>
-    <tr><td class="feat">Self-renewing 6 AM login</td><td class="why">Auto re-mints the daily broker token mid-pull (single-flight, bounded) so the overnight download survives the 06:00 reset</td><td class="why"><b>The headline:</b> downloads now run unattended for days</td><td><span class="pill live">MERGED</span></td></tr>
-    <tr><td class="feat">Freeze-proof renewal</td><td class="why">Wraps the token renewal in a wall-clock deadline so a hung network call retries instead of freezing the pool</td><td class="why">Covers the rare "6 AM and the network is flaky" case</td><td><span class="pill live">MERGED</span></td></tr>
-    <tr><td class="feat">Rate-limit tuning (8→5/sec)</td><td class="why">A live-log audit showed the vendor rejects above ~3–5/sec; the cap is lowered so retries aren't wasted probing a wall</td><td class="why">Same real throughput, far fewer wasted retries</td><td><span class="pill live">MERGED</span></td></tr>
-    <tr><td class="feat">"Why is M&amp;M empty?" diagnostic</td><td class="why">Observe-only check that names the exact on-disk key drift behind an empty symbol</td><td class="why">Turns a mystery gap into a one-line, fixable fact</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Futures Near/Next/Far filter</td><td class="why">The Futures tab's expiry-tier selector now actually filters — each tier picks that serial-month contract per underlying, cached independently (no stale Near rows for Next/Far)</td><td class="why">Drill into the exact expiry you trade, instantly</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Instant Movers everywhere</td><td class="why">The Movers page walks the lake once per download instead of on every tab/exchange/expiry switch</td><td class="why">Spot ↔ Futures ↔ Options is instant — no lag on any flip</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Clean, accurate Movers tabs</td><td class="why">Each tab stays its own market (no futures/options leaking into Spot); futures/options gainers-losers populate even without a daily partition</td><td class="why">What you see on each tab is right — no pollution, no falsely-empty lists</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Junk bars never stored</td><td class="why">A vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero</td><td class="why">Backtests run on real prices, never silently-corrupted ones</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Rate cap can't be overshot</td><td class="why">The 500/min limiter reserves its slot atomically so concurrent workers can never breach the hard cap</td><td class="why">Vendor limits truly enforced, even at full parallelism</td><td><span class="pill live">MERGED</span></td></tr>
+    <tr><td class="feat">Brute-force scaling design locked</td><td class="why">The plan to run the billion-combo sweep across CPU cores (bit-identical to serial) is designed + hostile-reviewed and recorded (ADR-0011) — code deferred until you scale past a pilot</td><td class="why">The path to 2–4-day sweeps is proven on paper before a line is written</td><td><span class="pill ship">DESIGN</span></td></tr>
+  </table>
+
+  <h2>🔜 Up next <small>— being built now</small></h2>
+  <table>
+    <tr><th>Item</th><th>What it'll do</th><th>Why you'll care</th><th>Status</th></tr>
+    <tr><td class="feat">"Suspicious empty" flag</td><td class="why">Surfaces a whole F&amp;O stock that came back 100% empty after every retry (the BAJAJ-AUTO / M&amp;M failure mode), instead of letting it blend into normal no-data</td><td class="why">A whole stock can never silently vanish from your data again</td><td><span class="pill ship">BUILDING</span></td></tr>
+    <tr><td class="feat">Live vendor probe</td><td class="why">A ready-to-run A/B test of a suspect symbol vs a known-good one against the live vendor</td><td class="why">Confirms whether missing data is recoverable or genuinely absent</td><td><span class="pill ship">READY</span></td></tr>
   </table>
 
   <h2>🔮 Future <small>— planned next (honest roadmap)</small></h2>
   <table>
     <tr><th>Priority</th><th>Plan</th><th>What it'll give you</th><th>Stage</th></tr>
-    <tr><td><span class="pill near">NEAR</span></td><td class="feat">In-place candle refresh</td><td class="why">Candle view updates its grid in place on paging (no full rebuild)</td><td class="ref">fast-follow</td></tr>
-    <tr><td><span class="pill mid">MID</span></td><td class="feat">True O(page) paging</td><td class="why">Candle pager reads only the visible page via a write-time manifest</td><td class="ref">documented</td></tr>
-    <tr><td><span class="pill mid">MID</span></td><td class="feat">Confirm vendor limits</td><td class="why">Lock in real rate limits + data boundaries with live probes</td><td class="ref">probe gate</td></tr>
-    <tr><td><span class="pill big">MAJOR</span></td><td class="feat">Brute-force sweep</td><td class="why">Test ~33 billion strategy combinations across all 21 timeframes (~2–4 days on reference hardware)</td><td class="ref">core mission</td></tr>
+    <tr><td><span class="pill big">MAJOR</span></td><td class="feat">Brute-force sweep (build)</td><td class="why">Run the ~33-billion-combo sweep across CPU cores — ~2–4 days on reference hardware, bit-identical to serial</td><td class="ref">design-locked (ADR-0011), build deferred</td></tr>
     <tr><td><span class="pill big">MAJOR</span></td><td class="feat">Options execution track</td><td class="why">Translate winning index signals into real options trades for execution realism</td><td class="ref">Track 2</td></tr>
+    <tr><td><span class="pill mid">MID</span></td><td class="feat">True O(page) paging</td><td class="why">Candle/discovery reads only the visible page via a write-time lake manifest</td><td class="ref">documented follow-up</td></tr>
+    <tr><td><span class="pill mid">MID</span></td><td class="feat">Engine → F&amp;O stocks</td><td class="why">Expand the brute-force engine beyond the 3 indices (the ~200-stock lake is reference-only today)</td><td class="ref">needs a scope decision</td></tr>
+    <tr><td><span class="pill near">NEAR</span></td><td class="feat">Daily health cron</td><td class="why">A dawn health-check run posts an automated report to Telegram</td><td class="ref">deferred</td></tr>
   </table>
   <p class="legend"><b>Legend:</b> <span class="pill live">LIVE</span> shipped ·
-    <span class="pill near">NEAR</span> near-term · <span class="pill mid">MID</span> mid-term ·
-    <span class="pill big">MAJOR</span> major initiative</p>
+    <span class="pill ship">NEXT</span> in flight · <span class="pill near">NEAR</span> near-term ·
+    <span class="pill mid">MID</span> mid-term · <span class="pill big">MAJOR</span> major initiative</p>
 
   <h2>🛡️ The bar every change clears</h2>
   <div class="trust">
     <div class="card"><b>100% tested</b><br>100% line + branch coverage on every touched module, plus property, golden, stress &amp; mutation tests.</div>
     <div class="card"><b>Hostile-reviewed</b><br>An independent adversarial reviewer hunts defects before anything merges.</div>
-    <div class="card"><b>Workspace-verified</b><br>Full-repo health check (255-file type-check + full suite) on every change.</div>
+    <div class="card"><b>Workspace-verified</b><br>Full-repo health check (258-file type-check + full suite) on every change.</div>
     <div class="card"><b>No hype, no illusion</b><br>Every limit is stated plainly — unverified things are labelled "unverified".</div>
     <div class="card"><b>Fast everywhere</b><br>O(1) / O(page) discipline — "nowhere in the product is ever slow."</div>
     <div class="card"><b>Scope-locked</b><br>The engine's market scope is never changed silently.</div>
   </div>
 
   <p class="foot">BruteX — Extreme brute-force backtesting engine for Indian index &amp; F&amp;O markets.<br>
-    Every row above is real, merged, and verified. Generated from the live decision ledger (through #911).</p>
+    Every row above is real, merged, and verified. Generated from the live decision ledger (through #917).</p>
 
 </div>
 </body>
