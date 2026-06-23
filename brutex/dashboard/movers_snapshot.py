@@ -693,6 +693,26 @@ class SpotCandidates:
     date: str
 
 
+def resolve_candle_datasets(
+    lake_root: Path, datasets: list[dict[str, str]] | None
+) -> list[dict[str, str]]:
+    """Return *datasets* if the caller pre-discovered them, else scan the lake now.
+
+    The O(1)-latency seam (DEC-MOVERS-DISCOVERY-MEMO-001): the ``/movers`` route
+    memoises ``list_candle_datasets`` ONCE per write-generation (the proven ``/db``
+    #896 pattern) and threads the cached list into spot / futures / options compute,
+    so a tab / section / exchange / expiry switch within one generation REUSES that
+    single ``bars/`` walk instead of re-walking the whole lake per compute. ``None``
+    ⇒ scan now (back-compat for the post-pull warmer + any direct caller). The scan
+    is the SAME deterministic, read-only dir-walk either way (Golden Rule #7).
+    """
+    if datasets is not None:
+        return datasets
+    from brutex.dashboard.db_view import list_candle_datasets
+
+    return list_candle_datasets(lake_root)
+
+
 def compute_spot_candidates(
     *,
     lake_root: Path,
@@ -701,6 +721,7 @@ def compute_spot_candidates(
     time: str | None,
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
+    datasets: list[dict[str, str]] | None = None,
 ) -> SpotCandidates:
     """Scan the lake → the spot :class:`SpotCandidates` for one snapshot coordinate.
 
@@ -747,8 +768,6 @@ def compute_spot_candidates(
     ValueError
         On a malformed *date* / *time* (the route maps it to a 400).
     """
-    from brutex.dashboard.db_view import list_candle_datasets
-
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
@@ -771,20 +790,20 @@ def compute_spot_candidates(
     # discovery interval (visible on 1-minute; latent on 1-day until the F&O 1-day
     # derive runs). Each tab now reads strictly its own instrument class
     # (Spot→INDEX/CASH, Futures→FNO/-FUT, Options→FNO/CE-PE).
-    datasets = [
+    spot_datasets = [
         d
-        for d in list_candle_datasets(lake_root)
+        for d in resolve_candle_datasets(lake_root, datasets)
         if d["interval"] == discovery_interval
         and d["segment"] in SPOT_PROBE_SEGMENTS
         and (exchange is None or d["exchange"] == exchange)
     ]
-    if not datasets:
+    if not spot_datasets:
         return SpotCandidates(snapshots=(), skipped=0, date=date_str)
 
     snapshots: list[MoverSnapshot] = []
     skipped = 0
     skip_errors = movers_read_skip_errors()
-    for dataset in datasets:
+    for dataset in spot_datasets:
         try:
             if is_daily:
                 bars = _read_daily_bars(
