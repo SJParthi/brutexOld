@@ -341,9 +341,11 @@ class RateController:
         1. **Per-minute governor** (only when ``ceiling_per_min`` is set) — a HARD
            ceiling on the issue count inside any rolling :data:`PER_MIN_WINDOW`. It
            runs its own compute-under-lock / sleep-outside-lock / re-check loop,
-           mirroring :meth:`AdaptiveTokenBucket.acquire` (CLAUDE.md §11 COMMON). When
-           the window is full, N woken workers re-evict + re-test under the lock so
-           only the freed slots pass — no overshoot.
+           mirroring :meth:`AdaptiveTokenBucket.acquire` (CLAUDE.md §11 COMMON). When a
+           worker observes a free slot it RESERVES it (appends its issue instant) in the
+           SAME lock acquisition — so the ``(check, reserve)`` is atomic and N concurrent
+           workers can never all pass one free slot — no overshoot (DEC-GROWW-GOVERNOR
+           -ATOMIC-001).
         2. **Per-second token bucket** — the unchanged two-phase delegation below.
 
         CRITICAL (DEC-DHAN-PARALLEL-INGEST-001): the controller lock is taken ONLY
@@ -352,22 +354,43 @@ class RateController:
         serialise every worker through one mutex and collapse the achieved rate to
         ~1 r/s. The two gates SEQUENCE (never nest), so there is no lock-ordering
         cycle: the governor never holds ``self._lock`` when the bucket acquires its
-        own lock. The issue instant is recorded only AFTER both gates clear, under
-        the lock, so the deque counts true issue instants and can never exceed the
-        cap. A concurrent per-second step mutates the one bucket IN PLACE
+        own lock. The issue instant is RESERVED at governor admission (gate 1), under
+        the lock, ATOMICALLY with the free-slot check — so the deque counts true
+        admitted issues and can never exceed the cap even under concurrent workers
+        (DEC-GROWW-GOVERNOR-ATOMIC-001 — the pre-fix code appended only AFTER
+        ``bucket.acquire()``, a separate critical section, which let concurrent workers
+        overshoot by ``N-1``). Recording at admission is a few ms before the per-second
+        bucket clears — conservative for a HARD cap (never under-counts). A concurrent
+        per-second step mutates the one bucket IN PLACE
         (:meth:`AdaptiveTokenBucket.set_rate`) and never touches the governor state.
         """
         # ── Gate 1: per-minute governor (skipped entirely when disabled). ──
+        # The issue instant is RESERVED atomically under the SAME lock acquisition that
+        # observes a free slot (DEC-GROWW-GOVERNOR-ATOMIC-001) — NOT after the bucket. The
+        # old code checked ``len < cap`` and released the lock, then appended only AFTER
+        # ``bucket.acquire()``, so N concurrent workers could ALL pass a single free slot
+        # (each saw ``len = cap-1`` before any appended) and then each append → overshoot by
+        # ``N-1``. Reserving in the same critical section that saw room closes that gap: the
+        # ``(check, append)`` is now indivisible, so the deque can never exceed the cap. The
+        # instant is recorded at admission (a few ms before the per-second bucket clears);
+        # for a HARD cap recording slightly early is conservative (never under-counts).
         if self._ceiling_per_min is not None:
             iterations = 0
             while True:
                 with self._lock:
-                    wait = self._governor_wait_locked(self._clock())
+                    now = self._clock()
+                    wait = self._governor_wait_locked(now)
                     if wait <= 0.0:
-                        break  # window has room — fall through to the token bucket
+                        self._issues.append(now)  # reserve the slot atomically
+                        break  # slot reserved — fall through to the token bucket
                 iterations += 1
                 if iterations > _GOVERNOR_LOOP_CAP:
-                    break  # fail-OPEN after the cap (mirrors the bucket's acquire cap)
+                    # fail-OPEN after the cap (mirrors the bucket's acquire cap): still
+                    # record the issue so the rolling count stays honest (matches the
+                    # pre-fix fail-open, which also recorded the instant).
+                    with self._lock:
+                        self._issues.append(self._clock())
+                    break
                 # lock RELEASED before sleeping; re-evict + re-test on the next pass.
                 self._sleep(wait)
         # ── Gate 2: per-second token bucket (two-phase: copy ref under lock, sleep
@@ -375,10 +398,6 @@ class RateController:
         with self._lock:
             bucket = self._bucket
         bucket.acquire()
-        # ── Record the issue instant AFTER both gates cleared (governor only). ──
-        if self._ceiling_per_min is not None:
-            with self._lock:
-                self._issues.append(self._clock())
         # ── Periodic telemetry: a throttled rate.snapshot so a HOLDING rate is visible
         #    in /logs even with no rung change (DEC-GROWW-RATE-SNAPSHOT-LOG-001). ──
         self._maybe_log_snapshot()

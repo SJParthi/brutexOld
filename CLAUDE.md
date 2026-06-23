@@ -230,25 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/candle-partial-zero-skip-jlzt1n` (a vendor candle carrying a ZERO price among real prices
-  — e.g. `open: 0` with a real high/low/close — is now gracefully SKIPPED instead of silently STORED as a corrupted bar
-  (a fabricated zero price + a zero low/high clamp); the symmetric twin of the partial-ABSENT skip —
-  DEC-CANDLE-PARTIAL-ZERO-SKIP-001, MIGRATION.md #912, the operator's "cover all worst cases / no illusion"
-  correctness-hunt. ROOT (PROVEN by a direct repro): `data/candle_fields.py` `assemble_candle` had an ASYMMETRY — its
-  all-empty guard uses `has_no_price` (absent OR zero) but its partial guard used `is_absent` (absent ONLY), so a bar
-  with a MIX of zero + real prices fell through both and was stored; `assemble_candle(open_=0, high=100, low=50,
-  close=75)` STORED `open=0, low=0` (the high/low clamp pulled low to the junk zero — a fabricated zero price + zero
-  range, the exact Golden-Rule-#1 corruption the all-empty guard already prevents). The partial-ABSENT twin
-  (`open=None`) was correctly skipped — only ZERO leaked. FIX (one-line predicate; NO engine/scope/vocab/rate change,
-  ENGINE stays NIFTY/BANKNIFTY/SENSEX): the partial guard now uses the SAME `has_no_price` predicate as the all-empty
-  guard, so a partial-zero bar is a graceful `EmptyCandleRow` skip (the parser's `except EmptyCandleRow: continue`),
-  symmetric, never crashing the pull + never storing junk; a PRESENT-but-unparseable price (`"abc"`) STILL hard-errors
-  via `to_price`. HONEST: a narrow symmetry fix — only a zero-among-reals bar changes (skipped, was corrupted-stored);
-  all-zero still caught first (distinct no-trade message); never fabricates a bar, only drops an un-storable one; a
-  traded Indian price is never 0 (tick ≥ 0.05) so no legit bar is lost. `candle_fields.py` 100% line+branch (47/12);
-  NEW partial-zero parametrized + clobber-regression tests; parser/ingest/price-precision consumers (67) + candle-fields
-  (78) green; ruff/`mypy --strict` (258)/`pyright brutex tests` (0 errors whole-repo) clean. ENGINE UNCHANGED, no
-  scope/vocab/rate change. Prior merged: DEC-COMPLETENESS-SPOT-KEY-RECOVER-001, MIGRATION.md #911 (the read-side FIX of
+- **Active branch:** `claude/rate-governor-atomic-jlzt1n` (the per-minute rate governor now RESERVES its issue slot
+  ATOMICALLY under the SAME lock that observes a free slot, instead of appending the issue instant AFTER
+  `bucket.acquire()` — closing a latent concurrent-overshoot of the HARD 500/min cap; the "no overshoot" docstring is
+  now actually TRUE for the multi-threaded path — DEC-GROWW-GOVERNOR-ATOMIC-001, MIGRATION.md #913, the operator's
+  "cover all worst cases / no illusion / parallelise" correctness-hunt, found by the parallel concurrency-audit agent.
+  ROOT (provable trace): `rate_common.py` `RateController.pace()` ran the governor as TWO separate critical sections —
+  gate-1 checked `len(_issues) < cap` + BROKE (lock released), `bucket.acquire()` ran (no lock), then the instant was
+  appended in a SEPARATE `with _lock` — so N pool workers could ALL see the SAME free slot and each append → overshoot
+  by `N-1`. HONEST SEVERITY: DORMANT today — at `ceiling_rps ≤ 5` the per-second bucket caps at `5×60 = 300/min <
+  500/min`, so the governor wait never binds; it would breach only if `ceiling_per_min < ceiling_rps × 60`. Fixed for
+  robustness + honesty (the false "no overshoot" claim is a Golden-Rule-#10 issue). FIX (adapter-only; NO
+  engine/scope/vocab/rate-cap change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): gate-1 RESERVES (`_issues.append(now)`) in
+  the same lock that saw room, making `(check, reserve)` indivisible; the post-bucket append is removed; fail-open still
+  records (honest count); the instant is stamped at admission (conservative for a HARD cap). HONEST: overshoot now
+  IMPOSSIBLE (atomic) — proven by a NEW 16-thread `Barrier` regression with a recording-deque (`max_seen ≤ cap`,
+  5×-stable); single-threaded count byte-equivalent (only the timestamp shifts post-bucket→admission, `test_blocks_at_
+  cap_then_frees` updated 59.8→59.6); no new lock, O(1) per pace. `rate_common.py` 100% line+branch (141/34); 52
+  rate_common tests green; ruff/`mypy --strict` (258)/`pyright brutex tests` (0 errors whole-repo) clean. ENGINE
+  UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-CANDLE-PARTIAL-ZERO-SKIP-001, MIGRATION.md #912 (a vendor
+  candle carrying a ZERO price among real prices — e.g. `open: 0` with a real high/low/close — is now gracefully
+  SKIPPED instead of silently STORED as a corrupted bar (a fabricated zero price + a zero low/high clamp), the
+  symmetric twin of the partial-ABSENT skip: `assemble_candle`'s all-empty guard uses `has_no_price` (absent OR zero)
+  but its partial guard used `is_absent`, so a mix of zero + real prices leaked through and was stored; the partial
+  guard now uses the SAME `has_no_price` predicate, never storing junk, never fabricating a bar). Prior merged:
+  DEC-COMPLETENESS-SPOT-KEY-RECOVER-001, MIGRATION.md #911 (the read-side FIX of
   #907's M&M diagnostic — a lake spot partition whose on-disk directory key DRIFTED from the scored `symbol_name` (a
   legacy `"NSE-M&M"` / `"M&M "`) is RECOVERED to its canonical scored symbol on BOTH the `/completeness` scoreboard AND
   the `/universe` strip via ONE COMMON `_resolve_spot_category`, surfacing real on-disk data instead of silently
@@ -916,7 +922,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/candle-partial-zero-skip-jlzt1n`
+- **Active feature branch:** `claude/rate-governor-atomic-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

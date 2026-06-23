@@ -625,15 +625,71 @@ class TestPerMinuteGovernor:
 
     def test_blocks_at_cap_then_frees(self) -> None:
         # cap=2 at 5 r/s: the 3rd pace fills the window, so the governor BLOCKS until the
-        # oldest issue ages out (59.8 s), then admits exactly one — never overshooting.
+        # oldest issue ages out, then admits exactly one — never overshooting. The issue
+        # instant is RESERVED at admission (DEC-GROWW-GOVERNOR-ATOMIC-001), so the two
+        # issues are stamped @1000.0 + @1000.2 (the pre-bucket clock), and the 3rd pace
+        # waits (1000.0+60)-1000.4 = 59.6 (the oldest's age-out).
         ctl, _clock, slept = _governed(2)
-        ctl.pace()  # issue @1000.2 (bucket 0.2)
-        ctl.pace()  # issue @1000.4 (bucket 0.2)
+        ctl.pace()  # issue reserved @1000.0 (admission), then bucket 0.2 → clock 1000.2
+        ctl.pace()  # issue reserved @1000.2 (admission), then bucket 0.2 → clock 1000.4
         assert slept == [0.2, 0.2]
         assert ctl.snapshot()["recent_minute"] == 2
-        ctl.pace()  # window full → governor waits 0.2+60-0.4 = 59.8, then frees one
-        assert any(abs(s - 59.8) < 1e-6 for s in slept)  # the governor block fired
+        ctl.pace()  # window full → governor waits (1000.0+60)-1000.4 = 59.6, then frees one
+        assert any(abs(s - 59.6) < 1e-6 for s in slept)  # the governor block fired
         assert ctl.snapshot()["recent_minute"] == 2  # cap held, no overshoot
+
+    def test_concurrent_admission_never_overshoots_cap(self) -> None:
+        # DEC-GROWW-GOVERNOR-ATOMIC-001 regression: N workers contending for a governed
+        # window must NEVER overshoot the cap. Pre-fix, the free-slot CHECK and the issue
+        # APPEND were in two separate lock acquisitions (with bucket.acquire between), so
+        # concurrent workers could all pass one free slot and each append → cap + (N-1).
+        # The fix reserves the slot in the SAME lock that sees room, so the reservation is
+        # atomic. This probes the invariant under REAL threads: the deque length captured
+        # the instant each reservation lands (under the controller lock) is never > cap.
+        import threading
+        from collections import deque as _deque
+
+        cap = 4
+        n_workers = 16
+        cl = threading.Lock()
+        t = [1000.0]
+
+        def clock() -> float:
+            with cl:
+                return t[0]
+
+        def sleep(s: float) -> None:
+            with cl:  # the shared test clock advances on every sleep (thread-safe)
+                t[0] += s
+
+        ctl = RateController(clock=clock, sleep=sleep, ceiling_rps=1000.0, ceiling_per_min=cap)
+        # Swap in a deque that records the post-append length AT the reservation instant —
+        # the append fires inside the controller's lock, so this captures the true
+        # concurrent count (deque.append can't be monkeypatched on an instance; subclass).
+        max_seen = [0]
+        rec_lock = threading.Lock()
+
+        class _RecordingDeque(_deque):  # type: ignore[type-arg]
+            def append(self, item: object) -> None:
+                super().append(item)
+                with rec_lock:
+                    max_seen[0] = max(max_seen[0], len(self))
+
+        ctl._issues = _RecordingDeque()  # type: ignore[assignment]
+
+        barrier = threading.Barrier(n_workers)
+
+        def worker() -> None:
+            barrier.wait()  # release all workers together to maximise contention
+            ctl.pace()
+
+        threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10.0)
+        assert all(not th.is_alive() for th in threads)  # none hung
+        assert max_seen[0] <= cap  # the cap is NEVER overshot at any reservation instant
 
     def test_window_roll_evicts_all(self) -> None:
         # cap=2 filled, then >60 s passes with no issues → the next pace evicts BOTH
