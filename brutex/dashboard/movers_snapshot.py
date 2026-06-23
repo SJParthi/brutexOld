@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.data.models import CandleBar
+from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -575,27 +576,86 @@ def _read_daily_bars(
     return [_row_to_bar(row) for row in sel.rename({"timestamp": "ts_utc"}).iter_rows(named=True)]
 
 
+#: Max calendar days to walk back searching for the prior trading day's last
+#: 1-minute bar when the derived ``1day`` partition is absent (the F&O / stale-lake
+#: fallback in :func:`_prior_session_last_from_minute`). ~14 covers the longest NSE
+#: holiday cluster (Diwali + an adjacent weekend); past it we honestly return
+#: ``None`` rather than scan unbounded history (the hostile-review bound — the
+#: back-walk touches at most the day's month parquet + the prior month's, O(1) in
+#: partition depth, never an open ``rglob`` over the whole tree).
+_PREV_SESSION_MAX_BACK_DAYS: Final[int] = 14
+
+
+def _prior_session_last_from_minute(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> tuple[Decimal, int | None] | None:
+    """Most recent prior trading day's last 1-minute ``(close, open_interest)``, bounded.
+
+    The COMMON fallback for the prior-day baseline when the derived ``1day``
+    partition is missing (a stale lake whose F&O 1-day derive never ran, or any
+    contract with 1-minute but no 1-day). Walks back day-by-day from ``day − 1``
+    up to :data:`_PREV_SESSION_MAX_BACK_DAYS` calendar days, returning the last
+    1-minute bar's ``(close, open_interest)`` of the FIRST prior day that has data
+    (weekends / holidays / gaps are skipped). ``None`` when nothing is found within
+    the bound (the first day in the lake, or no 1-minute partition) — the caller
+    then reports an honest ``None`` baseline, never a fabricated one (Golden Rule #1).
+
+    The derived ``1day`` close IS the session's last 1-minute close, 2dp-snapped by
+    the same writer, so the recovered close is byte-equal to the ``1day`` value it
+    substitutes — keeping the spot %-change unchanged where ``1day`` exists and
+    making F&O %-change work where it does not. The OI is read from the same last
+    1-minute bar (F&O 1-minute bars carry ``open_interest``; ``None`` when absent).
+    """
+    import polars as pl
+
+    from brutex.data.lake_day_glob import read_day_intraday_frame
+
+    base = lake_root / "bars" / exchange / segment / symbol / "1minute"
+    if not base.is_dir():
+        return None
+    for back in range(1, _PREV_SESSION_MAX_BACK_DAYS + 1):
+        candidate = day - timedelta(days=back)
+        frame = read_day_intraday_frame(base, candidate, symbol=symbol)
+        if frame is None:
+            continue
+        ist = pl.col("timestamp").dt.convert_time_zone(_IST)
+        day_df = frame.filter(ist.dt.date() == candidate).sort("timestamp")
+        if day_df.is_empty():
+            continue
+        last = day_df.tail(1)
+        close = Decimal(str(last.get_column("close")[0]))
+        raw_oi = last.get_column("open_interest")[0] if "open_interest" in day_df.columns else None
+        return close, (None if raw_oi is None else int(raw_oi))
+    return None
+
+
 def _prev_day_close(
     lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
 ) -> Decimal | None:
-    """Return the previous trading day's 1-day close before *day*, or ``None``.
+    """Return the previous trading day's close before *day*, or ``None``.
 
-    Reads the symbol's stored ``1day`` partitions and returns the close of the
-    last bar whose IST trading date is strictly before *day*. ``None`` when there
-    is no 1-day data or no prior day (the first day in the lake) — the snapshot
-    then reports an honest ``None`` % change, never a fabricated base.
+    Reads the symbol's stored ``1day`` partitions FIRST and returns the close of
+    the last bar whose IST trading date is strictly before *day* (the primary path
+    — byte-unchanged for every spot symbol that has a derived ``1day``). When the
+    ``1day`` partition is absent or has no prior bar, falls back to the bounded
+    1-minute recovery (:func:`_prior_session_last_from_minute`) so the baseline —
+    and therefore the % change — still resolves for F&O contracts / stale lakes
+    with 1-minute but no 1-day. ``None`` only when neither source yields a prior
+    session (the first day in the lake) — an honest ``None`` % change, never faked.
     """
     import polars as pl
 
     df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
-    if df is None:
-        return None
-    prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
-        "timestamp"
+    if df is not None:
+        prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+            "timestamp"
+        )
+        if not prior.is_empty():
+            return Decimal(str(prior.tail(1).get_column("close")[0]))
+    recovered = _prior_session_last_from_minute(
+        lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
     )
-    if prior.is_empty():
-        return None
-    return Decimal(str(prior.tail(1).get_column("close")[0]))
+    return None if recovered is None else recovered[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,10 +758,20 @@ def compute_spot_candidates(
     # intraday snapshot resamples the `1minute` partitions. The exchange scope (when
     # given) narrows discovery so only that exchange's partitions are ever read.
     discovery_interval = "1day" if is_daily else "1minute"
+    # SPOT tab = SPOT ONLY: whitelist the cash/index segments (INDEX/CASH, the
+    # COMMON `SPOT_PROBE_SEGMENTS`) so F&O contract partitions (`segment="FNO"` —
+    # futures + options) NEVER leak into the Spot screen. Without this the
+    # unfiltered `list_candle_datasets` (which returns every segment) mixed
+    # `NSE-NIFTY-30Jun26-FUT` into Spot the moment an F&O partition existed for the
+    # discovery interval (visible on 1-minute; latent on 1-day until the F&O 1-day
+    # derive runs). Each tab now reads strictly its own instrument class
+    # (Spot→INDEX/CASH, Futures→FNO/-FUT, Options→FNO/CE-PE).
     datasets = [
         d
         for d in list_candle_datasets(lake_root)
-        if d["interval"] == discovery_interval and (exchange is None or d["exchange"] == exchange)
+        if d["interval"] == discovery_interval
+        and d["segment"] in SPOT_PROBE_SEGMENTS
+        and (exchange is None or d["exchange"] == exchange)
     ]
     if not datasets:
         return SpotCandidates(snapshots=(), skipped=0, date=date_str)

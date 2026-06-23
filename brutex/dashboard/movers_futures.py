@@ -68,6 +68,7 @@ from brutex.dashboard.movers_snapshot import (
     _IST,
     _cutoff_minute,
     _prev_day_close,
+    _prior_session_last_from_minute,
     interval_minutes,
     parse_snapshot_date,
     session_traded_value_paisa,
@@ -661,16 +662,23 @@ def _prev_day_oi(
     import polars as pl
 
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
-        return None
-    df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
-    prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
-        "timestamp"
+    if base.is_dir() and any(base.rglob("*.parquet")):
+        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+            "timestamp"
+        )
+        if not prior.is_empty():
+            raw_oi = prior.tail(1).get_column("open_interest")[0]
+            if raw_oi is not None:
+                return int(raw_oi)
+    # Fallback: derived ``1day`` partition absent (or no prior 1-day OI) — recover the
+    # prior trading day's OI from the stored 1-MINUTE bars (the OI twin of the
+    # ``_prev_day_close`` fallback, the ONE shared bounded helper) so the OI %-change
+    # works on an F&O lake whose 1-day derive never ran — the OI Gainers/Losers fix.
+    recovered = _prior_session_last_from_minute(
+        lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
     )
-    if prior.is_empty():
-        return None
-    raw_oi = prior.tail(1).get_column("open_interest")[0]
-    return None if raw_oi is None else int(raw_oi)
+    return None if recovered is None else recovered[1]
 
 
 def _underlying_spot_ltp(
