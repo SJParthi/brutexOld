@@ -688,6 +688,31 @@ def test_reauth_resolves_the_refreshed_sdk_via_leaf_index() -> None:
     assert out == {"leaf": 1}  # resolved leaf 1, not leaf 0
 
 
+def test_reauth_emits_observability_log() -> None:
+    """The 06:00 IST self-heal is VISIBLE: a re-mint emits ONE ``groww.token.reauth`` WARNING
+    carrying the bumped generation + the call label + the reauth count — so the operator can
+    CONFIRM in /logs that the token reset self-healed, never logging the token/secret."""
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired or invalid")])
+    fresh = _FakeSDK(payload={"candles": []})
+    refresher = _FakeRefresher([stale, fresh])
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
+    with capture_logs() as logs:
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    reauth_logs = [e for e in logs if e["event"] == "groww.token.reauth"]
+    assert len(reauth_logs) == 1  # exactly one re-mint, surfaced once
+    entry = reauth_logs[0]
+    assert entry["log_level"] == "warning"
+    assert entry["method"] == "get_expiries"
+    assert entry["reauth"] == 1
+    assert entry["generation"] == 1  # the refresher bumped the generation
+    # secret hygiene: the log carries ONLY safe metadata — no secret / access-token / totp value
+    assert set(entry) == {"event", "log_level", "method", "reauth", "generation"}
+
+
 def test_historical_candles_epoch_bound_unchanged_by_normalize() -> None:
     """An epoch-seconds bound has no ``T`` — the normalize is a safe no-op."""
 

@@ -257,9 +257,19 @@ class GrowwClient:
                     # Capture the generation BEFORE the re-mint so single-flight works:
                     # the refresher only re-mints if no other thread already has.
                     seen_generation = self.refresher.current_generation()
-                    self.refresher.reauth(seen_generation)
+                    new_generation = self.refresher.reauth(seen_generation)
                     reauths += 1
                     attempt -= 1  # a re-auth retry must not spend the rate-limit budget
+                    # OBSERVABILITY (DEC-GROWW-TOKEN-REAUTH-001): make the 06:00 IST daily-token
+                    # self-heal VISIBLE in /logs — the operator SEES the re-mint + the pull
+                    # continuing, instead of the old SILENT quarantine storm. NEVER logs the
+                    # token/secret (only the bumped generation + the call label + the count).
+                    _LOG.warning(
+                        "groww.token.reauth",
+                        method=label,
+                        reauth=reauths,
+                        generation=new_generation,
+                    )
                     continue
                 if is_retryable(err) and attempt < self.max_attempts:
                     base = (
