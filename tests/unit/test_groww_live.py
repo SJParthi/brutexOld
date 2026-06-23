@@ -198,3 +198,45 @@ def test_build_live_pool_size_one_fetches_through_its_single_leaf() -> None:
         end="2024-02-01T00:00:00",
     )
     assert out == {"candles": []}
+
+
+# ── AUTH-error auto-RE-MINT wiring (DEC-GROWW-TOKEN-REAUTH-001) ──────────────
+
+
+def test_build_live_client_wires_a_refresher_at_leaf_zero() -> None:
+    """The single live client carries a SdkRefresher (the auto-RE-MINT latch) at index 0."""
+    from brutex.adapters.groww.reauth import SdkRefresher
+
+    client = build_live_client(
+        _CREDS,
+        token_factory=lambda _k, _t: "ACCESS-TOKEN",
+        totp_minter=lambda _s: "123456",
+        sdk_factory=_FakeSDK,
+    )
+    assert isinstance(client.refresher, SdkRefresher)
+    assert client.refresher_index == 0
+    # The client's SDK is the refresher's current one (the ONE mint path).
+    assert client.sdk is client.refresher.current_sdk()
+
+
+def test_build_live_pool_leaves_share_one_refresher_with_distinct_indices() -> None:
+    """Every pool leaf shares the ONE refresher; each binds a DISTINCT leaf index.
+
+    So a single 06:00 re-mint refreshes EVERY leaf at once, while the K leaves keep
+    independent SDK connections (distinct indices into the refresher's fleet).
+    """
+    pool = build_live_pool(
+        _CREDS,
+        size=3,
+        token_factory=lambda _k, _t: "ACCESS-TOKEN",
+        totp_minter=lambda _s: "123456",
+        sdk_factory=_FakeSDK,
+    )
+    leaves = pool._clients
+    refreshers = {id(leaf.refresher) for leaf in leaves}
+    assert len(refreshers) == 1  # ONE shared refresher across all leaves
+    assert leaves[0].refresher is not None
+    assert leaves[0].refresher.size == 3  # the refresher fans 3 independent connections
+    # Each leaf binds a distinct index → distinct SDK connections (K-way concurrency kept).
+    assert sorted(leaf.refresher_index for leaf in leaves) == [0, 1, 2]
+    assert len({id(leaf.sdk) for leaf in leaves}) == 3

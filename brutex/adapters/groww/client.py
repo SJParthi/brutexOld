@@ -30,16 +30,22 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Protocol, Self, runtime_checkable
+from functools import partial
+from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
 import structlog
 
 from brutex.adapters.call_meter import CallMeter
 from brutex.adapters.groww.errors import (
+    GrowwAuthError,
     GrowwRateLimitError,
     from_groww_exception,
     is_retryable,
 )
+from brutex.adapters.groww.sdk_protocol import GrowwSDK
+
+if TYPE_CHECKING:
+    from brutex.adapters.groww.reauth import SdkRefresher
 
 #: Per-call observability (DEC-GROWW-CALL-LATENCY-LOG-001): every physical Groww REST
 #: call logs its wall-clock latency at INFO (``groww.call``) so the operator can SEE
@@ -104,27 +110,6 @@ def run_with_deadline(
     return result["value"]
 
 
-@runtime_checkable
-class GrowwSDK(Protocol):
-    """The subset of the ``growwapi.GrowwAPI`` surface BruteX calls.
-
-    Methods accept ``**_kwargs`` (the real SDK fixes the exact keyword names);
-    the client below always calls them with the explicit Groww keyword names.
-    """
-
-    def get_historical_candles(self, **_kwargs: object) -> Mapping[str, object]:
-        """Return one historical-candle window (row-of-arrays payload)."""
-        ...
-
-    def get_expiries(self, **_kwargs: object) -> Mapping[str, object]:
-        """Return the FNO expiries for an underlying."""
-        ...
-
-    def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
-        """Return the contract symbols for an underlying + expiry."""
-        ...
-
-
 @dataclass(frozen=True, slots=True)
 class GrowwClient:
     """Neutral wrapper over an injected :class:`GrowwSDK`.
@@ -152,6 +137,25 @@ class GrowwClient:
     max_attempts: int = 6
     backoff_seconds: float = 0.5
     rate_limit_backoff_seconds: float = 2.0
+    #: Thread-safe single-flight SDK refresher (DEC-GROWW-TOKEN-REAUTH-001). When set,
+    #: an AUTH-error call auto-RE-MINTS a fresh access token (the 06:00 IST daily-reset
+    #: self-heal) and retries against the refreshed SDK; the live SDK is resolved from
+    #: it per call (so a re-mint reaches every in-flight call). ``None`` (the default)
+    #: keeps the exact pre-DEC behaviour — an auth error raises terminally — for
+    #: offline / dry-run / unit tests. Excluded from eq/repr like :attr:`meter` (it is
+    #: shared mutable state, not client identity; ``replace`` carries it through).
+    refresher: SdkRefresher | None = field(default=None, compare=False, repr=False)
+    #: This client's leaf index into the shared :attr:`refresher`'s SDK fleet
+    #: (DEC-GROWW-TOKEN-REAUTH-001). ``0`` for a single client; a pool's leaf ``i`` binds
+    #: index ``i`` so the K connections stay independent while ONE re-mint refreshes them
+    #: all. Ignored when :attr:`refresher` is ``None``. Compared/repr'd like a normal
+    #: field (it IS client identity — leaf 0 ≠ leaf 1).
+    refresher_index: int = 0
+    #: Bounded re-auth budget (DEC-GROWW-TOKEN-REAUTH-001) — a genuinely-bad credential
+    #: re-mints AT MOST this many times then raises the :class:`GrowwAuthError`
+    #: terminally (never an infinite loop). Counted SEPARATELY from :attr:`max_attempts`
+    #: (the rate-limit/timeout budget) so an expiry mid-retry-storm still gets its bound.
+    max_reauths: int = 1
     #: Hard per-call wall-clock deadline (seconds) — the historical-pull FREEZE GUARD
     #: (DEC-GROWW-PULL-CALL-DEADLINE-001). ``None`` (the default) keeps the bare
     #: behaviour for unit tests + dry-runs; the LIVE pull build sites inject
@@ -168,26 +172,50 @@ class GrowwClient:
     #: (two clients differing only by meter instance stay equal; ``replace`` keeps it).
     meter: CallMeter = field(default_factory=CallMeter, compare=False, repr=False)
 
+    def _resolve_sdk(self) -> GrowwSDK:
+        """Return the SDK to call against — the refresher's live one, else :attr:`sdk`.
+
+        When a :attr:`refresher` is wired (the live pull) the SDK is resolved PER CALL
+        from it, so an auto-RE-MINT (DEC-GROWW-TOKEN-REAUTH-001) reaches every in-flight
+        call without rebuilding the client; when ``None`` (offline / dry-run / tests)
+        this is byte-identical to using :attr:`sdk` directly.
+        """
+        return (
+            self.refresher.sdk_at(self.refresher_index) if self.refresher is not None else self.sdk
+        )
+
     def _call(
-        self, fn: Callable[[], Mapping[str, object]], *, label: str = ""
+        self, fn: Callable[[GrowwSDK], Mapping[str, object]], *, label: str = ""
     ) -> Mapping[str, object]:
         """Run *fn* through the adaptive limiter: pace → retry retryable → decrement/recover.
 
-        Every physical call acquires a token (:attr:`pace`), then on a RETRYABLE
-        failure (rate-limit OR timeout — :func:`is_retryable`) backs off + retries
-        within :attr:`max_attempts`; a rate-limit additionally fires
-        :attr:`on_rate_limit` (decrement the shared bucket) on EVERY occurrence and
+        Every physical call acquires a token (:attr:`pace`), resolves the live SDK
+        (:meth:`_resolve_sdk` — the :attr:`refresher`'s if wired), then runs
+        ``fn(sdk)``. On a RETRYABLE failure (rate-limit OR timeout — :func:`is_retryable`)
+        it backs off + retries within :attr:`max_attempts`; a rate-limit additionally
+        fires :attr:`on_rate_limit` (decrement the shared bucket) on EVERY occurrence and
         uses the longer :attr:`rate_limit_backoff_seconds`. A clean call fires
-        :attr:`on_success` (recover the rate up). A terminal error (auth / bad-
-        request / not-found / unknown), or a retryable one that exhausts the budget,
-        re-raises the neutral :class:`GrowwError` for the caller to handle (the
-        orchestrator's layer-3 re-queue). Linear backoff (``base × attempt``) keeps
-        it O(1)-state + bounded.
+        :attr:`on_success` (recover the rate up).
+
+        On an AUTH error (DEC-GROWW-TOKEN-REAUTH-001) — the 06:00 IST daily-token reset —
+        if a :attr:`refresher` is wired and the bounded :attr:`max_reauths` budget is not
+        exhausted, it RE-MINTS a fresh access token (thread-safe + single-flight via the
+        refresher's generation check) and retries against the refreshed SDK WITHOUT
+        counting against :attr:`max_attempts` (so an expiry mid-retry-storm still gets its
+        bound). A genuinely-bad credential re-mints :attr:`max_reauths` times then raises
+        the auth error terminally (never an infinite loop).
+
+        A terminal error (auth with no refresher / budget exhausted / bad-request /
+        not-found / unknown), or a retryable one that exhausts the budget, re-raises the
+        neutral :class:`GrowwError` for the caller to handle (the orchestrator's layer-3
+        re-queue). Linear backoff (``base × attempt``) keeps it O(1)-state + bounded.
         """
         attempt = 0
+        reauths = 0
         while True:
             attempt += 1
             self.pace()
+            sdk = self._resolve_sdk()
             # Bracket the physical call for the achieved-throughput meter
             # (DEC-GROWW-RATE-ACHIEVED-METER-001): start AFTER pace() so in-flight
             # measures the call itself, not the token wait; stop on BOTH outcomes so the
@@ -202,14 +230,47 @@ class GrowwClient:
                 # connection can never freeze the pull (DEC-GROWW-PULL-CALL-DEADLINE-001);
                 # a timeout raises → classified retryable → handled by this same loop.
                 result = (
-                    fn()
+                    fn(sdk)
                     if self.call_timeout_seconds is None
-                    else run_with_deadline(fn, self.call_timeout_seconds)
+                    # bind `sdk` via partial so the deadline thread runs THIS attempt's
+                    # resolved SDK (and ruff B023 — loop-var closure capture — is moot).
+                    else run_with_deadline(partial(fn, sdk), self.call_timeout_seconds)
                 )
             except Exception as exc:  # broad: any SDK error → neutral GrowwError
                 err = from_groww_exception(exc)
                 if isinstance(err, GrowwRateLimitError):
                     self.on_rate_limit()  # decrement the shared bucket on EVERY 429
+                # AUTH-error auto-RE-MINT (DEC-GROWW-TOKEN-REAUTH-001): on the 06:00 IST
+                # daily-token reset, re-mint a fresh token (thread-safe + single-flight)
+                # and retry against the refreshed SDK on a SEPARATE `reauths` counter, so a
+                # token expiry mid-retry-storm still self-heals without consuming the
+                # rate-limit `max_attempts` budget. The `attempt -= 1` buys back exactly ONE
+                # attempt per re-auth, so the TOTAL worst-case iteration count is hard-bounded
+                # by `max_attempts + max_reauths` however auth/429 errors interleave. Bounded
+                # by `max_reauths`: a genuinely-bad credential re-mints once then raises
+                # terminally (never an infinite loop).
+                if (
+                    isinstance(err, GrowwAuthError)
+                    and self.refresher is not None
+                    and reauths < self.max_reauths
+                ):
+                    # Capture the generation BEFORE the re-mint so single-flight works:
+                    # the refresher only re-mints if no other thread already has.
+                    seen_generation = self.refresher.current_generation()
+                    new_generation = self.refresher.reauth(seen_generation)
+                    reauths += 1
+                    attempt -= 1  # a re-auth retry must not spend the rate-limit budget
+                    # OBSERVABILITY (DEC-GROWW-TOKEN-REAUTH-001): make the 06:00 IST daily-token
+                    # self-heal VISIBLE in /logs — the operator SEES the re-mint + the pull
+                    # continuing, instead of the old SILENT quarantine storm. NEVER logs the
+                    # token/secret (only the bumped generation + the call label + the count).
+                    _LOG.warning(
+                        "groww.token.reauth",
+                        method=label,
+                        reauth=reauths,
+                        generation=new_generation,
+                    )
+                    continue
                 if is_retryable(err) and attempt < self.max_attempts:
                     base = (
                         self.rate_limit_backoff_seconds
@@ -264,7 +325,7 @@ class GrowwClient:
         replace is a no-op for an epoch-seconds bound (no ``T``), so it is always safe.
         """
         return self._call(
-            lambda: self.sdk.get_historical_candles(
+            lambda sdk: sdk.get_historical_candles(
                 exchange=exchange,
                 segment=segment,
                 groww_symbol=groww_symbol,
@@ -297,14 +358,14 @@ class GrowwClient:
             kwargs["year"] = year
         if month is not None:
             kwargs["month"] = month
-        return self._call(lambda: self.sdk.get_expiries(**kwargs), label="get_expiries")
+        return self._call(lambda sdk: sdk.get_expiries(**kwargs), label="get_expiries")
 
     def contracts(
         self, *, exchange: str, underlying_symbol: str, expiry_date: str
     ) -> Mapping[str, object]:
         """List contract symbols for an underlying + expiry."""
         return self._call(
-            lambda: self.sdk.get_contracts(
+            lambda sdk: sdk.get_contracts(
                 exchange=exchange, underlying_symbol=underlying_symbol, expiry_date=expiry_date
             ),
             label="get_contracts",

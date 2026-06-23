@@ -501,6 +501,218 @@ def test_historical_candles_normalizes_iso_t_to_space() -> None:
     assert sdk.kwargs["end_time"] == "2026-05-29 00:00:00"
 
 
+# ── AUTH-error auto-RE-MINT (DEC-GROWW-TOKEN-REAUTH-001) ────────────────────
+
+
+# Named like the SDK exception so from_groww_exception maps it to GrowwAuthError.
+class GrowwAPIAuthenticationException(Exception):
+    """Fake SDK auth exception (named so from_groww_exception maps it to GrowwAuthError)."""
+
+
+class _FakeRefresher:
+    """A fake SdkRefresher: a queue of SDKs, single-flight via a generation counter.
+
+    Models the real refresher's contract (current_sdk / current_generation / reauth)
+    so the client's auto-RE-MINT path is driven with NO pyotp / growwapi / network.
+    """
+
+    def __init__(self, sdks: list[_FakeSDK]) -> None:
+        self._sdks = sdks
+        self._index = 0
+        self.generation = 0
+        self.reauth_calls = 0
+
+    def sdk_at(self, _index: int) -> _FakeSDK:
+        # The client resolves its leaf SDK by index; this single-leaf fake ignores it
+        # and serves the current queue position (the re-mint advances the queue).
+        return self._sdks[self._index]
+
+    def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
+        return self._sdks[self._index]
+
+    def current_generation(self) -> int:
+        return self.generation
+
+    def reauth(self, seen_generation: int) -> int:
+        self.reauth_calls += 1
+        if self.generation != seen_generation:  # pragma: no cover — single-thread test path
+            return self.generation
+        self._index = min(self._index + 1, len(self._sdks) - 1)
+        self.generation += 1
+        return self.generation
+
+
+def test_auth_error_triggers_reauth_then_succeeds() -> None:
+    """An SDK that auth-fails once then a fresh SDK succeeds → exactly ONE reauth, used.
+
+    THE 06:00 IST regression: the daily token reset invalidated the in-flight token, so
+    every call hit GrowwAPIAuthenticationException → terminal GrowwAuthError → quarantine.
+    Now the client RE-MINTS and retries against the refreshed SDK, self-healing the pull.
+    """
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired or invalid")])
+    fresh = _FakeSDK(payload={"candles": [[1, 2, 3, 4, 5, 6, None]]})
+    refresher = _FakeRefresher([stale, fresh])
+    slept: list[float] = []
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=slept.append,
+        max_attempts=3,
+        backoff_seconds=0.1,
+    )
+    out = client.historical_candles(
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-NIFTY",
+        interval="1minute",
+        start="2024-01-01 09:15:00",
+        end="2024-01-02 15:30:00",
+    )
+    assert out == {"candles": [[1, 2, 3, 4, 5, 6, None]]}  # the REFRESHED sdk's payload
+    assert refresher.reauth_calls == 1  # exactly one re-mint
+    assert stale.calls == 1  # the stale sdk was hit once (the auth failure)
+    assert fresh.calls == 1  # the refreshed sdk served the retry
+    assert slept == []  # a re-auth retry does NOT spend a backoff sleep
+
+
+def test_auth_error_bounded_reauths_then_raises_terminally() -> None:
+    """A persistently-invalid credential re-mints AT MOST max_reauths times then raises.
+
+    Bounded — no infinite loop: a genuinely-bad credential still quarantines (today's
+    terminal behaviour) after the budget is spent.
+    """
+    from brutex.adapters.groww.errors import GrowwAuthError
+
+    sdks = [
+        _FakeSDK(raises=[GrowwAPIAuthenticationException("bad")]),
+        _FakeSDK(raises=[GrowwAPIAuthenticationException("still bad")]),
+        _FakeSDK(raises=[GrowwAPIAuthenticationException("never good")]),
+    ]
+    refresher = _FakeRefresher(sdks)
+    client = GrowwClient(
+        sdk=sdks[0],
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_attempts=3,
+        max_reauths=2,
+    )
+    with pytest.raises(GrowwAuthError):
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert refresher.reauth_calls == 2  # bounded at max_reauths (not infinite)
+    # Each sdk auth-failed once: initial + 2 reauthed attempts = 3 physical calls total.
+    assert sum(s.calls for s in sdks) == 3
+
+
+def test_auth_error_without_refresher_raises_immediately_back_compat() -> None:
+    """No refresher (offline / dry-run / tests) → an auth error is terminal, exactly as before."""
+    from brutex.adapters.groww.errors import GrowwAuthError
+
+    sdk = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+    client, slept = _client(sdk)  # _client wires NO refresher
+    with pytest.raises(GrowwAuthError):
+        client.contracts(exchange="NSE", underlying_symbol="NIFTY", expiry_date="2024-01-25")
+    assert sdk.calls == 1  # raised immediately, no retry, no reauth
+    assert slept == []
+
+
+def test_default_max_reauths_is_one() -> None:
+    """The bounded re-auth budget defaults to 1 (one self-heal then terminal)."""
+    sdks = [
+        _FakeSDK(raises=[GrowwAPIAuthenticationException("bad")]),
+        _FakeSDK(raises=[GrowwAPIAuthenticationException("still bad")]),
+    ]
+    refresher = _FakeRefresher(sdks)
+    from brutex.adapters.groww.errors import GrowwAuthError
+
+    client = GrowwClient(
+        sdk=sdks[0],
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
+    assert client.max_reauths == 1
+    with pytest.raises(GrowwAuthError):
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert refresher.reauth_calls == 1  # exactly the default single re-mint
+
+
+def test_with_pace_carries_the_refresher_through() -> None:
+    """`with_pace` (dataclasses.replace) preserves the refresher + leaf index unchanged."""
+    refresher = _FakeRefresher([_FakeSDK(payload={"candles": []})])
+    client = GrowwClient(sdk=_FakeSDK(), refresher=refresher, refresher_index=2)  # type: ignore[arg-type]
+
+    def _pace() -> None:
+        pass
+
+    repaced = client.with_pace(_pace)
+    assert repaced.refresher is refresher  # the SAME shared refresher carries through
+    assert repaced.refresher_index == 2  # the leaf binding is preserved
+    assert repaced.pace is _pace
+
+
+def test_reauth_resolves_the_refreshed_sdk_via_leaf_index() -> None:
+    """The client resolves its SDK from the refresher BY ITS LEAF INDEX (pool correctness)."""
+
+    class _IndexedRefresher:
+        """A 2-leaf fleet that flips both leaves to a fresh SDK on reauth."""
+
+        def __init__(self) -> None:
+            self._fleets = [
+                [_FakeSDK(raises=[GrowwAPIAuthenticationException("expired")]) for _ in range(2)],
+                [_FakeSDK(payload={"leaf": 0}), _FakeSDK(payload={"leaf": 1})],
+            ]
+            self._gen = 0
+
+        def sdk_at(self, index: int) -> _FakeSDK:
+            return self._fleets[self._gen][index]
+
+        def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
+            return self._fleets[self._gen][0]
+
+        def current_generation(self) -> int:
+            return self._gen
+
+        def reauth(self, seen_generation: int) -> int:
+            if self._gen == seen_generation:
+                self._gen += 1
+            return self._gen
+
+    refresher = _IndexedRefresher()
+    # Leaf 1 must resolve leaf-1's refreshed SDK ({"leaf": 1}), proving index binding.
+    client = GrowwClient(
+        sdk=refresher.sdk_at(1),
+        refresher=refresher,  # type: ignore[arg-type]
+        refresher_index=1,
+        sleep=lambda _s: None,
+    )
+    out = client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert out == {"leaf": 1}  # resolved leaf 1, not leaf 0
+
+
+def test_reauth_emits_observability_log() -> None:
+    """The 06:00 IST self-heal is VISIBLE: a re-mint emits ONE ``groww.token.reauth`` WARNING
+    carrying the bumped generation + the call label + the reauth count — so the operator can
+    CONFIRM in /logs that the token reset self-healed, never logging the token/secret."""
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired or invalid")])
+    fresh = _FakeSDK(payload={"candles": []})
+    refresher = _FakeRefresher([stale, fresh])
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
+    with capture_logs() as logs:
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    reauth_logs = [e for e in logs if e["event"] == "groww.token.reauth"]
+    assert len(reauth_logs) == 1  # exactly one re-mint, surfaced once
+    entry = reauth_logs[0]
+    assert entry["log_level"] == "warning"
+    assert entry["method"] == "get_expiries"
+    assert entry["reauth"] == 1
+    assert entry["generation"] == 1  # the refresher bumped the generation
+    # secret hygiene: the log carries ONLY safe metadata — no secret / access-token / totp value
+    assert set(entry) == {"event", "log_level", "method", "reauth", "generation"}
+
+
 def test_historical_candles_epoch_bound_unchanged_by_normalize() -> None:
     """An epoch-seconds bound has no ``T`` — the normalize is a safe no-op."""
 

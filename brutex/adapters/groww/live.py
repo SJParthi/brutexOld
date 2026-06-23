@@ -23,18 +23,11 @@ from brutex.adapters.groww.auth import (
     GrowwCredentials,
     _real_token_factory,
     _real_totp,
-    get_access_token,
 )
 from brutex.adapters.groww.client import GrowwClient, GrowwSDK, _noop_hook, _noop_pace
 from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
 from brutex.adapters.groww.pool import ClientPool
-
-
-def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
-    """Default SDK factory: ``GrowwAPI(token)`` (lazy import of the real SDK)."""
-    from growwapi import GrowwAPI  # type: ignore[import-not-found, unused-ignore]
-
-    return GrowwAPI(token)  # type: ignore[no-any-return]
+from brutex.adapters.groww.reauth import SdkRefresher, _real_sdk_factory
 
 
 def build_live_client(
@@ -84,12 +77,22 @@ def build_live_client(
     GrowwClient
         A neutral client wrapping the freshly built SDK + the limiter hooks.
     """
-    token_info = get_access_token(creds, token_factory=token_factory, totp_minter=totp_minter)
-    sdk = sdk_factory(token_info.access_token)
+    # The refresher is the ONE mint path (DEC-GROWW-TOKEN-REAUTH-001): it mints the
+    # INITIAL token + SDK at construction, AND auto-RE-MINTS on the 06:00 IST daily
+    # token reset so the overnight pull self-heals without a manual restart. A failed
+    # INITIAL issuance surfaces as a redacting GrowwAuthError straight from it.
+    refresher = SdkRefresher(
+        creds,
+        token_factory=token_factory,
+        totp_minter=totp_minter,
+        sdk_factory=sdk_factory,
+    )
     # A truthy callable wins; ``None`` falls back to the client's no-op default
     # (offline / unpaced) — every key is a ``Callable[[], None]`` (mypy-clean).
     return GrowwClient(
-        sdk=sdk,
+        sdk=refresher.current_sdk(),
+        refresher=refresher,
+        refresher_index=0,
         pace=pace or _noop_pace,
         on_rate_limit=on_rate_limit or _noop_hook,
         on_success=on_success or _noop_hook,
@@ -139,21 +142,34 @@ def build_live_pool(
         A pool of *size* leaf clients sharing one limiter + one meter.
     """
     safe_size = max(1, size)
-    token_info = get_access_token(creds, token_factory=token_factory, totp_minter=totp_minter)
-    token = token_info.access_token
+    # ONE shared refresher across ALL leaves (DEC-GROWW-TOKEN-REAUTH-001): it mints the
+    # INITIAL token ONCE and fans `safe_size` INDEPENDENT SDK connections off it (the
+    # single mint path), and on the 06:00 IST daily token reset a single re-mint rebuilds
+    # EVERY leaf's connection at once (each leaf binds its own SDK index via `sdk_at`), so
+    # the overnight pull self-heals without a manual restart, WITHOUT a token stampede
+    # (single-flight), AND the pool keeps its K-way concurrency (K distinct sockets).
+    refresher = SdkRefresher(
+        creds,
+        size=safe_size,
+        token_factory=token_factory,
+        totp_minter=totp_minter,
+        sdk_factory=sdk_factory,
+    )
     # ONE shared meter across all leaves → the dashboard's achieved-rate gauge aggregates
     # across every connection (in_flight rises toward `size`, not split per-connection).
     meter = CallMeter()
     leaves = [
         GrowwClient(
-            sdk=sdk_factory(token),
+            sdk=refresher.sdk_at(index),
+            refresher=refresher,
+            refresher_index=index,
             pace=pace or _noop_pace,
             on_rate_limit=on_rate_limit or _noop_hook,
             on_success=on_success or _noop_hook,
             call_timeout_seconds=GROWW_PULL_CALL_TIMEOUT_S,
             meter=meter,
         )
-        for _ in range(safe_size)
+        for index in range(safe_size)
     ]
     return ClientPool(leaves)
 
