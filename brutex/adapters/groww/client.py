@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 import structlog
 
 from brutex.adapters.call_meter import CallMeter
+from brutex.adapters.groww.deadline import run_with_deadline
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
     GrowwRateLimitError,
@@ -68,46 +69,6 @@ def _noop_sleep(_seconds: float) -> None:  # pragma: no cover — replaced in te
     import time
 
     time.sleep(_seconds)
-
-
-def run_with_deadline(
-    fn: Callable[[], Mapping[str, object]], seconds: float
-) -> Mapping[str, object]:
-    """Run *fn* in a daemon thread, raising a timeout if it blows the wall-clock deadline.
-
-    THE HISTORICAL-PULL FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001). The Groww
-    ``get_historical_candles`` SDK call carries no inherent wall-clock bound, so a
-    stalled connection (half-open socket, server not responding) would block the
-    pull worker FOREVER — the :class:`GrowwClient` retry loop cannot help because it
-    only fires on a *raised* error, and a hung call never raises. This caps EVERY
-    call: if *fn* has not returned within *seconds*, raise a :class:`TimeoutError`
-    whose message carries the ``deadline exceeded`` hint, so
-    :func:`~brutex.adapters.groww.errors.from_groww_exception` classifies it as a
-    retryable :class:`~brutex.adapters.groww.errors.GrowwTimeoutError`. The bounded
-    retry loop then re-issues it; a persistently-stalled window finally FAILS (and
-    is re-attempted next pull) instead of freezing the whole pull. The abandoned
-    worker is a daemon — it dies with the process and never blocks shutdown.
-    """
-    import threading
-
-    result: dict[str, Mapping[str, object]] = {}
-    failure: dict[str, Exception] = {}
-    done = threading.Event()
-
-    def _runner() -> None:
-        try:
-            result["value"] = fn()
-        except Exception as exc:  # re-raised on the caller thread below (any SDK error)
-            failure["error"] = exc
-        finally:
-            done.set()
-
-    threading.Thread(target=_runner, name="groww-pull-call", daemon=True).start()
-    if not done.wait(seconds):
-        raise TimeoutError(f"Groww historical pull call deadline exceeded ({seconds:g}s)")
-    if "error" in failure:
-        raise failure["error"]
-    return result["value"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,4 +405,4 @@ ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
         raise NotImplementedError  # structural Protocol stub — never executed
 
 
-__all__ = ["GrowwClient", "GrowwClientProtocol", "GrowwSDK"]
+__all__ = ["GrowwClient", "GrowwClientProtocol", "GrowwSDK", "run_with_deadline"]

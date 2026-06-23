@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
-from brutex.adapters.groww.errors import GrowwAuthError
+from brutex.adapters.groww.errors import GrowwAuthError, GrowwTimeoutError
 from brutex.adapters.groww.reauth import SdkRefresher
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
 
@@ -241,3 +241,108 @@ def test_size_is_clamped_to_at_least_one() -> None:
     )
     assert refresher.size == 1
     assert isinstance(refresher.current_sdk(), _FakeSDK)
+
+
+# ── FREEZE GUARD: a hung re-mint must not hold the lock forever (MINOR-1) ────
+
+
+def test_hung_remint_raises_retryable_timeout_releases_lock_no_half_state() -> None:
+    """A re-mint whose network mint BLOCKS past the deadline raises a retryable timeout.
+
+    THE MINOR-1 hazard: a half-open socket at 06:00 IST would hold ``_lock`` forever,
+    freezing every pool leaf. The freeze guard bounds ONLY the network mint, so:
+      * ``reauth`` raises a RETRYABLE :class:`GrowwTimeoutError` (NOT a terminal auth error),
+      * the lock is RELEASED afterward (another thread's call does NOT deadlock),
+      * NO partial state was published (generation unchanged, SDK still the OLD one).
+    """
+    release = threading.Event()
+    minted: list[str] = []
+
+    def token_factory(_api_key: str, _totp: str) -> str:
+        if minted:  # the SECOND issuance (the re-mint) hangs past the deadline
+            release.wait(timeout=5.0)
+        minted.append(f"ACCESS-{len(minted) + 1}")
+        return minted[-1]
+
+    refresher = SdkRefresher(
+        _CREDS,
+        token_factory=token_factory,
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+        call_timeout_seconds=0.05,  # a SHORT injected deadline so the test is fast
+    )
+    initial_sdk = refresher.current_sdk()
+    try:
+        with pytest.raises(GrowwTimeoutError):
+            refresher.reauth(seen_generation=0)
+        # The secret never leaked into the timeout message.
+        # (the error message carries only the "deadline exceeded" hint)
+        # NO half-state: generation unchanged, the OLD SDK still served.
+        assert refresher.current_generation() == 0
+        assert refresher.current_sdk() is initial_sdk
+        # The lock was RELEASED — a subsequent call from "another thread" returns
+        # (it would DEADLOCK if the timed-out re-mint had held the lock forever).
+        done: list[int] = []
+
+        def _probe() -> None:
+            done.append(refresher.current_generation())
+
+        probe = threading.Thread(target=_probe)
+        probe.start()
+        probe.join(timeout=2.0)
+        assert not probe.is_alive()  # did not deadlock on the lock
+        assert done == [0]
+    finally:
+        release.set()  # let the abandoned daemon mint worker exit
+
+
+def test_hung_remint_does_not_leak_the_secret() -> None:
+    """The freeze-guard timeout message carries only the deadline hint — never the secret."""
+    release = threading.Event()
+    minted: list[str] = []
+
+    def token_factory(_api_key: str, _totp: str) -> str:
+        if minted:
+            release.wait(timeout=5.0)
+        minted.append("ACCESS")
+        return "ACCESS"
+
+    refresher = SdkRefresher(
+        _CREDS,
+        token_factory=token_factory,
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+        call_timeout_seconds=0.05,
+    )
+    try:
+        with pytest.raises(GrowwTimeoutError) as exc:
+            refresher.reauth(seen_generation=0)
+        assert "fake_secret" not in str(exc.value)
+        assert "deadline exceeded" in str(exc.value)
+    finally:
+        release.set()
+
+
+def test_fast_remint_within_deadline_still_bumps_generation() -> None:
+    """The NORMAL (fast) re-mint path is unchanged — deadline-wrapped but not hit.
+
+    Back-compat: a mint that returns well within the deadline still mints a fresh SDK
+    and bumps the generation exactly as before the freeze guard was added.
+    """
+    _minted, _tokens, built, totp_minter, token_factory, sdk_factory = _counting_factories()
+    refresher = SdkRefresher(
+        _CREDS,
+        token_factory=token_factory,
+        totp_minter=totp_minter,
+        sdk_factory=sdk_factory,
+        call_timeout_seconds=5.0,  # generous — the fast mint never hits it
+    )
+    first = refresher.current_sdk()
+    assert len(built) == 1
+
+    new_gen = refresher.reauth(seen_generation=0)
+    assert new_gen == 1
+    assert refresher.current_generation() == 1
+    second = refresher.current_sdk()
+    assert second is not first
+    assert len(built) == 2  # exactly one re-mint within the deadline
