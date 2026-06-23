@@ -143,18 +143,26 @@ def assemble_candle(
     """
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
-    # Partially-ABSENT bar (DEC-CANDLE-PARTIAL-ABSENT-SKIP-001): the row is
-    # NOT all-empty, but a REQUIRED OHLC price is ABSENT (vendor null / empty) — the
-    # production crash was Groww returning ``open: None`` alongside a real high / low /
-    # close, which `to_price(None)` raised as `unparseable open price: None`, and that
-    # non-`GrowwError` propagated out of `run_groww_spot_ingest` and CRASHED the whole
-    # 779-symbol pull. We cannot fabricate the missing price (Golden Rule #1), so SKIP
-    # the un-storable bar gracefully (the parser's `except EmptyCandleRow: continue`),
-    # mirroring the negative-volume + OHLC clamps below — never crash a pull on one
-    # vendor quirk. A price that is PRESENT but unparseable / non-finite is left to the
-    # strict `to_price` calls below (a hard error — a genuine malformation worth surfacing).
-    if any(is_absent(v) for v in (open_, high, low, close)):
-        raise EmptyCandleRow("candle missing a required OHLC price (partial vendor bar — skipped)")
+    # Partially-NO-PRICE bar (DEC-CANDLE-PARTIAL-ABSENT-SKIP-001 + DEC-CANDLE-PARTIAL-ZERO
+    # -SKIP-001): the row is NOT all-empty, but a REQUIRED OHLC price carries no tradeable
+    # information — ABSENT (vendor null / empty) OR ZERO. The production crash was Groww
+    # returning ``open: None`` alongside a real high / low / close, which `to_price(None)`
+    # raised as `unparseable open price: None`, crashing the whole 779-symbol pull. The
+    # ZERO twin is the SAME un-storable junk: a traded Indian price is never 0 (tick ≥ 0.05,
+    # see :func:`has_no_price`), so a lone ``open: 0`` among real prices is a vendor glitch —
+    # storing it (and clamping ``low`` to 0 below) would FABRICATE a zero price + a zero
+    # range, the exact Golden-Rule-#1 corruption the all-empty check already guards against.
+    # We cannot fabricate the missing price, so SKIP the un-storable bar gracefully (the
+    # parser's `except EmptyCandleRow: continue`), mirroring the negative-volume + OHLC
+    # clamps below — never crash a pull, never store junk, on one vendor quirk. This uses the
+    # SAME `has_no_price` predicate as the all-empty check above (absent OR zero), so the two
+    # guards are symmetric. A price that is PRESENT but unparseable / non-finite (e.g.
+    # ``"abc"`` — `has_no_price` is False) is left to the strict `to_price` calls below (a
+    # hard error — a genuine malformation worth surfacing, never silently skipped).
+    if any(has_no_price(v) for v in (open_, high, low, close)):
+        raise EmptyCandleRow(
+            "candle has an absent or zero OHLC price (partial vendor bar — skipped)"
+        )
     # Vendor count-field normalization (DEC-VENDOR-VOLUME-NORMALIZE-001, sibling
     # of the OHLC clamp below): an IMPOSSIBLE negative volume / open-interest
     # must NEVER crash a multi-year pull on the strict ``CandleBar`` invariant.

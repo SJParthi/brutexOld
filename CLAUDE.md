@@ -230,32 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/mnm-spot-key-recover-jlzt1n` (the read-side FIX of #907's M&M diagnostic — a lake spot
-  partition whose on-disk directory key DRIFTED from the scored `symbol_name` (a legacy `"NSE-M&M"` / `"M&M "` instead
-  of the bare `"M&M"`) is now RECOVERED to its canonical scored symbol on BOTH the `/completeness` scoreboard AND the
-  `/universe` per-row strip, so its REAL on-disk data is surfaced instead of silently dropped — DEC-COMPLETENESS-SPOT-KEY-RECOVER-001,
-  MIGRATION.md #911, the operator's "M&M empty-symbol fix" pick. EVIDENCE-GROUNDED (no guess): an Explore trace proved
-  the production WRITE path keys both sides IDENTICALLY (`ingest.py` writes the partition dir from the stripped
-  `instrument.symbol_name`; the scoreboard keys `categories` on the SAME `symbol_name`), so the operator's REAL
-  M&M-empty was the OPTIONS chain that never pulled when the overnight pull died at 06:00 IST — fixed by #909/#910, NOT
-  a key bug; a key drift can only arise from a LEGACY/foreign/regression partition. FIX (READ-ONLY dashboard; NO
-  engine/lake/vocab/rate/scope change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): ONE COMMON
-  `_resolve_spot_category(symbol, exchange, categories)` resolving exact → whitespace-stripped → the row's OWN
-  `exchange` prefix stripped (DATA-DRIVEN via `removeprefix`, never a hardcoded list, so `BAJAJ-AUTO` is never split on
-  its internal hyphen), returning the canonical scored key or `None` (a genuine stray STAYS dropped — never
-  fabricated); wired into BOTH read-side lookups (`_per_symbol_spot` + `per_symbol_completeness`). The #907 reconcile
-  diagnostic STILL warns on the raw drifted key (recover AND flag-for-cleanup). FOLDED hostile-review BLOCKER: a clean
-  `full` partition + a stale drifted `none` fragment both recover to one canonical symbol, and the SORTED scan let the
-  stale fragment CLOBBER the real `full` via blind last-write (Golden-Rule-#1 regression) — fixed by a COMMON
-  `_spot_cell_supersedes` rank-merge (`full > partial > failed > none`, ties by earlier start) at both sites, so the
-  surfaced cell is the BEST real data ORDER-INDEPENDENT (regression-proven both scan orders × both read paths). HONEST:
-  recovers only data that PHYSICALLY EXISTS (never invents a row); does NOT change the operator's current bare-`"M&M"`
-  (already matched) — DEFENSIVE hardening, NOT their cure (the #909/#910 token self-heal is); OPTIONS path out of scope
-  (keys on the structured `CoverageRecord.underlying_symbol`, not a dir name). `completeness.py` 100% line+branch
-  (293/108); 131 completeness + dashboard coverage/e2e/universe integration tests green; ruff/`mypy --strict`
-  (258)/`pyright brutex tests` (0 errors whole-repo) clean; hostile-reviewer FIX-FIRST → BLOCKER FOLDED (1 harmless
-  NIT) + workspace-health HEALTHY. COMPLETES the #907 diagnostic's "confirmed key-normalization FIX" next step. ENGINE
-  UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-GROWW-REAUTH-DEADLINE-001, MIGRATION.md #910 (the token
+- **Active branch:** `claude/candle-partial-zero-skip-jlzt1n` (a vendor candle carrying a ZERO price among real prices
+  — e.g. `open: 0` with a real high/low/close — is now gracefully SKIPPED instead of silently STORED as a corrupted bar
+  (a fabricated zero price + a zero low/high clamp); the symmetric twin of the partial-ABSENT skip —
+  DEC-CANDLE-PARTIAL-ZERO-SKIP-001, MIGRATION.md #912, the operator's "cover all worst cases / no illusion"
+  correctness-hunt. ROOT (PROVEN by a direct repro): `data/candle_fields.py` `assemble_candle` had an ASYMMETRY — its
+  all-empty guard uses `has_no_price` (absent OR zero) but its partial guard used `is_absent` (absent ONLY), so a bar
+  with a MIX of zero + real prices fell through both and was stored; `assemble_candle(open_=0, high=100, low=50,
+  close=75)` STORED `open=0, low=0` (the high/low clamp pulled low to the junk zero — a fabricated zero price + zero
+  range, the exact Golden-Rule-#1 corruption the all-empty guard already prevents). The partial-ABSENT twin
+  (`open=None`) was correctly skipped — only ZERO leaked. FIX (one-line predicate; NO engine/scope/vocab/rate change,
+  ENGINE stays NIFTY/BANKNIFTY/SENSEX): the partial guard now uses the SAME `has_no_price` predicate as the all-empty
+  guard, so a partial-zero bar is a graceful `EmptyCandleRow` skip (the parser's `except EmptyCandleRow: continue`),
+  symmetric, never crashing the pull + never storing junk; a PRESENT-but-unparseable price (`"abc"`) STILL hard-errors
+  via `to_price`. HONEST: a narrow symmetry fix — only a zero-among-reals bar changes (skipped, was corrupted-stored);
+  all-zero still caught first (distinct no-trade message); never fabricates a bar, only drops an un-storable one; a
+  traded Indian price is never 0 (tick ≥ 0.05) so no legit bar is lost. `candle_fields.py` 100% line+branch (47/12);
+  NEW partial-zero parametrized + clobber-regression tests; parser/ingest/price-precision consumers (67) + candle-fields
+  (78) green; ruff/`mypy --strict` (258)/`pyright brutex tests` (0 errors whole-repo) clean. ENGINE UNCHANGED, no
+  scope/vocab/rate change. Prior merged: DEC-COMPLETENESS-SPOT-KEY-RECOVER-001, MIGRATION.md #911 (the read-side FIX of
+  #907's M&M diagnostic — a lake spot partition whose on-disk directory key DRIFTED from the scored `symbol_name` (a
+  legacy `"NSE-M&M"` / `"M&M "`) is RECOVERED to its canonical scored symbol on BOTH the `/completeness` scoreboard AND
+  the `/universe` strip via ONE COMMON `_resolve_spot_category`, surfacing real on-disk data instead of silently
+  dropping it; a clean+stale-fragment collision is rank-merged so the best real data wins order-independent; recovers
+  only data that exists, never fabricates; the #907 diagnostic still flags the raw drift for cleanup). Prior merged:
+  DEC-GROWW-REAUTH-DEADLINE-001, MIGRATION.md #910 (the token
   re-mint is now WRAPPED in the freeze-guard wall-clock deadline, so even a HUNG re-mint at 06:00 IST raises a
   retryable timeout — the window quarantines + re-pulls — instead of freezing the whole pool; `run_with_deadline`
   MOVED to a cycle-proof stdlib-only `deadline.py` + re-exported from `client.py`; `SdkRefresher.reauth` wraps the
@@ -917,7 +916,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/mnm-spot-key-recover-jlzt1n`
+- **Active feature branch:** `claude/candle-partial-zero-skip-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
