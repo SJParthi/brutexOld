@@ -544,6 +544,148 @@ class GrowwOptionIngestReport:
         return any(f.auth_failure for f in self.failures)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# "Suspicious empty" diagnostic (DEC-SUSPICIOUS-EMPTY-FLAG-001) — OBSERVE-ONLY
+#
+# When a whole F&O underlying (e.g. ``BAJAJ-AUTO`` / ``M&M``) is pulled and EVERY
+# one of its cleanly-fetched contracts comes back empty, the underlying currently
+# vanishes silently — indistinguishable from a legit "no data" gap. This surfaces
+# that case as ONE structured WARNING for human triage, mirroring the read-side
+# ``completeness.symbol_reconcile_mismatch`` observe-only diagnostic (#907): it
+# changes NO return value, NO ledger row, NO engine input — the brute-force ENGINE
+# stays NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §3). It is PULL-side (not read-side)
+# because only the pull knows "tried-and-empty" vs "never-tried" — a lake scan sees
+# only "0 partitions" and cannot tell a clean-but-empty vendor response from an
+# underlying we never pulled.
+# ──────────────────────────────────────────────────────────────────────────
+
+#: The structlog event a whole-underlying 100%-empty F&O pull emits (observe-only;
+#: the pull-side twin of ``completeness.RECONCILE_MISMATCH_EVENT``).
+UNDERLYING_ALL_EMPTY_EVENT = "pull.underlying_all_empty"
+#: Emitted if the observe-only scan itself raises — it NEVER breaks the pull.
+UNDERLYING_ALL_EMPTY_ERROR_EVENT = "pull.underlying_all_empty_error"
+#: Minimum CLEANLY-fetched contracts an underlying must have before a 100%-empty
+#: result is "suspicious". Below this, one or two thinly-traded empty legs are
+#: normal and do not warrant a warning (false-positive guard). Tunable constant.
+_ALL_EMPTY_MIN_CONTRACTS = 3
+#: Cap on the number of flagged underlyings NAMED per pull, so a pathological pull
+#: cannot flood the log (mirrors completeness.py's sample cap).
+_ALL_EMPTY_SAMPLE_CAP = 20
+
+
+@dataclass(frozen=True, slots=True)
+class UnderlyingEmptyReport:
+    """One underlying whose every cleanly-fetched F&O contract came back empty.
+
+    Attributes
+    ----------
+    underlying
+        The underlying symbol (``DerivativeContract.underlying_symbol``), e.g.
+        ``"BAJAJ-AUTO"``.
+    attempted_pairs
+        Count of CLEANLY-fetched ``(contract, interval)`` pairs for this underlying
+        — a real vendor fetch that could have stored bars (a ledger-skip, a
+        transient residual, and an empty-clamp no-op are EXCLUDED; see
+        :func:`_is_clean_fetch`).
+    stored_bars
+        Total bars stored across those attempted pairs — ``0`` for a flagged
+        underlying (the whole chain produced nothing).
+    """
+
+    underlying: str
+    attempted_pairs: int
+    stored_bars: int
+
+
+@dataclass(frozen=True, slots=True)
+class AllEmptyScan:
+    """The observe-only result of scanning one pull's pairs for whole-underlying empties."""
+
+    suspicious: tuple[UnderlyingEmptyReport, ...]
+
+    def has_suspicious(self) -> bool:
+        """True iff at least one underlying tripped the flag (else the emit stays silent)."""
+        return bool(self.suspicious)
+
+
+def _is_clean_fetch(report: IngestReport) -> bool:
+    """True iff *report* is a CLEAN vendor fetch (could have stored bars), not a skip.
+
+    A ledger-skip (``skipped_windows``), a transient residual (``still_failed_windows``),
+    and an empty-clamp no-op (``windows == 0``) are EXCLUDED — none is a clean
+    tried-and-empty vendor response, so none counts toward "attempted". This is what
+    keeps a re-pull (all already-settled) and a still-draining transient storm from
+    tripping the flag (Golden Rule #1 — never-tried is not tried-and-empty).
+    """
+    return report.windows >= 1 and report.skipped_windows == 0 and report.still_failed_windows == 0
+
+
+def scan_underlying_all_empty(
+    pairs: Mapping[tuple[str, str], IngestReport],
+    contract_list: Sequence[DerivativeContract],
+) -> AllEmptyScan:
+    """Scan one pull's ``pairs`` for underlyings whose every cleanly-fetched contract was empty.
+
+    Groups the ``(contract symbol, interval)`` pairs by their contract's
+    ``underlying_symbol`` (resolved via *contract_list*), counts the CLEANLY-fetched
+    pairs (:func:`_is_clean_fetch`) per underlying, and flags an underlying iff it had
+    at least :data:`_ALL_EMPTY_MIN_CONTRACTS` clean fetches AND they stored ZERO bars
+    in total. Pure + O(pairs); a pair whose symbol is not in *contract_list* is skipped
+    (defensive — never raises).
+
+    Parameters
+    ----------
+    pairs
+        The ``(symbol, interval) -> IngestReport`` map a pull assembled.
+    contract_list
+        The contracts the pull attempted (carries each symbol's underlying).
+
+    Returns
+    -------
+    AllEmptyScan
+        The flagged underlyings (sorted by symbol), empty when nothing is suspicious.
+    """
+    symbol_to_underlying = {c.symbol: c.underlying_symbol for c in contract_list}
+    attempted: dict[str, int] = {}
+    stored: dict[str, int] = {}
+    for (symbol, _interval), report in pairs.items():
+        underlying = symbol_to_underlying.get(symbol)
+        if underlying is None or not _is_clean_fetch(report):
+            continue
+        attempted[underlying] = attempted.get(underlying, 0) + 1
+        stored[underlying] = stored.get(underlying, 0) + report.bars_appended
+    flagged = tuple(
+        UnderlyingEmptyReport(
+            underlying=underlying,
+            attempted_pairs=attempted[underlying],
+            stored_bars=stored[underlying],
+        )
+        for underlying in sorted(attempted)
+        if attempted[underlying] >= _ALL_EMPTY_MIN_CONTRACTS and stored[underlying] == 0
+    )
+    return AllEmptyScan(suspicious=flagged)
+
+
+def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> None:
+    """Emit ONE observe-only WARNING per flagged underlying (capped), else stay silent.
+
+    Mirrors ``completeness._log_symbol_reconcile_mismatch`` (#907): early-returns in
+    the healthy steady state (nothing suspicious), and otherwise names each underlying
+    via ``repr()`` with its attempted/stored counts. Observe-only — it triggers no
+    re-pull and no engine action.
+    """
+    if not scan.has_suspicious():
+        return
+    for rep in scan.suspicious[:_ALL_EMPTY_SAMPLE_CAP]:
+        _LOG.warning(
+            UNDERLYING_ALL_EMPTY_EVENT,
+            pull_id=pull_id,
+            underlying=repr(rep.underlying),
+            attempted_pairs=rep.attempted_pairs,
+            stored_bars=rep.stored_bars,
+        )
+
+
 #: Live-progress hook fired once per ``(contract, interval)`` pair after it is
 #: processed: ``(label, bars_appended, failed)``. ``bars_appended`` is 0 for a
 #: quarantined pair.
@@ -873,6 +1015,14 @@ def run_groww_option_ingest(
         )
         if on_progress is not None:
             on_progress(label, 0, True)
+    # Observe-only (DEC-SUSPICIOUS-EMPTY-FLAG-001): surface a whole underlying whose
+    # every cleanly-fetched contract came back empty (the BAJAJ-AUTO/M&M silent-vanish
+    # case) — a WARNING for human triage, NEVER an engine input or auto-action. Wrapped
+    # so the diagnostic can never break the pull (mirrors completeness.py #907).
+    try:
+        _log_underlying_all_empty(scan_underlying_all_empty(pairs, contract_list), pull_id=pull_id)
+    except Exception as exc:  # observe-only diagnostic must never break the pull
+        _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=pull_id, error=str(exc))
     return GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
 
 
@@ -1021,12 +1171,15 @@ def ingest_underlying_futures(
 
 
 __all__ = [
+    "UNDERLYING_ALL_EMPTY_EVENT",
+    "AllEmptyScan",
     "ContractWindows",
     "GrowwOptionIngestReport",
     "OptionJob",
     "OptionPairFailure",
     "Pacer",
     "ProgressHook",
+    "UnderlyingEmptyReport",
     "contract_exchange",
     "fetch_option_candles",
     "ingest_option_contract",
@@ -1034,4 +1187,5 @@ __all__ = [
     "ingest_underlying_options",
     "plan_contract_windows",
     "run_groww_option_ingest",
+    "scan_underlying_all_empty",
 ]
