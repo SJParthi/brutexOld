@@ -230,22 +230,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/scoreboard-refresh-jlzt1n` (the customer-facing Product Scoreboard
-  `docs/PRODUCT_SCOREBOARD.md` + the shareable `docs/product_scoreboard.html` one-pager are REFRESHED to cover the
-  ledger through #907 — DEC-SCOREBOARD-REFRESH-001, MIGRATION.md #908, the operator's "provide the finished current
-  future plans … easy table-level comparison even any human can understand … attract millions of customers" →
-  "Cover everything dude". DOCS ONLY (NO code/engine/scope/vocab/rate change, ENGINE stays NIFTY/BANKNIFTY/SENSEX):
-  both files rewritten to a themed finished/current/future comparison over the full recent batch (#861–#907) under
-  SIX value themes (⚡ never slow · 📊 see what's moving · 🛡️ never lost · 📡 always informed · 🎯 data is right · 🚀
-  one-click data), each row "what it does → why you care → ledger entry"; the citation column switched from the
-  ambiguous "PR #" mix to the AUTHORITATIVE `MIGRATION.md #NNN` ledger entry (every claim traceable to the single
-  source of truth); "Current" shows the two just-merged items (#906 rate-ceiling, #907 M&M diagnostic), "Future"
-  reconciled (drops the merged #903/#904, adds the M&M read-side fix grounded in #907 + the in-place candle refresh);
-  HTML mirrors the markdown 1:1 (zero-dependency inline CSS, badged "ledger #907"). HONEST: every row traces to a
-  real merged ledger entry (no invented features/numbers); the engine-vs-lake scope distinction stated explicitly;
-  the ledger re-declared authoritative on any disagreement; future rows labelled by honest stage. DOCS ONLY — no
-  test/coverage surface (the no-hallucination PR-body scan + markdown render are the gates); ruff/mypy/pyright N/A
-  (no code). ENGINE UNCHANGED, no scope/vocab/rate change. Prior merged: DEC-COMPLETENESS-RECONCILE-DIAG-001,
+- **Active branch:** `claude/groww-token-reauth-jlzt1n` (the Groww adapter now AUTO-RE-MINTS the daily access token
+  on an auth-expiry mid-pull, so the 06:00 IST token reset is a self-healing non-event — DEC-GROWW-TOKEN-REAUTH-001,
+  MIGRATION.md #909, the operator's "how can the token be auto-created/rotated like a human, especially overnight …
+  why is it struggling" + uploaded `brutex.log`. ROOT (PROVEN from the logs, not hypothesised): the daily access
+  token resets at **06:00 IST**; the operator's TOTP credential is CORRECT (130,069 successful calls all day) but
+  BruteX minted the token ONCE at pull start and never re-minted, so at exactly `00:30Z`=06:00 IST every call failed
+  `GrowwAPIAuthenticationException: token expired` — 3,764 quarantines, 0 successes after 06:00, the overnight pull
+  dead until a manual restart (the §11 AUTOMATED violation the operator feared). FIX (adapter-only; NO
+  engine/lake/vocab/scope/rate-cap change, ENGINE stays NIFTY/BANKNIFTY/SENSEX): NEW `reauth.py` `SdkRefresher`
+  (thread-safe, SINGLE-FLIGHT via a generation counter — 32-thread stampede → exactly 1 re-mint — pool-aware so one
+  re-mint updates every leaf while keeping the K-way pool); `client.py` `_call` re-auths + retries on a
+  `GrowwAuthError` (bounded by `max_reauths`=1, on a SEPARATE counter so it doesn't spend the rate-limit budget;
+  total hard-bounded by `max_attempts + max_reauths` → never an infinite loop); `live.py` wires ONE shared refresher.
+  HONEST: back-compat byte-identical with `refresher=None`; secret hygiene preserved (redacting `safe_message`);
+  retry hits the FRESH SDK. KNOWN fast-follow (hostile MINOR-1, NOT a regression): the re-mint isn't yet wrapped in
+  the `run_with_deadline` freeze-guard (same unbounded property the original one-time mint always had) — deferred to
+  its own PR (the clean fix moves the deadline helper to avoid an import cycle). `reauth.py` 100% line+branch (40/2)
+  + `client.py` 100% (108/14) + `live.py` 100% (18/0); 498 groww-adapter + 7239 unit tests green; ruff/`mypy --strict`/
+  `pyright` clean; hostile-reviewer SHIP + workspace-health HEALTHY. This CLOSES the §6 "unattended TOTP token
+  lifetime" Phase-0 gate (token reset now VERIFIED 06:00 IST + auto-handled). ENGINE UNCHANGED, no scope/vocab/rate
+  change. Prior merged: DEC-SCOREBOARD-REFRESH-001, MIGRATION.md #908 (the customer-facing Product Scoreboard
+  `docs/PRODUCT_SCOREBOARD.md` + `docs/product_scoreboard.html` REFRESHED through ledger #907 under six plain-English
+  value themes, citation column switched to the authoritative `MIGRATION.md #NNN` entry; DOCS ONLY). Prior merged: DEC-COMPLETENESS-RECONCILE-DIAG-001,
   MIGRATION.md #907 (an OBSERVE-ONLY `/completeness` diagnostic pinpointing why a stock — the operator's "M&M" — reads
   empty: a lake-key ↔ scored-key drift surfaced as ONE `completeness.symbol_reconcile_mismatch` WARNING naming both
   sides via `repr()`; `SPOT_PROBE_SEGMENTS`-filtered so a pure F&O backfill stays SILENT (the hostile-review MAJOR,
@@ -894,7 +901,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/scoreboard-refresh-jlzt1n`
+- **Active feature branch:** `claude/groww-token-reauth-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -1060,7 +1067,7 @@ bruteX/
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **5 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=5.0`, operator-approved 2026-06-22, LOWERED 8 → 5, DEC-GROWW-RATE-CEILING-5-001 supersedes DEC-GROWW-RATE-CEILING-8-001 — 5×60 = 300/min stays well under the 500/min governor; a live-log audit showed the vendor 429s even at 3–5 r/s so the 5–8 headroom only wasted 429-retries; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118,165` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=5.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
 | Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **5 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-5-001; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198`; `groww/constants.py:165`; `dashboard/pull_controller.py:776`; `cli.py:2020` + this file §2 rule 6 |
-| Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds via `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET`. The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED) | `groww/auth.py:28-31,94-114`; `groww/api-reference/01-introduction.md:34-96` |
+| Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds via `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET`. The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) is **AUTO-RE-MINTED mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` — via the stored TOTP secret, so the 06:00 reset self-heals unattended (no nightly manual rotation; DEC-GROWW-TOKEN-REAUTH-001 #909) | `groww/auth.py:28-31,94-114`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
 | Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError, GrowwEmptyResponseError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name; an empty/non-JSON body `json.JSONDecodeError` → **retryable** `GrowwEmptyResponseError`, so a transient throttle is re-pulled instead of a terminal "not on Groww" quarantine — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854) | `groww/errors.py`; `groww/api-reference/05-exceptions.md:9-70` |
@@ -1069,7 +1076,7 @@ bruteX/
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:124-136`; `groww/adapter.py:162-174` |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
-| Token lifetime + backtest-vs-live drift | **UNVERIFIED** — Phase-0 probe gates (unattended TOTP token lifetime; prior-vendor↔Groww 1m bar drift) | `adr/0009-...-migration.md:88-92,113-124` |
+| Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull auto-re-mint (DEC-GROWW-TOKEN-REAUTH-001 #909), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |
 
 ## 7. Verified Indian Market Microstructure Facts
 

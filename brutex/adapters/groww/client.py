@@ -262,10 +262,13 @@ class GrowwClient:
                     self.on_rate_limit()  # decrement the shared bucket on EVERY 429
                 # AUTH-error auto-RE-MINT (DEC-GROWW-TOKEN-REAUTH-001): on the 06:00 IST
                 # daily-token reset, re-mint a fresh token (thread-safe + single-flight)
-                # and retry against the refreshed SDK — WITHOUT spending the retry budget
-                # (a separate `reauths` counter), so a token expiry mid-retry-storm still
-                # self-heals. Bounded by `max_reauths`: a genuinely-bad credential
-                # re-mints once then raises terminally (never an infinite loop).
+                # and retry against the refreshed SDK on a SEPARATE `reauths` counter, so a
+                # token expiry mid-retry-storm still self-heals without consuming the
+                # rate-limit `max_attempts` budget. The `attempt -= 1` buys back exactly ONE
+                # attempt per re-auth, so the TOTAL worst-case iteration count is hard-bounded
+                # by `max_attempts + max_reauths` however auth/429 errors interleave. Bounded
+                # by `max_reauths`: a genuinely-bad credential re-mints once then raises
+                # terminally (never an infinite loop).
                 if (
                     isinstance(err, GrowwAuthError)
                     and self.refresher is not None
