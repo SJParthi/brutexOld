@@ -311,6 +311,88 @@ def _overall_spot(one_minute: str) -> str:
     return one_minute
 
 
+#: Spot dimension verdicts ranked best→worst, so a merge can keep the STRICTLY-better cell
+#: when two lake partitions resolve to the same canonical symbol (the collision the key-drift
+#: recovery introduces — DEC-COMPLETENESS-SPOT-KEY-RECOVER-001).
+_SPOT_VERDICT_RANK: Final[dict[str, int]] = {
+    DIM_NONE: 0,
+    DIM_FAILED: 1,
+    DIM_PARTIAL: 2,
+    DIM_FULL: 3,
+}
+
+
+def _spot_cell_supersedes(
+    new_status: str, new_start: str | None, cur_status: str, cur_start: str | None
+) -> bool:
+    """True if a ``(status, start)`` spot cell should REPLACE the currently-stored one.
+
+    DEC-COMPLETENESS-SPOT-KEY-RECOVER-001 — once a drifted lake key is recovered to its
+    canonical symbol, a clean partition and a stale legacy fragment can BOTH land on the same
+    ``(symbol, interval)``. A blind last-write would let whichever the lake scan emits LAST win
+    — and the scan is sorted, so the drifted ``"NSE-M&M"`` fragment sorts AFTER the clean
+    ``"M&M"`` and would clobber a real ``full`` with a stale ``none`` (a Golden-Rule-#1 honesty
+    regression). This makes the merge ORDER-INDEPENDENT: rank verdicts
+    ``full > partial > failed > none`` and, on a tie, prefer the EARLIER start (the wider real
+    coverage; ISO date strings sort chronologically, a ``None`` start ranks worst). So the
+    surfaced cell is always the best real data that physically exists, regardless of scan order.
+    """
+    new_rank = _SPOT_VERDICT_RANK.get(new_status, 0)
+    cur_rank = _SPOT_VERDICT_RANK.get(cur_status, 0)
+    if new_rank != cur_rank:
+        return new_rank > cur_rank
+    if new_start is None:
+        return False
+    if cur_start is None:
+        return True
+    return new_start < cur_start
+
+
+def _resolve_spot_category(
+    symbol: str, exchange: str, categories: Mapping[str, str]
+) -> tuple[str, str] | None:
+    """Resolve a lake-partition spot symbol to its ``(canonical scored key, category)``.
+
+    DEC-COMPLETENESS-SPOT-KEY-RECOVER-001 — the read-side FIX for the key drift the #907
+    diagnostic (DEC-COMPLETENESS-RECONCILE-DIAG-001) only OBSERVED. A lake row's ``symbol``
+    is the on-disk partition DIRECTORY NAME (``db_view`` reads ``sym_dir.name``). In the
+    steady state the pull writes that directory from the stripped ``instrument.symbol_name``
+    (``adapters/groww/ingest.py`` → ``instruments.py``), so it matches the scored
+    *categories* key EXACTLY and this returns on the first lookup — byte-identical to the
+    prior direct ``categories.get`` for every clean symbol. But a LEGACY / foreign /
+    regression partition can carry a DRIFTED key; the two documented drift classes are a
+    surrounding-whitespace form (``"M&M "``) or an exchange-PREFIXED groww_symbol form
+    (``"NSE-M&M"`` instead of the bare ``"M&M"``). Without recovery such a partition is
+    SILENTLY dropped (the ``categories.get`` miss → invisible), so its REAL on-disk data
+    never shows on the scoreboard.
+
+    Recovery tries ONLY those deterministic classes, in order: (1) exact, (2)
+    whitespace-stripped, (3) the row's OWN *exchange* prefix stripped — DATA-DRIVEN off the
+    partition's exchange, never a hardcoded exchange list, so a hyphenated symbol like
+    ``BAJAJ-AUTO`` is untouched (it does not start with ``"<exch>-"``). Returns the CANONICAL
+    scored key (so the row is grouped + displayed under the clean symbol) + its category, or
+    ``None`` if no class matches — a genuinely unscored stray STAYS dropped, never fabricated
+    onto the board (Golden Rule #1: this only surfaces data that physically exists on disk).
+    """
+    category = categories.get(symbol)
+    if category is not None:
+        return symbol, category
+    stripped = symbol.strip()
+    if stripped != symbol:
+        category = categories.get(stripped)
+        if category is not None:
+            return stripped, category
+    exch = exchange.strip()
+    if exch:
+        prefix = f"{exch}-"
+        if stripped.startswith(prefix):
+            candidate = stripped.removeprefix(prefix)
+            category = categories.get(candidate)
+            if category is not None:
+                return candidate, category
+    return None
+
+
 def _per_symbol_spot(
     spot_rows: Iterable[Mapping[str, Any]], categories: Mapping[str, str]
 ) -> list[dict[str, Any]]:
@@ -320,16 +402,19 @@ def _per_symbol_spot(
     :func:`~brutex.dashboard.coverage_view.build_spot_coverage_payload` (each carries
     ``symbol`` · ``interval`` · ``completeness``). *categories* maps a symbol to its
     :data:`CATEGORIES` bucket; an unmapped symbol is excluded (it is not in the scored
-    universe). 1-day is DERIVED from 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so it is
-    not scored — only the single fetched 1-minute dimension is. Symbols are returned sorted
+    universe) UNLESS its key is a recoverable drift of a scored symbol (see
+    :func:`_resolve_spot_category` — the row is then grouped under the CANONICAL scored key).
+    1-day is DERIVED from 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so it is not scored —
+    only the single fetched 1-minute dimension is. Symbols are returned sorted
     (symbol, exchange) for a stable view.
     """
     by_symbol: dict[str, dict[str, Any]] = {}
     for row in spot_rows:
-        symbol = str(row["symbol"])
-        category = categories.get(symbol)
-        if category is None:
+        exchange = str(row.get("exchange", ""))
+        resolved = _resolve_spot_category(str(row["symbol"]), exchange, categories)
+        if resolved is None:
             continue  # not a scored universe symbol (e.g. a stray lake partition)
+        symbol, category = resolved  # symbol is the CANONICAL scored key (drift recovered)
         interval = str(row["interval"])
         if interval not in SPOT_DIMENSIONS:
             continue  # a derived TF (incl. 1-day) — not the separately-pulled dimension
@@ -337,7 +422,7 @@ def _per_symbol_spot(
             symbol,
             {
                 "symbol": symbol,
-                "exchange": str(row.get("exchange", "")),
+                "exchange": exchange,
                 "category": category,
                 "1minute": DIM_NONE,
                 # DEC-COMPLETENESS-HONEST-EMPTY-001: the actually-covered date range for the
@@ -353,9 +438,14 @@ def _per_symbol_spot(
         # 2020-floor honesty downgrade: a settled-but-late-start 1-minute dimension reads
         # ``partial``, not ``full`` (DEC-SPOT-COMPLETENESS-2020-FLOOR-001) — the start date
         # below shows the operator WHEN it actually begins.
-        entry[interval] = _spot_dimension_verdict_with_floor(row.get("completeness"), first_s)
-        entry[f"{interval}_start"] = first_s
-        entry[f"{interval}_end"] = str(last) if last else None
+        new_verdict = _spot_dimension_verdict_with_floor(row.get("completeness"), first_s)
+        # Rank-merge (DEC-COMPLETENESS-SPOT-KEY-RECOVER-001): when a clean + a drifted partition
+        # both resolve to this canonical symbol, keep the STRICTLY-better cell so a stale
+        # fragment can never clobber real data (order-independent — see _spot_cell_supersedes).
+        if _spot_cell_supersedes(new_verdict, first_s, entry[interval], entry[f"{interval}_start"]):
+            entry[interval] = new_verdict
+            entry[f"{interval}_start"] = first_s
+            entry[f"{interval}_end"] = str(last) if last else None
     for entry in by_symbol.values():
         entry["overall"] = _overall_spot(entry["1minute"])
     return sorted(by_symbol.values(), key=lambda e: (e["symbol"], e["exchange"]))
@@ -586,17 +676,26 @@ def per_symbol_completeness(
     """
     out: dict[str, dict[str, Any]] = {}
     for row in spot_rows:
-        symbol = str(row["symbol"])
-        category = spot_categories.get(symbol)
-        if category is None:
+        exchange = str(row.get("exchange", ""))
+        # Recover a drifted lake key to its canonical scored symbol (the SAME COMMON resolver
+        # the /completeness scoreboard uses — DEC-COMPLETENESS-SPOT-KEY-RECOVER-001), so the
+        # /universe per-row strip ALSO surfaces a drifted partition instead of reading empty.
+        resolved = _resolve_spot_category(str(row["symbol"]), exchange, spot_categories)
+        if resolved is None:
             continue  # not a scored universe symbol
+        symbol, category = resolved  # canonical scored key (drift recovered)
         interval = str(row["interval"])
         if interval not in SPOT_DIMENSIONS:
             continue  # a derived intraday TF — not a separately-pulled dimension
-        entry = out.setdefault(
-            symbol, _new_per_symbol_entry(symbol, str(row.get("exchange", "")), category)
-        )
-        entry["spot"][interval] = _spot_dimension_detail(row)
+        entry = out.setdefault(symbol, _new_per_symbol_entry(symbol, exchange, category))
+        detail = _spot_dimension_detail(row)
+        existing = entry["spot"][interval]
+        # Rank-merge the recovered-drift collision (DEC-COMPLETENESS-SPOT-KEY-RECOVER-001): keep
+        # the strictly-better cell so a stale drifted fragment never clobbers real data here too.
+        if _spot_cell_supersedes(
+            detail["status"], detail["first_date"], existing["status"], existing["first_date"]
+        ):
+            entry["spot"][interval] = detail
     for entry in out.values():
         entry["spot"]["overall"] = _overall_spot(entry["spot"]["1minute"]["status"])
     _fold_per_symbol_options(out, option_records, option_categories)
