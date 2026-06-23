@@ -113,8 +113,10 @@ def candidate_key(
         The intraday ``HH:MM`` IST cutoff, or ``None`` / ``""`` for a daily
         snapshot.
     expiry_tier, expiry_track
-        Options-only — the lower-cased ``near``/``next``/``far`` tier and
-        ``all``/``monthly``/``weekly`` cadence track; ``None`` for spot/futures.
+        The lower-cased ``near``/``next``/``far`` serial-expiry tier (Options AND
+        Futures — DEC-MOVERS-FUTURES-TIER-001) and the ``all``/``monthly``/``weekly``
+        cadence track (Options-only); ``None`` for spot (and ``expiry_track``
+        ``None`` for futures).
 
     Returns
     -------

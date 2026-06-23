@@ -826,21 +826,27 @@ def _discover_futures(
 class FuturesCandidates:
     """The cacheable futures candidate set for one snapshot coordinate (pre-ranking).
 
-    The expensive, ``top_n``-independent product of one lake scan — the near-month
-    :class:`FuturesMover` per live underlying + the skipped count + the normalised
-    snapshot date. Caching THIS (keyed by ``(exchange, interval, date, time)``)
-    makes a sub-filter / ``top_n`` change an O(1) hit + a cheap re-rank
-    (:func:`build_futures_payload`), never a re-scan (DEC-MOVERS-O1-LATENCY-001).
+    The expensive, ``top_n``-independent product of one lake scan — the
+    selected-tier :class:`FuturesMover` per live underlying + the skipped count +
+    the normalised snapshot date + the canonical expiry tier. Caching THIS (keyed
+    by ``(exchange, interval, date, time, expiry_tier)`` so Near / Next / Far
+    cache independently) makes a sub-filter / ``top_n`` change an O(1) hit + a
+    cheap re-rank (:func:`build_futures_payload`), never a re-scan
+    (DEC-MOVERS-O1-LATENCY-001 / DEC-MOVERS-FUTURES-TIER-001).
 
     Attributes
     ----------
     movers
-        The computed near-month future rows (one per live underlying).
+        The computed future rows for the selected tier (one per live underlying).
     skipped
-        Count of underlyings/contracts dropped (all-expired, no session bars,
-        or an unreadable Parquet file logged as ``movers.parquet_skip``).
+        Count of underlyings/contracts dropped (no live contract at the tier, no
+        session bars, or an unreadable Parquet file logged as
+        ``movers.parquet_skip``).
     date
         The normalised ISO ``YYYY-MM-DD`` snapshot day.
+    expiry_tier
+        The canonical serial expiry tier these candidates were screened at
+        (``near`` / ``next`` / ``far``) — echoed so the payload + page agree.
     """
 
     movers: tuple[FuturesMover, ...]
