@@ -3230,6 +3230,17 @@ def build_app(
                 ONLY on a miss / post-pull; a hit is an O(1) handoff + a cheap
                 in-memory rank (DEC-MOVERS-O1-LATENCY-001).
                 """
+                # Memoise the lake DISCOVERY once per write-generation (the proven
+                # `/db` #896 pattern), shared across spot/futures/options, so a tab /
+                # section / exchange / expiry switch within one generation REUSES a
+                # single `bars/` walk instead of re-walking the whole lake inside each
+                # compute on every cache miss (DEC-MOVERS-DISCOVERY-MEMO-001). Computed
+                # on the worker thread; a pull bumps `generation` → one fresh walk.
+                movers_datasets = _db_datasets_cache.get_or_compute(
+                    "movers_candle_datasets",
+                    generation=generation,
+                    compute=lambda: list_candle_datasets(lake_root),
+                )
                 if asset == "options":
                     # Options carries the extra Near/Next/Far expiry tier (blank ⇒
                     # near) + the All/Monthly/Weekly cadence track (blank ⇒ all),
@@ -3255,6 +3266,7 @@ def build_app(
                             expiry_tier=tier,
                             expiry_track=trk,
                             exchange=exch,
+                            datasets=movers_datasets,
                         ),
                     )
                     return build_options_payload(
@@ -3284,6 +3296,7 @@ def build_app(
                             date=date_str,
                             time=time,
                             exchange=exch,
+                            datasets=movers_datasets,
                         ),
                     )
                     return build_futures_payload(
@@ -3310,6 +3323,7 @@ def build_app(
                         date=date_str,
                         time=time,
                         exchange=exch,
+                        datasets=movers_datasets,
                     ),
                 )
                 return build_snapshot_payload(

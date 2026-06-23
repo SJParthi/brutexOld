@@ -115,6 +115,7 @@ from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
     interval_minutes,
     parse_snapshot_date,
+    resolve_candle_datasets,
 )
 from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
 from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
@@ -580,7 +581,10 @@ def build_options_payload(
 
 
 def _discover_options(
-    lake_root: Path, *, exchange: str | None = None
+    lake_root: Path,
+    *,
+    exchange: str | None = None,
+    datasets: list[dict[str, str]] | None = None,
 ) -> list[tuple[str, str, str, date_cls, Decimal, str]]:
     """List the lake's option contracts as ``(symbol, exchange, underlying, expiry, strike, type)``.
 
@@ -598,6 +602,10 @@ def _discover_options(
         Top-level lake directory (the parent of ``bars/``).
     exchange
         Restrict to one exchange (``NSE`` / ``BSE``), or ``None`` for all.
+    datasets
+        Pre-discovered candle datasets (the route's memoised list, the O(1)-latency
+        seam) or ``None`` to scan the lake now (see
+        :func:`~brutex.dashboard.movers_snapshot.resolve_candle_datasets`).
 
     Returns
     -------
@@ -605,10 +613,8 @@ def _discover_options(
         ``(contract_symbol, exchange, underlying, expiry, strike, opt_type)`` per
         option contract found in the lake.
     """
-    from brutex.dashboard.db_view import list_candle_datasets
-
     contracts: list[tuple[str, str, str, date_cls, Decimal, str]] = []
-    for dataset in list_candle_datasets(lake_root):
+    for dataset in resolve_candle_datasets(lake_root, datasets):
         if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
             continue
         if exchange is not None and dataset["exchange"] != exchange:
@@ -783,6 +789,7 @@ def compute_options_candidates(
     expiry_track: str = "all",
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
+    datasets: list[dict[str, str]] | None = None,
 ) -> OptionsCandidates:
     """Scan the lake → the :class:`OptionsCandidates` for one snapshot coordinate.
 
@@ -821,7 +828,7 @@ def compute_options_candidates(
     cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
     resolved_names = names or {}
     tier, track = normalize_options_selectors(expiry_tier, expiry_track)
-    contracts = _discover_options(lake_root, exchange=exchange)
+    contracts = _discover_options(lake_root, exchange=exchange, datasets=datasets)
     # Keep ONLY the contracts on the selected Near/Next/Far expiry (resolved per
     # underlying as-of the snapshot day) WITHIN the chosen cadence track; an
     # underlying without that serial expiry on the track drops out honestly.

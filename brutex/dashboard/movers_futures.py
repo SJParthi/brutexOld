@@ -71,6 +71,7 @@ from brutex.dashboard.movers_snapshot import (
     _prior_session_last_from_minute,
     interval_minutes,
     parse_snapshot_date,
+    resolve_candle_datasets,
     session_traded_value_paisa,
     value_crore_str,
 )
@@ -707,21 +708,24 @@ def _underlying_spot_ltp(
 
 
 def _discover_futures(
-    lake_root: Path, *, exchange: str | None = None
+    lake_root: Path,
+    *,
+    exchange: str | None = None,
+    datasets: list[dict[str, str]] | None = None,
 ) -> dict[str, list[tuple[str, str, date_cls]]]:
     """Group the lake's FUT datasets by underlying → ``[(symbol, exchange, expiry)]``.
 
-    Walks :func:`~brutex.dashboard.db_view.list_candle_datasets`, keeps ONLY the
-    ``FNO`` ``1minute`` datasets whose symbol ends ``-FUT`` (options share the
-    FNO segment but carry a strike + ``-CE`` / ``-PE`` suffix), parses each into
-    ``(underlying, expiry)`` (a non-parsing symbol is skipped), and buckets by
-    underlying. When *exchange* is given only that exchange's contracts are kept
-    (an exact per-exchange ranking). Returns ``{}`` when no futures are present.
+    Walks the lake's candle datasets (the memoised list when the route threads one
+    in via *datasets* — :func:`~brutex.dashboard.movers_snapshot.resolve_candle_datasets`,
+    the O(1)-latency seam — else a fresh :func:`~brutex.dashboard.db_view.list_candle_datasets`
+    scan), keeps ONLY the ``FNO`` ``1minute`` datasets whose symbol ends ``-FUT``
+    (options share the FNO segment but carry a strike + ``-CE`` / ``-PE`` suffix),
+    parses each into ``(underlying, expiry)`` (a non-parsing symbol is skipped), and
+    buckets by underlying. When *exchange* is given only that exchange's contracts
+    are kept (an exact per-exchange ranking). Returns ``{}`` when no futures present.
     """
-    from brutex.dashboard.db_view import list_candle_datasets
-
     by_underlying: dict[str, list[tuple[str, str, date_cls]]] = {}
-    for dataset in list_candle_datasets(lake_root):
+    for dataset in resolve_candle_datasets(lake_root, datasets):
         if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
             continue
         if exchange is not None and dataset["exchange"] != exchange:
@@ -771,6 +775,7 @@ def compute_futures_candidates(
     time: str | None,
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
+    datasets: list[dict[str, str]] | None = None,
 ) -> FuturesCandidates:
     """Scan the lake → the :class:`FuturesCandidates` for one snapshot coordinate.
 
@@ -806,7 +811,7 @@ def compute_futures_candidates(
     date_str = day.isoformat()
     cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
     resolved_names = names or {}
-    by_underlying = _discover_futures(lake_root, exchange=exchange)
+    by_underlying = _discover_futures(lake_root, exchange=exchange, datasets=datasets)
     if minutes is None or not by_underlying:
         return FuturesCandidates(movers=(), skipped=0, date=date_str)
 
