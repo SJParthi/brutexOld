@@ -11,10 +11,17 @@ removes the *re-scan on every poll*:
 * :class:`SummaryCache` — caches the last spot/option summary payloads behind a
   :class:`threading.Lock`, keyed by a monotonic ``generation`` counter. A poll
   returns the cached payload (an O(1) dict handoff) unless the cache is **dirty**
-  (a write bumped the generation) AND a **2 s TTL floor** has elapsed since the
-  last recompute — so a 200-symbol write fan-out that calls
-  :meth:`mark_dirty` hundreds of times can trigger at most one rescan every 2 s,
-  never hundreds of back-to-back full-lake scans.
+  (a write bumped the generation) AND an **ADAPTIVE TTL floor** has elapsed since
+  the last recompute — so a 200-symbol write fan-out that calls :meth:`mark_dirty`
+  hundreds of times can trigger at most one rescan per floor window, never
+  hundreds of back-to-back full-lake scans. The floor is
+  ``max(base 2 s, the last scan's own duration)`` capped at
+  :data:`MAX_ADAPTIVE_FLOOR_S` (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001): a cheap
+  scan keeps the snappy 2 s floor, but a scan that grows to N seconds (the
+  full-lake completeness/spot aggregate during a long pull, which was observed
+  reaching 30 s) self-throttles to a **≤50% duty cycle** — it never re-fires until
+  it has been idle at least as long as it took — freeing the other half of the
+  CPU for the concurrent pull instead of starving it with back-to-back 30 s scans.
 * :class:`CoverageCounters` — a per-dataset-label int64 running bar tally bumped
   from the single write-progress funnel (``BackgroundPullJob._on_progress``).
   :meth:`snapshot` is genuinely O(1) in the lake size (one dict copy). Because
@@ -62,6 +69,15 @@ OPTIONS: Final[str] = "options"
 #: rescan per window, so the poll never amplifies a pull into hundreds of scans.
 DEFAULT_TTL_FLOOR_S: Final[float] = 2.0
 
+#: Hard cap on the ADAPTIVE floor (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001). The
+#: effective floor grows to the LAST recompute's own duration (so a scan that
+#: grows to 30 s throttles itself to a ≤50% duty cycle — it never re-fires until
+#: it has been idle at least as long as it took, freeing the other half of the
+#: CPU for a concurrent pull). This caps that self-throttle so a pathologically
+#: slow scan can never freeze the detailed summary for longer than this — staleness
+#: is bounded; the live headline counter (:class:`CoverageCounters`) is unaffected.
+MAX_ADAPTIVE_FLOOR_S: Final[float] = 120.0
+
 #: A summary payload is whatever the injected ``recompute`` returns — the list of
 #: per-dataset dicts ``summarize_spot_datasets`` / ``summarize_option_datasets``
 #: produce. Treated opaquely here (the cache never inspects it).
@@ -93,11 +109,21 @@ class _Entry:
     computed_at
         The injected clock value when the payload was computed — the TTL floor
         is measured against this.
+    compute_duration
+        How long the ``recompute`` that produced this payload took (clock delta
+        across the call; a non-monotonic clock could make it negative, which the
+        adaptive floor's ``max(base_floor, …)`` harmlessly neutralizes). The
+        ADAPTIVE floor uses it: the next recompute of this kind is throttled for
+        ``max(base_floor, compute_duration)`` (capped at
+        :data:`MAX_ADAPTIVE_FLOOR_S`), so an expensive scan self-throttles to a
+        ≤50% duty cycle while a cheap scan keeps the snappy base floor
+        (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001).
     """
 
     payload: SummaryPayload
     generation: int
     computed_at: float
+    compute_duration: float
 
 
 class SummaryCache:
@@ -170,8 +196,10 @@ class SummaryCache:
         * **Hit** — a clean entry exists (its generation == the current
           generation): return it, no recompute.
         * **Stale-but-throttled** — the entry is dirty but recomputed less than
-          ``ttl_floor_s`` ago: return the stale entry anyway (the floor wins, so
-          a write storm can't trigger a scan storm).
+          the ADAPTIVE floor ago (``max(ttl_floor_s, last scan duration)`` capped
+          at :data:`MAX_ADAPTIVE_FLOOR_S`): return the stale entry anyway (the
+          floor wins, so a write storm — or an expensive scan — can't trigger a
+          scan storm; an expensive scan self-throttles to a ≤50% duty cycle).
         * **Miss / eligible** — no entry yet, OR dirty and past the floor:
           invoke ``recompute`` (OUTSIDE the lock) and store the result stamped
           with the generation observed *before* the recompute.
@@ -198,16 +226,23 @@ class SummaryCache:
             # Hit or stale-but-throttled: a payload is available without a scan.
             return self._entries[kind].payload
         gen_at_start = decision
+        started_at = self._clock()
         try:
             payload = recompute()
         finally:
             with self._lock:
                 self._refreshing.discard(kind)
+        finished_at = self._clock()
         with self._lock:
             self._entries[kind] = _Entry(
                 payload=payload,
                 generation=gen_at_start,
-                computed_at=self._clock(),
+                computed_at=finished_at,
+                # The measured cost of THIS scan drives the adaptive floor for the
+                # next one. A non-monotonic clock could make the delta negative, but the
+                # `max(base_floor, duration)` in `_plan` neutralizes that (a negative can
+                # never drive the floor below the base) — so no clamp is needed here.
+                compute_duration=finished_at - started_at,
             )
         return payload
 
@@ -235,13 +270,21 @@ class SummaryCache:
             # the first to SHARE the SPOT entry across two concurrently-polled
             # routes, widening the cold-start exposure of the latent race).
             return None
-        if (
-            entry is not None
-            and self._ttl_floor_s > 0.0
-            and (self._clock() - entry.computed_at) < self._ttl_floor_s
-        ):
-            # Dirty but within the TTL floor — throttle: serve the stale entry.
-            return None
+        if entry is not None:
+            # ADAPTIVE floor (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001): throttle for at
+            # least as long as the LAST scan took (capped), so an expensive full-lake
+            # scan that grows to N seconds re-fires at most once per ~N seconds (a
+            # ≤50% duty cycle) instead of back-to-back on every poll — freeing the
+            # other half of the CPU for a concurrent pull. A cheap scan (duration <
+            # base floor) keeps the snappy base floor, so idle/fast behaviour is
+            # unchanged. ``ttl_floor_s <= 0`` (the test "no floor" mode) disables the
+            # base but the adaptive component still bounds a genuinely slow scan.
+            effective_floor = min(
+                max(self._ttl_floor_s, entry.compute_duration), MAX_ADAPTIVE_FLOOR_S
+            )
+            if effective_floor > 0.0 and (self._clock() - entry.computed_at) < effective_floor:
+                # Dirty but within the (adaptive) floor — throttle: serve the stale entry.
+                return None
         self._refreshing.add(kind)
         return self._generation
 
@@ -327,6 +370,7 @@ class CoverageCountersSnapshot:
 
 __all__ = [
     "DEFAULT_TTL_FLOOR_S",
+    "MAX_ADAPTIVE_FLOOR_S",
     "OPTIONS",
     "SPOT",
     "CoverageCounters",
