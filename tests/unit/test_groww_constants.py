@@ -65,16 +65,17 @@ def test_unverified_gates_are_flagged() -> None:
 
 
 def test_operator_directed_per_second_ceiling_stays_under_the_per_minute_governor() -> None:
-    # The production per-second ceiling is the operator-DIRECTED 5 r/s (lowered 8 → 5
-    # on 2026-06-22) — the per-second backtesting cap itself stays officially
-    # UNVERIFIED. 5 is chosen because 5×60 = 300/min stays well UNDER the 500/min
-    # governor (the safety property: the per-second ceiling never overshoots the
-    # per-minute cap GROWW_RATE_LIMIT_PER_MIN), and a live-log audit showed the vendor
-    # 429s even at 3–5 r/s so probing up to 8 only wasted ~870 429-retries.
-    assert c.GROWW_RATE_LIMIT_RPS_CEILING == 5.0
+    # The production per-second ceiling is the operator-DIRECTED 8 r/s (RAISED 5 → 8
+    # on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002) — the per-second backtesting cap
+    # itself stays officially UNVERIFIED. 8 is safe because 8×60 = 480/min stays UNDER
+    # the 500/min governor (the safety property: the per-second ceiling never overshoots
+    # the per-minute cap GROWW_RATE_LIMIT_PER_MIN). It is a CEILING raise — it only
+    # ALLOWS up to 8; the AIMD ladder still steps DOWN on 429s and recovers only as far
+    # as the vendor tolerates, so the worst case is identical to 5 (self-correcting).
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING == 8.0
     assert c.GROWW_RATE_LIMIT_PER_MIN == 500
-    # The 300 ≤ 500 invariant — the per-second ceiling stays under the per-minute governor.
-    assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 == 300
+    # The 480 ≤ 500 invariant — the per-second ceiling stays under the per-minute governor.
+    assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 == 480
     assert c.GROWW_RATE_LIMIT_RPS_CEILING * 60 <= c.GROWW_RATE_LIMIT_PER_MIN
 
 
@@ -134,17 +135,23 @@ def test_pool_size_default_is_four_for_saturation() -> None:
     """DEC-FETCH-WRITE-OVERLAP-001 (Lever 2): the default is pinned at 4.
 
     A fresh-log audit proved 2 connections cap the achieved rate at ~3.2 r/s while the
-    shared controller held its 5.0 ceiling (time-weighted 4.96 r/s, ~1.76 r/s unused slack).
-    With the ~625 ms per-contract cycle, L = λ·W ⇒ reaching 5 r/s needs ≥ 3.1 concurrent
-    calls, so 4 connections (4/0.625 = 6.4 r/s demand > 5) let the bucket bind at the ceiling
-    while 2 (2/0.625 = 3.2) cannot. An accidental revert to 2 would silently re-cap at ~3.2.
+    shared controller held its ceiling (time-weighted 4.96 r/s, ~1.76 r/s unused slack).
+    With the ~625 ms per-contract cycle, L = λ·W ⇒ 4 connections generate 4/0.625 = 6.4 r/s
+    of demand vs 2/0.625 = 3.2 — DOUBLE the demand, consuming the slack. An accidental
+    revert to 2 would silently re-cap the achieved rate at ~3.2.
     """
     assert c.GROWW_CLIENT_POOL_SIZE == 4
-    # 4 connections × (1 / 0.625 s cycle) = 6.4 r/s demand ≥ the 5.0 controller ceiling, so
-    # the SHARED rate controller binds at 5 (the slack is consumed) — never exceeded (Rule 6).
-    assert c.GROWW_CLIENT_POOL_SIZE / 0.625 >= c.GROWW_RATE_LIMIT_RPS_CEILING
-    # 4 stays at/below the hard token-sharing cap; reaching 8 needs the OVERLAP lever, not
-    # more connections (which the MAX=4 clamp forbids without ADR sign-off).
+    # 4 connections × (1 / 0.625 s cycle) = 6.4 r/s of demand — STRICTLY MORE than the
+    # ~3.2 r/s the prior 2 connections achieved, so the demand-side slack is consumed.
+    assert c.GROWW_CLIENT_POOL_SIZE / 0.625 > 2 / 0.625
+    # HONEST (Golden Rule #10): 6.4 r/s demand is BELOW the operator-raised 8.0 ceiling, so
+    # with ceiling=8 the pull is demand-limited at ~6.4 (the controller ALLOWS 8 but the
+    # 4-connection demand does not reach it). Reaching a true 8 needs a shorter per-contract
+    # cycle — NOT more connections (MAX=4 token-sharing cap) and NOT the append-overlap
+    # (DEC-FETCH-WRITE-OVERLAP-001 Lever 1, which a write-rate benchmark refuted: a fresh
+    # append is ~30 ms, not the assumed ~440 ms).
+    assert c.GROWW_CLIENT_POOL_SIZE / 0.625 < c.GROWW_RATE_LIMIT_RPS_CEILING
+    # 4 stays at/below the hard token-sharing cap.
     assert c.GROWW_CLIENT_POOL_SIZE <= c.GROWW_CLIENT_POOL_MAX == 4
 
 

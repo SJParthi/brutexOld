@@ -154,19 +154,27 @@ GROWW_DAILY_QUOTA_UNVERIFIED: Final[int | None] = None
 GROWW_RATE_LIMIT_PER_MIN: Final[int] = 500
 
 #: Operator-DIRECTED per-second ceiling for the production Groww backtesting pull
-#: (operator-approved 2026-06-22, lowered 8 → 5). NOT vendor-documented — the
+#: (operator-approved 2026-06-24, RAISED 5 → 8). NOT vendor-documented — the
 #: per-second backtesting cap stays officially UNVERIFIED (see
-#: GROWW_RATE_LIMIT_RPS_UNVERIFIED); 5 is operator-directed, NOT vendor-confirmed.
-#: 5 r/s is chosen because 5×60 = 300/min stays well under the operator-confirmed
-#: 500/min governor (GROWW_RATE_LIMIT_PER_MIN), and a live-log audit showed the vendor
-#: 429s even at 3–5 r/s — so probing up to 8 only wasted ~870 429-retries with no
-#: throughput gain. A ceiling of 5 REDUCES those wasted 429-retries while keeping the
-#: adaptive AIMD ladder UNCHANGED: a 429 burst still steps the rate DOWN (soft floor 3,
-#: deep floor 1 under sustained pressure) and recovers back UP to this 5 r/s ceiling
-#: once it clears. Lowering the ceiling only ever REDUCES the issue rate (it caps; it
-#: never raises a ceiling), so it is a safe change (CLAUDE.md §2 Rule 6). Supersedes the
-#: prior operator-directed 8 r/s ceiling (DEC-GROWW-RATE-CEILING-8-001).
-GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 5.0
+#: GROWW_RATE_LIMIT_RPS_UNVERIFIED); 8 is operator-directed, NOT vendor-confirmed.
+#: 8 r/s is safe against the HARD per-minute governor because 8×60 = 480/min stays
+#: UNDER the operator-confirmed 500/min cap (GROWW_RATE_LIMIT_PER_MIN), so the
+#: governor can never be overshot (DEC-GROWW-GOVERNOR-ATOMIC-001).
+#:
+#: RAISED back to 8 by DEC-GROWW-RATE-CEILING-8-002 (supersedes the 5 r/s ceiling of
+#: DEC-GROWW-RATE-CEILING-5-001) once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4)
+#: gave the pull enough concurrent connections to actually GENERATE demand toward the
+#: ceiling — at the prior 2 connections the achieved rate capped at ~3.2 r/s so the
+#: 5–8 range was pure waste (the #906 finding), but with 4 connections demand can reach
+#: the ceiling, making 8 a FAIR test of whether the vendor serves above 5. The change is
+#: a CEILING raise, so it only ALLOWS a higher rate — it does NOT force it: the adaptive
+#: AIMD ladder still steps the rate DOWN on a 429 burst (soft floor 3, deep floor 1 under
+#: sustained pressure) and recovers back UP only as far as the vendor tolerates, so the
+#: worst case at 8 is identical to 5 (the controller self-corrects). HONEST (Golden Rule
+#: #10): a live-log audit showed the vendor 429ing AT the 5.0 ceiling, so SUSTAINED 8 is
+#: UNPROVEN — the controller will settle wherever the vendor allows; revert to 5 is this
+#: one constant if 8 only burns 429-retries without a throughput gain (the #906 trap).
+GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
 
 #: Hard per-call wall-clock deadline (seconds) for a single historical-candles SDK
 #: call — the pull FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001). The Groww

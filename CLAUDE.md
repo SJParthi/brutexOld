@@ -230,7 +230,15 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/serene-hamilton-jlzt1n` (the Groww pull was achieving only ~3.2 r/s against a controller
+- **Active branch:** `claude/serene-hamilton-jlzt1n` (**DEC-GROWW-RATE-CEILING-8-002, MIGRATION.md #922** — the
+  production per-second ceiling RAISED 5 → 8 `GROWW_RATE_LIMIT_RPS_CEILING` (operator-directed 2026-06-24,
+  supersedes DEC-GROWW-RATE-CEILING-5-001): now that Lever 2's 4 connections generate ~6.4 r/s of demand toward the
+  ceiling, 8 is a fair test of vendor headroom; 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be
+  overshot; a CEILING raise only ALLOWS a higher rate — the AIMD ladder still steps DOWN on 429s and recovers only as
+  far as the vendor tolerates, so worst-case = 5; SUSTAINED 8 is UNVERIFIED (the log shows the vendor 429ing at 5),
+  revert is one constant; one test updated (480 ≤ 500), 99 constants/rate/pool/live tests GREEN, ruff + mypy clean.
+  Prior on this branch — DEC-FETCH-WRITE-OVERLAP-001 #921 (Lever 2, MERGED #883): the Groww pull was achieving only
+  ~3.2 r/s against a controller
   ceiling held at 5.0 — a 9-agent deep-research workflow PROVED from the fresh log (`cf1afd97-brutex.log`, 3.33 h,
   37,381 fetches, re-derived twice) that this is OUR code, not Groww: time-weighted rate 4.96 r/s (held 5.0 for 96.3%,
   only 65 429s all at `current_rps=5.0`, burst `rps_1s_max=10`), yet achieved 3.20 → a 1.76 r/s SLACK a binding limiter
@@ -870,17 +878,24 @@ hostile-review pass._
    never raise the per-second ceiling OR the per-minute cap without
    explicit user approval. The PRODUCTION per-second ceiling injected at
    BOTH live build sites (dashboard `_build_live_controller` + CLI live
-   pull) is now the operator-DIRECTED **5 r/s**
-   (`GROWW_RATE_LIMIT_RPS_CEILING=5.0`, operator-approved 2026-06-22, LOWERED
-   8 → 5, DEC-GROWW-RATE-CEILING-5-001 — supersedes DEC-GROWW-RATE-CEILING-8-001)
-   — chosen because 5×60 = 300/min stays well under the 500/min governor, AND a
-   live-log audit showed the vendor 429s even at 3–5 r/s, so the 5–8 headroom was
-   never usable throughput and only wasted ~870 429-retries probing into a wall.
-   A cap-LOWERING is intrinsically safe (it only ever LOWERS the issue rate, never
-   raises a ceiling); the per-second backtesting cap itself stays officially
-   UNVERIFIED (`GROWW_RATE_LIMIT_RPS_UNVERIFIED`) and the adaptive ladder still
-   steps DOWN on 429s. (The vendor-neutral `rate_common.CEILING_RPS=5` DEFAULT is
-   unchanged.)
+   pull) is now the operator-DIRECTED **8 r/s**
+   (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED
+   5 → 8, DEC-GROWW-RATE-CEILING-8-002 — supersedes DEC-GROWW-RATE-CEILING-5-001)
+   — raised back to 8 (with EXPLICIT, repeated operator approval) once
+   DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave the pull enough connections to
+   GENERATE demand toward the ceiling (at 2 connections the achieved rate capped at
+   ~3.2 r/s so the 5–8 range was pure waste; at 4 connections demand reaches ~6.4 so 8
+   is a FAIR test of vendor headroom). 8×60 = 480/min stays UNDER the 500/min governor,
+   so the HARD per-minute cap can never be overshot (DEC-GROWW-GOVERNOR-ATOMIC-001). A
+   CEILING raise only ever ALLOWS a higher rate — it does NOT force it: the adaptive
+   AIMD ladder still steps DOWN on a 429 burst (soft floor 3, deep floor 1) and recovers
+   UP only as far as the vendor tolerates, so the worst case at 8 is identical to 5 (the
+   controller self-corrects). HONEST (Golden Rule #10): a live-log audit showed the vendor
+   429ing AT the 5.0 ceiling, so SUSTAINED 8 is UNVERIFIED — the controller settles wherever
+   the vendor allows; revert to 5 is this one constant if 8 only burns 429-retries without a
+   throughput gain (the #906 trap). The per-second backtesting cap itself stays officially
+   UNVERIFIED (`GROWW_RATE_LIMIT_RPS_UNVERIFIED`). (The vendor-neutral `rate_common.CEILING_RPS=5`
+   DEFAULT is unchanged.)
 7. **Idempotence.** Every ingest chunk and every backtest combo must be
    rerun-safe. Same inputs → same outputs, bit-for-bit. The audit-log
    replay test is the oracle.
@@ -1146,8 +1161,8 @@ bruteX/
 | Symbol/key format | **`groww_symbol` string** `EXCH-SYMBOL[-…]` (e.g. `NSE-NIFTY`, `BSE-SENSEX`) — O(1) resolution: a BARE trading symbol (incl. a hyphenated stock like `BAJAJ-AUTO` / a verbose-symbol index like `MIDCPNIFTY`) resolves via `by_exchange_symbol` + the master's `groww_symbol_by_pair` (the real groww_symbol, never reconstructed); an already-prefixed FUT/CE/PE contract resolves via `by_groww_symbol`. NOT a numeric ID (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001, MIGRATION.md entry #845) | `groww/instruments.py:190-201`; `groww/adapter.py:162-174`; `groww/api-reference/02-instruments.md:119`, `03-backtesting.md:10-37` |
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
-| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **5 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=5.0`, operator-approved 2026-06-22, LOWERED 8 → 5, DEC-GROWW-RATE-CEILING-5-001 supersedes DEC-GROWW-RATE-CEILING-8-001 — 5×60 = 300/min stays well under the 500/min governor; a live-log audit showed the vendor 429s even at 3–5 r/s so the 5–8 headroom only wasted 429-retries; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118,165` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=5.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **5 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-5-001; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198`; `groww/constants.py:165`; `dashboard/pull_controller.py:776`; `cli.py:2020` + this file §2 rule 6 |
+| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118,165` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198`; `groww/constants.py:165`; `dashboard/pull_controller.py:776`; `cli.py:2020` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds via `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET`. The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) is **AUTO-RE-MINTED mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` — via the stored TOTP secret, so the 06:00 reset self-heals unattended (no nightly manual rotation; DEC-GROWW-TOKEN-REAUTH-001 #909) | `groww/auth.py:28-31,94-114`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
