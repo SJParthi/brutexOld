@@ -230,10 +230,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/suspicious-empty-flag-jlzt1n` (an OBSERVE-ONLY pull-side diagnostic surfaces a whole F&O
-  underlying whose every cleanly-fetched contract came back 100% EMPTY — the BAJAJ-AUTO / M&M "silent-vanish" failure
-  mode — as ONE `pull.underlying_all_empty` WARNING, so a whole stock can never silently blend into a normal no-data
-  gap again — DEC-SUSPICIOUS-EMPTY-FLAG-001, MIGRATION.md #919, the operator's "a whole stock should never silently
+- **Active branch:** `claude/summary-cache-adaptive-floor-jlzt1n` (the dashboard's `SummaryCache` TTL floor is now
+  ADAPTIVE — `max(base 2 s, the last scan's own duration)` capped at 120 s — so an expensive full-lake
+  completeness/coverage scan self-throttles to a ≤50% duty cycle during a pull instead of re-firing back-to-back on
+  every ~4 s poll and starving the concurrent pull in the SAME process — DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001,
+  MIGRATION.md #920, the operator-approved item (b) "the tiny completeness-cache fix so the dashboard stops freezing
+  during pulls". PROVEN from the operator's logs: the shared `SPOT` scan grew to 28–32 s ≫ the fixed 2 s floor, so a
+  poll re-triggered it continuously and the pull's fetch rate HALVED (~6 → ~3 RPS) as the scan latency climbed into the
+  options phase. FIX (READ-ONLY dashboard cache; NO engine/lake/pull change): `_Entry` gains `compute_duration` (clamped
+  ≥ 0), `get_or_refresh` times the scan, `_plan` throttles for `min(max(base, duration), 120 s)` — a cheap scan keeps
+  the snappy 2 s floor (idle byte-unchanged), a 30 s scan auto-throttles to ~30 s. HONEST: the live HEADLINE is the O(1)
+  `CoverageCounters` (unaffected); only the DETAILED aggregate goes its-own-duration stale during a pull; reduces the
+  collision (~50% CPU-duty recovery) but does NOT eliminate disk-IO contention (process isolation was DROPPED by the
+  operator, not claimed); self-tuning, no magic constant. `summary_cache.py` 100% line+branch (86/12, 0 missing); NEW
+  adaptive-floor tests + 299 coverage/completeness/dashboard regression tests green; ruff/`mypy --strict`/`pyright`
+  clean. Prior merged: DEC-SUSPICIOUS-EMPTY-FLAG-001, MIGRATION.md #919 — an OBSERVE-ONLY pull-side diagnostic surfaces
+  a whole F&O underlying whose every cleanly-fetched contract came back 100% EMPTY — the BAJAJ-AUTO / M&M "silent-vanish"
+  failure mode — as ONE `pull.underlying_all_empty` WARNING, so a whole stock can never silently blend into a normal
+  no-data gap again — the operator's "a whole stock should never silently
   vanish". PULL-side (not read-side) because only the pull knows "tried-and-empty" vs "never-tried"; mirrors the #907
   observe-only triad — a pure `scan_underlying_all_empty` (groups pairs by `underlying_symbol`, counts CLEAN fetches
   via `_is_clean_fetch` = `windows≥1 ∧ skipped==0 ∧ still_failed==0`, flags `attempted≥3 ∧ stored_bars==0`) + immutable
@@ -951,7 +965,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/suspicious-empty-flag-jlzt1n`
+- **Active feature branch:** `claude/summary-cache-adaptive-floor-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

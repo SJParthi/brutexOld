@@ -180,6 +180,86 @@ def test_default_ttl_floor_constant() -> None:
     assert DEFAULT_TTL_FLOOR_S == 2.0
 
 
+# ────────────────────────────────────────────────────────────────────────
+# SummaryCache — ADAPTIVE TTL floor (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _SlowRecompute:
+    """A recompute that ADVANCES the injected clock by *duration* (simulates a slow scan)."""
+
+    def __init__(self, clock: _FakeClock, duration: float) -> None:
+        self._clock = clock
+        self._duration = duration
+        self.calls = 0
+
+    def __call__(self) -> list[dict[str, object]]:
+        self.calls += 1
+        self._clock.advance(self._duration)
+        return [{"call": self.calls}]
+
+
+def test_slow_scan_self_throttles_beyond_base_floor() -> None:
+    # A 30 s scan makes the adaptive floor 30 s: a dirty read 10 s later is throttled
+    # (the base 2 s floor alone would have rescanned), and one 35 s later rescans.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)  # base 2 s floor
+    rc = _SlowRecompute(clock, duration=30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # cold → scans, clock +30, duration=30
+    assert rc.calls == 1
+    cache.mark_dirty()
+    clock.advance(10.0)  # 10 s < adaptive 30 s floor
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1  # THROTTLED by the adaptive floor (base 2 s would have rescanned)
+    clock.advance(25.0)  # now 35 s since the scan finished > 30 s
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2  # past the adaptive floor → rescans
+
+
+def test_adaptive_floor_capped_at_max() -> None:
+    # A pathologically slow 200 s scan is capped at MAX_ADAPTIVE_FLOOR_S (120 s), so a
+    # dirty read 130 s later rescans (without the cap, a 200 s floor would throttle it).
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    rc = _SlowRecompute(clock, duration=200.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # clock +200, duration=200 → capped to 120
+    cache.mark_dirty()
+    clock.advance(130.0)  # 130 s > 120 s cap (but < the uncapped 200 s)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2  # the cap let it rescan; an uncapped 200 s floor would not have
+
+
+def test_zero_base_floor_still_bounds_a_slow_scan() -> None:
+    # ttl_floor_s=0 disables the BASE floor, but the adaptive component still throttles a
+    # genuinely slow scan (so "no floor" never devolves into back-to-back 30 s scans).
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=0.0)
+    rc = _SlowRecompute(clock, duration=30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # clock +30, duration=30
+    cache.mark_dirty()
+    clock.advance(5.0)  # 5 s < adaptive 30 s
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1  # throttled by the adaptive floor despite ttl_floor_s=0
+
+
+def test_nonmonotonic_clock_falls_back_to_base_floor() -> None:
+    # A clock that goes BACKWARDS during recompute yields a NEGATIVE scan-duration delta.
+    # The adaptive floor's `max(base, duration)` harmlessly neutralizes it — the effective
+    # floor falls back to the base 2 s, never negative/zero (so no explicit clamp is
+    # needed; the outer max is load-bearing, not a separate clamp).
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    rc = _SlowRecompute(clock, duration=-5.0)  # finishes BEFORE it started → negative delta
+    cache.get_or_refresh(SPOT, recompute=rc)  # stored duration is -5; max(2, -5) = 2
+    cache.mark_dirty()
+    clock.advance(1.0)  # 1 s < base 2 s floor
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1  # base 2 s floor in effect (negative duration neutralized by max)
+    clock.advance(2.0)  # 3 s elapsed since the (negative-delta) scan → past the base floor
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2  # base floor elapsed → rescans
+
+
 def test_in_flight_refresh_serves_current_entry_no_double_scan() -> None:
     """A concurrent dirty read of the SAME kind serves the stale entry, no rescan.
 
