@@ -430,7 +430,7 @@ def test_cmd_fetch_live_inspect_reports_failures(
     # ``__self__`` exists on the bound method at runtime; pyright only sees a
     # ``FunctionType`` so reach it via ``getattr`` (typed ``Any``) to stay gate-clean.
     controller = getattr(seen["pace"], "__self__")  # noqa: B009
-    assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 5.0
+    assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
     assert controller.snapshot()["ceiling_per_min"] == 500
 
 
