@@ -182,14 +182,26 @@ GROWW_PULL_CALL_TIMEOUT_S: Final[float] = 45.0
 #: Default number of INDEPENDENT Groww SDK connections the live spot pull fans its worker
 #: threads across (DEC-GROWW-CLIENT-POOL-001 — the multi-connection
 #: :class:`~brutex.adapters.groww.pool.ClientPool`). 1 = today's exact single-connection
-#: behaviour; 2 lets the worker threads stop serialising on one socket (the measured
-#: avg-0.49-in-flight starve) so the achieved rate can approach the rate-controller ceiling.
-#: Little's Law says ~0.75 concurrent calls reach the 5 r/s ceiling at the ~150 ms observed
-#: latency, so 2 is sufficient AND gentle. The SHARED rate controller still caps the AGGREGATE issue rate
-#: (CLAUDE.md §2 Rule 6 untouched — K connections add concurrency, never extra rate); the
-#: achieved-rate meter proves the real number. Override per environment via
-#: ``BRUTEX_GROWW_POOL_SIZE`` (clamped to ``[1, GROWW_CLIENT_POOL_MAX]``).
-GROWW_CLIENT_POOL_SIZE: Final[int] = 2
+#: behaviour. Raised 2 → 4 by DEC-FETCH-WRITE-OVERLAP-001 (Lever 2) after a fresh-log audit
+#: PROVED 2 connections cap the achieved rate at ~3.2 r/s while the shared controller held
+#: its 5.0 ceiling for 96% of the run (time-weighted 4.96 r/s, only 65 429s, ~1.76 r/s of
+#: UNUSED slack — the bottleneck was DEMAND, our code, not Groww).
+#:
+#: The earlier "Little's Law → 0.75 concurrent calls reach 5 r/s at ~150 ms latency, so 2 is
+#: sufficient" reasoning was WRONG: it used the FETCH latency (~150 ms) alone, but a worker
+#: holds its connection for the WHOLE per-contract cycle (~625 ms = ~185 ms fetch + ~440 ms
+#: serial non-fetch work, dominated by the lake Parquet append). With W = 0.625 s the real
+#: requirement to reach λ = 5 r/s is L = λ·W = 3.1 concurrent calls — so 2 connections cap at
+#: 2/0.625 = ~3.2 r/s (EXACTLY the observed achieved rate), and 4 connections give
+#: 4/0.625 = 6.4 r/s of demand > 5 so the SHARED rate controller binds at the 5.0 ceiling.
+#: Reaching 8 needs Lever 1 (the fetch/write OVERLAP that shrinks the 625 ms cycle), NOT more
+#: connections — 4 is the cap here (one shared TOTP token, GROWW_CLIENT_POOL_MAX=4).
+#:
+#: The SHARED rate controller still caps the AGGREGATE issue rate (CLAUDE.md §2 Rule 6
+#: untouched — K connections add concurrency, never extra rate); the achieved-rate meter
+#: proves the real number. Override per environment via ``BRUTEX_GROWW_POOL_SIZE`` (clamped
+#: to ``[1, GROWW_CLIENT_POOL_MAX]``).
+GROWW_CLIENT_POOL_SIZE: Final[int] = 4
 
 #: Hard upper bound on the connection-pool size (a safety clamp on
 #: ``BRUTEX_GROWW_POOL_SIZE``). Concurrent use of one TOTP token across many SDK connections

@@ -130,6 +130,24 @@ def test_pool_size_constants_are_sane() -> None:
     assert c.GROWW_CLIENT_POOL_MAX >= 1
 
 
+def test_pool_size_default_is_four_for_saturation() -> None:
+    """DEC-FETCH-WRITE-OVERLAP-001 (Lever 2): the default is pinned at 4.
+
+    A fresh-log audit proved 2 connections cap the achieved rate at ~3.2 r/s while the
+    shared controller held its 5.0 ceiling (time-weighted 4.96 r/s, ~1.76 r/s unused slack).
+    With the ~625 ms per-contract cycle, L = λ·W ⇒ reaching 5 r/s needs ≥ 3.1 concurrent
+    calls, so 4 connections (4/0.625 = 6.4 r/s demand > 5) let the bucket bind at the ceiling
+    while 2 (2/0.625 = 3.2) cannot. An accidental revert to 2 would silently re-cap at ~3.2.
+    """
+    assert c.GROWW_CLIENT_POOL_SIZE == 4
+    # 4 connections × (1 / 0.625 s cycle) = 6.4 r/s demand ≥ the 5.0 controller ceiling, so
+    # the SHARED rate controller binds at 5 (the slack is consumed) — never exceeded (Rule 6).
+    assert c.GROWW_CLIENT_POOL_SIZE / 0.625 >= c.GROWW_RATE_LIMIT_RPS_CEILING
+    # 4 stays at/below the hard token-sharing cap; reaching 8 needs the OVERLAP lever, not
+    # more connections (which the MAX=4 clamp forbids without ADR sign-off).
+    assert c.GROWW_CLIENT_POOL_SIZE <= c.GROWW_CLIENT_POOL_MAX == 4
+
+
 def test_resolve_pool_size_accepts_exact_max(monkeypatch) -> None:
     """The exact MAX is ACCEPTED (off-by-one guard on the `> MAX` clamp)."""
     monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, str(c.GROWW_CLIENT_POOL_MAX))

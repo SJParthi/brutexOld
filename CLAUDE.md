@@ -230,7 +230,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/summary-cache-adaptive-floor-jlzt1n` (the dashboard's `SummaryCache` TTL floor is now
+- **Active branch:** `claude/serene-hamilton-jlzt1n` (the Groww pull was achieving only ~3.2 r/s against a controller
+  ceiling held at 5.0 — a 9-agent deep-research workflow PROVED from the fresh log (`cf1afd97-brutex.log`, 3.33 h,
+  37,381 fetches, re-derived twice) that this is OUR code, not Groww: time-weighted rate 4.96 r/s (held 5.0 for 96.3%,
+  only 65 429s all at `current_rps=5.0`, burst `rps_1s_max=10`), yet achieved 3.20 → a 1.76 r/s SLACK a binding limiter
+  cannot have. ROOT: only 2 SDK connections, each on a ~625 ms per-contract cycle (~185 ms fetch + ~440 ms serial
+  non-fetch work dominated by the lake Parquet append) → 2/0.625 = 3.2 r/s demand < 5 allowed. **DEC-FETCH-WRITE-OVERLAP-001,
+  MIGRATION.md #921 — Lever 2 (PROVEN, shipped):** `GROWW_CLIENT_POOL_SIZE` 2 → 4 (4/0.625 = 6.4 r/s demand > 5 → the
+  SHARED rate controller binds at the 5.0 ceiling, consuming the slack with ZERO new concurrency surface; MAX stays 4 =
+  the sanctioned one-TOTP-token envelope; Rule 6 per-second ceiling UNTOUCHED at 5.0); the stale "Little's Law → 2 is
+  sufficient" comment corrected with the proven 625 ms-cycle arithmetic. **Lever 1 (DESIGNED + adversarially reviewed,
+  benchmark-gated NEXT):** a COMMON sharded `write_consumer` producer/consumer primitive moving the ~440 ms append+record
+  OFF the fetch worker (the only lever that unlocks 8) — merges ONLY if `bench_write_rate(W) > 3.2/s` is proven (a SINGLE
+  writer would serialize appends at ~3/s = a NET REGRESSION); folds the #919 back-channel-block fix +
+  one-consumer-per-interval lifecycle + ledger-settle-only-after-durable-write. The 5 → 8 flip is ONE constant
+  (`GROWW_RATE_LIMIT_RPS_CEILING`), gated on a clean overlap-at-5 run then KEPT only if 8 nets HIGHER throughput (the #906
+  trap); `8×60 = 480 < 500/min` governor PROVEN-safe. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). `constants.py` ruff +
+  `mypy --strict` clean; 21 constants tests GREEN (NEW default-is-4 + slack-arithmetic regression); 58 groww
+  pool/live/reauth tests GREEN. Prior merged: DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001, MIGRATION.md #920 — the dashboard's `SummaryCache` TTL floor is now
   ADAPTIVE — `max(base 2 s, the last scan's own duration)` capped at 120 s — so an expensive full-lake
   completeness/coverage scan self-throttles to a ≤50% duty cycle during a pull instead of re-firing back-to-back on
   every ~4 s poll and starving the concurrent pull in the SAME process — DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001,
@@ -965,7 +982,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/summary-cache-adaptive-floor-jlzt1n`
+- **Active feature branch:** `claude/serene-hamilton-jlzt1n`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
