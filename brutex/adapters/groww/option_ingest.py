@@ -64,7 +64,7 @@ from time import sleep as _time_sleep
 
 import structlog
 
-from brutex.adapters.groww.candles import fetch_candle_windows
+from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -195,6 +195,7 @@ def fetch_option_candles(
     interval: str,
     start: date,
     end: date,
+    on_raw_payload: RawPayloadHook | None = None,
 ) -> list[CandleBar]:
     """Fetch ONE contract's OHLCV+OI bars over ``[start, end)`` — index-free, FNO.
 
@@ -204,6 +205,11 @@ def fetch_option_candles(
     ``segment="FNO"`` (:data:`OPTION_SEGMENT`) and ``drop_volume=False`` (options
     trade — volume + OI are kept). The exchange comes from the contract symbol's
     leading token.
+
+    *on_raw_payload* is the OPTIONAL raw-data integrity capture hook
+    (DEC-RAW-DATA-INTEGRITY-001), threaded straight to
+    :func:`fetch_candle_windows`; ``None`` (the default) keeps the fetch
+    byte-identical to the pre-feature path.
 
     Returns
     -------
@@ -219,6 +225,7 @@ def fetch_option_candles(
         start=start,
         end=end,
         drop_volume=False,
+        on_raw_payload=on_raw_payload,
     )
 
 
@@ -279,6 +286,7 @@ def ingest_option_contract(
     empty_retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
+    on_raw_payload: RawPayloadHook | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -364,7 +372,12 @@ def ingest_option_contract(
             fetch_count += 1
             try:
                 raw_bars = fetch_option_candles(
-                    client, contract=contract, interval=interval, start=start, end=clamped_end
+                    client,
+                    contract=contract,
+                    interval=interval,
+                    start=start,
+                    end=clamped_end,
+                    on_raw_payload=on_raw_payload,
                 )
                 break
             except GrowwError as exc:
@@ -832,6 +845,7 @@ def run_groww_option_ingest(
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     contract_windows: ContractWindows | None = None,
     run_parallel: RunParallel | None = None,
+    on_raw_payload: RawPayloadHook | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -959,6 +973,7 @@ def run_groww_option_ingest(
                 backoff=backoff,
                 now_ist=now_ist,
                 market=market,
+                on_raw_payload=on_raw_payload,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}

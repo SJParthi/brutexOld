@@ -811,8 +811,8 @@ def test_run_out_of_scope_error_quarantines_contract_not_crashes(
     # the bulk option pull CONTINUES, exactly like the spot spine — never a crash.
     ok, bad = _ce(), _ce2()
 
-    def _fake_fetch(client, *, contract, interval, start, end):
-        del client, interval, start, end
+    def _fake_fetch(client, *, contract, interval, start, end, on_raw_payload=None):
+        del client, interval, start, end, on_raw_payload
         if contract.symbol == bad.symbol:
             raise OutOfScopeError(f"symbol not in Groww universe: {contract.symbol}")
         return []  # the good contract fetches cleanly (0 bars — a settled empty window)
@@ -850,8 +850,8 @@ def test_run_global_stop_quota_error_propagates_not_quarantined(
     # stop, NOT one contract's problem — every remaining contract would fail the same way —
     # so it must PROPAGATE (the caller maps it to the quota_exhausted verdict,
     # DEC-SPOT-QUOTA-MIDROUND-001), never be quarantined per contract like an OutOfScopeError.
-    def _fake_fetch(client, *, contract, interval, start, end):
-        del client, contract, interval, start, end
+    def _fake_fetch(client, *, contract, interval, start, end, on_raw_payload=None):
+        del client, contract, interval, start, end, on_raw_payload
         raise quota_exc
 
     monkeypatch.setattr(_oi, "fetch_option_candles", _fake_fetch)
@@ -963,8 +963,8 @@ def test_run_parallel_pool_global_stop_propagates(monkeypatch: pytest.MonkeyPatc
     # A GLOBAL stop raised inside a pool worker must still PROPAGATE through the drain
     # (re-raised, never quarantined) AND the pool must shut down cleanly — the test
     # COMPLETING proves the generator-close → ThreadPoolExecutor teardown never hangs.
-    def _fake_fetch(client, *, contract, interval, start, end):
-        del client, contract, interval, start, end
+    def _fake_fetch(client, *, contract, interval, start, end, on_raw_payload=None):
+        del client, contract, interval, start, end, on_raw_payload
         raise DailyQuotaExceeded("daily quota spent")
 
     monkeypatch.setattr(_oi, "fetch_option_candles", _fake_fetch)

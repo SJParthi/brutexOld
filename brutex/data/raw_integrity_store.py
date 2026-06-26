@@ -1,0 +1,287 @@
+"""Durable sidecar store for :class:`~brutex.data.raw_integrity.RawIntegrityRecord`.
+
+DEC-RAW-DATA-INTEGRITY-001. The per-window raw-payload hash
+(:mod:`brutex.data.raw_integrity`) is only useful as a PROVABLE audit if it
+SURVIVES the pull that captured it — so this is its durable home: an
+**append-only JSON-lines sidecar** at
+``<lake_root>/raw_integrity/records.jsonl``.
+
+Why a SEPARATE sidecar (not the candle lake, not the window ledger):
+
+* **The candle lake is untouched (the hard requirement).** This store lives
+  OUTSIDE ``bars/`` / ``options/`` under its own ``raw_integrity/`` directory, so
+  no candle partition, no lake schema, and nothing the lake scanner reads is
+  changed — the integrity layer is purely ADDITIVE proof alongside the data.
+* **Append-only over an in-place rewrite (the lower-risk additive option).** A
+  JSON-line APPEND per captured window is O(record) and never reads/rewrites the
+  whole file — it can never lose or corrupt prior records on a crash mid-write
+  (a half-written trailing line is simply skipped on load). The window ledger
+  was considered, but extending its fixed Parquet schema with a
+  ``raw_payload_hash`` column would (a) touch a load-bearing, heavily-tested
+  lake table and (b) couple the proof to the ledger's load/save/migrate path —
+  strictly more risk than an isolated sidecar. The sidecar keys by the SAME
+  ``(exchange, segment, groww_symbol, interval, window_start, window_end)``
+  coordinates, so a future ledger join is trivial if ever wanted.
+
+Reliability (never crash a pull): :func:`append_record` is best-effort at the
+call site (the ingest hook guards it); :func:`load_records` degrades to an empty
+result on a missing / unreadable / malformed file (a structured WARNING, never
+an exception) — a lost integrity sidecar costs a re-verify, never data.
+
+The record-per-window APPEND is O(1); the one-shot :func:`load_records` is
+O(records) (latest-wins per key), paid only by the verify path, never the hot
+pull.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
+from pathlib import Path
+
+import structlog
+
+from brutex.data.raw_integrity import (
+    HASH_ALGORITHM,
+    RawIntegrityError,
+    RawIntegrityRecord,
+    build_record,
+)
+
+#: Structured logger — surfaces a corrupt/absent integrity sidecar into ``/logs``.
+_LOG = structlog.get_logger("brutex.data.raw_integrity_store")
+
+#: The integrity sidecar directory + file under the lake root (NEVER under
+#: ``bars/`` / ``options/`` — it is proof alongside the data, not lake data).
+INTEGRITY_DIRNAME: str = "raw_integrity"
+INTEGRITY_FILENAME: str = "records.jsonl"
+
+#: Serialise concurrent appends from the parallel window workers. An APPEND of
+#: one short JSON line under an exclusive lock is atomic enough for a sidecar
+#: (each line is independently parseable; a partial trailing line on a crash is
+#: skipped on load) — the lock only prevents two threads interleaving bytes
+#: within one process. Module-level so every store instance for a given process
+#: shares it (the conservative, never-interleave choice).
+_APPEND_LOCK = threading.Lock()
+
+
+def integrity_dir(lake_root: Path) -> Path:
+    """Return the integrity directory for *lake_root* (``<lake_root>/raw_integrity``)."""
+    return lake_root / INTEGRITY_DIRNAME
+
+
+def integrity_path(lake_root: Path) -> Path:
+    """Return the integrity sidecar path (``<lake_root>/raw_integrity/records.jsonl``)."""
+    return integrity_dir(lake_root) / INTEGRITY_FILENAME
+
+
+def _record_to_json(record: RawIntegrityRecord) -> str:
+    """Serialise one record to a single compact JSON line (no embedded newline)."""
+    payload = {
+        "exchange": record.exchange,
+        "segment": record.segment,
+        "groww_symbol": record.groww_symbol,
+        "interval": record.interval,
+        "window_start": record.window_start,
+        "window_end": record.window_end,
+        "payload_hash": record.payload_hash,
+        "row_count": record.row_count,
+        "algorithm": record.algorithm,
+        "captured_at": (record.captured_at.isoformat() if record.captured_at is not None else None),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def append_record(record: RawIntegrityRecord, lake_root: Path) -> None:
+    """Append *record* as one JSON line to the integrity sidecar (crash-safe append).
+
+    Creates the ``raw_integrity/`` directory if absent and APPENDS one line under
+    the module append lock. O(record) — never reads or rewrites prior lines, so a
+    crash mid-append can at worst leave a partial trailing line (skipped on
+    load), never corrupt earlier records. The candle lake is never touched.
+
+    The CALLER (the ingest capture hook) is responsible for best-effort guarding
+    this so a sidecar write failure can never halt a pull — this function does
+    the durable write and lets an :class:`OSError` propagate for the guard to
+    swallow.
+    """
+    directory = integrity_dir(lake_root)
+    directory.mkdir(parents=True, exist_ok=True)
+    line = _record_to_json(record)
+    path = integrity_path(lake_root)
+    with _APPEND_LOCK, path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def _record_from_obj(obj: object) -> RawIntegrityRecord | None:
+    """Reconstruct a record from one parsed JSON object, or ``None`` if malformed.
+
+    A line missing a required key, or carrying a wrong-typed value, returns
+    ``None`` (skipped on load) rather than raising — one bad line never sinks the
+    whole sidecar. ``captured_at`` is parsed back to a tz-aware datetime when
+    present + parseable, else left ``None`` (provenance only, never part of the
+    hash, so an unparseable stamp is non-fatal).
+    """
+    if not isinstance(obj, dict):
+        return None
+    try:
+        captured_raw = obj.get("captured_at")
+        captured_at: datetime | None = None
+        if isinstance(captured_raw, str):
+            try:
+                captured_at = datetime.fromisoformat(captured_raw)
+            except ValueError:
+                captured_at = None
+        return RawIntegrityRecord(
+            exchange=str(obj["exchange"]),
+            segment=str(obj["segment"]),
+            groww_symbol=str(obj["groww_symbol"]),
+            interval=str(obj["interval"]),
+            window_start=str(obj["window_start"]),
+            window_end=str(obj["window_end"]),
+            payload_hash=str(obj["payload_hash"]),
+            row_count=int(obj["row_count"]),
+            algorithm=str(obj.get("algorithm", HASH_ALGORITHM)),
+            captured_at=captured_at,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def load_records(lake_root: Path) -> dict[tuple[str, str, str, str, str, str], RawIntegrityRecord]:
+    """Load the integrity sidecar as a ``{key: latest record}`` map (latest-wins).
+
+    **Never raises** (reliability): a missing file is an empty map; an unreadable
+    file logs a WARNING and also returns empty; a malformed individual line is
+    skipped (the append-only format means a crash can only damage the trailing
+    line). When the same window appears more than once (a re-pull re-captures it),
+    the LAST (most recent) record for that key wins — the file is read in append
+    order, so a later line overwrites an earlier one for the same key.
+
+    O(records) — paid only by the verify path, never the hot pull.
+    """
+    path = integrity_path(lake_root)
+    if not path.is_file():
+        return {}
+    records: dict[tuple[str, str, str, str, str, str], RawIntegrityRecord] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _LOG.warning("raw_integrity.load_failed", path=str(path), error=str(exc))
+        return {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue  # a partial/corrupt trailing line — skip, never crash
+        record = _record_from_obj(obj)
+        if record is not None:
+            records[record.key] = record
+    return records
+
+
+def find_record(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    groww_symbol: str,
+    interval: str,
+    window_start: str,
+    window_end: str,
+) -> RawIntegrityRecord | None:
+    """Look up the latest recorded :class:`RawIntegrityRecord` for one window.
+
+    Convenience over :func:`load_records` for the verify path (re-fetch ONE
+    window then compare). Returns ``None`` when the window was never captured —
+    the honest "no proof on file" state (e.g. a window pulled before this layer
+    shipped; the :func:`~brutex.data.raw_integrity.verify_record` envelope).
+    """
+    return load_records(lake_root).get(
+        (exchange, segment, groww_symbol, interval, window_start, window_end)
+    )
+
+
+def append_records(records: Iterable[RawIntegrityRecord], lake_root: Path) -> int:
+    """Append every record in *records* — returns the count appended.
+
+    A thin batch convenience over :func:`append_record` (one durable line each),
+    used where several windows are captured together; returns how many were
+    written so the caller can log the count.
+    """
+    written = 0
+    for record in records:
+        append_record(record, lake_root)
+        written += 1
+    return written
+
+
+def make_capture_hook(
+    lake_root: Path, *, exchange: str, segment: str, groww_symbol: str
+) -> Callable[[Mapping[str, object], str, str, str], None]:
+    """Return a BEST-EFFORT raw-payload capture hook for one instrument's fetch.
+
+    The function the ingest layer injects as
+    :data:`~brutex.adapters.groww.candles.RawPayloadHook` (DEC-RAW-DATA-INTEGRITY-001).
+    On each fetched window it (1) builds the integrity record
+    (:func:`~brutex.data.raw_integrity.build_record` — hash of the RAW payload at
+    capture) for the bound ``(exchange, segment, groww_symbol)`` plus the per-call
+    ``(interval, window_start, window_end)`` the hook receives, and (2) APPENDS it
+    to the sidecar (:func:`append_record`).
+
+    **It can NEVER halt or corrupt a pull** (the hard requirement): every error —
+    a malformed payload (:class:`~brutex.data.raw_integrity.RawIntegrityError`) or
+    a sidecar write failure (:class:`OSError`) — is caught and logged at WARNING,
+    then swallowed, so the candle fetch+store proceeds exactly as if the hook were
+    absent. The hash is additive PROOF, never a gate.
+
+    Per fetched window the work is O(payload) (one canonicalise+hash) + O(record)
+    (one append) — off the rate-limited critical path's correctness, additive only.
+    """
+
+    def _capture(
+        payload: Mapping[str, object], interval: str, window_start: str, window_end: str
+    ) -> None:
+        try:
+            record = build_record(
+                payload,
+                exchange=exchange,
+                segment=segment,
+                groww_symbol=groww_symbol,
+                interval=interval,
+                window_start=window_start,
+                window_end=window_end,
+            )
+            append_record(record, lake_root)
+        except (RawIntegrityError, OSError) as exc:
+            # Best-effort: a bad payload / sidecar write failure must NEVER halt or
+            # corrupt the pull (the candle write is the source of truth; the hash is
+            # additive proof). Log + swallow so the fetch proceeds unaffected.
+            _LOG.warning(
+                "raw_integrity.capture_failed",
+                groww_symbol=groww_symbol,
+                interval=interval,
+                window_start=window_start,
+                window_end=window_end,
+                error=str(exc),
+            )
+
+    return _capture
+
+
+__all__ = [
+    "INTEGRITY_DIRNAME",
+    "INTEGRITY_FILENAME",
+    "append_record",
+    "append_records",
+    "find_record",
+    "integrity_dir",
+    "integrity_path",
+    "load_records",
+    "make_capture_hook",
+]
