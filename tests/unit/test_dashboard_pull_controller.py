@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwBadRequestError
@@ -1765,3 +1766,133 @@ class TestPullCandlesDecouple:
         assert report.total_failed == 0
         assert report.total_skipped == 0
         assert report.total_no_data == 0
+
+
+class TestObserveRate:
+    """The live rate-observer + pull-health-monitor push seam (DEC-PULL-HEALTH-MONITOR-001).
+
+    Covers every branch of ``_observe_rate`` (the CI per-module coverage gate runs ONLY
+    this file + ``test_dashboard_pull_pool_sizing.py`` for ``pull_controller.py``, so the
+    monitor-wiring branches must live HERE, not in ``test_dashboard_rate_panel.py``).
+    """
+
+    @staticmethod
+    def _controller() -> object:
+        from brutex.adapters.rate_common import RateController
+
+        class _FakeController:
+            def snapshot(self) -> dict[str, object]:
+                return {"current_rps": 5.0, "recent_hits": 0}
+
+        return cast(RateController, _FakeController())
+
+    @staticmethod
+    def _adapter_with_meter() -> object:
+        class _FakeMeter:
+            def snapshot(self) -> dict[str, object]:
+                return {"effective_rps": 3.2, "latency_ms_p95": 200.0, "in_flight": 2}
+
+        class _FakeClient:
+            meter = _FakeMeter()
+
+        class _FakeAdapter:
+            client = _FakeClient()
+
+        return cast(MarketAdapter, _FakeAdapter())
+
+    def test_skips_when_no_controller(self) -> None:
+        """Dry-run / injected-factory pull (no controller) → early return, nothing called."""
+        from brutex.dashboard.pull_controller import _observe_rate
+
+        calls: list[object] = []
+        _observe_rate(
+            lambda r, m: calls.append((r, m)),
+            None,
+            cast(MarketAdapter, object()),
+        )
+        assert calls == []
+
+    def test_skips_when_no_observer_and_no_monitor(self) -> None:
+        """Controller present but neither observer nor monitor wired → early return."""
+        from brutex.dashboard.pull_controller import _observe_rate
+
+        # A controller whose snapshot must NEVER be called on the skip path.
+        class _ExplodingController:
+            def snapshot(self) -> dict[str, object]:
+                raise AssertionError("snapshot must not be read on the skip path")
+
+        from brutex.adapters.rate_common import RateController
+
+        _observe_rate(
+            None,
+            cast(RateController, _ExplodingController()),
+            cast(MarketAdapter, object()),
+            None,
+        )
+
+    def test_pushes_to_observer_and_monitor(self) -> None:
+        """Active path: builds both snapshots ONCE and feeds the observer + the monitor."""
+        from brutex.dashboard.pull_controller import _observe_rate
+        from brutex.observability.pull_health import PullHealthMonitor
+
+        class _RecordingMonitor:
+            def __init__(self) -> None:
+                self.observed: list[tuple[object, object]] = []
+
+            def observe(self, ctrl: object, meter: object) -> None:
+                self.observed.append((ctrl, meter))
+
+        obs_calls: list[tuple[object, object]] = []
+        monitor = _RecordingMonitor()
+        _observe_rate(
+            lambda r, m: obs_calls.append((r, m)),
+            self._controller(),  # type: ignore[arg-type]
+            self._adapter_with_meter(),  # type: ignore[arg-type]
+            cast(PullHealthMonitor, monitor),
+        )
+        expected = (
+            {"current_rps": 5.0, "recent_hits": 0},
+            {"effective_rps": 3.2, "latency_ms_p95": 200.0, "in_flight": 2},
+        )
+        assert obs_calls == [expected]
+        assert monitor.observed == [expected]
+
+    def test_observer_only_no_monitor(self) -> None:
+        """Observer wired, monitor None → the observer fires, the monitor branch is skipped."""
+        from brutex.dashboard.pull_controller import _observe_rate
+
+        obs_calls: list[tuple[object, object]] = []
+        _observe_rate(
+            lambda r, m: obs_calls.append((r, m)),
+            self._controller(),  # type: ignore[arg-type]
+            self._adapter_with_meter(),  # type: ignore[arg-type]
+            None,
+        )
+        assert obs_calls == [
+            (
+                {"current_rps": 5.0, "recent_hits": 0},
+                {"effective_rps": 3.2, "latency_ms_p95": 200.0, "in_flight": 2},
+            )
+        ]
+
+    def test_monitor_only_no_meter(self) -> None:
+        """Monitor wired, observer None, adapter has no meter → empty meter snapshot."""
+        from brutex.dashboard.pull_controller import _observe_rate
+        from brutex.observability.pull_health import PullHealthMonitor
+
+        class _RecordingMonitor:
+            def __init__(self) -> None:
+                self.observed: list[tuple[object, object]] = []
+
+            def observe(self, ctrl: object, meter: object) -> None:
+                self.observed.append((ctrl, meter))
+
+        monitor = _RecordingMonitor()
+        # A bare object() adapter → no `.client.meter` → meter snapshot defaults to {}.
+        _observe_rate(
+            None,
+            self._controller(),  # type: ignore[arg-type]
+            cast(MarketAdapter, object()),
+            cast(PullHealthMonitor, monitor),
+        )
+        assert monitor.observed == [({"current_rps": 5.0, "recent_hits": 0}, {})]

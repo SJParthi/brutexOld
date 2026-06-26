@@ -335,6 +335,43 @@ class SweepAlerter:
             dedupe_key="rate-breach",
         )
 
+    def pull_degraded(self, *, rule: str, achieved: float, allowed: float, detail: str) -> bool:
+        """Alert that the live pull's health degraded against an SLA rule (WARN; deduped by *rule*).
+
+        Fired by :class:`brutex.observability.pull_health.PullHealthMonitor` on a rule
+        OK→BREACH edge (DEC-PULL-HEALTH-MONITOR-001). Mirrors :meth:`rate_breach`: a
+        best-effort, fire-and-forget push deduped on the rule name so a single sustained
+        breach coalesces into ONE message instead of one per observe tick.
+
+        The body carries the achieved-vs-allowed r/s AND the *detail* string, which
+        states the ONE thing the operator needs to triage: whether **OUR pipeline is the
+        limiter** (write latency / pool width — action: investigate our code) or the
+        breach is **VENDOR 429-gated** (expected, the controller already throttled and
+        the pull continues — no action). The caller (the monitor) chooses *detail* per
+        rule, so this method does not need to know the rule taxonomy.
+
+        Parameters
+        ----------
+        rule
+            The breached rule name (the dedupe key — e.g. ``"pull.stalled"``).
+        achieved
+            The measured effective r/s at the breach.
+        allowed
+            The controller-allowed r/s at the breach.
+        detail
+            The OUR-pipeline-vs-VENDOR triage string (see above).
+        """
+        message = escape_markdown_v2(
+            f"⚠️ Pull health degraded ({rule}): achieved {achieved:.2f} r/s vs "
+            f"allowed {allowed:.2f} r/s. {detail}."
+        )
+        return self._publish(
+            kind=TelegramEventKind.RATE_LIMIT_DOWNSHIFT,
+            severity=TelegramSeverity.WARN,
+            message=message,
+            dedupe_key=f"pull-degraded:{rule}",
+        )
+
     def auth_renew_failed(self, *, reason: str) -> bool:
         """Alert that ``RenewToken`` refused so the token will expire (ERROR)."""
         message = escape_markdown_v2(
