@@ -63,6 +63,21 @@ permissions:
 env:
   PYTHON_VERSION: "3.12"
   RUST_VERSION: "1.93.1"
+  # Cargo network resilience (CI-only flake hardening). crates.io
+  # downloads flake intermittently on GitHub-hosted runners — transient
+  # `download of <crate> failed / curl [56] Failure receiving data /
+  # OpenSSL SSL_read: unexpected eof / Connection reset by peer` — which
+  # aborts the maturin wheel build (`pip install ./rust/*`) BEFORE any
+  # test runs, flaking the unit/coverage/mutation/golden/property/rust
+  # jobs. CARGO_NET_RETRY makes cargo retry each failed download up to 10x
+  # (the single most effective fix); GIT_FETCH_WITH_CLI uses the system
+  # git for git-source fetches, which respects these retries and is more
+  # robust to mid-stream resets than cargo's built-in libgit2 transport.
+  # Pure download-retry behaviour — changes NOTHING about what is built or
+  # run (CI-only; no app/engine/coverage impact). Workflow-level so every
+  # job that builds a Rust wheel inherits it automatically.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # Reproducibility (matches REQUIREMENTS.md NFR-DET-001)
   PYTHONHASHSEED: "0"
   PYTHONDONTWRITEBYTECODE: "1"
@@ -161,13 +176,39 @@ jobs:
         # actually importable.
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # BruteX's 52-condition vocab delegates to the shared Rust core
         # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
         # + maturin/abi3 build as fno-math above (identical edition 2024 /
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -225,13 +266,39 @@ jobs:
         # rust/fno-math/pyproject.toml's [build-system] requires) to
         # build the cdylib + install it into the env so the unit tests
         # can `import fno_math`.
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # BruteX's 52-condition vocab delegates to the shared Rust core
         # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
         # + maturin/abi3 build as fno-math above (identical edition 2024 /
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest with coverage gate
         run: |
           # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
@@ -1697,13 +1764,39 @@ jobs:
         # brutex.orchestrator.* module must install the Rust extension.
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # BruteX's 52-condition vocab delegates to the shared Rust core
         # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
         # + maturin/abi3 build as fno-math above (identical edition 2024 /
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -1746,13 +1839,39 @@ jobs:
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # BruteX's 52-condition vocab delegates to the shared Rust core
         # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
         # + maturin/abi3 build as fno-math above (identical edition 2024 /
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -1804,13 +1923,39 @@ jobs:
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # BruteX's 52-condition vocab delegates to the shared Rust core
         # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
         # + maturin/abi3 build as fno-math above (identical edition 2024 /
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement, including
         # test_execution_driver_golden.py (DEC-EXEC-GOLDEN-PIN-001) — the frozen
@@ -2017,9 +2162,22 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build wheel + verify the Python binding is bit-identical (Phase 2a)
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the maturin wheel build
+        # (the cargo download point) up to 3 times. POSIX sh; builds the
+        # same wheel — no test/coverage change.
         run: |
           pip install maturin
-          maturin build --release --out dist
+          n=0
+          until maturin build --release --out dist; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "maturin build failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "maturin build failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
           pip install dist/*.whl
           python ../../scripts/check_vocab_rust_parity.py
 
@@ -2059,9 +2217,25 @@ jobs:
       - name: Install brutex[data,ui] — the make run set (NO dev)
         run: pip install -e ".[data,ui]"
       - name: Build both Rust kernels (the make run way)
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry each wheel build up to
+        # 3 times. POSIX sh; installs exactly the same kernels.
         run: |
-          pip install ./rust/fno-math
-          pip install ./rust/trading-core
+          install_with_retry() {
+            crate="$1"
+            n=0
+            until pip install "$crate"; do
+              n=$((n + 1))
+              if [ "$n" -ge 3 ]; then
+                echo "pip install $crate failed after 3 attempts" >&2
+                return 1
+              fi
+              echo "pip install $crate failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
+          }
+          install_with_retry ./rust/fno-math
+          install_with_retry ./rust/trading-core
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
           python -c "import trading_core, fno_math; print('kernels OK')"
@@ -2126,14 +2300,40 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # The sweep-resume chaos suite (DEC-CHAOS-SWEEP-LAKE-001 #585) drives the
         # real evaluate path, whose 52-condition vocabulary delegates to
         # trading_core.evaluate_with_levels (brutex.vocabulary.evaluator imports
         # it at module load). Same dtolnay/rust-toolchain@stable + maturin/abi3
         # build as fno-math above; mirrors the test/property/golden/bench jobs.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -2463,13 +2663,39 @@ jobs:
         # at module load; mutmut runs pytest which imports orchestrator.
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # BruteX's 52-condition vocab delegates to the shared Rust core
         # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
         # + maturin/abi3 build as fno-math above (identical edition 2024 /
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1

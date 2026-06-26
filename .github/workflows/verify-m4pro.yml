@@ -41,6 +41,16 @@ concurrency:
 permissions:
   contents: read
 
+# Cargo network resilience (CI-only flake hardening) — see ci.yml for the
+# rationale. crates.io downloads flake intermittently; CARGO_NET_RETRY makes
+# cargo retry each failed download up to 10x, GIT_FETCH_WITH_CLI uses the
+# system git for git-source fetches. Pure download-retry behaviour — changes
+# nothing about what is built or run. Workflow-level so the bootstrap step's
+# maturin-develop builds inherit it.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   m4pro-full-verification:
     # Gated to the self-hosted M4 Pro runner. If no runner with this label set
@@ -84,8 +94,24 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[dev,optimize]"
           pip install maturin
-          (cd rust/fno-math && maturin develop --release)
-          (cd rust/trading-core && maturin develop --release)
+          # Belt-and-suspenders crates.io flake guard (on top of the
+          # workflow-level CARGO_NET_RETRY=10): retry each maturin build up to
+          # 3 times. POSIX sh; builds the same kernels.
+          build_with_retry() {
+            dir="$1"
+            n=0
+            until (cd "$dir" && maturin develop --release); do
+              n=$((n + 1))
+              if [ "$n" -ge 3 ]; then
+                echo "maturin develop ($dir) failed after 3 attempts" >&2
+                return 1
+              fi
+              echo "maturin develop ($dir) failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
+          }
+          build_with_retry rust/fno-math
+          build_with_retry rust/trading-core
 
       - name: Lint + format (ruff)
         run: |
