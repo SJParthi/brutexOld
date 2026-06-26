@@ -230,7 +230,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dashboard-latency-jlzt1n` (**DEC-DASHBOARD-NAV-LATENCY-001, MIGRATION.md #933** — the
+- **Active branch:** `claude/pull-health-wiring-jlzt1n` (**DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
+  live pull-health monitor shipped DORMANT in #893 (DEC-PULL-HEALTH-MONITOR-001 — the `PullHealthMonitor` + the
+  `_observe_rate(..., monitor=None)` seam, but NO production build site constructed one, so it watched NOTHING on a
+  real pull) is now BOUND at the dashboard live-pull build site, so it actually runs on every real pull — the same
+  dormant-feature fix #934 just applied to the raw-data-integrity hook. NEW best-effort
+  `pull_controller._build_pull_health_monitor(controller)` wires a `PullHealthMonitor` to the process-global
+  `MetricRegistry` (`/metrics` gauges) + a `SweepAlerter.pull_degraded` Telegram alert callback (silent no-op when
+  Telegram is disabled) + the resolved `resolve_pool_size()`, returning `None` for a dry-run (no controller) and
+  swallowing any construction error → `None` so binding it can NEVER block/slow/crash a pull; BOTH `pull_all_spot` +
+  `pull_candles` build it after `_live_rate_runtime` and thread it into their `_observe_rate(..., _pull_health_monitor)`
+  tick (the seam already accepted `monitor` since #893 — this is the BINDING, not the seam). HONEST: thresholds are
+  operator-tunable HEURISTICS not vendor limits, a breach is an OBSERVATION + alert not auto-remediation; wires the
+  DASHBOARD pull path (the only path with a rate-observe tick) — the CLI `brutex fetch` path has no `_observe_rate`
+  seam, so a CLI monitor is a SEPARATE follow-up, NOT claimed. `_build_pull_health_monitor` 100% line+branch (all
+  three branches); NEW `test_dashboard_pull_health_wiring.py` (5 tests incl. an end-to-end breach → one `pull_degraded`
+  push through the real `_observe_rate` seam); ruff/ruff-format/`mypy --strict`/`pyright` clean on the touched file.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior merged — **DEC-DASHBOARD-NAV-LATENCY-001, MIGRATION.md #933** — the
   three remaining UNCACHED dashboard pollers (`/api/v1/coverage`, `/api/v1/universe/completeness`,
   `/api/v1/universe/mapping-integrity`) are now memoised behind a COMPOSITE (write-generation,
   instrument-master-revision) token, so a repeat poll is an O(1) handoff instead of a full O(datasets)+ledger
