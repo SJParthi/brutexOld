@@ -455,6 +455,19 @@ class ParquetWriter:
         to a freshly-rounded incoming bar even if the partition predates
         DEC-SPOT-PRICE-2DP-001 (any 4-decimal remnant rounds to the same 2dp),
         keeping re-pulls idempotent and converging the lake to clean 2dp.
+
+        Performance (DEC-WRITER-COLUMNAR-4A-001): the reconstruction extracts each
+        column ONCE via :meth:`polars.Series.to_list` and zips the per-row scalars,
+        rather than ``df.iter_rows(named=True)`` (one Python dict allocated per row).
+        ``to_list`` yields the SAME Python scalar types per cell — ``float`` for the
+        OHLC columns, the same ``datetime`` (UTC ``ZoneInfo``) key, ``int`` /
+        ``None`` for volume / open_interest — so the reconstructed
+        ``Decimal(str(float))`` value, the ``_tick_round`` snap, and the resulting
+        ``{timestamp: CandleBar}`` mapping are BYTE-IDENTICAL to the per-row path
+        (idempotence preserved, CLAUDE.md Golden Rule #7). This is the
+        byte-preserving cut of the GIL-bound merge READ — the per-row dict build is
+        gone; the Decimal reconstruction itself is unchanged (that float→Decimal math
+        is the byte contract — a switch to float math is explicitly out of scope here).
         """
         try:
             import polars as pl
@@ -470,17 +483,27 @@ class ParquetWriter:
         # pull-wide stop, not a raw mid-merge crash (DEC-LAKE-WRITE-HALT-001).
         with lake_write_guard():
             df = pl.read_parquet(dest)
+            # COLUMN-wise extraction (one Series.to_list per column) instead of a
+            # per-row dict — the byte-preserving speed cut (DEC-WRITER-COLUMNAR-4A-001).
+            timestamps = df["timestamp"].to_list()
+            opens = df["open"].to_list()
+            highs = df["high"].to_list()
+            lows = df["low"].to_list()
+            closes = df["close"].to_list()
+            volumes = df["volume"].to_list()
+            ois = df["open_interest"].to_list()
             out: dict[datetime, CandleBar] = {}
-            for row in df.iter_rows(named=True):
-                oi = row["open_interest"]
+            for ts, op, hi, lo, cl, vol, oi in zip(
+                timestamps, opens, highs, lows, closes, volumes, ois, strict=True
+            ):
                 bar = _tick_round(
                     CandleBar(
-                        timestamp=row["timestamp"],
-                        open=Decimal(str(row["open"])),
-                        high=Decimal(str(row["high"])),
-                        low=Decimal(str(row["low"])),
-                        close=Decimal(str(row["close"])),
-                        volume=int(row["volume"]),
+                        timestamp=ts,
+                        open=Decimal(str(op)),
+                        high=Decimal(str(hi)),
+                        low=Decimal(str(lo)),
+                        close=Decimal(str(cl)),
+                        volume=int(vol),
                         open_interest=None if oi is None else int(oi),
                     )
                 )
