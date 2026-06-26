@@ -22,7 +22,7 @@ One genuinely precise observation I can offer, and I will verify it properly bef
 
 **3) The call**
 
-Yes — Wednesday July 1 works, and I'd be glad to chat live. What time and timezone suit your engineer? I will make it work.
+Thank you — I would genuinely welcome the chance to chat live, and Wednesday, July 1 works well for me if it still suits your team. One small scheduling note, only to make things easier: I am based in IST (India, UTC+5:30), so a slot in your morning generally lands in my evening and overlaps nicely. Please do not rearrange anything on my account, though — whatever time is easiest for you and your engineer, I will gladly make it work. If it helps, feel free to send a calendar invite to this email at whatever time fits your schedule.
 
 I also have more findings from continued use of the beta; I will send them as a separate, evidence-backed batch, and I would be glad to walk through them live on the call.
 
