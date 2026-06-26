@@ -30,8 +30,8 @@ always know what's happening.**
 | A faster way to write each downloaded file that keeps the data byte-for-byte identical — a safe first step toward much quicker pulls. | Downloads start getting faster without changing a single number in your data. | ✅ Merged | #891 |
 | A live "pull health" monitor that can tell whether a slow download is **our** software holding it back or the broker simply rejecting requests. | When a pull is slow, you'll know exactly whose fault it is — so it gets fixed, not guessed. | ✅ Merged | #893 |
 | Smart caching for the dashboard so the Coverage, Completeness and Mapping pages stop re-scanning everything on every refresh. | The dashboard stays snappy even while a big download is running. | ✅ Merged | #894 |
-| Switching between candle views (spot ↔ F&O ↔ options) is now instant — it no longer re-walks the whole data lake on every tab click. | Browsing your data feels immediate, not laggy. | ✅ Merged | #896 |
-| The candle picker now lets you drill down by symbol → timeframe (and by underlying → expiry → strike for F&O) instead of one giant flat dropdown. | Finding the exact contract or timeframe you want is fast and obvious. | ✅ Merged | #897 |
+| Your EAP feedback evidence doc + product scoreboard, published to GitHub. | A clear, shareable record for the Claude Code team. | ✅ Merged | #896 |
+| CI auto-retries flaky crates.io downloads so transient network blips stop failing builds. | Our build pipeline stops breaking over random network hiccups. | ✅ Merged | #897 |
 
 ---
 
@@ -47,7 +47,7 @@ always know what's happening.**
 
 | What changed (plain English) | Why you care | Status | PR |
 |---|---|---|---|
-| A raw-data integrity layer that proves every downloaded bar is internally consistent (no impossible prices, no gaps where there should be bars). | Stronger automatic proof that the data you trust is actually clean. | 🟡 In progress (a PR is being opened) | — |
+| Hash the raw Groww response on every pull and store it alongside the data, so each pull PROVES the stored lake equals exactly what the broker sent — real-time tamper/drift detection. | Mathematical proof your data is never altered. | 🟡 In progress | — |
 | The big one: a new file format that should make downloads roughly 5× faster — but it rewrites how data is stored, so it needs a formal sign-off first to guarantee old results still reproduce exactly. | Much faster downloads, with a promise that nothing already saved ever changes. | 🔮 Not started (needs ADR sign-off) | — |
 | Plugging the new "pull health" monitor directly into the live download so it watches every real pull automatically. | The slowdown detector becomes always-on, not a manual check. | 🔮 Not started | — |
 | Making dashboard pages swap content in place instead of fully reloading — the last big source of page lag. | The final "nothing is ever slow" fix for the whole dashboard. | 🔮 Not started | — |
