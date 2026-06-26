@@ -40,10 +40,20 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+
+# The harness drives the REAL ParquetWriter / ingest_spot / catalog stack, which need
+# the `[data]` extra (polars + duckdb). The O(1)-NFR `bench` CI job installs only
+# `.[dev]` (it runs the whole `tests/bench` dir), so importorskip these FIRST — the
+# established repo pattern (test_catalog_reconcile_o1.py / test_parquet_write_o1.py) —
+# so this heavyweight WALL-CLOCK throughput gate SKIPS cleanly there (it is NOT an
+# O(1)-ratio test and must not be asserted against the p99-ratio gate), and RUNS where
+# `.[data]` is installed. The skip must precede the `tests.bench.pull_harness` import
+# below, which transitively imports the polars/duckdb-backed lake writer.
+pytest.importorskip("polars", reason="the at-scale pull harness writes a real Parquet lake")
+pytest.importorskip("duckdb", reason="the harness ParquetBarSink catalog path imports duckdb")
+
 from brutex.adapters.groww.chunks import window_days_for_interval
-from brutex.adapters.groww.constants import (
-    GROWW_RATE_LIMIT_RPS_CEILING,
-)
+from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
 from brutex.adapters.ingest_common import tile_windows
 from brutex.adapters.rate_common import BURST
 
