@@ -769,6 +769,18 @@ jobs:
           else
             echo "(brutex.observability.sla test file not present yet — gate inactive)"
           fi
+          # DEC-PULL-WORKER-HEARTBEAT-001 (2026-06-26, MIGRATION entry #936):
+          # ratchet brutex.observability.pull_heartbeat (the per-worker
+          # heartbeat + live pull-progress signal) into the strict
+          # per-module 100% gate. Unit + property (concurrent threads
+          # stamping beats) + stuck-detection tests cover beat/scan/
+          # progress, the edge-triggered stuck latch, the best-effort
+          # swallows, gauge mirroring, and the window-tick wrap.
+          if compgen -G "tests/unit/test_observability_pull_heartbeat.py" > /dev/null; then
+            pytest --cov=brutex.observability.pull_heartbeat --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_pull_heartbeat.py
+          else
+            echo "(brutex.observability.pull_heartbeat test file not present yet — gate inactive)"
+          fi
           # DEC-WATCHDOG-001 (2026-05-25, MIGRATION entry #240):
           # ratchet brutex.observability.watchdog (the hung-worker
           # heartbeat detector) into the strict per-module 100% gate.
@@ -1531,7 +1543,7 @@ jobs:
           # covered by tests/unit/test_dashboard_pull_health_wiring.py, which MUST
           # join the per-module gate so its coverage of those lines registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_heartbeat_wiring.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi

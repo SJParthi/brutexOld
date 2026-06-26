@@ -93,6 +93,7 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
+from brutex.observability.pull_heartbeat import make_heartbeat_window_tick
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
@@ -105,6 +106,7 @@ if TYPE_CHECKING:
     from brutex.data.models import CandleBar
     from brutex.data.spot_daily_resample import DailyDeriveTarget
     from brutex.observability.pull_health import PullHealthMonitor
+    from brutex.observability.pull_heartbeat import PullHeartbeat
 
 _LOG = structlog.get_logger(__name__)
 
@@ -914,12 +916,13 @@ def _observe_rate(
     controller: RateController | None,
     adapter: MarketAdapter,
     monitor: PullHealthMonitor | None = None,
+    heartbeat: PullHeartbeat | None = None,
 ) -> None:
     """Push a live pull's adaptive rate + measured throughput to the dashboard panel.
 
-    A no-op for a dry-run / injected-factory pull (no *controller*) or when neither an
-    observer nor a *monitor* is wired (the default). On a live pull it builds the
-    controller's ``snapshot()`` (current_rps + recent 429s) and the transport
+    A no-op for a dry-run / injected-factory pull (no *controller*) or when none of an
+    observer, a *monitor*, or a *heartbeat* is wired (the default). On a live pull it
+    builds the controller's ``snapshot()`` (current_rps + recent 429s) and the transport
     ``CallMeter``'s ``snapshot()`` (effective_rps + latency p95 + the instantaneous
     ``rps_1s`` / ``rps_1s_max`` gauge) and:
 
@@ -928,12 +931,18 @@ def _observe_rate(
       rate + its peak on the dashboard, not just in ``/logs``;
     * feeds them to *monitor* (:class:`~brutex.observability.pull_health.PullHealthMonitor`
       — DEC-PULL-HEALTH-MONITOR-001), which WATCHES the same snapshots for a degraded /
-      stalled pull and fires a best-effort Telegram alert on a breach edge.
+      stalled pull and fires a best-effort Telegram alert on a breach edge;
+    * ticks *heartbeat* (:class:`~brutex.observability.pull_heartbeat.PullHeartbeat` —
+      DEC-PULL-WORKER-HEARTBEAT-001) by calling :meth:`PullHeartbeat.scan` so an
+      INDIVIDUAL fan-out worker that has silently wedged (no per-window beat past the
+      stale threshold) is flagged + alerted on the SAME observe cadence — the per-worker
+      liveness the aggregate rate monitor cannot see.
 
-    The monitor's :meth:`~brutex.observability.pull_health.PullHealthMonitor.observe` is
-    itself best-effort (never raises), so this seam can never block or crash the pull.
+    The monitor's :meth:`~brutex.observability.pull_health.PullHealthMonitor.observe` and
+    the heartbeat's :meth:`~brutex.observability.pull_heartbeat.PullHeartbeat.scan` are
+    each best-effort (never raise), so this seam can never block or crash the pull.
     """
-    if controller is None or (rate_observer is None and monitor is None):
+    if controller is None or (rate_observer is None and monitor is None and heartbeat is None):
         return
     meter = getattr(getattr(adapter, "client", None), "meter", None)
     controller_snap = controller.snapshot()
@@ -942,6 +951,8 @@ def _observe_rate(
         rate_observer(controller_snap, meter_snap)
     if monitor is not None:
         monitor.observe(controller_snap, meter_snap)
+    if heartbeat is not None:
+        heartbeat.scan()
 
 
 def _build_pull_health_monitor(
@@ -992,6 +1003,67 @@ def _build_pull_health_monitor(
         )
     except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
         _LOG.exception("pull_health.monitor_build_failed")
+        return None
+
+
+def _build_pull_heartbeat(
+    controller: RateController | None,
+    *,
+    units_total: int | None = None,
+) -> PullHeartbeat | None:
+    """Build the live pull's :class:`PullHeartbeat`, or ``None`` (best-effort).
+
+    BINDS the per-worker heartbeat at the dashboard live-pull build site
+    (DEC-PULL-WORKER-HEARTBEAT-001). The aggregate :class:`PullHealthMonitor`
+    (#932 / #935) watches the rate but cannot see an INDIVIDUAL fan-out worker that
+    silently wedged; this wires a registry that each per-window ``on_window`` tick
+    stamps + the :func:`_observe_rate` cadence scans, so a wedged worker is flagged +
+    alerted. Wired to the live rails: the process-global
+    :class:`~brutex.observability.metrics.MetricRegistry` (so ``/metrics`` carries the
+    live pull-progress gauges) and the
+    :meth:`~brutex.notifications.sweep_alerts.SweepAlerter.pull_degraded` Telegram alert
+    callback (so a newly-stuck worker reaches the operator — a silent no-op when
+    Telegram is disabled, the default).
+
+    Returns ``None`` — disabling the heartbeat without affecting the pull — when there is
+    no live *controller* (a dry-run / injected-factory pull has no fan-out worth
+    scanning), so :func:`_observe_rate`'s ``heartbeat is None`` arm is a no-op. The whole
+    body is GUARDED: an import / construction error is swallowed + logged and yields
+    ``None``, so binding the heartbeat can NEVER block, slow, or crash the pull
+    (Golden Rule #10).
+
+    Honest envelope: the stale threshold is an operator-tunable heuristic, NOT a vendor
+    limit; a stuck flag is an OBSERVATION + alert, never an auto-remediation — the pull
+    continues unchanged whether or not a worker is flagged.
+    """
+    if controller is None:
+        return None
+    try:
+        from brutex.notifications.sweep_alerts import SweepAlerter
+        from brutex.observability.metrics import get_registry
+        from brutex.observability.pull_heartbeat import PullHeartbeat
+
+        alerter = SweepAlerter()
+
+        def _on_stuck(worker_id: str, age_s: float, units: int) -> None:
+            """Route a newly-stuck worker to the best-effort ``pull_degraded`` alert."""
+            alerter.pull_degraded(
+                rule="pull.worker_stuck",
+                achieved=float(units),
+                allowed=age_s,
+                detail=(
+                    f"worker {worker_id} made no progress for {age_s:.0f}s "
+                    "(wedged — OUR pipeline; the rest of the pull continues)"
+                ),
+            )
+
+        return PullHeartbeat(
+            registry=get_registry(),
+            units_total=units_total,
+            on_stuck=_on_stuck,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull_heartbeat.build_failed")
         return None
 
 
@@ -1304,6 +1376,11 @@ def pull_all_spot(
         # (DEC-PULL-HEALTH-WIRING-001) — watches every _observe_rate tick + alerts on a
         # degraded/stalled pull; best-effort (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
+        # BIND the per-worker heartbeat (DEC-PULL-WORKER-HEARTBEAT-001) — each per-window
+        # ``on_window`` beat stamps the worker; _observe_rate scans it so a SILENTLY
+        # WEDGED worker the aggregate rate monitor cannot see is flagged + alerted;
+        # best-effort (None for a dry-run, never crashes/slows the pull).
+        _pull_heartbeat = _build_pull_heartbeat(_rate_controller)
         # NO per-pull RenewToken here (DEC-DHAN-RENEW-SINGLE-OWNER-001). RenewToken
         # ROTATES — it mints a new token and INVALIDATES the presented one
         # (DEC-DHAN-RENEWTOKEN-ROTATE-001). A renew fired at EVERY pull start (with
@@ -1327,6 +1404,10 @@ def pull_all_spot(
         # mode (single writer, no race), so the per-pair flush below is suppressed;
         # otherwise the per-pair flush is byte-unchanged.
         live_sync = make_live_sync(ledger, ledger_flush, on_ledger_sync)
+        # Wrap the per-window live-sync so each WINDOW also stamps a worker heartbeat
+        # (DEC-PULL-WORKER-HEARTBEAT-001) — a one-line additive wrap; a None heartbeat
+        # returns live_sync unchanged so the dry-run / no-heartbeat path is byte-equal.
+        live_sync = make_heartbeat_window_tick(_pull_heartbeat, live_sync)
         live_sync_active = on_ledger_sync is not None and ledger is not None
 
         def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
@@ -1607,7 +1688,9 @@ def pull_all_spot(
         for phase_report in phase_reports:
             merged_pairs.update(phase_report.pairs)
             failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
-        _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
+        _observe_rate(
+            rate_observer, _rate_controller, adapter, _pull_health_monitor, _pull_heartbeat
+        )
         # Groww has NO no-data marker — unlike the previous vendor's no-data 400
         # marker, which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we
         # do not invent a Groww twin, so every terminal Groww error is a uniform terminal
@@ -2003,6 +2086,14 @@ def pull_candles(
         # (DEC-PULL-HEALTH-WIRING-001) — watches every _observe_rate tick + alerts on a
         # degraded/stalled pull; best-effort (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
+        # BIND the per-worker heartbeat (DEC-PULL-WORKER-HEARTBEAT-001) — the per-window
+        # beat below stamps each worker; _observe_rate scans it so a wedged worker is
+        # flagged; best-effort (None for a dry-run, never crashes/slows the pull).
+        _pull_heartbeat = _build_pull_heartbeat(_rate_controller)
+        # The per-window heartbeat tick (a no-op inner — this path advances the bar via
+        # _progress_then_flush per pair, not per window; the heartbeat only needs the
+        # liveness beat). A None heartbeat yields a no-op (byte-equal to the prior path).
+        _heartbeat_window = make_heartbeat_window_tick(_pull_heartbeat, lambda: None)
         # NO per-pull RenewToken here (DEC-DHAN-RENEW-SINGLE-OWNER-001) — RenewToken
         # ROTATES + invalidates the presented token, so an ungated per-pull renew
         # killed the live token and the pull ran on the corpse (DH-906). The 12h
@@ -2045,6 +2136,7 @@ def pull_candles(
                 on_progress=_progress_then_flush,
                 ledger=ledger,
                 run_parallel=run_parallel,
+                on_window=_heartbeat_window,
                 symbol_windows=phase_windows,
             )
             merged_pairs.update(phase_report.pairs)
@@ -2111,7 +2203,9 @@ def pull_candles(
                 )
         finally:
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
-        _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
+        _observe_rate(
+            rate_observer, _rate_controller, adapter, _pull_health_monitor, _pull_heartbeat
+        )
 
         # Build one result per REQUESTED interval (the injected *intervals*, ``1m`` only
         # — DEC-1MINUTE-ONLY-DERIVE-1DAY-001). The label map gives

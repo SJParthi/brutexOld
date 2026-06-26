@@ -230,7 +230,25 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-health-wiring-jlzt1n` (**DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
+- **Active branch:** `claude/pull-heartbeat-jlzt1n` (**DEC-PULL-WORKER-HEARTBEAT-001, MIGRATION.md #936** — the
+  historical pull fan-out gains a per-worker HEARTBEAT + a live "X of Y done" pull-progress signal, so a SILENTLY
+  WEDGED worker (a hung socket / a stuck merge-read lock / a non-progressing retry loop) is now detected + alerted
+  instead of being invisible — closing the top open row the aggregate `PullHealthMonitor` (#932/#935) cannot see. NEW
+  `brutex/observability/pull_heartbeat.py` `PullHeartbeat` (a lock-protected registry: `beat(worker_id, units=)` O(1)
+  per completed unit; `scan()` flags any worker stale past an operator-tunable `stale_after_s` (default 120 s) → a
+  structlog WARNING + a `brutex_pull_workers_stuck` gauge + a best-effort `on_stuck` → `SweepAlerter.pull_degraded`
+  alert, edge-triggered ONCE per stuck spell via a per-worker latch; `progress()` exposes
+  `{units_done, units_total, workers_active, workers_stuck, oldest_beat_age_s}`) + a COMMON
+  `make_heartbeat_window_tick` that wraps the spot pull's `on_window` `WindowTick` to beat-then-delegate. WIRED at BOTH
+  live build sites via NEW `_build_pull_heartbeat` (mirrors `_build_pull_health_monitor`) + an optional `heartbeat`
+  param on `_observe_rate` that ticks `scan()`. HONEST: `beat` is O(1), `scan`/`progress` are O(W) (≤ pool width,
+  NOT O(1)); DETECT-and-WARN, NOT auto-remediation (a flagged worker is reported, never killed); best-effort
+  throughout (a heartbeat failure can NEVER slow/crash the pull); `stale_after_s` is an operator-tunable heuristic.
+  `pull_heartbeat.py` 100% line+branch (132/14); `pull_controller.py` stays 100% (428/100); NEW
+  `test_observability_pull_heartbeat.py` (23 — unit + property concurrency + stuck-detection + integration) +
+  `test_dashboard_pull_heartbeat_wiring.py` (6); ruff/ruff-format/`mypy --strict`/`pyright` clean; 345 pull/ingest/
+  observability regression tests green. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior
+  merged — **DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
   live pull-health monitor shipped DORMANT in #893 (DEC-PULL-HEALTH-MONITOR-001 — the `PullHealthMonitor` + the
   `_observe_rate(..., monitor=None)` seam, but NO production build site constructed one, so it watched NOTHING on a
   real pull) is now BOUND at the dashboard live-pull build site, so it actually runs on every real pull — the same
