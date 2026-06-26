@@ -50,8 +50,14 @@ def audit_path(tmp_path: Path) -> Path:
 
 class TestConstants:
     def test_genesis_prev_hash_is_64_zeros(self) -> None:
+        # Byte-exact value + type pin. The `str` type assertion kills the
+        # `"0" * 64` -> `"0" / 64` mutation (a `str.__truediv__` that would
+        # not yield a 64-char string), and the all-chars-zero check kills a
+        # repeat-count / fill-char mutation, on this module-level constant.
+        assert isinstance(GENESIS_PREV_HASH, str)
         assert GENESIS_PREV_HASH == "0" * 64
         assert len(GENESIS_PREV_HASH) == 64
+        assert set(GENESIS_PREV_HASH) == {"0"}
 
 
 # ────────────────────────────────────────────────────────────────────────
