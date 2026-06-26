@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from brutex.orchestrator.audit import (
     AuditChainCorruption,
     AuditEntry,
     AuditError,
+    AuditPayloadError,
     AuditWriteError,
     AuditWriter,
     read_entries,
@@ -814,3 +817,176 @@ class TestReadEntriesPins:
         entries = read_entries(audit_path)
         assert [e.action for e in entries] == ["A", "B"]
         assert verify_chain(audit_path) == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# RFC-safe JSON — NaN / Inf rejection (DEC-AUDIT-FSYNC-DURABILITY-001 #2)
+#
+# `json.dumps` defaults to `allow_nan=True`, emitting the bare tokens
+# `NaN` / `Infinity` / `-Infinity` — NOT valid RFC 8259 JSON. The audit
+# writer now serialises with `allow_nan=False` and maps the resulting
+# ValueError to AuditPayloadError, so a non-finite metric value can never
+# be written into the tamper-evident chain.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRfcSafeJson:
+    @pytest.mark.parametrize(
+        "bad_value",
+        [float("nan"), float("inf"), float("-inf")],
+        ids=["nan", "inf", "-inf"],
+    )
+    def test_append_rejects_non_finite_payload(self, audit_path: Path, bad_value: float) -> None:
+        # A NaN / Inf metric value is REFUSED at append time with a clear
+        # domain error — never silently written as non-RFC JSON.
+        with (
+            AuditWriter.open(audit_path) as log,
+            pytest.raises(AuditPayloadError, match="not RFC 8259-serialisable"),
+        ):
+            log.append(action="RUN_STATS", subject="s", payload={"sharpe": bad_value})
+
+    def test_rejected_append_does_not_corrupt_the_chain(self, audit_path: Path) -> None:
+        # The bad append must leave the on-disk chain untouched: a good
+        # entry before it, a good entry after it, and the chain still
+        # verifies with EXACTLY the two good entries (the bad one absent).
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", payload={"ok": 1.0}, ts_utc=1.0)
+            with pytest.raises(AuditPayloadError):
+                log.append(action="BAD", subject="s2", payload={"x": math.inf}, ts_utc=2.0)
+            after = log.append(action="C", subject="s3", payload={"ok": 2.0}, ts_utc=3.0)
+        # The rejected append did NOT advance the chain — `after` is seq 1.
+        assert after.seq == 1
+        entries = read_entries(audit_path)
+        assert [e.action for e in entries] == ["A", "C"]
+        assert [e.seq for e in entries] == [0, 1]
+        assert verify_chain(audit_path) == 2
+
+    def test_nested_non_finite_is_rejected(self, audit_path: Path) -> None:
+        # The check is recursive (json.dumps walks the whole structure) —
+        # a NaN buried in a nested list/dict is caught too.
+        with (
+            AuditWriter.open(audit_path) as log,
+            pytest.raises(AuditPayloadError),
+        ):
+            log.append(
+                action="A",
+                subject="s",
+                payload={"nested": {"metrics": [1.0, float("nan"), 3.0]}},
+            )
+
+    def test_canonical_json_rejection_message_pinned_byte_exact(self, audit_path: Path) -> None:
+        # Pin the full message (prefix + CPython's own ValueError text,
+        # captured live so it survives wording changes but kills the XX-wrap).
+        with pytest.raises(ValueError) as raw_exc:
+            json.dumps(float("nan"), allow_nan=False)
+        with (
+            AuditWriter.open(audit_path) as log,
+            pytest.raises(AuditPayloadError) as exc_info,
+        ):
+            log.append(action="A", subject="s", payload={"x": float("nan")})
+        assert str(exc_info.value) == (
+            "Audit payload is not RFC 8259-serialisable "
+            f"(NaN/Infinity not permitted): {raw_exc.value}"
+        )
+
+    def test_finite_floats_still_serialise(self, audit_path: Path) -> None:
+        # The guard must NOT reject legitimate finite floats — the common
+        # case (a real Sharpe / p-value) must still write + verify.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s", payload={"sharpe": 1.5, "p": 0.0})
+        assert verify_chain(audit_path) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Kill-recovery / fsync durability (DEC-AUDIT-FSYNC-DURABILITY-001 #1 + #3)
+#
+# A crash mid-append can leave a torn final line (the bytes were written
+# but the process died before the line + newline + fsync completed). The
+# chain reader must DETECT the broken/partial tail and the chain must stay
+# verifiable up to the last DURABLE record.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestKillRecovery:
+    def test_torn_last_line_is_detected_not_silently_accepted(self, audit_path: Path) -> None:
+        # Simulate a crash that wrote a PARTIAL final line (no closing
+        # brace / newline) after two durable entries. verify_chain must
+        # RAISE (AuditError) — it must never silently accept a torn tail
+        # as a valid entry.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", ts_utc=1.0)
+            log.append(action="B", subject="s2", ts_utc=2.0)
+        # Append a torn (truncated, no newline) partial line, as a crash
+        # between write() and the next flush/fsync would leave.
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write('{"seq": 2, "prev_hash": "abc", "ts_utc": 3.0, "act')  # torn
+        with pytest.raises(AuditError, match="Malformed audit line"):
+            verify_chain(audit_path)
+
+    def test_durable_prefix_recovers_via_resume_after_torn_tail(self, audit_path: Path) -> None:
+        # The KEY regression: after a torn tail, the operator recovers by
+        # truncating the partial line to the last newline (the standard
+        # JSONL recovery), and the durable prefix verifies + resumes
+        # unbroken. This proves the chain remains usable up to the last
+        # durable record after a crash.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", ts_utc=1.0)
+            log.append(action="B", subject="s2", ts_utc=2.0)
+        durable = audit_path.read_text(encoding="utf-8")
+        # Crash writes a torn partial third line.
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write('{"seq": 2, "prev_hash": "broken')  # torn, no newline
+
+        # Recovery: drop the partial trailing line (everything after the
+        # last newline) — the durable, newline-terminated prefix is intact.
+        recovered = audit_path.read_text(encoding="utf-8")
+        last_nl = recovered.rfind("\n")
+        audit_path.write_text(recovered[: last_nl + 1], encoding="utf-8")
+        assert audit_path.read_text(encoding="utf-8") == durable
+
+        # The durable prefix verifies to its exact length …
+        assert verify_chain(audit_path) == 2
+        # … and resume continues the chain unbroken from the last record.
+        with AuditWriter.open(audit_path, resume=True) as log:
+            entry = log.append(action="C", subject="s3", ts_utc=3.0)
+        assert entry.seq == 2
+        assert verify_chain(audit_path) == 3
+
+    def test_append_calls_fsync_per_record(
+        self, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Durability proof: each append fsyncs the record (O(1) per record,
+        # not per byte) — exactly one fsync of the writer's fd per append.
+        calls: list[int] = []
+        real_fsync = os.fsync
+
+        def _spy_fsync(fd: int) -> None:
+            calls.append(fd)
+            real_fsync(fd)
+
+        monkeypatch.setattr("brutex.orchestrator.audit.os.fsync", _spy_fsync)
+        with AuditWriter.open(audit_path) as log:
+            target_fd = log._fp.fileno()  # pyright: ignore[reportPrivateUsage]
+            log.append(action="A", subject="s1", ts_utc=1.0)
+            log.append(action="B", subject="s2", ts_utc=2.0)
+            # Two appends → at least two fsyncs of the log's own fd (the
+            # context-manager close adds one more on top).
+            assert calls.count(target_fd) >= 2
+        assert verify_chain(audit_path) == 2
+
+    def test_fsync_oserror_on_append_is_suppressed_flush_still_durable(
+        self, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On a filesystem / sandbox that rejects fsync on an append fd, the
+        # OSError from os.fsync is SUPPRESSED (best-effort, same as close())
+        # — the flush above already reached the kernel, so the append
+        # succeeds and the chain verifies. A genuine WRITE OSError is still
+        # wrapped (covered by test_append_wraps_write_oserror).
+        def _boom_fsync(_fd: int) -> None:
+            raise OSError("fsync not supported on this fs")
+
+        monkeypatch.setattr("brutex.orchestrator.audit.os.fsync", _boom_fsync)
+        with AuditWriter.open(audit_path) as log:
+            entry = log.append(action="A", subject="s", ts_utc=1.0)
+        assert entry.seq == 0
+        assert verify_chain(audit_path) == 1
