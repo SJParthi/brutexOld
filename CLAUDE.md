@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dashboard-latency-jlzt1n` (**DEC-DASHBOARD-NAV-LATENCY-001, MIGRATION.md #926** — the
+- **Active branch:** `claude/dashboard-latency-jlzt1n` (**DEC-DASHBOARD-NAV-LATENCY-001, MIGRATION.md #933** — the
   three remaining UNCACHED dashboard pollers (`/api/v1/coverage`, `/api/v1/universe/completeness`,
   `/api/v1/universe/mapping-integrity`) are now memoised behind a COMPOSITE (write-generation,
   instrument-master-revision) token, so a repeat poll is an O(1) handoff instead of a full O(datasets)+ledger
