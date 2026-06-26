@@ -364,10 +364,11 @@ class TestWriteAndSettle:
 
 
 class TestErrorBackChannel:
-    def test_generic_write_error_delivered_to_settle_and_reraised(self) -> None:
-        # A generic write error is (a) delivered to settle as the back-channel result
-        # AND (b) latched + re-raised on close, so the producer's quarantine path sees it
-        # — never silently dropped (the #919 fix / constraint #4).
+    def test_generic_write_error_delivered_to_settle_not_reraised(self) -> None:
+        # A NON-halt write error is delivered to settle as the back-channel result (so the
+        # caller quarantines the ONE contract), but it is NOT latched / re-raised — a single
+        # per-contract write failure must never abort the whole pull (the #919 back-channel
+        # is preserved; DEC-FETCH-WRITE-OVERLAP-001 MAJOR-3 makes it non-fatal).
         boom = ValueError("disk wobble")
         wc, out, lock = _settling_consumer(_RaisingSink(boom), shards=2)
         wc.start()
@@ -379,8 +380,7 @@ class TestErrorBackChannel:
             bars=[_bar(1)],
             settle=_make_settle(out, lock),
         )
-        with pytest.raises(ValueError, match="disk wobble"):
-            wc.close()
+        wc.close()  # a non-halt error does NOT re-raise on close
         assert len(out) == 1
         result, error = out[0]
         assert result is None
@@ -398,11 +398,11 @@ class TestErrorBackChannel:
             bars=bars,
             settle=_make_settle(out, lock),
         )
-        with pytest.raises(KeyError):
-            wc.close()
+        wc.close()  # non-halt errors do NOT re-raise (one submit → one settle)
         assert len(out) == 1
         result, error = out[0]
         assert result is None
+        # The submit's settle receives the FIRST group's error (both groups raised KeyError).
         assert isinstance(error, KeyError)
 
 

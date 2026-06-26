@@ -112,6 +112,14 @@ _LOG = structlog.get_logger("brutex.adapters.groww.option_ingest")
 #: the SAME ``Callable[[], None]`` contract the spot spine uses.
 Pacer = Callable[[], None]
 
+#: Sink fired (on the writer thread) with a contract ``groww_symbol`` whose DEFERRED
+#: write-behind append FAILED, so the phase can EXCLUDE it from the clean/complete set
+#: after the consumer drains (DEC-FETCH-WRITE-OVERLAP-001 MAJOR-3). ``None`` in the
+#: synchronous path (a sync write failure raises inline → the normal quarantine). Must
+#: be thread-safe (it is called from a :class:`~brutex.data.write_consumer.WriteConsumer`
+#: writer thread).
+WriteFailureSink = Callable[[str], None]
+
 #: Optional per-contract minute-pull bounds, keyed by the contract ``groww_symbol``:
 #: ``{symbol: (start, end)}`` half-open fetch windows derived from the 1-day lake
 #: coverage (DEC-DERIV-MINUTE-BOUNDS-001 — see
@@ -263,22 +271,31 @@ def _clamped_window_key(
 
 def _make_consumer_settle(
     on_durable: Callable[[SinkAppendResult], object],
+    *,
+    on_write_failure: Callable[[], None] | None = None,
 ) -> Callable[[SinkAppendResult | None, BaseException | None], None]:
     """Adapt the synchronous post-write tail to a :class:`WriteConsumer` settle callback.
 
     On a SUCCESSFUL durable write (``error is None``) it runs *on_durable* (the shared
     conflict-log + ledger-record + ``on_success`` tail) — so the durable ledger is
     settled ONLY AFTER the bars are durably written (the durability-ordering invariant
-    of DEC-FETCH-WRITE-OVERLAP-001). On a write ERROR it does NOTHING (the window is
-    deliberately NOT settled — deferred to the next pull, the no-skip guarantee); the
-    error is already latched by the consumer and re-raised on the worker's next
-    ``submit`` / ``close``, so it still propagates to the pull's quarantine / halt path.
-    The callback NEVER raises — a raise here would die on the writer thread.
+    of DEC-FETCH-WRITE-OVERLAP-001). On a write ERROR it does NOT settle the ledger (the
+    window is deliberately left UNMARKED — deferred to the next pull, the no-skip
+    guarantee); the consumer also latches the error and re-raises it on the worker's next
+    ``submit`` / ``close``, so a global-stop (e.g. ``LakeWriteHalt``) still propagates to
+    the pull's halt path. ON TOP of that, *on_write_failure* (when wired) is fired so the
+    PHASE can record the contract symbol whose DEFERRED write failed and EXCLUDE it from
+    the clean/complete set AFTER the drain — closing the gap where the synchronous report
+    already counted the contract clean before the deferred write confirmed
+    (DEC-FETCH-WRITE-OVERLAP-001 MAJOR-3, the hostile-review fix). The callback NEVER
+    raises (a raise here would die on the writer thread) and must be thread-safe.
     """
 
     def settle(result: SinkAppendResult | None, error: BaseException | None) -> None:
         if error is None and result is not None:
             on_durable(result)
+        elif error is not None and on_write_failure is not None:
+            on_write_failure()
 
     return settle
 
@@ -303,6 +320,7 @@ def ingest_option_contract(
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     write_consumer: WriteConsumer | None = None,
+    write_failure_sink: WriteFailureSink | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -509,13 +527,25 @@ def ingest_option_contract(
         # ``len(bars)`` (the count the keep-first sink accepts), so the aggregate progress
         # report stays accurate; ``conflicts`` is logged in ``_settle`` post-write (not in
         # this progress-only report — the durable record is the ledger).
+        # MAJOR-3 (DEC-FETCH-WRITE-OVERLAP-001 hostile-review fix): a DEFERRED write
+        # error fires *write_failure_sink* with THIS contract's symbol on the writer
+        # thread, so the phase records it and EXCLUDES the contract from clean/complete
+        # AFTER the drain — the synchronous report below CANNOT know the deferred write's
+        # outcome yet, so without this a deferred write failure would leave the contract
+        # marked clean (a permanent missing-data gap the operator would never re-pull).
+        symbol = contract.symbol
+
+        def _on_write_failure() -> None:
+            if write_failure_sink is not None:
+                write_failure_sink(symbol)
+
         write_consumer.submit(
             exchange=exchange,
             segment=OPTION_SEGMENT,
-            symbol=contract.symbol,
+            symbol=symbol,
             interval=interval,
             bars=bars,
-            settle=_make_consumer_settle(_settle),
+            settle=_make_consumer_settle(_settle, on_write_failure=_on_write_failure),
         )
         return IngestReport(
             windows=1,
@@ -898,6 +928,7 @@ def run_groww_option_ingest(
     contract_windows: ContractWindows | None = None,
     run_parallel: RunParallel | None = None,
     write_consumer: WriteConsumer | None = None,
+    write_failure_sink: WriteFailureSink | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1026,6 +1057,7 @@ def run_groww_option_ingest(
                 now_ist=now_ist,
                 market=market,
                 write_consumer=write_consumer,
+                write_failure_sink=write_failure_sink,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}

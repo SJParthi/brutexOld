@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -176,32 +177,59 @@ def _write_consumer_enabled(env: Mapping[str, str] | None = None) -> bool:
     return raw.strip().lower() not in _WRITE_CONSUMER_OFF_TOKENS
 
 
+@dataclass(slots=True)
+class _WriteBehind:
+    """The write-behind handle a phase threads into its ingest passes.
+
+    Carries the started :class:`WriteConsumer` AND a thread-safe ``failed_symbols`` set
+    the consumer's deferred-write-failure sink appends to. After the consumer drains
+    (the ``with`` exits), the phase consults :attr:`failed_symbols` and EXCLUDES those
+    contracts from the clean/complete set — a deferred non-halt write failure can never
+    leave a contract marked clean (DEC-FETCH-WRITE-OVERLAP-001 MAJOR-3).
+    """
+
+    consumer: WriteConsumer
+    failed_symbols: set[str]
+    _lock: threading.Lock
+
+    def record_failure(self, symbol: str) -> None:
+        """Record a contract whose DEFERRED write failed (thread-safe; writer-thread call)."""
+        with self._lock:
+            self.failed_symbols.add(symbol)
+
+
 @contextlib.contextmanager
 def _maybe_write_consumer(
     sink: BarSink, *, dry_run: bool, env: Mapping[str, str] | None = None
-) -> Generator[WriteConsumer | None, None, None]:
-    """Yield a started :class:`WriteConsumer` when opted-in, else ``None`` (sync path).
+) -> Generator[_WriteBehind | None, None, None]:
+    """Yield a started :class:`_WriteBehind` when opted-in, else ``None`` (sync path).
 
-    The consumer spans ONE phase's whole drain and is CLOSED (drained + joined, any
-    latched write error re-raised) on exit — so the subsequent 1-day derivation reads a
-    fully-written 1-minute lake, never a still-queued partition (the durability ordering
-    that makes the derived 1-day correct). DISABLED on a dry-run (the ``NullBarSink``
-    discards anyway — overlap buys nothing) and whenever the env flag is off, in which
-    case it yields ``None`` and the spine uses the unchanged synchronous append.
+    The consumer spans ONE phase's ingest passes and is DRAINED + joined (any latched
+    write error re-raised) when this ``with`` exits — and CRUCIALLY the phase saves its
+    durable ledger only AFTER this scope closes, so an in-flight write's
+    settle-driven ledger record is persisted, never discarded (DEC-FETCH-WRITE-OVERLAP-001
+    MAJOR-2). DISABLED on a dry-run (the ``NullBarSink`` discards anyway — overlap buys
+    nothing) and whenever the env flag is off, in which case it yields ``None`` and the
+    spine uses the unchanged synchronous append.
+
+    Uses ``with consumer:`` (the consumer's own context-manager drain) rather than a
+    bare ``finally: consumer.close()`` so the lifecycle is the idiomatic with-statement
+    (resolves the CodeQL ``py/should-use-with-statement`` note on the prior finally).
     """
     if dry_run or not _write_consumer_enabled(env):
         yield None
         return
     source = os.environ if env is None else env
     shards = resolve_shard_count(source.get(_WRITE_CONSUMER_SHARDS_ENV))
-    consumer = WriteConsumer(sink, shards=shards)
-    consumer.start()
-    try:
-        yield consumer
-    finally:
-        # Drain + join (no lost tail) and re-raise any latched write error so a halt /
-        # failed write propagates to the caller's pull-halt handling.
-        consumer.close()
+    handle = _WriteBehind(
+        consumer=WriteConsumer(sink, shards=shards),
+        failed_symbols=set(),
+        _lock=threading.Lock(),
+    )
+    # `with` drains + joins + re-raises any latched write error on exit (no lost tail);
+    # a halt / failed write propagates to the caller's pull-halt handling.
+    with handle.consumer:
+        yield handle
 
 
 #: Factory: ``(lake_root) -> (client, sink)`` — injected in tests; the default picks the
@@ -621,7 +649,7 @@ def _run_phase(
     until_clean_rounds: int,
     contract_windows: ContractWindows | None,
     run_parallel: RunParallel | None,
-    write_consumer: WriteConsumer | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -631,6 +659,14 @@ def _run_phase(
     the one-shot path OR the bounded until-clean loop, and returns the folded
     :class:`_PhaseResult`. The barrier flag :attr:`_PhaseResult.clean` is True iff EVERY
     selected contract landed clean with no quarantine / still-failing / auth death.
+
+    The opt-in write-behind consumer (DEC-FETCH-WRITE-OVERLAP-001 Lever 1) is created +
+    DRAINED here, INSIDE the ledger ``try`` so it closes BEFORE ``end_pull_ledger`` saves
+    the durable ledger — so an in-flight write's settle-driven ledger record is persisted,
+    never discarded (MAJOR-2). A deferred write failure records the contract in
+    ``failed_symbols`` and is excluded from the clean/complete set after the drain
+    (MAJOR-3). *env* injects the consumer's enable/shard env for tests (defaults to
+    ``os.environ``).
     """
     ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
@@ -643,6 +679,9 @@ def _run_phase(
             flush()
 
     passes: list[_PassResult] = []
+    #: The active write-behind handle (bound inside the `with` below), or None on the
+    #: synchronous path. A 1-element holder so the closures below read the live value.
+    write_behind_holder: list[_WriteBehind | None] = [None]
 
     def _one_pass() -> _PassResult:
         """Run ONE full ingest pass over EVERY market bucket at *interval*; collect clean.
@@ -658,6 +697,9 @@ def _run_phase(
         pass_still_failed = 0
         pass_auth = False
         clean: set[str] = set()
+        write_behind = write_behind_holder[0]
+        consumer = write_behind.consumer if write_behind is not None else None
+        failure_sink = write_behind.record_failure if write_behind is not None else None
         # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
         # a STABLE, deterministic order independent of dict insertion order.
         for market, bucket in sorted(
@@ -680,7 +722,8 @@ def _run_phase(
                 market=market,
                 contract_windows=contract_windows,
                 run_parallel=run_parallel,
-                write_consumer=write_consumer,
+                write_consumer=consumer,
+                write_failure_sink=failure_sink,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows
@@ -701,7 +744,8 @@ def _run_phase(
         passes.append(result)
         return result
 
-    try:
+    def _run_passes() -> None:
+        """Run the one-shot path OR the bounded until-clean loop over *_one_pass*."""
         if until_clean:
 
             def _round_runner() -> UntilCleanRound:
@@ -730,14 +774,32 @@ def _run_phase(
             )
         else:
             _one_pass()
+
+    deferred_write_failures: set[str] = set()
+    try:
+        # The write-behind consumer (opt-in) wraps the WHOLE pass run and DRAINS on exit of
+        # this inner `with` — BEFORE `end_pull_ledger` saves the durable ledger (MAJOR-2:
+        # an in-flight write's settle-driven ledger record is persisted, not discarded) and
+        # before the caller's 1-day derivation reads the lake. A deferred write failure is
+        # captured in `failed_symbols` for the clean/complete exclusion below (MAJOR-3).
+        with _maybe_write_consumer(sink, dry_run=dry_run, env=env) as write_behind:
+            write_behind_holder[0] = write_behind
+            _run_passes()
+        if write_behind is not None:
+            deferred_write_failures = set(write_behind.failed_symbols)
     finally:
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
 
     # bars/windows SUM across rounds (round N re-appends only newly-fetched windows — the
     # keep-first sink + ledger skip make double-counting impossible); the residual reflects
     # the LAST round. ``until_clean_rounds <= 0`` runs zero rounds → empty passes → all-zero.
+    # A contract whose DEFERRED write-behind append FAILED is EXCLUDED from `complete` even
+    # though its synchronous report counted it clean (MAJOR-3) — so it is never marked
+    # `candle_status=complete` and the operator re-pulls it.
     complete: frozenset[str] = (
-        frozenset().union(*(p.clean_symbols for p in passes)) if passes else frozenset()
+        frozenset().union(*(p.clean_symbols for p in passes)) - deferred_write_failures
+        if passes
+        else frozenset()
     )
     # The GLOBAL barrier for this phase: EVERY selected contract landed clean (so the union
     # of clean symbols covers the whole selection) — an empty selection clears vacuously.
@@ -1018,35 +1080,33 @@ def pull_contract_candles(
     )
 
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
-    # Opt-in write-behind (DEC-FETCH-WRITE-OVERLAP-001 Lever 1): when BRUTEX_WRITE_CONSUMER
-    # is set, the per-contract lake appends are offloaded to a sharded writer pool so the
-    # fetch connections overlap fetch + write. The consumer is DRAINED + joined on exit of
-    # this `with` (BEFORE the 1-day derivation below reads the lake), so the derived 1-day
-    # never races a still-queued 1-minute write. DEFAULT (flag off / dry-run) yields None →
-    # the byte-identical synchronous append.
-    with _maybe_write_consumer(sink, dry_run=dry_run) as write_consumer:
-        minute = _run_phase(
-            interval=_MINUTE_INTERVAL,
-            by_market=by_market,
-            selected_symbols=selected_symbols,
-            client=client,
-            sink=sink,
-            lake_root=lake_root,
-            dry_run=dry_run,
-            start=start,
-            end=end,
-            pace=pace,
-            on_rate_limit=on_rate_limit,
-            on_timeout=on_timeout,
-            on_success=on_success,
-            on_progress=on_progress,
-            session_rate=session_rate,
-            until_clean=until_clean,
-            until_clean_rounds=until_clean_rounds,
-            contract_windows=minute_windows,
-            run_parallel=run_parallel,
-            write_consumer=write_consumer,
-        )
+    # Opt-in write-behind (DEC-FETCH-WRITE-OVERLAP-001 Lever 1) is created + drained INSIDE
+    # `_run_phase` so the consumer drains BEFORE the phase persists its durable ledger (an
+    # in-flight write's settle-driven ledger record is never discarded — MAJOR-2), and a
+    # deferred write failure excludes that contract from clean/complete (MAJOR-3). The
+    # consumer is also fully drained before the 1-day derivation below reads the lake.
+    # DEFAULT (flag off / dry-run) keeps the byte-identical synchronous append.
+    minute = _run_phase(
+        interval=_MINUTE_INTERVAL,
+        by_market=by_market,
+        selected_symbols=selected_symbols,
+        client=client,
+        sink=sink,
+        lake_root=lake_root,
+        dry_run=dry_run,
+        start=start,
+        end=end,
+        pace=pace,
+        on_rate_limit=on_rate_limit,
+        on_timeout=on_timeout,
+        on_success=on_success,
+        on_progress=on_progress,
+        session_rate=session_rate,
+        until_clean=until_clean,
+        until_clean_rounds=until_clean_rounds,
+        contract_windows=minute_windows,
+        run_parallel=run_parallel,
+    )
 
     # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
     # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the

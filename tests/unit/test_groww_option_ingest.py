@@ -497,6 +497,101 @@ def test_make_consumer_settle_runs_on_durable_only_on_success() -> None:
     assert calls == [ok]
 
 
+def test_make_consumer_settle_fires_on_write_failure_on_error_only() -> None:
+    """MAJOR-3: a DEFERRED write error fires *on_write_failure*, never on success.
+
+    DEC-FETCH-WRITE-OVERLAP-001 hostile-review fix: the phase consults the recorded
+    write-failure to EXCLUDE a contract from clean/complete when its deferred write fails,
+    so a deferred failure can never leave a contract marked clean.
+    """
+    durable: list[SinkAppendResult] = []
+    failures: list[int] = []
+    settle = _oi._make_consumer_settle(durable.append, on_write_failure=lambda: failures.append(1))
+    ok = SinkAppendResult(bars_appended=2, partitions_written=1, write_results=())
+    # Success: on_durable runs, write-failure does NOT.
+    settle(ok, None)
+    assert durable == [ok]
+    assert failures == []
+    # Error: write-failure fires, on_durable does NOT.
+    settle(None, RuntimeError("write failed"))
+    assert durable == [ok]
+    assert failures == [1]
+    # (result None, error None) does neither (defensive).
+    settle(None, None)
+    assert durable == [ok]
+    assert failures == [1]
+
+
+def test_ingest_via_write_consumer_records_deferred_write_failure() -> None:
+    """MAJOR-3: a contract whose DEFERRED write FAILS fires the *write_failure_sink*.
+
+    The synchronous report still reads ``windows=1`` (the worker returned before the write
+    confirmed), but the failure sink captures the contract symbol so the phase can exclude
+    it from clean/complete after the drain — the gap that would otherwise mark a
+    write-failed contract complete.
+    """
+    from brutex.data.write_consumer import WriteConsumer
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _RaisingSink()  # the deferred append raises a genuine (non-halt) error
+    ledger = WindowLedger()
+    failed: list[str] = []
+    failed_lock = threading.Lock()
+
+    def _record_failure(symbol: str) -> None:
+        with failed_lock:
+            failed.append(symbol)
+
+    with WriteConsumer(sink, shards=1) as wc:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            now_ist=_now,
+            write_consumer=wc,
+            write_failure_sink=_record_failure,
+        )
+    # The worker reported the deferred submit as a window (it cannot know the write fails).
+    assert report.windows == 1
+    # On drain the write raised → the failure sink captured THIS contract's symbol, so the
+    # phase excludes it from clean/complete; the durable ledger was NOT settled for it.
+    assert failed == ["NSE-NIFTY-02Jan25-28500-CE"]
+    assert list(ledger.records()) == []
+
+
+def test_ingest_via_write_consumer_deferred_failure_without_sink_is_safe() -> None:
+    """A deferred write failure with NO *write_failure_sink* wired is a safe no-op.
+
+    Covers the ``write_failure_sink is None`` branch — the consumer still delivers the
+    error to settle (no durable ledger record), and the absent sink is simply skipped; the
+    pull is not aborted by a single non-halt write failure.
+    """
+    from brutex.data.write_consumer import WriteConsumer
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _RaisingSink()
+    ledger = WindowLedger()
+    with WriteConsumer(sink, shards=1) as wc:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            now_ist=_now,
+            write_consumer=wc,
+            # write_failure_sink intentionally OMITTED (None)
+        )
+    assert report.windows == 1
+    assert list(ledger.records()) == []  # the failed write never durably settled
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # ingest_option_contract — transient retry + terminal
 # ─────────────────────────────────────────────────────────────────────────

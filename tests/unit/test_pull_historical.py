@@ -25,6 +25,7 @@ invariants are asserted directly:
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -1181,13 +1182,129 @@ class TestWriteConsumerGating:
             assert wc is None
 
     def test_maybe_consumer_on_yields_started_and_drains(self) -> None:
-        from brutex.data.write_consumer import WriteConsumer
-
         sink = _RecordingSink()
         env = {"BRUTEX_WRITE_CONSUMER": "1", "BRUTEX_WRITE_CONSUMER_SHARDS": "3"}
-        with hp._maybe_write_consumer(sink, dry_run=False, env=env) as wc:
-            assert isinstance(wc, WriteConsumer)
-            assert wc.shards == 3
-            assert wc._started is True
+        with hp._maybe_write_consumer(sink, dry_run=False, env=env) as handle:
+            assert isinstance(handle, hp._WriteBehind)
+            assert handle.consumer.shards == 3
+            assert handle.consumer._started is True
+            assert handle.failed_symbols == set()
         # On context exit the consumer is closed (drained + joined).
-        assert wc._closed is True
+        assert handle.consumer._closed is True
+
+    def test_write_behind_record_failure_is_thread_safe_dedup(self) -> None:
+        """``_WriteBehind.record_failure`` collects failed symbols (idempotent set add)."""
+        sink = _RecordingSink()
+        env = {"BRUTEX_WRITE_CONSUMER": "1"}
+        with hp._maybe_write_consumer(sink, dry_run=False, env=env) as handle:
+            assert isinstance(handle, hp._WriteBehind)
+            handle.record_failure("NSE-X")
+            handle.record_failure("NSE-X")  # dedup
+            handle.record_failure("NSE-Y")
+            assert handle.failed_symbols == {"NSE-X", "NSE-Y"}
+
+
+class _FailingParquetSink:
+    """A real-shaped sink that FAILS the deferred write for one symbol (MAJOR-3).
+
+    The append raises a non-halt error for *fail_symbol* (a per-contract write fault) and
+    succeeds for every other contract, so the consumer's settle delivers the failure to
+    the phase's write-failure sink for exactly that one contract.
+    """
+
+    def __init__(self, *, fail_symbol: str) -> None:
+        self._fail_symbol = fail_symbol
+        self.appends: list[str] = []
+        self._lock = threading.Lock()
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[object],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        with self._lock:
+            self.appends.append(symbol)
+        if symbol == self._fail_symbol:
+            raise RuntimeError(f"simulated deferred write failure for {symbol}")
+        return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+
+
+class TestWriteBehindDurabilityAndAccounting:
+    """End-to-end MAJOR-2 (ledger persisted after drain) + MAJOR-3 (write-fail not clean)."""
+
+    def test_inflight_write_ledger_record_is_persisted_major2(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MAJOR-2: an in-flight (deferred) write's ledger record survives the pull.
+
+        The consumer drains INSIDE ``_run_phase`` BEFORE ``end_pull_ledger`` saves the
+        durable ledger, so the settle-driven ``ledger.record`` for a deferred write is in
+        the persisted Parquet — never discarded (which would force a needless re-fetch).
+        With the old ordering (ledger saved before the consumer drained) the persisted
+        ledger would be EMPTY for the F&O windows; here it must carry the SUCCESS rows.
+        """
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        monkeypatch.setenv("BRUTEX_WRITE_CONSUMER", "1")
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_lake))
+        sdk = _FakeSDK()
+        selected = registry.list_contracts(underlying="NIFTY")
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+        assert report.windows >= 1
+        # The PERSISTED ledger (re-loaded from disk) carries the deferred writes' records,
+        # proving the consumer drained + settled BEFORE end_pull_ledger saved (MAJOR-2).
+        persisted = load_window_ledger(tmp_lake)
+        recorded_symbols = {rec.security_id for rec in persisted.records()}
+        assert {r.contract_symbol for r in selected} <= recorded_symbols
+
+    def test_deferred_write_failure_excludes_contract_from_complete_major3(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MAJOR-3: a contract whose DEFERRED write fails is NOT marked complete.
+
+        The synchronous report counts the contract clean (the worker returns before the
+        deferred write confirms), but the write-failure sink records it after the drain so
+        the phase EXCLUDES it from the clean/complete set — it never reads
+        ``candle_status=complete`` and the operator re-pulls it.
+        """
+        monkeypatch.setenv("BRUTEX_WRITE_CONSUMER", "1")
+        # Force the deterministic single-shard, single-thread path so the failing write is
+        # observed before the drain returns (no cross-shard nondeterminism in the test).
+        monkeypatch.setenv("BRUTEX_WRITE_CONSUMER_SHARDS", "1")
+        fail_symbol = "NSE-NIFTY-25Jan24-21000-CE"
+        sink = _FailingParquetSink(fail_symbol=fail_symbol)
+        sdk = _FakeSDK()
+        selected = registry.list_contracts(underlying="NIFTY")
+        pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+        statuses = _statuses(registry)
+        # The write-failed contract is NOT complete; its clean siblings ARE.
+        assert statuses[fail_symbol] == CANDLE_STATUS_NONE
+        assert statuses["NSE-NIFTY-25Jan24-21000-PE"] == CANDLE_STATUS_COMPLETE
+        assert statuses["NSE-NIFTY-25Jan24-FUT"] == CANDLE_STATUS_COMPLETE

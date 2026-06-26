@@ -37,14 +37,25 @@ write FAILURE is propagated to the settle callback (it receives the exception), 
 failed/blocked write never deadlocks and never settles a window as durable
 (the #919 back-channel-block fix, folded).
 
+Error tiers (constraint #4 / DEC-FETCH-WRITE-OVERLAP-001 MAJOR-3)
+----------------------------------------------------------------
+A write error reaches the producer via TWO distinct tiers:
+
+* a **GLOBAL-STOP halt** (:class:`~brutex.data.errors.LakeWriteHalt`, disk-full / OOM —
+  a member of both ingest spines' ``_GLOBAL_STOP_ERRORS``) fails every remaining write
+  identically, so the FIRST one is latched and RE-RAISED on the next :meth:`submit` /
+  :meth:`close` to HALT the whole pull (never keep hammering a full disk), and
+* a **non-halt** per-contract write error is delivered to THAT submit's settle callback
+  as its error (so the caller quarantines / excludes the ONE contract) but is NOT latched
+  for re-raise — a single bad write never aborts the whole pull (the MAJOR-3 fix).
+
 Lifecycle (constraint #5)
 -------------------------
 :meth:`WriteConsumer.start` spins up the W writer threads (one-consumer-per-shard
 lifecycle); the context-manager / :meth:`close` DRAINS every queue (no lost tail)
-and joins the threads before returning. A writer that hits a
-:class:`~brutex.data.errors.LakeWriteHalt` (disk-full / OOM) latches it; the next
-:meth:`submit` (or :meth:`close`) re-raises it so the pull HALTS (it is in both
-ingest spines' ``_GLOBAL_STOP_ERRORS``) rather than silently swallowing a full disk.
+and joins the threads before returning. A latched :class:`~brutex.data.errors.LakeWriteHalt`
+is re-raised on the next :meth:`submit` (or :meth:`close`) so the pull HALTS; a non-halt
+error only reaches the producer through its settle callback.
 
 Honest envelope (Golden Rule #10)
 ---------------------------------
@@ -71,6 +82,7 @@ import structlog
 
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import WriteResult
 from brutex.data.partition import partition_for_timestamp
 from brutex.data.sink import BarSink, SinkAppendResult
 
@@ -177,7 +189,7 @@ class _SubmitState:
     remaining: int
     lock: threading.Lock = field(default_factory=threading.Lock)
     partitions_written: int = 0
-    write_results: list[object] = field(default_factory=list)
+    write_results: list[WriteResult] = field(default_factory=list)
     error: BaseException | None = None
     settled: bool = False
 
@@ -234,15 +246,22 @@ class WriteConsumer:
         self._threads: list[threading.Thread] = []
         self._started = False
         self._closed = False
-        # The FIRST write error caught on any writer thread is latched here and
-        # re-raised on the next submit / close, so a write failure PROPAGATES to the
-        # producer (the pull's quarantine / global-stop path) instead of being lost on
-        # a worker that already moved on — the back-channel "never deadlock, never
-        # swallow" contract (constraint #4 / the #919 fix). A LakeWriteHalt (disk-full /
-        # OOM, a member of both ingest spines' _GLOBAL_STOP_ERRORS) latches the same
-        # way so a full disk halts the pull. Guarded by its own lock.
+        # The error back-channel has TWO tiers (DEC-FETCH-WRITE-OVERLAP-001 MAJOR-3):
+        #
+        #  * A GLOBAL-STOP halt (a LakeWriteHalt — disk-full / OOM, a member of both
+        #    ingest spines' _GLOBAL_STOP_ERRORS) fails EVERY remaining write identically,
+        #    so the FIRST one is latched here and RE-RAISED on the next submit / close to
+        #    HALT the whole pull (it must not keep hammering a full disk). Guarded by its
+        #    own lock.
+        #  * A NON-HALT write error (a genuine per-contract write failure) is delivered to
+        #    THAT submit's settle callback as its error (the #919 back-channel — never
+        #    silently swallowed, never deadlocks) but is NOT latched for re-raise, so it
+        #    quarantines ONE contract (the caller's settle / write-failure sink records it
+        #    and excludes it from clean/complete) WITHOUT aborting the pull. This is the
+        #    MAJOR-3 fix: a deferred non-halt failure leaves the contract NOT-clean, not
+        #    the whole pull dead.
         self._error_lock = threading.Lock()
-        self._latched_error: BaseException | None = None
+        self._latched_halt: LakeWriteHalt | None = None
 
     @property
     def shards(self) -> int:
@@ -274,10 +293,16 @@ class WriteConsumer:
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
-        """Drain + join on context exit (always, even on an error in the body)."""
+        """Drain + join on context exit (always, even on an error in the body).
+
+        The context-manager protocol args (*exc_type* / *exc_val* / *exc_tb*) are
+        unused — :meth:`close` drains + joins + re-raises any latched GLOBAL-STOP halt
+        regardless of how the ``with`` body exits; the names match the whitelisted
+        dunder-arg convention in ``scripts/ci/vulture_whitelist.py``.
+        """
         self.close()
 
     def _partition_key(self, coords: _AppendCoords, year: int, month: int) -> str:
@@ -329,14 +354,14 @@ class WriteConsumer:
         ------
         RuntimeError
             If the consumer is not started or already closed.
-        BaseException
-            Re-raises the FIRST latched write error from a prior submit's write (a
-            :class:`LakeWriteHalt` for disk-full / OOM, or any other write error), so a
-            write failure propagates to the producer's quarantine / halt path.
+        LakeWriteHalt
+            Re-raises the FIRST latched GLOBAL-STOP halt (disk-full / OOM) from a prior
+            submit's write, so a full disk halts the pull promptly. A NON-halt write error
+            is NOT re-raised here — it was delivered to its own settle callback (MAJOR-3).
         """
         if not self._started or self._closed:
             raise RuntimeError("WriteConsumer.submit requires a started, open consumer")
-        self._raise_if_errored()
+        self._raise_if_halted()
 
         coords = _AppendCoords(
             exchange=exchange,
@@ -400,17 +425,20 @@ class WriteConsumer:
                 merge_mode=coords.merge_mode,
             )
         except LakeWriteHalt as halt:
-            # Disk-full / OOM: latch it so the producer halts the pull, and propagate
-            # it to this submit's settle as an error (the window is NOT settled durable).
-            self._latch_error(halt, lake_halt=True)
+            # Disk-full / OOM (GLOBAL stop): LATCH it so the producer HALTS the pull on the
+            # next submit / close, and propagate it to this submit's settle as an error
+            # (the window is NOT settled durable). A full disk fails every remaining write.
+            self._latch_halt(halt)
             error = halt
         except Exception as exc:  # mirror PoolRunParallel's capture contract
-            # Any other write error is latched + delivered to settle (so the caller can
-            # quarantine), NEVER silently dropped and NEVER allowed to settle the window
-            # as durable (the #919 fix). KeyboardInterrupt / SystemExit deliberately
-            # propagate (kill the thread) — a real interpreter-level signal is not a
-            # write error to be re-delivered.
-            self._latch_error(exc, lake_halt=False)
+            # Any OTHER (non-halt) write error is delivered to THIS submit's settle (so the
+            # caller can quarantine the ONE contract / exclude it from clean-complete),
+            # NEVER silently dropped and NEVER allowed to settle the window as durable (the
+            # #919 fix). It is NOT latched for re-raise — a single per-contract write
+            # failure must not abort the whole pull (MAJOR-3). KeyboardInterrupt /
+            # SystemExit deliberately propagate (kill the thread) — a real interpreter-level
+            # signal is not a write error to be re-delivered.
+            _LOG.error("write_consumer.write_error", error_type=type(exc).__name__)
             error = exc
         self._advance(task.state, result, error)
 
@@ -436,7 +464,7 @@ class WriteConsumer:
                 aggregated: SinkAppendResult | None = SinkAppendResult(
                     bars_appended=state.total_bars,
                     partitions_written=state.partitions_written,
-                    write_results=tuple(state.write_results),  # type: ignore[arg-type]
+                    write_results=tuple(state.write_results),
                 )
             else:
                 aggregated = None
@@ -444,31 +472,35 @@ class WriteConsumer:
         # sibling group's _advance; the barrier above guarantees this fires exactly once.
         state.settle(aggregated, final_error)
 
-    def _latch_error(self, exc: BaseException, *, lake_halt: bool) -> None:
-        """Latch the FIRST write error seen on any writer thread (halt or otherwise)."""
+    def _latch_halt(self, halt: LakeWriteHalt) -> None:
+        """Latch the FIRST GLOBAL-STOP halt seen on any writer thread (re-raised to halt)."""
         with self._error_lock:
-            if self._latched_error is None:
-                self._latched_error = exc
-        if lake_halt and isinstance(exc, LakeWriteHalt):
-            _LOG.error("write_consumer.lake_halt", reason=exc.reason)
-        else:
-            _LOG.error("write_consumer.write_error", error_type=type(exc).__name__)
+            if self._latched_halt is None:
+                self._latched_halt = halt
+        _LOG.error("write_consumer.lake_halt", reason=halt.reason)
 
-    def _raise_if_errored(self) -> None:
-        """Re-raise the FIRST latched write error, if any, so the producer halts/quarantines."""
+    def _raise_if_halted(self) -> None:
+        """Re-raise the FIRST latched GLOBAL-STOP halt, if any, so the producer halts.
+
+        Only a :class:`LakeWriteHalt` is re-raised here — a non-halt per-contract write
+        error is delivered to its settle callback instead (it quarantines one contract,
+        never aborts the pull; MAJOR-3).
+        """
         with self._error_lock:
-            exc = self._latched_error
-        if exc is not None:
-            raise exc
+            halt = self._latched_halt
+        if halt is not None:
+            raise halt
 
     def close(self) -> None:
-        """Drain every queue, join the writer threads, then re-raise any latched error.
+        """Drain every queue, join the writer threads, then re-raise any latched HALT.
 
         Idempotent: a second call is a no-op. Enqueues one poison pill per shard
         (after the real tasks already queued), then joins — so NO queued write is
-        lost (constraint #5, drain-on-shutdown). The FIRST write error latched by any
-        writer (a :class:`LakeWriteHalt` or otherwise) is re-raised AFTER the join, so
-        a failure on the very last write still propagates to the caller.
+        lost (constraint #5, drain-on-shutdown). The FIRST GLOBAL-STOP halt latched by
+        any writer (a :class:`LakeWriteHalt`) is re-raised AFTER the join, so a disk-full
+        on the very last write still halts the caller. A NON-halt per-contract write error
+        is NOT re-raised here — it was delivered to its own settle callback (MAJOR-3), so a
+        single bad write quarantines one contract without aborting the drain.
         """
         if self._closed:
             return
@@ -480,4 +512,4 @@ class WriteConsumer:
             q.put(None)  # one poison pill per shard, after that shard's real tasks
         for thread in self._threads:
             thread.join()
-        self._raise_if_errored()
+        self._raise_if_halted()

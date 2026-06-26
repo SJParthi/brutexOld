@@ -1,162 +1,327 @@
-"""Benchmark gate for the sharded write-behind consumer (DEC-FETCH-WRITE-OVERLAP-001 Lever 1).
+"""Benchmark gate for the write-behind consumer (DEC-FETCH-WRITE-OVERLAP-001 Lever 1).
 
-This is THE merge gate. CLAUDE.md Golden Rule #10 (honest limits): Lever 1 only
-unlocks a higher pull rate if the SHARDED consumer's aggregate write throughput beats
-the ~3.2/s a single serial writer would manage (the #906 trap — a single writer
-serialises every append at ~3/s, a NET REGRESSION). We PROVE here that:
+THE HONEST OUTCOME (Golden Rule #10): a NO-GO.
 
-* a single serial writer's rate ≈ ``1 / per_write_seconds`` (the floor — the trap), and
-* the W-shard consumer's aggregate rate is materially higher (it overlaps the writes
-  across W threads when they target distinct partitions, which a real pull's
-  per-contract appends do), specifically ``> 3.2/s``.
+This benchmark measures the ACTUAL end-to-end mechanism Lever 1 claims to improve —
+the aggregate FETCH throughput (windows pulled per second) of the F&O pull — using the
+REAL :class:`~brutex.data.sink.ParquetBarSink` / :class:`~brutex.data.parquet_writer.ParquetWriter`
+over pre-seeded DEEP month partitions, with the network FETCH modelled as a
+GIL-RELEASING ``time.sleep`` (legitimate — real network I/O releases the GIL while a
+writer thread runs). It compares:
 
-The per-write cost is modelled with a calibrated ``time.sleep`` standing in for the
-~440 ms lake Parquet append (a forensic log analysis, MIGRATION.md #921, measured the
-real append at ~440 ms on a deep production partition). We model the COST rather than
-do a real 440 ms Parquet write so the gate runs in seconds on CI; the property under
-test is the OVERLAP (W writers vs 1), which the model captures faithfully — each
-submit routes to a distinct partition/shard, so W writers run W appends concurrently.
+* (a) SYNCHRONOUS: N fetch workers each do ``fetch -> real-write`` serially, and
+* (b) WRITE-BEHIND: N fetch workers do ONLY fetches (enqueue), a writer pool (W=1/2/4)
+  drains the REAL writes off the fetch critical path.
 
-Honest envelope: this measures the consumer's write-overlap throughput in isolation;
-it does NOT measure the end-to-end pull (fetch + write), which depends on the live
-vendor rate. It proves the necessary condition for Lever 1 (sharded beats serial and
-clears 3.2/s); the end-to-end gain is verified by the operator's live-log re-run.
+The measured truth (this machine, deep ~9k-bar partition, 128 ms fetch model):
+
+    SYNCHRONOUS         : ~5.7 fetch r/s
+    WRITE-BEHIND W=1    : ~7.2 fetch r/s  (~1.26x)
+    WRITE-BEHIND W=2    : ~6.6 fetch r/s  (~1.16x)
+    WRITE-BEHIND W=4    : ~6.8 fetch r/s  (~1.19x)
+
+and at a heavier (production-representative ~370 ms) append the gain collapses to
+~1.05–1.09x with W=4 ≤ W=2 ≤ W=1.
+
+The PURE-WRITE sharding measurement (no fetch overlap, real writer) is a NET
+REGRESSION: W=4 ≈ 0.94x of W=1 — write-vs-write sharding does NOT parallelize, because
+the real append is GIL-BOUND pure-Python work (``ParquetWriter._read_existing_bars``
+row-decode + the keep-first ``_merge_write``), NOT a GIL-releasing ``time.sleep``. The
+shards only add lock + context-switch overhead.
+
+Conclusion (recorded in MIGRATION.md #923, corroborating the #922 ledger note that a
+write-rate benchmark already REFUTED Lever 1): the SHARDING that was the feature's whole
+novelty buys NOTHING under the GIL; the only real effect is a small fetch<->write
+OVERLAP captured at W=1, and only while the write is not the per-contract bottleneck.
+The consumer therefore stays DEFAULT-OFF (``BRUTEX_WRITE_CONSUMER`` unset) and is NOT a
+merge-justifying win. This bench ASSERTS that measured truth so a future change cannot
+silently re-introduce the false "sharded W>1 beats W=1" claim.
+
+The prior version of this file modelled the lake write itself as ``time.sleep(40ms)``
+(GIL-releasing), which faked perfect write-thread parallelism and produced the bogus
+"W=4 = 88.8 r/s = 3.57x serial" headline. That model was the BLOCKER the hostile review
+caught. This file uses the REAL writer for the write and only models the (genuinely
+GIL-releasing) network fetch.
 """
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
+import pytest
 from brutex.data.models import CandleBar
-from brutex.data.sink import SinkAppendResult
+from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.sink import ParquetBarSink, SinkAppendResult
 from brutex.data.write_consumer import WriteConsumer
 
-#: Modelled per-write cost (seconds) standing in for the ~440 ms production lake
-#: append. Smaller than 440 ms so the bench is fast, but large enough that the
-#: serial floor sits BELOW the 3.2/s gate (1/0.4 = 2.5/s < 3.2) — proving a single
-#: writer would NOT clear the bar, so the win must come from sharding.
-_PER_WRITE_SECONDS = 0.04
+#: Modelled per-FETCH cost (seconds) — the ~128 ms measured median network fetch. This
+#: is the ONLY ``time.sleep`` in the bench, and it stands in for real network I/O, which
+#: genuinely releases the GIL — so a writer thread can run during it (the overlap under
+#: test). The WRITE is the REAL ``ParquetBarSink`` append (GIL-bound), never a sleep.
+_FETCH_SECONDS = 0.128
 
-#: The merge gate from the task: the sharded aggregate write rate MUST exceed this.
-_GATE_RATE = 3.2
+#: Number of fetch workers (the production SDK connection-pool size, DEC-FETCH-WRITE-OVERLAP-001
+#: Lever 2 raised ``GROWW_CLIENT_POOL_SIZE`` 2 -> 4).
+_N_FETCH_WORKERS = 4
 
-#: Number of distinct-partition submits to time (enough to amortise thread startup).
-_N_SUBMITS = 200
+#: Distinct contracts (distinct lake partitions) timed per run. Small enough that the
+#: bench finishes in a few seconds on CI (each does one GIL-releasing fetch + one real
+#: append), large enough to amortise thread startup.
+_N_CONTRACTS = 24
+
+#: Depth of each pre-seeded month partition. A real F&O 1-minute month is thousands of
+#: bars; this makes each append pay a realistic merge-read + re-render cost so the
+#: GIL-bound nature of the write is exercised (a 1-bar partition would hide it).
+_SEED_BARS = 6000
+
+#: Bars appended per fetch (one trading day's 1-minute bars).
+_APPEND_BARS = 200
 
 
-def _bar(idx: int) -> CandleBar:
-    """A deterministic bar; the day cycles so timestamps stay valid."""
+def _seed_bar(idx: int) -> CandleBar:
+    """A deterministic bar inside June 2024 (one deep partition per symbol)."""
     return CandleBar(
-        timestamp=datetime(2024, 1, 1 + (idx % 27), 9, 15, 0, tzinfo=UTC),
-        open=Decimal("100.00"),
-        high=Decimal("110.00"),
-        low=Decimal("90.00"),
-        close=Decimal("105.00"),
-        volume=10,
-        open_interest=5,
+        timestamp=datetime(2024, 6, 1 + (idx // 375) % 27, 3, 45, 0, tzinfo=UTC)
+        + timedelta(minutes=idx % 375),
+        open=Decimal("100.05"),
+        high=Decimal("110.15"),
+        low=Decimal("90.25"),
+        close=Decimal("105.35"),
+        volume=10 + idx,
+        open_interest=5 + idx,
     )
 
 
-class _SlowSink:
-    """A :class:`BarSink` whose append costs a fixed time — models the ~440 ms append."""
-
-    def __init__(self, per_write_seconds: float) -> None:
-        self._cost = per_write_seconds
-
-    def append(
-        self,
-        *,
-        exchange: str,
-        segment: str,
-        symbol: str,
-        interval: str,
-        bars: Sequence[CandleBar],
-        merge_mode: str = "keep-first",
-    ) -> SinkAppendResult:
-        time.sleep(self._cost)
-        return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+def _append_bars(offset: int) -> list[CandleBar]:
+    """New (unique-timestamp) bars appended on each fetch → a real merge-read each time."""
+    return [
+        CandleBar(
+            timestamp=datetime(2024, 6, 28, 3, 45, 0, tzinfo=UTC)
+            + timedelta(minutes=offset * _APPEND_BARS + i),
+            open=Decimal("101.05"),
+            high=Decimal("111.15"),
+            low=Decimal("91.25"),
+            close=Decimal("106.35"),
+            volume=20 + i,
+            open_interest=10 + i,
+        )
+        for i in range(_APPEND_BARS)
+    ]
 
 
-def _bench_write_rate(shards: int, *, n: int = _N_SUBMITS) -> float:
-    """Submit *n* distinct-partition writes through a *shards*-wide consumer; return r/s.
+def _make_sink(root: Path) -> ParquetBarSink:
+    return ParquetBarSink(writer=ParquetWriter(lake_root=root))
 
-    Each submit targets a UNIQUE symbol → a distinct partition → it can route to any
-    shard, so with W shards up to W appends overlap. The returned rate is
-    ``n / wall_seconds`` measured from first submit to the last durable settle (the
-    consumer's ``close`` drains + joins, so on return every write has completed).
-    """
-    sink = _SlowSink(_PER_WRITE_SECONDS)
+
+def _seed(root: Path, symbols: Sequence[str]) -> None:
+    """Pre-seed one deep month partition per symbol so each later append is realistic."""
+    sink = _make_sink(root)
+    bars = [_seed_bar(i) for i in range(_SEED_BARS)]
+    for sym in symbols:
+        sink.append(exchange="NSE", segment="FNO", symbol=sym, interval="1minute", bars=bars)
+
+
+def _symbols() -> list[str]:
+    return [f"NSE-BENCH{i:04d}" for i in range(_N_CONTRACTS)]
+
+
+def _run_synchronous(root: Path, symbols: Sequence[str]) -> float:
+    """N workers each fetch (GIL-released sleep) then REAL-write serially → aggregate r/s."""
     done = 0
     lock = threading.Lock()
 
-    def settle(_result: SinkAppendResult | None, _error: BaseException | None) -> None:
+    def worker(batch: Sequence[str]) -> None:
         nonlocal done
-        with lock:
-            done += 1
-
-    start = time.perf_counter()
-    with WriteConsumer(sink, shards=shards, queue_depth=max(2, shards * 2)) as wc:
-        for i in range(n):
-            wc.submit(
+        sink = _make_sink(root)
+        for k, sym in enumerate(batch):
+            time.sleep(_FETCH_SECONDS)
+            sink.append(
                 exchange="NSE",
                 segment="FNO",
-                symbol=f"NSE-B{i}",
+                symbol=sym,
                 interval="1minute",
-                bars=[_bar(i)],
-                settle=settle,
+                bars=_append_bars(k % 5 + 1),
             )
+            with lock:
+                done += 1
+
+    batches = [list(symbols[i::_N_FETCH_WORKERS]) for i in range(_N_FETCH_WORKERS)]
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=_N_FETCH_WORKERS) as ex:
+        list(ex.map(worker, batches))
     elapsed = time.perf_counter() - start
-    assert done == n, f"only {done}/{n} writes settled"
-    return n / elapsed
+    assert done == len(symbols)
+    return len(symbols) / elapsed
 
 
-def test_serial_writer_rate_is_one_over_cost() -> None:
-    """A single shard serialises every append → rate is bounded above by ``1/per_write``.
+def _run_write_behind(root: Path, symbols: Sequence[str], *, shards: int) -> float:
+    """N fetch workers fetch+enqueue; W shards drain the REAL writes → aggregate fetch r/s."""
+    sink = _make_sink(root)
+    fetched = 0
+    lock = threading.Lock()
 
-    This pins the SERIAL ceiling: one writer can do AT MOST ``1/per_write`` writes/s
-    (it does them back-to-back). The production-latency consequence — that this floor
-    is BELOW the 3.2/s gate — is asserted analytically in
-    :func:`test_production_latency_serial_would_miss_gate`; here we only confirm the
-    serial rate tracks ``1/cost`` (the modelled 0.04 s → ≤ ~25/s), so the sharded
-    speed-up below is measured against a real serial baseline, not a strawman.
+    def settle(_r: SinkAppendResult | None, _e: BaseException | None) -> None:
+        pass
+
+    batches = [list(symbols[i::_N_FETCH_WORKERS]) for i in range(_N_FETCH_WORKERS)]
+    start = time.perf_counter()
+    with WriteConsumer(sink, shards=shards, queue_depth=max(8, shards * 4)) as wc:
+
+        def worker(batch: Sequence[str]) -> None:
+            nonlocal fetched
+            for k, sym in enumerate(batch):
+                time.sleep(_FETCH_SECONDS)
+                wc.submit(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol=sym,
+                    interval="1minute",
+                    bars=_append_bars(k % 5 + 1),
+                    settle=settle,
+                )
+                with lock:
+                    fetched += 1
+
+        with ThreadPoolExecutor(max_workers=_N_FETCH_WORKERS) as ex:
+            list(ex.map(worker, batches))
+        # WriteConsumer.__exit__ drains + joins → every write is durable on return.
+    elapsed = time.perf_counter() - start
+    assert fetched == len(symbols)
+    return len(symbols) / elapsed
+
+
+@pytest.mark.bench
+def test_pure_write_sharding_does_not_parallelize_under_the_gil(tmp_path: Path) -> None:
+    """W>1 shards do NOT speed up pure (no-fetch) REAL writes — they are a NET REGRESSION.
+
+    This is the load-bearing NO-GO measurement: the real ``ParquetWriter`` append is
+    GIL-bound pure-Python work, so feeding distinct-partition writes through a W-shard
+    consumer with NO fetch overlap gives W=4 <= W=1 (the shards add lock + context-switch
+    overhead, not parallelism). Asserting W=4 does NOT materially beat W=1 pins the truth
+    that the SHARDING premise of Lever 1 is false under the GIL — a future change cannot
+    silently re-introduce the "sharded W>1 is faster" claim. (Tolerance is generous to
+    absorb CI scheduler noise; the point is the ABSENCE of a real speed-up, not an exact
+    ratio.)
     """
-    serial_rate = _bench_write_rate(shards=1)
-    ceiling = 1.0 / _PER_WRITE_SECONDS
-    assert serial_rate <= ceiling * 1.15  # within scheduling noise of the floor
+    symbols = _symbols()
 
+    def pure_write_rate(root: Path, *, shards: int) -> float:
+        _seed(root, symbols)
+        sink = _make_sink(root)
+        done = 0
+        lock = threading.Lock()
 
-def test_sharded_consumer_beats_gate() -> None:
-    """THE MERGE GATE: the W-shard aggregate write rate must exceed 3.2/s AND beat serial."""
-    serial_rate = _bench_write_rate(shards=1)
-    sharded_rate = _bench_write_rate(shards=4)
-    # 1) Sharded clears the absolute gate.
-    assert sharded_rate > _GATE_RATE, (
-        f"sharded rate {sharded_rate:.2f}/s did NOT clear the {_GATE_RATE}/s gate — "
-        f"a regression must NOT merge"
+        def settle(_r: SinkAppendResult | None, _e: BaseException | None) -> None:
+            nonlocal done
+            with lock:
+                done += 1
+
+        start = time.perf_counter()
+        with WriteConsumer(sink, shards=shards, queue_depth=max(8, shards * 4)) as wc:
+            for k, sym in enumerate(symbols):
+                wc.submit(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol=sym,
+                    interval="1minute",
+                    bars=_append_bars(k % 5 + 1),
+                    settle=settle,
+                )
+        elapsed = time.perf_counter() - start
+        assert done == len(symbols)
+        return len(symbols) / elapsed
+
+    w1 = pure_write_rate(tmp_path / "pw1", shards=1)
+    w4 = pure_write_rate(tmp_path / "pw4", shards=4)
+    # NO real parallelism: 4 shards must NOT clear even a 1.3x bar over 1 shard. (On the
+    # bench machine W=4 ≈ 0.94x of W=1 — an outright regression; 1.3x is a wide noise band
+    # that still fails loudly if someone fakes a speed-up with a GIL-releasing stub.)
+    assert w4 < w1 * 1.3, (
+        f"pure-write W=4 ({w4:.2f}/s) unexpectedly beat W=1 ({w1:.2f}/s) by >1.3x — the "
+        f"real GIL-bound writer cannot parallelize; a faked sleep-based writer can. "
+        f"Investigate before claiming sharding helps."
     )
-    # 2) Sharded is materially faster than the single serial writer (the real win:
-    #    overlap, not a faster individual write). Require a clear margin over noise.
-    assert sharded_rate > serial_rate * 1.5, (
-        f"sharded {sharded_rate:.2f}/s not meaningfully faster than serial "
-        f"{serial_rate:.2f}/s — no overlap benefit"
-    )
 
 
-def test_production_latency_serial_would_miss_gate() -> None:
-    """At the PRODUCTION ~440 ms append cost, a single writer (2.27/s) misses 3.2/s.
+@pytest.mark.bench
+def test_end_to_end_fetch_throughput_sync_vs_write_behind(tmp_path: Path) -> None:
+    """End-to-end: write-behind raises fetch r/s only marginally, and shards don't help.
 
-    This is the honest, load-bearing claim: with the real measured append latency the
-    serial floor is BELOW the gate, so the win MUST come from sharding. We compute the
-    floor analytically (1 / 0.44) rather than sleep 0.44 s × 200 on CI.
+    Measures the REAL goal — aggregate fetch throughput — for synchronous fetch+write vs
+    write-behind at W=1/2/4. The honest finding (NO-GO): write-behind gives a small
+    fetch<->write overlap win (the single background writer lets a fetch worker start the
+    next fetch while the previous write runs), but it is modest and W>1 does NOT improve on
+    W=1 (the GIL-bound writer is the same single bottleneck regardless of shard count).
+
+    The assertions are deliberately LOOSE (CI scheduler noise on a shared runner is large):
+    they pin only the qualitative truth, never a fragile exact number —
+        (1) write-behind W=1 does not REGRESS below synchronous, and
+        (2) W=4 does not MATERIALLY beat W=1 (no sharding win).
+    The verbatim numbers live in MIGRATION.md #923 / the PR body, measured on the M-class
+    reference box, not re-asserted here (they are machine-dependent).
     """
-    production_append_seconds = 0.44
-    serial_floor_rate = 1.0 / production_append_seconds
-    assert serial_floor_rate < _GATE_RATE  # 2.27/s < 3.2/s — serial can't clear it
-    # With 4 shards overlapping the same 0.44 s appends, the ceiling is ~4× → ~9.1/s,
-    # comfortably over the gate. (Measured overlap is verified by the bench above at
-    # the modelled cost; this asserts the production arithmetic that motivates Lever 1.)
-    assert (4.0 / production_append_seconds) > _GATE_RATE
+    symbols = _symbols()
+
+    sync_root = tmp_path / "sync"
+    _seed(sync_root, symbols)
+    sync_rate = _run_synchronous(sync_root, symbols)
+
+    wb_rates: dict[int, float] = {}
+    for shards in (1, 2, 4):
+        root = tmp_path / f"wb{shards}"
+        _seed(root, symbols)
+        wb_rates[shards] = _run_write_behind(root, symbols, shards=shards)
+
+    # (1) Write-behind never REGRESSES the pull below synchronous (a 0.85 floor absorbs
+    #     noise; the measured W=1 is ~1.1–1.26x of sync, comfortably above).
+    assert wb_rates[1] > sync_rate * 0.85, (
+        f"write-behind W=1 ({wb_rates[1]:.2f}/s) regressed below synchronous "
+        f"({sync_rate:.2f}/s) — the overlap should never make the pull slower"
+    )
+    # (2) Sharding (W=4) buys NO material end-to-end gain over a single writer (W=1):
+    #     the GIL-bound writer is the same bottleneck. A future "sharded is faster" claim
+    #     must justify itself against THIS measurement.
+    assert wb_rates[4] < wb_rates[1] * 1.3, (
+        f"write-behind W=4 ({wb_rates[4]:.2f}/s) materially beat W=1 ({wb_rates[1]:.2f}/s) "
+        f"by >1.3x — unexpected under the GIL-bound writer; re-verify before claiming a "
+        f"sharding win"
+    )
+
+
+def test_no_go_decision_is_recorded() -> None:
+    """A plain assertion that this bench encodes the NO-GO, not a merge gate.
+
+    Lever 1 sharding does NOT measurably raise end-to-end fetch throughput (the GIL-bound
+    writer caps it); the only effect is a small W=1 overlap. The consumer stays DEFAULT-OFF.
+    This test documents that the benchmark above is a NO-GO REGRESSION PIN, not a
+    pass-to-merge gate — there is no '>3.2/s sharded' claim to satisfy (the old #906-style
+    gate was the faked-sleep artefact). See MIGRATION.md #923.
+    """
+    # The decision is structural (default-off + the loose pins above), so there is nothing
+    # numeric to assert here beyond the documented conclusion; this body is intentionally
+    # a no-op marker that keeps the NO-GO rationale next to the bench.
+    assert True
+
+
+def _smoke_print_numbers() -> None:  # pragma: no cover - manual run only
+    """Print the verbatim numbers (run by hand: ``python -m tests.bench...``), not in CI."""
+    tmp = Path(tempfile.mkdtemp(prefix="brutex-wcbench-"))
+    try:
+        symbols = _symbols()
+        sroot = tmp / "sync"
+        _seed(sroot, symbols)
+        print(f"SYNCHRONOUS: {_run_synchronous(sroot, symbols):.2f} fetch r/s")
+        for w in (1, 2, 4):
+            r = tmp / f"wb{w}"
+            _seed(r, symbols)
+            print(f"WRITE-BEHIND W={w}: {_run_write_behind(r, symbols, shards=w):.2f} fetch r/s")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
