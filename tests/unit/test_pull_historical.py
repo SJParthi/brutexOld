@@ -307,6 +307,73 @@ def test_futures_market_pulled_before_options(
     )
 
 
+def test_live_pull_binds_capture_hook_factory(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The LIVE (dry_run=False) F&O pull threads a NON-None capture_hook_factory.
+
+    DEC-RAW-DATA-INTEGRITY-001 FIX 1 (option path): a spy captures the
+    ``capture_hook_factory`` kwarg ``run_groww_option_ingest`` receives — on the live
+    path it MUST be a real factory (so every F&O window records a raw-payload hash).
+    """
+    factories: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, capture_hook_factory: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        factories.append(capture_hook_factory)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert factories  # at least one ingest call
+    assert all(f is not None for f in factories)  # every call carried a live factory
+
+
+def test_dry_run_pull_has_no_capture_hook_factory(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry-run pull threads capture_hook_factory=None (no real vendor bytes to attest)."""
+    factories: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, capture_hook_factory: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        factories.append(capture_hook_factory)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert factories
+    assert all(f is None for f in factories)
+
+
 def test_market_pull_order_sorts_unknown_market_last() -> None:
     """The order key sorts the two known markets futures-first, an unknown market LAST.
 

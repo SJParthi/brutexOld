@@ -29,11 +29,11 @@ live API.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Final
 
-from brutex.adapters.groww.candles import fetch_candle_windows
+from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     EARLIEST_HISTORY,
@@ -49,6 +49,7 @@ from brutex.adapters.protocol import (
     single_instrument_page,
 )
 from brutex.data.models import CandleBar
+from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.models import Exchange, OutOfScopeError
 
 #: Capabilities of the Track-1 Groww spot adapter (CLAUDE.md §3 scope).
@@ -76,10 +77,31 @@ class GrowwMarketAdapter:
     :class:`~brutex.adapters.groww.pool.ClientPool` (DEC-GROWW-CLIENT-POOL-001); the adapter
     is identical for both (it only calls ``historical_candles`` / ``expiries`` / ``contracts``
     and exposes ``client.meter`` for the rate panel).
+
+    Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001) has TWO optional,
+    purely-additive injection seams (``None`` for BOTH keeps the adapter
+    byte-identical to the pre-feature behaviour):
+
+    * ``capture_hook_factory`` is the PRODUCTION seam the live build sites use
+      (``dashboard/pull_controller`` + ``cli``): a single adapter pulls MANY
+      symbols, so a per-symbol hook is built INSIDE ``fetch_ohlcv`` from the
+      RESOLVED ``(exchange, segment, groww_symbol)`` via
+      :func:`~brutex.data.raw_integrity_store.make_capture_hook_factory` — the
+      ONLY way the recorded record is correctly attributed to each symbol (a
+      single pre-bound hook would mis-record every symbol under one
+      ``groww_symbol``).
+    * ``on_raw_payload`` is a pre-bound single-symbol hook seam, used by the unit
+      tests + any single-symbol caller; when set it takes precedence over the
+      factory for that fetch.
+
+    Both are excluded from eq/repr like the client's ``meter``: they are shared
+    observability state, not adapter identity.
     """
 
     client: GrowwClientProtocol
     index: InstrumentIndex
+    on_raw_payload: RawPayloadHook | None = field(default=None, compare=False, repr=False)
+    capture_hook_factory: CaptureHookFactory | None = field(default=None, compare=False, repr=False)
 
     @property
     def capabilities(self) -> MarketCapabilities:
@@ -175,15 +197,25 @@ class GrowwMarketAdapter:
             groww_symbol = symbol
         if instrument is None:
             raise OutOfScopeError(f"symbol not in Groww universe: {symbol}")
+        segment = "FNO" if instrument.is_derivative else "CASH"
+        # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): the explicit
+        # pre-bound ``on_raw_payload`` wins (single-symbol callers + tests); else
+        # the production ``capture_hook_factory`` builds a hook correctly
+        # attributed to THIS resolved ``(exchange, segment, groww_symbol)`` — a
+        # single adapter pulls many symbols, so attribution must happen here.
+        on_raw_payload = self.on_raw_payload
+        if on_raw_payload is None and self.capture_hook_factory is not None:
+            on_raw_payload = self.capture_hook_factory(exchange.value, segment, groww_symbol)
         return fetch_candle_windows(
             self.client,
             exchange=exchange.value,
-            segment="FNO" if instrument.is_derivative else "CASH",
+            segment=segment,
             groww_symbol=groww_symbol,
             interval=interval,
             start=start,
             end=end,
             drop_volume=instrument.is_index,
+            on_raw_payload=on_raw_payload,
         )
 
 

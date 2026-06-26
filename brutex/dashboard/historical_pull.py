@@ -96,6 +96,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.nse import IST
+from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
     CANDLE_STATUS_COMPLETE,
     ContractRow,
@@ -577,6 +578,11 @@ def _run_phase(
     """
     ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
+    # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-contract
+    # capture-hook factory to the lake root on the LIVE path so every F&O window
+    # records a hash of EXACTLY what Groww sent. Skipped for a dry-run (no real
+    # vendor bytes to attest); best-effort inside the hook — it can never halt a pull.
+    capture_hook_factory = None if dry_run else make_capture_hook_factory(lake_root)
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional)."""
@@ -623,6 +629,7 @@ def _run_phase(
                 market=market,
                 contract_windows=contract_windows,
                 run_parallel=run_parallel,
+                capture_hook_factory=capture_hook_factory,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows

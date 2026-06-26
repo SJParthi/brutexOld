@@ -24,6 +24,7 @@ O(windows) which is network-bound, NOT an O(1)-total claim (Golden Rule #10).
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, time
 
 from brutex.adapters.groww.chunks import plan_candle_windows
@@ -31,6 +32,16 @@ from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import INTERVAL_TO_GROWW
 from brutex.adapters.groww.parser import parse_candle_rows
 from brutex.data.models import CandleBar
+
+#: Raw-payload capture hook (DEC-RAW-DATA-INTEGRITY-001). Fired ONCE per fetched
+#: window with the RAW vendor payload (the row-of-arrays mapping, BEFORE any
+#: parse/transform) plus the exact ``(groww_interval, window_start, window_end)``
+#: strings the call was issued with — the coordinates a verify re-fetch needs to
+#: re-issue the byte-identical call. The hash + sidecar write happen INSIDE the
+#: caller's hook (best-effort, guarded), so the integrity layer is purely
+#: additive: ``None`` (the default — CLI / tests / non-instrumented paths) makes
+#: this a no-op and the fetch byte-identical to the pre-feature behaviour.
+RawPayloadHook = Callable[[Mapping[str, object], str, str, str], None]
 
 
 def fetch_candle_windows(
@@ -43,6 +54,7 @@ def fetch_candle_windows(
     start: date,
     end: date,
     drop_volume: bool,
+    on_raw_payload: RawPayloadHook | None = None,
 ) -> list[CandleBar]:
     """Fetch + parse every Groww candle window for ``[start, end)`` at *interval*.
 
@@ -74,6 +86,15 @@ def fetch_candle_windows(
         Passed through to :func:`parse_candle_rows`: ``True`` zeroes per-bar
         volume (an INDEX carries no traded volume — DEC-VENDOR-VOLUME-NORMALIZE-001);
         ``False`` keeps it (equities / FUT / CE / PE all trade — 03-backtesting.md:141-143).
+    on_raw_payload
+        Optional :data:`RawPayloadHook` fired ONCE per fetched window with the
+        RAW vendor payload (BEFORE :func:`parse_candle_rows`) + the exact
+        ``(groww_interval, window_start, window_end)`` the call was issued with —
+        the raw-data integrity capture seam (DEC-RAW-DATA-INTEGRITY-001). ``None``
+        (the default) makes the fetch byte-identical to the pre-feature path; the
+        hash + sidecar persist live inside the caller's (best-effort) hook, so a
+        hook failure is the CALLER's to absorb — the candle fetch itself is never
+        affected by the capture.
 
     Returns
     -------
@@ -102,8 +123,14 @@ def fetch_candle_windows(
             start=window.start,
             end=window.end,
         )
+        # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): hand the RAW
+        # payload + the exact issued coordinates to the hook BEFORE any parse, so
+        # the recorded hash attests EXACTLY what the vendor sent. Purely additive
+        # — a no-op when no hook is wired.
+        if on_raw_payload is not None:
+            on_raw_payload(payload, groww_interval, window.start, window.end)
         bars.extend(parse_candle_rows(payload, drop_volume=drop_volume))
     return bars
 
 
-__all__ = ["fetch_candle_windows"]
+__all__ = ["RawPayloadHook", "fetch_candle_windows"]

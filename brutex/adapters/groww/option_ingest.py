@@ -64,7 +64,7 @@ from time import sleep as _time_sleep
 
 import structlog
 
-from brutex.adapters.groww.candles import fetch_candle_windows
+from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -93,6 +93,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
+from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
@@ -195,6 +196,7 @@ def fetch_option_candles(
     interval: str,
     start: date,
     end: date,
+    on_raw_payload: RawPayloadHook | None = None,
 ) -> list[CandleBar]:
     """Fetch ONE contract's OHLCV+OI bars over ``[start, end)`` — index-free, FNO.
 
@@ -204,6 +206,11 @@ def fetch_option_candles(
     ``segment="FNO"`` (:data:`OPTION_SEGMENT`) and ``drop_volume=False`` (options
     trade — volume + OI are kept). The exchange comes from the contract symbol's
     leading token.
+
+    *on_raw_payload* is the OPTIONAL raw-data integrity capture hook
+    (DEC-RAW-DATA-INTEGRITY-001), threaded straight to
+    :func:`fetch_candle_windows`; ``None`` (the default) keeps the fetch
+    byte-identical to the pre-feature path.
 
     Returns
     -------
@@ -219,6 +226,7 @@ def fetch_option_candles(
         start=start,
         end=end,
         drop_volume=False,
+        on_raw_payload=on_raw_payload,
     )
 
 
@@ -279,6 +287,7 @@ def ingest_option_contract(
     empty_retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
+    on_raw_payload: RawPayloadHook | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -364,7 +373,12 @@ def ingest_option_contract(
             fetch_count += 1
             try:
                 raw_bars = fetch_option_candles(
-                    client, contract=contract, interval=interval, start=start, end=clamped_end
+                    client,
+                    contract=contract,
+                    interval=interval,
+                    start=start,
+                    end=clamped_end,
+                    on_raw_payload=on_raw_payload,
                 )
                 break
             except GrowwError as exc:
@@ -832,6 +846,8 @@ def run_groww_option_ingest(
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     contract_windows: ContractWindows | None = None,
     run_parallel: RunParallel | None = None,
+    on_raw_payload: RawPayloadHook | None = None,
+    capture_hook_factory: CaptureHookFactory | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -880,6 +896,16 @@ def run_groww_option_ingest(
     is the outer concurrency primitive (``None`` → the byte-identical serial default;
     production injects a rate-sized ``PoolRunParallel``; tests inject a synchronous
     fake).
+
+    Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001) is wired via TWO
+    optional seams (both ``None`` = byte-identical pre-feature behaviour): an
+    explicit pre-bound *on_raw_payload* (single-contract callers / tests) wins;
+    otherwise the production *capture_hook_factory* (the live build sites inject
+    :func:`~brutex.data.raw_integrity_store.make_capture_hook_factory` bound to the
+    lake root) builds a hook correctly attributed to EACH contract's
+    ``(exchange, FNO, contract.symbol)`` — one run pulls many contracts, so the
+    per-contract hook is built per pair. The hook is best-effort (it can never halt
+    a pull), so wiring it never changes the pull's outcome.
 
     *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is an OPTIONAL per-contract
     ``{symbol: (start, end)}`` map (typically built by
@@ -942,6 +968,16 @@ def run_groww_option_ingest(
             start=start,
             end=end,
         )
+        # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): an explicit
+        # pre-bound ``on_raw_payload`` wins (single-contract callers + tests); else
+        # the production ``capture_hook_factory`` builds a hook correctly attributed
+        # to THIS contract's ``(exchange, FNO, contract.symbol)`` — one ingest run
+        # pulls many contracts, so the per-contract hook must be built here.
+        contract_hook = on_raw_payload
+        if contract_hook is None and capture_hook_factory is not None:
+            contract_hook = capture_hook_factory(
+                contract_exchange(contract), OPTION_SEGMENT, contract.symbol
+            )
         with pull_id_scope(pull_id):
             return ingest_option_contract(
                 client,
@@ -959,6 +995,7 @@ def run_groww_option_ingest(
                 backoff=backoff,
                 now_ist=now_ist,
                 market=market,
+                on_raw_payload=contract_hook,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
