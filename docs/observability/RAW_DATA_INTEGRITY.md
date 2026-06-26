@@ -1,8 +1,11 @@
 # Raw-Data Integrity Layer — provable "the lake derives from EXACTLY what Groww sent"
 
 > **Decision ID:** DEC-RAW-DATA-INTEGRITY-001 (`docs/MIGRATION.md` #934)
-> **Status:** Implemented (capture + verify core + ingest wiring); the verbatim
-> raw-payload archive for full offline replay is DESIGNED-ONLY (future, gated).
+> **Status:** Implemented (capture + verify core) AND **BOUND at the LIVE pull
+> build sites** (dashboard `pull_controller._build_live_spot_adapter`, CLI
+> `cli._build_live_groww_spot`, and the F&O `historical_pull._run_one_interval`),
+> so the capture runs on every real spot + F&O pull. The verbatim raw-payload
+> archive for full offline replay is DESIGNED-ONLY (future, gated).
 > **Scope:** purely ADDITIVE — changes NOTHING about existing storage. The
 > 2-decimal rounding (DEC-SPOT-PRICE-2DP-001), the parse path
 > (`brutex/adapters/groww/parser.py`), and the lake writer
@@ -105,21 +108,50 @@ funnel through:
   BEFORE `parse_candle_rows`. `None` (the default) makes the fetch
   byte-identical to the pre-feature path.
 
-* The hook factory `raw_integrity_store.make_capture_hook` ties
-  `build_record` (hash) + `append_record` (persist) into a **best-effort**
-  closure: every error — a malformed payload (`RawIntegrityError`) or a sidecar
-  write failure (`OSError`) — is caught, logged at WARNING, and swallowed, so the
-  candle fetch+store proceeds exactly as if the hook were absent. **A hash
-  failure can never halt or corrupt a pull** — the candle write is the source of
-  truth; the hash is additive proof, never a gate.
+* The hook `raw_integrity_store.make_capture_hook` ties `build_record` (hash) +
+  `append_record` (persist) into a **best-effort** closure: every error — a
+  malformed payload (`RawIntegrityError`) or a sidecar write failure (`OSError`) —
+  is caught, logged at WARNING, and swallowed, so the candle fetch+store proceeds
+  exactly as if the hook were absent. **A hash failure can never halt or corrupt a
+  pull** — the candle write is the source of truth; the hash is additive proof,
+  never a gate.
 
-* The hook is threaded:
-  - SPOT: `GrowwMarketAdapter` carries an optional `on_raw_payload` field
-    (excluded from eq/repr — observability state, not identity) → passed to
-    `fetch_candle_windows` in `fetch_ohlcv`. No `MarketAdapter` protocol change.
+* **Per-symbol attribution** (`raw_integrity_store.make_capture_hook_factory`):
+  `make_capture_hook` binds ONE `(exchange, segment, groww_symbol)`, but a single
+  live adapter / option-ingest run pulls MANY symbols. The factory (bound to the
+  lake root) builds a correctly-attributed per-symbol hook AT the call site where
+  the symbol is resolved — the only way each window's record carries its OWN
+  symbol. The per-symbol hooks remain best-effort, so wiring the factory can never
+  make a pull fail.
+
+* The hook is threaded AND **bound at the live build sites** (the FIX that makes
+  the guarantee real rather than dormant):
+  - SPOT: `GrowwMarketAdapter` carries an optional `capture_hook_factory` field
+    (plus a single-symbol `on_raw_payload` field for tests; both excluded from
+    eq/repr — observability state, not identity). `fetch_ohlcv` builds the
+    per-symbol hook from the factory for the resolved
+    `(exchange, segment, groww_symbol)`. No `MarketAdapter` protocol change.
+    The CLI builder (`cli._build_live_groww_spot`) and the dashboard builder
+    (`pull_controller._build_live_spot_adapter`) BOTH construct the adapter with
+    `capture_hook_factory=make_capture_hook_factory(lake_root)`, so every real
+    spot pull captures.
   - OPTION: `fetch_option_candles` / `ingest_option_contract` /
-    `run_groww_option_ingest` each gain an optional `on_raw_payload` pass-through
-    param (default `None`).
+    `run_groww_option_ingest` each carry an `on_raw_payload` pass-through, and
+    `run_groww_option_ingest` additionally accepts a `capture_hook_factory` that
+    builds a per-contract hook for each `(exchange, FNO, contract.symbol)`. The
+    live F&O pull (`historical_pull._run_one_interval`) binds
+    `make_capture_hook_factory(lake_root)` on the non-dry-run path, so every real
+    futures/option pull captures (a dry-run binds `None` — no real bytes to attest).
+
+* **Cross-process append safety:** because the capture now runs on real pulls, a
+  CLI `brutex fetch` and a dashboard pull can share one `BRUTEX_LAKE_ROOT` and
+  append concurrently. `append_record` therefore serialises the write on BOTH a
+  process-local `threading.Lock` AND a cross-process advisory `fcntl.flock`
+  (`LOCK_EX`) held on the open append-mode sidecar fd for the write — mirroring
+  the lake's partition flock (DEC-LAKE-PARTITION-FLOCK-001). Unlike a Parquet
+  partition the sidecar is only ever appended to (never `os.replace`d), so the
+  fd's inode is stable for the lock; POSIX-only (Linux + macOS — the Track-1
+  envelope), as for the partition lock.
 
 ### 2.4 Verify path (the provable "no drift since capture" check)
 
@@ -175,8 +207,11 @@ the hash + coordinates, so the archive is purely additive on top.
 | File | Role |
 |------|------|
 | `brutex/data/raw_integrity.py` | PURE core — canonicalize, blake2b hash, `RawIntegrityRecord`, `build_record`, `verify_record` |
-| `brutex/data/raw_integrity_store.py` | durable append-only sidecar + the best-effort `make_capture_hook` |
+| `brutex/data/raw_integrity_store.py` | durable append-only sidecar (cross-process `flock`) + best-effort `make_capture_hook` + the per-symbol `make_capture_hook_factory` |
 | `brutex/adapters/groww/integrity_verify.py` | thin re-fetch verify layer (`verify_one`, `verify_lake_records`) |
 | `brutex/adapters/groww/candles.py` | the COMMON `fetch_candle_windows` capture seam (`on_raw_payload`) |
-| `brutex/adapters/groww/adapter.py` | spot wiring (`GrowwMarketAdapter.on_raw_payload` field) |
-| `brutex/adapters/groww/option_ingest.py` | option wiring (`on_raw_payload` pass-through) |
+| `brutex/adapters/groww/adapter.py` | spot wiring (`GrowwMarketAdapter.capture_hook_factory` / `on_raw_payload` fields; per-symbol hook built in `fetch_ohlcv`) |
+| `brutex/adapters/groww/option_ingest.py` | option wiring (`on_raw_payload` pass-through + `capture_hook_factory` per-contract hook) |
+| `brutex/cli.py` | LIVE build-site binding — `_build_live_groww_spot` passes `capture_hook_factory=make_capture_hook_factory(lake_root)` |
+| `brutex/dashboard/pull_controller.py` | LIVE build-site binding — `_build_live_spot_adapter` passes the same factory |
+| `brutex/dashboard/historical_pull.py` | LIVE F&O build-site binding — `_run_one_interval` binds the factory on the non-dry-run path |

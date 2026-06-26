@@ -621,6 +621,7 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     from brutex.adapters.groww.live import build_live_pool
     from brutex.config.credentials import resolve_groww_file_credentials
     from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.raw_integrity_store import make_capture_hook_factory
     from brutex.data.sink import ParquetBarSink
 
     del instruments  # the Groww adapter carries the whole master index (O(1) resolve)
@@ -635,7 +636,13 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     client = build_live_pool(creds, size=pool_size)
     _LOG.info("groww.spot.client_pool", connections=pool_size)
     index = load_index(urllib_http_get)
-    adapter = GrowwMarketAdapter(client=client, index=index)
+    # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-symbol
+    # capture-hook factory to the lake root so EVERY live spot window records a hash
+    # of EXACTLY what Groww sent. Best-effort inside the hook — it can never halt a
+    # pull (a malformed payload / sidecar write failure is logged + swallowed).
+    adapter = GrowwMarketAdapter(
+        client=client, index=index, capture_hook_factory=make_capture_hook_factory(lake_root)
+    )
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     return adapter, sink
 

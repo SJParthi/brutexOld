@@ -1729,13 +1729,19 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     from brutex.adapters.groww.live import build_live_client
     from brutex.config.credentials import resolve_groww_file_credentials
     from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.raw_integrity_store import make_capture_hook_factory
     from brutex.data.sink import ParquetBarSink
 
     file_creds = resolve_groww_file_credentials()
     creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
     client = build_live_client(creds)
     index = load_index(urllib_http_get)
-    adapter = GrowwMarketAdapter(client=client, index=index)
+    # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-symbol
+    # capture-hook factory to the lake root so every live ``brutex fetch`` spot
+    # window records a hash of EXACTLY what Groww sent (best-effort — never halts).
+    adapter = GrowwMarketAdapter(
+        client=client, index=index, capture_hook_factory=make_capture_hook_factory(lake_root)
+    )
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root), catalog=catalog)
     return adapter, sink
 

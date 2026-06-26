@@ -23,6 +23,7 @@ from brutex.data.raw_integrity_store import (
     integrity_path,
     load_records,
     make_capture_hook,
+    make_capture_hook_factory,
 )
 
 _PAYLOAD = {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 777, 42]]}
@@ -205,3 +206,70 @@ def test_capture_hook_swallows_write_failure(
     monkeypatch.setattr("brutex.data.raw_integrity_store.append_record", _boom)
     # A sidecar write failure must NEVER raise out of the hook (best-effort).
     hook(_PAYLOAD, "1minute", "a", "b")
+
+
+# --------------------------------------------------------------------------- #
+# make_capture_hook_factory — per-symbol attribution (the live-pull seam)
+# --------------------------------------------------------------------------- #
+def test_capture_hook_factory_attributes_each_symbol(tmp_path: Path) -> None:
+    # A single factory (bound to one lake root) builds a CORRECTLY per-symbol hook —
+    # the property the live build sites rely on (one adapter, many symbols).
+    factory = make_capture_hook_factory(tmp_path)
+    factory("NSE", "CASH", "NSE-NIFTY")(_PAYLOAD, "1minute", "2024-01-01 00:00:00", "e1")
+    factory("BSE", "CASH", "BSE-SENSEX")(_PAYLOAD, "1minute", "2024-01-02 00:00:00", "e2")
+    loaded = load_records(tmp_path)
+    symbols = {record.groww_symbol for record in loaded.values()}
+    assert symbols == {"NSE-NIFTY", "BSE-SENSEX"}  # each window kept its own symbol
+    nifty = find_record(
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-NIFTY",
+        interval="1minute",
+        window_start="2024-01-01 00:00:00",
+        window_end="e1",
+    )
+    assert nifty is not None
+    assert nifty.payload_hash == hash_payload(_PAYLOAD)
+
+
+# --------------------------------------------------------------------------- #
+# append_record — cross-process flock (DEC-LAKE-PARTITION-FLOCK-001 mirror)
+# --------------------------------------------------------------------------- #
+def test_append_takes_cross_process_flock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import brutex.data.raw_integrity_store as store
+
+    locked: list[int] = []
+
+    def _spy_flock(fd: int, operation: int) -> None:
+        import fcntl
+
+        assert operation == fcntl.LOCK_EX  # exclusive, held for the write
+        locked.append(operation)
+
+    monkeypatch.setattr(store.fcntl, "flock", _spy_flock)
+    append_record(_record(), tmp_path)
+    assert locked == [store.fcntl.LOCK_EX]  # the advisory lock was taken once
+    # The record still landed despite the spied lock — append is unaffected.
+    (record,) = load_records(tmp_path).values()
+    assert record.groww_symbol == "NSE-NIFTY"
+
+
+def test_append_concurrent_threads_no_interleave(tmp_path: Path) -> None:
+    # The real flock + the in-process lock together keep every appended line intact
+    # (each JSON line independently parseable) under concurrent appends.
+    import threading
+
+    barrier = threading.Barrier(8)
+
+    def _worker(n: int) -> None:
+        barrier.wait()
+        append_record(_record(symbol=f"NSE-SYM{n}", window_start=f"w{n}"), tmp_path)
+
+    threads = [threading.Thread(target=_worker, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    loaded = load_records(tmp_path)
+    assert len(loaded) == 8  # every line landed, none corrupted/interleaved

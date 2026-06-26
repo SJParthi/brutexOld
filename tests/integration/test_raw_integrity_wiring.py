@@ -7,6 +7,8 @@ through a FAKE SDK behind a REAL :class:`GrowwClient` (no ``growwapi``, no
 network). Confirms the capture is purely additive (same bars returned) and
 records the byte-correct hash of EXACTLY what the fake vendor sent.
 """
+# Whitebox test: builds the live `_build_*` private adapter factories.
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 
+import pytest
 from brutex.adapters.groww.adapter import GrowwMarketAdapter
 from brutex.adapters.groww.candles import fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClient
@@ -22,8 +25,14 @@ from brutex.adapters.groww.instruments import InstrumentIndex, load_index_from_c
 from brutex.adapters.groww.integrity_verify import verify_lake_records, verify_one
 from brutex.adapters.groww.option_ingest import fetch_option_candles
 from brutex.adapters.protocol import DerivativeContract
+from brutex.config.credentials import GrowwFileCredentials
 from brutex.data.raw_integrity import hash_payload
-from brutex.data.raw_integrity_store import find_record, load_records, make_capture_hook
+from brutex.data.raw_integrity_store import (
+    find_record,
+    load_records,
+    make_capture_hook,
+    make_capture_hook_factory,
+)
 from brutex.models import Exchange
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
@@ -46,8 +55,23 @@ _NIFTY_ROW = _row(
 )
 
 
+_SENSEX_ROW = _row(
+    exchange="BSE",
+    exchange_token="SENSEX",
+    trading_symbol="SENSEX",
+    groww_symbol="BSE-SENSEX",
+    name="SENSEX",
+    instrument_type="IDX",
+    segment="CASH",
+)
+
+
 def _index() -> InstrumentIndex:
     return load_index_from_csv("\n".join([_HEADER, _NIFTY_ROW]) + "\n")
+
+
+def _two_symbol_index() -> InstrumentIndex:
+    return load_index_from_csv("\n".join([_HEADER, _NIFTY_ROW, _SENSEX_ROW]) + "\n")
 
 
 class _FakeSDK:
@@ -249,3 +273,170 @@ def test_verify_lake_records_empty_sidecar(tmp_path: Path) -> None:
     assert run.total == 0
     assert run.all_matched is True
     assert run.matched == 0
+
+
+# --------------------------------------------------------------------------- #
+# capture_hook_factory — the PRODUCTION seam (one adapter, many symbols)
+# --------------------------------------------------------------------------- #
+def test_adapter_factory_attributes_per_symbol(tmp_path: Path) -> None:
+    # ONE adapter (as the live bulk pull builds it) pulling TWO symbols must record
+    # each window under its OWN groww_symbol — the property the factory provides and
+    # a single pre-bound make_capture_hook cannot. This is the FIX-1 correctness proof.
+    client, _sdk = _client()
+    adapter = GrowwMarketAdapter(
+        client=client,
+        index=_two_symbol_index(),
+        capture_hook_factory=make_capture_hook_factory(tmp_path),
+    )
+    for symbol, exchange in (("NSE-NIFTY", Exchange.NSE), ("BSE-SENSEX", Exchange.BSE)):
+        adapter.fetch_ohlcv(
+            symbol=symbol,
+            exchange=exchange,
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 15),
+        )
+    loaded = load_records(tmp_path)
+    assert {record.groww_symbol for record in loaded.values()} == {"NSE-NIFTY", "BSE-SENSEX"}
+
+
+def test_adapter_explicit_hook_wins_over_factory(tmp_path: Path) -> None:
+    # An explicit pre-bound on_raw_payload takes precedence over the factory.
+    client, _sdk = _client()
+    captured: list[str] = []
+    adapter = GrowwMarketAdapter(
+        client=client,
+        index=_index(),
+        on_raw_payload=lambda _p, i, _ws, _we: captured.append(i),
+        capture_hook_factory=make_capture_hook_factory(tmp_path),
+    )
+    adapter.fetch_ohlcv(
+        symbol="NSE-NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 15),
+    )
+    assert captured == ["1minute"]  # the explicit hook fired
+    assert load_records(tmp_path) == {}  # the factory's sidecar path was NOT used
+
+
+def test_adapter_no_capture_persists_nothing(tmp_path: Path) -> None:
+    client, _sdk = _client()
+    GrowwMarketAdapter(client=client, index=_index()).fetch_ohlcv(  # neither seam
+        symbol="NSE-NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 15),
+    )
+    assert load_records(tmp_path) == {}
+
+
+def test_option_path_factory_attributes_per_contract(tmp_path: Path) -> None:
+    # The option ingest run is the same one-object-many-contracts shape; the factory
+    # must attribute each contract's window under its OWN contract symbol.
+    from brutex.adapters.groww.option_ingest import run_groww_option_ingest
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    client, _sdk = _client()
+    contracts = [
+        DerivativeContract(
+            underlying_symbol="NIFTY",
+            expiry=date(2025, 1, 2),
+            symbol="NSE-NIFTY-02Jan25-28500-PE",
+            contract_type="PE",
+            strike=28500.0,
+        ),
+        DerivativeContract(
+            underlying_symbol="NIFTY",
+            expiry=date(2025, 1, 2),
+            symbol="NSE-NIFTY-02Jan25-28600-CE",
+            contract_type="CE",
+            strike=28600.0,
+        ),
+    ]
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+    run_groww_option_ingest(
+        client,
+        sink,
+        contracts=contracts,
+        intervals=("1minute",),
+        start=date(2024, 12, 20),
+        end=date(2025, 1, 3),
+        capture_hook_factory=make_capture_hook_factory(tmp_path),
+    )
+    symbols = {record.groww_symbol for record in load_records(tmp_path).values()}
+    assert symbols == {"NSE-NIFTY-02Jan25-28500-PE", "NSE-NIFTY-02Jan25-28600-CE"}
+
+
+# --------------------------------------------------------------------------- #
+# Production build sites BIND the factory (FIX 1) — run the real builders with the
+# network/credential leaves faked, then prove the returned adapter captures.
+# --------------------------------------------------------------------------- #
+def _fake_build_leaves(
+    monkeypatch: pytest.MonkeyPatch, sdk: _FakeSDK, index: InstrumentIndex
+) -> None:
+    """Fake every network/credential leaf the live builders import lazily."""
+
+    def _creds() -> GrowwFileCredentials:
+        return GrowwFileCredentials(api_key="k", totp_secret="s")
+
+    def _client_from_sdk(_creds_arg: object) -> GrowwClient:
+        return GrowwClient(sdk=sdk, sleep=lambda _s: None)
+
+    def _pool_from_sdk(_creds_arg: object, size: int = 2) -> GrowwClient:
+        return GrowwClient(sdk=sdk, sleep=lambda _s: None)
+
+    def _load_index(_http: object) -> InstrumentIndex:
+        return index
+
+    def _pool_size() -> int:
+        return 2
+
+    monkeypatch.setattr("brutex.config.credentials.resolve_groww_file_credentials", _creds)
+    monkeypatch.setattr("brutex.adapters.groww.live.build_live_client", _client_from_sdk)
+    monkeypatch.setattr("brutex.adapters.groww.live.build_live_pool", _pool_from_sdk)
+    monkeypatch.setattr("brutex.adapters.groww.instrument_loader.load_index", _load_index)
+    monkeypatch.setattr("brutex.adapters.groww.constants.resolve_pool_size", _pool_size)
+
+
+def test_cli_build_site_binds_capture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from brutex.cli import _build_live_groww_spot
+
+    sdk = _FakeSDK()
+    _fake_build_leaves(monkeypatch, sdk, _index())
+    adapter, _sink = _build_live_groww_spot(tmp_path)
+    assert adapter.capture_hook_factory is not None  # FIX 1: the CLI binds the factory
+    adapter.fetch_ohlcv(
+        symbol="NSE-NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 15),
+    )
+    (record,) = load_records(tmp_path).values()  # a real record was written on a pull
+    assert record.groww_symbol == "NSE-NIFTY"
+    assert record.payload_hash == hash_payload(sdk.payload)
+
+
+def test_dashboard_build_site_binds_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brutex.dashboard.pull_controller import _build_live_spot_adapter
+
+    sdk = _FakeSDK()
+    _fake_build_leaves(monkeypatch, sdk, _index())
+    adapter, _sink = _build_live_spot_adapter(tmp_path, ())
+    assert isinstance(adapter, GrowwMarketAdapter)  # narrow the MarketAdapter return
+    assert adapter.capture_hook_factory is not None  # FIX 1: the dashboard binds it
+    adapter.fetch_ohlcv(
+        symbol="NSE-NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 15),
+    )
+    (record,) = load_records(tmp_path).values()
+    assert record.groww_symbol == "NSE-NIFTY"

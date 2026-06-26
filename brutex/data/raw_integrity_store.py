@@ -35,6 +35,7 @@ pull.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import threading
 from collections.abc import Callable, Iterable, Mapping
@@ -61,9 +62,12 @@ INTEGRITY_FILENAME: str = "records.jsonl"
 #: Serialise concurrent appends from the parallel window workers. An APPEND of
 #: one short JSON line under an exclusive lock is atomic enough for a sidecar
 #: (each line is independently parseable; a partial trailing line on a crash is
-#: skipped on load) — the lock only prevents two threads interleaving bytes
-#: within one process. Module-level so every store instance for a given process
-#: shares it (the conservative, never-interleave choice).
+#: skipped on load) — this lock only prevents two threads interleaving bytes
+#: WITHIN one process. Module-level so every store instance for a given process
+#: shares it (the conservative, never-interleave choice). CROSS-process safety —
+#: a CLI ``brutex fetch`` and a dashboard pull sharing one ``BRUTEX_LAKE_ROOT``
+#: both appending — is provided by the advisory :func:`fcntl.flock` taken on the
+#: sidecar fd inside :func:`append_record` (mirrors DEC-LAKE-PARTITION-FLOCK-001).
 _APPEND_LOCK = threading.Lock()
 
 
@@ -97,10 +101,23 @@ def _record_to_json(record: RawIntegrityRecord) -> str:
 def append_record(record: RawIntegrityRecord, lake_root: Path) -> None:
     """Append *record* as one JSON line to the integrity sidecar (crash-safe append).
 
-    Creates the ``raw_integrity/`` directory if absent and APPENDS one line under
-    the module append lock. O(record) — never reads or rewrites prior lines, so a
-    crash mid-append can at worst leave a partial trailing line (skipped on
-    load), never corrupt earlier records. The candle lake is never touched.
+    Creates the ``raw_integrity/`` directory if absent and APPENDS one line. The
+    write is serialised on BOTH levels (so a CLI ``brutex fetch`` and a dashboard
+    pull sharing one ``BRUTEX_LAKE_ROOT`` can never interleave bytes):
+
+    * a process-local :data:`_APPEND_LOCK` (``threading.Lock``) serialises the
+      parallel window workers WITHIN this process, and
+    * a CROSS-process advisory :func:`fcntl.flock` (``LOCK_EX``) taken on the open
+      sidecar fd for the duration of the write serialises SEPARATE processes
+      (mirrors :mod:`brutex.data.partition_lock` / DEC-LAKE-PARTITION-FLOCK-001).
+      The lock is held on the SAME append-mode fd that is written, which is safe
+      here because — unlike a Parquet partition — the sidecar is never replaced
+      (``os.replace`` would swap the inode); it is only ever appended to, so the
+      fd's inode is stable for the lifetime of the lock.
+
+    O(record) — never reads or rewrites prior lines, so a crash mid-append can at
+    worst leave a partial trailing line (skipped on load), never corrupt earlier
+    records. The candle lake is never touched.
 
     The CALLER (the ingest capture hook) is responsible for best-effort guarding
     this so a sidecar write failure can never halt a pull — this function does
@@ -112,6 +129,11 @@ def append_record(record: RawIntegrityRecord, lake_root: Path) -> None:
     line = _record_to_json(record)
     path = integrity_path(lake_root)
     with _APPEND_LOCK, path.open("a", encoding="utf-8") as handle:
+        # Advisory exclusive lock across processes for the duration of the write;
+        # released automatically when the ``with`` block closes the fd. POSIX
+        # (Linux + macOS — the Track-1 envelope); Windows is out of scope, as for
+        # the partition lock.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         handle.write(line + "\n")
 
 
@@ -274,9 +296,48 @@ def make_capture_hook(
     return _capture
 
 
+#: A per-symbol capture-hook factory (DEC-RAW-DATA-INTEGRITY-001). Given the
+#: RESOLVED ``(exchange, segment, groww_symbol)`` of ONE instrument's fetch, it
+#: returns the :data:`~brutex.adapters.groww.candles.RawPayloadHook` to fire per
+#: window for THAT instrument. This is the COMMON wiring primitive the live pull
+#: needs: a SINGLE adapter / option-ingest run pulls MANY symbols through one
+#: object, but :func:`make_capture_hook` binds ONE ``groww_symbol`` — so the
+#: live build sites inject this factory (bound to the lake root) and the fetch
+#: paths call it with each resolved symbol, building the correctly-attributed
+#: per-symbol hook at the point the symbol is known.
+CaptureHookFactory = Callable[
+    [str, str, str], Callable[[Mapping[str, object], str, str, str], None]
+]
+
+
+def make_capture_hook_factory(lake_root: Path) -> CaptureHookFactory:
+    """Return a :data:`CaptureHookFactory` bound to *lake_root*.
+
+    The factory takes the RESOLVED ``(exchange, segment, groww_symbol)`` of one
+    fetch and returns a best-effort :func:`make_capture_hook` for it — so the
+    live spot adapter (:class:`~brutex.adapters.groww.adapter.GrowwMarketAdapter`)
+    and the live option ingest (:func:`~brutex.adapters.groww.option_ingest.run_groww_option_ingest`),
+    which each pull MANY symbols through ONE object, can build a correctly
+    per-symbol-attributed capture hook at the call site where the symbol is
+    resolved (the single bound :func:`make_capture_hook` cannot — it fixes one
+    ``groww_symbol``). The returned per-symbol hooks are themselves best-effort
+    (they never halt a pull), so wiring the factory can never make a pull fail.
+    """
+
+    def _factory(
+        exchange: str, segment: str, groww_symbol: str
+    ) -> Callable[[Mapping[str, object], str, str, str], None]:
+        return make_capture_hook(
+            lake_root, exchange=exchange, segment=segment, groww_symbol=groww_symbol
+        )
+
+    return _factory
+
+
 __all__ = [
     "INTEGRITY_DIRNAME",
     "INTEGRITY_FILENAME",
+    "CaptureHookFactory",
     "append_record",
     "append_records",
     "find_record",
@@ -284,4 +345,5 @@ __all__ = [
     "integrity_path",
     "load_records",
     "make_capture_hook",
+    "make_capture_hook_factory",
 ]
