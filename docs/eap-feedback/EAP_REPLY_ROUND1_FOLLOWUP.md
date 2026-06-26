@@ -24,5 +24,7 @@ One genuinely precise observation I can offer, and I will verify it properly bef
 
 Yes — Wednesday July 1 works, and I'd be glad to chat live. What time and timezone suit your engineer? I will make it work.
 
+I also have more findings from continued use of the beta; I will send them as a separate, evidence-backed batch, and I would be glad to walk through them live on the call.
+
 Thanks again,
 Parthi
