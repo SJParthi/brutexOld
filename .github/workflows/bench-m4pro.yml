@@ -61,6 +61,16 @@ concurrency:
 permissions:
   contents: read
 
+# Cargo network resilience (CI-only flake hardening) — see ci.yml for the
+# rationale. crates.io downloads flake intermittently; CARGO_NET_RETRY makes
+# cargo retry each failed download up to 10x, GIT_FETCH_WITH_CLI uses the
+# system git for git-source fetches. Pure download-retry behaviour — changes
+# nothing about what is built or run. Workflow-level so the maturin-develop
+# steps below inherit it.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   m4pro-absolute-throughput:
     # Gated to the self-hosted M4 Pro runner. If no runner with this label
@@ -105,11 +115,23 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Build fno_math (Rust kernel)
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the maturin build up to
+        # 3 times. POSIX sh; builds the same kernel.
         run: |
           . .venv/bin/activate
           pip install maturin
           cd rust/fno-math
-          maturin develop --release
+          n=0
+          until maturin develop --release; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "maturin develop (fno-math) failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "maturin develop (fno-math) failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
 
       - name: Build trading_core (shared 52-vocab + pivot/Fib kernel)
         run: |
@@ -118,8 +140,18 @@ jobs:
           # delegate to the trading_core wheel; the throughput canary imports them
           # transitively, so this self-hosted job must build it too (maturin is
           # already installed by the fno_math step above).
+          # Belt-and-suspenders crates.io flake guard (see fno_math step).
           cd rust/trading-core
-          maturin develop --release
+          n=0
+          until maturin develop --release; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "maturin develop (trading-core) failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "maturin develop (trading-core) failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
 
       - name: Run absolute-throughput gate
         run: |
