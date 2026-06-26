@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-health-monitor-jlzt1n` (**DEC-PULL-HEALTH-MONITOR-001, MIGRATION.md #926** —
+- **Active branch:** `claude/pull-health-monitor-jlzt1n` (**DEC-PULL-HEALTH-MONITOR-001, MIGRATION.md #932** —
   the live Groww pull now SELF-INSTRUMENTS its health: a NEW `brutex/observability/pull_health.py`
   `PullHealthMonitor` holds the hysteresis `SLADetector` (UNCHANGED), mirrors the rate-controller +
   call-meter snapshots already produced each `_observe_rate` tick into Prometheus gauges, and routes a

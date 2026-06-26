@@ -53,7 +53,7 @@ auto-remediation. ``pull.rate_storm`` is labelled VENDOR-gated precisely because
 burst is expected behaviour the adaptive controller already handles; the alert says so
 explicitly so the operator does not chase our code for a vendor signal.
 
-## Decision: DEC-PULL-HEALTH-MONITOR-001 (MIGRATION.md entry #926).
+## Decision: DEC-PULL-HEALTH-MONITOR-001 (MIGRATION.md entry #932).
 """
 
 from __future__ import annotations
