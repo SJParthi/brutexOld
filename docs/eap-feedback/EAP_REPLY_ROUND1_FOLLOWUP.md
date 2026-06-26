@@ -24,7 +24,7 @@ One genuinely precise observation I can offer, and I will verify it properly bef
 
 Thank you — I would genuinely welcome the chance to chat live, and Wednesday, July 1 works well for me if it still suits your team. One small scheduling note: I am based in IST (India, UTC+5:30), so a slot in your morning generally lands in my evening and overlaps well. Whatever time is easiest for you and your engineer, I will gladly make it work — please feel free to send a calendar invite to this email at whatever time fits your schedule.
 
-I also have more findings from continued use of the beta; I will send them as a separate, evidence-backed batch, and I would be glad to walk through them live on the call.
+I also have more findings from continued use of the beta. Would you prefer I send them as a written, evidence-backed batch ahead of time, or walk through them live on the call — or both? Happy to do whatever is most useful for your team.
 
 Thanks again,
 Parthi
