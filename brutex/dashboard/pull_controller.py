@@ -944,6 +944,57 @@ def _observe_rate(
         monitor.observe(controller_snap, meter_snap)
 
 
+def _build_pull_health_monitor(
+    controller: RateController | None,
+) -> PullHealthMonitor | None:
+    """Build the live pull's :class:`PullHealthMonitor`, or ``None`` (best-effort).
+
+    BINDS the dormant monitor at the dashboard live-pull build site
+    (DEC-PULL-HEALTH-WIRING-001). PR #893 (DEC-PULL-HEALTH-MONITOR-001) shipped the
+    monitor + the :func:`_observe_rate` ``monitor`` seam, but NO production build site
+    constructed one — so on a real pull it watched nothing. This wires it to the live
+    rails: the process-global :class:`~brutex.observability.metrics.MetricRegistry`
+    (so ``/metrics`` carries the live pull-health gauges), the
+    :meth:`~brutex.notifications.sweep_alerts.SweepAlerter.pull_degraded` Telegram
+    alert callback (so a breach edge reaches the operator's phone — a silent no-op
+    when Telegram is disabled, the default), and the resolved connection-pool width
+    (:func:`~brutex.adapters.groww.constants.resolve_pool_size`) used by the
+    ``pull.pool_idle_high`` rule.
+
+    Returns ``None`` — disabling the monitor without affecting the pull — when there is
+    no live *controller* (a dry-run / injected-factory pull never observes a rate), so
+    :func:`_observe_rate`'s ``monitor is None`` arm is a no-op. The whole body is
+    GUARDED: an import / construction error is swallowed + logged and yields ``None``,
+    so binding the monitor can NEVER block, slow, or crash the pull (Golden Rule #10).
+
+    Honest envelope: the monitor's thresholds are operator-tunable heuristics, NOT
+    vendor-verified limits, and a breach is an OBSERVATION + alert, never an
+    auto-remediation — the pull continues unchanged whether or not the monitor fires.
+    """
+    if controller is None:
+        return None
+    try:
+        from brutex.adapters.groww.constants import resolve_pool_size
+        from brutex.notifications.sweep_alerts import SweepAlerter
+        from brutex.observability.metrics import get_registry
+        from brutex.observability.pull_health import PullHealthMonitor
+
+        alerter = SweepAlerter()
+
+        def _on_degraded(rule: str, achieved: float, allowed: float, detail: str) -> None:
+            """Route a monitor breach edge to the best-effort ``pull_degraded`` alert."""
+            alerter.pull_degraded(rule=rule, achieved=achieved, allowed=allowed, detail=detail)
+
+        return PullHealthMonitor(
+            registry=get_registry(),
+            on_degraded=_on_degraded,
+            pool_size=resolve_pool_size(),
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull_health.monitor_build_failed")
+        return None
+
+
 def _live_rate_runtime(
     use_live_rate: bool,
     session_rate: SessionRateController | None = None,
@@ -1249,6 +1300,10 @@ def pull_all_spot(
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
         )
+        # BIND the live pull-health monitor to the resolved controller
+        # (DEC-PULL-HEALTH-WIRING-001) — watches every _observe_rate tick + alerts on a
+        # degraded/stalled pull; best-effort (None for a dry-run, never crashes the pull).
+        _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
         # NO per-pull RenewToken here (DEC-DHAN-RENEW-SINGLE-OWNER-001). RenewToken
         # ROTATES — it mints a new token and INVALIDATES the presented one
         # (DEC-DHAN-RENEWTOKEN-ROTATE-001). A renew fired at EVERY pull start (with
@@ -1552,7 +1607,7 @@ def pull_all_spot(
         for phase_report in phase_reports:
             merged_pairs.update(phase_report.pairs)
             failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
-        _observe_rate(rate_observer, _rate_controller, adapter)
+        _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
         # Groww has NO no-data marker — unlike the previous vendor's no-data 400
         # marker, which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we
         # do not invent a Groww twin, so every terminal Groww error is a uniform terminal
@@ -1944,6 +1999,10 @@ def pull_candles(
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
         )
+        # BIND the live pull-health monitor to the resolved controller
+        # (DEC-PULL-HEALTH-WIRING-001) — watches every _observe_rate tick + alerts on a
+        # degraded/stalled pull; best-effort (None for a dry-run, never crashes the pull).
+        _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
         # NO per-pull RenewToken here (DEC-DHAN-RENEW-SINGLE-OWNER-001) — RenewToken
         # ROTATES + invalidates the presented token, so an ungated per-pull renew
         # killed the live token and the pull ran on the corpse (DH-906). The 12h
@@ -2052,7 +2111,7 @@ def pull_candles(
                 )
         finally:
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
-        _observe_rate(rate_observer, _rate_controller, adapter)
+        _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
 
         # Build one result per REQUESTED interval (the injected *intervals*, ``1m`` only
         # — DEC-1MINUTE-ONLY-DERIVE-1DAY-001). The label map gives
