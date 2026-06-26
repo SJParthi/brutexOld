@@ -1078,6 +1078,7 @@ bruteX/
 │   ├── TRACK1_DASHBOARD_DESIGN.md  ← v29 locked design spec + data contract
 │   ├── dashboard/mockups/          ← v28.html + v29.html (canonical mockups)
 │   ├── MIGRATION.md                ← decision ledger
+│   ├── ENGINEERING_REQUIREMENTS_CHARTER.md ← ultra-deep requirements (scope-tagged; aspirational, CLAUDE.md wins)
 │   ├── REQUIREMENTS.md             ← RETIRED (stub)
 │   ├── REQUIREMENTS_SIMPLE.md      ← RETIRED (stub)
 │   ├── ROADMAP.md                  ← RETIRED (stub)
