@@ -42,7 +42,9 @@ import pytest
 from brutex.orchestrator.audit import (
     GENESIS_PREV_HASH,
     AuditChainCorruption,
+    AuditPayloadError,
     AuditWriter,
+    read_entries,
     verify_chain,
 )
 from hypothesis import given, settings
@@ -269,3 +271,44 @@ class TestResumeCorrectness:
 
         total = verify_chain(path)
         assert total == len(initial) + len(resumed)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 7 — RFC-safe JSON (DEC-AUDIT-FSYNC-DURABILITY-001)
+#
+# A non-finite float (NaN / Inf / -Inf) anywhere in a payload is REFUSED
+# (AuditPayloadError) and the rejection NEVER advances the chain: the
+# durable chain after any mix of good + bad appends always verifies to
+# exactly the number of GOOD appends, with dense 0..n-1 seq numbers.
+# ────────────────────────────────────────────────────────────────────────
+
+
+_non_finite_st = st.sampled_from([float("nan"), float("inf"), float("-inf")])
+
+
+class TestRfcSafeJsonInvariant:
+    @given(
+        flags=st.lists(st.booleans(), min_size=1, max_size=20),
+        bad=_non_finite_st,
+    )
+    @settings(max_examples=100, deadline=None)
+    def test_non_finite_appends_are_rejected_and_never_advance_chain(
+        self, flags: list[bool], bad: float, tmp_path_factory
+    ) -> None:
+        # `flags[i] == True` → a BAD (non-finite) append that must be
+        # rejected; False → a GOOD finite append that must persist.
+        path = tmp_path_factory.mktemp("audit") / "chain.jsonl"
+        good = 0
+        with AuditWriter.open(path) as writer:
+            for i, is_bad in enumerate(flags):
+                if is_bad:
+                    with pytest.raises(AuditPayloadError):
+                        writer.append(action="X", subject=f"s{i}", payload={"v": bad})
+                else:
+                    writer.append(action="X", subject=f"s{i}", payload={"v": float(i)})
+                    good += 1
+
+        # The chain verifies to exactly the count of GOOD appends — the
+        # rejected non-finite appends left the chain untouched.
+        assert verify_chain(path) == good
+        assert [e.seq for e in read_entries(path)] == list(range(good))
