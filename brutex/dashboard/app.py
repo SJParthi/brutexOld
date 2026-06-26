@@ -2664,6 +2664,7 @@ def build_app(
         # load (master-revision move) yields a new key → recompute, never stale. The
         # full O(datasets)+ledger build runs ONLY on a miss, on the threadpool worker.
         def _cached_build() -> dict[str, Any]:
+            """Return the coverage payload, memoised behind the composite freshness key."""
             return _coverage_cache.get_or_compute(
                 _nav_latency_key("coverage", store, years),
                 generation=0,
@@ -2872,6 +2873,7 @@ def build_app(
         # within one generation + master revision is an O(1) handoff. A pull (generation) or
         # an instrument load (master revision) yields a new key → recompute, never stale.
         def _cached_per_symbol() -> dict[str, dict[str, Any]]:
+            """Return the per-symbol completeness map, memoised behind the composite freshness key."""
             return _universe_completeness_cache.get_or_compute(
                 _nav_latency_key("universe-completeness", store),
                 generation=0,
