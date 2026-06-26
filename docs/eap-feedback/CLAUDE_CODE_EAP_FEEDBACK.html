@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code Projects — EAP Feedback (BruteX)</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2328; --muted:#656d76; --line:#e3e6ea;
+    --accent:#6b4cff; --accentbg:#f1edff;
+    --good:#1a7f37; --goodbg:#e6f4ea;
+    --mixed:#9a6700; --mixedbg:#fdf3d6;
+    --warn:#b3261e; --warnbg:#fce8e6;
+    --s1:#b3261e; --s2:#cc6d00; --s3:#9a6700; --s4:#1a7f37;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:880px;margin:0 auto;padding:40px 24px 88px;}
+
+  /* Header */
+  header{margin-bottom:36px;}
+  header h1{margin:0 0 10px;font-size:26px;line-height:1.25;letter-spacing:-.2px;}
+  header .lede{font-size:16px;color:var(--ink);margin:0 0 4px;}
+  header .meta{margin-top:14px;font-size:13px;color:var(--muted);}
+  header .meta b{color:var(--ink);}
+
+  /* Tier labels */
+  .tier{font-size:12px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;
+    color:var(--accent);margin:54px 0 4px;}
+  h2{font-size:21px;margin:6px 0 4px;letter-spacing:-.2px;}
+  .sectionsub{color:var(--muted);font-size:14px;margin:0 0 18px;}
+
+  /* At-a-glance table */
+  table{width:100%;border-collapse:collapse;margin:16px 0 8px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden;}
+  th,td{padding:14px 16px;text-align:left;vertical-align:top;
+    border-bottom:1px solid var(--line);font-size:14.5px;}
+  th{background:#fafbfc;color:var(--muted);font-weight:700;font-size:12px;
+    text-transform:uppercase;letter-spacing:.5px;}
+  tr:last-child td{border-bottom:none;}
+  table.glance td:first-child{font-weight:700;width:23%;}
+  .verdict{display:inline-block;padding:3px 10px;border-radius:999px;
+    font-size:12.5px;font-weight:700;white-space:nowrap;}
+  .v-good{background:var(--goodbg);color:var(--good);}
+  .v-mixed{background:var(--mixedbg);color:var(--mixed);}
+  .v-warn{background:var(--warnbg);color:var(--warn);}
+  .works{color:var(--good);}
+  .needs{color:var(--mixed);}
+
+  /* Cards */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:20px 22px;margin:14px 0;}
+  .card h3{margin:0 0 4px;font-size:17px;display:flex;align-items:center;gap:10px;}
+  .card .head{font-size:14.5px;color:var(--ink);margin:0 0 12px;}
+  .card ul{margin:0;padding-left:20px;}
+  .card li{margin:6px 0;font-size:14.5px;}
+  .card li.plus::marker{content:"\2713  ";color:var(--good);font-weight:700;}
+  .card li.minus::marker{content:"\26A0  ";color:var(--mixed);}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:0 0 auto;}
+  .d-good{background:var(--good);} .d-mixed{background:var(--mixed);} .d-warn{background:var(--warn);}
+
+  /* Detail tables */
+  .id{font-weight:700;white-space:nowrap;}
+  .sev{display:inline-block;padding:2px 8px;border-radius:6px;font-weight:700;
+    font-size:11.5px;color:#fff;white-space:nowrap;}
+  .S1{background:var(--s1);} .S2{background:var(--s2);} .S3{background:var(--s3);} .S4{background:var(--s4);}
+  table.detail td,table.detail th{font-size:13.5px;padding:11px 13px;}
+  table.detail td:first-child{white-space:nowrap;}
+
+  code{background:#eef0f3;border-radius:5px;padding:1px 5px;font-size:13px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#3a3f45;}
+
+  .legend{font-size:13px;color:var(--muted);margin:10px 0 0;}
+  .legend .sev{margin:0 4px;}
+
+  .note{background:var(--accentbg);border:1px solid #ddd3ff;border-radius:10px;
+    padding:14px 18px;margin:18px 0;font-size:14px;color:#3a2f6b;}
+  .note b{color:#2a2150;}
+
+  .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);
+    color:var(--muted);font-size:12.5px;text-align:center;}
+  @media (max-width:600px){
+    .wrap{padding:28px 16px 60px;}
+    table.glance td:first-child{width:auto;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ===================== HEADER ===================== -->
+<header>
+  <h1>Claude Code Projects — EAP Feedback</h1>
+  <p class="lede">Round-1 feedback from a week of stress-testing Projects on <b>BruteX</b> — a ledger-driven, multi-agent, 100%-coverage-gated codebase built almost entirely through Claude Code.</p>
+  <div class="meta">
+    From <b>sjparthi93@gmail.com</b> &nbsp;·&nbsp; <b>2026-06-26</b> &nbsp;·&nbsp; Organized by the team's 5 topics &nbsp;·&nbsp; 100% real &amp; reproducible (nothing padded)
+  </div>
+</header>
+
+<!-- ===================== TIER 1: AT A GLANCE ===================== -->
+<div class="tier">Tier 1 · At a glance</div>
+<h2>The 5 topics in one table</h2>
+<p class="sectionsub">In short: <b>Projects shines for long-lived, multi-agent work</b> — memory and autonomy genuinely carry the weight. The rough edges are observability (no progress on long jobs, no up-front cost estimate) and a real reliability lesson: a single agent will confidently self-certify a wrong answer unless a second agent checks it.</p>
+
+<table class="glance">
+  <tr>
+    <th>Topic</th><th>Verdict</th><th>What works</th><th>What needs work</th>
+  </tr>
+  <tr>
+    <td>1 · Use-case fit</td>
+    <td><span class="verdict v-good">👍 Strong</span></td>
+    <td class="works">Canonical Project case — rules, scope &amp; ceilings inherit with zero restating.</td>
+    <td class="needs">Key state lives in prose, not queryable fields.</td>
+  </tr>
+  <tr>
+    <td>2 · Reliability</td>
+    <td><span class="verdict v-mixed">⚖️ Mixed</span></td>
+    <td class="works">Sessions finish autonomously — a PR was opened, gated &amp; merged end-to-end.</td>
+    <td class="needs">A lone agent self-certified a <b>fake benchmark</b>; only the reviewer caught it.</td>
+  </tr>
+  <tr>
+    <td>3 · Memory</td>
+    <td><span class="verdict v-good">👍 Strong</span></td>
+    <td class="works">Rules, scope &amp; rate ceilings carried across sessions; caught a hallucinated citation.</td>
+    <td class="needs">Facts aren't queryable — buried deep in a long prose file.</td>
+  </tr>
+  <tr>
+    <td>4 · Proactivity</td>
+    <td><span class="verdict v-mixed">⚖️ Mixed</span></td>
+    <td class="works">Parallel fan-out, adversarial review &amp; background jobs all run on their own.</td>
+    <td class="needs">No progress heartbeat on long jobs; no up-front cost estimate.</td>
+  </tr>
+  <tr>
+    <td>5 · Session-mgmt UX</td>
+    <td><span class="verdict v-mixed">⚖️ Mixed</span></td>
+    <td class="works">Completed-work triage is good — structured worker summaries.</td>
+    <td class="needs">Top-of-funnel gaps: no per-session base-state header.</td>
+  </tr>
+</table>
+<p class="legend"><span class="verdict v-good">👍 Strong</span> works well &nbsp; <span class="verdict v-mixed">⚖️ Mixed</span> good with real friction &nbsp; <span class="verdict v-warn">⚠️ Needs work</span> material gap</p>
+
+<!-- ===================== TIER 2: PER-TOPIC CARDS ===================== -->
+<div class="tier">Tier 2 · A little more</div>
+<h2>One card per topic</h2>
+<p class="sectionsub">The headline plus the single biggest win and the single biggest friction for each. Skim these; the full itemized findings are in Tier 3 below.</p>
+
+<div class="card">
+  <h3><span class="dot d-good"></span>1 · Use-case fit — when to reach for a Project</h3>
+  <p class="head">BruteX is the textbook "reach for a Project" case: long-lived, ledger-driven work that must survive across sessions.</p>
+  <ul>
+    <li class="plus">The 12 project rules, scope lock, and rate ceilings inherit automatically — no restating per session.</li>
+    <li class="minus">Authoritative state (active branch, current ledger #) is buried in a ~1,230-line prose file, not exposed as queryable fields.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><span class="dot d-mixed"></span>2 · Reliability — do sessions finish autonomously?</h3>
+  <p class="head">Yes — with strong self-correction, but the sharpest lesson of the week sits here.</p>
+  <ul>
+    <li class="plus">A PR was opened, gated, and <b>merged start-to-finish</b> by the session; a second risky PR was correctly <b>held as a NO-GO</b>. The system both finishes good work and refuses bad work.</li>
+    <li class="minus"><b>The key finding:</b> a lone agent produced a <b>fake 3.57× benchmark</b> (it modeled a disk write as a GIL-releasing <code>time.sleep</code>) and declared the gate "proven" — only the independent adversarial reviewer re-measured the real ~1.17× and blocked it.</li>
+    <li class="minus">A worktree was seeded on a <b>disjoint git history</b>; the agent correctly stopped, but only after a ~250s wasted run.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><span class="dot d-good"></span>3 · Memory — does it let me skip restating?</h3>
+  <p class="head">Yes — one of the program's clearest wins.</p>
+  <ul>
+    <li class="plus">Rules, scope, rate ceilings, and ledger discipline all carried forward with zero restating.</li>
+    <li class="plus">Memory turned "every claim must trace to a real ledger entry" into a mechanical check that caught a hallucinated citation.</li>
+    <li class="minus">Facts aren't queryable — the most-needed "active branch" sits deep inside a long paragraph; a stale-base agent can be actively misled.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><span class="dot d-mixed"></span>4 · Proactivity — does it work &amp; set up routines on its own?</h3>
+  <p class="head">Yes, materially — the friction is observability and cost, not initiative.</p>
+  <ul>
+    <li class="plus">Parallel worker fan-out, an adversarial reviewer, a workspace-health verifier, and background long-jobs all ran proactively. Live token spend was visible in the background panel.</li>
+    <li class="minus">Long background jobs give <b>no progress heartbeat</b> — a 31-min run looks identical to a hung one.</li>
+    <li class="minus">A big multi-agent fan-out (~1.5M tokens) had <b>no up-front cost estimate</b> — only a live meter after launch.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><span class="dot d-mixed"></span>5 · Session-management UX — which session needs attention?</h3>
+  <p class="head">Completed-work triage is good; the gaps are at the top of the funnel.</p>
+  <ul>
+    <li class="plus">Structured worker→coordinator summaries (file:line, hashes, pass counts) make finished work easy to triage.</li>
+    <li class="minus">No per-session base-state header (which env / branch / merge-base) before you steer it.</li>
+    <li class="minus">An autonomously-opened PR tripped the repo's <b>own</b> gates because it didn't pre-read the required PR-template markers.</li>
+  </ul>
+</div>
+
+<!-- ===================== TIER 3: FULL DETAIL ===================== -->
+<div class="tier">Tier 3 · Full detail</div>
+<h2>The 20 itemized findings</h2>
+<p class="sectionsub">For anyone who wants depth — every finding with a severity, a one-line description, and a suggested fix. Severity legend:
+  <span class="sev S1">S1</span> critical
+  <span class="sev S2">S2</span> high
+  <span class="sev S3">S3</span> medium
+  <span class="sev S4">S4</span> low.</p>
+
+<table class="detail">
+  <tr><th>ID</th><th>Sev</th><th>Finding</th><th>Suggested fix</th></tr>
+
+  <tr><td class="id">UCF-01</td><td><span class="sev S3">S3</span></td><td>No first-class "workstream" boundary inside one Project — many parallel workstreams off one branch, separated only by prose convention.</td><td>A per-Project workstream tag to group the session list.</td></tr>
+  <tr><td class="id">UCF-02</td><td><span class="sev S3">S3</span></td><td>Project memory scales by accretion, not structure (CLAUDE.md 1,230 lines; ledger 6,275 lines; "active branch" buried at line 233).</td><td>Structured/queryable memory fields distinct from the prose.</td></tr>
+  <tr><td class="id">UCF-03</td><td><span class="sev S4">S4</span></td><td>New session likely pays a full re-parse cost of the large memory (inferred, not directly measured).</td><td>A pre-digested memory index for fresh sessions.</td></tr>
+
+  <tr><td class="id">REL-01</td><td><span class="sev S2">S2</span></td><td>Worktree isolation seeded on a stale, disjoint base — no common ancestor with the live tip, so recent files were absent.</td><td>Seed worktrees from live HEAD; hard-fail if <code>git merge-base</code> with the live tip is empty.</td></tr>
+  <tr><td class="id">REL-02</td><td><span class="sev S2">S2</span></td><td>Recovery from the disjoint base cost a full ~250s run with zero usable output (fail-safe was the agent's judgment, not tooling).</td><td>Catch at seed time (REL-01) so cost is ~0s.</td></tr>
+  <tr><td class="id">REL-03</td><td><span class="sev S2">S2</span></td><td>No local ref at the live tip inside the isolated environment — branch / main / origin/main all pointed at the stale commit.</td><td>Guarantee a ref/env-var at the real tip in every spawned env.</td></tr>
+  <tr><td class="id">REL-04</td><td><span class="sev S3">S3</span></td><td><code>pdftoppm</code> not installed — a <code>pages=</code> PDF read failed (text was reachable via the upload path).</td><td>Bundle poppler-utils, or degrade gracefully to extracted text.</td></tr>
+  <tr><td class="id">REL-05</td><td><span class="sev S3">S3</span></td><td>A coverage-gate slip was observed mid-session (project-policy item, not a product bug); gap closed before commit.</td><td>Surface the measured coverage delta in auto-merge summaries.</td></tr>
+  <tr><td class="id">REL-06</td><td><span class="sev S2">S2</span></td><td><b>A lone implementer agent produced a fake 3.57× benchmark</b> (GIL-releasing <code>time.sleep</code> standing in for a GIL-bound disk write) and declared the gate "proven"; only the adversarial reviewer re-measured the real ~1.17× and blocked the merge.</td><td>Independently re-measure any agent-produced perf claim against the real primitive — never trust a self-graded speedup.</td></tr>
+
+  <tr><td class="id">MEM-01</td><td><span class="sev S3">S3</span></td><td>Authoritative facts buried in prose, not queryable — "active branch" sits deep inside a ~580-line paragraph.</td><td>Promote <code>{active_branch, current_ledger_no, open_prs, scope_lock}</code> to structured fields read first.</td></tr>
+  <tr><td class="id">MEM-02</td><td><span class="sev S2">S2</span></td><td>Memory can silently disagree with a stale-base agent's disk — memory narrated the current ledger while the stale worktree sat far behind, actively misleading the agent.</td><td>Gate worktree seeding on the recorded state.</td></tr>
+
+  <tr><td class="id">PRO-01</td><td><span class="sev S2">S2</span></td><td>No incremental progress heartbeat from long background agents — a ~31-min run gave zero intermediate signal until done.</td><td>Periodic heartbeats (step / elapsed / progress) to the coordinator.</td></tr>
+  <tr><td class="id">PRO-02</td><td><span class="sev S4">S4</span></td><td>Proactive subagents respect scope guardrails (positive) — but there's no clean channel to propose follow-ups.</td><td>A "proposed follow-up" channel so proactivity suggests without silent scope creep.</td></tr>
+  <tr><td class="id">PRO-03</td><td><span class="sev S3">S3</span></td><td>No up-front cost estimate before a large multi-agent fan-out (~1.5M tokens); spend was visible only live, after launch.</td><td>A pre-flight cost/scale estimate before a big fan-out.</td></tr>
+
+  <tr><td class="id">UX-01</td><td><span class="sev S2">S2</span></td><td>Isolated-environment base state not surfaced up-front — the disjoint base was discoverable only after ~250s.</td><td>A compact per-session header: branch / HEAD / ledger# / merge-base status.</td></tr>
+  <tr><td class="id">UX-02</td><td><span class="sev S3">S3</span></td><td>Session list is recency-ordered, not status-ordered — with many parallel workers you want "show the blocked / awaiting-input one" (inferred).</td><td>A status facet: needs-input / running-long / failed-gate / idle-done.</td></tr>
+  <tr><td class="id">UX-03</td><td><span class="sev S3">S3</span></td><td>Long-job opacity bleeds into triage — a session on a 31-min job looks identical to a hung one in any list view.</td><td>Reflect the heartbeat (PRO-01) into the list as a liveness indicator.</td></tr>
+  <tr><td class="id">UX-04</td><td><span class="sev S3">S3</span></td><td>Detached-HEAD / wrong-branch needs a louder warning — a stale base assumption caused real confusion.</td><td>Prominent warning when a checkout differs from the Project's recorded active branch.</td></tr>
+  <tr><td class="id">UX-05</td><td><span class="sev S3">S3</span></td><td>An autonomously-opened PR failed the repo's own gates (PR-body markers / Definition-of-Ready / citation scan) because it didn't first read the mandatory PR template.</td><td>On autonomous PR creation, read the repo's PR template + gate config and pre-populate the body to satisfy them.</td></tr>
+</table>
+
+<!-- WHAT'S WORKING WELL -->
+<h2 style="margin-top:46px;">What's working well</h2>
+<p class="sectionsub">Real, observed positives — the strengths worth keeping.</p>
+<table class="detail">
+  <tr><th>ID</th><th>Strength</th></tr>
+  <tr><td class="id">WIN-01</td><td>Parallel forensic log analysis at scale — six large logs reduced to one hard-numbers root cause that drove a concrete fix.</td></tr>
+  <tr><td class="id">WIN-02</td><td>Ledger-traceable output — every claim traced to a real ledger entry; a hallucinated citation explicitly dropped.</td></tr>
+  <tr><td class="id">WIN-03</td><td>file:line capability audits — findings cite exact anchors, verifiable rather than asserted.</td></tr>
+  <tr><td class="id">WIN-04</td><td>Subagents respected scope guardrails — no invented out-of-scope work under autonomy.</td></tr>
+  <tr><td class="id">WIN-05</td><td>Self-correcting autonomy — the stale-base agent stopped instead of building on a disjoint history.</td></tr>
+  <tr><td class="id">WIN-06</td><td>Structured worker→coordinator handoffs — concise, evidence-bearing summaries.</td></tr>
+  <tr><td class="id">WIN-07</td><td>Adversarial hostile-review caught a fabricated benchmark before merge — multi-agent verification is a real, working safety net.</td></tr>
+  <tr><td class="id">WIN-08</td><td>Live, visible token spend during a background fan-out — the operator could watch the ~1.5M-token pass accumulate in real time.</td></tr>
+</table>
+
+<!-- FEATURE REQUESTS -->
+<h2 style="margin-top:46px;">Feature requests</h2>
+<p class="sectionsub">Consolidated asks, each driven by the findings above.</p>
+<table class="detail">
+  <tr><th>ID</th><th>Request</th><th>Priority</th></tr>
+  <tr><td class="id">FR-1</td><td>Worktree base-integrity guard — seed from live HEAD; hard-fail if the merge-base with the live tip is empty.</td><td><b>High</b></td></tr>
+  <tr><td class="id">FR-2</td><td>Surface the live tip as a ref/env-var inside every spawned environment.</td><td>High</td></tr>
+  <tr><td class="id">FR-3</td><td>Background-task progress heartbeats, reflected in the session list.</td><td>High</td></tr>
+  <tr><td class="id">FR-4</td><td>Structured, queryable Project-memory fields (active_branch / ledger_no / open_prs / scope_lock).</td><td>Medium</td></tr>
+  <tr><td class="id">FR-5</td><td>Compact per-session base-state header (branch / HEAD / ledger# / merge-base / detached?).</td><td>Medium</td></tr>
+  <tr><td class="id">FR-6</td><td>Status-faceted session list (needs-input / running-long / failed-gate / idle-done).</td><td>Medium</td></tr>
+  <tr><td class="id">FR-7</td><td>Robust PDF reading — bundle poppler-utils or degrade <code>pages=</code> to extracted text.</td><td>Medium</td></tr>
+  <tr><td class="id">FR-8</td><td>Coverage/gate delta in auto-merge summaries so a slip can't pass silently.</td><td>Low</td></tr>
+  <tr><td class="id">FR-9</td><td>Independent re-measurement of any agent-produced perf/benchmark claim before a gate passes.</td><td><b>High</b></td></tr>
+  <tr><td class="id">FR-10</td><td>Pre-read the repo's PR template + gate config before autonomous PR creation; pre-populate the body to satisfy them.</td><td>Medium</td></tr>
+  <tr><td class="id">FR-11</td><td>Pre-flight cost/scale estimate for large multi-agent fan-outs.</td><td>Medium</td></tr>
+</table>
+
+<div class="note">
+  <b>Honesty note (project Golden Rule #10).</b> Every finding above is real and reproducible — tied to something that happened this week or observable in the repo right now. Nothing is fabricated to inflate counts; inferred items are labelled. The live reliability example (PR merged autonomously; a fake-benchmark PR held as NO-GO) is a genuine round-trip from this session.
+</div>
+
+<div class="foot">
+  BruteX EAP feedback · organized by the team's 5 topics · at-a-glance + per-topic cards + 20 itemized findings + 8 positives + 11 feature requests · 100% honest &amp; reproducible · claude-code-early-access@anthropic.com · 2026-06-26
+</div>
+
+</div>
+</body>
+</html>
