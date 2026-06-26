@@ -78,27 +78,32 @@
     <tr><td class="feat">The tamper-proof activity log is now flushed all the way to disk before each step counts as done, and only ever writes clean, standard data.</td><td class="why">Even a sudden power-cut can't lose or corrupt your audit trail.</td><td><span class="pill live">MERGED</span></td><td class="ref">#890</td></tr>
     <tr><td class="feat">Feedback on the Claude Code tool itself is now kept in the repo so it can be gathered and sent in.</td><td class="why">We keep improving the way the product is built.</td><td><span class="pill live">MERGED</span></td><td class="ref">#892</td></tr>
     <tr><td class="feat">A full-scale download test harness was added that fakes the broker so we can prove the pull keeps up with its allowed speed — and the test fails automatically if it ever falls behind.</td><td class="why">The download speed is now guarded by an automatic safety net, not just hope.</td><td><span class="pill live">MERGED</span></td><td class="ref">#895</td></tr>
+    <tr><td class="feat">A faster way to write each downloaded file that keeps the data byte-for-byte identical — a safe first step toward much quicker pulls.</td><td class="why">Downloads start getting faster without changing a single number in your data.</td><td><span class="pill live">MERGED</span></td><td class="ref">#891</td></tr>
+    <tr><td class="feat">A live "pull health" monitor that can tell whether a slow download is <b>our</b> software holding it back or the broker simply rejecting requests.</td><td class="why">When a pull is slow, you'll know exactly whose fault it is — so it gets fixed, not guessed.</td><td><span class="pill live">MERGED</span></td><td class="ref">#893</td></tr>
+    <tr><td class="feat">Smart caching for the dashboard so the Coverage, Completeness and Mapping pages stop re-scanning everything on every refresh.</td><td class="why">The dashboard stays snappy even while a big download is running.</td><td><span class="pill live">MERGED</span></td><td class="ref">#894</td></tr>
+    <tr><td class="feat">Switching between candle views (spot ↔ F&amp;O ↔ options) is now instant — it no longer re-walks the whole data lake on every tab click.</td><td class="why">Browsing your data feels immediate, not laggy.</td><td><span class="pill live">MERGED</span></td><td class="ref">#896</td></tr>
+    <tr><td class="feat">The candle picker now lets you drill down by symbol → timeframe (and by underlying → expiry → strike for F&amp;O) instead of one giant flat dropdown.</td><td class="why">Finding the exact contract or timeframe you want is fast and obvious.</td><td><span class="pill live">MERGED</span></td><td class="ref">#897</td></tr>
   </table>
 
   <h2>⚙️ Current <small>— being built right now (in CI, not merged yet)</small></h2>
   <table>
     <tr><th>What changed (plain English)</th><th>Why you care</th><th>Status</th><th>PR</th></tr>
-    <tr><td class="feat">A faster way to write each downloaded file that keeps the data byte-for-byte identical — a safe first step toward much quicker pulls.</td><td class="why">Downloads start getting faster without changing a single number in your data.</td><td><span class="pill ship">IN FLIGHT</span></td><td class="ref">#891</td></tr>
-    <tr><td class="feat">A live "pull health" monitor that can tell whether a slow download is <b>our</b> software holding it back or the broker simply rejecting requests.</td><td class="why">When a pull is slow, you'll know exactly whose fault it is — so it gets fixed, not guessed.</td><td><span class="pill ship">IN FLIGHT</span></td><td class="ref">#893</td></tr>
-    <tr><td class="feat">Smart caching for the dashboard so the Coverage, Completeness and Mapping pages stop re-scanning everything on every refresh.</td><td class="why">The dashboard stays snappy even while a big download is running.</td><td><span class="pill ship">IN FLIGHT</span></td><td class="ref">#894</td></tr>
+    <tr><td class="feat" colspan="4"><i>Nothing in flight — the whole resilience + dashboard-latency batch above has merged.</i></td></tr>
   </table>
 
   <h2>🔮 Future <small>— planned, honestly not built yet</small></h2>
   <table>
     <tr><th>What changed (plain English)</th><th>Why you care</th><th>Status</th><th>PR</th></tr>
+    <tr><td class="feat">A raw-data integrity layer that proves every downloaded bar is internally consistent (no impossible prices, no gaps where there should be bars).</td><td class="why">Stronger automatic proof that the data you trust is actually clean.</td><td><span class="pill mid">IN PROGRESS</span></td><td class="ref">—</td></tr>
     <tr><td class="feat">The big one: a new file format that should make downloads roughly 5× faster — but it rewrites how data is stored, so it needs a formal sign-off first to guarantee old results still reproduce exactly.</td><td class="why">Much faster downloads, with a promise that nothing already saved ever changes.</td><td><span class="pill big">NOT STARTED</span></td><td class="ref">—</td></tr>
-    <tr><td class="feat">Plugging the new "pull health" monitor directly into the live download so it watches every real pull automatically.</td><td class="why">The slowdown detector becomes always-on, not a manual check.</td><td><span class="pill mid">NOT STARTED</span></td><td class="ref">—</td></tr>
+    <tr><td class="feat">Plugging the now-merged "pull health" monitor directly into the live download so it watches every real pull automatically.</td><td class="why">The slowdown detector becomes always-on, not a manual check.</td><td><span class="pill mid">NOT STARTED</span></td><td class="ref">—</td></tr>
     <tr><td class="feat">Making dashboard pages swap content in place instead of fully reloading — the last big source of page lag.</td><td class="why">The final "nothing is ever slow" fix for the whole dashboard.</td><td><span class="pill mid">NOT STARTED</span></td><td class="ref">—</td></tr>
-    <tr><td class="feat">A deeper download-test check that also proves every file was written to the exact expected depth.</td><td class="why">Even stronger automatic proof that downloads are complete and correct.</td><td><span class="pill near">NOT STARTED</span></td><td class="ref">—</td></tr>
+    <tr><td class="feat">Closing the remaining gaps in the download failure-matrix test (e.g. proving every file was written to the exact expected depth).</td><td class="why">Even stronger automatic proof that downloads are complete and correct.</td><td><span class="pill near">NOT STARTED</span></td><td class="ref">—</td></tr>
   </table>
 
   <p class="legend"><b>Legend:</b> <span class="pill live">MERGED</span> shipped &amp; live ·
     <span class="pill ship">IN FLIGHT</span> in CI, not merged ·
+    <span class="pill mid">IN PROGRESS</span> a PR is being opened ·
     <span class="pill big">NOT STARTED</span> planned, not yet built.</p>
 
   <h2>🛡️ The bar every change clears <small>— why you can trust it</small></h2>
@@ -109,8 +114,9 @@
   </div>
 
   <p class="foot">Honesty footer: the ~5× pull speedup is <b>not done</b> — it rewrites stored bytes and is gated on a formal
-    sign-off so old results still reproduce exactly. The pull-health monitor exists but is <b>not yet wired into the live
-    pull</b>. The in-place dashboard nav-swap is <b>planned, not built</b>. The brute-force engine trades 3 indices
+    sign-off so old results still reproduce exactly. The pull-health monitor has <b>merged</b> but is <b>not yet wired into
+    the live pull</b> (that wiring is a Future item). The raw-data integrity layer is <b>in progress, not merged</b>. The
+    in-place dashboard nav-swap is <b>planned, not built</b>. The brute-force engine trades 3 indices
     (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data, never changed silently. Generated from the decision
     ledger (<code>docs/MIGRATION.md</code>) — if a row and the ledger disagree, the ledger wins.</p>
 
