@@ -1526,8 +1526,12 @@ jobs:
           # finally-guaranteed ledger/status persist ship at 100% line+branch and
           # must stay there. (The option_pull_controller twin was retired in PR-J4c
           # with the dashboard options-pull feature.)
+          # DEC-PULL-HEALTH-WIRING-001: the live pull-health monitor binding
+          # (_build_pull_health_monitor + the _observe_rate monitor thread) is
+          # covered by tests/unit/test_dashboard_pull_health_wiring.py, which MUST
+          # join the per-module gate so its coverage of those lines registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi
