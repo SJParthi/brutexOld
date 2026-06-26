@@ -200,6 +200,30 @@ def test_revision_null_count_is_zero_token() -> None:
     assert UniverseSnapshotCache._revision(fake) == (0, "")
 
 
+def test_public_master_revision_is_the_shared_token_source(store: InstrumentStore) -> None:
+    """The public ``master_revision`` COMMON helper (DEC-DASHBOARD-NAV-LATENCY-001).
+
+    An empty store keys at the stable ``(0, "")``; a load advances the count, and a
+    re-load (fresh ``fetched_at``) advances the timestamp — the exact freshness signal
+    the ``/coverage`` + ``/universe`` nav-latency caches fold into their composite key.
+    ``_revision`` delegates to it, so both surfaces read ONE source of truth.
+    """
+    assert uc.master_revision(store) == (0, "")
+    store.upsert_many(
+        [_nifty()], snapshot_date=date(2024, 1, 2), run_id="r1", csv_source_sha256="0" * 64
+    )
+    first = uc.master_revision(store)
+    assert first[0] >= 1 and first[1] != ""
+    # A re-load stamps a fresh ``fetched_at``, so the token strictly MOVES.
+    store.upsert_many(
+        [_nifty()], snapshot_date=date(2024, 1, 3), run_id="r2", csv_source_sha256="1" * 64
+    )
+    second = uc.master_revision(store)
+    assert second != first
+    # The private wrapper returns the identical token (no second source).
+    assert UniverseSnapshotCache._revision(store) == second
+
+
 # ── concurrent-install re-check branches (deterministic, no threads) ────────────
 
 

@@ -55,6 +55,13 @@ concurrency:
 env:
   PYTHON_VERSION: "3.12"
   RUST_VERSION: "1.93.1"
+  # Cargo network resilience (CI-only flake hardening) — see ci.yml for the
+  # rationale. crates.io downloads flake intermittently; CARGO_NET_RETRY
+  # makes cargo retry each failed download up to 10x, GIT_FETCH_WITH_CLI
+  # uses the system git for git-source fetches. Pure download-retry — changes
+  # nothing about what is built or run.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
@@ -92,9 +99,33 @@ jobs:
       - name: Install Rust toolchain (for the PyO3 wheels)
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
-        run: pip install ./rust/fno-math
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the wheel build up to 3
+        # times. POSIX sh; installs the same wheel.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension
-        run: pip install ./rust/trading-core
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Run mutmut on critical modules
         run: |
           set -e

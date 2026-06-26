@@ -233,6 +233,35 @@ class TestAlerts:
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
 
+    def test_pull_degraded(self) -> None:
+        """pull_degraded mirrors rate_breach: WARN, deduped per rule, carries the detail."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).pull_degraded(
+            rule="pull.stalled",
+            achieved=0.1,
+            allowed=5.0,
+            detail="OUR pipeline is the limiter — check write latency",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.RATE_LIMIT_DOWNSHIFT
+        assert ev.severity == TelegramSeverity.WARN
+        assert ev.dedupe_key == "pull-degraded:pull.stalled"  # rule-scoped dedupe (RAW)
+        assert escape_markdown_v2("pull.stalled") in ev.message
+        assert escape_markdown_v2("OUR pipeline is the limiter") in ev.message
+
+    def test_pull_degraded_vendor_detail(self) -> None:
+        """A VENDOR-gated detail string renders distinctly from the our-code one."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).pull_degraded(
+            rule="pull.rate_storm",
+            achieved=2.0,
+            allowed=5.0,
+            detail="VENDOR 429-gated — expected; the pull continues",
+        )
+        ev = fake.published[0]
+        assert escape_markdown_v2("VENDOR 429-gated") in ev.message
+        assert "OUR pipeline" not in ev.message
+
     def test_sweep_complete(self) -> None:
         fake = FakeNotifier()
         summary = FakeSummary(

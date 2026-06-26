@@ -230,7 +230,40 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/serene-hamilton-jlzt1n` (**DEC-GROWW-RATE-CEILING-8-002, MIGRATION.md #922** — the
+- **Active branch:** `claude/dashboard-latency-jlzt1n` (**DEC-DASHBOARD-NAV-LATENCY-001, MIGRATION.md #933** — the
+  three remaining UNCACHED dashboard pollers (`/api/v1/coverage`, `/api/v1/universe/completeness`,
+  `/api/v1/universe/mapping-integrity`) are now memoised behind a COMPOSITE (write-generation,
+  instrument-master-revision) token, so a repeat poll is an O(1) handoff instead of a full O(datasets)+ledger
+  projection — the LOW-RISK nav-latency wins. NEW COMMON public `master_revision(store)` helper in
+  `universe_cache.py` (the ONE instrument-master content fingerprint `(count, max(fetched_at))`, which
+  `UniverseSnapshotCache._revision` now delegates to) folded — alongside `_summary_cache.generation` — into the
+  cache KEY of three dedicated generation-stamped `MoversSnapshotCache` instances, so a pull (generation bump) OR
+  a keyless `load-instruments` (master-revision move, which does NOT bump the generation) yields a new key →
+  recompute, never stale (Golden Rule #1). The JSON + CSV mapping-integrity routes share ONE cached report. PLUS
+  `defer` on the render-blocking `html2canvas` CDN `<script>` in `v29.html` (only used in the PNG-export click
+  handler, so safe) so it no longer blocks first paint. HONEST: a repeat poll is O(1) in lake/ledger depth, NOT a
+  literal O(1) total (the first poll after a pull/load pays one real projection); READ-ONLY accelerator, byte-identical
+  payloads; the DOMINANT remaining nav lag (full-page reload → in-place DOM swap) is a SEPARATE larger PR, NOT in this
+  one. `universe_cache.py` 100% line+branch (65/12); NEW `test_dashboard_nav_latency_cache.py` (4 tests) +
+  `master_revision` unit test; 491 dashboard integration tests green; ruff/ruff-format/`mypy --strict`/`pyright` clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior merged —
+  **DEC-PULL-HEALTH-MONITOR-001, MIGRATION.md #932** —
+  the live Groww pull now SELF-INSTRUMENTS its health: a NEW `brutex/observability/pull_health.py`
+  `PullHealthMonitor` holds the hysteresis `SLADetector` (UNCHANGED), mirrors the rate-controller +
+  call-meter snapshots already produced each `_observe_rate` tick into Prometheus gauges, and routes a
+  breach/recovery to a best-effort Telegram `pull_degraded` alert + structlog — five rules
+  (`pull.achieved_below_allowed` < 0.6 · `pull.pool_idle_high` > 0.5 · `pull.write_latency_spike` >
+  1500 ms · `pull.rate_storm` recent_hits > 20 VENDOR-gated · `pull.stalled` < 0.5 r/s for K samples
+  CRITICAL, via a NEW `DwellProvider` closure that layers the dwell on the detector's None-skip contract
+  with NO change to `SLADetector`). `sweep_alerts.py` gains ONE `pull_degraded(*, rule, achieved, allowed,
+  detail)` mirroring `rate_breach`, whose message DISTINGUISHES "OUR pipeline is the limiter — check write
+  latency" from "VENDOR 429-gated — expected, the pull continues". Wired into the `_observe_rate` seam
+  (optional `monitor` param, best-effort, no new thread). HONEST: thresholds are operator-tunable
+  heuristics not vendor limits; a breach is an OBSERVATION not auto-remediation; the monitor's production
+  binding at the live build site is a flagged FAST-FOLLOW (the SEAM + WATCH logic ship, the binding does
+  not). `pull_health.py` + `sweep_alerts.py` BOTH 100% line+branch; ruff/`mypy --strict`/`pyright` clean;
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior on `claude/serene-hamilton-jlzt1n` —
+  **DEC-GROWW-RATE-CEILING-8-002, MIGRATION.md #922** — the
   production per-second ceiling RAISED 5 → 8 `GROWW_RATE_LIMIT_RPS_CEILING` (operator-directed 2026-06-24,
   supersedes DEC-GROWW-RATE-CEILING-5-001): now that Lever 2's 4 connections generate ~6.4 r/s of demand toward the
   ceiling, 8 is a fair test of vendor headroom; 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be
