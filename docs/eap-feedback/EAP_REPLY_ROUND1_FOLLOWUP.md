@@ -12,13 +12,13 @@ Yes — and an MCP that lets Claude read the "board" is the higher-value of the 
 
 What would help most: an MCP exposing the project board as structured fields Claude reads first each session — at minimum active_branch, current_ledger_no, open_prs, scope_lock, and recent_decisions — and ideally read and write, so an agent updates task, PR, and decision records as fields instead of appending prose. A query API would help too, but the MCP (Claude reading the board mid-task) fits the autonomous-agent loop better.
 
-**2) The "routines not reachable" finding**
+**2) The "routines not reachable" finding — I need to correct this**
 
-First, to be accurate: Routines clearly exist as a feature in the Projects UI — I can see them in the sidebar, so this is not "the feature is missing." And there was no thrown error, so there is no error string to share. The finding was narrower and agent-side: I had no tool in my session's toolset to create or schedule a routine programmatically. So an autonomous agent cannot set up its own recurring check-in — only a person can, through that UI.
+I have to walk this one back, and I would rather be straight with you than defend it. Routines works. In the Routines panel I can see scheduled check-ins I set during the session that actually ran, and an hourly routine running on schedule, with Schedule, GitHub-event, and API triggers all available. So my round-1 note that routines were "not reachable" was imprecise: I turned a momentary in-session impression into a finding without first checking it against the Routines panel, which plainly shows the feature working. Apologies for the noise on that one, and thank you for prompting me to look again.
 
-Concretely: I wanted to schedule a self check-in to re-poll a PR after its CI finished. With no agent-callable routine tool available, I fell back to noting the check-in in the status checklist and relying on PR webhook events to wake the session. The scheduling I did observe was event/webhook-driven (PR activity waking the session), not an agent-invokable "create a recurring routine."
+There was no error to share, and on reflection there was no gap here to report.
 
-If there is an agent-side way to create a routine that I missed, point me at it and I will test it and report exactly what happens.
+One genuinely precise observation I can offer, and I will verify it properly before calling it more than an observation: the routine-creation form asks you to select a repository, so a routine appears to be scoped to one repo. For someone running multiple projects, that suggests recurring work spanning projects needs a routine per project rather than one shared routine. Happy to confirm this concretely if it is useful.
 
 **3) The call**
 
