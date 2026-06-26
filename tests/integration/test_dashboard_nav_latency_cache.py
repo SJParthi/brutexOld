@@ -43,7 +43,6 @@ pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
 import brutex.dashboard.app as app_module
-from brutex.dashboard.app import DashboardState, _coverage_years, build_app
 from brutex.dashboard.summary_cache import SummaryCache
 from brutex.data.coverage_ledger import CoverageRecord, classify_cell
 from brutex.data.instrument_store import InstrumentStore
@@ -143,7 +142,7 @@ def store(tmp_path: Path) -> Generator[InstrumentStore]:
         run_id="r1",
         csv_source_sha256="0" * 64,
     )
-    for year in _coverage_years():
+    for year in app_module._coverage_years():
         s.upsert_coverage(_cov("RELIANCE", year))
     _write_spot_bar(lake_root, "NIFTY")
     yield s
@@ -166,7 +165,11 @@ def _bump_master(store: InstrumentStore) -> None:
 
 
 def _make_client(store: InstrumentStore, cache: SummaryCache) -> TestClient:
-    return TestClient(build_app(DashboardState(), instrument_store=store, summary_cache=cache))
+    return TestClient(
+        app_module.build_app(
+            app_module.DashboardState(), instrument_store=store, summary_cache=cache
+        )
+    )
 
 
 # ── /api/v1/coverage ───────────────────────────────────────────────────────
