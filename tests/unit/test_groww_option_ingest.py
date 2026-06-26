@@ -401,6 +401,103 @@ def test_ingest_conflict_summary_logged() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# ingest_option_contract — write-behind consumer path (DEC-FETCH-WRITE-OVERLAP-001)
+# ─────────────────────────────────────────────────────────────────────────
+def test_ingest_via_write_consumer_records_ledger_after_durable_write() -> None:
+    """The consumer path writes off-thread; the durable ledger settles AFTER the write."""
+    from brutex.data.write_consumer import WriteConsumer
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    ledger = WindowLedger()
+    successes: list[int] = []
+    with WriteConsumer(sink, shards=2) as wc:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            on_success=lambda: successes.append(1),
+            now_ist=_now,
+            write_consumer=wc,
+        )
+    # The worker returned a deferred report (bars = len(bars), conflicts not yet known).
+    assert report.windows == 1
+    assert report.bars_appended == 1
+    assert report.conflicts == 0
+    # On consumer drain the write landed AND the durable settle ran (ledger + on_success).
+    assert sink.appends and sink.appends[0][2] == "NSE-NIFTY-02Jan25-28500-CE"
+    assert successes == [1]
+    assert ledger.records()  # the window was recorded post-write
+
+
+def test_ingest_via_write_consumer_logs_conflict_post_write() -> None:
+    """A keep-first conflict is logged on the writer thread inside the settle callback."""
+    from brutex.data.write_consumer import WriteConsumer
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink(with_conflict=True)
+    with capture_logs() as logs, WriteConsumer(sink, shards=1) as wc:
+        ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            write_consumer=wc,
+        )
+    # The conflict summary fires from the post-write settle, not the worker.
+    assert any(e["event"] == "option.ingest.conflict.summary" for e in logs)
+
+
+def test_ingest_via_write_consumer_empty_window_no_write() -> None:
+    """An empty (out-of-session) intraday window settles with 0 bars via the consumer."""
+    from brutex.data.write_consumer import WriteConsumer
+
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))  # 1minute → session-filtered to empty
+    sink = _Sink()
+    ledger = WindowLedger()
+    with WriteConsumer(sink, shards=2) as wc:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            now_ist=_now,
+            write_consumer=wc,
+        )
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    # Empty fast path: no writer append, but the ledger still records the empty outcome.
+    assert sink.appends == []
+    assert ledger.records()
+
+
+def test_make_consumer_settle_runs_on_durable_only_on_success() -> None:
+    """The settle adapter runs ``on_durable`` ONLY on a successful write, never on error."""
+    calls: list[SinkAppendResult] = []
+    settle = _oi._make_consumer_settle(calls.append)
+    ok = SinkAppendResult(bars_appended=2, partitions_written=1, write_results=())
+    # Success: on_durable runs.
+    settle(ok, None)
+    assert calls == [ok]
+    # Error: on_durable does NOT run (the window is deliberately not durably settled).
+    settle(None, RuntimeError("write failed"))
+    assert calls == [ok]
+    # A defensive (result None, error None) also does nothing.
+    settle(None, None)
+    assert calls == [ok]
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # ingest_option_contract — transient retry + terminal
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_timeout_retry_then_success() -> None:

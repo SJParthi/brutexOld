@@ -94,8 +94,9 @@ from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.session import filter_intraday_session
-from brutex.data.sink import BarSink
+from brutex.data.sink import BarSink, SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.write_consumer import WriteConsumer
 from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import SerialRunParallel
@@ -260,6 +261,28 @@ def _clamped_window_key(
     )
 
 
+def _make_consumer_settle(
+    on_durable: Callable[[SinkAppendResult], object],
+) -> Callable[[SinkAppendResult | None, BaseException | None], None]:
+    """Adapt the synchronous post-write tail to a :class:`WriteConsumer` settle callback.
+
+    On a SUCCESSFUL durable write (``error is None``) it runs *on_durable* (the shared
+    conflict-log + ledger-record + ``on_success`` tail) — so the durable ledger is
+    settled ONLY AFTER the bars are durably written (the durability-ordering invariant
+    of DEC-FETCH-WRITE-OVERLAP-001). On a write ERROR it does NOTHING (the window is
+    deliberately NOT settled — deferred to the next pull, the no-skip guarantee); the
+    error is already latched by the consumer and re-raised on the worker's next
+    ``submit`` / ``close``, so it still propagates to the pull's quarantine / halt path.
+    The callback NEVER raises — a raise here would die on the writer thread.
+    """
+
+    def settle(result: SinkAppendResult | None, error: BaseException | None) -> None:
+        if error is None and result is not None:
+            on_durable(result)
+
+    return settle
+
+
 def ingest_option_contract(
     client: GrowwClientProtocol,
     sink: BarSink,
@@ -279,6 +302,7 @@ def ingest_option_contract(
     empty_retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
+    write_consumer: WriteConsumer | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -421,21 +445,6 @@ def ingest_option_contract(
             empty_backoff(empty_attempt)
 
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
-    result = sink.append(
-        exchange=exchange,
-        segment=OPTION_SEGMENT,
-        symbol=contract.symbol,
-        interval=interval,
-        bars=bars,
-    )
-    conflicts = [c for wr in result.write_results for c in wr.conflicts]
-    if conflicts:
-        _LOG.warning(
-            "option.ingest.conflict.summary",
-            pull_id=pull_id,
-            **summarize_conflicts(conflicts),
-            **fields,
-        )
     # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 — the spot-spine twin): an EMPTY
     # window confirmed empty ACROSS an in-pull retry (``fetch_count >= 2``) AND OLD enough
     # that vendor data can never appear (``clamped_end`` strictly before ``old_cutoff``) is a
@@ -456,23 +465,79 @@ def ingest_option_contract(
             settled=settle_empty,
             **fields,
         )
-    if ledger is not None:
-        ledger.record(
-            key,
-            raw_bars=len(raw_bars),
-            error_type=None,
-            bars_appended=result.bars_appended,
-            now=datetime.now(UTC),
-            in_pull_fetches=fetch_count,
-            settle_empty=settle_empty,
+
+    def _settle(result: SinkAppendResult) -> int:
+        """The post-write tail: conflict log + durable ledger record + on_success.
+
+        Shared by BOTH the synchronous path and the write-behind consumer's settle
+        callback, so the durable ledger is recorded with the REAL ``bars_appended``
+        ONLY AFTER the bars are durably written (CLAUDE.md §11 COMMON; the
+        durability-ordering invariant of DEC-FETCH-WRITE-OVERLAP-001). Runs on the
+        worker thread (synchronous path) or the writer thread (consumer path). Returns
+        the conflict count so the synchronous path's report stays byte-identical.
+        """
+        conflicts = [c for wr in result.write_results for c in wr.conflicts]
+        if conflicts:
+            _LOG.warning(
+                "option.ingest.conflict.summary",
+                pull_id=pull_id,
+                **summarize_conflicts(conflicts),
+                **fields,
+            )
+        if ledger is not None:
+            ledger.record(
+                key,
+                raw_bars=len(raw_bars),
+                error_type=None,
+                bars_appended=result.bars_appended,
+                now=datetime.now(UTC),
+                in_pull_fetches=fetch_count,
+                settle_empty=settle_empty,
+            )
+        if on_success is not None:
+            on_success()
+        return len(conflicts)
+
+    if write_consumer is not None:
+        # Write-behind (DEC-FETCH-WRITE-OVERLAP-001 Lever 1): hand the append off to the
+        # sharded writer pool so THIS fetch worker returns immediately to fetch the next
+        # contract, overlapping fetch + write. The durable ledger settle (``_settle``)
+        # runs on the writer thread AFTER the bars are durably written; a write ERROR is
+        # propagated to the back-channel and RE-RAISED by the consumer (on the next submit
+        # / close) so the pull's quarantine/halt path sees it — never silently dropped
+        # (the #919 back-channel-block fix). ``bars_appended`` reported here is
+        # ``len(bars)`` (the count the keep-first sink accepts), so the aggregate progress
+        # report stays accurate; ``conflicts`` is logged in ``_settle`` post-write (not in
+        # this progress-only report — the durable record is the ledger).
+        write_consumer.submit(
+            exchange=exchange,
+            segment=OPTION_SEGMENT,
+            symbol=contract.symbol,
+            interval=interval,
+            bars=bars,
+            settle=_make_consumer_settle(_settle),
         )
-    if on_success is not None:
-        on_success()
+        return IngestReport(
+            windows=1,
+            bars_appended=len(bars),
+            transient_failures=0,
+            conflicts=0,
+            retried_windows=1 if attempt > 0 else 0,
+        )
+
+    result = sink.append(
+        exchange=exchange,
+        segment=OPTION_SEGMENT,
+        symbol=contract.symbol,
+        interval=interval,
+        bars=bars,
+    )
+    conflict_count = _settle(result)
     return IngestReport(
         windows=1,
         bars_appended=result.bars_appended,
         transient_failures=0,
-        conflicts=len(conflicts),
+        conflicts=conflict_count,
         retried_windows=1 if attempt > 0 else 0,
     )
 
@@ -832,6 +897,7 @@ def run_groww_option_ingest(
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     contract_windows: ContractWindows | None = None,
     run_parallel: RunParallel | None = None,
+    write_consumer: WriteConsumer | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -959,6 +1025,7 @@ def run_groww_option_ingest(
                 backoff=backoff,
                 now_ist=now_ist,
                 market=market,
+                write_consumer=write_consumer,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}

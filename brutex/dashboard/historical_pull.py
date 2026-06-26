@@ -65,7 +65,9 @@ leaves it ``none``). A contract that quarantined or left a transient window is l
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import contextlib
+import os
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -108,6 +110,10 @@ from brutex.data.window_ledger_store import (
     end_pull_ledger,
     make_live_ledger_flush,
 )
+from brutex.data.write_consumer import (
+    WriteConsumer,
+    resolve_shard_count,
+)
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
@@ -147,6 +153,56 @@ _MARKET_PULL_ORDER: Final[dict[str, int]] = {
     GROWW_FUTURE_COVERAGE_MARKET: 0,
     GROWW_OPTION_COVERAGE_MARKET: 1,
 }
+
+#: Env flag that OPTS IN to the sharded write-behind consumer (DEC-FETCH-WRITE-OVERLAP-001
+#: Lever 1). DEFAULT OFF → the F&O pull keeps its byte-identical synchronous append, so the
+#: live pull carries ZERO risk until the operator explicitly enables it. Any value other than
+#: the disabled tokens turns it ON.
+_WRITE_CONSUMER_ENV: Final[str] = "BRUTEX_WRITE_CONSUMER"
+_WRITE_CONSUMER_SHARDS_ENV: Final[str] = "BRUTEX_WRITE_CONSUMER_SHARDS"
+#: Disabled tokens for the on/off flag (case-insensitive); everything else enables it.
+_WRITE_CONSUMER_OFF_TOKENS: Final[frozenset[str]] = frozenset({"", "0", "false", "no", "off"})
+
+
+def _write_consumer_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether the write-behind consumer is enabled via ``BRUTEX_WRITE_CONSUMER``.
+
+    DEFAULT OFF (the env var unset / blank / a disabled token) so the live pull is
+    byte-unchanged until the operator opts in. *env* defaults to ``os.environ`` (injected
+    in tests).
+    """
+    source = os.environ if env is None else env
+    raw = source.get(_WRITE_CONSUMER_ENV, "")
+    return raw.strip().lower() not in _WRITE_CONSUMER_OFF_TOKENS
+
+
+@contextlib.contextmanager
+def _maybe_write_consumer(
+    sink: BarSink, *, dry_run: bool, env: Mapping[str, str] | None = None
+) -> Generator[WriteConsumer | None, None, None]:
+    """Yield a started :class:`WriteConsumer` when opted-in, else ``None`` (sync path).
+
+    The consumer spans ONE phase's whole drain and is CLOSED (drained + joined, any
+    latched write error re-raised) on exit — so the subsequent 1-day derivation reads a
+    fully-written 1-minute lake, never a still-queued partition (the durability ordering
+    that makes the derived 1-day correct). DISABLED on a dry-run (the ``NullBarSink``
+    discards anyway — overlap buys nothing) and whenever the env flag is off, in which
+    case it yields ``None`` and the spine uses the unchanged synchronous append.
+    """
+    if dry_run or not _write_consumer_enabled(env):
+        yield None
+        return
+    source = os.environ if env is None else env
+    shards = resolve_shard_count(source.get(_WRITE_CONSUMER_SHARDS_ENV))
+    consumer = WriteConsumer(sink, shards=shards)
+    consumer.start()
+    try:
+        yield consumer
+    finally:
+        # Drain + join (no lost tail) and re-raise any latched write error so a halt /
+        # failed write propagates to the caller's pull-halt handling.
+        consumer.close()
+
 
 #: Factory: ``(lake_root) -> (client, sink)`` — injected in tests; the default picks the
 #: honest dry-run pair or the live ``(GrowwClient, ParquetBarSink)``. Re-uses the SAME
@@ -565,6 +621,7 @@ def _run_phase(
     until_clean_rounds: int,
     contract_windows: ContractWindows | None,
     run_parallel: RunParallel | None,
+    write_consumer: WriteConsumer | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -623,6 +680,7 @@ def _run_phase(
                 market=market,
                 contract_windows=contract_windows,
                 run_parallel=run_parallel,
+                write_consumer=write_consumer,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows
@@ -960,27 +1018,35 @@ def pull_contract_candles(
     )
 
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
-    minute = _run_phase(
-        interval=_MINUTE_INTERVAL,
-        by_market=by_market,
-        selected_symbols=selected_symbols,
-        client=client,
-        sink=sink,
-        lake_root=lake_root,
-        dry_run=dry_run,
-        start=start,
-        end=end,
-        pace=pace,
-        on_rate_limit=on_rate_limit,
-        on_timeout=on_timeout,
-        on_success=on_success,
-        on_progress=on_progress,
-        session_rate=session_rate,
-        until_clean=until_clean,
-        until_clean_rounds=until_clean_rounds,
-        contract_windows=minute_windows,
-        run_parallel=run_parallel,
-    )
+    # Opt-in write-behind (DEC-FETCH-WRITE-OVERLAP-001 Lever 1): when BRUTEX_WRITE_CONSUMER
+    # is set, the per-contract lake appends are offloaded to a sharded writer pool so the
+    # fetch connections overlap fetch + write. The consumer is DRAINED + joined on exit of
+    # this `with` (BEFORE the 1-day derivation below reads the lake), so the derived 1-day
+    # never races a still-queued 1-minute write. DEFAULT (flag off / dry-run) yields None →
+    # the byte-identical synchronous append.
+    with _maybe_write_consumer(sink, dry_run=dry_run) as write_consumer:
+        minute = _run_phase(
+            interval=_MINUTE_INTERVAL,
+            by_market=by_market,
+            selected_symbols=selected_symbols,
+            client=client,
+            sink=sink,
+            lake_root=lake_root,
+            dry_run=dry_run,
+            start=start,
+            end=end,
+            pace=pace,
+            on_rate_limit=on_rate_limit,
+            on_timeout=on_timeout,
+            on_success=on_success,
+            on_progress=on_progress,
+            session_rate=session_rate,
+            until_clean=until_clean,
+            until_clean_rounds=until_clean_rounds,
+            contract_windows=minute_windows,
+            run_parallel=run_parallel,
+            write_consumer=write_consumer,
+        )
 
     # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
     # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the

@@ -1144,3 +1144,50 @@ def test_derive_daily_from_minute_quarantines_per_target_error(
     )
     # No 1-day partition was written (the derive errored), but the pull completed cleanly.
     assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Write-behind consumer gating (DEC-FETCH-WRITE-OVERLAP-001 Lever 1)
+# ─────────────────────────────────────────────────────────────────────────
+class TestWriteConsumerGating:
+    """The ``BRUTEX_WRITE_CONSUMER`` env flag + ``_maybe_write_consumer`` lifecycle."""
+
+    @pytest.mark.parametrize(
+        ("raw", "enabled"),
+        [
+            ({}, False),  # unset → OFF (default)
+            ({"BRUTEX_WRITE_CONSUMER": ""}, False),
+            ({"BRUTEX_WRITE_CONSUMER": "0"}, False),
+            ({"BRUTEX_WRITE_CONSUMER": "false"}, False),
+            ({"BRUTEX_WRITE_CONSUMER": "OFF"}, False),
+            ({"BRUTEX_WRITE_CONSUMER": "no"}, False),
+            ({"BRUTEX_WRITE_CONSUMER": "1"}, True),
+            ({"BRUTEX_WRITE_CONSUMER": "true"}, True),
+            ({"BRUTEX_WRITE_CONSUMER": "on"}, True),
+        ],
+    )
+    def test_enabled_flag(self, raw: dict[str, str], enabled: bool) -> None:
+        assert hp._write_consumer_enabled(raw) is enabled
+
+    def test_maybe_consumer_off_yields_none(self) -> None:
+        sink = _RecordingSink()
+        with hp._maybe_write_consumer(sink, dry_run=False, env={}) as wc:
+            assert wc is None
+
+    def test_maybe_consumer_dry_run_yields_none_even_when_enabled(self) -> None:
+        sink = _RecordingSink()
+        env = {"BRUTEX_WRITE_CONSUMER": "1"}
+        with hp._maybe_write_consumer(sink, dry_run=True, env=env) as wc:
+            assert wc is None
+
+    def test_maybe_consumer_on_yields_started_and_drains(self) -> None:
+        from brutex.data.write_consumer import WriteConsumer
+
+        sink = _RecordingSink()
+        env = {"BRUTEX_WRITE_CONSUMER": "1", "BRUTEX_WRITE_CONSUMER_SHARDS": "3"}
+        with hp._maybe_write_consumer(sink, dry_run=False, env=env) as wc:
+            assert isinstance(wc, WriteConsumer)
+            assert wc.shards == 3
+            assert wc._started is True
+        # On context exit the consumer is closed (drained + joined).
+        assert wc._closed is True
