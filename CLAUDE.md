@@ -230,7 +230,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/serene-hamilton-jlzt1n` (**DEC-GROWW-RATE-CEILING-8-002, MIGRATION.md #922** — the
+- **Active branch:** `claude/pull-health-monitor-jlzt1n` (**DEC-PULL-HEALTH-MONITOR-001, MIGRATION.md #926** —
+  the live Groww pull now SELF-INSTRUMENTS its health: a NEW `brutex/observability/pull_health.py`
+  `PullHealthMonitor` holds the hysteresis `SLADetector` (UNCHANGED), mirrors the rate-controller +
+  call-meter snapshots already produced each `_observe_rate` tick into Prometheus gauges, and routes a
+  breach/recovery to a best-effort Telegram `pull_degraded` alert + structlog — five rules
+  (`pull.achieved_below_allowed` < 0.6 · `pull.pool_idle_high` > 0.5 · `pull.write_latency_spike` >
+  1500 ms · `pull.rate_storm` recent_hits > 20 VENDOR-gated · `pull.stalled` < 0.5 r/s for K samples
+  CRITICAL, via a NEW `DwellProvider` closure that layers the dwell on the detector's None-skip contract
+  with NO change to `SLADetector`). `sweep_alerts.py` gains ONE `pull_degraded(*, rule, achieved, allowed,
+  detail)` mirroring `rate_breach`, whose message DISTINGUISHES "OUR pipeline is the limiter — check write
+  latency" from "VENDOR 429-gated — expected, the pull continues". Wired into the `_observe_rate` seam
+  (optional `monitor` param, best-effort, no new thread). HONEST: thresholds are operator-tunable
+  heuristics not vendor limits; a breach is an OBSERVATION not auto-remediation; the monitor's production
+  binding at the live build site is a flagged FAST-FOLLOW (the SEAM + WATCH logic ship, the binding does
+  not). `pull_health.py` + `sweep_alerts.py` BOTH 100% line+branch; ruff/`mypy --strict`/`pyright` clean;
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). Prior on `claude/serene-hamilton-jlzt1n` —
+  **DEC-GROWW-RATE-CEILING-8-002, MIGRATION.md #922** — the
   production per-second ceiling RAISED 5 → 8 `GROWW_RATE_LIMIT_RPS_CEILING` (operator-directed 2026-06-24,
   supersedes DEC-GROWW-RATE-CEILING-5-001): now that Lever 2's 4 connections generate ~6.4 r/s of demand toward the
   ceiling, 8 is a fair test of vendor headroom; 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be

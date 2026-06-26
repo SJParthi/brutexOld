@@ -134,6 +134,125 @@ def test_observe_rate_skips_without_observer_or_controller() -> None:
     assert calls == []
 
 
+def test_observe_rate_pushes_to_observer_and_monitor() -> None:
+    """The active path builds both snapshots ONCE and feeds the observer + the monitor.
+
+    Covers the live branch (controller present + observer/monitor wired) that was
+    previously ``# pragma: no cover — live`` before DEC-PULL-HEALTH-MONITOR-001 added
+    the monitor seam. Uses lightweight fakes for the adapter/controller/monitor.
+    """
+    from typing import Any, cast
+
+    from brutex.adapters.protocol import MarketAdapter
+    from brutex.adapters.rate_common import RateController
+    from brutex.dashboard.pull_controller import _observe_rate
+    from brutex.observability.pull_health import PullHealthMonitor
+
+    class _FakeMeter:
+        def snapshot(self) -> dict[str, Any]:
+            return {"effective_rps": 3.2, "latency_ms_p95": 200.0, "in_flight": 2}
+
+    class _FakeClient:
+        meter = _FakeMeter()
+
+    class _FakeAdapter:
+        client = _FakeClient()
+
+    class _FakeController:
+        def snapshot(self) -> dict[str, Any]:
+            return {"current_rps": 5.0, "recent_hits": 0}
+
+    class _RecordingMonitor:
+        def __init__(self) -> None:
+            self.observed: list[tuple[object, object]] = []
+
+        def observe(self, ctrl: object, meter: object) -> None:
+            self.observed.append((ctrl, meter))
+
+    obs_calls: list[tuple[object, object]] = []
+
+    def _obs(rate: object, meter: object) -> None:
+        obs_calls.append((rate, meter))
+
+    monitor = _RecordingMonitor()
+    _observe_rate(
+        _obs,
+        cast(RateController, _FakeController()),
+        cast(MarketAdapter, _FakeAdapter()),
+        cast(PullHealthMonitor, monitor),
+    )
+    assert obs_calls == [
+        (
+            {"current_rps": 5.0, "recent_hits": 0},
+            {"effective_rps": 3.2, "latency_ms_p95": 200.0, "in_flight": 2},
+        )
+    ]
+    assert monitor.observed == obs_calls
+
+
+def test_observe_rate_observer_only_no_monitor() -> None:
+    """Observer wired, monitor None → the observer fires, the monitor branch is skipped."""
+    from typing import Any, cast
+
+    from brutex.adapters.protocol import MarketAdapter
+    from brutex.adapters.rate_common import RateController
+    from brutex.dashboard.pull_controller import _observe_rate
+
+    class _FakeMeter:
+        def snapshot(self) -> dict[str, Any]:
+            return {"effective_rps": 4.0}
+
+    class _FakeClient:
+        meter = _FakeMeter()
+
+    class _FakeAdapter:
+        client = _FakeClient()
+
+    class _FakeController:
+        def snapshot(self) -> dict[str, Any]:
+            return {"current_rps": 5.0}
+
+    obs_calls: list[tuple[object, object]] = []
+    _observe_rate(
+        lambda r, m: obs_calls.append((r, m)),
+        cast(RateController, _FakeController()),
+        cast(MarketAdapter, _FakeAdapter()),
+        None,  # monitor None → the 936-False branch
+    )
+    assert obs_calls == [({"current_rps": 5.0}, {"effective_rps": 4.0})]
+
+
+def test_observe_rate_monitor_only_no_meter() -> None:
+    """Monitor wired but observer None, and the adapter has no meter → empty meter snap."""
+    from typing import Any, cast
+
+    from brutex.adapters.protocol import MarketAdapter
+    from brutex.adapters.rate_common import RateController
+    from brutex.dashboard.pull_controller import _observe_rate
+    from brutex.observability.pull_health import PullHealthMonitor
+
+    class _FakeController:
+        def snapshot(self) -> dict[str, Any]:
+            return {"current_rps": 5.0, "recent_hits": 0}
+
+    class _RecordingMonitor:
+        def __init__(self) -> None:
+            self.observed: list[tuple[object, object]] = []
+
+        def observe(self, ctrl: object, meter: object) -> None:
+            self.observed.append((ctrl, meter))
+
+    monitor = _RecordingMonitor()
+    # adapter is a bare object() → no `.client.meter` → meter snapshot defaults to {}.
+    _observe_rate(
+        None,
+        cast(RateController, _FakeController()),
+        cast(MarketAdapter, object()),
+        cast(PullHealthMonitor, monitor),
+    )
+    assert monitor.observed == [({"current_rps": 5.0, "recent_hits": 0}, {})]
+
+
 def test_state_to_dict_exposes_the_new_rate_fields() -> None:
     state = DashboardState()
     state.update_rate_limit(current_rps=5.0, available_tokens=2.0, recent_429_count=1)

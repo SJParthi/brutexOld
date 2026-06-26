@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from brutex.adapters.rate_common import RateController
     from brutex.data.models import CandleBar
     from brutex.data.spot_daily_resample import DailyDeriveTarget
+    from brutex.observability.pull_health import PullHealthMonitor
 
 _LOG = structlog.get_logger(__name__)
 
@@ -905,25 +906,35 @@ def _observe_rate(
     rate_observer: RateObserver | None,
     controller: RateController | None,
     adapter: MarketAdapter,
+    monitor: PullHealthMonitor | None = None,
 ) -> None:
     """Push a live pull's adaptive rate + measured throughput to the dashboard panel.
 
-    A no-op for a dry-run / injected-factory pull (no *controller*) or when no
-    observer is wired (the default). On a live pull it sends the controller's
-    ``snapshot()`` (current_rps + recent 429s) and the transport ``CallMeter``'s
-    ``snapshot()`` (effective_rps + latency p95 + the instantaneous
-    ``rps_1s`` / ``rps_1s_max`` gauge) to *rate_observer* (``make_rate_observer`` —
-    DEC-DASHBOARD-RATE-PANEL-001 + DEC-DASHBOARD-RPS1S-PANEL-001), so the operator
-    SEES the live per-second issue rate + its peak on the dashboard, not just in
-    ``/logs``.
+    A no-op for a dry-run / injected-factory pull (no *controller*) or when neither an
+    observer nor a *monitor* is wired (the default). On a live pull it builds the
+    controller's ``snapshot()`` (current_rps + recent 429s) and the transport
+    ``CallMeter``'s ``snapshot()`` (effective_rps + latency p95 + the instantaneous
+    ``rps_1s`` / ``rps_1s_max`` gauge) and:
+
+    * sends them to *rate_observer* (``make_rate_observer`` — DEC-DASHBOARD-RATE-PANEL-001
+      + DEC-DASHBOARD-RPS1S-PANEL-001), so the operator SEES the live per-second issue
+      rate + its peak on the dashboard, not just in ``/logs``;
+    * feeds them to *monitor* (:class:`~brutex.observability.pull_health.PullHealthMonitor`
+      — DEC-PULL-HEALTH-MONITOR-001), which WATCHES the same snapshots for a degraded /
+      stalled pull and fires a best-effort Telegram alert on a breach edge.
+
+    The monitor's :meth:`~brutex.observability.pull_health.PullHealthMonitor.observe` is
+    itself best-effort (never raises), so this seam can never block or crash the pull.
     """
-    if rate_observer is None or controller is None:
+    if controller is None or (rate_observer is None and monitor is None):
         return
-    meter = getattr(getattr(adapter, "client", None), "meter", None)  # pragma: no cover — live
-    rate_observer(  # pragma: no cover — live
-        controller.snapshot(),
-        meter.snapshot() if meter is not None else {},
-    )
+    meter = getattr(getattr(adapter, "client", None), "meter", None)
+    controller_snap = controller.snapshot()
+    meter_snap = meter.snapshot() if meter is not None else {}
+    if rate_observer is not None:
+        rate_observer(controller_snap, meter_snap)
+    if monitor is not None:
+        monitor.observe(controller_snap, meter_snap)
 
 
 def _live_rate_runtime(
