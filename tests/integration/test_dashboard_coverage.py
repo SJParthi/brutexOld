@@ -197,6 +197,12 @@ class TestCoverageApi:
         # row without the raw code comments (the operator-reported confusion).
         assert "How to read a row" in win.text
         assert "in-pull" in win.text
+        # DEC-FETCHES-COL-HONESTY-001: the column is RELABELLED "EMPTY-retries" and the
+        # legend states it is NOT the total vendor calls — the deeper timeout/429 in-call
+        # retry ladder a FAILED window burns is not counted, so the operator cannot read
+        # the column as "barely retried".
+        assert "EMPTY-retries" in win.text
+        assert "NOT the total vendor calls" in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
