@@ -122,25 +122,58 @@ class AuditWriteError(AuditError):
     """Raised on any file I/O failure in the writer."""
 
 
+class AuditPayloadError(AuditError):
+    """Raised when a payload cannot be serialised as RFC 8259 JSON.
+
+    The most common cause is a ``float`` that is ``NaN`` / ``Infinity`` /
+    ``-Infinity`` — Python's :func:`json.dumps` emits the bare tokens
+    ``NaN`` / ``Infinity`` / ``-Infinity`` by default, which are **not**
+    valid JSON (RFC 8259 §6 forbids them) and which a strict reader
+    rejects. Rather than write a non-RFC, non-reproducible record into a
+    tamper-evident chain, the writer refuses the append with this error so
+    the caller can sanitise the value at the source. See
+    :func:`_canonical_json`.
+    """
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Canonical JSON helper
 # ────────────────────────────────────────────────────────────────────────
 
 
 def _canonical_json(obj: Any) -> str:
-    """Return a stable, hash-friendly JSON representation.
+    """Return a stable, hash-friendly, RFC 8259-valid JSON representation.
 
     * Keys sorted lexicographically
     * No whitespace between tokens (compact)
     * UTF-8 ensure_ascii=False so non-ASCII text hashes the same
       across platforms
+    * ``allow_nan=False`` so a ``NaN`` / ``Infinity`` / ``-Infinity``
+      value raises instead of emitting the bare non-RFC tokens
+      ``NaN`` / ``Infinity`` / ``-Infinity`` (which Python's default
+      ``allow_nan=True`` would write — invalid JSON a strict reader
+      rejects, and which would also poison the entry hash with a value
+      that cannot be round-tripped). The :class:`ValueError` is mapped
+      to :class:`AuditPayloadError` so callers get a clear domain error.
+
+    Raises
+    ------
+    AuditPayloadError
+        If *obj* contains a non-finite float (``NaN`` / ``Inf``) and so
+        cannot be represented as RFC-valid JSON.
     """
-    return json.dumps(
-        obj,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
+    try:
+        return json.dumps(
+            obj,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except ValueError as exc:
+        raise AuditPayloadError(
+            f"Audit payload is not RFC 8259-serialisable (NaN/Infinity not permitted): {exc}"
+        ) from exc
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -256,9 +289,13 @@ class AuditWriter:
         with AuditWriter.open(path) as log:
             log.append(action="RUN_START", subject="run:...", payload={})
 
-    Entries are flushed to disk on every ``append`` call (no buffering)
-    so a crash or SIGKILL between calls leaves the log in a consistent
-    state — the last write is either fully persisted or absent.
+    Entries are flushed AND ``os.fsync``-ed to disk on every ``append``
+    call (no buffering, DEC-AUDIT-FSYNC-DURABILITY-001) so a crash or
+    SIGKILL between calls leaves the log in a consistent state — the last
+    committed write is durably persisted (not merely in the OS page
+    cache), and a torn / partial tail is the only thing a crash can leave,
+    which the chain reader detects (an incomplete final line is skipped /
+    surfaced as an :class:`AuditError`, never a corrupt committed prefix).
 
     **Not thread-safe.** The caller must serialize ``append`` calls
     externally (either via a single-writer design or a lock). The
@@ -430,10 +467,24 @@ class AuditWriter:
             entry_hash=computed_hash,
         )
 
+        # to_json_line() may raise AuditPayloadError (NaN/Inf) BEFORE any
+        # write — the entry is rejected without touching the file, so the
+        # on-disk chain is never advanced past a non-RFC record.
         line = entry.to_json_line() + "\n"
         try:
             self._fp.write(line)
             self._fp.flush()
+            # fsync the record to stable storage BEFORE the action is
+            # considered committed (DEC-AUDIT-FSYNC-DURABILITY-001):
+            # `flush()` only pushes the bytes into the OS page cache, so a
+            # power loss / host crash after flush but before the kernel
+            # writes back could lose the last record and break the chain.
+            # ONE fsync per append (O(1) per record, NOT per byte) — same
+            # best-effort guard as `close()`: a few filesystems / sandboxes
+            # reject fsync on an append-only fd, where the flush above has
+            # still reached the kernel.
+            with contextlib.suppress(OSError):
+                os.fsync(self._fp.fileno())
         except OSError as exc:
             raise AuditWriteError(
                 f"Failed to write audit entry seq={entry.seq} to {self._path}: {exc}"
@@ -542,6 +593,7 @@ __all__ = [
     "AuditChainCorruption",
     "AuditEntry",
     "AuditError",
+    "AuditPayloadError",
     "AuditWriteError",
     "AuditWriter",
     "read_entries",
