@@ -57,6 +57,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+# The REAL-writer bench needs the [data] extra (polars) — the whole point is to measure
+# the GIL-bound ParquetWriter append, NOT a sleep stub. The CI "Benchmarks" job installs
+# `.[dev,data]` so these RUN there (and assert the NO-GO); a lean env without polars skips
+# honestly rather than hard-erroring (mirrors `pytest.importorskip("duckdb")` elsewhere).
+pytest.importorskip("polars", reason="real-writer write-behind bench needs the [data] extra")
+
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink, SinkAppendResult

@@ -1741,7 +1741,12 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]"
+        # The bench suite needs the [data] extra (polars/duckdb): the write-behind
+        # benchmark (tests/bench/test_write_consumer_o1.py, DEC-FETCH-WRITE-OVERLAP-LEVER1-001)
+        # measures the REAL ParquetWriter append — not a sleep stub — so polars must be
+        # present for it to RUN (and assert the NO-GO truth) rather than be skipped.
+        # Mirrors the golden job's "[dev,data]" install for the resample corpora.
+        run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
