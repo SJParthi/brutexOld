@@ -1,8 +1,8 @@
 # Claude Code EAP feedback — BruteX
 
 This directory holds **meta-feedback about Claude Code** (the Anthropic
-coding agent / "Claude Code Projects" Early Access Program), gathered from a
-week of building the BruteX backtesting engine almost entirely through Claude
+coding agent / "Claude Code Projects" Early Access Program), gathered from
+building the BruteX backtesting engine almost entirely through Claude
 Code. **It is NOT BruteX product code, spec, or engine documentation** — it
 describes the *tool* used to build BruteX, not BruteX itself.
 
@@ -15,8 +15,8 @@ consolidate the two into one EAP submission.
 
 | File | What it is |
 |------|------------|
-| `CLAUDE_CODE_EAP_FEEDBACK.html` | The self-contained feedback dossier (a shareable one-page HTML): a 5-topic at-a-glance table, one card per topic, and the itemized findings + positives + feature requests. |
-| `EAP_FEEDBACK_EMAIL.md` | The ready-to-send cover email (subject + body + send checklist) that the HTML attaches to. |
+| `CLAUDE_CODE_EAP_FEEDBACK.html` | The self-contained feedback dossier (a shareable one-page HTML): a feature-by-feature testing verdict, a 5-topic at-a-glance table, one card per topic, and the itemized findings + positives + feature requests. |
+| `EAP_FEEDBACK_EMAIL.md` | The ready-to-send cover email (subject + body + send checklist) that the HTML attaches to. Open it on GitHub's **rendered** view to copy the body into Gmail with paragraph spacing intact. |
 
 ## The 5-topic structure
 
@@ -40,8 +40,8 @@ When merging with TickVault's equivalent:
 
 - Both repos use the **same 5-topic structure** — align findings under each
   topic before de-duplicating.
-- Findings carry stable IDs (`UCF-/REL-/MEM-/PRO-/UX-`, `WIN-`, `FR-`) and a
-  severity (S1–S4); keep the IDs so cross-references survive the merge.
+- Findings carry a severity (S1–S4); keep any per-finding identifiers stable so
+  cross-references survive the merge.
 - Every finding is **real and reproducible** (Golden Rule #10 honesty) — do not
   pad or inflate counts during consolidation.
 
