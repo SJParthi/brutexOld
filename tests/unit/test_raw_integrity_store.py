@@ -237,19 +237,17 @@ def test_capture_hook_factory_attributes_each_symbol(tmp_path: Path) -> None:
 # append_record — cross-process flock (DEC-LAKE-PARTITION-FLOCK-001 mirror)
 # --------------------------------------------------------------------------- #
 def test_append_takes_cross_process_flock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import brutex.data.raw_integrity_store as store
+    import fcntl
 
     locked: list[int] = []
 
     def _spy_flock(fd: int, operation: int) -> None:
-        import fcntl
-
         assert operation == fcntl.LOCK_EX  # exclusive, held for the write
         locked.append(operation)
 
-    monkeypatch.setattr(store.fcntl, "flock", _spy_flock)
+    monkeypatch.setattr("brutex.data.raw_integrity_store.fcntl.flock", _spy_flock)
     append_record(_record(), tmp_path)
-    assert locked == [store.fcntl.LOCK_EX]  # the advisory lock was taken once
+    assert locked == [fcntl.LOCK_EX]  # the advisory lock was taken once
     # The record still landed despite the spied lock — append is unaffected.
     (record,) = load_records(tmp_path).values()
     assert record.groww_symbol == "NSE-NIFTY"
