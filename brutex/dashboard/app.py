@@ -152,7 +152,7 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
-from brutex.dashboard.universe_cache import UniverseSnapshotCache
+from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
@@ -928,6 +928,21 @@ def build_app(
     # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
     _spot_cascade_cache = MoversSnapshotCache()
+    # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
+    # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
+    # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
+    # projection on EVERY poll. Each payload is a pure function of the instrument master +
+    # the coverage ledger, so it is memoised behind a COMPOSITE token = the dashboard
+    # write-generation (`_summary_cache.generation`, bumped by every pull / materialize)
+    # AND the instrument-master content revision (`master_revision`, which a keyless
+    # `load-instruments` moves WITHOUT bumping the generation). Folding BOTH into the cache
+    # KEY (with a fixed generation=0) means a hit fires only when neither the ledger nor the
+    # master has changed — a pull OR an instrument load → new key → recompute, never stale
+    # (Golden Rule #1). REUSES the COMMON generation-stamped LRU `MoversSnapshotCache` (the
+    # SAME generic memo `_db_datasets_cache` / `_candle_count_cache` use; no new class).
+    _coverage_cache = MoversSnapshotCache()
+    _universe_completeness_cache = MoversSnapshotCache()
+    _mapping_integrity_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -2584,6 +2599,25 @@ def build_app(
 
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
 
+    def _nav_latency_key(name: str, store: Any, *extra: object) -> str:
+        """Build the COMPOSITE cache key for the nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001).
+
+        Encodes the route name, the dashboard write-generation (``_summary_cache.generation``,
+        bumped by every pull / materialize) AND the instrument-master content revision
+        (:func:`master_revision`, moved by a keyless ``load-instruments`` that does NOT bump
+        the generation) into ONE string key, plus any route-specific ``extra`` discriminants
+        (e.g. the coverage ``years`` span). Folding BOTH freshness signals into the KEY — and
+        passing ``generation=0`` to :meth:`MoversSnapshotCache.get_or_compute` — means a cache
+        hit fires ONLY when neither the ledger NOR the master has changed since the entry was
+        stored, so a pull or an instrument load always yields a fresh key (never a stale
+        payload — Golden Rule #1). The token is cheap (a COUNT+MAX over the lean master table
+        plus an O(1) generation read), strictly lighter than the projection it guards.
+        """
+        gen = _summary_cache.generation
+        count, latest = master_revision(store)
+        extra_repr = "|".join(repr(item) for item in extra)
+        return f"{name}|gen={gen}|m={count}:{latest}|{extra_repr}"
+
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
         """GET /api/v1/coverage — headline + per-cell coverage rows.
@@ -2624,7 +2658,20 @@ def build_app(
             ]
             return build_coverage_payload(store.list_coverage(), expected, years)
 
-        return JSONResponse(await run_in_threadpool(_build))
+        # Memoise behind the COMPOSITE (generation, master-revision) token
+        # (DEC-DASHBOARD-NAV-LATENCY-001): a 4 s poll within one generation + master
+        # revision is an O(1) handoff, while a pull (generation bump) OR an instrument
+        # load (master-revision move) yields a new key → recompute, never stale. The
+        # full O(datasets)+ledger build runs ONLY on a miss, on the threadpool worker.
+        def _cached_build() -> dict[str, Any]:
+            """Return the coverage payload, memoised behind the composite freshness key."""
+            return _coverage_cache.get_or_compute(
+                _nav_latency_key("coverage", store, years),
+                generation=0,
+                compute=_build,
+            )
+
+        return JSONResponse(await run_in_threadpool(_cached_build))
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -2816,9 +2863,24 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({})
-        per_symbol = await run_in_threadpool(
-            _build_per_symbol_completeness, store, lake_root.parent
-        )
+        lake = lake_root.parent
+
+        # Memoise the per-symbol projection behind the COMPOSITE (generation,
+        # master-revision) token (DEC-DASHBOARD-NAV-LATENCY-001). The inner SPOT lake
+        # scan is ALREADY `_summary_cache`-cached (DEC-COMPLETENESS-O1-LATENCY-001), but
+        # the residual `categorize_instruments` + `list_coverage` + `per_symbol_completeness`
+        # projection re-ran on every 15 s poll; this caches the WHOLE map so a repeat poll
+        # within one generation + master revision is an O(1) handoff. A pull (generation) or
+        # an instrument load (master revision) yields a new key → recompute, never stale.
+        def _cached_per_symbol() -> dict[str, dict[str, Any]]:
+            """Return the per-symbol completeness map, memoised behind the composite freshness key."""
+            return _universe_completeness_cache.get_or_compute(
+                _nav_latency_key("universe-completeness", store),
+                generation=0,
+                compute=lambda: _build_per_symbol_completeness(store, lake),
+            )
+
+        per_symbol = await run_in_threadpool(_cached_per_symbol)
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -2843,6 +2905,27 @@ def build_app(
             now=datetime.now(UTC),
         )
 
+    def _build_mapping_integrity_report_cached() -> MappingIntegrityReport:
+        """Cache the mapping-integrity report behind the COMPOSITE freshness token.
+
+        DEC-DASHBOARD-NAV-LATENCY-001. The JSON route polls this every 15 s and the CSV
+        download reuses the SAME builder; both run the two store reads
+        (``fno_eligible_underlyings`` + ``list_coverage``) + the reconciliation on every
+        call. The report is a pure function of the instrument master + the coverage ledger,
+        so it is memoised behind the ``(generation, master-revision)`` key — a repeat poll
+        within one generation + master revision is an O(1) handoff, while a pull OR an
+        instrument load yields a new key → recompute (never stale — Golden Rule #1). The
+        whitelist + ``now`` are constants here; ``now`` only stamps the report's clock, the
+        verdict itself depends solely on the cached master + ledger, so a same-revision
+        re-serve carrying the entry's ``now`` is byte-identical to recomputing (the entry is
+        dropped the instant either signal moves).
+        """
+        return _mapping_integrity_cache.get_or_compute(
+            _nav_latency_key("mapping-integrity", _require_store()),
+            generation=0,
+            compute=_build_mapping_integrity_report,
+        )
+
     @app.get("/api/v1/universe/mapping-integrity")
     async def api_universe_mapping_integrity() -> JSONResponse:
         """GET /api/v1/universe/mapping-integrity — the green/red spot↔options mapping verdict.
@@ -2858,7 +2941,7 @@ def build_app(
         line+branch); READ-ONLY, no pull. No store wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report)
+        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
         return JSONResponse(report_to_dict(report))
 
     @app.get("/api/v1/universe/mapping-integrity.csv")
@@ -2875,7 +2958,7 @@ def build_app(
         wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report)
+        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
         return Response(
             content=mapping_integrity_to_csv(report),
             media_type="text/csv; charset=utf-8",

@@ -230,7 +230,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-health-monitor-jlzt1n` (**DEC-PULL-HEALTH-MONITOR-001, MIGRATION.md #932** —
+- **Active branch:** `claude/dashboard-latency-jlzt1n` (**DEC-DASHBOARD-NAV-LATENCY-001, MIGRATION.md #933** — the
+  three remaining UNCACHED dashboard pollers (`/api/v1/coverage`, `/api/v1/universe/completeness`,
+  `/api/v1/universe/mapping-integrity`) are now memoised behind a COMPOSITE (write-generation,
+  instrument-master-revision) token, so a repeat poll is an O(1) handoff instead of a full O(datasets)+ledger
+  projection — the LOW-RISK nav-latency wins. NEW COMMON public `master_revision(store)` helper in
+  `universe_cache.py` (the ONE instrument-master content fingerprint `(count, max(fetched_at))`, which
+  `UniverseSnapshotCache._revision` now delegates to) folded — alongside `_summary_cache.generation` — into the
+  cache KEY of three dedicated generation-stamped `MoversSnapshotCache` instances, so a pull (generation bump) OR
+  a keyless `load-instruments` (master-revision move, which does NOT bump the generation) yields a new key →
+  recompute, never stale (Golden Rule #1). The JSON + CSV mapping-integrity routes share ONE cached report. PLUS
+  `defer` on the render-blocking `html2canvas` CDN `<script>` in `v29.html` (only used in the PNG-export click
+  handler, so safe) so it no longer blocks first paint. HONEST: a repeat poll is O(1) in lake/ledger depth, NOT a
+  literal O(1) total (the first poll after a pull/load pays one real projection); READ-ONLY accelerator, byte-identical
+  payloads; the DOMINANT remaining nav lag (full-page reload → in-place DOM swap) is a SEPARATE larger PR, NOT in this
+  one. `universe_cache.py` 100% line+branch (65/12); NEW `test_dashboard_nav_latency_cache.py` (4 tests) +
+  `master_revision` unit test; 491 dashboard integration tests green; ruff/ruff-format/`mypy --strict`/`pyright` clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior merged —
+  **DEC-PULL-HEALTH-MONITOR-001, MIGRATION.md #932** —
   the live Groww pull now SELF-INSTRUMENTS its health: a NEW `brutex/observability/pull_health.py`
   `PullHealthMonitor` holds the hysteresis `SLADetector` (UNCHANGED), mirrors the rate-controller +
   call-meter snapshots already produced each `_observe_rate` tick into Prometheus gauges, and routes a

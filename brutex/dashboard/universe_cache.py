@@ -83,7 +83,7 @@ from typing import Any, Final
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Exchange, Instrument
 
-__all__ = ["UniverseSnapshotCache"]
+__all__ = ["UniverseSnapshotCache", "master_revision"]
 
 #: The content-revision probe: the row-count + newest write time over the
 #: ``instruments`` table — the exact table the cached reads project from. A COUNT +
@@ -91,6 +91,43 @@ __all__ = ["UniverseSnapshotCache"]
 #: because every ``upsert_many`` stamps a fresh ``fetched_at`` on every written row,
 #: so any master change moves ``max(fetched_at)`` and/or ``count(*)``.
 _REVISION_SQL: Final[str] = "SELECT count(*), max(fetched_at) FROM instruments"
+
+
+def master_revision(store: Any) -> tuple[int, str]:
+    """Probe the instrument master's content-revision token — ``(count, str(max_fetched_at))``.
+
+    The ONE source of truth (CLAUDE.md §11 COMMON) for the instrument-master content
+    fingerprint: the row-count + newest ``fetched_at`` over the ``instruments`` table —
+    the exact table the cached ``/universe`` reads project from. An empty store returns
+    ``(0, None)`` from the SQL, normalised to ``(0, "")`` — a stable token, so an empty
+    universe keys deterministically. The timestamp is stringified so the token is a
+    hashable, comparable value independent of the DuckDB row type. Read on the store's
+    READ cursor (``store.connection``), which DuckDB MVCC keeps consistent with the
+    writer's committed snapshot (the token advances right after a committed
+    ``upsert_many``).
+
+    A keyless ``load-instruments`` populates the master WITHOUT bumping the dashboard
+    write-generation, so any cache whose payload depends on the instrument master (the
+    ``/coverage`` grid, the ``/universe`` completeness + mapping-integrity reports) MUST
+    fold this token into its key alongside the generation, or it would serve pre-load
+    rows after an instrument refresh (DEC-DASHBOARD-NAV-LATENCY-001).
+
+    Parameters
+    ----------
+    store
+        Anything exposing a DuckDB-style ``connection`` with ``execute(...).fetchone()``.
+
+    Returns
+    -------
+    tuple[int, str]
+        ``(count, str(max_fetched_at))``; ``(0, "")`` for an empty / never-loaded store.
+    """
+    row = store.connection.execute(_REVISION_SQL).fetchone()
+    if row is None:  # defensive: COUNT(*) always returns a row, but never trust it.
+        return (0, "")
+    count = int(row[0]) if row[0] is not None else 0
+    latest = row[1]
+    return (count, "" if latest is None else str(latest))
 
 
 @dataclass(slots=True)
@@ -150,22 +187,13 @@ class UniverseSnapshotCache:
 
     @staticmethod
     def _revision(store: Any) -> tuple[int, str]:
-        """Probe the master's content-revision token — ``(count, str(max_fetched_at))``.
+        """Probe the master's content-revision token — delegates to :func:`master_revision`.
 
-        An empty store returns ``(0, None)`` from the SQL, normalised to
-        ``(0, "")`` — a stable token, so an empty universe is cached too. The
-        timestamp is stringified so the token is a hashable, comparable value
-        independent of the DuckDB row type. Read on the store's READ cursor
-        (``store.connection``), which DuckDB MVCC keeps consistent with the
-        writer's committed snapshot (verified: the token advances right after a
-        committed ``upsert_many``).
+        Thin wrapper over the module-level :func:`master_revision` so the master
+        content fingerprint lives in exactly ONE place (CLAUDE.md §11 COMMON); the
+        ``/coverage`` + ``/universe`` latency caches reuse the SAME helper.
         """
-        row = store.connection.execute(_REVISION_SQL).fetchone()
-        if row is None:  # defensive: COUNT(*) always returns a row, but never trust it.
-            return (0, "")
-        count = int(row[0]) if row[0] is not None else 0
-        latest = row[1]
-        return (count, "" if latest is None else str(latest))
+        return master_revision(store)
 
     def _current(self, store: Any) -> _Snapshot:
         """Return the snapshot for the store's current revision, rebuilding on a miss.
