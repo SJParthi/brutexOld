@@ -40,6 +40,16 @@ def run_with_deadline[T](fn: Callable[[], T], seconds: float) -> T:
     Generic over the return type so it bounds BOTH the historical candle call (which
     returns a candle ``Mapping``) AND the token re-mint (which returns an SDK tuple) —
     one freeze guard, no copy (CLAUDE.md §11 COMMON).
+
+    Daemon-thread bound (DEC-PULL-HEALTH-CONCURRENCY-001 GAP #18; ADR-0009 §3): under a
+    sustained timeout storm each timed-out call leaves ONE abandoned daemon worker behind
+    until its underlying SDK socket finally returns / fails. The number of live daemons is
+    therefore bounded by the SDK's own (finite) socket timeout, NOT by this guard — a
+    daemon dies with the call it wraps. The guard relies on that finite socket timeout to
+    keep ``threading.active_count()`` from growing without bound;
+    ``tests/unit/test_groww_deadline.py`` pins this by firing N timed-out calls and
+    asserting the thread count returns to its pre-storm baseline once every simulated
+    socket fires.
     """
     result: dict[str, T] = {}
     failure: dict[str, Exception] = {}
