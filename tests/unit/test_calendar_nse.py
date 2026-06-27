@@ -384,7 +384,9 @@ class TestRebalanceLookupIsO1:
         assert set(_REBALANCE_BY_DATE) == {e.effective_date for e in NIFTY50_REBALANCE_EVENTS}
         assert len(_REBALANCE_BY_DATE) == len(NIFTY50_REBALANCE_EVENTS)
 
-    def test_map_lookup_agrees_with_linear_scan_for_every_event(self) -> None:
+    def test_map_lookup_resolves_every_event_by_identity(self) -> None:
+        # Every authoritative event resolves through the dict by `is`-identity
+        # (the prior O(n) linear scan was removed in favour of the O(1) map).
         from brutex.calendars.nse import NIFTY50_REBALANCE_EVENTS
 
         for event in NIFTY50_REBALANCE_EVENTS:

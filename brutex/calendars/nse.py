@@ -366,6 +366,10 @@ def forced_exit_time_for_session(session: TradingSession) -> time:
     15:20 IST (== :data:`FORCED_EXIT_IST`); for a short / half-day session
     (e.g. a Diwali Muhurat hour) the exit scales with the actual close, so a
     single COMMON rule replaces a hardcoded 15:20.
+
+    Assumes the session close is at or after 00:10 IST (always true for every
+    NSE/BSE session — the earliest in-scope close is the 14:45 Muhurat); below
+    that the 10-minute subtraction would roll back into the previous day.
     """
     close_dt = datetime.combine(session.date, session.close_time_ist)
     return (close_dt - _FORCED_EXIT_MARGIN).time()
