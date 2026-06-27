@@ -55,6 +55,7 @@ unavailable / no merge base). Fail-closed, mirroring the sibling CI gates.
 from __future__ import annotations
 
 import argparse
+import ast
 import subprocess  # nosec B404 — git/pytest invocation is the gate's purpose
 import sys
 from collections.abc import Sequence
@@ -215,20 +216,24 @@ def candidate_test_globs(module: str) -> list[str]:
     ]
 
 
-def module_import_tokens(module: str) -> tuple[str, ...]:
-    """Return the import substrings that prove a test covers *module*.
+def module_import_tokens(module: str) -> tuple[str, str, str]:
+    """Return the dotted identifiers that prove a test covers *module*.
 
-    A test genuinely covering ``brutex/feed/lookahead.py`` must reference
-    the module by its dotted path. We accept any of:
+    A test genuinely covering ``brutex/feed/lookahead.py`` must import the
+    module by its dotted path in one of three precise forms, checked by
+    :func:`_file_imports_module` against a parsed AST (NOT a substring
+    scan):
 
-    * ``brutex.feed.lookahead`` — a dotted ``import``/``from`` of the
-      module (``import brutex.feed.lookahead`` /
-      ``from brutex.feed.lookahead import …``);
-    * ``from brutex.feed import lookahead`` — the package-relative form
-      (matched via the ``from <pkg> import`` token plus the bare name).
+    * ``import brutex.feed.lookahead`` — an :class:`ast.Import` whose alias
+      name equals ``module_dotted``;
+    * ``from brutex.feed.lookahead import X`` — an :class:`ast.ImportFrom`
+      whose ``module`` equals ``module_dotted``;
+    * ``from brutex.feed import lookahead`` — an :class:`ast.ImportFrom`
+      whose ``module`` equals ``parent_pkg`` and one of whose alias names
+      equals ``stem``.
 
     A foreign same-stem test (e.g. one importing a *different* package's
-    ``lookahead``) references none of these, so it is rejected.
+    ``lookahead``) matches none of these, so it is rejected.
 
     Parameters
     ----------
@@ -238,25 +243,43 @@ def module_import_tokens(module: str) -> tuple[str, ...]:
     Returns
     -------
     tuple[str, str, str]
-        ``(dotted_path, "from <pkg> import ", stem)``. A test covers the
-        module if it contains ``dotted_path`` anywhere, OR has the
-        ``"from <pkg> import "`` prefix and the bare ``stem`` on the SAME
-        line (see :func:`_file_imports_module`).
+        ``(module_dotted, parent_pkg, stem)`` — e.g.
+        ``("brutex.feed.lookahead", "brutex.feed", "lookahead")``.
     """
     dotted = module.removesuffix(".py").replace("/", ".")
     path = Path(module)
     stem = path.stem
-    pkg = ".".join(path.parts[:-1])  # e.g. "brutex.feed"
-    return (dotted, f"from {pkg} import ", stem)
+    parent_pkg = ".".join(path.parts[:-1])  # e.g. "brutex.feed"
+    return (dotted, parent_pkg, stem)
 
 
 def _file_imports_module(test_path: Path, module: str) -> bool:
     """Return True if *test_path* imports *module* (not a foreign same-stem).
 
-    Reads the test file and accepts it iff it references the module's
-    dotted path directly OR uses the ``from <package> import <stem>``
-    package-relative form. An unreadable file is treated as a non-match
-    (it cannot be proven to cover the module).
+    The candidate test file is parsed with :func:`ast.parse` and its nodes
+    walked, so the decision is precise — independent of comments, string
+    contents, line wrapping, or a coincidental substring. The file is
+    accepted iff ANY top-or-nested import node satisfies one of:
+
+    * an :class:`ast.Import` with an alias whose ``name`` *exactly* equals
+      the module's dotted path (``import brutex.feed.lookahead`` — so
+      ``import brutex.feed.lookahead_extra`` or ``import
+      other.brutex.feed.lookahead`` is rejected);
+    * an :class:`ast.ImportFrom` whose ``module`` equals the dotted path
+      (``from brutex.feed.lookahead import X``);
+    * an :class:`ast.ImportFrom` whose ``module`` equals the parent
+      package *and* one of whose alias ``name`` values equals the stem
+      (``from brutex.feed import lookahead`` / ``... import lookahead as
+      lh`` — the imported NAME is matched, never the asname).
+
+    A relative import (``from . import x``) has ``node.module is None`` and
+    never matches. An :class:`ast.ImportFrom` always carries a
+    non-``None`` ``names`` list, so the alias scan needs no guard. An
+    unreadable file (:class:`OSError`) and a file that fails to parse
+    (:class:`SyntaxError`) are both treated as a non-match — a test that
+    cannot be read or is syntactically broken cannot be relied on to cover
+    the module — and the parse failure is reported on stdout (the script's
+    CLI contract).
 
     Parameters
     ----------
@@ -274,14 +297,24 @@ def _file_imports_module(test_path: Path, module: str) -> bool:
         text = test_path.read_text(encoding="utf-8")
     except OSError:
         return False
-    dotted, from_pkg, stem = module_import_tokens(module)
-    if dotted in text:
-        return True
-    # `from brutex.feed import lookahead` (possibly with siblings on the
-    # same line): require the package-import prefix AND the bare stem on
-    # the SAME line so an unrelated `import lookahead` elsewhere does not
-    # count.
-    return any(from_pkg in line and stem in line for line in text.splitlines())
+    try:
+        tree = ast.parse(text, filename=str(test_path))
+    except SyntaxError as exc:
+        print(f"  WARN: cannot parse {test_path} ({exc}) — treating as no import")
+        return False
+    module_dotted, parent_pkg, stem = module_import_tokens(module)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == module_dotted for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is None:
+                continue
+            if node.module == module_dotted:
+                return True
+            if node.module == parent_pkg and any(alias.name == stem for alias in node.names):
+                return True
+    return False
 
 
 def discover_tests_for_module(module: str, test_files: Sequence[Path]) -> list[str]:

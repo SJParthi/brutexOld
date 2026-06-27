@@ -18,6 +18,14 @@ the two blockers the redesign fixes:
   foreign test) is REJECTED, so it is never mistaken for the module's own
   coverage.
 
+The import check is an :func:`ast.parse` walk (NOT a substring scan), so
+the regression set also pins both flaws that scan had: the SUBSTRING
+false-accept (``import brutex.feed.lookahead_extra`` /
+``import other.brutex.feed.lookahead`` / the dotted path only in a
+``# comment``) is REJECTED, and a multi-line parenthesized package import
+(``from brutex.feed import (\\n    lookahead,\\n)``) is ACCEPTED; a
+syntactically broken candidate is caught as a ``SyntaxError`` and rejected.
+
 Also covered: import-verified isolation PASS / FAIL (<100% / not-measured),
 zero-touched PASS, the empty exclude-allowlist, deterministic ordering,
 Added-vs-Modified handling, renamed (R) path resolution, git-error
@@ -211,18 +219,28 @@ class TestCandidateTestGlobs:
 
 
 class TestModuleImportTokens:
-    """``module_import_tokens``: the import substrings proving coverage."""
+    """``module_import_tokens``: the dotted identifiers proving coverage."""
 
     def test_tokens_for_nested_module(self, gate: ModuleType) -> None:
+        # (module_dotted, parent_pkg, stem) for the ast-based check.
         assert gate.module_import_tokens("brutex/feed/lookahead.py") == (
             "brutex.feed.lookahead",
-            "from brutex.feed import ",
+            "brutex.feed",
             "lookahead",
         )
 
 
 class TestFileImportsModule:
-    """``_file_imports_module``: accept real importers, reject foreign tests."""
+    """``_file_imports_module``: ast-precise accept/reject of importers.
+
+    The matcher parses the candidate with :func:`ast.parse` (NOT a
+    substring scan), so it accepts only genuine import statements and is
+    immune to comments, string contents, prefix/suffix collisions, and
+    line wrapping. These tests pin both the accept paths and the two flaws
+    the ast rewrite eliminates: the SUBSTRING false-accept (``..._extra`` /
+    ``other.brutex...`` / comment-only) and the multi-line parenthesized
+    false-reject.
+    """
 
     def _write(self, tmp_path: Path, body: str) -> Path:
         f = tmp_path / "test_x.py"
@@ -241,22 +259,78 @@ class TestFileImportsModule:
         f = self._write(tmp_path, "from brutex.feed import lookahead\n")
         assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is True
 
+    def test_from_package_import_stem_as_alias_accepted(
+        self, gate: ModuleType, tmp_path: Path
+    ) -> None:
+        # `from brutex.feed import lookahead as lh` — the imported NAME
+        # (`lookahead`) is matched, never the asname.
+        f = self._write(tmp_path, "from brutex.feed import lookahead as lh\n")
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is True
+
+    def test_multiline_parenthesized_package_import_accepted(
+        self, gate: ModuleType, tmp_path: Path
+    ) -> None:
+        # MINOR-2 regression: a parenthesized multi-line package import
+        # lands the stem on a DIFFERENT line than the `from <pkg> import`
+        # prefix. The old same-line substring scan REJECTED this valid
+        # import; the ast walk accepts it.
+        f = self._write(
+            tmp_path,
+            "from brutex.feed import (\n    lookahead,\n    other,\n)\n",
+        )
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is True
+
+    def test_stem_prefix_collision_rejected(self, gate: ModuleType, tmp_path: Path) -> None:
+        # FALSE-ACCEPT regression: `import brutex.feed.lookahead_extra`
+        # contains the dotted path as a substring but is a DIFFERENT
+        # module — the ast exact-name match rejects it.
+        f = self._write(tmp_path, "import brutex.feed.lookahead_extra\n")
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is False
+
+    def test_foreign_prefix_dotted_path_rejected(self, gate: ModuleType, tmp_path: Path) -> None:
+        # FALSE-ACCEPT regression: `import other.brutex.feed.lookahead`
+        # ENDS with the dotted path but is a foreign module — rejected.
+        f = self._write(tmp_path, "import other.brutex.feed.lookahead\n")
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is False
+
+    def test_dotted_path_only_in_comment_rejected(self, gate: ModuleType, tmp_path: Path) -> None:
+        # FALSE-ACCEPT regression: the dotted path appears ONLY in a
+        # comment — no import node references it, so it is rejected.
+        f = self._write(tmp_path, "# imports brutex.feed.lookahead indirectly\nimport os\n")
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is False
+
+    def test_relative_import_is_non_match(self, gate: ModuleType, tmp_path: Path) -> None:
+        # A relative `from . import x` has node.module is None — never a
+        # match (the `node.module is None` continue branch).
+        f = self._write(tmp_path, "from . import lookahead\n")
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is False
+
     def test_foreign_same_stem_rejected(self, gate: ModuleType, tmp_path: Path) -> None:
         # B2 regression: a same-stem test importing a DIFFERENT package's
-        # `models` must NOT be accepted for brutex/data/models.py.
+        # `models` must NOT be accepted for brutex/data/models.py. Neither
+        # `from brutex import models` (module != parent_pkg) nor a bare
+        # `import models` (name != module_dotted) matches.
         f = self._write(tmp_path, "from brutex import models\nimport models\n")
         assert gate._file_imports_module(f, "brutex/data/models.py") is False
 
-    def test_unrelated_import_on_other_line_rejected(
-        self, gate: ModuleType, tmp_path: Path
-    ) -> None:
-        # The package prefix and the bare stem appear, but on DIFFERENT
-        # lines — must not count (the same-line requirement).
+    def test_unrelated_import_and_comment_rejected(self, gate: ModuleType, tmp_path: Path) -> None:
+        # An UNRELATED sibling import from the right package plus the stem
+        # only in a comment — no node imports `lookahead`, so rejected.
         f = self._write(
             tmp_path,
             "from brutex.feed import other\n# lookahead mentioned in a comment\n",
         )
         assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is False
+
+    def test_syntax_error_is_non_match(
+        self, gate: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A syntactically broken candidate cannot be parsed — caught as a
+        # SyntaxError specifically, warned on stdout, and treated as a
+        # non-match (a broken test can't be relied on to cover the module).
+        f = self._write(tmp_path, "def broken(:\n    pass\n")
+        assert gate._file_imports_module(f, "brutex/feed/lookahead.py") is False
+        assert "cannot parse" in capsys.readouterr().out
 
     def test_unreadable_file_is_non_match(self, gate: ModuleType, tmp_path: Path) -> None:
         # A directory path raises OSError on read_text -> treated as non-match.
