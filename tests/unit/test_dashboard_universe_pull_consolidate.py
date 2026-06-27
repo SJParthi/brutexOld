@@ -46,19 +46,39 @@ def test_only_one_pull_button_remains() -> None:
 
 
 def test_kept_controls_are_present() -> None:
-    """The selection helpers + date range + granularity + unified pre-build stay."""
+    """The selection helpers + granularity + unified pre-build stay."""
     html = _render_universe_html()
     for needle in (
         'id="selallbtn"',  # ✓ all shown
         'id="clrselbtn"',  # ✗ clear
         'id="tickconstbtn"',  # ⊕ tick its constituents
-        'id="fromDate"',  # date-range picker
-        'id="toDate"',
         "granularity · <b>1-minute</b> (1-day derived)",  # granularity display
         'id="matbtn"',  # the ONE unified pre-build button
         "⚙ Pre-build timeframes",
     ):
         assert needle in html, f"kept control missing: {needle}"
+
+
+def test_dead_date_range_picker_is_removed() -> None:
+    """The from/to date-range picker is GONE (FIX-FIRST review follow-up).
+
+    The consolidated ``▶ Pull · full pipeline`` button posts the gated route, which
+    accepts NO from/to and ALWAYS pulls the fixed default window — so an inert picker
+    the button silently ignored was dead/misleading UI implying a scoping it no longer
+    provides. It is removed in favour of a static "window · 2020 → prev-day (fixed)"
+    label; a pull is scoped by TICKING ROWS, not by date (Golden Rule #10 honesty).
+    """
+    html = _render_universe_html()
+    # The native date inputs + their range container are GONE from the page.
+    assert 'id="fromDate"' not in html, "the dead from-date input must be removed"
+    assert 'id="toDate"' not in html, "the dead to-date input must be removed"
+    assert 'data-bxdp="range"' not in html, "the date-range component container must be removed"
+    # The placeholder tokens the (now-removed) picker carried are gone with it.
+    assert "__BRUTEX_DATE_MAX__" not in html, "no unfilled date token may leak"
+    # The honest static window label replaces the picker.
+    assert "window · <b>2020 → prev-day</b> (fixed)" in html, (
+        "the static fixed-window label must replace the removed picker"
+    )
 
 
 def test_pull_button_is_selection_aware() -> None:
@@ -119,6 +139,22 @@ def test_pull_progress_header_reflects_real_terminal_state() -> None:
         "the stale live-feed header must be removed (DEC-LIVE-REMOVE-001 leftover)"
     )
     assert "Failed to fetch" not in html, "no hardcoded 'Failed to fetch' header may remain"
+
+
+def test_zero_unit_settle_is_neutral_not_a_green_success() -> None:
+    """A degenerate zero-unit settle is NEUTRAL, never a green ✓ success tick.
+
+    The clean predicate ``completed === total`` is trivially true at ``0 === 0``, so
+    without a guard a pull that fetched nothing read "✓ complete — 0 units". A
+    started pull always has ``total > 0`` (``resolve_pull_targets`` fails-closed on an
+    empty selection), but an idle / planned-nothing snapshot can settle here — the
+    header must show the honest "nothing to pull" note for it (FIX-FIRST hardening).
+    """
+    html = _render_universe_html()
+    assert "total === 0 && completed === 0" in html, (
+        "the zero-unit neutral guard must short-circuit before the clean-success arm"
+    )
+    assert "} — nothing to pull" in html, "the neutral zero-unit header arm is missing"
 
 
 def test_transient_poll_blip_is_retried_not_a_failure() -> None:

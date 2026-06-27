@@ -257,14 +257,16 @@
   .pull-row { display:flex; flex-wrap:wrap; align-items:center; gap:var(--s-2); width:100%; }
   .pull-div { width:1px; align-self:stretch; min-height:var(--ctl-h);
     background:var(--border-strong); margin:0 3px; }
-  .daterange, .ctl-field { display:inline-flex; align-items:center; gap:7px;
+  /* The from→to .daterange group was REMOVED with the dead date picker
+     (DEC-UNIVERSE-PULL-CONSOLIDATE-001 FIX-FIRST follow-up); only the static
+     .ctl-field chips (window + granularity) remain. */
+  .ctl-field { display:inline-flex; align-items:center; gap:7px;
     min-height:var(--ctl-h); padding:0 12px; background:var(--surface-2);
     border:1px solid var(--border-strong); border-radius:var(--r-md);
     color:var(--muted); font-size:12px; transition:.15s var(--ease); }
-  .daterange:focus-within, .ctl-field:focus-within { border-color:var(--blue);
+  .ctl-field:focus-within { border-color:var(--blue);
     box-shadow:0 0 0 3px rgba(91,141,239,.16); }
-  .daterange .dr-sep { color:var(--border-strong); }
-  .daterange input[type="date"], .ctl-field select { color-scheme:dark; }
+  .ctl-field select { color-scheme:dark; }
   /* Every pull-bar button shares ONE height + shape so the toolbar reads as a
      single aligned row instead of mismatched chips (the alignment report). */
   .pullbtn, .loadbtn { min-height:var(--ctl-h); display:inline-flex; align-items:center;
@@ -517,11 +519,15 @@
   <div class="pullbar" role="toolbar" aria-label="Pull controls">
     <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above</div>
     <div class="pull-row">
-      <div class="daterange" role="group" aria-label="Date range" data-bxdp="range" data-from="fromDate" data-to="toDate">
-        <label title="Inclusive start date — defaults to 2020-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
-        <span class="dr-sep" aria-hidden="true">→</span>
-        <label title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
-      </div>
+      <!-- The from/to date-range picker was REMOVED in DEC-UNIVERSE-PULL-CONSOLIDATE-001
+           follow-up: the single ▶ Pull · full pipeline button posts the gated route, which
+           ALWAYS pulls the fixed default window (spot 2020-01-01→prev-day; F&O per-contract
+           lookback) — it accepts NO from/to. A picker that the button silently ignored was
+           dead/misleading UI implying a scoping it no longer provides, so it is gone rather
+           than left inert (Golden Rule #10 honesty). The static line below states the fixed
+           window so the operator knows exactly what a pull fetches. -->
+      <span class="ctl-field" title="The full pipeline pulls the fixed history window — spot from 2020-01-01 to the previous trading day; F&amp;O per-contract lookback — at 1-minute. There is no date scoping: scope a pull by ticking rows, not by date.">window · <b>2020 → prev-day</b> (fixed)</span>
+      <span class="pull-div" aria-hidden="true"></span>
       <span class="ctl-field" title="1-minute is the ONLY granularity fetched from Groww; 1-day + the 19 intraday timeframes are derived from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).">granularity · <b>1-minute</b> (1-day derived)</span>
       <span class="pull-div" aria-hidden="true"></span>
       <!-- The single ONE UNIFIED pre-build button (DEC-UNIVERSE-PULL-CONSOLIDATE-001):
@@ -1549,6 +1555,15 @@ function terminalPullHeader(label, s) {
   const L = esc(label);
   if (s.state === 'error') {
     return `<span style="color:var(--red)">✕</span> ${L} failed: ${esc(s.detail || 'error')}`;
+  }
+  // A degenerate zero-unit settle (idle, or a job that planned nothing) is NEUTRAL,
+  // never a green success tick: `completed === total` is trivially true at 0 === 0,
+  // so without this guard a pull that fetched nothing read "✓ complete — 0 units".
+  // In practice resolve_pull_targets fails-closed on an empty selection so a started
+  // pull always has total > 0, but an idle snapshot can settle here — show the honest
+  // "nothing to pull" note instead of a success (Golden Rule #10).
+  if (total === 0 && completed === 0) {
+    return `<span style="color:var(--muted)">—</span> ${L} — nothing to pull`;
   }
   const clean = failed === 0 && gaps === 0 && completed === total;
   if (clean) {

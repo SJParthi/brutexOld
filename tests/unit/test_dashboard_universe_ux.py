@@ -276,9 +276,13 @@ def test_universe_selection_respects_composed_visibility() -> None:
     assert "if (v.option_pullable === false) selMulti.delete(k);" in html
 
 
-def test_universe_date_pickers_carry_today_ceiling() -> None:
-    """The pickers refuse future dates client-side; the rendered page carries
-    a real ISO max (the raw token never leaks)."""
+def test_universe_date_pickers_removed_no_token_leak() -> None:
+    """The from/to date pickers are REMOVED (DEC-UNIVERSE-PULL-CONSOLIDATE-001
+    FIX-FIRST follow-up — the consolidated pipeline accepts no from/to and always
+    pulls the fixed default window, so the picker was dead UI). The pickers + their
+    ``__BRUTEX_DATE_*__`` placeholder tokens are gone with them."""
     html = _render_universe_html()
-    assert "__BRUTEX_DATE_MAX__" not in html, "the max token leaked unfilled"
-    assert html.count('max="2') == 2, "both pickers must carry the ISO max ceiling"
+    assert "__BRUTEX_DATE_MAX__" not in html, "no max token may leak unfilled"
+    assert 'id="fromDate"' not in html and 'id="toDate"' not in html, (
+        "the dead date pickers must be removed"
+    )

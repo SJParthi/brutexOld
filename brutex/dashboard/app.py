@@ -2527,8 +2527,11 @@ def build_app(
         Returns the background job's O(1)
         :meth:`brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot` — ``state``
         (idle/running/done/error), ``total`` / ``completed`` / ``failed`` /
-        ``bars`` / ``percent`` / ``current``. The page polls this while a pull
-        runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001).
+        ``gaps`` / ``bars`` / ``percent`` / ``current``. The page polls this while
+        a pull runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001);
+        the terminal-header builder (``terminalPullHeader``) reads ``gaps`` to
+        distinguish a clean finish from a no-data-gap partial, so it is documented
+        here as a first-class snapshot key (it is NOT dead code).
         """
         return JSONResponse(_pull_job.snapshot().to_dict())
 
