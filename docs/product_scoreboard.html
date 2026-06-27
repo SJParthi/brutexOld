@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · Jun 2026 · ledger #926</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #935</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that records <b>every single minute</b> of India's index &amp; F&amp;O
       market history (2020 → today), shows you <b>what's actually moving</b> right now, and brute-force
@@ -69,42 +69,125 @@
     <div class="kpi"><b>100%</b><span>line + branch test coverage</span></div>
   </div>
 
-  <h2>✅ Finished <small>— shipped and live</small></h2>
+  <p class="tag" style="margin-top:14px;font-size:15px">Scope note (honest): the brute-force <b>engine</b>
+    trades the 3 indices (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data for future
+    expansion. Nothing in the engine scope is ever changed silently.</p>
+
+  <h2>✅ Finished &amp; Live <small>— already merged into the product</small></h2>
+
+  <p class="theme">⚡ Theme 1 — "Nothing is ever slow"</p>
   <table>
-    <tr><th>What changed (plain English)</th><th>Why you care</th><th>Status</th><th>PR</th></tr>
-    <tr><td class="feat">The data download no longer crashes if the disk fills up — it stops cleanly and tells you, leaving no half-written or corrupt files.</td><td class="why">A full disk can never wreck the data you already pulled.</td><td><span class="pill live">MERGED</span></td><td class="ref">#885</td></tr>
-    <tr><td class="feat">The download log's "Fetches" column was renamed and re-explained so a failed window can't be mis-read as "barely tried" when it actually retried hard behind the scenes.</td><td class="why">The status screen tells the truth about what really happened.</td><td><span class="pill live">MERGED</span></td><td class="ref">#887</td></tr>
-    <tr><td class="feat">Your phone gets an instant alert the moment a download stops for any reason (disk full, out of memory, quota).</td><td class="why">You hear about a stopped download in real time, not hours later.</td><td><span class="pill live">MERGED</span></td><td class="ref">#888</td></tr>
-    <tr><td class="feat">The tamper-proof activity log is now flushed all the way to disk before each step counts as done, and only ever writes clean, standard data.</td><td class="why">Even a sudden power-cut can't lose or corrupt your audit trail.</td><td><span class="pill live">MERGED</span></td><td class="ref">#890</td></tr>
-    <tr><td class="feat">Feedback on the Claude Code tool itself is now kept in the repo so it can be gathered and sent in.</td><td class="why">We keep improving the way the product is built.</td><td><span class="pill live">MERGED</span></td><td class="ref">#892</td></tr>
-    <tr><td class="feat">A full-scale download test harness was added that fakes the broker so we can prove the pull keeps up with its allowed speed — and the test fails automatically if it ever falls behind.</td><td class="why">The download speed is now guarded by an automatic safety net, not just hope.</td><td><span class="pill live">MERGED</span></td><td class="ref">#895</td></tr>
-    <tr><td class="feat">A faster way to write each downloaded file that keeps the data byte-for-byte identical — a safe first step toward much quicker pulls.</td><td class="why">Downloads start getting faster without changing a single number in your data.</td><td><span class="pill live">MERGED</span></td><td class="ref">#891</td></tr>
-    <tr><td class="feat">A live "pull health" monitor that can tell whether a slow download is <b>our</b> software holding it back or the broker simply rejecting requests.</td><td class="why">When a pull is slow, you'll know exactly whose fault it is — so it gets fixed, not guessed.</td><td><span class="pill live">MERGED</span></td><td class="ref">#893</td></tr>
-    <tr><td class="feat">Smart caching for the dashboard so the Coverage, Completeness and Mapping pages stop re-scanning everything on every refresh.</td><td class="why">The dashboard stays snappy even while a big download is running.</td><td><span class="pill live">MERGED</span></td><td class="ref">#894</td></tr>
-    <tr><td class="feat">Your EAP feedback evidence doc + product scoreboard, published to GitHub.</td><td class="why">A clear, shareable record for the Claude Code team.</td><td><span class="pill live">MERGED</span></td><td class="ref">#896</td></tr>
-    <tr><td class="feat">CI auto-retries flaky crates.io downloads so transient network blips stop failing builds.</td><td class="why">Our build pipeline stops breaking over random network hiccups.</td><td><span class="pill live">MERGED</span></td><td class="ref">#897</td></tr>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Instant view switching — re-scanned the whole multi-year data tree on every click → cached instant handoff</td><td class="why">No waiting when you change candle views</td><td class="ref">#896</td></tr>
+    <tr><td class="feat">Instant Universe page — waited 30–160 s on a slow external site every visit → served from cache</td><td class="why">The ~750-name list opens immediately</td><td class="ref">#892</td></tr>
+    <tr><td class="feat">Instant Completeness page — re-scanned the whole lake each load → O(1) on repeat</td><td class="why">"How complete is my data?" answers instantly</td><td class="ref">#895</td></tr>
+    <tr><td class="feat">Fast "Fetch Windows" — counted 340,000+ rows in Python per click → database-paginated</td><td class="why">Stays snappy no matter how big history grows</td><td class="ref">#893</td></tr>
+    <tr><td class="feat">Every data tab paginated — the last whole-table reads → page-at-a-time database queries</td><td class="why">Browsing huge tables never stalls</td><td class="ref">#863 / #864</td></tr>
+    <tr><td class="feat">Cached page totals — re-counted millions of rows on every paging click → memoised</td><td class="why">Paging the candle browser is instant</td><td class="ref">#867</td></tr>
+    <tr><td class="feat">Instant Movers tab/section switch — re-walked the whole 750-name lake on every flip → walked once per pull, shared across tabs</td><td class="why">Spot ↔ Futures ↔ Options switches are instant</td><td class="ref">#916</td></tr>
+    <tr><td class="feat">Dashboard never freezes during a download — Coverage / Completeness scans now self-throttle, so a running download keeps its full speed instead of dropping by half</td><td class="why">The dashboard stays usable even mid-download</td><td class="ref">#920</td></tr>
+    <tr><td class="feat">Faster, byte-identical file writes — a smarter way of merging each downloaded month makes writes quicker without changing a single number in your data</td><td class="why">Downloads start getting faster, results stay identical</td><td class="ref">#927</td></tr>
+    <tr><td class="feat">Instant nav on the last three pages — Coverage / Completeness / Mapping pages answer a repeat refresh instantly instead of re-projecting the whole lake each time</td><td class="why">Section-to-section navigation is snappy</td><td class="ref">#933</td></tr>
   </table>
 
-  <h2>⚙️ Current <small>— being built right now (in CI, not merged yet)</small></h2>
+  <p class="theme">📊 Theme 2 — "See what's actually moving"</p>
   <table>
-    <tr><th>What changed (plain English)</th><th>Why you care</th><th>Status</th><th>PR</th></tr>
-    <tr><td class="feat" colspan="4"><i>Nothing in flight — the whole resilience + dashboard-latency batch above has merged.</i></td></tr>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Top movers across everything — gainers / losers / volume / turnover across <b>spot + futures + options</b>, on any of 21 timeframes</td><td class="why">One screen for what's really moving</td><td class="ref">#876 / #900</td></tr>
+    <tr><td class="feat">Broker-accurate turnover — prices each minute at its typical price (H+L+C)/3 × volume, not the closing tick alone</td><td class="why">Rankings track your broker's turnover far more closely</td><td class="ref">#899</td></tr>
+    <tr><td class="feat">Per-option moneyness — shows each option's ITM / ATM / OTM and how many strikes from the money, as one clear label</td><td class="why">Read an option chain at a glance</td><td class="ref">#865 / #869</td></tr>
+    <tr><td class="feat">Full F&amp;O candle history — futures + options 1-minute history is a first-class, browsable table</td><td class="why">Inspect any contract's real history</td><td class="ref">#861 / #881</td></tr>
+    <tr><td class="feat">Find any contract fast — symbol → expiry → strike cascading pickers for F&amp;O, symbol → timeframe for spot</td><td class="why">Pinpoint the exact contract instead of a giant dropdown</td><td class="ref">#880 / #897</td></tr>
+    <tr><td class="feat">Each tab stays its own market — spot shows only spot; futures/options gainers-losers populate even without a daily partition</td><td class="why">Clean, accurate tabs — no cross-asset pollution, no empty movers</td><td class="ref">#915</td></tr>
+    <tr><td class="feat">Pick your futures expiry — Near / Next / Far filters to that serial-month future per underlying (front / 2nd / 3rd), each cached independently</td><td class="why">Focus on the liquid expiry — no stale rows, no spreadsheet juggling</td><td class="ref">#917</td></tr>
   </table>
 
-  <h2>🔮 Future <small>— planned, honestly not built yet</small></h2>
+  <p class="theme">🛡️ Theme 3 — "Nothing is ever lost"</p>
   <table>
-    <tr><th>What changed (plain English)</th><th>Why you care</th><th>Status</th><th>PR</th></tr>
-    <tr><td class="feat">Hash the raw Groww response on every pull and store it alongside the data, so each pull PROVES the stored lake equals exactly what the broker sent — real-time tamper/drift detection.</td><td class="why">Mathematical proof your data is never altered.</td><td><span class="pill mid">IN PROGRESS</span></td><td class="ref">—</td></tr>
-    <tr><td class="feat">The big one: a new file format that should make downloads roughly 5× faster — but it rewrites how data is stored, so it needs a formal sign-off first to guarantee old results still reproduce exactly.</td><td class="why">Much faster downloads, with a promise that nothing already saved ever changes.</td><td><span class="pill big">NOT STARTED</span></td><td class="ref">—</td></tr>
-    <tr><td class="feat">Plugging the now-merged "pull health" monitor directly into the live download so it watches every real pull automatically.</td><td class="why">The slowdown detector becomes always-on, not a manual check.</td><td><span class="pill mid">NOT STARTED</span></td><td class="ref">—</td></tr>
-    <tr><td class="feat">Making dashboard pages swap content in place instead of fully reloading — the last big source of page lag.</td><td class="why">The final "nothing is ever slow" fix for the whole dashboard.</td><td><span class="pill mid">NOT STARTED</span></td><td class="ref">—</td></tr>
-    <tr><td class="feat">Closing the remaining gaps in the download failure-matrix test (e.g. proving every file was written to the exact expected depth).</td><td class="why">Even stronger automatic proof that downloads are complete and correct.</td><td><span class="pill near">NOT STARTED</span></td><td class="ref">—</td></tr>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Crash-safe writes — every file is written-then-atomically-swapped via one shared, tested core</td><td class="why">A crash mid-write never corrupts your data</td><td class="ref">#885 / #890 / #891</td></tr>
+    <tr><td class="feat">Crash-proof audit log — every step's tamper-evident record is flushed all the way to disk before it counts as done, and only ever writes clean, standard data</td><td class="why">Even a sudden power-cut can't lose or corrupt your audit trail</td><td class="ref">#926</td></tr>
+    <tr><td class="feat">No silent data loss — two downloads sharing a lake can't overwrite each other (cross-process locking)</td><td class="why">Run CLI + dashboard pulls at once, safely</td><td class="ref">#887</td></tr>
+    <tr><td class="feat">One bad file ≠ broken page — a corrupt file skips that one instrument (logged) instead of crashing the screen</td><td class="why">Your dashboard never goes down over one bad file</td><td class="ref">#886</td></tr>
+    <tr><td class="feat">Graceful disk-full halt — if the disk fills mid-download, the pull stops cleanly (no corrupt partial data), end to end</td><td class="why">A full disk can never corrupt or runaway-fail your data</td><td class="ref">#885 / #901</td></tr>
+    <tr><td class="feat">Resume in seconds — mid-download checkpointing means a crash re-pulls a tiny window, not the whole span</td><td class="why">Multi-day downloads survive interruptions</td><td class="ref">#884</td></tr>
+    <tr><td class="feat">Transient errors retry — vendor 5xx / empty blips are retried, not treated as "missing forever"</td><td class="why">Temporary hiccups don't leave gaps</td><td class="ref">#883</td></tr>
+    <tr><td class="feat">Junk bars never stored — a vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero</td><td class="why">Your backtest runs on real prices, never corrupted ones</td><td class="ref">#912</td></tr>
+    <tr><td class="feat">Rate cap can't be overshot — the 500/min limiter reserves its slot atomically</td><td class="why">Your vendor limits are truly enforced, even at full parallelism</td><td class="ref">#913</td></tr>
+    <tr><td class="feat">One bad combo ≠ dead sweep — a single failing strategy combo is skipped + flagged, the rest finish</td><td class="why">A days-long sweep isn't lost to one bad tuple</td><td class="ref">#904</td></tr>
+  </table>
+
+  <p class="theme">📡 Theme 4 — "You always know what's happening"</p>
+  <table>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Instant phone alerts — a CRITICAL Telegram alert fires when a download halts (disk-full / out-of-memory / quota), from both CLI and dashboard</td><td class="why">You hear about a stopped pull in real time, not hours later</td><td class="ref">#888 / #889</td></tr>
+    <tr><td class="feat">Pull-health self-watch — a live monitor decides whether a slow download is <b>our</b> software holding it back or the broker simply rejecting requests, and it's now wired into every real pull (firing a phone alert the moment it degrades)</td><td class="why">When a pull is slow, you know exactly whose fault it is — automatically, not by squinting at a chart</td><td class="ref">#932 / #935</td></tr>
+  </table>
+
+  <p class="theme">🎯 Theme 5 — "The data is right (and honest)"</p>
+  <table>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Provable raw-data integrity — every download fingerprints <b>exactly what the broker sent</b> (before any processing) and stores that proof, on every real spot / futures / option pull, so any later tampering or drift of a re-fetched window is caught by a hash mismatch</td><td class="why">Mathematical proof your stored data derives from exactly what the broker sent</td><td class="ref">#934</td></tr>
+    <tr><td class="feat">Whole-stock "vanish" flag — if a whole F&amp;O stock comes back 100% empty after every retry (the BAJAJ-AUTO / M&amp;M failure mode), it's flagged loudly instead of blending into a normal no-data gap</td><td class="why">A whole stock can never silently disappear from your data</td><td class="ref">#919</td></tr>
+    <tr><td class="feat">Honest "Fetches" column — the download log's retry count is relabelled "EMPTY-retries" so a failed window can't be mis-read as "barely tried" when it actually retried hard behind the scenes</td><td class="why">The status screen tells the truth about what really happened</td><td class="ref">#924</td></tr>
+    <tr><td class="feat">"&amp;"-name stocks fixed — M&amp;M, L&amp;TFH, J&amp;KBANK etc. retry an encoded form so their full options chains download</td><td class="why">No whole stocks silently missing from F&amp;O data</td><td class="ref">#898</td></tr>
+    <tr><td class="feat">Tricky symbols resolved — hyphenated / verbose vendor symbols resolve to the real master symbol</td><td class="why">Names like BAJAJ-AUTO / MIDCPNIFTY map correctly</td><td class="ref">#845</td></tr>
+    <tr><td class="feat">Mapping integrity audits — proves every option maps to the right stock + lot size; flagged, never faked</td><td class="why">Trust that the data lines up</td><td class="ref">#870 / #873 / #874 / #875</td></tr>
+    <tr><td class="feat">Honest completeness — late-listed names + missing years marked "partial" instead of faking a full span</td><td class="why">The completeness screen never lies to you</td><td class="ref">#859 / #868</td></tr>
+    <tr><td class="feat">Empty-symbol recovery — a stock whose stored data key drifted has its real on-disk data recovered under the clean name, never silently dropped</td><td class="why">No stock with real data ever reads falsely "empty"</td><td class="ref">#907 / #911</td></tr>
+  </table>
+
+  <p class="theme">🚀 Theme 6 — "Getting the data is one click (and as fast as the vendor allows)"</p>
+  <table>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">One-click full pipeline — one button pulls the whole universe: spot → expiries/contracts → history</td><td class="why">Years of clean data without a manual chore</td><td class="ref">#872</td></tr>
+    <tr><td class="feat">Futures + smart ordering — futures download enabled, pulled before options, both on a 30-day default window</td><td class="why">Right data, right order, no wasted quota</td><td class="ref">#871 / #905</td></tr>
+    <tr><td class="feat">Minute-true, derived rest — only 1-minute is fetched; the daily + 19 intraday timeframes are derived from it</td><td class="why">One source of truth, 21 timeframes, no drift</td><td class="ref">#853</td></tr>
+    <tr><td class="feat">Self-tuning rate limit — an adaptive limiter backs off on rejections and recovers automatically; the per-second ceiling is operator-tuned to 8/sec</td><td class="why">Fast downloads that adjust themselves and don't get you blocked</td><td class="ref">#906 / #922</td></tr>
+    <tr><td class="feat">Actually uses its allowed speed — more download connections so the pull generates real demand toward the rate ceiling instead of leaving most of it idle</td><td class="why">Faster downloads from the slack that used to go to waste</td><td class="ref">#921</td></tr>
+    <tr><td class="feat">Proven not to leave speed on the table — an at-scale test harness fails the build if the pull ever falls short of the rate it's allowed</td><td class="why">The download speed is guarded by an automatic safety net, not hope</td><td class="ref">#929</td></tr>
+  </table>
+
+  <p class="theme">🌙 Theme 7 — "Runs itself overnight — even the login renews itself"</p>
+  <table>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Self-renewing login (6 AM fix) — the broker's access token resets daily at 06:00; BruteX <b>re-mints it automatically</b> mid-download — thread-safe, exactly once even under a stampede</td><td class="why"><b>You sleep, it keeps working.</b> No manual token rotation at dawn, ever</td><td class="ref">#909</td></tr>
+    <tr><td class="feat">Visible self-heal in the log — each automatic renewal prints a <code>groww.token.reauth</code> line</td><td class="why">You can <i>see</i> it healed itself — proof, not a promise</td><td class="ref">#909</td></tr>
+    <tr><td class="feat">Can't freeze on a bad renewal — even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry</td><td class="why">A flaky network at 6 AM can never lock up your pull</td><td class="ref">#910</td></tr>
+  </table>
+
+  <h2>🟡 Current <small>— in flight right now (open PRs, not yet merged)</small></h2>
+  <p class="tag" style="font-size:15px">These are real open pull requests. They are <b>docs / process</b> work — no <code>brutex/</code> engine change.</p>
+  <table>
+    <tr><th>What it is</th><th>Why it matters</th><th>Status</th></tr>
+    <tr><td class="feat">EAP feedback — round 2: an evidence-gated feedback dossier for the Claude Code Early-Access Program, every finding backed by a reproducible proof</td><td class="why">Improves how the product itself is built (meta, not a product feature)</td><td><span class="pill mid">OPEN PR #905</span></td></tr>
+    <tr><td class="feat">Consolidated EAP dossier — one shared feedback file so the BruteX + TickVault repos can be submitted together</td><td class="why">Same meta-feedback track as above</td><td><span class="pill mid">DRAFT PR #889</span></td></tr>
+    <tr><td class="feat">Fetch/write overlap (Lever 1) — an experiment to overlap downloading and disk-writing for higher throughput</td><td class="why">Kept <b>default-off</b> — a real benchmark showed it doesn't help under Python's lock, so it's honestly <b>NO-GO</b> and shelved, not shipped</td><td><span class="pill big">DRAFT PR #886 · NO-GO</span></td></tr>
+  </table>
+
+  <h2>🔜 Up next <small>— being built or designed now (not yet shipped)</small></h2>
+  <table>
+    <tr><th>What it'll do</th><th>Why you'll care</th><th>Status</th></tr>
+    <tr><td class="feat">🔬 Live vendor probe — a ready-to-run A/B test of a suspect symbol vs a known-good one against the live vendor</td><td class="why">Confirms whether missing data is <i>recoverable</i> or genuinely absent</td><td><span class="pill near">recipe delivered (needs creds)</span></td></tr>
+    <tr><td class="feat">📦 Verbatim raw-payload archive — store the full raw broker response (not just its fingerprint) so any past window can be replayed offline</td><td class="why">Even stronger, end-to-end proof your data is exactly what the broker sent</td><td><span class="pill near">designed, gated (extends #934)</span></td></tr>
+    <tr><td class="feat">🩺 CLI pull-health monitor — extend the now-live pull-health watch to the command-line download path too</td><td class="why">The slowdown detector becomes always-on everywhere, not just the dashboard</td><td><span class="pill near">flagged follow-up (#935)</span></td></tr>
+  </table>
+
+  <h2>🔮 Future <small>— planned next (honest roadmap, not yet built)</small></h2>
+  <table>
+    <tr><th>Plan</th><th>What it'll give you</th><th>Stage</th></tr>
+    <tr><td class="feat">Brute-force sweep (build) — run the ~33-billion-combo sweep across CPU cores, ~2–4 days on reference hardware, bit-identical to serial</td><td class="why">Massive-scale testing on the reference machine</td><td><span class="pill big">🔴 design-locked (ADR-0011), build deferred</span></td></tr>
+    <tr><td class="feat">Options execution track — translate winning index signals into real options trades for execution realism</td><td class="why">From signal research to execution-realistic results</td><td><span class="pill big">🔴 Track 2</span></td></tr>
+    <tr><td class="feat">In-place dashboard nav — pages swap content in place instead of fully reloading</td><td class="why">The last big source of page lag, gone</td><td><span class="pill mid">🟡 documented follow-up (#933)</span></td></tr>
+    <tr><td class="feat">True O(page) paging — candle/discovery reads only the visible page via a write-time lake manifest</td><td class="why">Paging stays instant at any history depth</td><td><span class="pill mid">🟡 documented follow-up (#896 / #916)</span></td></tr>
+    <tr><td class="feat">Engine → F&amp;O stocks — expand the brute-force engine beyond the 3 indices (the ~212-stock lake is reference-only today)</td><td class="why">Brute-force more of the market — once a scope decision is taken</td><td><span class="pill mid">🟡 needs a scope decision (#200)</span></td></tr>
+    <tr><td class="feat">Daily health cron — a dawn <code>brutex doctor</code> run posts an automated health report to Telegram</td><td class="why">Wake up to a daily "all good" (or "fix this") message</td><td><span class="pill near">🟢 deferred follow-up</span></td></tr>
   </table>
 
   <p class="legend"><b>Legend:</b> <span class="pill live">MERGED</span> shipped &amp; live ·
-    <span class="pill ship">IN FLIGHT</span> in CI, not merged ·
-    <span class="pill mid">IN PROGRESS</span> a PR is being opened ·
-    <span class="pill big">NOT STARTED</span> planned, not yet built.</p>
+    <span class="pill mid">IN FLIGHT / MID</span> open PR or mid-term plan ·
+    <span class="pill near">NEAR</span> near-term / designed ·
+    <span class="pill big">MAJOR</span> major initiative or shelved experiment.</p>
 
   <h2>🛡️ The bar every change clears <small>— why you can trust it</small></h2>
   <div class="trust">
@@ -113,12 +196,11 @@
     <div class="card"><b>Honesty rule.</b> No hallucinations, no hype — unverified things are labelled "unverified", and nothing is claimed done until it merges.</div>
   </div>
 
-  <p class="foot">Honesty footer: the ~5× pull speedup is <b>not done</b> — it rewrites stored bytes and is gated on a formal
-    sign-off so old results still reproduce exactly. The pull-health monitor has <b>merged</b> but is <b>not yet wired into
-    the live pull</b> (that wiring is a Future item). The raw-data integrity layer is <b>in progress, not merged</b>. The
-    in-place dashboard nav-swap is <b>planned, not built</b>. The brute-force engine trades 3 indices
-    (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data, never changed silently. Generated from the decision
-    ledger (<code>docs/MIGRATION.md</code>) — if a row and the ledger disagree, the ledger wins.</p>
+  <p class="foot">Honesty footer: every Finished row above traces to a real, merged <code>docs/MIGRATION.md</code>
+    ledger entry (refreshed through #935). The Current rows are <b>open PRs, not merged</b> (the Lever-1 write
+    overlap is honestly <b>NO-GO</b> and shelved). The Up-next and Future rows are <b>planned, not built</b>. The
+    brute-force engine trades 3 indices (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data, never
+    changed silently. Generated from the decision ledger — if a row and the ledger disagree, the ledger wins.</p>
 
 </div>
 </body>
