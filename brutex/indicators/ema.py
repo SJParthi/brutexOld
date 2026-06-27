@@ -52,6 +52,7 @@ JSON. Supports checkpoint/restore for resumable sweeps per
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -108,6 +109,8 @@ class EMAState:
             On bar (period-1), returns the SMA seed.
             On bars ≥ period, returns the recursive EMA value.
         """
+        if not math.isfinite(close):
+            raise ValueError(f"EMA close must be finite, got {close!r}")
         self.bars_seen += 1
 
         if self.period == 1:
