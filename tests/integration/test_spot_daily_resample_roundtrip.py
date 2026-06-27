@@ -218,3 +218,115 @@ def test_partial_session_daily_is_corrected_by_complete_repull(tmp_path: Path) -
     assert int(rows[0][5]) == sum(b.volume for b in full)  # volume = sum over FULL session
     # The corrected bar genuinely differs from the frozen partial (proof the fix engaged).
     assert int(rows[0][5]) > sum(b.volume for b in partial)
+
+
+def _write_1m_across_months(lake_root: Path) -> None:
+    """Write 1-minute across SIX month partitions (incl. an untouched 2024 month).
+
+    The whole-tree read globbed ALL of these on every derive; the bounded read
+    (DEC-RESAMPLE-BOUND-GLOB-001) reads ONLY the months the IST span covers.
+    """
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    days = (
+        date(2024, 6, 3),  # far-past, never in any tested span
+        date(2025, 11, 5),
+        date(2025, 12, 31),
+        date(2026, 1, 2),
+        date(2026, 2, 14),
+    )
+    for idx, day in enumerate(days):
+        sink.append(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            interval="1minute",
+            bars=_session_1m(day, 1400.0 + idx * 100),
+        )
+
+
+def test_bounded_read_reads_strictly_fewer_files_than_whole_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded month-glob reads STRICTLY FEWER Parquet files than the whole tree.
+
+    Spies :func:`polars.read_parquet` (the call the REAL ``make_lake_read_1m_window``
+    makes) to capture the path-list it is handed, and compares against the on-disk
+    partition count. A single-day span must read only its own month(s), never the whole
+    multi-year tree, and never the far-past 2024 month (DEC-RESAMPLE-BOUND-GLOB-001).
+    """
+    import polars as pl
+
+    _write_1m_across_months(tmp_path)
+    base = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute"
+    whole_tree_files = sorted(base.rglob("*.parquet"))
+    assert len(whole_tree_files) == 5  # five month partitions on disk
+
+    captured: list[list[str]] = []
+    real_read_parquet = pl.read_parquet
+
+    def _spy(source: list[str]) -> pl.DataFrame:
+        # The bounded reader passes an EXPLICIT list of file paths (not a glob string).
+        captured.append(list(source))
+        return real_read_parquet(source)
+
+    monkeypatch.setattr(pl, "read_parquet", _spy)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),  # ONLY the 2025-12-31 IST session
+    )
+    read()
+
+    assert len(captured) == 1
+    globbed = captured[0]
+    # STRICTLY fewer than the whole tree, and never reads the far-past 2024 month.
+    assert 0 < len(globbed) < len(whole_tree_files)
+    assert not any("2024" in p for p in globbed)
+
+
+def test_bounded_read_byte_identical_to_whole_tree(tmp_path: Path) -> None:
+    """The bounded read's resampled 1-day bars are BYTE-IDENTICAL to the whole-tree read.
+
+    Drives the REAL ``make_lake_read_1m_window`` (bounded) and a faithful replica of the
+    OLD whole-tree read over the SAME multi-month + cross-year lake, then compares the
+    :class:`~brutex.data.models.CandleBar` lists ``resample_1m_to_daily`` produces.
+    """
+    import polars as pl
+    from brutex.data.spot_daily_resample import resample_1m_to_daily
+
+    _write_1m_across_months(tmp_path)
+    base = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute"
+    before = date(2026, 6, 19)
+
+    def _old_whole_tree(start: date, end: date) -> pl.DataFrame:
+        frame = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        ist = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
+        return (
+            frame.rename({"timestamp": "ts_utc"})
+            .with_columns(ist.alias("_ist_date"))
+            .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
+            .select("ts_utc", "open", "high", "low", "close", "volume")
+            .sort("ts_utc")
+        )
+
+    spans = (
+        (date(2025, 11, 1), date(2026, 3, 1)),  # multi-month + cross-year
+        (date(2025, 12, 20), date(2026, 1, 10)),  # cross-year boundary
+        (date(2024, 6, 1), date(2024, 7, 1)),  # single far-past month
+        (date(2030, 1, 1), date(2030, 2, 1)),  # absent span → empty
+    )
+    for start, end in spans:
+        bounded = make_lake_read_1m_window(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            start=start,
+            end=end,
+        )()
+        new_bars = resample_1m_to_daily(bounded, before=before)
+        old_bars = resample_1m_to_daily(_old_whole_tree(start, end), before=before)
+        assert new_bars == old_bars, f"daily output diverged for [{start}, {end})"
