@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from types import TracebackType
 
 import pytest
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook, WatchdogFactory
@@ -414,6 +415,74 @@ class TestBackgroundPullJobWatchdog:
         assert running_after_stale is True
         c_started = job.start(lambda _h: None, total=1)
         assert c_started is False  # single-flight holds vs run B
+
+    def test_stale_finally_interleaved_at_token_publish_does_not_clobber(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BLOCKER (residual TOCTOU): run A's finally fires DURING run B's start() lock.
+
+        The deterministic version of the race the sequential test cannot observe: run B's
+        ``start()`` must claim ``_running`` AND publish ``self._watchdog`` ATOMICALLY under
+        one lock. If the token is published OUTSIDE the lock (the racy code), a stale worker
+        A's finally can acquire the just-released lock in the gap between ``_running = True``
+        and ``self._watchdog = wd_B`` — still see ``self._watchdog is wd_A`` → clear
+        ``_running`` → admit a third pull C concurrently with B.
+
+        This injects A's finally at EXACTLY that point via a lock whose release fires a
+        one-shot hook. With the under-lock fix B's token is published BEFORE the lock is
+        released, so the interleaved A-finally sees ``self._watchdog is wd_B`` → no clobber →
+        C is REFUSED. Reverting the under-lock move makes this FAIL (C accepted).
+        """
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+
+        # Run A starts and hangs; A's timer clears _running (A was current).
+        job.start(lambda _h: None, total=1)
+        built[0].trigger_hung()
+        running_after_a_hung = job.running
+        assert running_after_a_hung is False
+
+        # Wrap the job's real lock so that, on the NEXT release (run B's start()), we run the
+        # stale worker A's captured finally exactly once — at the lock-release boundary, i.e.
+        # the instant after the lock is dropped. Under the fix B has already published
+        # self._watchdog INSIDE the lock, so A's gate sees wd_B; in the racy code the token is
+        # published only AFTER the release, so A's gate would still see wd_A and clobber.
+        real_lock = job._lock
+        fired: list[bool] = []
+
+        class _InterleavingLock:
+            def __enter__(self) -> bool:
+                return real_lock.acquire()
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: TracebackType | None,
+            ) -> None:
+                real_lock.release()
+                if not fired:
+                    fired.append(True)
+                    captured[0]()  # stale worker A's _run(..., wd_A) finally, mid-B-start
+
+        job._lock = _InterleavingLock()  # type: ignore[assignment]
+
+        # Run B starts. Under the fix, B publishes self._watchdog INSIDE the lock, so when the
+        # release hook runs A's finally, self._watchdog is already wd_B → A's gate is False.
+        b_started = job.start(lambda _h: None, total=1)
+        assert b_started is True
+        assert fired == [True]  # the interleaving actually happened
+        job._lock = real_lock  # restore the real lock for the rest of the test
+
+        # B is still the current in-flight run; single-flight holds → a third pull is REFUSED.
+        running_after_interleave = job.running
+        assert running_after_interleave is True
+        c_started = job.start(lambda _h: None, total=1)
+        assert c_started is False
 
     def test_stale_on_hung_for_superseded_run_does_not_clobber(
         self, monkeypatch: pytest.MonkeyPatch

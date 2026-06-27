@@ -175,23 +175,29 @@ class BackgroundPullJob:
         per WINDOW (~1 s cadence) rather than per finished symbol. Default ``False`` keeps
         the per-pair advance (every other caller — options, per-symbol — is unchanged).
         """
-        with self._lock:
-            if self._running:
-                return False
-            self._running = True
-        self._ledger_synced = ledger_synced
-        self._progress.start(total=total, detail=detail)
-        # Build + start the per-run stall watchdog (DEC-PULL-STALL-DETECTION-001): the
-        # worker beats it on real progress (per window), and its daemon timer declares the
-        # worker HUNG if no beat lands for the audited timeout — so a wedged worker (which
+        # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
+        # the worker beats it on real progress (per window), and its daemon timer declares
+        # the worker HUNG if no beat lands for the audited timeout — so a wedged worker (which
         # never reaches the finally below to clear ``_running``) is still detected + alerted
-        # and the single-flight flag is released. Built here (not in __init__) so each run
+        # and the single-flight flag is released. Building it here is side-effect-free
+        # (``.start()`` is NOT called on the ``return False`` path → no leaked timer); each run
         # gets a fresh heartbeat / timer with no cross-run state. The watchdog object IS this
         # run's identity token: both _on_hung and _run's finally gate their ``_running`` clear
         # on ``self._watchdog is`` this watchdog (under the lock), so they only ever act on
         # the CURRENT run (a stale worker can never clobber a newer run — the BLOCKER fix).
         watchdog = self._watchdog_factory(lambda event: self._on_hung(event, watchdog))
-        self._watchdog = watchdog
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+            # Publish the run-identity token ATOMICALLY with the single-flight flag, under
+            # the SAME lock the gates read it under. Otherwise a stale worker A's finally
+            # could acquire the lock in the gap between ``_running = True`` and a later
+            # unlocked ``self._watchdog = watchdog``, still see ``self._watchdog is wd_A`` →
+            # clear ``_running`` → admit a third pull concurrently (the residual race).
+            self._watchdog = watchdog
+        self._ledger_synced = ledger_synced
+        self._progress.start(total=total, detail=detail)
         watchdog.start()
         self._spawn(lambda: self._run(work, watchdog))
         return True
