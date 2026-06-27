@@ -257,14 +257,16 @@
   .pull-row { display:flex; flex-wrap:wrap; align-items:center; gap:var(--s-2); width:100%; }
   .pull-div { width:1px; align-self:stretch; min-height:var(--ctl-h);
     background:var(--border-strong); margin:0 3px; }
-  .daterange, .ctl-field { display:inline-flex; align-items:center; gap:7px;
+  /* The from→to .daterange group was REMOVED with the dead date picker
+     (DEC-UNIVERSE-PULL-CONSOLIDATE-001 FIX-FIRST follow-up); only the static
+     .ctl-field chips (window + granularity) remain. */
+  .ctl-field { display:inline-flex; align-items:center; gap:7px;
     min-height:var(--ctl-h); padding:0 12px; background:var(--surface-2);
     border:1px solid var(--border-strong); border-radius:var(--r-md);
     color:var(--muted); font-size:12px; transition:.15s var(--ease); }
-  .daterange:focus-within, .ctl-field:focus-within { border-color:var(--blue);
+  .ctl-field:focus-within { border-color:var(--blue);
     box-shadow:0 0 0 3px rgba(91,141,239,.16); }
-  .daterange .dr-sep { color:var(--border-strong); }
-  .daterange input[type="date"], .ctl-field select { color-scheme:dark; }
+  .ctl-field select { color-scheme:dark; }
   /* Every pull-bar button shares ONE height + shape so the toolbar reads as a
      single aligned row instead of mismatched chips (the alignment report). */
   .pullbtn, .loadbtn { min-height:var(--ctl-h); display:inline-flex; align-items:center;
@@ -467,58 +469,31 @@
 
   <div class="band" id="tabs"></div>
 
-  <!-- ── Zone 0: one-click "Pull the Universe" hero — the 8-button matrix ── -->
+  <!-- ── Zone 0: the ONE selection-aware full-pipeline hero (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+       The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull historical) +
+       the bulk ①②③④ matrix + the separate "Pull selected" button are GONE: the pipeline ALWAYS
+       runs the fixed gated order spot → expiries+contracts → historical → pre-build, advancing only
+       when the prior stage fully succeeds, so one button does the whole thing. -->
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
     <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
-      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b>; the intraday ones are computed on demand, <b>NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
-    <!-- One-click full pipeline (DEC-ONE-CLICK-PIPELINE-001): runs all three
-         phases in order — spot → expiries+contracts → historical — over the WHOLE
-         universe on ONE click, gated so a failed earlier phase stops the chain
-         (the buttons below stay for per-surface manual control). -->
+      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b>; the intraday ones are computed on demand, <b>NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) The pipeline's FINAL stage pre-builds them automatically once the fetch fully succeeds; the <b>⚙ Pre-build timeframes</b> button below is an on-demand re-warm.</div>
+    <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
+         TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
+         /pull-pipeline route (resolve_pull_targets: ?symbols= for a selection, bare = everything).
+         Always runs the fixed gated chain spot → expiries+contracts → historical (futures then
+         options) → pre-build, advancing only on each stage's FULL success. Single-flight via
+         startAndPoll; the label reflects the selection count. -->
     <button class="pull-everything-btn" id="pullPipelineBtn"
-            title="ONE click: pull all spot (2020 → prev day, 1-minute), then ALL expiries + contracts metadata, then ALL historical F&amp;O candles — in that order. Each phase only starts once the previous one finishes clean (a dead token / quota / failed window stops the chain). Re-click is safe — already-pulled windows are skipped.">
+            title="ONE click — the full gated pipeline: pull spot (2020 → prev day, 1-minute), then ALL expiries + contracts metadata, then ALL historical F&amp;O candles (futures then options), then pre-build the derived timeframes — in that order. Each stage only starts once the previous one finishes clean (a dead token / quota / failed window stops the chain). Tick rows to scope it to your selection, or leave none ticked to pull the WHOLE universe. Re-click is safe — already-pulled windows are skipped.">
       <span class="pe-icon">▶</span>
       <span class="pe-text">
-        <b>Pull EVERYTHING — one click, full pipeline</b>
-        <span class="pe-sub">spot → expiries + contracts → historical · whole universe · auto-gated, fail-closed</span>
+        <b id="pullPipelineLabel">Pull · full pipeline</b>
+        <span class="pe-sub">spot → expiries + contracts → historical → pre-build · auto-gated, fail-closed · ticked rows scope it, else the whole universe</span>
       </span>
     </button>
-    <div class="bulkgrid">
-      <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
-        <span class="shine"></span><span class="bnum">①</span>
-        <span class="bicon">📈</span><span class="blabel">Indices · Spot</span>
-        <span class="bmeta">all index · 1-minute (1-day derived)</span>
-      </button>
-      <button class="bulkbtn stk" id="bulkStkSpot" data-surface="spot" data-kind="stock">
-        <span class="shine"></span><span class="bnum">②</span>
-        <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
-        <span class="bmeta">all F&amp;O stock · 1-minute (1-day derived)</span>
-      </button>
-      <button class="bulkbtn idx" id="bulkIdxDeriv" data-surface="derivatives" data-kind="index"
-              title="Metadata-only: enumerate + persist every expiry date + every listed contract symbol for ALL indices into the registry cache — no history. Use ⤓ Pull historical for OHLC. Re-click is safe (the immutable past is skipped).">
-        <span class="shine"></span><span class="bnum">③</span>
-        <span class="bicon">🔗</span><span class="blabel">Indices · Expiries + contracts</span>
-        <span class="bmeta">metadata only · no history</span>
-      </button>
-      <button class="bulkbtn stk" id="bulkStkDeriv" data-surface="derivatives" data-kind="stock"
-              title="Metadata-only: enumerate + persist every expiry date + every listed contract symbol for ALL F&amp;O stocks into the registry cache — no history. Use ⤓ Pull historical for OHLC. Re-click is safe (the immutable past is skipped).">
-        <span class="shine"></span><span class="bnum">④</span>
-        <span class="bicon">🔗</span><span class="blabel">Stocks · Expiries + contracts</span>
-        <span class="bmeta">metadata only · no history</span>
-      </button>
-    </div>
-    <!-- Metadata-only caption (DEC-DERIV-DECOMMISSION-FUSED-001): the ③④ bulk
-         derivative buttons now persist expiry DATES + contract SYMBOLS into the
-         registry cache and pull ZERO candles (the fused /pull-derivatives candle
-         path is decommissioned — no single click downloads the whole chain). The
-         historical OHLC fill is the separate "⤓ Pull historical" button, so the
-         per-pull interval/contract-type knobs are gone (metadata has no candles). -->
-    <div class="derivctl" style="margin:12px 0 0; display:flex; gap:16px; align-items:center; flex-wrap:wrap; color:var(--muted); font-size:12px;">
-      <span>⛓ ALL expiries + contracts (metadata only · no history) · Jan-2020 → today — use ⤓ Pull historical for OHLC</span>
-    </div>
   </div>
 
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
@@ -528,9 +503,9 @@
     <div style="font-size:13px; color:var(--text); line-height:1.6;">
       The dashboard works, but there are <b>0 instruments</b> because nothing has been ingested.
       To fill it:
-      <b>1)</b> click <b>⟳ Load instruments</b> above (the instrument master is a public list — no keys needed);
+      <b>1)</b> the instrument master loads automatically on this page (a public list — no keys needed; it is loading now if this is a fresh clone);
       <b>2)</b> for live candle pulls set <code>BRUTEX_GROWW_API_KEY</code> + <code>BRUTEX_GROWW_TOTP_SECRET</code>,
-      then hit any <b>⚡ Pull the Universe</b> button — without keys it runs an offline synthetic preview.
+      then hit <b>▶ Pull · full pipeline</b> above — without keys it runs an offline synthetic preview.
     </div>
     <div style="font-size:12px; color:var(--muted); margin-top:10px;">
       Paths — lake: <code>~/.brutex/lake</code> · DB: <code>~/.brutex/lake/instruments.duckdb</code> ·
@@ -542,26 +517,24 @@
   </div>
 
   <div class="pullbar" role="toolbar" aria-label="Pull controls">
-    <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
+    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above</div>
     <div class="pull-row">
-      <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
-      <div class="daterange" role="group" aria-label="Date range" data-bxdp="range" data-from="fromDate" data-to="toDate">
-        <label title="Inclusive start date — defaults to 2020-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
-        <span class="dr-sep" aria-hidden="true">→</span>
-        <label title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
-      </div>
+      <!-- The from/to date-range picker was REMOVED in DEC-UNIVERSE-PULL-CONSOLIDATE-001
+           follow-up: the single ▶ Pull · full pipeline button posts the gated route, which
+           ALWAYS pulls the fixed default window (spot 2020-01-01→prev-day; F&O per-contract
+           lookback) — it accepts NO from/to. A picker that the button silently ignored was
+           dead/misleading UI implying a scoping it no longer provides, so it is gone rather
+           than left inert (Golden Rule #10 honesty). The static line below states the fixed
+           window so the operator knows exactly what a pull fetches. -->
+      <span class="ctl-field" title="The full pipeline pulls the fixed history window — spot from 2020-01-01 to the previous trading day; F&amp;O per-contract lookback — at 1-minute. There is no date scoping: scope a pull by ticking rows, not by date.">window · <b>2020 → prev-day</b> (fixed)</span>
+      <span class="pull-div" aria-hidden="true"></span>
       <span class="ctl-field" title="1-minute is the ONLY granularity fetched from Groww; 1-day + the 19 intraday timeframes are derived from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).">granularity · <b>1-minute</b> (1-day derived)</span>
-      <button class="pullbtn" id="pullbtn" title="Pull 1-minute spot (the only granularity fetched; 1-day is derived from it). Tick rows for many, or click one. Blank dates = full history (2020 → prev day)." disabled>⤓ Pull spot</button>
       <span class="pull-div" aria-hidden="true"></span>
-      <button class="loadbtn" id="pullDerivBtn" title="Pull expiries + contracts METADATA ONLY (every expiry date + every listed contract symbol, Jan-2020 → today) for the selected instrument(s) — no history, fast. The historical candle fill is a separate button. Re-click is safe (the immutable past is skipped)." disabled>⛓ Pull expiries + contracts</button>
-      <button class="loadbtn" id="pullHistBtn" title="download OHLC for the SELECTED contracts (single / chain / all) — auto-retries until clean. Needs the contracts cached first (⛓ button); the candles land in the verified candle lake. Highlight an underlying (whole-underlying or pick an expiry for its chain), or click an option-chain cell for that one contract." disabled>⤓ Pull historical</button>
-      <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
+      <!-- The single ONE UNIFIED pre-build button (DEC-UNIVERSE-PULL-CONSOLIDATE-001):
+           an on-demand re-warm covering BOTH spot AND F&O via the COMMON resampler (no
+           spot/fno split). The pipeline also pre-builds automatically as its FINAL stage. -->
+      <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s) — both spot AND F&amp;O via the shared resampler — so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. The full pipeline already does this automatically as its final stage; this button is an on-demand re-warm. Writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
       <span class="pull-div" aria-hidden="true"></span>
-      <!-- The one-click full pipeline scoped to ONLY the ticked instruments
-           (DEC-PULL-SELECTED-PIPELINE-001): spot → expiries+contracts → historical
-           over the selection, gated/fail-closed exactly like "▶ Pull EVERYTHING"
-           (which stays whole-universe). Active only when ≥1 row is ticked. -->
-      <button class="loadbtn" id="pullSelPipelineBtn" title="ONE click over ONLY the ticked instruments: pull spot → expiries + contracts → historical, in that order, each phase gated on the previous finishing clean (a dead token / quota / failed window stops the chain). Re-click is safe — already-pulled windows are skipped. (The hero '▶ Pull EVERYTHING' button covers the whole universe.)" disabled>▶ Pull selected — full pipeline</button>
       <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
       <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
       <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's constituent stocks — ALL of them, or only F&amp;O-eligible when 'F&amp;O only' is on (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
@@ -678,8 +651,7 @@ let COV = {};                  // symbol → per-symbol completeness (DEC-COMPLE
 let covSig = "";               // last COV signature — re-render only when it actually changes
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
 let selPullSymbol = null;      // selected instrument's vendor symbol (Groww SECURITY_ID)
-let selExp = null;             // selected expiry ISO date
-let selMulti = new Map();      // multi-select: symbol → instrument, for the unified "⤓ Pull spot"
+let selMulti = new Map();      // multi-select: symbol → instrument, scoping the ONE pull button
 let listAnimated = false;      // entrance animation plays ONCE per fresh load, never on re-render
 
 /* Escape broker-sourced free text (instrument name/symbol/contract_symbol)
@@ -837,7 +809,11 @@ async function loadInstrumentMaster(msgId) {
     btns.forEach(b => { b.disabled = false; b.classList.remove("busy"); });
   }
 }
-document.getElementById("loadbtn").onclick = () => loadInstrumentMaster("loadmsg");
+/* The manual "⟳ Load instruments" toolbar button is REMOVED
+   (DEC-UNIVERSE-PULL-CONSOLIDATE-001): the master auto-loads on page open when
+   the lake is empty (maybeAutoLoad below), so the operator never needs a manual
+   click. `loadInstrumentMaster` is KEPT — it is the shared loader the auto-load
+   path calls. */
 
 /* One-shot auto-load: fire the keyless load EXACTLY ONCE per page load, and
    only when the lake is genuinely empty. Never re-fires (autoLoadAttempted),
@@ -1079,16 +1055,13 @@ function renderInstruments() {
   const list = visibleInstruments();
   const el = document.getElementById("instruments");
   if (!list.length) {
-    // Empty banner: when the whole universe is empty (not merely a search
-    // miss), offer the keyless "Load instruments" button right here so the
-    // operator can populate the public master without leaving the page.
+    // Empty state: the instrument master AUTO-LOADS on page open when the lake is
+    // empty (maybeAutoLoad — DEC-UNIVERSE-PULL-CONSOLIDATE-001), so there is no
+    // manual "Load instruments" button to click; the message reflects the loading.
     el.innerHTML = UNIV.length
       ? '<div class="empty"><span class="ei" aria-hidden="true">🔍</span>No matches — try a different symbol</div>'
-      : '<div class="empty">No instruments loaded yet — the master is a public list (no Groww keys needed).'
-        + '<br><button class="loadbtn" id="loadbtn-empty">⟳ Load instruments</button>'
+      : '<div class="empty">Loading the instrument master… (a public list — no Groww keys needed). It loads automatically on this page.'
         + '<div class="loadmsg" id="loadmsg-empty"></div></div>';
-    const be = document.getElementById("loadbtn-empty");
-    if (be) be.onclick = () => loadInstrumentMaster("loadmsg-empty");
     return;
   }
   el.innerHTML = "";
@@ -1144,7 +1117,7 @@ function renderInstruments() {
 }
 
 async function selectInstrument(i) {
-  selInst = i.symbol; selPullSymbol = i.pull_symbol; selExp = null;
+  selInst = i.symbol; selPullSymbol = i.pull_symbol;
   /* O(1) selection: swap the .sel class on just the affected rows — NOT a 243-row
      rebuild (which restarted the entrance animation and ate the next click). The
      list DOM is untouched, so clicks stay instant. */
@@ -1154,8 +1127,8 @@ async function selectInstrument(i) {
     if (n.dataset.symbol === i.symbol) n.classList.add("sel");
   });
   document.getElementById("pulllead").innerHTML =
-    `Ready to pull <b>${esc(i.symbol)}</b> spot / options — or click a future / option contract below`;
-  updateMultiBtn();  // enable + label BOTH unified pull buttons for this single highlight
+    `Selected <b>${esc(i.symbol)}</b> — tick more rows to scope the pull, or hit ▶ Pull · full pipeline above`;
+  updateMultiBtn();  // enable + label the pre-build button + scope the pipeline button
   /* "⊕ tick its constituents" is meaningful only for an INDEX
      (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
   document.getElementById("tickconstbtn").disabled = (i.kind !== "index");
@@ -1163,15 +1136,15 @@ async function selectInstrument(i) {
   ex.innerHTML = '<div class="empty">loading…</div>';
   document.getElementById("contracts").innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⛓</span>Pick an expiry to see the chain</div>';
   try {
-    /* DEC-UNIVERSE-REGISTRY-PANELS-001: the EXPIRIES panel now reads the F&O
-       metadata REGISTRY (registry.duckdb) that the "⛓ Pull expiries + contracts"
-       button fills — NOT the expired-options OHLC lake. Rows follow
+    /* DEC-UNIVERSE-REGISTRY-PANELS-001: the EXPIRIES panel reads the F&O metadata
+       REGISTRY (registry.duckdb) that the full pipeline's expiries+contracts stage
+       fills — NOT the expired-options OHLC lake. Rows follow
        REGISTRY_EXPIRY_COLUMNS = [exch, underlying, expiry_date, year, fetched_at]. */
     const r = await fetch('/api/v1/db/registry/expiries?underlying=' + encodeURIComponent(i.symbol));
     const body = await r.json();
     const rows = (body.rows || []);
     if (!rows.length) {
-      const msg = body.note || 'No expiries pulled yet — click "⛓ Pull expiries + contracts"';
+      const msg = body.note || 'No expiries pulled yet — run ▶ Pull · full pipeline above';
       ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
       return;
     }
@@ -1189,7 +1162,6 @@ async function selectInstrument(i) {
 }
 
 function selectExpiry(symbol, expiryDate, el) {
-  selExp = expiryDate;
   document.querySelectorAll('#expiries .pill').forEach(x => x.classList.remove('sel'));
   el.classList.add('sel');
   renderContracts(symbol, expiryDate);
@@ -1232,292 +1204,90 @@ async function renderContracts(symbol, expiryDate) {
     ladder.innerHTML = '<div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
     strikes.forEach((s, ix) => {
       const row = byStrike[s];
-      ladder.appendChild(optionCell("ce", row.ce, ix, symbol, expiryDate));
+      ladder.appendChild(optionCell("ce", row.ce, ix));
       const st = document.createElement("div");
       st.className = "strike"; st.textContent = s;
       ladder.appendChild(st);
-      ladder.appendChild(optionCell("pe", row.pe, ix, symbol, expiryDate));
+      ladder.appendChild(optionCell("pe", row.pe, ix));
     });
     c.appendChild(ladder);
   } catch (e) { c.innerHTML = '<div class="empty">error loading contracts</div>'; }
 }
 
-/* Build one CE/PE option-chain cell; lit when that side's series is in the lake. A live
-   cell is click-to-pull-historical (DEC-DERIV-PULL-HISTORICAL-001): clicking it pulls
-   THIS expiry's cached chain's history (?underlying=…&expiry=… when the code is a real
-   ISO date, else the whole underlying) — the candles land in the verified candle lake.
-   The chain cells carry no registry contract_symbol, so the cell click is the per-expiry
-   grain available; the route + button cover single / multi / underlying / all. */
-function optionCell(side, present, ix, symbol, expiryDate) {
+/* Build one CE/PE option-chain cell; lit when that side's series is in the lake.
+   BROWSE-only (DEC-UNIVERSE-PULL-CONSOLIDATE-001): the per-cell click-to-pull was
+   removed with the "Pull historical" button — the ONE full pipeline pulls every
+   contract's history automatically (futures then options) over the selection / the
+   whole universe, so the operator never clicks a single cell to fill it. */
+function optionCell(side, present, ix) {
   const cell = document.createElement("div");
   cell.className = "cell " + side + (present ? " live" : "");
   cell.style.animationDelay = (ix * 0.02) + "s";
   cell.textContent = present ? side.toUpperCase() : "—";
   if (present) {
-    cell.title = side.toUpperCase() + " series in the lake — click to pull this expiry's chain history";
-    cell.onclick = () => pullHistorical(symbol, expiryDate);
+    cell.title = side.toUpperCase() + " series in the lake";
   }
   return cell;
 }
 
-/* ── click-to-pull (real POST /api/v1/universe/pull) ── */
-/* Instrument-agnostic: pulls candles for a spot, a future, OR a CE/PE
-   contract via the SAME endpoint. `label` is a human-friendly tag shown
-   in the animation panel so the operator sees exactly which symbol — the
-   spot or the contract — is being pulled. */
-async function runPull(symbol, label) {
-  if (!symbol) return;
-  const btn = document.getElementById("pullbtn");
-  const panel = document.getElementById("pullpanel");
-  panel.classList.add("on", "running");   // beam animates only while in flight
-  btn.disabled = true;
-  /* The from/to date picker scopes EVERY pull path (spot / future / CE-PE).
-     Blank ends default server-side to 2020-01-01 / previous trading day and are clamped
-     into the Groww-served window, so a malformed range can't waste quota. */
-  const fromDate = document.getElementById("fromDate").value;
-  const toDate = document.getElementById("toDate").value;
-  // 1-minute is the ONLY granularity fetched (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
-  // 1-day is derived server-side. The granularity dropdown is retired.
-  let qs = '/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol);
-  if (fromDate) qs += '&from_date=' + encodeURIComponent(fromDate);
-  if (toDate) qs += '&to_date=' + encodeURIComponent(toDate);
-  const range = (fromDate || toDate)
-    ? ` · ${fromDate || "2020-01-01"} → ${toDate || "prev day"}`
-    : "";
-  const ivLabel = "1-minute (1-day derived)";
-  document.getElementById("pulltitle").textContent = `Pulling ${label} · ${ivLabel}${range}`;
-  windowsBucket = 'spot';
-  refreshWindowsLine();
-  const grid = document.getElementById("tfgrid");
-  grid.innerHTML = "";
-  document.getElementById("counter").textContent = "0";
-  try {
-    const r = await fetch(qs, {method: 'POST'});
-    const report = await r.json();
-    if (!r.ok) {
-      // The route returns 400 {detail: "..."} for a malformed / inverted
-      // range (DEC-PULL-ERROR-VISIBILITY-001) — show the real reason, not
-      // a misleading "no data".
-      throw new Error(report.detail || ('HTTP ' + r.status));
-    }
-    document.getElementById("previewBadge").classList.toggle("on", !!report.dry_run);
-    const tfs = report.timeframes || [];
-    grid.innerHTML = "";
-    tfs.forEach(tf => {
-      const cls = tf.failed > 0 ? "failed" : (tf.completed > 0 ? "done" : "");
-      const d = document.createElement("div");
-      d.className = "tf " + cls;
-      d.textContent = esc(tf.interval);
-      grid.appendChild(d);
-    });
-    const completed = report.total_completed || 0;
-    const failed = report.total_failed || 0;
-    document.getElementById("counter").textContent =
-      completed.toLocaleString('en-IN');
-    if (completed === 0 && failed > 0) {
-      // Chunks ERRORED (vendor rejected the request) — this is NOT "no data".
-      // Tell the operator the truth + where the real reason is logged, so a
-      // 100%-failed pull (e.g. a wrong segment for an index) is never mistaken
-      // for an empty range. The per-chunk reason is in /logs (ingest.chunk.failed).
-      document.getElementById("pulltitle").innerHTML =
-        `<span style="color:var(--red)">✕</span> ${esc(label)} — ${failed.toLocaleString('en-IN')} chunk(s) failed across ${tfs.length} timeframes · see the brutex.log file (ingest.chunk.failed) for the reason`;
-    } else if (completed === 0) {
-      // No chunk persisted AND none failed → the vendor genuinely returned no
-      // data (or every chunk was already settled). Don't show a green ✓.
-      document.getElementById("pulltitle").innerHTML =
-        `<span style="color:var(--yellow)">∅</span> ${esc(label)} — no data returned`;
-    } else {
-      const verb = report.dry_run ? "preview-pulled (synthetic)" : "pulled";
-      const win = (report.start_date && report.end_date)
-        ? ` (${esc(report.start_date)} → ${esc(report.end_date)})`
-        : "";
-      document.getElementById("pulltitle").innerHTML =
-        `<span class="spark">✓</span> ${esc(label)} ${verb} — ${tfs.length} timeframes${win}`;
-    }
-  } catch (e) {
-    document.getElementById("pulltitle").innerHTML =
-      `<span style="color:var(--red)">✕</span> pull failed: ${esc(e.message)}`;
-  } finally {
-    btn.disabled = false;
-    panel.classList.remove("running");   // stop the beam; panel stays on to show the result
-  }
-}
-
-/* The spot pull button pulls the selected instrument's spot using its
-   vendor symbol (pull_symbol — the Groww SECURITY_ID) so the backend
-   resolves the instrument — NOT the bare display symbol. */
-/* ── Unified "⤓ Pull spot" (DEC-UNIVERSE-PULL-UNIFY-001): ONE button for one OR
-   many. If rows are ticked it pulls each in turn (sequential — the one shared
-   5 r/s budget is respected + each shows in the live panel); otherwise it pulls
-   the single highlighted instrument. The from/to date rule lives in runPull
-   (blank = full history 2020 → prev day). A re-entrancy guard stops a
-   double-click from launching two loops. ── */
-let spotPullInFlight = false;
-function spotSelection() {
+/* ── The ONE selection-aware full-pipeline button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+   The redundant per-stage handlers (runPull / pull spot / pull expiries+contracts /
+   pull historical) + the separate "Pull selected" + bulk-button handlers are GONE.
+   The single ▶ Pull · full pipeline button posts the SHARED /api/v1/universe/pull-pipeline
+   route: with ticked rows it sends ?symbols= so resolve_pull_targets scopes the pull to the
+   selection; with NO ticks it posts the bare route so resolve_pull_targets pulls the WHOLE
+   universe. The pipeline ALWAYS runs the fixed gated chain spot → expiries+contracts →
+   historical → pre-build, advancing only on each stage's full success. Single-flight via
+   startAndPoll. ── */
+function pipelineSelection() {
+  // The ticked rows scope the pull; a lone single-highlight also scopes it (so a
+  // one-row highlight pulls just that name). Empty ⇒ the whole universe.
   if (selMulti.size > 0) return [...selMulti.values()];
   if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
   return [];
 }
-document.getElementById("pullbtn").onclick = async () => {
-  if (spotPullInFlight) return;
-  const items = spotSelection();
-  if (!items.length) return;
-  /* The from/to date picker scopes every spot pull (blank = full 2020 → prev-day
-     history; clamped + defaulted server-side). */
-  const fromDate = document.getElementById("fromDate").value;
-  const toDate = document.getElementById("toDate").value;
-  // 1-minute only (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); 1-day is derived server-side.
-  let dq = "";
-  if (fromDate) dq += "&from_date=" + encodeURIComponent(fromDate);
-  if (toDate) dq += "&to_date=" + encodeURIComponent(toDate);
-  if (items.length > 1) {
-    /* DEC-DHAN-SPOT-MULTI-SATURATE-001: fan ALL ticked symbols in ONE server-side
-       bulk pass via /universe/pull-all?symbols= — the cross-symbol window flatten
-       keeps the shared 5 r/s controller SATURATED, replacing the old serial
-       per-symbol `await runPull` loop that only kept ~3 r/s in flight. Mirrors the
-       options-multi startAndPoll path; startAndPoll is itself single-flight. */
-    const ids = items.map(it => it.pull_symbol).join(",");
-    startAndPoll("/api/v1/universe/pull-all?symbols=" + encodeURIComponent(ids) + dq,
-      `${items.length} symbols spot`);
-    return;
-  }
-  /* Single highlight: keep the synchronous, live-animated single-symbol pull. */
-  spotPullInFlight = true;
-  try {
-    await runPull(items[0].pull_symbol, `${items[0].symbol} spot`);
-  } finally {
-    spotPullInFlight = false;
-    updateMultiBtn();
-  }
-};
-
-/* ── "⛓ Pull expiries + contracts" (DEC-DERIV-METADATA-ROUTE-001): the per-selection
-   METADATA-only chain pull — every expiry DATE + every listed contract SYMBOL for
-   the ticked / highlighted underlying(s), persisted to the registry cache with NO
-   historical candles (the heavy minute fill moved to a separate "Pull historical"
-   button). No interval/contract-type knobs (there are no candles) → the full
-   Jan-2020 → today FNO year grid; re-click is idempotent (the registry PKs +
-   coverage skip-set skip the immutable past). ── */
-document.getElementById("pullDerivBtn").onclick = () => {
-  const items = spotSelection();
-  if (!items.length) return;
-  const ids = items.map(it => it.pull_symbol).join(",");
-  startAndPoll(
-    "/api/v1/universe/pull-expiries-contracts?symbols=" + encodeURIComponent(ids),
-    `${items.length} metadata`);
-};
-
-/* ── "⤓ Pull historical" (DEC-DERIV-PULL-HISTORICAL-001 + DEC-FNO-ONECLICK-HISTORICAL-001):
-   the SEPARATE heavy-pull button. TWO modes off the SAME button:
-   • MULTI-select (≥1 ticked rows) → the ONE-CLICK COMPOSITE: POST
-     ?symbols=a,b,c&enumerate=true, which for EACH F&O-eligible selected underlying
-     refreshes its chain metadata (the guarded enumerator — index / VIX / non-F&O are
-     skipped, a zero-call no-op) THEN pulls its contracts' candles (FUT + CE/PE) over the
-     freshly-cached registry rows. The candle engine never re-enumerates.
-   • SINGLE highlight (no ticks) → the original single-underlying pull: ?underlying=… (a
-     picked ISO expiry narrows it to that CHAIN, ?underlying=…&expiry=…). Requires the
-     metadata already cached by the ⛓ button.
-   Both default until_clean=true (auto-retry every failed window); both candle paths land
-   on the verified candle lake (PATH A). The interval is ALWAYS 1-minute
-   (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 — 1-day is derived from it, never fetched). ── */
-const _ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-function histInterval() {
-  // F&O is 1-minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001); 1-day is derived
-  // from the 1-minute server-side, never fetched. The granularity dropdown is retired.
-  return "1minute";
-}
-function pullHistorical(underlying, expiryDate) {
-  /* Multi-select wins: the ONE-CLICK composite over the SAME selection the spot /
-     metadata buttons use (enumerate + pull each F&O-eligible name; reference-only
-     names are skipped server-side). */
-  const items = spotSelection();
-  if (items.length > 1 || (items.length && selMulti.size > 0)) {
-    const ids = items.map(it => it.pull_symbol).join(",");
-    startAndPoll(
-      "/api/v1/universe/pull-historical?enumerate=true&symbols=" + encodeURIComponent(ids)
-        + "&interval=" + encodeURIComponent(histInterval()),
-      `${items.length} historical (enumerate + pull)`);
-    return;
-  }
-  if (!underlying) return;
-  let qs = "/api/v1/universe/pull-historical?underlying=" + encodeURIComponent(underlying)
-    + "&interval=" + encodeURIComponent(histInterval());
-  let label = `${underlying} historical`;
-  /* Only pass &expiry= when the picked expiry is a real ISO date (the registry keys on
-     dates). A display-only expiry code is NOT forwarded — the whole-underlying pull is
-     the honest fallback (never a fabricated date). */
-  if (expiryDate && _ISO_DATE_RE.test(expiryDate)) {
-    qs += "&expiry=" + encodeURIComponent(expiryDate);
-    label = `${underlying} ${expiryDate} chain historical`;
-  }
-  startAndPoll(qs, label);
-}
-document.getElementById("pullHistBtn").onclick = () => pullHistorical(selInst, selExp);
-
-/* ── "▶ Pull selected — full pipeline" (DEC-PULL-SELECTED-PIPELINE-001): the one-click
-   spot→expiries+contracts→historical chain over ONLY the ticked instruments. Posts the
-   SAME /api/v1/universe/pull-pipeline route as the whole-universe hero, but with
-   ?symbols= so resolve_pull_targets scopes it to the selection (empty selection there =
-   whole universe; here we always send the ticks). Single-flight via startAndPoll. ── */
-const SEL_PIPELINE_BTN = document.getElementById("pullSelPipelineBtn");
-if (SEL_PIPELINE_BTN) {
-  SEL_PIPELINE_BTN.onclick = () => {
-    const items = spotSelection();
-    if (!items.length) return;
-    const ids = items.map(it => it.pull_symbol).join(",");
-    startAndPoll(
-      "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids),
-      `${items.length} selected — spot → expiries + contracts → historical`);
+const PIPELINE_BTN = document.getElementById("pullPipelineBtn");
+if (PIPELINE_BTN) {
+  PIPELINE_BTN.onclick = () => {
+    const items = pipelineSelection();
+    if (items.length) {
+      const ids = items.map(it => it.pull_symbol).join(",");
+      startAndPoll(
+        "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids),
+        `${items.length} selected — spot → expiries + contracts → historical → pre-build`);
+    } else {
+      // No selection ⇒ the whole universe (the bare route; resolve_pull_targets
+      // falls back to the whole admitted universe).
+      startAndPoll(
+        "/api/v1/universe/pull-pipeline",
+        "EVERYTHING — spot → expiries + contracts → historical → pre-build");
+    }
   };
 }
 
-/* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
-   selected" pulls each instrument's spot in turn (sequential, so the one shared
-   rate budget is respected and each shows in the live panel). The per-row
-   checkbox toggles selMulti; the row BODY click still does single-select +
+/* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001 / DEC-UNIVERSE-PULL-CONSOLIDATE-001):
+   tick several rows → the ONE ▶ Pull · full pipeline button scopes its pull to them.
+   The per-row checkbox toggles selMulti; the row BODY click still does single-select +
    expiries — stopPropagation on the checkbox keeps the two independent. ── */
 function toggleMulti(i, on) {
   if (on) selMulti.set(i.symbol, i); else selMulti.delete(i.symbol);
   updateMultiBtn();
 }
 function updateMultiBtn() {
-  // Drives BOTH unified pull buttons: the label reflects the selection count;
-  // each is enabled when ANY rows are ticked OR a single row is highlighted.
+  // Drives the remaining selection-aware controls: the ONE pipeline button's
+  // label + the pre-build button. Both reflect the selection count; the pipeline
+  // button is ALWAYS enabled (no ticks ⇒ whole universe), the pre-build needs a
+  // target (ticks OR a single highlight).
   const n = selMulti.size;
-  const b = document.getElementById("pullbtn");
-  b.textContent = n > 0 ? `⤓ Pull spot · ${n} selected` : "⤓ Pull spot";
-  b.disabled = n === 0 && !selPullSymbol;
-  // The "⚙ Pre-build timeframes" materialise button is selection-driven too
-  // (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001): one OR many, same enable rule.
+  // The single pull button's label shows the scope; it is never disabled (it pulls
+  // the whole universe when nothing is ticked).
+  const lbl = document.getElementById("pullPipelineLabel");
+  if (lbl) lbl.textContent = n > 0 ? `Pull · ${n} selected — full pipeline` : "Pull · full pipeline";
+  // The "⚙ Pre-build timeframes" re-warm button is selection-driven
+  // (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001): one OR many, enabled with a target.
   const m = document.getElementById("matbtn");
   m.textContent = n > 0 ? `⚙ Pre-build timeframes · ${n} selected` : "⚙ Pre-build timeframes";
   m.disabled = n === 0 && !selPullSymbol;
-  // "⛓ Pull expiries + contracts" is selection-driven (one OR many) — same enable
-  // rule as the spot pull (any ticked row OR a single highlight).
-  const d = document.getElementById("pullDerivBtn");
-  if (d) {
-    d.textContent = n > 0 ? `⛓ Pull expiries + contracts · ${n} selected` : "⛓ Pull expiries + contracts";
-    d.disabled = n === 0 && !selPullSymbol;
-  }
-  // "⤓ Pull historical" drives BOTH modes (DEC-FNO-ONECLICK-HISTORICAL-001): a
-  // MULTI-select runs the one-click enumerate+pull COMPOSITE over every ticked name;
-  // a single highlight runs the original single-underlying cached-chain pull. Enabled
-  // whenever ANY rows are ticked OR one underlying row is highlighted (same rule as the
-  // spot / metadata buttons); the label reflects the selection count.
-  const h = document.getElementById("pullHistBtn");
-  if (h) {
-    h.textContent = n > 0 ? `⤓ Pull historical · ${n} selected` : "⤓ Pull historical";
-    h.disabled = n === 0 && !selInst;
-  }
-  // "▶ Pull selected — full pipeline" (DEC-PULL-SELECTED-PIPELINE-001): the one-click
-  // spot→expiries+contracts→historical chain scoped to the ticked set. Active ONLY when
-  // ≥1 row is ticked OR a single underlying is highlighted (same enable rule as the spot
-  // pull); the label reflects the selection count.
-  const sp = document.getElementById("pullSelPipelineBtn");
-  if (sp) {
-    sp.textContent = n > 0 ? `▶ Pull selected · ${n} — full pipeline` : "▶ Pull selected — full pipeline";
-    sp.disabled = n === 0 && !selPullSymbol;
-  }
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed
@@ -1539,9 +1309,9 @@ document.getElementById("clrselbtn").onclick = () => {
    fetched on the operator's machine; NSE bot-blocks + this build env
    network-blocks nseindia.com), intersected with our F&O-eligible stocks.
    source:"nse"  → switch to the Stocks tab + tick the returned members in
-                   the existing selMulti multi-select (ready for ⤓ Pull N).
-   source:"unknown-index" / "unavailable" → show the honest note pointing at
-                   the "Pull ALL F&O stocks" superset (button ③). NEVER 500. */
+                   the existing selMulti multi-select (scoping ▶ Pull · full pipeline).
+   source:"unknown-index" / "unavailable" → show the honest note (leave none
+                   ticked to pull the whole universe). NEVER 500. */
 document.getElementById("tickconstbtn").onclick = async () => {
   if (!selInst) return;
   const btn = document.getElementById("tickconstbtn");
@@ -1582,9 +1352,9 @@ document.getElementById("tickconstbtn").onclick = async () => {
      tab/view: fetch the stock instruments in the BACKGROUND (so selMulti gets real
      inst objects) into a LOCAL list — never replacing the visible UNIV nor touching
      `filter` — then add the members to selMulti and re-render the CURRENT view, so
-     only the selection count + "⤓ Pull spot" button update. The ticked stocks show
-     their checkboxes if/when the operator later switches to the Stocks tab
-     (renderInstruments reads selMulti.has(symbol)). */
+     only the selection count + the ▶ Pull · full pipeline button label update. The
+     ticked stocks show their checkboxes if/when the operator later switches to the
+     Stocks tab (renderInstruments reads selMulti.has(symbol)). */
   let stockUniv;
   try {
     const sr = await fetch('/api/v1/universe/instruments?kind=stock');
@@ -1615,9 +1385,9 @@ document.getElementById("tickconstbtn").onclick = async () => {
        the FULL count); OFF, prefer the backend note (it says "fresh from NSE" vs
        "from cache (fetched …)" correctly per source). */
     msg.textContent = fnoOnly
-      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ⤓ Pull spot.`
+      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ▶ Pull · full pipeline.`
       : (note
-        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ⤓ Pull spot.`);
+        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ▶ Pull · full pipeline.`);
   }
   btn.disabled = false;
 };
@@ -1627,10 +1397,12 @@ document.getElementById("tickconstbtn").onclick = async () => {
    that was removed (DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001): ONE clean button that
    materialises ALL 19 derived intraday timeframes to the lake for the selected
    instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1)
-   instead of resampling the 1-minute base. Selection-driven (mirrors
-   spotSelection): ticked rows → each in turn; else the single highlight. The
+   instead of resampling the 1-minute base. Selection-driven via its own
+   matSelection helper: ticked rows → each in turn; else the single highlight. The
    POST omits ?tfs= so the backend writes every materialisable timeframe. A
-   re-entrancy guard stops a double-click from launching two loops. ── */
+   re-entrancy guard stops a double-click from launching two loops. This is the
+   ON-DEMAND re-warm; the full pipeline pre-builds automatically as its final stage
+   (DEC-UNIVERSE-PULL-CONSOLIDATE-001). ── */
 let matInFlight = false;
 function matSelection() {
   if (selMulti.size > 0) return [...selMulti.values()];
@@ -1688,50 +1460,14 @@ document.getElementById("matbtn").onclick = async () => {
   }
 };
 
-/* ── Bulk spot pull (buttons ① ②) — one click fans the whole kind ──
-   surface=spot → /pull-all?kind=…
-   Disables every bulk button while one runs so two universe pulls can't race. */
-const BULK_BTNS = ['bulkIdxSpot','bulkStkSpot','bulkIdxDeriv','bulkStkDeriv']
-  .map(id => document.getElementById(id));
-const PIPELINE_BTN = document.getElementById('pullPipelineBtn');
-
+/* ── In-flight lock for the ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+   The bulk ①②③④ matrix + its multi-button disable loop are GONE: with a single
+   pipeline button, "disable the pull controls while a pull runs" is just disabling
+   that one button (PIPELINE_BTN was declared with the click handler above). Kept as
+   setBulkDisabled so startAndPoll / finishLive call it unchanged. */
 function setBulkDisabled(on) {
-  BULK_BTNS.forEach(b => { if (b) b.disabled = on; });
   if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
 }
-
-/* ── One-click full pipeline (DEC-ONE-CLICK-PIPELINE-001): spot → expiries +
-   contracts → historical over the WHOLE universe, server-gated so a failed
-   earlier phase stops the chain. Single-flight via startAndPoll. ── */
-if (PIPELINE_BTN) {
-  PIPELINE_BTN.addEventListener('click', () => {
-    startAndPoll('/api/v1/universe/pull-pipeline',
-      'EVERYTHING — spot → expiries + contracts → historical');
-  });
-}
-
-BULK_BTNS.forEach(btn => {
-  if (!btn) return;
-  btn.addEventListener('click', () => {
-    const kind = btn.dataset.kind;             // "index" | "stock"
-    const noun = kind === 'index' ? 'indices' : 'stocks';
-    if (btn.dataset.surface === 'derivatives') {
-      /* METADATA-ONLY (DEC-DERIV-DECOMMISSION-FUSED-001): the bulk derivative
-         buttons enumerate + persist every expiry DATE + contract SYMBOL into the
-         registry cache and pull ZERO candles — NO interval/contract-type knobs
-         (there are no candles in a metadata pull). The historical OHLC fill is the
-         separate ⤓ Pull historical button. This decommissions the fused
-         /pull-derivatives candle path so no single click downloads the whole chain. */
-      const path = '/api/v1/universe/pull-expiries-contracts?kind=' + encodeURIComponent(kind);
-      startAndPoll(path, `ALL ${noun} expiries + contracts (metadata)`);
-    } else {
-      // 1-minute is the only granularity fetched (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
-      // 1-day is derived server-side. The granularity dropdown is retired.
-      const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
-      startAndPoll(path, `ALL ${noun} spot`);
-    }
-  });
-});
 
 /* ── The LIVE feed: start a background pull, then poll /pull-progress ──
    The pull runs off the request thread (DEC-PULL-PROGRESS-LIVE-001); we POST to
@@ -1801,12 +1537,64 @@ async function startAndPoll(path, label) {
   }
 }
 
-/* Poll the O(1) progress snapshot and tick the panel until the job ends. */
+/* Build the HONEST terminal header from a settled progress snapshot
+   (DEC-UNIVERSE-PULL-CONSOLIDATE-001). The header reflects the REAL terminal state
+   driven by the actual completed/total/failed/gap counts — NEVER a hardcoded
+   network-error string left over from the removed live-feed poll:
+   • state === 'error'                                  → red ✕ failed (the detail)
+   • completed === total AND failed === 0 AND gaps === 0 → green ✓ complete (success)
+   • otherwise (a partial: short of total, or any failed / no-data gap)
+                                                        → amber ⚠ partial, with the
+     real failed / gap / shortfall counts so the operator sees exactly what is left. */
+function terminalPullHeader(label, s) {
+  const completed = s.completed || 0;
+  const total = s.total || 0;
+  const bars = s.bars || 0;
+  const failed = s.failed || 0;
+  const gaps = s.gaps || 0;
+  const L = esc(label);
+  if (s.state === 'error') {
+    return `<span style="color:var(--red)">✕</span> ${L} failed: ${esc(s.detail || 'error')}`;
+  }
+  // A degenerate zero-unit settle (idle, or a job that planned nothing) is NEUTRAL,
+  // never a green success tick: `completed === total` is trivially true at 0 === 0,
+  // so without this guard a pull that fetched nothing read "✓ complete — 0 units".
+  // In practice resolve_pull_targets fails-closed on an empty selection so a started
+  // pull always has total > 0, but an idle snapshot can settle here — show the honest
+  // "nothing to pull" note instead of a success (Golden Rule #10).
+  if (total === 0 && completed === 0) {
+    return `<span style="color:var(--muted)">—</span> ${L} — nothing to pull`;
+  }
+  const clean = failed === 0 && gaps === 0 && completed === total;
+  if (clean) {
+    return `<span class="spark">✓</span> ${L} complete — `
+      + `${completed.toLocaleString('en-IN')} units · ${bars.toLocaleString('en-IN')} bars`;
+  }
+  // Honest partial: show the shortfall + the failed / no-data-gap tallies.
+  const parts = [];
+  if (completed < total) {
+    parts.push(`${completed.toLocaleString('en-IN')} / ${total.toLocaleString('en-IN')} units`);
+  } else {
+    parts.push(`${completed.toLocaleString('en-IN')} units`);
+  }
+  parts.push(`${bars.toLocaleString('en-IN')} bars`);
+  if (failed) parts.push(`<span style="color:var(--red)">${failed} failed</span>`);
+  if (gaps) parts.push(`<span style="color:var(--yellow)">${gaps} no-data gap${gaps === 1 ? '' : 's'}</span>`);
+  return `<span style="color:var(--yellow)">⚠</span> ${L} partial — ` + parts.join(' · ');
+}
+
+/* Poll the O(1) progress snapshot and tick the panel until the job ends. A
+   transient poll-fetch failure (a momentary network blip, NOT a terminal state)
+   is RETRIED a bounded number of times instead of clobbering the header with the
+   scary network-error string the removed live-feed poll used to show. */
+const POLL_MAX_FEED_RETRIES = 5;
+let pollFeedRetries = 0;
 async function pollProgress(label) {
   if (pollTimer) clearTimeout(pollTimer);
   try {
     const r = await fetch('/api/v1/universe/pull-progress');
     const s = await r.json();
+    pollFeedRetries = 0;  // a successful poll clears the transient-retry budget
     document.getElementById('counter').textContent =
       (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
     renderLiveStats(s);
@@ -1816,21 +1604,22 @@ async function pollProgress(label) {
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
-    if (s.state === 'error') {
-      document.getElementById('pulltitle').innerHTML =
-        `<span style="color:var(--red)">✕</span> ${esc(label)} failed: ${esc(s.detail || 'error')}`;
-    } else {  // done (or idle, if nothing ran)
-      document.getElementById('pulltitle').innerHTML =
-        `<span class="spark">✓</span> ${esc(label)} complete — `
-        + `${(s.completed||0).toLocaleString('en-IN')} units · `
-        + `${(s.bars||0).toLocaleString('en-IN')} bars`
-        + (s.failed ? ` · <span style="color:var(--red)">${s.failed} failed</span>` : '')
-        + (s.gaps ? ` · <span style="color:var(--yellow)">${s.gaps} no-data gap${s.gaps === 1 ? '' : 's'}</span>` : '');
-    }
+    // Settled (done / error / idle): paint the honest terminal header.
+    document.getElementById('pulltitle').innerHTML = terminalPullHeader(label, s);
     finishLive();
   } catch (e) {
+    // A transient poll blip is NOT a pull failure — retry a few times before
+    // surfacing an honest "feed dropped" note (never a hardcoded network-error
+    // string, and never overriding the real terminal state we already know).
+    pollFeedRetries += 1;
+    if (pollFeedRetries <= POLL_MAX_FEED_RETRIES) {
+      pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
+      return;
+    }
+    pollFeedRetries = 0;
     document.getElementById('pulltitle').innerHTML =
-      `<span style="color:var(--red)">✕</span> lost the live feed: ${esc(e.message)}`;
+      `<span style="color:var(--yellow)">…</span> ${esc(label)} — live progress feed dropped `
+      + `(the pull may still be running); ⟳ Refresh the verdict below to re-check`;
     finishLive();
   }
 }
@@ -1838,9 +1627,8 @@ async function pollProgress(label) {
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   setBulkDisabled(false);
-  // Restore BOTH unified pull buttons to their selection-driven label/enabled
-  // state (ticked rows OR a single highlight) — not just the single case, so a
-  // multi-select options pull leaves the button correctly enabled afterwards.
+  // Restore the ONE pull button + the pre-build button to their selection-driven
+  // label/enabled state (the pipeline button is re-enabled by setBulkDisabled(false)).
   updateMultiBtn();
   document.getElementById('pullpanel').classList.remove('running');  // stop the beam
   refreshVerdict();  // a pull just ended — fetch + paint the verdict banner (DEC-VERDICT-BANNER-001)
