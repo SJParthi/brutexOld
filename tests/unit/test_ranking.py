@@ -144,6 +144,58 @@ class TestPassesGates:
         assert passes_gates(_m(max_consecutive_losses=10)) is True
 
 
+# ────── passes_gates — fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001) ──────
+
+
+class TestNonFiniteGatesFailClosed:
+    """A NaN / ±inf in a float-valued gate input must REJECT, not silently PASS.
+
+    ``NaN < x`` and ``NaN > x`` are both ``False``, and ``inf``/``-inf`` skew the
+    comparisons, so an unguarded ``<`` / ``>`` gate would wrongly ACCEPT malformed
+    data. The fail-closed guard rejects any present non-finite gate input; behaviour
+    for FINITE values and for ``None`` is byte-identical (pinned below).
+    """
+
+    def test_nan_profit_factor_rejected(self) -> None:
+        # NaN would pass `pf < 1.2` (False) AND the `is None` check (False) → without
+        # the guard this WRONGLY accepts. The guard must REJECT.
+        assert passes_gates(_m(profit_factor=math.nan)) is False
+
+    def test_positive_inf_max_drawdown_rejected(self) -> None:
+        # +inf drawdown would pass `dd > 30.0`? No — +inf > 30 is True → already
+        # rejected by the drawdown gate. So force the case the guard uniquely catches
+        # by also proving -inf (which `dd > 30.0` does NOT catch) is rejected below.
+        assert passes_gates(_m(max_drawdown_pct=math.inf)) is False
+
+    def test_negative_inf_max_drawdown_rejected(self) -> None:
+        # -inf drawdown PASSES `dd > 30.0` (-inf > 30 is False) → without the guard
+        # this wrongly accepts. The guard must REJECT (the uniquely-caught case).
+        assert passes_gates(_m(max_drawdown_pct=-math.inf)) is False
+
+    def test_inf_win_rate_rejected(self) -> None:
+        assert passes_gates(_m(win_rate=math.inf)) is False
+
+    def test_negative_inf_win_rate_rejected(self) -> None:
+        assert passes_gates(_m(win_rate=-math.inf)) is False
+
+    def test_nan_win_loss_ratio_rejected(self) -> None:
+        # NaN WLR would pass `wlr < 2.0` (False) → could wrongly accept a low-win-rate
+        # combo. The guard rejects the NaN before that comparison.
+        assert passes_gates(_m(win_rate=0.20, win_loss_ratio=math.nan)) is False
+
+    def test_finite_values_unchanged(self) -> None:
+        # Every finite default still PASSES — the guard never touches finite inputs.
+        assert passes_gates(_m()) is True
+        assert passes_gates(_m(profit_factor=1.2, max_drawdown_pct=30.0)) is True
+
+    def test_none_values_unchanged(self) -> None:
+        # None handling is byte-identical: None profit_factor still REJECTS via the
+        # existing `is None` path (not the new non-finite guard); None win_loss_ratio
+        # with a healthy win_rate still PASSES.
+        assert passes_gates(_m(profit_factor=None)) is False
+        assert passes_gates(_m(win_loss_ratio=None)) is True
+
+
 # ────── rank_combos ──────
 
 

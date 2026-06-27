@@ -56,6 +56,7 @@ correctness. Recorded in ``docs/MIGRATION.md`` (DEC-RANKING-001 / DEC-RANKING-OV
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -142,13 +143,39 @@ class RankedCombo:
         return _risk_efficiency(self.metrics)
 
 
+def _non_finite_gate_input(value: float | None) -> bool:
+    """Whether a float-valued gate input is present but non-finite (``NaN``/±``inf``).
+
+    A ``None`` input is *not* non-finite here — it is mathematically undefined for
+    the sample and keeps its existing per-gate ``None`` handling. Only a present
+    ``NaN``/``inf`` value is flagged, so :func:`passes_gates` can FAIL CLOSED on it
+    (a ``NaN`` silently passes a ``<`` / ``>`` comparison — ``NaN < x`` is always
+    ``False`` — so an unguarded gate would wrongly ACCEPT malformed data).
+    """
+    return value is not None and not math.isfinite(value)
+
+
 def passes_gates(m: ResultMetrics) -> bool:
     """Apply the hard rejection gates to one result (lockbox gate deferred).
 
     Returns ``True`` iff the result survives every applicable gate. A ``None``
     metric (mathematically undefined for the sample) is treated as failing —
     a combo with no real edge cannot be ranked above one with a measured edge.
+
+    **Fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001).** A ``NaN`` or
+    ±``inf`` in any float-valued gate input (``profit_factor``, ``max_drawdown_pct``,
+    ``win_rate``, ``win_loss_ratio``) would silently slip through a ``<`` / ``>``
+    comparison as a PASS (``NaN < x`` and ``NaN > x`` are both ``False``), a silent
+    wrong-ACCEPT on malformed data. Such a result is REJECTED up front. The
+    integer-valued gates (``total_trades``, ``max_consecutive_losses``) cannot be
+    non-finite. Behaviour for every FINITE value and for ``None`` is byte-identical
+    to before this guard.
     """
+    if any(
+        _non_finite_gate_input(value)
+        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
+    ):
+        return False
     if m.total_trades < MIN_TRADES:
         return False
     if m.profit_factor is None or m.profit_factor < _MIN_PROFIT_FACTOR:
