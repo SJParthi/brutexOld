@@ -26,19 +26,24 @@ def movers_read_skip_errors() -> tuple[type[BaseException], ...]:
     found at end of file"* — on the SAME corrupt file read via ``read_parquet``,
     confirmed against duckdb 1.5), and ``OSError`` covers file-level faults. The ONE
     source of truth for the unreadable-Parquet skip set (CLAUDE.md §11 COMMON): the
-    ``/movers`` candidate loops read via ``polars`` and the ``/db`` candle pager
-    (:func:`brutex.dashboard.db_view._execute_parquet_resilient`) reads via ``duckdb``,
-    so the union covers BOTH engines from one place — no copy-pasted set. NARROW on
+    polars + ``OSError`` half is DELEGATED to the data-layer
+    :func:`brutex.data.errors.parquet_read_skip_errors` (shared with the lake writers'
+    corrupt-partition quarantine), and this dashboard twin WIDENS it with
+    :class:`duckdb.Error` because the ``/movers`` candidate loops read via ``polars``
+    while the ``/db`` candle pager
+    (:func:`brutex.dashboard.db_view._execute_parquet_resilient`) reads via ``duckdb`` —
+    so the union covers BOTH engines from one place, no copy-pasted set. NARROW on
     purpose: a genuine code bug (``ValueError`` / ``KeyError`` / …) still propagates, so
     a logic error is never silently swallowed as a "skipped symbol" (Golden Rule #1).
-    ``polars`` / ``duckdb`` are imported inside the call (not at module load) to keep
-    this tiny helper module importable without paying the import cost — both consumers
-    import the engines anyway.
+    ``duckdb`` is imported inside the call (not at module load) to keep this tiny helper
+    module importable without paying the import cost — both consumers import the engines
+    anyway.
     """
     import duckdb
-    import polars as pl
 
-    return (pl.exceptions.PolarsError, duckdb.Error, OSError)
+    from brutex.data.errors import parquet_read_skip_errors
+
+    return (*parquet_read_skip_errors(), duckdb.Error)
 
 
 def log_movers_skip(*, source: str, symbol: str, error: str) -> None:

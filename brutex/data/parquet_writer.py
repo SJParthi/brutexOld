@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -67,13 +66,13 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
-from brutex.data.errors import WriterError
+from brutex.data.errors import WriterError, parquet_read_skip_errors
 from brutex.data.models import CandleBar, CatalogEntry
 from brutex.data.partition import (
     build_partition_path,
     partition_for_timestamp,
 )
-from brutex.data.partition_lock import partition_write_lock
+from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
 from brutex.money import round_money
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -107,30 +106,13 @@ ZSTD_LEVEL: Final[int] = 3
 #: the map only ever holds locks for partitions actually written. It is keyed by
 #: PATH (not writer instance) on purpose: the production fan-out may build one
 #: :class:`ParquetWriter` per worker (the docstring blesses that), so the lock
-#: MUST be shared across instances that resolve to the same on-disk file.
-_PARTITION_LOCKS: dict[Path, threading.Lock] = {}
-
-#: Guards :data:`_PARTITION_LOCKS` itself — held only for the O(1)
-#: get-or-create of a path's lock, never across a write.
-_PARTITION_LOCKS_GUARD: threading.Lock = threading.Lock()
-
-
-def _partition_lock(dest: Path) -> threading.Lock:
-    """Return the shared write lock for partition *dest* (interned, O(1)).
-
-    The first caller for a given path creates the lock under
-    :data:`_PARTITION_LOCKS_GUARD`; every later caller (any thread, any
-    :class:`ParquetWriter` instance) gets the SAME lock object, so concurrent
-    merge-writes to one partition file are serialised. The guard is held only
-    for the dict get-or-create — never across the write itself — so distinct
-    partitions are looked up without contention.
-    """
-    with _PARTITION_LOCKS_GUARD:
-        lock = _PARTITION_LOCKS.get(dest)
-        if lock is None:
-            lock = threading.Lock()
-            _PARTITION_LOCKS[dest] = lock
-        return lock
+#: MUST be shared across instances that resolve to the same on-disk file. The
+#: intern is CAPACITY-BOUNDED (:class:`~brutex.data.partition_lock.BoundedLockRegistry`,
+#: LRU eviction of idle locks) so a full multi-year pull touching 10^5–10^6 distinct
+#: month partitions can no longer accumulate a ``Lock`` object per partition forever
+#: (GAP #19); an in-flight (refcounted) write keeps its lock, so correctness is
+#: independent of the cap.
+_PARTITION_LOCKS: BoundedLockRegistry = BoundedLockRegistry()
 
 
 def _tick_round(bar: CandleBar) -> CandleBar:
@@ -383,7 +365,7 @@ class ParquetWriter:
         # bookkeeping is added.
         lock_acquire_start = time.perf_counter()
         with contextlib.ExitStack() as stack:
-            stack.enter_context(_partition_lock(dest))
+            stack.enter_context(_PARTITION_LOCKS.acquire(dest))
             stack.enter_context(partition_write_lock(self._lake_root, dest))
             lock_wait_ms = (time.perf_counter() - lock_acquire_start) * 1000.0
 
@@ -439,7 +421,15 @@ class ParquetWriter:
           (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / FIX-2) so a later
           complete-session re-derive corrects a partial-session frozen daily.
         """
-        merged = self._read_existing_bars(dest)
+        # Read the stored partition's RAW bytes ONCE (inside lake_write_guard via
+        # `_read_existing_bytes`), then parse the bars from those same bytes. The raw
+        # bytes give us the stored file's hash + size with NO second full read, so the
+        # idempotent no-op path below reuses them (GAP #11 — the old code re-read the
+        # whole month with `dest.read_bytes()` + `dest.stat()` OUTSIDE the write guard
+        # purely to hash a file it had ALREADY loaded, an unguarded OOM site on a deep
+        # partition; this matches the option writer's no-second-read no-op).
+        existing_bytes = self._read_existing_bytes(dest)
+        merged = self._read_existing_bars(dest, existing_bytes)
         added = 0
         rewrite = False
         conflicts: list[BarConflict] = []
@@ -462,14 +452,15 @@ class ParquetWriter:
         merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
         if added == 0 and not rewrite:
             # Every incoming bar is already stored identically or is a conflict
-            # (kept-first) → no rewrite needed; the stored file is unchanged.
+            # (kept-first) → no rewrite needed; the stored file is unchanged. Reuse the
+            # already-read bytes for the hash/size — no second full read of the partition.
             return WriteResult(
                 path=dest,
                 row_count=len(merged_sorted),
-                raw_hash=hashlib.sha256(dest.read_bytes()).hexdigest(),
+                raw_hash=hashlib.sha256(existing_bytes).hexdigest(),
                 first_ts=merged_sorted[0].timestamp,
                 last_ts=merged_sorted[-1].timestamp,
-                bytes_written=dest.stat().st_size,
+                bytes_written=len(existing_bytes),
                 conflicts=tuple(conflicts),
             )
 
@@ -517,14 +508,49 @@ class ParquetWriter:
     # ── Private ────────────────────────────────────────────────────
 
     @staticmethod
-    def _read_existing_bars(dest: Path) -> dict[datetime, CandleBar]:
-        """Read a stored partition back into ``{timestamp: CandleBar}``.
+    def _read_existing_bytes(dest: Path) -> bytes:
+        """Read the stored partition's raw Parquet bytes once (inside the write guard).
+
+        The merge READ is the steady-state re-pull's largest allocation (it loads
+        the WHOLE existing month partition), so it runs inside ``lake_write_guard`` —
+        a ``MemoryError`` here (or an ENOSPC, defensively) becomes a ``LakeWriteHalt``
+        pull-wide stop, not a raw mid-merge crash (DEC-LAKE-WRITE-HALT-001). Returning
+        the raw bytes lets the no-op merge path reuse them for the hash/size with NO
+        second full read of the partition (GAP #11).
+
+        GAP #1 (resilience): a non-ENOSPC ``OSError`` (e.g. the partition file vanished
+        / an I/O fault mid-pull) is a per-symbol problem, NOT a pull-wide one, so it is
+        re-raised as a QUARANTINABLE :class:`~brutex.data.errors.WriterError` naming the
+        path — the spine quarantines that one window and the pull proceeds. ENOSPC /
+        ``MemoryError`` are still mapped to ``LakeWriteHalt`` by the guard FIRST (a
+        ``LakeWriteHalt`` is a ``DataLakeError``, not an ``OSError``, so it sails past
+        the ``except OSError`` untouched and halts the pull).
+        """
+        try:
+            with lake_write_guard():
+                return dest.read_bytes()
+        except OSError as exc:
+            raise WriterError(f"unreadable existing partition {dest}: {exc}") from exc
+
+    @staticmethod
+    def _read_existing_bars(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
+        """Parse a stored partition's *existing_bytes* into ``{timestamp: CandleBar}``.
 
         Decimals are reconstructed via ``Decimal(str(float))`` and then snapped
         to the 2dp tick grid (``_tick_round``) — so a stored bar compares equal
         to a freshly-rounded incoming bar even if the partition predates
         DEC-SPOT-PRICE-2DP-001 (any 4-decimal remnant rounds to the same 2dp),
         keeping re-pulls idempotent and converging the lake to clean 2dp.
+
+        Resilience (GAP #1): the existing-partition parse is wrapped in a narrow
+        ``try`` over :func:`~brutex.data.errors.parquet_read_skip_errors` (a
+        ``polars.exceptions.PolarsError`` on a corrupt / version-incompatible file, or
+        an ``OSError`` fault). A CORRUPT existing partition therefore raises a
+        QUARANTINABLE :class:`~brutex.data.errors.WriterError` naming the bad path
+        instead of crashing the whole pull — the ingest spine quarantines that one
+        symbol's window and proceeds; every other symbol still pulls. ``MemoryError`` /
+        ENOSPC stay mapped to ``LakeWriteHalt`` by the guard around the bytes read
+        (a pull-wide stop, never demoted to a per-symbol quarantine).
 
         Performance (DEC-WRITER-COLUMNAR-4A-001): the reconstruction extracts each
         column ONCE via :meth:`polars.Series.to_list` and zips the per-row scalars,
@@ -547,38 +573,45 @@ class ParquetWriter:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
-        # The merge READ is the steady-state re-pull's largest allocation (it loads
-        # the WHOLE existing month partition), so it runs inside lake_write_guard too:
-        # a MemoryError here (or an ENOSPC, defensively) becomes a LakeWriteHalt
-        # pull-wide stop, not a raw mid-merge crash (DEC-LAKE-WRITE-HALT-001).
+        import io
+
+        # The parse is the steady-state re-pull's largest allocation, so it stays inside
+        # `lake_write_guard`: a `MemoryError` here becomes a `LakeWriteHalt` pull-wide
+        # stop (DEC-LAKE-WRITE-HALT-001, unchanged). NESTED inside it, a corrupt-file
+        # `PolarsError` / non-ENOSPC `OSError` (GAP #1) is caught FIRST and re-raised as a
+        # quarantinable `WriterError` naming the path — `MemoryError` is NOT in the skip
+        # set, so an OOM still reaches the guard and halts (never demoted to a quarantine).
         with lake_write_guard():
-            df = pl.read_parquet(dest)
-            # COLUMN-wise extraction (one Series.to_list per column) instead of a
-            # per-row dict — the byte-preserving speed cut (DEC-WRITER-COLUMNAR-4A-001).
-            timestamps = df["timestamp"].to_list()
-            opens = df["open"].to_list()
-            highs = df["high"].to_list()
-            lows = df["low"].to_list()
-            closes = df["close"].to_list()
-            volumes = df["volume"].to_list()
-            ois = df["open_interest"].to_list()
-            out: dict[datetime, CandleBar] = {}
-            for ts, op, hi, lo, cl, vol, oi in zip(
-                timestamps, opens, highs, lows, closes, volumes, ois, strict=True
-            ):
-                bar = _tick_round(
-                    CandleBar(
-                        timestamp=ts,
-                        open=Decimal(str(op)),
-                        high=Decimal(str(hi)),
-                        low=Decimal(str(lo)),
-                        close=Decimal(str(cl)),
-                        volume=int(vol),
-                        open_interest=None if oi is None else int(oi),
-                    )
+            try:
+                df = pl.read_parquet(io.BytesIO(existing_bytes))
+            except parquet_read_skip_errors() as exc:
+                raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+        # COLUMN-wise extraction (one Series.to_list per column) instead of a
+        # per-row dict — the byte-preserving speed cut (DEC-WRITER-COLUMNAR-4A-001).
+        timestamps = df["timestamp"].to_list()
+        opens = df["open"].to_list()
+        highs = df["high"].to_list()
+        lows = df["low"].to_list()
+        closes = df["close"].to_list()
+        volumes = df["volume"].to_list()
+        ois = df["open_interest"].to_list()
+        out: dict[datetime, CandleBar] = {}
+        for ts, op, hi, lo, cl, vol, oi in zip(
+            timestamps, opens, highs, lows, closes, volumes, ois, strict=True
+        ):
+            bar = _tick_round(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(op)),
+                    high=Decimal(str(hi)),
+                    low=Decimal(str(lo)),
+                    close=Decimal(str(cl)),
+                    volume=int(vol),
+                    open_interest=None if oi is None else int(oi),
                 )
-                out[bar.timestamp] = bar
-            return out
+            )
+            out[bar.timestamp] = bar
+        return out
 
     @staticmethod
     def _bar_values_equal(a: CandleBar, b: CandleBar) -> bool:
