@@ -82,6 +82,7 @@ import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.timeframes import DAILY_TF_MINUTES
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger, WindowLedgerRecord
 
@@ -111,6 +112,8 @@ __all__ = [
     "DailyResampleWindow",
     "derive_daily_for_targets",
     "fill_daily_from_minute",
+    "ist_span_partition_files",
+    "ist_span_partition_months",
     "make_lake_read_1m_window",
     "make_lake_write_1day",
     "plan_daily_resample_windows",
@@ -538,6 +541,90 @@ def _parse_window_date(value: str) -> date:
     return datetime.fromisoformat(value).date()
 
 
+def ist_span_partition_months(start: date, end: date) -> list[tuple[int, int]]:
+    """The UTC ``(year, month)`` lake partitions an IST ``[start, end)`` span can touch.
+
+    The 1-minute lake partitions by **UTC** ``(year, month)``
+    (:func:`~brutex.data.partition.partition_for_timestamp`), but
+    :func:`make_lake_read_1m_window` filters by each bar's **IST trading date**
+    ``(ts_utc + 05:30).date()``. An intraday spot bar lives at 09:15–15:30 IST =
+    03:45–10:00 UTC, so its IST calendar day equals its UTC calendar day and hence its
+    UTC partition month equals its IST month — so the partitions covering the IST span
+    are exactly the UTC months the IST date range covers (DEC-RESAMPLE-BOUND-GLOB-001).
+
+    To stay byte-correct even if a future / non-spot 1-minute bar ever sat within 05:30
+    of a UTC month boundary (so its IST date and UTC partition month differ), the span
+    is **padded by one calendar day on each side** before the month set is collected.
+    That pad can at most add the immediately-adjacent month, so the result is still
+    O(pulled-window) months (NOT O(lake-depth)); it merely guarantees no IST-edge bar
+    is ever globbed out.
+
+    Parameters
+    ----------
+    start, end
+        The half-open IST date window ``[start, end)`` to derive ``1day`` over.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        The ascending ``(year, month)`` UTC partitions to read. An empty or inverted
+        span (``end <= start``) yields ``[]`` — an honest no-op, exactly as the old
+        whole-tree read produced an empty frame when the IST filter matched nothing.
+    """
+    if end <= start:
+        return []
+    # Pad one day each side so an IST-edge bar whose UTC partition month differs from
+    # its IST month is never excluded (a proven no-op for intraday spot; a cheap safety
+    # net for any boundary bar). ``[start, end)`` is half-open, so the last covered IST
+    # date is ``end - 1 day``; pad that to ``end`` (inclusive) for the +1-day side.
+    lo = start - timedelta(days=1)
+    hi = end  # == (end - 1 day) + 1 day, the padded inclusive upper IST date
+    months: list[tuple[int, int]] = []
+    year, month = lo.year, lo.month
+    while (year, month) <= (hi.year, hi.month):
+        months.append((year, month))
+        if month == MONTHS_PER_YEAR:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    return months
+
+
+def ist_span_partition_files(base: Path, start: date, end: date) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files for an IST ``[start, end)`` span.
+
+    Bounds the post-pull 1-day derivation read to ONLY the month partitions the pulled
+    window covers, instead of the whole ``<base>/**/*.parquet`` tree
+    (DEC-RESAMPLE-BOUND-GLOB-001): the read is O(pulled-window) months, not
+    O(lake-depth). The UTC partitions to consider come from
+    :func:`ist_span_partition_months`; only those that EXIST on disk are returned (an
+    absent month is skipped cleanly), as POSIX path strings ready for
+    :func:`polars.read_parquet`. The in-memory IST-date filter in
+    :func:`make_lake_read_1m_window` stays the precise final cut, so the resampled
+    ``1day`` output is byte-identical to the old whole-tree read.
+
+    Parameters
+    ----------
+    base
+        The symbol's ``1minute`` partition root
+        (``<lake_root>/bars/<exchange>/<segment>/<symbol>/1minute``).
+    start, end
+        The half-open IST date window ``[start, end)``.
+
+    Returns
+    -------
+    list[str]
+        Ascending POSIX paths of the existing month-partition Parquet files. Empty when
+        the span is empty/inverted OR no covered month exists on disk.
+    """
+    files: list[str] = []
+    for year, month in ist_span_partition_months(start, end):
+        candidate = base / f"{year:04d}" / f"{month:02d}.parquet"
+        if candidate.is_file():
+            files.append(candidate.as_posix())
+    return files
+
+
 def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration-tested
     *,
     lake_root: Path,
@@ -552,17 +639,23 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     Returns a zero-arg callable reading the symbol's stored ``1minute`` Parquet,
     filtered to the bars whose IST trading date falls in the half-open window
     ``[start, end)``, into a sorted polars frame with exactly the resampler's columns
-    (``ts_utc, open, high, low, close, volume``). UNLIKE
+    (``ts_utc, open, high, low, close, volume``). The read is BOUNDED to ONLY the
+    ``<yyyy>/<mm>.parquet`` month partitions the IST span covers
+    (:func:`ist_span_partition_files`) instead of the whole ``/**/*.parquet`` tree, so
+    the post-pull derivation is O(pulled-window) months, not O(lake-depth)
+    (DEC-RESAMPLE-BOUND-GLOB-001); the in-memory IST-date filter below is the precise
+    final cut, so the output is byte-identical to the old whole-tree read. UNLIKE
     :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` (which RAISES when no
-    1-minute exists), a missing partition tree returns an EMPTY frame so "no 1-minute
-    to fill from" is a clean no-op, never an error (the verify-first default). Raw
-    lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
+    1-minute exists), no covered partition on disk returns an EMPTY frame so "no
+    1-minute to fill from" is a clean no-op, never an error (the verify-first default).
+    Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        files = ist_span_partition_files(base, start, end)
+        if not files:
             return pl.DataFrame(
                 schema={
                     "ts_utc": pl.Datetime(time_unit="us", time_zone="UTC"),
@@ -573,7 +666,7 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
                     "volume": pl.Int64,
                 }
             )
-        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        df = pl.read_parquet(files)
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
