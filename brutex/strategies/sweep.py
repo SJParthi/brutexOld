@@ -15,8 +15,10 @@ and adds:
 * :class:`ComboCache` — LMDB-backed persistent dedup cache, keyed by
   the 32-byte raw sha256 of the combo identity. Two sweep runs over
   the same ``(strategy_id, params, data_snapshot_hash, commit_sha)``
-  produce identical cache hits in O(1) — the property ``FR-BF-004``
-  demands.
+  produce identical cache hits via one LMDB point-get — an O(log n)
+  B+tree descent that is effectively flat for realistic n (high fanout
+  + warm page cache), not a literal O(1). FR-BF-004 demands
+  deterministic dedup, not constant-time lookup.
 * :class:`ComboSweep` — the driver. Enumerates the grid, computes
   the :func:`combo_hash` for each combo, short-circuits on cache
   hits, otherwise constructs a fresh strategy + runner pair and
@@ -117,13 +119,25 @@ class ParamGrid:
 
     axes: Mapping[str, tuple[Any, ...]] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Reject any empty axis (the single source of truth for the guard).
+
+        ``ParamGrid`` is a public, directly-constructible frozen dataclass, so
+        the empty-axis guard must live here — not only in :meth:`from_dict`. A
+        frozen ``__post_init__`` may validate (it reads, never writes, fields).
+        An empty axis would otherwise yield a silent zero-combo sweep
+        (``len == 0``, ``iter`` empty) with no error.
+        """
+        for name, values in self.axes.items():
+            if not values:
+                raise StrategyError(
+                    f"ParamGrid axis {name!r} must have at least one candidate value"
+                )
+
     @classmethod
     def from_dict(cls, axes: Mapping[str, Iterable[Any]]) -> Self:
         """Build a :class:`ParamGrid` from any iterable-valued dict."""
         materialised = {k: tuple(v) for k, v in axes.items()}
-        for k, v in materialised.items():
-            if not v:
-                raise StrategyError(f"ParamGrid axis {k!r} must have at least one candidate value")
         return cls(axes=materialised)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
@@ -308,7 +322,9 @@ class ComboCache:
         """Return ``True`` iff *combo_hash_hex* has a cached result.
 
         Faster than :meth:`get` because it does not deserialise the
-        payload — exactly one B+tree lookup.
+        payload — one B+tree point-lookup with no payload
+        deserialisation (an O(log n) descent, vs :meth:`get`'s
+        O(log n) descent + O(value_size) JSON decode).
         """
         self._ensure_open()
         key = _hex_to_key(combo_hash_hex)

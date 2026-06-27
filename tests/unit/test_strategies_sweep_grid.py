@@ -64,3 +64,35 @@ class TestParamGrid:
         # Second iteration must still work — the original generator
         # would be exhausted, but ParamGrid materialises to tuples.
         assert len(list(grid)) == 3
+
+
+class TestParamGridDirectConstruction:
+    """The empty-axis guard lives in ``__post_init__`` (the single source of
+    truth), so even a DIRECT ``ParamGrid(axes=...)`` construction is validated."""
+
+    def test_direct_construction_empty_axis_rejected(self) -> None:
+        with pytest.raises(StrategyError, match="at least one"):
+            ParamGrid(axes={"a": ()})
+        with pytest.raises(StrategyError, match="at least one"):
+            ParamGrid(axes={"a": (1, 2), "b": ()})
+
+    def test_empty_axes_dict_still_single_combo(self) -> None:
+        grid = ParamGrid(axes={})
+        assert len(grid) == 1
+        assert list(grid) == [{}]
+
+
+class TestParamGridScale:
+    """The grid is lazy + overflow-free — ``len`` is an exact Python int and
+    iteration never materialises the full Cartesian product."""
+
+    def test_len_no_overflow_huge_product(self) -> None:
+        grid = ParamGrid.from_dict({"a": range(10**6), "b": range(10**6), "c": range(10**6)})
+        assert len(grid) == 10**18
+        assert isinstance(len(grid), int)
+
+    def test_iteration_is_lazy(self) -> None:
+        grid = ParamGrid.from_dict({"x": range(1000), "y": range(1000)})
+        # The first combo is produced without materialising the 10**6 product.
+        first = next(iter(grid))
+        assert first == {"x": 0, "y": 0}
