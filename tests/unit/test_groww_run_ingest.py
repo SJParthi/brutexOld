@@ -352,6 +352,95 @@ def test_ledger_threaded_and_skipped_windows_aggregated(monkeypatch: pytest.Monk
     assert report.bars_appended == 0
 
 
+def test_write_pool_wraps_sink_in_write_consumer_sink(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEC-FETCH-WRITE-OVERLAP-LEVER1-001: a non-None write_pool wraps the sink.
+
+    The spine routes every pair's write through a WriteConsumerSink so the lake write is
+    handed off to the background pool, while the settle-after-durable ordering is preserved
+    by the wrapper (it blocks on the durable result). Asserts the wrapped sink — NOT the raw
+    sink — is what reaches ``ingest_spot``.
+    """
+    from brutex.data.sink import NullBarSink
+    from brutex.data.write_consumer import ShardedWriteConsumer, WriteConsumerSink
+
+    seen_sinks: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        seen_sinks.append(sink)
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    raw_sink = NullBarSink()
+    pool = ShardedWriteConsumer(sink=raw_sink, workers=2)
+    try:
+        run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            raw_sink,
+            instruments=[_index("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            write_pool=pool,
+        )
+    finally:
+        pool.drain()
+    assert len(seen_sinks) == 1
+    assert isinstance(seen_sinks[0], WriteConsumerSink)
+
+
+def test_write_pool_none_leaves_sink_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """write_pool=None (the default) is byte-identical: the RAW sink reaches ingest_spot."""
+    from brutex.data.sink import NullBarSink
+
+    seen_sinks: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        seen_sinks.append(sink)
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    raw_sink = NullBarSink()
+    run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        raw_sink,
+        instruments=[_index("NIFTY")],
+        intervals=["1minute"],
+        start=_START,
+        end=_END,
+    )
+    assert seen_sinks == [raw_sink]
+
+
+def test_with_retry_forwards_write_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retry wrapper forwards write_pool to every pass (the wrapped sink reaches ingest)."""
+    from brutex.data.sink import NullBarSink
+    from brutex.data.write_consumer import ShardedWriteConsumer, WriteConsumerSink
+
+    seen_sinks: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        seen_sinks.append(sink)
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    raw_sink = NullBarSink()
+    pool = ShardedWriteConsumer(sink=raw_sink, workers=2)
+    try:
+        result = run_groww_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            raw_sink,
+            instruments=[_index("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            write_pool=pool,
+        )
+    finally:
+        pool.drain()
+    assert result.retry is None
+    assert all(isinstance(s, WriteConsumerSink) for s in seen_sinks)
+
+
 def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[object, object, object]] = []
 

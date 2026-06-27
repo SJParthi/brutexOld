@@ -906,6 +906,56 @@ def test_run_multi_contract_success_and_quarantine() -> None:
     assert (f"{ok1.symbol} 1day", 1, False) in progress
 
 
+def test_run_write_pool_routes_through_consumer() -> None:
+    """DEC-FETCH-WRITE-OVERLAP-LEVER1-001: a write_pool routes the F&O write through the pool.
+
+    The underlying ``_Sink`` (wrapped by the pool's WriteConsumerSink) STILL receives every
+    contract's append — proving the write is durably handed off through the background shard
+    and the settle-after-durable ordering preserves the recorded outcome.
+    """
+    from brutex.data.write_consumer import ShardedWriteConsumer
+
+    ok1, ok2 = _ce(), _ce2()
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    pool = ShardedWriteConsumer(sink=sink, workers=2)
+    try:
+        report = run_groww_option_ingest(
+            _client(sdk),
+            sink,
+            contracts=[ok1, ok2],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            write_pool=pool,
+        )
+    finally:
+        pool.drain()
+    assert set(report.pairs) == {(ok1.symbol, "1day"), (ok2.symbol, "1day")}
+    assert report.bars_appended == 2
+    # Each contract's durable append reached the real sink THROUGH the pool.
+    assert {a[2] for a in sink.appends} == {ok1.symbol, ok2.symbol}
+
+
+def test_run_write_pool_none_uses_raw_sink() -> None:
+    """write_pool=None (default) is byte-identical — the raw sink records the appends directly."""
+    ok = _ce()
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    report = run_groww_option_ingest(
+        _client(sdk),
+        sink,
+        contracts=[ok],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1
+    assert {a[2] for a in sink.appends} == {ok.symbol}
+
+
 def test_run_auth_failure_sets_auth_aborted() -> None:
     bad = _ce()
     sdk = _FakeSDK(raise_for={bad.symbol: GrowwAPIAuthenticationException("dead token")})

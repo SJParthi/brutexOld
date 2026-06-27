@@ -97,6 +97,7 @@ from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.write_consumer import ShardedWriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import SerialRunParallel
@@ -848,6 +849,7 @@ def run_groww_option_ingest(
     run_parallel: RunParallel | None = None,
     on_raw_payload: RawPayloadHook | None = None,
     capture_hook_factory: CaptureHookFactory | None = None,
+    write_pool: ShardedWriteConsumer | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -920,6 +922,16 @@ def run_groww_option_ingest(
     keep-first sink + WindowLedger make the resulting lake byte-identical to a
     full-range pull (Golden Rule #7).
 
+    *write_pool* (DEC-FETCH-WRITE-OVERLAP-LEVER1-001) is the F&O twin of the spot
+    spine's hand-off: when supplied, *sink* is wrapped in a
+    :class:`~brutex.data.write_consumer.WriteConsumerSink` so each contract's
+    O(month-depth) lake write runs on a background shard worker instead of serially on
+    the fetch worker, freeing the connection to keep fetching the next contract. The
+    per-contract settle-after-durable ledger ordering is preserved BYTE-FOR-BYTE (the
+    wrapper blocks until the durable write returns). ``None`` (default) is the
+    synchronous path. The caller owns the pool's lifetime and MUST :meth:`drain` it
+    before saving the window ledger.
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -927,6 +939,11 @@ def run_groww_option_ingest(
         the quarantined failures.
     """
     pull_id = current_pull_id()
+    # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
+    # the background pool when wired, freeing the fetch connection from the serial
+    # O(month-depth) write. `write_pool=None` leaves `sink` untouched (byte-identical).
+    if write_pool is not None:
+        sink = WriteConsumerSink(consumer=write_pool)
     runner: RunParallel = run_parallel if run_parallel is not None else SerialRunParallel()
     # Deterministic worklist: one job per (contract, interval) pair, in the caller's
     # contract order × interval order — the OUTER fan-out unit (each a distinct lake

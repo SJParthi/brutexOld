@@ -56,6 +56,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.write_consumer import ShardedWriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError, Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
@@ -265,6 +266,7 @@ def run_groww_spot_ingest(
     audit: AuditWriter | None = None,
     on_window: WindowTick | None = None,
     symbol_windows: SpotWindows | None = None,
+    write_pool: ShardedWriteConsumer | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -320,6 +322,19 @@ def run_groww_spot_ingest(
         ``[start, end)`` range for every symbol: the 1-minute fetch is fully decoupled
         from the 1-day coverage. The alias is retained for any caller that does supply
         an opt-in map (the never-narrow fallback).
+    write_pool
+        Optional :class:`~brutex.data.write_consumer.ShardedWriteConsumer`
+        (DEC-FETCH-WRITE-OVERLAP-LEVER1-001). When supplied, *sink* is wrapped in a
+        :class:`~brutex.data.write_consumer.WriteConsumerSink` so each window's lake
+        write is handed OFF to a background shard worker instead of running serially on
+        the fetch worker thread — the fetch lane stops idling on its own
+        O(month-depth) write, and the ONLY limiter becomes Groww's rate. The spine's
+        settle-after-durable ledger ordering is preserved BYTE-FOR-BYTE: the wrapper's
+        ``append`` blocks until the durable write returns, so the existing
+        ``ledger.record`` still runs only after the bytes are on disk. ``None`` (the
+        default) reproduces TODAY's fully-synchronous path exactly — no thread, no queue.
+        The caller OWNS the pool's lifetime and MUST :meth:`drain` it BEFORE saving the
+        window ledger (so every settled window is durable).
 
     Returns
     -------
@@ -327,6 +342,13 @@ def run_groww_spot_ingest(
         Per-pair :class:`IngestReport` for successes + the quarantined failures.
     """
     pull_id = current_pull_id()
+    # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): when a write pool is wired, route
+    # every sink.append through it so the O(month-depth) lake write runs on a background
+    # shard worker, freeing the fetch connection to keep fetching. `write_pool=None`
+    # leaves `sink` untouched → byte-identical synchronous path. The wrapper still blocks
+    # the fetch worker until the durable write returns, so settle-after-durable holds.
+    if write_pool is not None:
+        sink = WriteConsumerSink(consumer=write_pool)
     # Wire the shared bucket's *pace* into the adapter's Groww client so a client
     # fast-retry re-acquires a token instead of bypassing the limiter. No-op for
     # adapters without a paceable client (fakes) or when unthrottled.
@@ -569,6 +591,7 @@ def run_groww_spot_ingest_with_retry(
     audit: AuditWriter | None = None,
     on_window: WindowTick | None = None,
     symbol_windows: SpotWindows | None = None,
+    write_pool: ShardedWriteConsumer | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -591,6 +614,11 @@ def run_groww_spot_ingest_with_retry(
     paths pass ``None`` since DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851), so
     each round re-pulls only the still-failed windows of the full ``[start, end)``
     range.
+
+    *write_pool* (DEC-FETCH-WRITE-OVERLAP-LEVER1-001) is forwarded verbatim to every
+    pass, so each retry round ALSO routes its writes through the same background
+    consumer — preserving the settle-after-durable ledger ordering. ``None`` (default)
+    keeps the synchronous write path.
 
     Returns
     -------
@@ -623,6 +651,7 @@ def run_groww_spot_ingest_with_retry(
             audit=audit,
             on_window=on_window,
             symbol_windows=symbol_windows,
+            write_pool=write_pool,
         )
 
     report = _one_pass()
