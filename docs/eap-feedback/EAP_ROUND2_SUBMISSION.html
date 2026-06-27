@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Claude Code Projects (beta) — Consolidated Round-2 Submission</title>
+<title>Claude Code Projects (beta) — Round-2 Feedback</title>
 <style>
 :root{--fg:#1a1a1a;--muted:#5b6470;--bg:#ffffff;--accent:#b4530a;--accent2:#0a5fb4;
 --border:#e2e6ea;--code-bg:#f5f7f9;--quote-bg:#fbf6ef;--quote-border:#e0b070;
@@ -43,336 +43,83 @@ table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px;display:b
 th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top;}
 th{background:var(--th-bg);font-weight:650;}
 tbody tr:nth-child(even){background:var(--row-alt);}
-.banner{background:#fff;border:1px solid var(--border);border-radius:10px;
-padding:4px 22px;margin:18px 0 8px;}
 @media (max-width:680px){.wrap{padding:24px 18px 60px;}h1{font-size:24px;}}
 @media print{body{background:#fff;}.wrap{box-shadow:none;max-width:none;padding:0;}}
 </style>
 </head>
 <body>
 <main class="wrap">
-<h1>Claude Code Projects (beta) — Consolidated Round-2 Submission</h1>
-<p><strong>For:</strong> Claude Code Early Access team — Diana Liu (claude-code-early-access@anthropic.com); Omid (eng lead), Jul 1 feedback call <strong>From:</strong> Parthiban (sjparthi93@gmail.com) <strong>Date:</strong> 2026-06-27 <strong>Workload under test:</strong> BruteX — a large multi-agent backtesting-engine repo. The product under review is the <strong>Claude Code Projects beta</strong>; BruteX is only the workload that exercised it.</p>
-<blockquote><p><strong>What this is.</strong> One consolidated, evidence-gated dossier of every Round-2 finding, gathered while running a real, large multi-agent batch inside the Projects beta. It merges three working notes (the Projects pilot batch, the session-state note, and the evidence gallery) into a single submission.</p><p><strong>Beta-appropriate framing (read first).</strong> Projects is a <strong>private early-access beta</strong> — I am not flagging "missing docs" as defects (a beta is expected to be sparsely documented). Every Projects item below is one of three things and nothing else:</p><ul><li>a <strong>behavior</strong> the feature did or didn't do,</li><li>an <strong>expectation gap</strong> (the mental model I formed vs what actually happened), or</li><li>a <strong>feature request</strong> (what I'd want the beta to add).</li></ul><p><strong>Verify-before-claim.</strong> Each item carries an explicit evidence label — <strong>VERIFIED</strong> (directly observed/reproduced this session), <strong>HELD</strong> (plausible but needs a user-side confirmation before it can be called a defect), or <strong>UNVERIFIED</strong> (a user-reported observation not yet reproduced). Nothing unproven is presented as fact. This mirrors the BruteX project's own no-illusion bar (CLAUDE.md §2 Golden Rule #10).</p></blockquote>
+<h1>Claude Code Projects (beta) — Round-2 Feedback</h1>
+<p><strong>For:</strong> Claude Code Early Access team — Diana Liu (claude-code-early-access@anthropic.com); Omid (eng lead), Jul 1 call <strong>From:</strong> Parthiban (sjparthi93@gmail.com) · <strong>Date:</strong> 2026-06-27 <strong>Workload under test:</strong> BruteX — a large multi-agent backtesting-engine repo (the workload that exercised the Projects beta).</p>
+<p>Round-2 feedback on the <strong>Claude Code Projects beta</strong>, from running a real, large multi-agent batch inside it. Findings are labelled <strong>✅ Verified</strong> (observed/reproduced this session) or <strong>🟡 Needs repro</strong> (plausible, root cause unconfirmed). Nothing unproven is stated as fact (mirrors the project's no-illusion bar, CLAUDE.md §2 Golden Rule #10).</p>
 <hr/>
-<h2>Table of contents</h2>
+<h2>Top issues at a glance</h2>
+<table>
+<thead><tr><th>#</th><th>Issue</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>GitHub access drops mid-session; no in-session recovery — must start a new session</td><td>✅ Verified</td></tr>
+<tr><td>2</td><td>That auth drop forced creating a <strong>whole new Project</strong> for the same repo</td><td>✅ Verified</td></tr>
+<tr><td>3</td><td>Connecting the GitHub App doesn't reach an already-running session</td><td>✅ Verified</td></tr>
+<tr><td>4</td><td>A Project isn't a self-running container; 24/7 needs a manually-wired Routine</td><td>✅ Verified</td></tr>
+<tr><td>5</td><td>The 403 is a broker message with misleading "org admin" wording on a <strong>personal</strong> account</td><td>✅ Verified</td></tr>
+<tr><td>6</td><td>No per-task liveness/progress signal — a batch "felt stalled" while landing PRs</td><td>✅ Verified</td></tr>
+<tr><td>7</td><td>Can't re-run a failed CI check — must push an empty commit</td><td>✅ Verified</td></tr>
+<tr><td>8</td><td>Chat-pasted screenshots aren't file-readable (only @-attached uploads are)</td><td>✅ Verified</td></tr>
+<tr><td>9</td><td>One shared ledger file serialises parallel-branch merges</td><td>✅ Verified</td></tr>
+<tr><td>10</td><td>Typosquat <code>httpx2</code> wheel is installable from the managed env's package index (security)</td><td>✅ Verified</td></tr>
+<tr><td>11</td><td><strong>Projects beta seems to REQUIRE an external Routine for overnight automation that plain sessions did NOT (a regression)</strong></td><td>🟡 Needs repro</td></tr>
+<tr><td>12</td><td>Effort tier appears to revert after long idle</td><td>🟡 Needs repro</td></tr>
+</tbody>
+</table>
+<hr/>
+<h2>What we'd like (feature requests)</h2>
 <ul>
-<li><strong>Projects (beta) — pilot feedback</strong> (P-1..P-13): behavior · expectation gaps · feature requests · held</li>
-<li><strong>Session-state findings</strong> (F-8..F-14): auth lapse, effort-revert, Routine limits, typosquat, Dispatch, billing</li>
-<li><strong>Bucket-1 — verified findings</strong> (V-1..V-7)</li>
-<li><strong>Bucket-2 — ideas</strong> (I-1..I-5) + 3 questions for Omid</li>
-<li><strong>Original evidence gallery</strong> (F-1..F-7)</li>
-<li><strong>Screenshot map</strong></li>
-<li><strong>Evidence integrity note</strong></li>
+<li><strong>Project auto-resume</strong> — a first-class "keep working on goal X" so a Project drives continuity without hand-wiring scheduling.</li>
+<li><strong>In-session credential refresh</strong> — re-bind GitHub / pick up a newly-connected App without tearing down the session.</li>
+<li><strong>A Project status surface</strong> — one place showing what is persistent (history, repo), live (this session, bound credentials, environment), and stale.</li>
+<li><strong>Attach Routines to a Project</strong> — Routines listed + owned by the Project, firing into its sessions.</li>
 </ul>
 <hr/>
-<h1>1. Projects (beta) — pilot feedback</h1>
-<p>Projects <strong>is</strong> a real beta feature I have access to: there is an internal "coordinator session" that orchestrates a project, and this very batch ran inside one. So this is <strong>not</strong> "Projects doesn't exist." The items below are the behaviors I saw, the expectations that diverged from them, and the capabilities I'd want next.</p>
-<h2>A. Behavior observed</h2>
-<h3>P-1 — GitHub access dropped mid-session and could not be recovered inside that session</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> high (blocks unattended completion) · <strong>Evidence: VERIFIED (this session)</strong></p>
-<p><strong>What happened.</strong> A long-running session began with fully working GitHub access — it opened PRs <strong>#896–#905</strong> earlier in the same run. Partway through, the GitHub REST API began returning HTTP <strong>403</strong> for every API operation. The session could still <code>git push</code> over its own credential channel, but could no longer <strong>open or merge PRs</strong> — the GitHub work surface was gone mid-run while the git surface stayed alive. <strong>Being "in a Project" did not shield the running session's credentials.</strong> The literal question this raised: <em>"why a new session if I'm in a Project?"</em> (full origin analysis in <strong>F-8</strong>, §2).</p>
-<p><strong>Why it matters.</strong> A persistent Project that can't keep its own session authenticated breaks the core promise of "persistent." Long-running work dies on a credential drop and the only recovery observed was to start over — the opposite of what a Project is supposed to buy you.</p>
-<p><strong>Proof.</strong> The verbatim 403 body, the broker-vs-GitHub origin analysis, and the push-works-while-API-403s channel divergence are all in <strong>F-8</strong> (§2). Backed by the operator's overnight-stuck screenshots.</p>
-<p><strong>Request (not a demand).</strong> Let a Project re-bind / refresh credentials for its running session without forcing a brand-new session (see <strong>P-8</strong>), or at minimum surface the auth drop proactively the moment it happens instead of letting the agent discover it by failing an action.</p>
-<h3>P-2 — Connecting the GitHub App did not propagate into the Project's running session</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> high · <strong>Evidence: VERIFIED (re-tested twice)</strong></p>
-<p><strong>What happened.</strong> After the correct remediation — installing the Claude GitHub App on <strong>@SJParthi</strong>, scope <strong>All repositories</strong>, read/write — the new access did <strong>not</strong> take effect in the already-running Project session. A fresh session was required for it to be picked up. I re-tested twice to rule out a transient glitch: the running session never saw the newly-granted access; only a new session did.</p>
-<p><strong>Why it matters.</strong> The natural fix for an auth gap — "connect the App" — appears to do nothing from inside the live session, so the user repeats it, doubts whether it worked, and only stumbles onto "start a new session" by accident. It compounds P-1.</p>
-<p><strong>Proof.</strong> F-8 (§2) records the re-test-after-install evidence in full (install-did-not-recover-running-session, re-tested twice). Backed by the operator's GitHub-App-install screenshots.</p>
-<p><strong>Request.</strong> Propagate a credential/permission change (App connect, repo grant) into the running session, or surface an explicit <em>"new permissions detected — restart session to apply"</em> prompt instead of silently requiring a fresh session (see <strong>P-9</strong>).</p>
-<h3>P-3 — The coordinator / ambient orchestration is invisible to the user</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> medium (operability / trust) · <strong>Evidence: VERIFIED</strong></p>
-<p><strong>What happened.</strong> Projects are orchestrated by an internal coordinator session, but the user gets <strong>no signal</strong> of whether or how the Project is continuously working — no "the coordinator is active / idle," no view of what it is doing on the user's behalf. The orchestration layer that defines a Project is hidden.</p>
-<p><strong>Why it matters.</strong> Invisibility of the coordinator is why the Project "feels" idle even when something is (or should be) happening — and why the expectation gap in P-4 is so hard to self-correct. The user cannot tell "working" from "nothing scheduled."</p>
-<p><strong>Request.</strong> Surface coordinator/ambient state in the Project UI: active vs idle, what is currently running, and what (if anything) is scheduled (see <strong>P-10</strong>).</p>
-<h3>P-13 — Auth-binding limitation forced creating an entirely NEW Project for the same repo</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> high (forced workaround / context split) · <strong>Evidence: VERIFIED (this session)</strong></p>
-<p><strong>What was observed (VERIFIED, this session).</strong> The mid-session GitHub access drop (the auth-binding behavior in P-1 / P-2 / F-8) could only be resolved by a session that <strong>starts after</strong> the App is connected. Reconnecting / installing the App did <strong>not</strong> reach the already-running session — re-tested <strong>4×</strong>, the running session never picked up the newly-granted access. As a direct consequence, the user created a <strong>whole new Project pointing at the same bruteX repository</strong> just to obtain a working session.</p>
-<p><strong>Why it matters.</strong> This is a heavy real-world workaround for what should be an in-session credential refresh. It also risks <strong>two Projects (two coordinator sessions) on one repository</strong> — split context, duplicate work, and ambiguity about which Project is canonical. It is the concrete downstream impact of the auth-binding (P-1 / P-2) + no-in-session-refresh findings: when the only recovery path is "a new session," and a new session can only be obtained cleanly by spinning up a new Project, the user ends up with a second Project they never wanted.</p>
-<p><strong>Suggested fix.</strong> Provide <strong>in-session / in-Project credential refresh</strong> so a newly-connected App takes effect without a new session or a new Project (ties to the existing in-Project credential-refresh feature request, <strong>P-6</strong>). That single capability removes the need to fork a second Project just to recover auth.</p>
-<h2>B. Expectation gaps (the mental model I formed vs what actually happened)</h2>
-<h3>P-4 — I expected a Project to be a self-running, persistent container; it runs as sessions + a manually-wired Routine</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> medium (expectation-setting) · <strong>Evidence: VERIFIED (this session)</strong></p>
-<p><strong>What I expected.</strong> The word "Project" led me to expect a self-running, always-on container that keeps working on its own — something I could point at a goal and walk away from.</p>
-<p><strong>What actually happened.</strong> Work runs as <strong>sessions</strong>, and 24/7 / recurring automation still requires an explicitly-wired <strong>Routine/trigger</strong>. There is no ambient "the Project is working" loop. This divergence cost multiple rounds of confusion this session before the model clicked. (Routines themselves work — see the retraction note and <strong>F-11</strong> for their real constraints.)</p>
-<p><strong>Why it matters.</strong> The gap between the implied promise ("a Project that runs") and the mechanism ("sessions + a manually-wired Routine") is exactly where a beta loses trust — a user waits for work that will never start on its own.</p>
-<p><strong>The two things I learned the hard way (stated as behavior, not a docs ask):</strong></p>
-<ul>
-<li><strong>Persistence boundary I hit:</strong> conversation history <strong>persists</strong> across sessions, but <strong>live credentials and the running VM/environment do not</strong> — they are session-scoped and re-bound per session. This is the mechanism behind P-1/P-2. I only learned it by hitting it mid-task — the most expensive way to learn it.</li>
-<li><strong>Where the work and the auth actually live:</strong> the <strong>session</strong> runs the work and <strong>holds the auth</strong> (bound at session start, per F-8); a <strong>Routine/trigger</strong> fires scheduled work; the <strong>environment</strong> is the VM the session runs in. I had to infer this hierarchy from behavior.</li>
-</ul>
-<p><strong>Request.</strong> Either make the Project actually drive continuity (see <strong>P-8</strong>), or let the running-session behaviors above (auth re-bind, status) match the "persistent" expectation (P-9/P-10).</p>
-<h2>C. Feature requests (grounded in the behaviors above)</h2>
-<h3>P-5 — Project-level auto-resume / "keep working"</h3>
-<p><strong>Evidence: VERIFIED (request grounded in P-4)</strong></p>
-<p>Today continuity requires manually wiring a Routine/trigger; a Project does not resume work on its own. Request: a first-class Project-level "keep working" / auto-resume so users get the continuity they already expect (P-4) without hand-building scheduling plumbing — a Project setting <em>"auto-resume in-flight work" / "keep working on goal X,"</em> backed by the existing routine/trigger machinery but owned by the Project. This is the single capability that would make "Project" mean what users think it means.</p>
-<h3>P-6 — In-Project credential refresh</h3>
-<p><strong>Evidence: VERIFIED (request grounded in P-1 / P-2)</strong></p>
-<p>A mid-session credential drop could not be recovered in-session (P-1), and connecting the GitHub App took effect only after a new session (P-2). Request: an in-session <em>"refresh credentials / re-bind GitHub"</em> action (and/or automatic pickup of a newly-connected App) that does not require tearing down the session. Removes the "start a new session to fix auth" tax that currently breaks long-running Project work.</p>
-<h3>P-7 — A clear Project status surface</h3>
-<p><strong>Evidence: VERIFIED (request grounded in P-3 / P-4)</strong></p>
-<p>There is no single place that tells the user what in a Project is <strong>persistent</strong>, what is <strong>live</strong> (this session), and what is <strong>stale</strong>. Request: a Project status panel — persistent items (history, repo, config) · live items (current session, bound credentials, environment) · stale/expired items, each with a clear badge. This is the cheapest fix that addresses P-1, P-2, P-3, and P-4 at once: most of the confusion above is <em>"I can't tell what state I'm in."</em></p>
-<h3>P-8 — Attach Routines/triggers to a Project explicitly</h3>
-<p><strong>Evidence: VERIFIED (request grounded in P-4 / P-5)</strong></p>
-<p>Routines/triggers exist but are not visibly owned by the Project — so "the Project takes care of it" is not actually true; the user wires scheduling separately. Request: first-class <em>"Routines attached to this Project,"</em> listed and editable in the Project UI, firing into the Project's sessions. Makes the Project the unit of automation (matching the mental model) and makes P-5's "keep working" composable from explicit, inspectable routines.</p>
-<h2>D. Held — needs user confirmation (NOT presented as verified)</h2>
-<h3>P-9 — Projects / EAP billing vs sessions</h3>
-<p><strong>Evidence: HELD</strong></p>
-<p>Whether Project / EAP usage is metered against the plan, exempt, or free is <strong>unknown</strong> — I have not confirmed it, so it is raised as a question, not a claim. Heavy multi-agent fan-outs inside a Project plausibly consume plan usage, but I will not assert that without confirmation. Operators running large Projects need a documented billing policy to make a go/no-go call. Cross-ref <strong>F-14</strong>.</p>
-<h3>P-10 — Dispatch ↔ Projects relationship</h3>
-<p><strong>Evidence: HELD</strong></p>
-<p>The relationship between "Dispatch" and Projects is <strong>unclear</strong> to me, and Dispatch may be plan-gated. I have not verified how (or whether) Dispatch integrates with a Project — raised as an open question, not a finding. Cross-ref <strong>F-13</strong>.</p>
-<h3>P-11 — Overnight disruption appears specific to the Projects beta (user-reported correlation)</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> (if confirmed) high · <strong>Evidence: HELD (user-reported correlation; no causation claimed)</strong></p>
-<p><strong>What was observed (user-reported).</strong> Across three run modes the user reports a difference in overnight stability:</p>
-<ul>
-<li><strong>Fable-5 overnight runs</strong> ran the <strong>full night uninterrupted</strong> — no human/manual intervention, no Routines — completing per plan.</li>
-<li>Recent <strong>plain (non-Projects) sessions</strong> also did <strong>not</strong> show the mid-session disruption.</li>
-<li>With the <strong>Projects beta</strong> feature access, the mid-session disruption <strong>did</strong> occur — the GitHub-access drop + "start a new session" stranding (P-1 / P-2 / F-8).</li>
-</ul>
-<p><strong>Why it matters.</strong> If the disruption is specific to the beta, it directly undermines the unattended-overnight value proposition of the exact feature being piloted.</p>
-<p><strong>Honest caveat (why this is HELD).</strong> This is a <strong>user-reported correlation</strong>, not a controlled comparison; there is no telemetry exposed to compare the three run paths, so the <strong>root cause is UNCONFIRMED</strong> and <strong>no causation is claimed.</strong> A plausible-but-unverified mechanism worth checking: the Projects beta may wrap sessions with a different lifecycle / coordinator or auth-binding path than plain sessions.</p>
-<p><strong>Request.</strong> Have Anthropic compare the <strong>session lifecycle + GitHub-auth binding</strong> between Projects-beta sessions and plain sessions / Fable-5 overnight runs, to determine why only the beta path drops mid-run.</p>
-<h3>P-12 — Reasoning-effort tier may revert to a lower value after long idle</h3>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> medium (if confirmed) · <strong>Evidence: UNVERIFIED / NEEDS REPRODUCTION — held pending</strong></p>
-<p>Same finding as <strong>F-9</strong> (§2) — kept here as the Projects-context cross-link. The user observed the effort selector <strong>appears</strong> to fall from the chosen maximum back to "Extra" after a long idle. Held pending (a) resolving whether "ultracode" (mode) and "Extra" (effort tier) are two independent controls — if so, "Extra" sitting in the effort selector is just the separate control at its default, <strong>not a revert</strong> — and (b) a 2–3× before/after reproduction. An agent cannot inspect client-side UI state from inside its own session, so only the user can confirm this. See <strong>F-9</strong> for the full write-up.</p>
-<hr/>
-<h1>2. Session-state findings (F-8..F-14)</h1>
-<p>These were gathered in the same large multi-agent session. F-8 is the full, deep write-up behind P-1/P-2; the rest cover effort-revert, Routine limits, a supply-chain hazard, Dispatch, and billing.</p>
-<h2>F-8 — GitHub App authorization lapses mid-session with no in-session recovery</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> high (blocks unattended completion) · <strong>Evidence: VERIFIED</strong></p>
-<p><strong>What was observed.</strong> A long-running session began with fully working GitHub access (opened PRs <strong>#896–#905</strong> earlier in the same run). Partway through, the GitHub REST API began returning HTTP <strong>403</strong> for every API operation. The session could still <code>git push</code>, but could no longer <strong>open or merge PRs</strong> — the GitHub work surface was effectively gone mid-run while the git surface stayed alive.</p>
-<p>The 403 body, quoted verbatim:</p>
+<h2>Details</h2>
+<h3>1 — GitHub access drops mid-session; no in-session recovery</h3>
+<p>A long-running session opened PRs <strong>#896–#905</strong>, then every GitHub REST call began returning <strong>403</strong>. <code>git push</code> kept working but PR open/merge died — stranded push-only mid-run. Re-tested in a fresh sub-agent: same 403, a stable session-level state, not a blip. <strong>Fix:</strong> allow in-session re-auth, or auto-checkpoint and resume in a fresh session so the unattended loop survives the lapse.</p>
+<h3>2 — The auth drop forced a whole new Project for the same repo</h3>
+<p>Because nothing recovered the running session (re-tested 4×), the only clean way to a working session was to spin up a <strong>second Project pointing at the same bruteX repo</strong> — split context, duplicate coordinator, ambiguity over which is canonical. <strong>Fix:</strong> in-session/in-Project credential refresh removes the need to fork a second Project just to recover auth.</p>
+<h3>3 — Connecting the GitHub App doesn't reach a running session</h3>
+<p>After installing the App on <strong>@SJParthi</strong> (All repositories, read/write), the already-running session never saw the new access (re-tested twice); only a fresh session did. The natural fix appears to do nothing from inside the live session. <strong>Fix:</strong> propagate a credential change into the running session, or prompt <em>"new permissions detected — restart session to apply."</em></p>
+<h3>4 — A Project isn't a self-running container</h3>
+<p>"Project" implied a self-running, always-on container. In practice work runs as <strong>sessions</strong>, and 24/7 automation still needs an explicitly-wired <strong>Routine/trigger</strong> — there is no ambient "the Project is working" loop. <strong>Fix:</strong> Project auto-resume, and/or set the expectation in-product (work runs as sessions; attach a Routine to make it run on its own).</p>
+<h3>5 — The 403 message is a broker gate and misleading</h3>
+<p>The body says <em>"an org admin must connect the Claude GitHub App for this organization,"</em> but this is a <strong>personal account</strong> (no org admin) and the App was demonstrably connected (it just opened #896–#905). The response is broker-side, not GitHub-native: its <code>documentation_url</code> points at <code>docs.anthropic.com</code>, it is 403 (GitHub's bad-credential failure is 401), and it carries none of GitHub's signature headers (<code>x-github-request-id</code>, <code>x-ratelimit-*</code>). Verbatim:</p>
 <pre><code>HTTP 403
 {"message":"GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.","documentation_url":".../claude-code/github-actions"}</code></pre>
-<p><strong>Confirmed three independent ways.</strong></p>
-<ul>
-<li>The GitHub MCP tools (<code>mcp__github__*</code>) were <strong>no longer exposed</strong> in the session — the integration that earlier opened #896–#905 had dropped out of the available tool set.</li>
-<li>The <code>gh</code> CLI was <strong>not installed</strong> (invocation exited <strong>127</strong>) — no shell fallback path to GitHub.</li>
-<li>A raw authenticated GitHub API call returned the <strong>403 above</strong>.</li>
-</ul>
-<p>The 403 was <strong>re-tested later in a fresh sub-agent</strong> within the same session and returned the <strong>same 403</strong> — a stable session-level state, not a transient blip.</p>
-<p><strong>New evidence — the 403 originates in the Anthropic broker, not GitHub (VERIFIED).</strong> The response is <strong>not</strong> a GitHub-native rejection; it is the Claude/Anthropic GitHub <em>broker</em> refusing to mint a downstream call:</p>
-<ul>
-<li>The body's <code>documentation_url</code> points at <strong><code>docs.anthropic.com</code></strong> (<code>.../claude-code/github-actions</code>), not at <code>docs.github.com</code>.</li>
-<li>The status is <strong>HTTP 403</strong>. GitHub's native bad-credential failure is <strong>HTTP 401 "Bad credentials"</strong> with a GitHub-format body — a different code and shape.</li>
-<li>The response carries <strong>none of GitHub's signature headers</strong> (<code>x-github-request-id</code>, <code>x-ratelimit-*</code>).</li>
-<li>The agent proxy's own <code>/__agentproxy/status</code> carries <strong>no GitHub token/expiry state at all</strong>, and <code>recentRelayFailures</code> was <strong>empty</strong> — the proxy never even attempted a GitHub relay; the refusal is upstream, at the broker's enablement gate.</li>
-</ul>
-<blockquote><p><strong>Live corroboration captured this session.</strong> While diagnosing the #905 CI failure, a <code>curl</code> to the GitHub Actions REST API (<code>api.github.com/repos/SJParthi/bruteX/actions/runs/.../jobs</code>) returned the <strong>byte-identical broker 403</strong> quoted above — confirming the gate is still in the push-only state and that the failure is broker-side, not a GitHub rejection. (This is also why the #905 CI logs could not be read from inside this session — see §1 of the cover report.)</p></blockquote>
-<p><strong>New evidence — the 403 message is misleading (VERIFIED).</strong> It says <em>"an org admin must connect the Claude GitHub App for this organization."</em> But:</p>
-<ul>
-<li>This is a <strong>personal account (SJParthi), not an organization</strong> — there is no "org admin" in the loop.</li>
-<li>The App was <strong>demonstrably connected</strong> — the same session used it to open PRs <strong>#896–#905</strong> earlier. So "must connect … for this organization" is factually wrong at the moment it is shown.</li>
-</ul>
-<p>The message <strong>misattributes a session-enablement lapse</strong> as a "never connected / needs an org admin" problem — pointing the user at the wrong fix.</p>
-<p><strong>New evidence — installing the App did NOT recover the running session (VERIFIED).</strong> After the user installed the Claude GitHub App on <strong>@SJParthi</strong>, scope <strong>All repositories</strong>, <strong>read/write</strong>, this <strong>already-running</strong> session <strong>still returned the same 403</strong> when re-tested (twice). This proves GitHub access is <strong>bound at session start</strong>: a newly-installed grant <strong>cannot</strong> be picked up by a session already running. Only a <strong>fresh session</strong> can.</p>
-<p><strong>New evidence — the two channels diverge (VERIFIED).</strong> Throughout the 403 state, <code>git push</code> over the session's own git credential channel <strong>kept working.</strong> The agent was left <strong>half-functional</strong>: push <strong>yes</strong>, PR/merge/API <strong>no.</strong> The git surface and the REST-API surface authorize independently, and only one lapsed — which is why the failure is easy to miss (commits keep landing; only the PR step fails).</p>
-<p><strong>Root behavior (VERIFIED).</strong> The GitHub grant is read <strong>at session start</strong> and bound for that session's life. Re-connecting / installing the App mid-run does <strong>not</strong> propagate to the already-running session — picking up the restored grant requires a <strong>new session.</strong></p>
-<p><strong>Why it matters.</strong> Directly undermines "run unattended overnight to completion." An autonomous agent that loses GitHub access partway through a batch is <strong>stranded push-only</strong> — it can commit and push branches but cannot open or merge the PRs that are the deliverable — until a human restarts the session. The failure is also <strong>silent</strong>: nothing surfaced the auth drop; it was discovered only by <em>attempting</em> a GitHub action and getting the 403.</p>
-<p><strong>Suggested fixes (feedback, not a demand).</strong></p>
-<ul>
-<li><strong>Surface the auth drop proactively</strong> the moment it happens (session-level notification / status badge) so an operator can intervene immediately.</li>
-<li><strong>Allow in-session re-auth</strong> so a restored grant propagates into the running session (the re-test-after-install shows it currently does not).</li>
-<li>Failing that, <strong>auto-checkpoint and resume in a fresh session</strong> so the unattended loop survives the lapse without manual intervention.</li>
-<li><strong>Fix the message text</strong> — detect the personal account + already-connected state and say what is true: <em>"this session's GitHub access was not enabled; start a new session (or re-enable) to recover."</em></li>
-<li><strong>Distinguish broker-gate from credential errors</strong> (the <code>docs.anthropic.com</code> URL + 403 + missing GitHub headers identify it as a broker-side gate).</li>
-</ul>
-<p><strong>Evidence / screenshots.</strong> The user has shared screenshots of the stranded push-only state. Image files are not yet in the repo — see the screenshot map (§6). <code>(attach: overnight-stuck-403)</code></p>
-<h2>F-9 — Reasoning-effort tier may revert to a lower value after long idle</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> medium (if confirmed) · <strong>Evidence: UNVERIFIED / NEEDS REPRODUCTION — held pending</strong></p>
-<p><strong>What was observed (user-reported, not yet reproduced).</strong> After a long idle period, the effort / reasoning selector <strong>appears</strong> to change from the user's chosen maximum back to <strong>"Extra."</strong> This is a user observation; it has <strong>not</strong> been reproduced under controlled conditions from inside the session.</p>
-<p><strong>Open question to resolve BEFORE calling this a bug.</strong> "ultracode" and "Extra" may be <strong>two independent controls</strong>: "ultracode" a <em>multi-agent orchestration MODE</em>, "Extra" a <em>reasoning-effort TIER</em>. If they are separate, then "Extra" sitting in the effort selector is simply that control resting at its default — <strong>NOT a revert</strong> — i.e. expected behavior, not a defect. This disambiguation must be resolved first.</p>
-<p><strong>Why it is held.</strong> Explicitly <strong>HELD pending</strong> two gates: (1) confirm one-control-vs-two; (2) reproduce 2–3× with a before/after screenshot pair (effort=max → after idle → effort=Extra).</p>
-<p><strong>Scope note.</strong> The effort selector is <strong>desktop-client UI state</strong> — outside the repository and outside any tool an agent session can read or drive. An agent cannot inspect or reproduce a client-side selector value from within its own session, so only the user can confirm this.</p>
-<p><strong>Evidence / screenshots.</strong> Needs a <strong>before/after pair</strong>. <code>(attach: effort-before-idle-max)</code> / <code>(attach: effort-after-idle-extra)</code> — still to be captured.</p>
-<h2>F-10 — Expected a Project to keep running; the execution model is sessions + a wired Routine</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> medium (expectation-setting) · <strong>Evidence: VERIFIED (evidenced user expectation gap)</strong></p>
-<p><strong>What was observed (reframed as an expectation gap, not a docs ask).</strong> The Claude Code UI prominently surfaces a <strong>"Projects"</strong> item, and the EAP itself is called "Claude Code Projects." The mental model this produced was that a "Project" is a <strong>persistent, auto-running container</strong> that lives on and does work on its own — <em>avoiding</em> having to think in sessions. The behavior I actually observed is the opposite: work runs as <strong>sessions</strong>, and unattended automation requires a <strong>Routine / trigger</strong>.</p>
-<p><strong>Why it matters.</strong> The persistence/automation expectations are precisely the ones that matter most for an "unattended overnight" tool. A user who believes "I have a Project, so it keeps running" will not set up the Routine they actually need — exactly the gap in <strong>P-4</strong>.</p>
-<p><strong>Honest caveat.</strong> This is <strong>"the execution model diverged from my expectation," NOT "Projects is broken"</strong> and NOT a documentation complaint — a private beta is expected to be sparsely documented. It is filed as a behavior/expectation report so the team knows the default mental model new pilots form.</p>
-<p><strong>Request (for the beta team).</strong> Make the execution model match the expectation where feasible (P-5 auto-resume, P-8 attach-Routines), and/or set the expectation in-product: <em>work runs as sessions; to make a Project run on its own, attach a Routine.</em></p>
-<h2>F-11 — Routine limits constrain frequent / real-time automation</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> low–medium (automation latency ceiling) · <strong>Evidence: VERIFIED (from docs)</strong></p>
-<p><strong>What was observed.</strong> Per the published Routines documentation (<code>https://code.claude.com/docs/en/routines</code>), a Routine's <strong>minimum schedule interval is one hour</strong> — <strong>sub-hourly cron is rejected</strong> — and there is a <strong>daily per-account run cap</strong>. Together these put a floor on how frequently an unattended loop can fire.</p>
-<p><strong>Why it matters.</strong> Some real automation needs <strong>lower latency than one hour</strong> — driving CI every few minutes, polling a long-running job for completion, or reacting promptly to an external event. With a one-hour floor and a daily cap, a tight unattended loop cannot be expressed as a Routine; the operator must fall back to a foreground session (defeating "unattended") or accept hour-granularity reactions.</p>
-<p><strong>Suggested fixes (for the beta team).</strong></p>
-<ul>
-<li><strong>Allow sub-hourly intervals</strong> for short / bounded jobs, even if gated behind a stricter quota.</li>
-<li>Or <strong>provide event-driven triggers</strong> as the supported lower-latency alternative to polling Routines, so users reach for the right primitive instead of trying to make a 1-hour Routine behave like a 1-minute one.</li>
-</ul>
-<blockquote><p><strong>Note (Routines do work).</strong> An earlier round-1 note that "Routines don't fire" was <strong>retracted</strong> after verifying Routines fire correctly. F-11 is only about their <strong>interval/cap limits</strong>, not whether they work.</p></blockquote>
-<h2>F-12 — A typosquat <code>httpx2</code> wheel is installable from the managed env's package index</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> high (supply-chain hazard) · <strong>Evidence: VERIFIED (security-relevant)</strong></p>
-<p><strong>What was observed.</strong> The <strong>managed environment's package index</strong> serves a wheel named <strong><code>httpx2</code> version <code>2.5.0</code></strong> whose metadata <strong>cribs the real <code>httpx</code> project's</strong> — it advertises itself as a <em>"next generation HTTP client"</em> and reuses authorship signals associated with the genuine <code>httpx</code> (Tom Christie / Pydantic-adjacent). The name <code>httpx2</code> is a one-character / suffix variant of the widely-used <code>httpx</code>. In shape this is a <strong>classic typosquat</strong>: a near-name package, dressed in the real package's description, made <strong>installable</strong> from the index the environment trusts.</p>
-<p><strong>Scope note (distinct from an internal issue).</strong> This is <strong>NOT</strong> our own repository's fabricated test stub. That stub was an <em>internal</em> artifact a prior agent created in <strong>our</strong> repo, it is <strong>our</strong> issue, it has already been handled, and it is <strong>out of scope for EAP feedback</strong> (see "Considered but excluded" in §5). <strong>This finding is specifically that the managed ENVIRONMENT's package index itself serves an installable typosquat</strong> — a property of the Claude Code environment, not of BruteX.</p>
-<p><strong>Why it matters.</strong> An installable typosquat in the managed index is a <strong>supply-chain hazard</strong>: a developer (or an autonomous agent) who fat-fingers <code>httpx2</code>, or is steered toward it by a poisoned suggestion, can <strong>silently substitute</strong> a look-alike for a real dependency — and because the metadata mimics the genuine project, the substitution is hard to spot in review. Agents installing dependencies non-interactively are especially exposed.</p>
-<p><strong>Suggested fixes (for the beta team).</strong></p>
-<ul>
-<li><strong>Scan and block typosquat-shaped packages</strong> in the managed index — name-edit distance to popular packages, plus metadata that copies a different project's description/authorship, are strong signals.</li>
-<li>At minimum, <strong>warn loudly</strong> when an install resolves to a near-name of a high-popularity package.</li>
-</ul>
-<h2>F-13 — "Dispatch (Beta)" is shown in the sidebar but may not be activatable</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> low (clarity / availability) · <strong>Evidence: HELD — needs user confirmation</strong></p>
-<p><strong>What was observed (HELD).</strong> The Desktop sidebar shows a <strong>"Dispatch (Beta)"</strong> entry. It <strong>may be plan-gated</strong> (e.g. Pro / Max) and <strong>not activatable for all users</strong> — there is a known GitHub issue describing exactly this sidebar-presence-without-availability behavior. We have <strong>not</strong> confirmed the behavior on this user's plan from inside the session.</p>
-<p><strong>Why this is HELD.</strong> Whether the feature is genuinely unavailable, plan-gated, or simply not yet enabled for this account is a <strong>user-side, client-state question</strong> an agent cannot resolve. Held pending the user confirming the behavior (does clicking it activate, error, or no-op?). Cross-ref <strong>P-10.</strong></p>
-<p><strong>What to capture if confirming.</strong> A screenshot of the sidebar entry, the result of activating it, and the user's plan tier.</p>
-<h2>F-14 — EAP &amp; Routine billing is opaque</h2>
-<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> low (documentation request, not a defect) · <strong>Evidence: HELD / documentation request</strong></p>
-<p><strong>What was observed (HELD).</strong> It is <strong>unclear</strong> whether EAP usage is <strong>free or metered</strong>, and — separately — <strong>how Routine usage is billed.</strong> Routines draw on plan usage <strong>like sessions do</strong> and are subject to a <strong>daily run cap</strong> (F-11), so the cost model during/after a free-promo period is ambiguous: does a Routine firing overnight consume plan usage the same way a manual session would? Does the free promo cover Routine runs?</p>
-<p><strong>Framing (deliberate).</strong> This is a <strong>"please clarify EAP billing" request, not a defect claim.</strong> Per the honesty bar we are <strong>not</strong> asserting that EAP is free, nor that it is metered — both are <strong>unconfirmed.</strong> Cross-ref <strong>P-9.</strong></p>
-<p><strong>What would resolve it.</strong> A short statement covering: (a) is EAP usage metered, exempt, or free; (b) does that change when the private-beta promo ends; (c) how Routine runs are counted against plan usage and the daily cap.</p>
+<p><strong>Fix:</strong> detect the personal-account + already-connected state and say what's true (<em>"this session's GitHub access was not enabled; start a new session to recover"</em>); distinguish broker-gate from credential errors.</p>
+<h3>6 — No per-task liveness/progress signal</h3>
+<p>In a big fan-out, agents that were almost certainly stuck (≈5 h elapsed, 2–4 tool uses) sat in the same "Running" list as obviously-live ones (8 m, 53 tool uses) — indistinguishable. The panel shows elapsed time and a tool-use count but <strong>no "last active N min ago," heartbeat, progress %, or stalled badge.</strong> The run repeatedly <em>felt</em> stalled while it was in fact landing PRs: between 2026-06-24 and 2026-06-26, <strong>20 commits landed on <code>origin/main</code>, 13 with a <code>(#NNN)</code> PR marker.</strong> <strong>Fix:</strong> per-task liveness (last-tool-use + stalled badge), a tool-use-rate progress hint, batch-level "N PRs opened/merged."</p>
+<h3>7 — Can't re-run a failed CI check</h3>
+<p>On a transient CI failure (network flake, timeout) the agent has no way to "re-run failed jobs" — the only workaround is an <strong>empty re-trigger commit</strong>, which pollutes history and restarts the whole workflow. There are <strong>48 <code>chore(ci): re-trigger …</code> commits</strong> across this session's refs. (The broker 403 in #5 also blocks re-running CI via the API, leaving only the empty-commit path.) <strong>Fix:</strong> a first-class "re-run this check / re-run failed jobs" capability.</p>
+<h3>8 — Chat-pasted screenshots aren't file-readable</h3>
+<p>Images <strong>pasted into chat</strong> are visible to the model but never materialised to a path the file tools can reach. <strong>@-attached uploads ARE readable</strong> at <code>/root/.claude/uploads/&lt;session-id&gt;/...</code> (demonstrated with a real <code>Read</code>). The difference isn't discoverable — both look the same in chat. <strong>Fix:</strong> materialise chat-pasted images to the same readable path so paste and @-attach behave identically.</p>
+<h3>9 — One shared ledger file serialises parallel merges</h3>
+<p>BruteX requires every PR to append to one shared ledger (<code>docs/MIGRATION.md</code>, 6,297 lines). N parallel PRs each edit its tail, so each pair conflicts — parallelism collapses to sequential at merge time. A pattern any repo with a hot append-only file (CHANGELOG, registry) will hit. <strong>Fix:</strong> a merge-queue mode that auto-rebases append-only conflicts (tail appends are associative), or detect a hot shared file across a fan-out and warn up front.</p>
+<h3>10 — Typosquat <code>httpx2</code> wheel installable from the managed index</h3>
+<p>The managed environment's package index serves a wheel named <strong><code>httpx2</code> 2.5.0</strong> whose metadata cribs the real <code>httpx</code> project (description + authorship signals). A near-name of a high-popularity package, dressed in its description, made installable — a classic typosquat / supply-chain hazard, especially for agents installing non-interactively. (Distinct from our own repo's internal test stub, which is handled and out of scope.) <strong>Fix:</strong> scan/block typosquat-shaped packages in the managed index, or at minimum warn loudly on a near-name resolve.</p>
+<h3>11 — Overnight automation got HARDER under Projects (a regression)</h3>
+<p><strong>User-reported (first-hand, this past week):</strong> plain (non-Projects) sessions ran overnight plan activities <strong>to completion without any Routine</strong> and without the long-idle disruption — the user has <strong>not</strong> used Routines for overnight automation. With the <strong>Projects beta</strong>, the same overnight work now appears to <strong>need an external Routine</strong> to keep going — unattended overnight got harder, not easier. <strong>Open question / request:</strong> the user does not want to wire a Routine (it worked without one before) — so if not a Routine, <strong>how is the Project itself supposed to keep overnight work going?</strong> Resolution would be Project auto-resume or attach-Routines-to-a-Project (see feature requests). <em>Honesty: the session-vs-Projects experience is the user's first-hand testimony; "Projects causes it" is a correlation with root cause <strong>unconfirmed</strong> — no internal causation asserted.</em></p>
+<h3>12 — Effort tier appears to revert after long idle</h3>
+<p>After a long idle, the effort selector <strong>appears</strong> to fall from the chosen maximum back to "Extra." Held pending (a) confirming whether "ultracode" (a mode) and "Extra" (an effort tier) are two independent controls — if so this is the default control resting, not a revert — and (b) a 2–3× before/after screenshot pair. An agent can't inspect client-side UI state, so only the user can confirm.</p>
 <hr/>
-<h1>3. Bucket-1 — verified findings (V-1..V-7)</h1>
-<p>Findings grounded in directly-observable session/repo state — a log line, a file path, or a git fact — so each is reproducible without an image.</p>
-<h3>V-1 — The background-tasks panel has no per-task progress or liveness signal</h3>
-<p><strong>Severity:</strong> medium (operability / trust) · <strong>Evidence: VERIFIED</strong></p>
-<p><strong>What happened.</strong> During one large run there were dozens of subagents (review + worker) in the Background-tasks panel at once. Some showed shapes that strongly suggest they were stuck — e.g. ~5 hours elapsed with only 2–4 tool uses — sitting in the same "Running" list as obviously-live agents (2h 47m / 35 tool uses; 8m / 53 tool uses). There is no way to tell them apart from the panel.</p>
-<p><strong>Concrete proof.</strong> The provable, image-independent fact is the <strong>absence of a signal</strong>: the panel shows elapsed time, token count, and a tool-use count per task, but <strong>no "last active N min ago," no heartbeat, no progress %, and no stalled badge.</strong> Two agents with identical "Running" status and wildly different tool-use rates render identically. The unbounded "Finished N" pile (it reached the high-hundreds this session) never collapses. (I do not claim the 5h agents were definitively orphaned — only that the panel gives me nothing to decide that with.)</p>
-<p><strong>Why it matters.</strong> The single most common question during a big fan-out is "is this task actually working, or hung?" The panel can't answer it; an operator either waits indefinitely or kills tasks blindly.</p>
-<p><strong>Suggested fix.</strong> Per-task liveness ("last tool use N min ago" + a stalled badge past a threshold); a progress hint (tool-use rate) so a 2-tool-use/5h task reads differently from a 35-tool-use one; a way to collapse/clear the Finished pile.</p>
-<h3>V-2 — "Felt stalled" while the batch was, in fact, making heavy progress</h3>
-<p><strong>Severity:</strong> medium (trust / perceived reliability) — tied to V-1 · <strong>Evidence: VERIFIED (git)</strong></p>
-<p><strong>What happened.</strong> Because of V-1, the run repeatedly <em>felt</em> stalled. In reality the batch was landing PRs the whole time.</p>
-<p><strong>Concrete proof (git, this session).</strong> Between 2026-06-24 and 2026-06-26, <strong>20 commits landed on <code>origin/main</code></strong>, of which <strong>13 carry an explicit <code>(#NNN)</code> PR marker</strong> — PRs #882, #883, #884, #887, #893, #894, #896, #897, #898, #900, #902,</p>
-<p>#903, #927, #931. That is a sustained merge cadence, not a stall. Reproduce:</p>
-<pre><code>git log origin/main --since="2026-06-24 00:00" --pretty=format:"%h %ci %s"
-git log origin/main --since="2026-06-24 00:00" --pretty=format:"%s" | grep -oE '\(#[0-9]+\)' | sort -u | wc -l   # → 13</code></pre>
-<p><strong>Why it matters.</strong> The perception gap is the product gap: real, verifiable throughput was happening, but the surface conveyed "stuck." Exactly the cost of V-1's missing liveness signal.</p>
-<p><strong>Suggested fix.</strong> Surface forward-progress at the batch level — "N PRs opened/merged this session," a live activity stream, or the per-task progress from V-1. The data exists (commits, PR events); it just isn't reflected back.</p>
-<h3>V-3 — Chat-pasted screenshots aren't exposed to file tools (though @-attached uploads are)</h3>
-<p><strong>Severity:</strong> medium (workflow friction) — corrected/narrowed from round 1 · <strong>Evidence: VERIFIED</strong></p>
-<p><strong>What happened.</strong> Round 1 said "the agent can't access user-uploaded images." Too broad. The precise finding:</p>
-<ul>
-<li><strong>Images pasted directly into the chat</strong> are visible to the model's context but are <strong>not materialized to any filesystem path</strong> the agent's Read/Write/Bash/ Glob tools can reach. The agent cannot programmatically save, rename, or embed them.</li>
-<li><strong>Files @-attached as uploads ARE readable.</strong> They land at <code>/root/.claude/uploads/&lt;session-id&gt;/&lt;uuid&gt;-&lt;originalname&gt;</code> and the Read tool reads them directly.</li>
-</ul>
-<p><strong>Concrete proof.</strong> An @-attached PNG was read this session with the Read tool: <code>Read("/root/.claude/uploads/&lt;session-id&gt;/&lt;uuid&gt;-IMG_6793.png")</code> returned the image successfully; <code>ls -la /root/.claude/uploads/&lt;session-id&gt;/</code> shows the upload (526 KB PNG) alongside other @-attached files. So the gap is specifically the <strong>chat-paste path</strong>, not uploads in general.</p>
-<p><strong>Why it matters.</strong> A natural Projects workflow is "here's a screenshot, capture it into the report." With @-attach it works; with an inline paste it silently doesn't, and the difference isn't discoverable — they look the same in chat.</p>
-<p><strong>Suggested fix.</strong> Materialize chat-pasted images to the same readable <code>uploads/</code> path so paste and @-attach behave identically.</p>
-<h3>V-4 — A single shared append-only ledger file forces parallel PRs to merge sequentially</h3>
-<p><strong>Severity:</strong> medium (throughput ceiling for multi-agent batches) · <strong>Evidence: VERIFIED (repo state)</strong></p>
-<p><strong>What happened.</strong> BruteX requires every PR to append an entry to one shared decision ledger, <code>docs/MIGRATION.md</code>. When N agents open N PRs in parallel, each edits the same file's tail, so each pair of PRs conflicts on that file. Whichever merges first wins; the rest must rebase and re-resolve — serializing what was meant to be parallel.</p>
-<p><strong>Concrete proof (repo state).</strong> <code>docs/MIGRATION.md</code> on <code>origin/main</code> is <strong>6,297 lines / 267 ledger entries</strong>, and every PR in this batch appended to it. Reproduce: <code>git show origin/main:docs/MIGRATION.md | wc -l</code>. This is a structural property of the workload, but it is a pattern the Projects multi-agent model will hit anywhere a repo has a hot append-only file (CHANGELOG, ledger, registry).</p>
-<p><strong>Why it matters.</strong> The headline promise of multi-agent is parallelism. A hot shared file quietly converts it back to sequential at merge time; the operator only sees "why are these PRs taking turns?"</p>
-<p><strong>Suggested fix (idea-adjacent, grounded).</strong> A merge-queue-aware mode that auto-rebases append-only conflicts (append is associative — two tail appends can be auto-merged), or tooling to detect a hot shared file across a fan-out and warn up front.</p>
-<h3>V-5 — Recurring transient crates.io flake in CI (worked around, not a product bug)</h3>
-<p><strong>Severity:</strong> low (CI reliability / friction) · <strong>Evidence: VERIFIED (in repo)</strong></p>
-<p><strong>What happened.</strong> Rust wheel builds in CI intermittently failed at dependency download — <code>download of &lt;crate&gt; failed / curl [56] Failure receiving data / OpenSSL SSL_read: unexpected eof / Connection reset by peer</code> — aborting the build before any test ran, flaking otherwise-green PRs.</p>
-<p><strong>Concrete proof + our fix (in repo).</strong> Hardened in <code>.github/workflows/ci.yml</code>: <code>CARGO_NET_RETRY: "10"</code> (line ~79), <code>CARGO_NET_GIT_FETCH_WITH_CLI: "true"</code> (line ~80), plus per-step "belt-and-suspenders crates.io flake guard" retry loops around each <code>pip install ./rust/*</code> wheel build. The root-cause comment block documents the exact failure strings. Environmental, not a Projects defect — flagged as context for how often the runner network flakes, since it interacts with V-6.</p>
-<p><strong>Why it matters.</strong> Each flake cost a re-trigger cycle (see V-6). Worth the team knowing how frequently GitHub-hosted runner networking drops mid-download.</p>
-<p><strong>Suggested fix.</strong> Nothing for Anthropic to fix in the product; noted because it compounds V-6.</p>
-<h3>V-6 — An agent can't re-run a failed CI check; it must push an empty commit to re-trigger</h3>
-<p><strong>Severity:</strong> medium (workflow friction / wasted cycles) · <strong>Evidence: VERIFIED (git)</strong></p>
-<p><strong>What happened.</strong> When CI fails on a transient (the V-5 crates.io flake, an artifact-upload timeout, a stuck gate), the agent has no way to simply <em>re-run</em> the failed check — the natural action a human takes from the GitHub UI. The only workaround is to push an <strong>empty/no-op "re-trigger" commit</strong> to force the workflow to run again.</p>
-<p><strong>Concrete proof (git, across this session's branches).</strong> There are <strong>48 <code>chore(ci): re-trigger …</code> commits</strong> across the session's refs, 6 of them specifically for the crates.io flake. Reproduce: <code>git log --all --oneline --grep="re-trigger" | wc -l</code> → 48. The workaround is even codified in our own <code>ship-pr</code> skill ("re-trigger (empty commit) at most a couple of times").</p>
-<blockquote><p><strong>Reinforced this round (cross-ref F-8).</strong> The broker-side 403 (F-8) <strong>also blocks re-running CI via the GitHub API</strong> — so during the push-only state there is no API path to retry a flaky check at all, only the empty-commit workaround. This is exactly the situation that produced the #905 CI failure investigation: the failing run could not be re-run from inside the session.</p></blockquote>
-<p><strong>Why it matters.</strong> Empty commits pollute history, churn the branch, restart the <em>entire</em> workflow (not just the failed job), and burn agent turns. A human clicks "Re-run failed jobs"; the agent can't.</p>
-<p><strong>Suggested fix.</strong> Give the agent a first-class "re-run this check / re-run failed jobs" capability (the GitHub <code>rerun</code> API surface), so transient failures don't require history-polluting empty commits.</p>
-<h3>V-7 — Worktree stale-base trap exists and is correctly guarded (a POSITIVE)</h3>
-<p><strong>Severity:</strong> n/a — this one works; included as a "keep doing this" · <strong>Evidence: VERIFIED (in repo)</strong></p>
-<p><strong>What happened.</strong> With many agents on many worktrees against a fast-moving <code>main</code>, a feature branch can fall behind and a merge over a stale base would be unsafe — a real hazard in the multi-worktree model.</p>
-<p><strong>Concrete proof (it's guarded).</strong> The auto-merge workflow refuses to merge unless <code>mergeable_state</code> is clean — it explicitly rejects conflict / stale-base / blocked states: <code>.github/workflows/auto-merge.yml:411</code> — <code>"refusing to merge (conflict / stale base / blocked)"</code>, backed by a red-team regression test <code>tests/redteam/test_redteam_automerge_safety.py</code>.</p>
-<p><strong>Why it matters.</strong> This is the safety property that <em>should</em> exist in a multi-agent merge pipeline, and it's enforced + regression-tested. Called out so the pattern is recognized and preserved as Projects' own merge tooling matures.</p>
-<hr/>
-<h1>4. Bucket-2 — ideas (clearly labelled IDEAS, no claim of proof)</h1>
-<p>Not defects and no claim of proof — directions that would have helped this batch.</p>
-<ul>
-<li><strong>I-1 — A structured project-state MCP.</strong> Today an orchestrator re-derives state by running <code>git status</code> / <code>git worktree list</code> / diffing branches every time. An MCP exposing project state as structured fields (open PRs, per-branch status, per-worktree dirty flags, current ledger head) would let an agent read state in O(1) instead of reconstructing it. We'd happily prototype against it.</li>
-<li><strong>I-2 — An agent-invocable routine/scheduling tool.</strong> A first-class, agent-callable "run this prompt on a schedule / after condition X" primitive so a batch can self-pace ("re-check CI in 10 min," "resume when PR #N merges") instead of busy-waiting or burning a turn.</li>
-<li><strong>I-3 — A per-session base-state header.</strong> A cheap, authoritative "verified current state of these files/branches" snapshot attached at sub-task dispatch, so a worker confirms its premise in one check rather than spending a full turn discovering a stale handoff.</li>
-<li><strong>I-4 — An up-front cost estimate for large fan-outs.</strong> Before launching N subagents, an estimated token/cost envelope so the operator can make an informed go/no-go.</li>
-<li><strong>I-5 — Correlate the same infra error across subagents into one alert.</strong> When the V-5 crates.io flake hits several wheel-build jobs at once, surface it as one "transient infra error affecting N tasks" notice instead of N separate failures.</li>
-</ul>
-<h2>Questions for Omid (3)</h2>
-<ul>
-<li><strong>Routine/scheduling:</strong> Is an agent-invocable routine/scheduling tool (I-2) on the roadmap? It's the single capability that would most change how we structure long multi-agent batches.</li>
-<li><strong>Structured state MCP:</strong> Is a structured project-state MCP (I-1) planned? If so, we'd like to prototype BruteX's orchestration against it and give early feedback.</li>
-<li><strong>Billing:</strong> Is EAP / Projects usage metered against the plan, exempt, or free? We run heavy multi-agent fan-outs and want to reason honestly about cost (relevant to I-4, P-9, and F-14).</li>
-</ul>
-<hr/>
-<h1>5. Original evidence gallery (F-1..F-7)</h1>
-<p>The round-1/round-2 evidence-gallery findings, observed during one real 11-PR "critical-risks resilience-hardening" batch driven concurrently in a single Projects session. F-1/F-2 are the earlier framings later refined by V-1/V-3; F-3..F-7 are grounded in directly-observable session/worktree state.</p>
-<h3>F-1 — Background-tasks panel lacks per-task progress/liveness; orphaned subagents accumulate invisibly</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> medium · <strong>Evidence: VERIFIED</strong> · <strong>Proof:</strong> screenshots <code>01</code>, <code>02</code></p>
-<p>In the "Running" section, several review subagents ran ~5 hours each while reporting only 2–4 tool uses and ~70–90k tokens:</p>
-<ul>
-<li>Altitude review of PR #887 — 5h 01m · 79.6k tokens · 3 tool uses</li>
-<li>Reuse review of PR #888 docs — 5h 00m · 89.7k tokens · 4 tool uses</li>
-<li>Simplification review of PR #888 docs — 5h 00m · 72.2k tokens · 2 tool uses</li>
-<li>(plus several more #888-docs review agents, all ~5h)</li>
-</ul>
-<p>For contrast, clearly-live agents in the same list show very different shapes: "Hostile review of nav-latency caches — 2h 47m · 150.7k tokens · 35 tool uses" and "Diagnose+fix #893 citation scan — 8m · 177.9k tokens · 53 tool uses." A "Finished 294" counter sits at the bottom.</p>
-<p><strong>The gap.</strong> A 5-hour agent with 2 tool uses is almost certainly orphaned/stuck, but the panel offers <strong>no per-task progress or liveness signal</strong> — no heartbeat, no "last active N min ago," no progress %, no auto-reap when the PR work it was reviewing has completed. Stuck agents are visually indistinguishable from working ones, and finished/orphaned tasks accumulate unbounded (294 finished). This is the screenshot evidence behind <strong>V-1.</strong></p>
-<p><strong>Suggested fixes.</strong> Per-task liveness signal ("last tool use N min ago" / stalled badge); a progress hint (tool-use rate); auto-reap or flag subagents whose parent PR work has finished; let the user collapse/clear the Finished pile.</p>
-<h3>F-2 — Agent file tools cannot access user-uploaded images in a Projects session</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> medium · <strong>Evidence: VERIFIED (round-1 framing; narrowed by V-3)</strong></p>
-<p>The user shared screenshots and asked the agent to save and embed them. The agent can <em>see</em> the images in context, but in the round-1 observation they were never written to any filesystem path the agent's tools could reach. <strong>Narrowed by V-3:</strong> the precise gap is the <strong>chat-paste path</strong> — @-attached uploads ARE readable at <code>/root/.claude/uploads/&lt;session-id&gt;/...</code>. See V-3 for the corrected, verified statement.</p>
-<p><strong>Suggested fix.</strong> Expose user-shared images to the session's file tools (a readable <code>attachments/</code> path, or a tool to materialize a pasted image to disk).</p>
-<h3>F-3 — Worktree-per-agent isolation leaves orphaned worktrees that share one branch name</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> medium · <strong>Evidence: VERIFIED (reproducible from <code>git worktree list</code>)</strong></p>
-<p>Driving the 11-PR batch with isolated worker agents produced <strong>16 live git worktrees</strong> under <code>.claude/worktrees/</code>, of which <strong>13 carry the same <code>…-jlzt1n</code> branch suffix</strong> and several point at the <em>identical</em> branch name (e.g. three worktree dirs all on <code>claude/writer-columnar-4a-jlzt1n</code>; two each on <code>claude/dashboard-latency-jlzt1n</code> and <code>claude/pull-health-monitor-jlzt1n</code>). Some worktrees still hold staged-but-uncommitted edits to files unrelated to their nominal task.</p>
-<p><strong>Why it matters.</strong> A new session (or human) opening the repo cannot tell which worktree is "live" for a branch, which are abandoned, or which carry stray staged changes. Multiple worktrees on one branch name also invite cross-contamination.</p>
-<p><strong>Suggested fixes.</strong> GC (or clearly mark stale) worktrees whose agent has finished/been reaped; guarantee one worktree ↔ one branch (or surface which is canonical); surface per-worktree dirty/staged state.</p>
-<h3>F-4 — Lost work: a sub-agent's uncommitted output can silently disappear between sessions</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> high (data loss / trust) · <strong>Evidence: VERIFIED</strong></p>
-<p>A follow-up was launched on the premise that prior agents had left uncommitted findings + a refreshed scoreboard in the working tree. An exhaustive search — every one of the 16 worktrees, <code>git stash</code>, and every <code>origin/*</code> branch — found <strong>no trace</strong> of that content. The earlier agents' additional output was never committed and is gone.</p>
-<p><strong>Why it matters.</strong> Isolated worktrees + reaped agents mean anything a sub-agent produces but does not <em>commit and push</em> can evaporate when its worktree is cleaned or its session ends — with no warning to the orchestrating session, which then plans against output that no longer exists.</p>
-<p><strong>Suggested fixes.</strong> Treat a sub-agent's working tree as durable until explicitly discarded, or auto-commit/auto-stash its diff to a recoverable ref on reap; when an orchestrator hands a "build on the prior agent's uncommitted changes" follow-up, verify those changes still exist and warn if not; make "uncommitted work will be lost on teardown" a visible state.</p>
-<h3>F-5 — No cross-session view of cost/usage accrued by a multi-agent batch</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> medium (cost observability) · <strong>Evidence: VERIFIED</strong></p>
-<p>The background-tasks panel shows per-task token counts (150.7k, 177.9k, 89.7k…) but there is <strong>no rolled-up total</strong> for the batch and no per-session/per-day usage figure. With dozens of subagents — including the ~5h orphans still "running" — the operator cannot see what an 11-PR batch cost, nor whether the orphans are still burning budget.</p>
-<p><strong>Why it matters.</strong> Heavy runs consume the operator's plan usage, and whether EAP usage is metered is itself unconfirmed (F-14). Without an aggregate cost view, an operator can't make an informed "continue?" call.</p>
-<p><strong>Suggested fixes.</strong> Show a batch/session/daily token+cost rollup; flag tasks accruing tokens while making no tool-use progress (ties to F-1); clarify the EAP billing policy (F-14).</p>
-<h3>F-6 — Resuming an agent with a stale premise wastes a full turn before the mismatch surfaces</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> low–medium · <strong>Evidence: VERIFIED</strong></p>
-<p>A resumed/spawned agent is handed a brief that assumes a specific prior state ("the working tree has uncommitted findings"). When that premise is false (F-4), the agent must spend a full investigative turn — listing worktrees, diffing branches, searching stashes and <code>origin/*</code> — just to <em>discover</em> the premise is wrong, before doing the actual work. There is no cheap, authoritative "what is the current state of these files?" handoff.</p>
-<p><strong>Why it matters.</strong> Multi-agent orchestration relies on accurate state handoffs. A stale premise is caught only after the worker burns tokens reconstructing reality — compounding F-4 and F-5.</p>
-<p><strong>Suggested fixes.</strong> Let an orchestrator attach a verified state snapshot (file hashes / <code>git status</code>) to a sub-task (ties to I-3); surface at dispatch whether the referenced files/branches actually exist in the target worktree.</p>
-<h3>F-7 — Branch/worktree naming collisions make "which PR is this?" ambiguous in the UI</h3>
-<p><strong>Date:</strong> 2026-06-26 · <strong>Severity:</strong> low · <strong>Evidence: VERIFIED</strong></p>
-<p>Across the batch, the scoreboard's PR numbers and the decision-ledger entries (<code>docs/MIGRATION.md #NNN</code>) use two numbering schemes that overlap in range, while several background tasks are labelled only by a short title ("Reuse review of PR</p>
-<p>#888 docs") with no link back to a branch/worktree/commit. Combined with F-3's many-worktrees-one-branch state, it is hard to map a running review task → its branch → its eventual PR → its ledger entry.</p>
-<p><strong>Why it matters.</strong> When a reviewer task is stuck (F-1) or its work is lost (F-4), the first question is "which PR/branch/commit was it touching?" — and that requires manual cross-referencing.</p>
-<p><strong>Suggested fixes.</strong> Link each background task to its branch + worktree + (eventual) PR/commit, not just a free-text title; let tasks carry both the GitHub PR number and an internal ledger number so they don't get conflated.</p>
-<hr/>
-<h1>6. Screenshot map</h1>
-<p>Each screenshot the user has → the finding(s) it backs. Image files are not in the repo; <code>(attach: &lt;name&gt;)</code> are placeholders for the email/submission. Several findings need <strong>no</strong> screenshot — they are carried by verbatim text, doc citations, or git facts (see §7).</p>
-<table><thead><tr><th>Screenshot</th><th><code>(attach: …)</code></th><th>Backs</th><th>Status</th></tr></thead><tbody><tr><td>Background-tasks panel — orphaned ~5h / 2–4-tool-use review agents</td><td><code>(attach: 01-background-tasks-orphaned-agents.png)</code></td><td><strong>V-1 / F-1</strong></td><td>shared in chat; not on disk — drop into <code>evidence/</code></td></tr><tr><td>Background-tasks panel — live high-tool-use agents next to stuck ones; "Finished 294"</td><td><code>(attach: 02-background-tasks-running-5h.png)</code></td><td><strong>V-1 / F-1 / F-5</strong></td><td>shared in chat; not on disk — drop into <code>evidence/</code></td></tr><tr><td>Overnight stranded push-only state (the in-session 403)</td><td><code>(attach: overnight-stuck-403.png)</code></td><td><strong>P-1 / P-2 / P-11 / F-8</strong></td><td>operator has it; strengthens (text-sufficient)</td></tr><tr><td>Correct GitHub-App install (<code>@SJParthi</code>, All-repos, read/write)</td><td><code>(attach: github-app-install.png)</code></td><td><strong>P-2 / F-8</strong></td><td>operator has it; strengthens (text-sufficient)</td></tr><tr><td>Effort tier BEFORE long idle (= max)</td><td><code>(attach: effort-before-idle-max.png)</code></td><td><strong>P-12 / F-9</strong></td><td><strong>still needed</strong> — required to move F-9 HELD → VERIFIED</td></tr><tr><td>Effort tier AFTER long idle (= "Extra")</td><td><code>(attach: effort-after-idle-extra.png)</code></td><td><strong>P-12 / F-9</strong></td><td><strong>still needed</strong> — the second half of the F-9 pair</td></tr></tbody></table>
-<p><strong>The one still-needed capture:</strong> the <strong>F-9 effort before/after pair</strong> (<code>effort-before-idle-max</code> + <code>effort-after-idle-extra</code>). F-9 stays UNVERIFIED until this pair is captured <strong>and</strong> the ultracode-mode-vs-Extra-effort-tier disambiguation is resolved (see F-9). Everything else is either already-shared or text-sufficient.</p>
-<blockquote><p><strong>Do not fabricate placeholder images.</strong> The gallery rows are written and ready to receive the real files; drop the operator's screenshots into <code>docs/eap-feedback/evidence/</code> under the names above.</p></blockquote>
-<hr/>
-<h1>7. Evidence integrity note</h1>
-<p>Every claim in this submission is labelled. Three tiers:</p>
-<h3>A. Text-proven — no screenshot needed</h3>
-<p>These stand on a verbatim quote, a doc citation, or a git/repo fact that anyone can reproduce:</p>
-<ul>
-<li><strong>F-8 / P-1 / P-2</strong> — the <strong>verbatim 403 body</strong>, the broker-vs-GitHub origin analysis (<code>docs.anthropic.com</code> URL · 403-not-401 · missing GitHub headers · empty proxy relay state), the personal-account/App-already-connected contradiction, the re-test-after-install, and the push-works-while-API-403s channel divergence. <strong>Independently corroborated this session</strong> by a live <code>curl</code> to the GitHub Actions API returning the byte-identical broker 403.</li>
-<li><strong>V-2</strong> — git commit/PR counts (<code>git log origin/main --since=… | grep -oE '\(#[0-9]+\)' | sort -u | wc -l</code> → 13; 20 commits total).</li>
-<li><strong>V-3</strong> — the exact readable upload path (<code>/root/.claude/uploads/&lt;session-id&gt;/...</code>) demonstrated with a real <code>Read</code>.</li>
-<li><strong>V-4</strong> — <code>docs/MIGRATION.md</code> line count (<code>git show origin/main:docs/MIGRATION.md | wc -l</code> → 6,297).</li>
-<li><strong>V-5 / V-6</strong> — <code>.github/workflows/ci.yml</code> flake-guard lines + the <code>git log --all --grep="re-trigger" | wc -l</code> → 48 count.</li>
-<li><strong>V-7</strong> — <code>auto-merge.yml:411</code> refusal string + the named regression test.</li>
-<li><strong>F-3 / F-4 / F-6 / F-7</strong> — reproducible from <code>git worktree list</code>, branch/stash search, and the on-disk worktree layout.</li>
-<li><strong>F-11</strong> — quoted directly from the published Routines docs (1-hour minimum interval + daily run cap).</li>
-<li><strong>F-12</strong> — the typosquat wheel name/version/metadata are observable from the managed index.</li>
-</ul>
-<h3>B. Strengthened by a screenshot (verified by text; image adds weight)</h3>
-<ul>
-<li><strong>V-1 / F-1 / F-5</strong> — backed by screenshots <code>01</code>/<code>02</code>, but the <em>core claim</em> (the panel exposes no liveness/progress/heartbeat/stalled signal) is true independent of the image. The screenshots make the contrast vivid.</li>
-<li><strong>P-1 / P-2 / P-11 / F-8</strong> — the operator's overnight-stuck + GitHub-App-install screenshots strengthen the auth-lapse story, which is already text-proven by the verbatim 403 + re-test evidence.</li>
-</ul>
-<h3>C. HELD / UNVERIFIED — explicitly NOT presented as fact</h3>
-<ul>
-<li><strong>F-9 / P-12 (effort-revert)</strong> — <strong>UNVERIFIED.</strong> Needs (a) the ultracode-vs- Extra disambiguation and (b) a 2–3× before/after reproduction. An agent cannot inspect client-side UI state. <strong>Do not present as a defect</strong> until both gates pass.</li>
-<li><strong>P-9 / F-14 (billing)</strong> — <strong>HELD.</strong> A documentation/clarification request; neither "free" nor "metered" is asserted.</li>
-<li><strong>P-10 / F-13 (Dispatch)</strong> — <strong>HELD.</strong> Open question; plan-gating unconfirmed.</li>
-<li><strong>P-11 (overnight disruption specific to the beta)</strong> — <strong>HELD.</strong> A user-reported correlation only; <strong>no causation claimed</strong>; root cause unconfirmed (no telemetry to compare the run paths).</li>
-</ul>
-<p><strong>One excluded item (honesty, by design).</strong> The fabricated <code>httpx2</code> <strong>test stub</strong> a prior agent created inside <em>our</em> repo is <strong>deliberately excluded</strong> from this submission — it was <strong>our</strong> code, it has been handled internally, and it is <strong>not a Claude Code product defect.</strong> It must not be conflated with <strong>F-12</strong>, which is the separate, genuine product finding that the <em>managed environment's package index</em> serves an installable <code>httpx2</code> typosquat. (The stub is, however, a useful reminder that autonomous agents can produce convincing-but-fake "green" results — which is exactly why this submission labels every claim and leans on independent, adversarial verification rather than face-value "it works" claims.)</p>
-<hr/>
-<p><em>Prepared 2026-06-27. Every fact above is reproducible from this repo and session; every unproven item is labelled HELD or UNVERIFIED per the project's verify-before-claim bar (CLAUDE.md §2 Golden Rule #10).</em></p>
+<h2>Screenshots to attach</h2>
+<table>
+<thead><tr><th>Screenshot</th><th>Backs</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Overnight stranded push-only state (the in-session 403)</td><td>items 1 / 2 / 3 / 5 / 11</td><td>operator has it; text-sufficient</td></tr>
+<tr><td>Correct GitHub-App install (<code>@SJParthi</code>, All-repos, read/write)</td><td>item 3</td><td>operator has it; text-sufficient</td></tr>
+<tr><td>Background-tasks panel — stuck ~5 h / 2–4-tool agents next to live ones</td><td>item 6</td><td>shared in chat; not on disk</td></tr>
+<tr><td>Effort tier <strong>before</strong> long idle (= max) → <strong>after</strong> (= "Extra")</td><td>item 12</td><td><strong>still needed</strong> — the before/after pair to move it Verified</td></tr>
+</tbody>
+</table>
+<p><em>Prepared 2026-06-27. Every Verified item is reproducible from this repo and session; every 🟡 item is labelled needs-repro per the project's verify-before-claim bar (CLAUDE.md §2 Golden Rule #10).</em></p>
 </main>
 </body>
 </html>
