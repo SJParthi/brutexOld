@@ -230,7 +230,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-health-wiring-jlzt1n` (**DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
+- **Active branch:** `claude/raw-payload-archive-jlzt1n` (**DEC-RAW-PAYLOAD-ARCHIVE-001, MIGRATION.md #938** — an
+  OPT-IN verbatim RAW-PAYLOAD ARCHIVE that EXTENDS the raw-data integrity layer (#934 /
+  DEC-RAW-DATA-INTEGRITY-001): the canonicalised raw Groww payload BYTES themselves are gzip-compressed to a sidecar
+  (`<lake_root>/raw_payload_archive/<sha256(6-tuple)>.json.gz`, OUTSIDE `bars/`/`options/`, keyed by the SAME
+  `(exchange,segment,groww_symbol,interval,window_start,window_end)` tuple as the #934 hash), so a window's integrity can
+  be re-verified OFFLINE later — `verify_archived_record` reads the archived bytes, recomputes the `blake2b` digest the
+  SAME way #934's `hash_payload` does, and returns `MATCH`/`MISMATCH`/`MISSING` (proving lake == archived raw == recorded
+  hash) WITHOUT re-fetching the vendor. NEW PURE `brutex/data/raw_payload_archive.py` — `RawPayloadArchiveConfig(root,
+  enabled=False)` (DYNAMIC injectable; `from_env` reads `BRUTEX_RAW_PAYLOAD_ARCHIVE`, default OFF — storage cost),
+  `archive_key`/`archive_path` (DETERMINISTIC filesystem-safe key), `archive_payload` (COMMON
+  `raw_integrity.canonicalize_payload` bytes — NEVER re-implemented — gzip `mtime=0` → golden-stable, idempotent),
+  `read_archived_canonical_bytes`, `verify_archived_record`, and the best-effort `make_archive_hook`/
+  `make_archive_hook_factory` (the #934-twin per-symbol `RawPayloadHook` for the SAME `candles.py` `on_raw_payload` seam:
+  a TRUE no-op when disabled, SWALLOWS every error when enabled so it can NEVER halt/slow a pull). HONEST: OFF by default
+  (storage trade-off); does NOT retroactively archive windows pulled before it was enabled (those read `MISSING`, never a
+  silent pass); ADDITIVE — the parser/writer value path/2dp rounding/#934 hash sidecar/candle-lake schema are
+  byte-UNCHANGED; O(payload) per write/read (NOT O(1)-total); binding the hooks at the production live-pull build sites is
+  a flagged FAST-FOLLOW, NOT claimed. `raw_payload_archive.py` at 100% line+branch (81/0 stmts, 6/0 branch); NEW
+  `test_raw_payload_archive.py` (35 tests — unit + hypothesis property [archive→read-back→hash matches; corrupt bytes
+  never silent-pass] + golden [frozen sha256 key + deterministic gzip] + disabled-no-op); the 49 existing #934 integrity
+  tests still GREEN (84 total, 0 regressions); ruff/ruff-format/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior merged — **DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
   live pull-health monitor shipped DORMANT in #893 (DEC-PULL-HEALTH-MONITOR-001 — the `PullHealthMonitor` + the
   `_observe_rate(..., monitor=None)` seam, but NO production build site constructed one, so it watched NOTHING on a
   real pull) is now BOUND at the dashboard live-pull build site, so it actually runs on every real pull — the same
