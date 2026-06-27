@@ -634,18 +634,56 @@ class TestUpshift:
             bucket.record_rate_limit_hit()
         assert bucket.current_rps() == 10.0
 
+    def test_upshift_gated_on_upshift_recovery_not_downshift_window(self, clock: FakeClock) -> None:
+        """The upshift gate is :attr:`upshift_recovery`, NOT
+        :attr:`downshift_window` (DEC-ORCH-UPSHIFT-RECOVERY-001 regression).
+
+        With ``downshift_window=60`` and ``upshift_recovery=120``, the
+        previously-shipped (defective) code gated the upshift on the 60 s
+        window — so it recovered ~2x faster than the documented 120 s. This
+        pins the corrected contract: after a downshift the bucket must STILL
+        be downshifted at 61 s (past the 60 s window, short of recovery) and
+        only restore initial_rps once the full 120 s recovery has elapsed.
+        """
+        bucket = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        self._downshift(bucket)
+        # 61 s: past the 60 s downshift_window but well short of the 120 s
+        # recovery — the OLD code upshifted here; the fixed code must HOLD.
+        clock.advance(61.0)
+        bucket.acquire()
+        assert bucket.current_rps() == 10.0
+        assert bucket.pending_events() == []
+        # Cross the 120 s recovery threshold (61 + 60 = 121 total) — now it
+        # upshifts back to initial_rps.
+        clock.advance(60.0)
+        bucket.acquire()
+        assert bucket.current_rps() == 15.0
+
     def test_clean_window_upshifts_back_to_initial(
         self, bucket: AdaptiveTokenBucket, clock: FakeClock
     ) -> None:
-        """Once the 429 window is clean, acquire restores initial_rps.
+        """Once a full ``upshift_recovery`` window is clean, acquire
+        restores initial_rps.
 
-        Also covers the stale-429 eviction inside the upshift check
-        (rate_limiter.py:461) and the upshift event construction
-        (rate_limiter.py:477-487).
+        Also covers the upshift event construction in
+        ``_maybe_upshift_locked``. The gate is keyed on
+        :attr:`upshift_recovery` (=120 s), NOT the shorter
+        :attr:`downshift_window` (=60 s) used only to count 429s for the
+        downshift trigger (Golden Rule #6: never recover faster than
+        specified).
         """
         self._downshift(bucket)
-        # Move past the 60s rolling window so the 3 hits age out.
-        clock.advance(61.0)
+        # Move past the 120s recovery window so the last 429 ages out.
+        clock.advance(121.0)
         bucket.acquire()
         assert bucket.current_rps() == 15.0
 
@@ -658,7 +696,7 @@ class TestUpshift:
         upshift arm is the only producer of batched events today.
         """
         self._downshift(bucket)
-        clock.advance(61.0)
+        clock.advance(121.0)  # past the 120s upshift_recovery window
         bucket.acquire()
 
         events = bucket.pending_events()
@@ -674,9 +712,9 @@ class TestUpshift:
     def test_429_still_in_window_blocks_upshift(
         self, bucket: AdaptiveTokenBucket, clock: FakeClock
     ) -> None:
-        """A 429 still inside the rolling window keeps the lower rate."""
+        """A 429 still inside the recovery window keeps the lower rate."""
         self._downshift(bucket)
-        clock.advance(10.0)  # hits recorded 10s ago — well within 60s
+        clock.advance(10.0)  # last 429 only 10s ago — well within 120s recovery
         bucket.acquire()
         assert bucket.current_rps() == 10.0
         assert bucket.pending_events() == []
@@ -686,35 +724,53 @@ class TestUpshift:
     ) -> None:
         """Defensive guard: ``now < last_success_at`` defers the upshift.
 
-        Unreachable under a true monotonic clock — pins the
-        rate_limiter.py:469-470 anomaly guard so a backwards-stepping
-        injected clock can never upshift early.
+        Unreachable under a true monotonic clock — pins the anomaly guard
+        in ``_maybe_upshift_locked`` so a backwards-stepping injected clock
+        can never upshift early, even AFTER the recovery window has
+        nominally elapsed.
         """
         self._downshift(bucket)
-        clock.advance(200.0)
-        bucket.record_success()  # last_success_at = t+200
-        clock.advance(-90.0)  # rewind: now (t+110) < last_success (t+200)
-        bucket.acquire()  # 429s aged out (cutoff t+50) but guard holds
+        clock.advance(300.0)  # past the 120s recovery window (last 429 ages out)
+        bucket.record_success()  # last_success_at = t+300
+        clock.advance(-90.0)  # rewind: now (t+210) < last_success (t+300)
+        bucket.acquire()  # recovery satisfied but the anomaly guard holds
         assert bucket.current_rps() == 10.0
         assert bucket.pending_events() == []
 
-    def test_429_exactly_at_window_edge_blocks_upshift(
+    def test_429_just_before_recovery_edge_blocks_upshift(
         self, bucket: AdaptiveTokenBucket, clock: FakeClock
     ) -> None:
-        """A 429 EXACTLY `downshift_window` seconds old still blocks.
+        """A 429 just SHORT of ``upshift_recovery`` still blocks.
 
-        The upshift check evicts strictly (`hit < cutoff`): hits at
-        t=1000 with the acquire at t=1060 (cutoff exactly 1000.0) stay
-        in-window, so the rate must HOLD at 10 — the `<` → `<=` flip
-        would evict them and upshift one tick early
-        (DEC-MUTATION-RUNTIME-001 boundary pin; Golden Rule #6: never
-        recover faster than specified).
+        The recovery gate is strict-less-than (`now - last_429 < recovery`):
+        the last 429 at t=1000 with the acquire at t=1119 (119 s elapsed,
+        recovery 120 s) is still inside the window, so the rate must HOLD
+        at 10 — the gate must NOT recover one tick early. Pins the gate on
+        :attr:`upshift_recovery` (Golden Rule #6: never recover faster than
+        specified) and kills the `< upshift_recovery` → `< downshift_window`
+        regression that would upshift at 61 s.
         """
         self._downshift(bucket)
-        clock.advance(60.0)
+        clock.advance(119.0)  # 119 < 120 recovery → still blocked
         bucket.acquire()
         assert bucket.current_rps() == 10.0
         assert bucket.pending_events() == []
+
+    def test_429_exactly_at_recovery_edge_upshifts(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """At EXACTLY ``upshift_recovery`` seconds the bucket upshifts.
+
+        The recovery gate is strict-less-than (`now - last_429 < recovery`):
+        the last 429 at t=1000 with the acquire at t=1120 gives elapsed
+        exactly 120.0, so `120.0 < 120.0` is False → upshift fires. Pins
+        the boundary so the `<` → `<=` flip (which would defer the
+        on-the-dot recovery one tick) is killed.
+        """
+        self._downshift(bucket)
+        clock.advance(120.0)  # exactly at the recovery edge → upshift
+        bucket.acquire()
+        assert bucket.current_rps() == 15.0
 
     def test_upshift_when_now_equals_last_success(
         self, bucket: AdaptiveTokenBucket, clock: FakeClock
@@ -728,7 +784,7 @@ class TestUpshift:
         `< 0` → `< 1` flips (each would defer this upshift).
         """
         self._downshift(bucket)
-        clock.advance(61.0)  # the 3 hits age out of the 60s window
+        clock.advance(121.0)  # past the 120s upshift_recovery window
         bucket.record_success()  # last_success_at == now exactly
         bucket.acquire()
         assert bucket.current_rps() == 15.0
@@ -755,7 +811,7 @@ class TestUpshift:
         for _ in range(3):
             bucket.record_rate_limit_hit()
         assert bucket.current_rps() == 10.0
-        clock.advance(61.0)  # 429s age out of the window
+        clock.advance(121.0)  # past the 120s upshift_recovery window
         bucket.acquire()
         assert bucket.current_rps() == 15.0
 
@@ -780,7 +836,7 @@ class TestUpshift:
         for _ in range(3):
             b.record_rate_limit_hit()
         assert b.current_rps() == 1.0 - 1.5e-6
-        clock.advance(61.0)
+        clock.advance(121.0)  # past the 120s upshift_recovery window
         b.acquire()
         assert b.current_rps() == 1.0  # upshifted: the gap exceeds 1e-6
 
@@ -788,8 +844,9 @@ class TestUpshift:
         """Defensive guard: ``last_success_at <= 0`` defers the upshift.
 
         A monotonic clock CAN legitimately start at 0.0 — the
-        rate_limiter.py:474-475 guard then waits for one recorded
-        success before trusting the recovery window.
+        ``_maybe_upshift_locked`` ``last_success_at <= 0`` guard then waits
+        for one recorded success before trusting the recovery window, even
+        once the recovery window has elapsed.
         """
         clock = FakeClock(start=0.0)  # construction stamps last_success_at=0.0
         bucket = AdaptiveTokenBucket(
@@ -805,7 +862,7 @@ class TestUpshift:
         for _ in range(3):
             bucket.record_rate_limit_hit()
         assert bucket.current_rps() == 10.0
-        clock.advance(61.0)  # 429s age out of the window
+        clock.advance(121.0)  # recovery satisfied, but last_success_at == 0.0 blocks
         bucket.acquire()
         assert bucket.current_rps() == 10.0
         assert bucket.pending_events() == []
