@@ -267,7 +267,8 @@ class TestPartitionLock:
         with _PARTITION_LOCKS.acquire(dest):
             with _PARTITION_LOCKS._guard:  # pyright: ignore[reportPrivateUsage]
                 entry = _PARTITION_LOCKS._locks[dest]  # pyright: ignore[reportPrivateUsage]
-            assert entry.lock.acquire(blocking=False) is False
+            nested_acquired = entry.lock.acquire(blocking=False)
+            assert nested_acquired is False
 
     def test_different_paths_do_not_contend(self, tmp_path: Path) -> None:
         from brutex.data.option_parquet_writer import _PARTITION_LOCKS
@@ -331,7 +332,8 @@ class TestCorruptExistingPartition:
     def test_corrupt_existing_partition_raises_option_writer_error(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
         # First write creates a real partition.
-        assert w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)]) == 1
+        written = w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        assert written == 1
         (dest,) = (tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL").glob("*.parquet")
         # Overwrite with garbage so the REAL pl.read_parquet raises a PolarsError on merge.
         dest.write_bytes(b"this is not a parquet file at all")
@@ -347,11 +349,13 @@ class TestCorruptExistingPartition:
         w = _writer(tmp_path)
         other_pk = "NSE_FNO|13|WEEK|0|ATM|PUT"
         # Series A gets a real partition, then is corrupted on disk.
-        assert w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)]) == 1
+        written_a = w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        assert written_a == 1
         (dest_a,) = (tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL").glob("*.parquet")
         dest_a.write_bytes(b"garbage")
         # Series B (distinct partition) writes cleanly — never blocked by A's corruption.
-        assert w.write(partition_key=other_pk, coordinate=_COORD, bars=[_bar(side="PE")]) == 1
+        written_b = w.write(partition_key=other_pk, coordinate=_COORD, bars=[_bar(side="PE")])
+        assert written_b == 1
         # A re-write of the corrupt series A still quarantines (raises), in isolation.
         with pytest.raises(OptionWriterError, match="corrupt existing partition"):
             w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=2)])

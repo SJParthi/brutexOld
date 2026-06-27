@@ -648,7 +648,8 @@ class TestPartitionLock:
         with _PARTITION_LOCKS.acquire(dest):
             with _PARTITION_LOCKS._guard:  # pyright: ignore[reportPrivateUsage]
                 entry = _PARTITION_LOCKS._locks[dest]  # pyright: ignore[reportPrivateUsage]
-            assert entry.lock.acquire(blocking=False) is False
+            nested_acquired = entry.lock.acquire(blocking=False)
+            assert nested_acquired is False
 
     def test_different_paths_do_not_contend(self, tmp_path: Path) -> None:
         from brutex.data.parquet_writer import _PARTITION_LOCKS

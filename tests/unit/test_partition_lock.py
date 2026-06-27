@@ -158,7 +158,8 @@ class TestBoundedLockRegistry:
             with reg._guard:  # pyright: ignore[reportPrivateUsage]
                 entry = reg._locks["p"]  # pyright: ignore[reportPrivateUsage]
                 assert entry.refs == 1  # the holder is refcounted (so it can't be evicted)
-            assert entry.lock.acquire(blocking=False) is False
+            nested_acquired = entry.lock.acquire(blocking=False)
+            assert nested_acquired is False
         # Released + refcount dropped after the block → idle (evictable).
         with reg._guard:  # pyright: ignore[reportPrivateUsage]
             assert reg._locks["p"].refs == 0  # pyright: ignore[reportPrivateUsage]
