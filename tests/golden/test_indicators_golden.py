@@ -6,7 +6,11 @@ indicators against accidental drift:
 
 * **pivots** — one ORACLE-ANCHORED case (NIFTY 14-May-2026, the verified
   TradingView "Pivots Traditional Auto" screenshot already pinned in
-  ``tests/unit/test_pivots.py``).
+  ``tests/unit/test_pivots.py``). The inner levels P/R1-R3/S1-S3 are the
+  screenshot values verbatim; R4/S4 are pinned to the engine's EXACT
+  computed output (2439095 / 2298835), which is 5 paisa off the chart-OCR
+  screenshot (2439090 / 2298830) the unit test absorbs with its ``±10``
+  tolerance — here a deliberate exact-computed regression lock.
 * **fib** — one ORACLE-ANCHORED case (BANKNIFTY 13-May-2026 BEARISH, the
   ES Trading Academy AmiBroker v11 screenshot pinned in
   ``tests/unit/test_fib_levels.py``).
@@ -16,10 +20,12 @@ indicators against accidental drift:
 * **day_extremes** — a multi-bar single-day running-extremes case plus a
   next-IST-day reset.
 
-The pivot/fib expected vectors are copied verbatim from the unit-test
-oracles so the golden is GROUNDED in the operator's screenshots, not
-self-referential. The test reads the JSON literals and asserts the live
-functions reproduce them EXACTLY.
+The inner pivot levels (P/R1-R3/S1-S3) and every fib level are copied
+verbatim from the unit-test oracles so the golden is GROUNDED in the
+operator's screenshots, not self-referential; only R4/S4 are code-anchored
+to the engine's exact computed output (5 paisa off the chart-OCR screenshot,
+within the unit test's ``±10`` tolerance). The test reads the JSON literals
+and asserts the live functions reproduce them EXACTLY.
 """
 
 from __future__ import annotations

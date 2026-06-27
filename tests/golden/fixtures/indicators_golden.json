@@ -1,6 +1,6 @@
 {
   "schema": "brutex.indicators golden vectors v1",
-  "description": "Frozen oracle-anchored answer-key for brutex/indicators. Pivot + Fib cases are copied verbatim from the operator-verified TradingView / AmiBroker screenshots already pinned in tests/unit/test_pivots.py and tests/unit/test_fib_levels.py, so the golden is grounded, not self-referential.",
+  "description": "Frozen oracle-anchored answer-key for brutex/indicators. The inner pivot levels P/R1-R3/S1-S3 and every fib level are copied verbatim from the operator-verified TradingView / AmiBroker screenshots already pinned in tests/unit/test_pivots.py and tests/unit/test_fib_levels.py, so the golden is grounded, not self-referential. R4/S4 are pinned to compute_pivot_levels' EXACT computed output (r4_paisa=2439095, s4_paisa=2298835), which is 5 paisa off the chart-OCR screenshot values (R4=2439090, S4=2298830) the unit test absorbs with its +/-10 tolerance; here they are a deliberate exact-computed regression lock.",
   "pivots": [
     {
       "id": "nifty-14may2026",
