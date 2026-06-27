@@ -5,8 +5,11 @@ DEC-LAKE-PARTITION-FLOCK-001 — :mod:`brutex.data.partition_lock` adds an advis
 ``brutex fetch`` + a dashboard pull sharing one lake) can't lost-update the same
 month partition. The lock is on a stable ``<lake_root>/.locks/<sha256(dest)>.lock``
 sidecar (never the partition file, whose inode ``os.replace`` swaps), per partition,
-and a full disk at lock creation maps to a :class:`LakeWriteHalt`.
+and a full disk at lock creation maps to a :class:`LakeWriteHalt`. The bounded-acquire
+(DEC-PULL-CONTENTION-ANTISTALL-001) tests white-box the module-private ``_acquire_bounded``.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -17,11 +20,15 @@ import threading
 from pathlib import Path
 
 import pytest
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import DataLakeError, LakeWriteHalt, PartitionLockTimeout
 from brutex.data.partition_lock import (
+    DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS,
+    PARTITION_LOCK_TIMEOUT_ENV,
     BoundedLockRegistry,
+    _acquire_bounded,
     partition_lock_path,
     partition_write_lock,
+    resolve_partition_lock_timeout_seconds,
 )
 
 
@@ -130,6 +137,129 @@ def test_disk_full_at_lock_creation_maps_to_halt(
     with pytest.raises(LakeWriteHalt) as exc_info:
         cm.__enter__()
     assert exc_info.value.reason == "disk_full"
+
+
+# ── PartitionLockTimeout (the transient defer signal) ────────────────────────
+def test_partition_lock_timeout_is_transient_datalake_error_not_halt() -> None:
+    exc = PartitionLockTimeout(12.5)
+    assert exc.timeout_seconds == 12.5
+    # A DataLakeError (so the spines' BruteXError handling sees it) but NOT a
+    # LakeWriteHalt (a window defer, never a pull-wide stop).
+    assert isinstance(exc, DataLakeError)
+    assert not isinstance(exc, LakeWriteHalt)
+    assert "12.5" in str(exc)
+    assert "deferred" in str(exc)
+
+
+# ── resolve_partition_lock_timeout_seconds (env-tunable deadline) ─────────────
+def test_timeout_default_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(PARTITION_LOCK_TIMEOUT_ENV, raising=False)
+    assert resolve_partition_lock_timeout_seconds() == DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
+    # The audited default is well under the 600 s pull watchdog (the anti-stall point).
+    assert DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS < 600.0
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "not-a-number", "0", "-5", "nan", "NAN", "inf", "-inf"])
+def test_timeout_falls_back_on_bad_value(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blank / non-numeric / non-positive / non-finite can never disable the bound.
+
+    ``nan`` / ``inf`` parse as floats but would DEFEAT the bound (a ``nan`` deadline makes
+    ``clock() >= deadline`` perpetually False; an ``inf`` deadline never expires) — both
+    must fall back to the audited default (DEC-PULL-CONTENTION-ANTISTALL-001 fail-safe).
+    """
+    monkeypatch.setenv(PARTITION_LOCK_TIMEOUT_ENV, raw)
+    assert resolve_partition_lock_timeout_seconds() == DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
+
+
+def test_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PARTITION_LOCK_TIMEOUT_ENV, "42.5")
+    assert resolve_partition_lock_timeout_seconds() == 42.5
+
+
+# ── _acquire_bounded (the bounded, never-blocking acquire) ────────────────────
+def test_acquire_succeeds_first_try(tmp_path: Path) -> None:
+    """An uncontended lock is taken on the first non-blocking attempt (no sleep)."""
+    fd = os.open(tmp_path / "x.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    slept: list[float] = []
+    try:
+        _acquire_bounded(fd, timeout_seconds=1.0, sleep=slept.append)
+    finally:
+        os.close(fd)
+    assert slept == []  # acquired immediately, never polled
+
+
+def test_acquire_retries_then_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A peer holding the lock makes the bounded acquire POLL, then win when released."""
+    lock_path = tmp_path / "y.lock"
+    held_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a peer holds it
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    beats: list[int] = []
+    monkeypatch.setattr("brutex.data.partition_lock.emit_progress_beat", lambda: beats.append(1))
+
+    def _release_after_two(_secs: float) -> None:
+        # Drop the peer's lock on the SECOND poll so the next attempt wins.
+        if len(beats) >= 2:
+            fcntl.flock(held_fd, fcntl.LOCK_UN)
+
+    try:
+        _acquire_bounded(fd, timeout_seconds=10.0, poll_seconds=0.0, sleep=_release_after_two)
+    finally:
+        os.close(fd)
+        os.close(held_fd)
+    # It polled (beat fired) at least twice before winning — a liveness beat per poll
+    # keeps the watchdog alive (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15).
+    assert len(beats) >= 2
+
+
+def test_acquire_raises_partition_lock_timeout_on_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged peer that never releases → PartitionLockTimeout, never an infinite block."""
+    lock_path = tmp_path / "z.lock"
+    held_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # wedged peer, never releases
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+
+    # A fake monotonic clock that jumps PAST the deadline after the first poll, so the
+    # test never really sleeps yet the deadline branch is exercised deterministically.
+    ticks = iter([0.0, 0.0, 100.0])
+
+    def _clock() -> float:
+        return next(ticks)
+
+    beats: list[int] = []
+    monkeypatch.setattr("brutex.data.partition_lock.emit_progress_beat", lambda: beats.append(1))
+    try:
+        with pytest.raises(PartitionLockTimeout) as exc_info:
+            _acquire_bounded(
+                fd, timeout_seconds=1.0, poll_seconds=0.0, clock=_clock, sleep=lambda _s: None
+            )
+    finally:
+        os.close(fd)
+        fcntl.flock(held_fd, fcntl.LOCK_UN)
+        os.close(held_fd)
+    assert exc_info.value.timeout_seconds == 1.0
+    # A liveness beat fired on each poll before the deadline expired (the clock ticks:
+    # one for the deadline baseline, then 0.0 < 1.0 → beat+sleep, then 100.0 ≥ 1.0 → raise).
+    assert beats == [1, 1]
+
+
+def test_partition_write_lock_times_out_against_wedged_peer(tmp_path: Path) -> None:
+    """End-to-end: the public CM raises the bounded-timeout transient, not a block."""
+    dest = tmp_path / "bars" / "w" / "05.parquet"
+    lock_path = partition_lock_path(tmp_path, dest)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    held_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a wedged peer holds it
+    try:
+        cm = partition_write_lock(tmp_path, dest, timeout_seconds=0.05)
+        with pytest.raises(PartitionLockTimeout):
+            cm.__enter__()
+    finally:
+        fcntl.flock(held_fd, fcntl.LOCK_UN)
+        os.close(held_fd)
 
 
 # ── BoundedLockRegistry (GAP #19) ────────────────────────────────────────────
