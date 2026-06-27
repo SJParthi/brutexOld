@@ -31,9 +31,10 @@ BLAKE3 ships only in the Rust ``fno_math`` wheel, so this test runs under CI
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
-from brutex.strategies.combo import combo_hash
+from brutex.strategies.combo import canonicalise_params, combo_hash
 
 
 def _hash(fields: Mapping[str, Any]) -> str:
@@ -116,3 +117,59 @@ def test_params_insertion_order_does_not_change_the_digest() -> None:
     """NFR-UNIQ-002: param key order is canonicalised away."""
     reordered = {**_BASE, "params": {"mult": 1.5, "lookback": 20}}
     assert _hash(reordered) == _EXPECTED_DIGESTS["base"]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Hardening safety proof — the REJECT-ONLY guards add no valid digest change.
+#
+# DEC-STRATEGIES-CANONICAL-HARDEN: combo.py gained \x1f-injection rejection,
+# non-finite float/Decimal rejection, a float-subclass guard, a top-level
+# Mapping guard, and a nesting-depth cap — all REJECT-ONLY (they raise for
+# never-valid input BEFORE producing any byte). The unchanged ``_BASE`` digest
+# below is the byte-for-byte proof that no VALID combo's identity moved.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_base_digest_unchanged_after_hardening() -> None:
+    """Safety proof: the wire-locked ``_BASE`` digest survives the hardening."""
+    assert (
+        _hash(_BASE)
+        == _EXPECTED_DIGESTS["base"]
+        == "c48b382dc97f66d03859fac94a82ae7de0347ec55761e9bf9d29cf367453ecd6"
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Wire-locked canonical-STRING pins (frozen ``canonicalise_params`` output).
+#
+# These freeze the canonicalisation surface directly (not a blake3 digest, so
+# no hand-computed hash is needed). A change to any of these is a wire break.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_wire_locked_alias_frozen() -> None:
+    """float / str / Decimal carrying the same text collapse to ONE token."""
+    assert canonicalise_params({"sl": 1.5}) == '{"sl":"1.5"}'
+    assert canonicalise_params({"sl": "1.5"}) == '{"sl":"1.5"}'
+    assert canonicalise_params({"sl": Decimal("1.5")}) == '{"sl":"1.5"}'
+
+
+def test_signed_zero_frozen() -> None:
+    """Signed zero is COLLAPSED to +0.0 (DEC-SWEEP-DEDUP-LMDB-001) — two
+    mathematically-equal zero params share ONE run-identity (Golden Rule #4
+    reproducibility); ``-0.0`` normalises to ``"0.0"`` BEFORE repr."""
+    assert canonicalise_params({"x": 0.0}) == '{"x":"0.0"}'
+    assert canonicalise_params({"x": -0.0}) == '{"x":"0.0"}'
+
+
+def test_decimal_scale_frozen() -> None:
+    """Decimal scale is significant — each textual form is its own token."""
+    assert canonicalise_params({"x": Decimal("1.0")}) == '{"x":"1.0"}'
+    assert canonicalise_params({"x": Decimal("1.00")}) == '{"x":"1.00"}'
+    assert canonicalise_params({"x": Decimal("1E+2")}) == '{"x":"1E+2"}'
+    assert canonicalise_params({"x": Decimal("100")}) == '{"x":"100"}'
+
+
+def test_unicode_param_frozen() -> None:
+    """Non-ASCII text is escaped to its ``\\uXXXX`` ensure_ascii form."""
+    assert canonicalise_params({"label": "naïveé"}) == '{"label":"na\\u00efve\\u00e9"}'
