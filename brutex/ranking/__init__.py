@@ -56,6 +56,7 @@ correctness. Recorded in ``docs/MIGRATION.md`` (DEC-RANKING-001 / DEC-RANKING-OV
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -271,7 +272,9 @@ def rank_combos(
     candidates
         ``(mask, metrics)`` pairs for one (instrument, TF) leaderboard. ``len`` is
         the authoritative multiple-testing trial count ``N`` for the opt-in overfit
-        gate (``TRACK1_BACKTEST_SPEC.md:383-385``).
+        gate (``TRACK1_BACKTEST_SPEC.md:383-385``). Each ``mask`` is the combo's
+        identity and MUST be unique among the gate-passing survivors — the
+        deterministic tie-break keys on it (see Raises).
     overfit
         Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig` activating the
         **6th (overfit) gate + the 8th (Deflated-Sharpe) ranking term**
@@ -289,6 +292,15 @@ def rank_combos(
         ``overfit`` is supplied and the pool was deflatable, each :class:`RankedCombo`
         carries its ``deflated_sharpe`` and the composite includes the weighted
         Deflated-Sharpe z-term.
+
+    Raises
+    ------
+    ValueError
+        If two gate-passing survivors share the same ``mask``. The total-order
+        tie-break depends on a unique mask per combo; a duplicate would silently
+        reintroduce input-order-dependent ordering, so it is rejected LOUDLY with the
+        offending mask(s) named (DEC-RANKING-TIEBREAK-001) — a deterministic,
+        auditable error instead of latent nondeterminism.
     """
     survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
 
@@ -348,17 +360,37 @@ def rank_combos(
         )
         for i, (mask, m) in enumerate(survivors)
     ]
-    # Deterministic TOTAL order (DEC-RANKING-TIEBREAK-001): primary key is the
-    # composite score DESCENDING, with the combo's unique ``mask`` ASCENDING as the
-    # final tie-break. ``mask`` is the per-(instrument, TF) combo identity, so the
-    # key ``(-composite_score, mask)`` is a strict total order — two distinct
-    # survivors can never compare equal. A bare ``key=composite_score, reverse=True``
-    # left tied scores in INPUT order (``list.sort`` is stable), so permuting the
-    # candidate enumeration permuted the leaderboard for any score tie — a violation
-    # of idempotence/reproducibility (Golden Rules #4/#7). The negation orders the
-    # score descending while keeping ``mask`` ascending in ONE ``reverse=False`` sort
-    # (composite scores are finite — every z-term is clamped to ``[-_Z_CLAMP,
-    # +_Z_CLAMP]``, so ``-score`` is finite and well-ordered, never ``NaN``).
+    # ENFORCE the unique-mask precondition the total order depends on
+    # (DEC-RANKING-TIEBREAK-001): the deterministic tie-break keys on ``mask``, so a
+    # DUPLICATE mask would silently reintroduce the input-order-dependent ordering the
+    # tie-break exists to remove (a caller — ``engine.sweep_run`` / ``sweep_driver`` —
+    # passes the sweep's ``(mask, metrics)`` pairs VERBATIM with no dedup). A mask is
+    # the per-(instrument, TF) combo identity and MUST be unique within one
+    # leaderboard; detect a violation here and FAIL LOUD, converting latent silent
+    # nondeterminism into a deterministic, auditable error rather than an
+    # order-dependent ranking. (Checked over the gate SURVIVORS — the only rows that
+    # reach the sort; a duplicate among gate-rejected combos is irrelevant to the
+    # ordering and never raised.)
+    masks = [rc.mask for rc in ranked]
+    if len(set(masks)) != len(masks):
+        counts = Counter(masks)
+        dupes = sorted(mask for mask, count in counts.items() if count > 1)
+        raise ValueError(
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            f"tie-break keys on it); duplicate survivor mask(s): {dupes}"
+        )
+    # Deterministic TOTAL order: primary key is the composite score DESCENDING, with
+    # the unique ``mask`` ASCENDING as the final tie-break, so the key
+    # ``(-composite_score, mask)`` is a strict total order — two distinct survivors can
+    # never compare equal. A bare ``key=composite_score, reverse=True`` left tied
+    # scores in INPUT order (``list.sort`` is stable), so permuting the candidate
+    # enumeration permuted the leaderboard for any score tie — a violation of
+    # idempotence/reproducibility (Golden Rules #4/#7). The negation orders the score
+    # descending while keeping ``mask`` ascending in ONE ``reverse=False`` sort. The
+    # sort key is always finite: a non-finite metric field reaches ``_zscores``, but
+    # the ``[-_Z_CLAMP, +_Z_CLAMP]`` min/max clamp maps any non-finite z to a finite
+    # bound, so every composite — and thus ``-composite_score`` — is finite, never
+    # ``NaN`` (a ``NaN`` key would make ``list.sort`` itself nondeterministic).
     ranked.sort(key=lambda rc: (-rc.composite_score, rc.mask))
     return ranked
 

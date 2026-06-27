@@ -271,6 +271,38 @@ class TestTieBreakDeterminism:
         # 7-term composite (all 0.0) ⇒ pure mask tie-break.
         assert [rc.mask for rc in ranked] == [10, 20, 30]
 
+    def test_duplicate_survivor_mask_raises(self) -> None:
+        # The total-order tie-break keys on the mask, so a DUPLICATE mask among
+        # gate-passing survivors would silently reintroduce input-order-dependent
+        # ordering. rank_combos must FAIL LOUD (ValueError) instead — pins the
+        # enforced unique-mask precondition (DEC-RANKING-TIEBREAK-001).
+        cand = [(5, _m(sharpe_ratio=2.0)), (5, _m(sharpe_ratio=1.0))]
+        with pytest.raises(ValueError, match="unique mask") as exc:
+            rank_combos(cand)
+        # Byte-exact message naming the offending mask (mutation-gate discipline:
+        # a substring `match=` still passes mutmut's "XX…XX"-wrapped string mutant).
+        assert str(exc.value) == (
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            "tie-break keys on it); duplicate survivor mask(s): [5]"
+        )
+
+    def test_duplicate_among_rejected_does_not_raise(self) -> None:
+        # The uniqueness check is over the gate SURVIVORS only — a duplicate mask
+        # among gate-REJECTED combos never reaches the sort and must NOT raise.
+        cand = [
+            (5, _m(total_trades=10)),  # rejected (too few trades)
+            (5, _m(profit_factor=1.0)),  # rejected (no edge) — same mask, but rejected
+            (7, _m(sharpe_ratio=2.0)),  # the sole survivor
+        ]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [7]
+
+    def test_unique_mask_path_unaffected(self) -> None:
+        # The normal unique-mask path is byte-unchanged by the precondition check.
+        cand = [(3, _m(sharpe_ratio=2.0)), (1, _m(sharpe_ratio=2.0)), (2, _m(sharpe_ratio=2.0))]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [1, 2, 3]
+
 
 # ────── _zscores — the z-normalisation engine behind every composite term ──────
 
