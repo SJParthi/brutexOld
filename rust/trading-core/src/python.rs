@@ -110,14 +110,14 @@ fn check_prev_day_hl(pdh: i64, pdl: i64) -> Result<(), String> {
 const MAX_BAR_PAISA: i64 = i64::MAX / 65536;
 
 /// Generous absolute ceiling for a proximity `bps` parameter (rejects an absurd
-/// standalone value early — the real overflow guard is the i128 `close × bps`
+/// standalone value early — the real overflow guard is the `close.checked_mul(bps)`
 /// product check in [`check_evaluate_inputs`]).
 ///
 /// Real bps are tiny (the golden max is 50, the proptest domain is 0..=200); a
 /// 1,000,000-bps cap (= 10,000 %) is astronomically above any real tolerance, so
 /// it never rejects a valid input. A bps anywhere up to this cap is still
-/// **product-checked against the actual `close`** in i128, so `close × bps` can
-/// never overflow `i64` regardless of how the two ceilings interact.
+/// **product-checked against the actual `close`** via `checked_mul`, so `close × bps`
+/// can never overflow `i64` regardless of how the two ceilings interact.
 const MAX_BPS: i64 = 1_000_000;
 
 /// True iff `|value| <= MAX_BAR_PAISA` (a finite per-bar price/level magnitude).
@@ -179,9 +179,9 @@ fn check_evaluate_inputs(
         }
     }
 
-    // 2. Every proximity bps: `close * bps` must fit i64 (exact i128 check), and
-    //    bps must be non-negative + non-absurd. A negative bps would make the
-    //    tolerance negative (harmless to overflow but nonsensical); reject it.
+    // 2. Every proximity bps: `close * bps` must fit i64 (exact `checked_mul`
+    //    check), and bps must be non-negative + non-absurd. A negative bps would
+    //    make the tolerance negative (harmless to overflow but nonsensical); reject it.
     for (name, bps) in [
         ("pivot_bps", pivot_bps),
         ("pdh_pdl_bps", pdh_pdl_bps),
@@ -192,9 +192,12 @@ fn check_evaluate_inputs(
                 "{name} ({bps}) out of the overflow-safe range [0, {MAX_BPS}]"
             ));
         }
-        // close is already bar-bounded above, but check the actual product in
-        // i128 so the guarantee is exact regardless of the ceilings' arithmetic.
-        if (close as i128 * bps as i128).unsigned_abs() > i64::MAX as u128 {
+        // close is already bar-bounded above, but check the ACTUAL i64 product so
+        // the guarantee is exact regardless of the ceilings' arithmetic.
+        // `checked_mul` returns `None` iff `close * bps` would overflow i64 — the
+        // precise condition `is_near` needs (it also correctly ACCEPTS a product of
+        // exactly `i64::MIN`, which fits i64, and has no `>`/`>=` boundary to mutate).
+        if close.checked_mul(bps).is_none() {
             return Err(format!(
                 "{name} ({bps}) × close_paisa ({close}) overflows i64"
             ));
@@ -213,7 +216,7 @@ fn check_evaluate_inputs(
 /// (`pdh < pdl`, `pdc` outside `[pdl, pdh]`, or an overflow-prone magnitude →
 /// [`check_prev_day_ohlc`]) AND every per-bar evaluate input (`open/high/low/close`,
 /// the optional EMAs, `day_high/day_low/open_of_day`, `pdc`, and the three
-/// proximity `bps` — including the exact i128 `close × bps` product check →
+/// proximity `bps` — including the exact `close.checked_mul(bps)` product check →
 /// [`check_evaluate_inputs`]). With both passing, the evaluate path is panic-safe
 /// at the boundary for the audited arithmetic (`is_near`'s `close*bps` /
 /// `(close-level).abs()`, the Group-5/7/9 multiplies); the inner evaluator math is
@@ -962,7 +965,7 @@ mod tests {
     #[test]
     fn raw_impl_rejects_close_times_bps_overflow() {
         // A big close (at the bar ceiling) × a big-but-in-cap bps overflows i64 —
-        // the i128 product guard rejects it (the close × bps DoS the reviewer
+        // the `checked_mul` guard rejects it (the close × bps DoS the reviewer
         // found). MAX_BAR_PAISA × MAX_BPS ≈ 1.4·10²⁰ ≫ i64::MAX ≈ 9.2·10¹⁸.
         let close = MAX_BAR_PAISA;
         let err = raw_bar(
@@ -974,7 +977,7 @@ mod tests {
 
     #[test]
     fn check_evaluate_inputs_product_overflow_direct() {
-        // The i128 product guard fires for a close × bps that overflows i64 …
+        // The `checked_mul` guard fires for a close × bps that overflows i64 …
         let err = check_evaluate_inputs(
             0,
             0,
@@ -992,7 +995,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
-        // … and for a NEGATIVE close of the same magnitude (unsigned_abs path).
+        // … and for a NEGATIVE close of the same magnitude.
         assert!(
             check_evaluate_inputs(
                 0,
@@ -1021,6 +1024,30 @@ mod tests {
         assert!(
             check_evaluate_inputs(0, 0, 0, 0, None, None, 0, 0, 0, MAX_BAR_PAISA + 1, 0, 0, 0)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn check_evaluate_inputs_product_overflow_exact_boundary() {
+        // The EXACT `checked_mul` boundary at bps = MAX_BPS: the largest `close`
+        // whose product still fits i64 is `i64::MAX / MAX_BPS`. Both closes below
+        // are valid bar prices (≤ MAX_BAR_PAISA), so they reach the product guard.
+        let fits = i64::MAX / MAX_BPS; // close * MAX_BPS <= i64::MAX
+        let over = fits + 1; // close * MAX_BPS  > i64::MAX
+        // exact-fit product is ACCEPTED (reaches the inner evaluator).
+        assert!(
+            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0).is_ok()
+        );
+        // one paisa over → product overflows i64 → REJECTED.
+        let err = check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0)
+            .unwrap_err();
+        assert!(err.contains("overflows i64"), "got: {err}");
+        // The same boundary holds per-bps-slot: only the offending slot rejects.
+        assert!(
+            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, 0, MAX_BPS, 0).is_ok()
+        );
+        assert!(
+            check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, 0, 0, MAX_BPS).is_err()
         );
     }
 
