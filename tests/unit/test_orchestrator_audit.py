@@ -26,12 +26,15 @@ from brutex.orchestrator.audit import (
     AuditChainCorruption,
     AuditEntry,
     AuditError,
+    AuditFieldError,
     AuditPayloadError,
     AuditWriteError,
     AuditWriter,
     read_entries,
     verify_chain,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -996,3 +999,225 @@ class TestKillRecovery:
             entry = log.append(action="A", subject="s", ts_utc=1.0)
         assert entry.seq == 0
         assert verify_chain(audit_path) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX B — the hash-preimage delimiter "|" is forbidden in the free-form
+# fields (DEC-ORCH-AUDIT-DELIM-001). compute_hash joins actor/action/subject
+# into the preimage with a literal "|", so a "|" inside any of them would make
+# the encoding non-injective: action="A|B", subject="C" and action="A",
+# subject="B|C" both flatten to "…|A|B|C|…" → one hash. AuditEntry.__post_init__
+# rejects "|" on BOTH the write path (construction) and the read path
+# (from_json_line), with NO change to the hash bytes for any conforming entry.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDelimiterCollisionGuard:
+    def _entry(self, *, actor: str = "brutex", action: str = "A", subject: str = "s") -> AuditEntry:
+        return AuditEntry(
+            seq=0,
+            prev_hash=GENESIS_PREV_HASH,
+            ts_utc=1.0,
+            actor=actor,
+            action=action,
+            subject=subject,
+            payload={},
+        )
+
+    def test_historical_collision_pair_both_rejected(self) -> None:
+        # The exact straddling-collision pair the chain could not previously
+        # distinguish: action="A|B", subject="C"  vs  action="A", subject="B|C".
+        # Both flattened to the SAME "…|A|B|C|…" preimage → identical hash.
+        # Now BOTH are unconstructable, so the collision is impossible.
+        with pytest.raises(AuditFieldError):
+            self._entry(action="A|B", subject="C")
+        with pytest.raises(AuditFieldError):
+            self._entry(action="A", subject="B|C")
+
+    def test_pipe_in_actor_rejected(self) -> None:
+        with pytest.raises(AuditFieldError, match="'actor'"):
+            self._entry(actor="bru|tex")
+
+    def test_pipe_in_action_rejected(self) -> None:
+        with pytest.raises(AuditFieldError, match="'action'"):
+            self._entry(action="RUN|START")
+
+    def test_pipe_in_subject_rejected(self) -> None:
+        with pytest.raises(AuditFieldError, match="'subject'"):
+            self._entry(subject="run|abc")
+
+    def test_error_message_names_field_and_value(self) -> None:
+        with pytest.raises(AuditFieldError) as exc_info:
+            self._entry(subject="run|abc")
+        msg = str(exc_info.value)
+        assert "'subject'" in msg
+        assert "'|'" in msg
+        assert "'run|abc'" in msg
+
+    def test_audit_field_error_is_an_audit_error(self) -> None:
+        # The new subclass must remain catchable by existing `except AuditError`
+        # handlers (doctor / cli / verify_chain / _read_entries) — no caller
+        # needs to learn the new type.
+        assert issubclass(AuditFieldError, AuditError)
+
+    def test_conforming_fields_construct_fine(self) -> None:
+        # The canonical delimiter-free conventions (`-`, `:`) are untouched.
+        entry = self._entry(subject="NSE-NIFTY-22Dec25-25000-CE", action="INGEST_CHUNK_DONE")
+        assert entry.subject == "NSE-NIFTY-22Dec25-25000-CE"
+
+    def test_append_rejects_pipe_in_subject_without_touching_chain(self, audit_path: Path) -> None:
+        # The guard fires at append-time construction BEFORE any write — a
+        # good entry, a rejected `|`-bearing append, then a good entry: the
+        # chain holds exactly the two good entries.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", ts_utc=1.0)
+            with pytest.raises(AuditFieldError):
+                log.append(action="B", subject="bad|subject", ts_utc=2.0)
+            after = log.append(action="C", subject="s3", ts_utc=3.0)
+        assert after.seq == 1
+        assert [e.action for e in read_entries(audit_path)] == ["A", "C"]
+        assert verify_chain(audit_path) == 2
+
+    def test_from_json_line_rejects_tampered_pipe_field(self) -> None:
+        # A tampered on-disk line that injected a "|" into a field is rejected
+        # by from_json_line (which rebuilds the entry through __post_init__).
+        line = json.dumps(
+            {
+                "seq": 0,
+                "prev_hash": GENESIS_PREV_HASH,
+                "ts_utc": 1.0,
+                "actor": "brutex",
+                "action": "A|B",
+                "subject": "C",
+                "payload": {},
+                "entry_hash": "a" * 64,
+            }
+        )
+        with pytest.raises(AuditFieldError):
+            AuditEntry.from_json_line(line)
+
+    def test_verify_chain_rejects_on_disk_pipe_resplit(self, audit_path: Path) -> None:
+        # The end-to-end read-path contract: a tampered line re-splitting a
+        # "|"-bearing (action, subject) pair is surfaced by verify_chain as an
+        # AuditError (the _read_entries wrapper prefixes path:line_no).
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", ts_utc=1.0)
+            log.append(action="B", subject="s2", ts_utc=2.0)
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        first = json.loads(lines[0])
+        first["action"] = "A|B"  # inject the delimiter
+        lines[0] = json.dumps(first)
+        audit_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(AuditError, match=f"{audit_path}:1:"):
+            verify_chain(audit_path)
+
+    def test_golden_hash_unchanged_by_the_guard(self) -> None:
+        # Regression: the "|" guard must NOT move the hash recipe — the frozen
+        # golden from TestCanonicalSerialisationPins still holds byte-for-byte.
+        entry = AuditEntry(
+            seq=0,
+            prev_hash=GENESIS_PREV_HASH,
+            ts_utc=1712987654.5,
+            actor="brutex",
+            action="RUN_START",
+            subject="run:abc",
+            payload={"note": "₹100"},
+        )
+        assert entry.compute_hash() == (
+            "2fddb7a79ba93681936238f756fbddd7bef4d435e2c7fb0dabdcf456fc96bdff"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX B (property) — once "|" is excluded from the field domain the preimage
+# is injective: two DISTINCT (actor, action, subject) triples never collide.
+# ────────────────────────────────────────────────────────────────────────
+
+# Pipe excluded (forbidden by __post_init__); codec="utf-8" drops lone
+# surrogates compute_hash cannot UTF-8 encode.
+_PIPE_FREE_TEXT = st.text(alphabet=st.characters(codec="utf-8", exclude_characters="|"), max_size=8)
+_TRIPLE = st.tuples(_PIPE_FREE_TEXT, _PIPE_FREE_TEXT, _PIPE_FREE_TEXT)
+
+
+@given(a=_TRIPLE, b=_TRIPLE)
+def test_property_distinct_pipe_free_triples_never_collide(
+    a: tuple[str, str, str], b: tuple[str, str, str]
+) -> None:
+    # With "|" removed from the field domain, the only way two triples share a
+    # compute_hash() is if they are equal. (All other preimage components are
+    # held fixed.) This is the injectivity the in-band delimiter previously
+    # broke for "|"-bearing fields.
+    def _hash(triple: tuple[str, str, str]) -> str:
+        actor, action, subject = triple
+        return AuditEntry(
+            seq=0,
+            prev_hash=GENESIS_PREV_HASH,
+            ts_utc=1.0,
+            actor=actor,
+            action=action,
+            subject=subject,
+            payload={},
+        ).compute_hash()
+
+    if a == b:
+        assert _hash(a) == _hash(b)
+    else:
+        assert _hash(a) != _hash(b)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX D — a tampered on-disk line whose payload holds a non-finite float
+# (json.loads accepts bare NaN / Infinity tokens) is surfaced by verify_chain
+# as AuditChainCorruption (NOT the sibling AuditPayloadError), so the
+# AuditChainCorruption-catching callers (doctor / cli) behave correctly.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNonFinitePayloadTamper:
+    @pytest.mark.parametrize(
+        ("token", "label"),
+        [("NaN", "nan"), ("Infinity", "inf"), ("-Infinity", "-inf")],
+        ids=["nan", "inf", "-inf"],
+    )
+    def test_tampered_non_finite_payload_is_chain_corruption(
+        self, audit_path: Path, token: str, label: str
+    ) -> None:
+        # Build a valid 2-entry chain, then byte-rewrite the FIRST (non-final)
+        # line's payload value to a bare non-finite token. seq + prev_hash of
+        # that line are untouched, so verify_chain reaches compute_hash, whose
+        # AuditPayloadError must surface as AuditChainCorruption(seq=0).
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", payload={"v": 1.0}, ts_utc=1.0)
+            log.append(action="B", subject="s2", payload={"v": 2.0}, ts_utc=2.0)
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        assert '"payload":{"v":1.0}' in lines[0]
+        lines[0] = lines[0].replace('"payload":{"v":1.0}', f'"payload":{{"v":{token}}}')
+        audit_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        with pytest.raises(AuditChainCorruption) as exc_info:
+            verify_chain(audit_path)
+        err = exc_info.value
+        assert err.seq == 0
+        assert err.reason == "payload contains a non-finite float (tampered line)"
+        assert err.expected == "a finite, RFC 8259-serialisable payload"
+        assert err.actual == "non-finite payload (NaN / Infinity / -Infinity)"
+
+    def test_chain_corruption_is_not_payload_error(self) -> None:
+        # The whole point of FIX D: AuditChainCorruption is NOT a subclass of
+        # AuditPayloadError (they are siblings), so a caller that catches only
+        # AuditChainCorruption (doctor / cli) now catches the NaN tamper.
+        assert not issubclass(AuditChainCorruption, AuditPayloadError)
+        assert not issubclass(AuditPayloadError, AuditChainCorruption)
+
+    def test_non_finite_in_final_line_also_chain_corruption(self, audit_path: Path) -> None:
+        # The final line is equally covered: the last entry's NaN payload is
+        # still raised as AuditChainCorruption (seq=1), not AuditPayloadError.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", payload={"v": 1.0}, ts_utc=1.0)
+            log.append(action="B", subject="s2", payload={"v": 2.0}, ts_utc=2.0)
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        lines[1] = lines[1].replace('"payload":{"v":2.0}', '"payload":{"v":NaN}')
+        audit_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(AuditChainCorruption) as exc_info:
+            verify_chain(audit_path)
+        assert exc_info.value.seq == 1
