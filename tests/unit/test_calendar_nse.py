@@ -11,20 +11,30 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 
 import pytest
 from brutex.calendars.nse import (
+    ALL_HOLIDAYS,
+    HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR,
+    IST,
+    SESSION_CLOSE_IST,
     SESSION_DURATION_MINUTES,
+    SESSION_OPEN_IST,
     TICK_SIZE_PAISA,
+    HolidayDataUnavailableError,
     SessionType,
     expected_bars_per_day_for_tf,
     get_session,
     has_muhurat_session,
     is_forced_exit_bar,
     is_holiday,
+    is_holiday_checked,
+    is_holiday_data_available,
     is_pre_open,
     is_trading_day,
+    is_trading_day_checked,
     is_weekend,
     session_minutes_per_day,
     trading_days_between,
@@ -343,3 +353,159 @@ class TestSpecialWeekendSessions:
         from brutex.calendars.nse import ALL_HOLIDAYS
 
         assert date(2025, 2, 1) not in ALL_HOLIDAYS
+
+
+class TestISTOffset:
+    """IST is a FIXED +05:30 offset with NO daylight-saving transition."""
+
+    @pytest.mark.parametrize(
+        "instant",
+        [
+            datetime(2020, 1, 1, 0, 0),  # winter
+            datetime(2024, 6, 21, 12, 0),  # midsummer (would shift under DST)
+            datetime(2024, 12, 21, 12, 0),  # midwinter
+            datetime(2025, 3, 9, 2, 30),  # US "spring forward" instant
+            datetime(2025, 11, 2, 1, 30),  # US "fall back" instant
+        ],
+    )
+    def test_offset_is_always_5h30m(self, instant: datetime) -> None:
+        aware = instant.replace(tzinfo=IST)
+        assert aware.utcoffset() == timedelta(hours=5, minutes=30)
+        # No DST component, ever.
+        assert aware.dst() == timedelta(0)
+
+    def test_offset_constant_across_year(self) -> None:
+        # Sample one instant per month; the offset must never move.
+        offsets = {datetime(2024, m, 15, 9, 15, tzinfo=IST).utcoffset() for m in range(1, 13)}
+        assert offsets == {timedelta(hours=5, minutes=30)}
+
+
+class TestHolidayCoverageRange:
+    """DEC-CALENDAR-HARDEN-001: out-of-coverage dates must not silently read False.
+
+    The hardcoded holiday list starts in 2021 but the Track-1 data pull floor
+    is 2020-01-01 (CLAUDE.md §3 / MIGRATION.md #722). A 2020 weekday holiday
+    used to read as a trading day; callers can now DETECT the gap.
+    """
+
+    def test_coverage_range_derived_from_list(self) -> None:
+        assert min(h.year for h in ALL_HOLIDAYS) == HOLIDAY_COVERAGE_FIRST_YEAR
+        assert max(h.year for h in ALL_HOLIDAYS) == HOLIDAY_COVERAGE_LAST_YEAR
+        assert HOLIDAY_COVERAGE_FIRST_YEAR <= HOLIDAY_COVERAGE_LAST_YEAR
+
+    def test_in_coverage_dates_available(self) -> None:
+        assert is_holiday_data_available(date(HOLIDAY_COVERAGE_FIRST_YEAR, 1, 1))
+        assert is_holiday_data_available(date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31))
+        assert is_holiday_data_available(date(2024, 6, 1))
+
+    def test_below_floor_2020_not_available(self) -> None:
+        # 2020 is IN the data-pull scope but OUT of the holiday list.
+        assert not is_holiday_data_available(date(2020, 3, 10))
+
+    def test_above_ceiling_2027_not_available(self) -> None:
+        assert not is_holiday_data_available(date(HOLIDAY_COVERAGE_LAST_YEAR + 1, 1, 26))
+
+    def test_is_holiday_in_range_unchanged(self) -> None:
+        # Within coverage, is_holiday and is_holiday_checked agree exactly.
+        assert is_holiday(date(2024, 1, 26)) is True
+        assert is_holiday_checked(date(2024, 1, 26)) is True
+        assert is_holiday(date(2024, 2, 20)) is False
+        assert is_holiday_checked(date(2024, 2, 20)) is False
+
+    def test_is_holiday_out_of_range_returns_false_silently(self) -> None:
+        # Documented behaviour: is_holiday returns False (absence of data),
+        # NOT a verified trading day. The checked variant is the honest path.
+        assert is_holiday(date(2020, 3, 10)) is False
+
+    def test_is_holiday_checked_raises_below_floor(self) -> None:
+        with pytest.raises(HolidayDataUnavailableError, match="2020-03-10"):
+            is_holiday_checked(date(2020, 3, 10))
+
+    def test_is_holiday_checked_raises_above_ceiling(self) -> None:
+        with pytest.raises(HolidayDataUnavailableError, match="covered span"):
+            is_holiday_checked(date(HOLIDAY_COVERAGE_LAST_YEAR + 1, 1, 26))
+
+    def test_error_is_lookup_error_subclass(self) -> None:
+        assert issubclass(HolidayDataUnavailableError, LookupError)
+
+
+class TestTradingDayChecked:
+    """DEC-CALENDAR-HARDEN-001: strict trading-day verdict refuses unknown dates."""
+
+    def test_in_range_matches_unchecked(self) -> None:
+        assert is_trading_day_checked(date(2024, 2, 20)) is True  # Tuesday
+        assert is_trading_day_checked(date(2024, 1, 26)) is False  # Republic Day
+        assert is_trading_day_checked(date(2024, 5, 11)) is False  # Saturday
+
+    def test_out_of_range_weekday_raises(self) -> None:
+        # Holi 2020-03-10 (Tuesday) — unchecked silently returns True, the
+        # exact phantom-trading-day bug this hardens against.
+        assert is_trading_day(date(2020, 3, 10)) is True
+        with pytest.raises(HolidayDataUnavailableError):
+            is_trading_day_checked(date(2020, 3, 10))
+
+    def test_out_of_range_weekend_resolves_false_without_raising(self) -> None:
+        # A weekend is non-trading INDEPENDENT of the holiday list, so its
+        # verdict consults no missing data and is honest even out of coverage.
+        # 2020-01-04 (below floor) and 2027-01-02 (above ceiling) are Saturdays.
+        assert is_trading_day_checked(date(2020, 1, 4)) is False
+        assert is_trading_day_checked(date(2027, 1, 2)) is False
+
+    def test_out_of_range_sunday_resolves_false_without_raising(self) -> None:
+        # 2020-01-05 is a Sunday — same data-complete contract.
+        assert is_trading_day_checked(date(2020, 1, 5)) is False
+
+    def test_special_weekend_session_overrides_even_out_of_coverage(self) -> None:
+        # A date the package DOES hold data for resolves without raising even
+        # if its year is outside the holiday span. (Currently every special
+        # session is in-coverage; this guards the precedence contract.)
+        d = date(2025, 2, 1)  # Budget-day Saturday, in coverage
+        assert is_trading_day_checked(d) is True
+
+
+class TestSessionBoundaries:
+    """Exact session boundary timestamps (09:15:00 / 15:30:00 / 15:20 / pre-open)."""
+
+    def test_open_is_0915_00(self) -> None:
+        assert time(9, 15, 0) == SESSION_OPEN_IST
+
+    def test_close_is_1530_00(self) -> None:
+        assert time(15, 30, 0) == SESSION_CLOSE_IST
+
+    def test_0914_59_is_pre_open(self) -> None:
+        assert is_pre_open(time(9, 14, 59))
+
+    def test_0915_00_is_not_pre_open(self) -> None:
+        # Open is inclusive of the session, exclusive of pre-open.
+        assert not is_pre_open(time(9, 15, 0))
+
+    def test_forced_exit_boundary_at_1519_59(self) -> None:
+        # A 1m bar opening 15:19:59 closes 15:20:59 > 15:20 → forced.
+        assert is_forced_exit_bar(time(15, 19, 59), tf_minutes=1)
+
+    def test_forced_exit_1m_bar_opening_exactly_1519_not_forced(self) -> None:
+        # 15:19:00 + 1m = 15:20:00 (exclusive end) → NOT yet forced.
+        assert not is_forced_exit_bar(time(15, 19, 0), tf_minutes=1)
+
+
+class TestLeapYear:
+    """Feb 29 on leap years is handled as an ordinary calendar date."""
+
+    def test_feb29_2020_is_valid_date(self) -> None:
+        # 2020-02-29 (Saturday) — weekend, not in holiday coverage.
+        d = date(2020, 2, 29)
+        assert is_weekend(d)
+        assert not is_holiday_data_available(d)
+
+    def test_feb29_2024_is_trading_day(self) -> None:
+        # 2024-02-29 is a Thursday, no holiday → trading day.
+        d = date(2024, 2, 29)
+        assert d.weekday() == 3
+        assert is_trading_day(d)
+        assert is_trading_day_checked(d)
+
+    def test_trading_days_between_spans_leap_day(self) -> None:
+        days = trading_days_between(date(2024, 2, 28), date(2024, 3, 1))
+        # Wed 28, Thu 29, Fri 1 — all weekday trading days.
+        assert date(2024, 2, 29) in days
+        assert len(days) == 3
