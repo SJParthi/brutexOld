@@ -47,12 +47,17 @@ _DEEP_ROWS = 8_000
 _TRIALS = 25
 
 
-def _legacy_read_existing_bars(dest: Path) -> dict[datetime, CandleBar]:
-    """The pre-4a per-row reconstruction (the BEFORE shape), verbatim."""
+def _legacy_read_existing_bars(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
+    """The pre-4a per-row reconstruction (the BEFORE shape), verbatim.
+
+    Takes the already-read ``existing_bytes`` (the GAP #11 single-read signature).
+    """
+    import io
+
     import polars as pl
 
     with lake_write_guard():
-        df = pl.read_parquet(dest)
+        df = pl.read_parquet(io.BytesIO(existing_bytes))
         out: dict[datetime, CandleBar] = {}
         for row in df.iter_rows(named=True):
             oi = row["open_interest"]

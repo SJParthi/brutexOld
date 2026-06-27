@@ -330,3 +330,35 @@ def test_pending_asset_payload_is_honest_and_empty() -> None:
     assert "Futures" in payload["note"]
     assert "Spot" in payload["note"]
     assert "price_gainers" not in payload  # absent category keys → page falls back to []
+
+
+def test_pending_asset_payload_escapes_reflected_asset() -> None:
+    """DEC-DASHBOARD-XSS-HARDENING-001: the raw ``?asset=`` echo is HTML-escaped.
+
+    ``asset`` is reflected verbatim into the note, so a payload like
+    ``<img src=x onerror=alert(1)>`` must come back as inert ``&lt;img …`` text,
+    never an unescaped live tag — defense-in-depth at the JSON source even though
+    the page also sets the note via ``textContent``.
+    """
+    payload = pending_asset_payload(
+        "<img src=x onerror=alert(1)>",
+        interval="1day",
+        date="2024-06-13",
+        time=None,
+        top_n=50,
+    )
+    note = payload["note"]
+    # The security invariant: NO literal angle bracket survives, so the browser
+    # can never re-form a live `<img …>` tag from the reflected note.
+    assert "<" not in note
+    assert ">" not in note
+    assert "<img" not in note  # no live tag survives
+    # The escaped form is present instead (title-cased to "&lt;Img …" by .title()).
+    assert "&lt;img" in note.lower()
+    assert "&gt;" in note
+    # ampersand + quote are escaped as well (html.escape default quote=True).
+    payload2 = pending_asset_payload(
+        "a&b\"'", interval="1day", date="2024-06-13", time=None, top_n=1
+    )
+    assert "&amp;" in payload2["note"]
+    assert "&quot;" in payload2["note"] or "&#x27;" in payload2["note"]

@@ -36,12 +36,18 @@ _COORDS = {
 }
 
 
-def _legacy_read_existing_bars(dest: Path) -> dict[datetime, CandleBar]:
-    """The pre-4a per-row reconstruction, verbatim (the parity oracle)."""
+def _legacy_read_existing_bars(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
+    """The pre-4a per-row reconstruction, verbatim (the parity oracle).
+
+    Takes the already-read ``existing_bytes`` (the GAP #11 single-read signature) and
+    parses from them, byte-identical to the legacy ``pl.read_parquet(dest)``.
+    """
+    import io
+
     import polars as pl
 
     with lake_write_guard():
-        df = pl.read_parquet(dest)
+        df = pl.read_parquet(io.BytesIO(existing_bytes))
         out: dict[datetime, CandleBar] = {}
         for row in df.iter_rows(named=True):
             oi = row["open_interest"]

@@ -160,12 +160,27 @@
         <thead><tr id="head"></tr></thead>
         <tbody id="rows"></tbody>
       </table>
-      <p class="note" id="note"></p>
+      <p class="note" id="note"><b>Note:</b> <span id="noteText"></span></p>
     </div>
   </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+/* esc(): HTML-escape any vendor-derived cell value before it touches innerHTML
+   (DEC-DASHBOARD-XSS-HARDENING-001). The SAME helper db.html / universe.html /
+   completeness.html ship (one source of truth, CLAUDE.md §11 COMMON) — a symbol
+   name or moneyness label like `<img src=x onerror=alert(1)>` renders as inert
+   text (`&lt;img …`), never a live tag. Numbers coerce to their string form
+   first; a clean numeric/`₹`-formatted string passes through unchanged. */
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 /* ── Per-asset config: ALL category sections + sortable columns ──
    Each column = [label, field, type]; every column header is click-to-sort. */
@@ -294,7 +309,7 @@ function renderRows() {
       if (v.startsWith("ITM")) cls = "pos"; else if (v.startsWith("OTM")) cls = "neg";
       else if (v==="?"||v==="—") cls = "muted";
     }
-    return `<td class="${cls}">${v}</td>`;
+    return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>").join("");
 }
 function syncControls() {
@@ -305,7 +320,11 @@ function syncControls() {
   $("topn").max = "500";  // matches the /api/v1/movers route cap (DEC-MOVERS-COMPLETENESS-001).
 }
 async function load() {
-  $("note").innerHTML = "Loading…";
+  /* The server note ECHOES the raw ?asset= query param (pending_asset_payload),
+     so it is set via textContent on a dedicated span — the static "<b>Note:</b>"
+     label stays in the DOM — never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
+     A reflected `?asset=<img …>` renders as inert text, not a live tag. */
+  $("noteText").textContent = "Loading…";
   syncControls();
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"100" });
   if ($("date").value) p.set("date", $("date").value);
@@ -321,13 +340,13 @@ async function load() {
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
     $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
-    $("note").innerHTML = "<b>Note:</b> "+(j.note||"");
+    $("noteText").textContent = (j.note||"");
   } catch (e) {
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     rowsData = SAMPLE[state.asset] || SAMPLE.spot;
     renderHead(); renderRows();
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
-    $("note").innerHTML = "<b>Note:</b> preview of the layout with sample rows — run the dashboard for real movers data (click any column to sort).";
+    $("noteText").textContent = "preview of the layout with sample rows — run the dashboard for real movers data (click any column to sort).";
   }
 }
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {

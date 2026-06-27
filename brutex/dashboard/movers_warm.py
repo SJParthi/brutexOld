@@ -79,12 +79,23 @@ def latest_movers_date(lake_root: Path) -> str | None:
     # MAX over the present spot 1day globs → the latest instant; convert to its IST date.
     # `present` is non-empty so the aggregate has rows; the None-guard is a single-line
     # ternary (a defensive narrow for the type checker, never a partial-branch miss).
-    with duckdb.connect() as conn:
-        row = conn.execute(
-            "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
-            "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound glob-list parameter
-            [present],
-        ).fetchone()
+    #
+    # GAP #4 (resilience): a single corrupt / unreadable 1day Parquet under the glob makes
+    # DuckDB raise a `duckdb.Error` (an `InvalidInputException` — "No magic bytes …") or an
+    # `OSError` fault; this read backs the DEFAULT `/movers` poll, so an unguarded raise
+    # would 500 the whole page on every open. Treat an unreadable lake the same as an empty
+    # one — return `None` so the route degrades to an honest empty/today payload instead of
+    # crashing (Golden Rule #1 / #10). NARROW: a code bug still propagates.
+    try:
+        with duckdb.connect() as conn:
+            row = conn.execute(
+                "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
+                "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound glob-list parameter
+                [present],
+            ).fetchone()
+    except (duckdb.Error, OSError) as exc:
+        _LOG.warning("movers.latest_date.unreadable_lake", error=str(exc))
+        return None
     return str(row[0]) if row is not None and row[0] is not None else None
 
 
