@@ -708,4 +708,109 @@ mod tests {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(total_conditions(), TOTAL_CONDITIONS);
     }
+
+    /// Stress: many valid anchors compute without panic and are deterministic,
+    /// and the validated FFI path equals the standalone indicators every time
+    /// (no per-call drift). Also a cheap perf smoke — the work is O(1) per call.
+    #[test]
+    fn stress_many_anchors_parity_and_no_panic() {
+        let mut acc = 0u64;
+        for i in 0..50_000i64 {
+            let pdl = 1 + (i % 100_000);
+            let pdh = pdl + (i % 20_000);
+            let pdc = pdl + (i % (pdh - pdl + 1));
+            let got = py_compute_pivot_levels_impl(pdh, pdl, pdc).unwrap();
+            let p = compute_pivot_levels(pdh, pdl, pdc);
+            assert_eq!(got[4], p.p_paisa);
+            let m = evaluate_from_raw_impl(
+                10 * 3600,
+                pdc,
+                pdh,
+                pdl,
+                pdc,
+                Some(pdc),
+                Some(pdc),
+                pdh,
+                pdl,
+                pdc,
+                pdh,
+                pdl,
+                pdc,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+            )
+            .unwrap();
+            acc = acc.wrapping_add(m);
+        }
+        // Black-box the accumulator so the loop is not optimised away; the exact
+        // value is incidental (the per-call parity asserts above are the point).
+        std::hint::black_box(acc);
+    }
+
+    // ── property layer ─────────────────────────────────────────────────────
+    use proptest::prelude::*;
+
+    /// Bound (₹10 billion paisa) far inside both the overflow ceiling and the
+    /// `tests/proptests.rs` domain — every generated valid anchor is accepted and
+    /// computes without tripping the release overflow-checks panic.
+    const PROP_MAX: i64 = 1_000_000_000_000;
+
+    /// A valid anchor: `1 <= pdl <= pdc <= pdh <= PROP_MAX`.
+    fn arb_valid_anchor() -> impl Strategy<Value = (i64, i64, i64)> {
+        (1i64..=PROP_MAX, 0i64..=PROP_MAX).prop_flat_map(|(pdl, range)| {
+            let pdh = pdl + range;
+            (Just(pdh), Just(pdl), pdl..=pdh)
+        })
+    }
+
+    proptest! {
+        /// A valid anchor is ALWAYS accepted, and the pivot/fib FFI logic equals
+        /// the standalone indicators bit-for-bit (the parity guarantee) — and
+        /// never panics (the overflow ceiling is never reached in-domain).
+        #[test]
+        fn valid_anchor_accepted_and_parity((pdh, pdl, pdc) in arb_valid_anchor()) {
+            prop_assert!(check_prev_day_ohlc(pdh, pdl, pdc).is_ok());
+            prop_assert!(check_prev_day_hl(pdh, pdl).is_ok());
+
+            let got_p = py_compute_pivot_levels_impl(pdh, pdl, pdc).unwrap();
+            let p = compute_pivot_levels(pdh, pdl, pdc);
+            prop_assert_eq!(
+                got_p,
+                vec![
+                    p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa,
+                    p.s1_paisa, p.s2_paisa, p.s3_paisa, p.s4_paisa,
+                ]
+            );
+
+            let got_f = py_compute_fib_levels_impl(pdh, pdl).unwrap();
+            prop_assert_eq!(got_f.len(), FIB_LEVELS_LEN);
+        }
+
+        /// `pdh < pdl` is ALWAYS rejected (both validators) and never panics —
+        /// for arbitrary in-domain magnitudes.
+        #[test]
+        fn pdh_below_pdl_always_rejected(
+            pdl in 2i64..=PROP_MAX,
+            drop in 1i64..=PROP_MAX,
+        ) {
+            let pdh = pdl - drop.min(pdl - 1); // pdh strictly below pdl, >= 1
+            prop_assume!(pdh < pdl);
+            prop_assert!(check_prev_day_hl(pdh, pdl).is_err());
+            prop_assert!(check_prev_day_ohlc(pdh, pdl, pdl).is_err());
+            prop_assert!(py_compute_pivot_levels_impl(pdh, pdl, pdl).is_err());
+            prop_assert!(py_compute_fib_levels_impl(pdh, pdl).is_err());
+        }
+
+        /// An overflow-prone magnitude (just past the ceiling) is ALWAYS rejected,
+        /// never reaching the inner arithmetic that would panic→abort.
+        #[test]
+        fn overflow_magnitude_always_rejected(extra in 1i64..=(i64::MAX / 8)) {
+            let pdh = MAX_ANCHOR_PAISA.saturating_add(extra);
+            prop_assert!(check_prev_day_hl(pdh, 0).is_err());
+            prop_assert!(check_prev_day_ohlc(pdh, 0, 0).is_err());
+        }
+    }
 }

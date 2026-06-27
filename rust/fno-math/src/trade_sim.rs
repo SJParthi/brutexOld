@@ -646,6 +646,36 @@ mod tests {
         assert_eq!(holding_bars(usize::MAX, 0), 1);
     }
 
+    // ── stress: a large window must not panic and is deterministic ─────────
+
+    #[test]
+    fn stress_large_window_no_panic_and_stable() {
+        // A 20k-bar window with a saw-tooth price + per-bar forced-exit flags +
+        // varied entry bits. The whole sweep must complete without tripping the
+        // holding/overflow guards, and re-running it is bit-identical (Golden
+        // Rule #7 idempotence — the sweep ranking must be reproducible).
+        let n = 20_000usize;
+        let open: Vec<i64> = (0..n as i64).map(|i| 10_000 + (i % 137) * 5).collect();
+        let high: Vec<i64> = open.iter().map(|&o| o + 50).collect();
+        let low: Vec<i64> = open.iter().map(|&o| o - 50).collect();
+        let close: Vec<i64> = open.iter().map(|&o| o + 10).collect();
+        let is_forced: Vec<bool> = (0..n).map(|i| i % 375 == 374).collect();
+        let bar_bits: Vec<u64> = (0..n as u64).map(|i| (i & 0x3) | 0x1).collect();
+        let s = ResidentSweepSim::build(open, high, low, close, is_forced, bar_bits)
+            .expect("equal-length stress window");
+
+        let policy = policy_default();
+        let run = || s.simulate_one(0x1, true, Some(200), Some(400), policy);
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "trade sweep must be deterministic");
+        // Every record's holding is >= 1 (the inclusive guard) and exit >= entry.
+        for &(_, _, _, holding, entry, exit) in &first {
+            assert!(holding >= 1);
+            assert!(exit >= entry);
+        }
+    }
+
     // ── construction validation (via the pure `build`, no PyErr in tests) ──
 
     #[test]

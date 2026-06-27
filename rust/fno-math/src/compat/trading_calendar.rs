@@ -1068,4 +1068,32 @@ mod tests {
         let expected_last = start + chrono::Duration::days(14);
         assert_eq!(result, expected_last);
     }
+
+    /// DOCUMENTING boundary test (no logic change): the calendar's lookups are
+    /// HashSet/weekday checks, so an extreme far-past or far-future date is a
+    /// total, panic-free function of its weekday — never an index/overflow hazard.
+    #[test]
+    fn test_extreme_dates_are_total_and_panic_free() {
+        let cal = TradingCalendar::from_config(&make_test_config()).unwrap();
+
+        // Far past (well before any listed holiday) and far future: a plain
+        // weekday classification, never a holiday in this config.
+        let far_past = NaiveDate::from_ymd_opt(1900, 1, 1).unwrap();
+        let far_future = NaiveDate::from_ymd_opt(2200, 12, 31).unwrap();
+        // is_trading_day == "is a weekday" for any date not in the holiday set.
+        let weekday = |d: NaiveDate| !matches!(d.weekday(), Weekday::Sat | Weekday::Sun);
+        assert_eq!(cal.is_trading_day(far_past), weekday(far_past));
+        assert_eq!(cal.is_trading_day(far_future), weekday(far_future));
+        assert!(!cal.is_holiday(far_past));
+        assert!(!cal.is_muhurat_trading_day(far_future));
+        assert!(!cal.is_mock_trading_day(far_past));
+
+        // The chrono domain extremes: MIN/MAX never panic the lookups.
+        let _ = cal.is_trading_day(NaiveDate::MIN);
+        let _ = cal.is_trading_day(NaiveDate::MAX);
+        // next_trading_day at MAX cannot advance (succ_opt → None) and returns it
+        // unchanged when MAX itself is a weekday trading day, or after the bounded
+        // lookahead otherwise — either way it terminates without panicking.
+        let _ = cal.next_trading_day(NaiveDate::MAX);
+    }
 }
