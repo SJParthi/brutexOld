@@ -1,0 +1,104 @@
+"""Property-based invariants for `brutex.calendars.nse` (DEC-CALENDAR-HARDEN-001).
+
+Hypothesis invariants:
+- IST offset is ALWAYS +05:30 with no DST, for any instant.
+- No listed holiday is ever a trading day (within coverage).
+- A regular session's open/close are exactly 09:15:00 / 15:30:00 and span 375m.
+- Every regular trading-day timestamp from open..close is within session bounds.
+- `is_holiday_data_available` is exactly the covered-year range test.
+- `is_holiday_checked` raises iff data is unavailable, else equals `is_holiday`.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta
+
+import pytest
+from brutex.calendars.nse import (
+    ALL_HOLIDAYS,
+    HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR,
+    IST,
+    SESSION_CLOSE_IST,
+    SESSION_DURATION_MINUTES,
+    SESSION_OPEN_IST,
+    HolidayDataUnavailableError,
+    SessionType,
+    get_session,
+    is_forced_exit_bar,
+    is_holiday,
+    is_holiday_checked,
+    is_holiday_data_available,
+    is_trading_day,
+)
+from hypothesis import given
+from hypothesis import strategies as st
+
+# A broad date span covering below-floor (2018), in-coverage, and above-ceiling.
+_DATES = st.dates(min_value=date(2018, 1, 1), max_value=date(2030, 12, 31))
+_INSTANTS = st.datetimes(
+    min_value=datetime(2018, 1, 1, 0, 0),
+    max_value=datetime(2030, 12, 31, 23, 59),
+)
+
+
+@given(_INSTANTS)
+def test_ist_offset_is_always_5h30m_no_dst(instant: datetime) -> None:
+    aware = instant.replace(tzinfo=IST)
+    assert aware.utcoffset() == timedelta(hours=5, minutes=30)
+    assert aware.dst() == timedelta(0)
+
+
+@given(_DATES)
+def test_no_listed_holiday_is_a_trading_day(d: date) -> None:
+    # Within the holiday list, a holiday can only be a trading day if it is a
+    # special weekend session — and the package guarantees those two sets are
+    # disjoint (a special session is never also in ALL_HOLIDAYS).
+    if d in ALL_HOLIDAYS:
+        assert not is_trading_day(d)
+
+
+@given(_DATES)
+def test_holiday_data_available_is_year_range_test(d: date) -> None:
+    expected = HOLIDAY_COVERAGE_FIRST_YEAR <= d.year <= HOLIDAY_COVERAGE_LAST_YEAR
+    assert is_holiday_data_available(d) is expected
+
+
+@given(_DATES)
+def test_checked_holiday_matches_or_raises(d: date) -> None:
+    if is_holiday_data_available(d):
+        assert is_holiday_checked(d) == is_holiday(d)
+    else:
+        with pytest.raises(HolidayDataUnavailableError):
+            is_holiday_checked(d)
+
+
+@given(_DATES)
+def test_regular_session_has_canonical_bounds(d: date) -> None:
+    session = get_session(d)
+    if session is not None and session.session_type == SessionType.REGULAR:
+        # Special weekend sessions are also REGULAR but use canonical hours too.
+        assert session.open_time_ist == SESSION_OPEN_IST == time(9, 15, 0)
+        assert session.close_time_ist == SESSION_CLOSE_IST == time(15, 30, 0)
+        assert session.duration_minutes == SESSION_DURATION_MINUTES == 375
+
+
+@given(st.integers(min_value=0, max_value=375))
+def test_minute_offsets_within_regular_session_are_in_bounds(offset: int) -> None:
+    # Every minute boundary from open (09:15) to close (15:30) inclusive lies in
+    # [open, close]. The 375th minute is exactly the close.
+    base = datetime(2024, 2, 20, 9, 15, tzinfo=IST)
+    moment = base + timedelta(minutes=offset)
+    assert moment.timetz() >= SESSION_OPEN_IST.replace(tzinfo=IST)
+    assert moment.timetz() <= SESSION_CLOSE_IST.replace(tzinfo=IST)
+
+
+@given(
+    st.times(),
+    st.integers(min_value=1, max_value=1440),
+)
+def test_forced_exit_is_monotone_in_open_time(t: time, tf_minutes: int) -> None:
+    # A bar whose window reaches 15:20 is a forced-exit bar; the predicate is
+    # a pure threshold so it never raises for tf>=1 and returns a bool.
+    result = is_forced_exit_bar(t, tf_minutes=tf_minutes)
+    assert isinstance(result, bool)

@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
 from brutex.indicators.day_extremes import DayExtremesState, compute_day_extremes
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -124,6 +125,22 @@ class TestEdgeCases:
         result = compute_day_extremes(bars)
         assert result[0].day_high_paisa == 5400000
         assert result[0].day_low_paisa == 5400000
+
+
+class TestCorruptionGuard:
+    """`DayExtremesState.update` must fail-fast on a corrupt bar with
+    high < low, so an inverted bar can never silently produce inverted
+    running extremes."""
+
+    def test_high_below_low_raises(self) -> None:
+        state = DayExtremesState()
+        with pytest.raises(ValueError, match="high < low"):
+            state.update(_t(13, 9, 15), high_paisa=5, low_paisa=10)
+
+    def test_doji_high_equals_low_ok(self) -> None:
+        # high == low is a valid doji (only strict < is corruption).
+        state = DayExtremesState()
+        assert state.update(_t(13, 9, 15), high_paisa=7, low_paisa=7) == (7, 7)
 
 
 class TestStateLifecycle:

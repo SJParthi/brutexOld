@@ -59,6 +59,38 @@ def test_digest_non_serialisable_params_raises() -> None:
         combo_digest(1, "NIFTY", "5m", "bull", {"bad": object()})
 
 
+# ── combo_digest non-finite-float guard (DEC-ENGINE-DEDUP-NAN-CANON-001) ─────
+
+
+def test_digest_nan_param_raises() -> None:
+    """A ``NaN`` float param is rejected (one-NaN-policy, CLAUDE.md §2 Rule 11).
+
+    The dedup-key canonicaliser uses ``allow_nan=False`` to match the
+    run-identity hash (`combo.canonicalise_params`) and the completion sentinel
+    (`tuple_complete.render_completion_sentinel`) — the membership key can never
+    silently accept a non-finite float the identity key would refuse.
+    """
+    with pytest.raises(SweepCacheError, match="non-finite float"):
+        combo_digest(1, "NIFTY", "5m", "bull", {"x": float("nan")})
+
+
+def test_digest_inf_param_raises() -> None:
+    with pytest.raises(SweepCacheError, match="non-finite float"):
+        combo_digest(1, "NIFTY", "5m", "bull", {"x": float("inf")})
+
+
+def test_digest_negative_inf_param_raises() -> None:
+    with pytest.raises(SweepCacheError, match="non-finite float"):
+        combo_digest(1, "NIFTY", "5m", "bull", {"x": float("-inf")})
+
+
+def test_digest_finite_float_param_still_succeeds() -> None:
+    """A FINITE float param is unaffected by the guard — a 64-hex digest."""
+    digest = combo_digest(1, "NIFTY", "5m", "bull", {"x": 1.5, "y": -0.0})
+    assert len(digest) == 32
+    assert len(digest.hex()) == 64
+
+
 # ── SweepCache lifecycle ────────────────────────────────────────────────────
 
 

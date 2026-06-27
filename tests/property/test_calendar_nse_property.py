@@ -1,0 +1,81 @@
+"""Property tests for brutex.calendars.nse (DEC-CALENDAR-HARDEN-001).
+
+Hypothesis-driven invariants for the forced-exit, bar-count, IST-offset and
+trading-day rules. Lives under tests/property/ (the `property` CI job has
+hypothesis); the per-module coverage gate is satisfied by the unit suite.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta
+
+from brutex.calendars.nse import (
+    IST,
+    SESSION_DURATION_MINUTES,
+    expected_bars_per_day_for_tf,
+    is_forced_exit_bar,
+    is_holiday,
+    is_special_weekend_session,
+    is_trading_day,
+    is_weekend,
+)
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+_FORCED_EXIT_SECONDS = 15 * 3600 + 20 * 60
+
+
+@given(tf=st.integers(min_value=1, max_value=10_000))
+@settings(deadline=None)
+def test_expected_bars_in_valid_range(tf: int) -> None:
+    bars = expected_bars_per_day_for_tf(tf)
+    assert 1 <= bars <= SESSION_DURATION_MINUTES
+
+
+@given(tf=st.integers(max_value=0))
+@settings(deadline=None)
+def test_expected_bars_rejects_non_positive(tf: int) -> None:
+    try:
+        expected_bars_per_day_for_tf(tf)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for tf <= 0")
+
+
+@given(
+    t=st.times(),
+    tf=st.integers(min_value=1, max_value=600),
+)
+@settings(deadline=None)
+def test_forced_exit_matches_oracle(t: time, tf: int) -> None:
+    open_seconds = t.hour * 3600 + t.minute * 60 + t.second
+    close_seconds = open_seconds + tf * 60
+    assert is_forced_exit_bar(t, tf) == (close_seconds > _FORCED_EXIT_SECONDS)
+
+
+@given(
+    t=st.times(),
+    tf=st.integers(min_value=1, max_value=599),
+)
+@settings(deadline=None)
+def test_forced_exit_monotonic_in_timeframe(t: time, tf: int) -> None:
+    # A wider window can only ever ADD a forced-exit, never remove one.
+    if is_forced_exit_bar(t, tf):
+        assert is_forced_exit_bar(t, tf + 1)
+
+
+@given(d=st.dates(min_value=date(2020, 1, 1), max_value=date(2026, 12, 31)))
+@settings(deadline=None)
+def test_ist_offset_fixed_no_dst_in_scope(d: date) -> None:
+    dt = datetime.combine(d, time(12, 0), tzinfo=IST)
+    assert dt.utcoffset() == timedelta(hours=5, minutes=30)
+    assert dt.dst() == timedelta(0)
+
+
+@given(d=st.dates(min_value=date(2021, 1, 1), max_value=date(2026, 12, 31)))
+@settings(deadline=None)
+def test_trading_day_biconditional(d: date) -> None:
+    if not is_weekend(d) and not is_holiday(d):
+        assert is_trading_day(d)
+    if (is_weekend(d) or is_holiday(d)) and not is_special_weekend_session(d):
+        assert not is_trading_day(d)
