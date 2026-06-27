@@ -1109,6 +1109,13 @@ def test_derive_daily_from_minute_writes_one_day_partition(
     daily_dir = tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day"
     assert daily_dir.is_dir()
     assert any(daily_dir.rglob("*.parquet"))
+    # DEC-FNO-TF-DERIVE-OI-001: the derived F&O 1-day bar carries the last-of-day OI
+    # (7 here) — NOT None (the old spot-path hardcode). The 1-minute all carry OI=7.
+    import polars as pl
+
+    daily = pl.read_parquet((daily_dir / "**" / "*.parquet").as_posix())
+    assert daily.height == 1
+    assert daily.get_column("open_interest").to_list() == [7]
 
 
 def test_derive_daily_from_minute_no_minute_is_noop(
