@@ -35,7 +35,8 @@ padding:1px 5px;font:13.5px/1.4 "SF Mono",ui-monospace,Menlo,Consolas,monospace;
 word-break:break-word;}
 pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;
 padding:14px 16px;overflow:auto;margin:12px 0;}
-pre code{background:none;border:0;padding:0;font-size:13px;white-space:pre;}
+pre code{background:none;border:0;padding:0;font-size:13px;
+white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}
 blockquote{background:var(--quote-bg);border-left:4px solid var(--quote-border);
 margin:14px 0;padding:8px 18px;border-radius:0 6px 6px 0;}
 blockquote p{margin:6px 0;}
@@ -83,7 +84,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <h3>1 — The 403 that blocks GitHub is a misleading error</h3>
 <p>A long-running session had been opening and merging pull requests normally for hours. Then every GitHub REST call began returning <strong>403</strong> at once. The body says <em>"an org admin must connect the Claude GitHub App for this organization"</em> — but this is a <strong>personal account</strong> with no organization and no org admin, and the App was demonstrably connected (it had been merging PRs minutes earlier). The response also doesn't look like a real GitHub error: its <code>documentation_url</code> points at <code>docs.anthropic.com</code>, the status is 403 (GitHub returns 401 for bad credentials), and it carries none of GitHub's signature headers (<code>x-github-request-id</code>, <code>x-ratelimit-*</code>). The exact body:</p>
 <pre><code>HTTP 403
-{"message":"GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.","documentation_url":"https://docs.anthropic.com/.../claude-code/github-actions"}</code></pre>
+{
+  "message": "GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.",
+  "documentation_url": "https://docs.anthropic.com/.../claude-code/github-actions"
+}</code></pre>
 <p><strong>Why it matters:</strong> the message sends a personal-account user chasing an "org admin" that doesn't exist, instead of telling them their session's access lapsed.</p>
 <p><strong>Suggested fix:</strong> detect the personal-account, already-connected case and say what's true (<em>"this session's GitHub access was not enabled; start a new session to recover"</em>), and distinguish an access-not-enabled state from a real credential error.</p>
 <h3>2 — GitHub access drops mid-session with no in-session recovery</h3>

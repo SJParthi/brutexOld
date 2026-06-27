@@ -42,7 +42,10 @@ A long-running session had been opening and merging pull requests normally for h
 
 ```
 HTTP 403
-{"message":"GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.","documentation_url":"https://docs.anthropic.com/.../claude-code/github-actions"}
+{
+  "message": "GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.",
+  "documentation_url": "https://docs.anthropic.com/.../claude-code/github-actions"
+}
 ```
 
 **Why it matters:** the message sends a personal-account user chasing an "org admin" that doesn't exist, instead of telling them their session's access lapsed.
