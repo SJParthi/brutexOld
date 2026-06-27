@@ -1351,6 +1351,104 @@ class TestSweepComboError:
         assert not trial_stats_sidecar_path(store.path).exists()
         assert not completion_sentinel_path(store.path).exists()
 
+    def test_keyboard_interrupt_propagates_bare_not_a_combo_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A KeyboardInterrupt ESCAPES the per-tuple SweepComboError catch BARE.
+
+        An operator Ctrl-C is a ``BaseException`` (NOT an ``Exception``), so the
+        combo loop's ``except Exception`` MUST NOT catch it — it propagates
+        unchanged so the whole (33B-trial) sweep aborts instead of being silently
+        downgraded to a single-tuple skip + continue (DEC-ENGINE-DEDUP-NAN-CANON-001
+        / the audit H1 guard, the BaseException twin of the MemoryError test). The
+        store / sidecar / sentinel stay unwritten + ``tuples_failed`` is irrelevant
+        (the single-tuple runner does not even reach the grid driver's count).
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _interrupt(*_args: object, **_kwargs: object) -> object:
+            raise KeyboardInterrupt("operator ctrl-c")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _interrupt)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(KeyboardInterrupt, match="operator ctrl-c") as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # It is NOT downgraded to a SweepComboError (the per-tuple skip path).
+        assert not isinstance(excinfo.value, SweepComboError)
+        # Bare re-raise (escaped `except Exception`): no SweepComboError chained.
+        assert excinfo.value.__cause__ is None
+        cause = excinfo.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # No artifact was written (the raise is before flush/mark/sentinel).
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_base_exception_subclass_propagates_bare_not_a_combo_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generic BaseException subclass ESCAPES the ``except Exception`` catch.
+
+        The combo loop catches only ``Exception`` (and re-raises ``MemoryError``
+        bare BEFORE it). Anything deriving from ``BaseException`` but NOT
+        ``Exception`` — Ctrl-C, ``SystemExit``, or any custom ``BaseException``
+        subclass — must propagate UNWRAPPED, pinning that a future refactor
+        widening the catch to ``except BaseException`` (which would silently
+        downgrade a fatal signal into a tuple skip) is caught (audit H1).
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        class _FatalSignal(BaseException):
+            """A BaseException that is NOT an Exception (mirrors Ctrl-C / SystemExit)."""
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _fatal(*_args: object, **_kwargs: object) -> object:
+            raise _FatalSignal("not an Exception")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _fatal)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(_FatalSignal, match="not an Exception") as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # Not an Exception, so it cannot be wrapped by the SweepComboError catch.
+        assert not isinstance(excinfo.value, Exception)
+        assert not isinstance(excinfo.value, SweepComboError)
+        assert excinfo.value.__cause__ is None
+        # No artifact was written (raise is before flush/mark/sentinel).
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
     def test_store_flush_error_aborts_not_a_combo_skip(self, tmp_path: Path) -> None:
         """A ResultsStoreError from store.flush() propagates OUT — NOT a tuple skip.
 

@@ -20,6 +20,7 @@ unit tests in ``tests/unit/test_ranking.py``:
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import Any
 
@@ -162,6 +163,41 @@ def test_excess_to_non_excess_kurtosis_identity(
         kurtosis=ek + GAUSSIAN_KURTOSIS,
     ).deflated_sharpe_ratio
     assert got == ref
+
+
+@given(
+    sharpes=st.lists(
+        st.floats(min_value=-3.0, max_value=6.0, allow_nan=False, allow_infinity=False),
+        min_size=0,
+        max_size=20,
+        unique=True,
+    ),
+    perm_seed=st.randoms(use_true_random=False),
+)
+def test_ranking_is_a_permutation_invariant_total_order(
+    sharpes: list[float], perm_seed: Any
+) -> None:
+    """Permuting the candidate enumeration yields a byte-identical ranking.
+
+    The determinism oracle for the tie-break fix (DEC-RANKING-TIEBREAK-001): a
+    leaderboard is a SET of combos, so its ranking must not depend on the order the
+    sweep enumerated them in (Golden Rules #4/#7). Distinct masks + a deliberate
+    proportion of DUPLICATE Sharpes (``i % 3`` reuse) force real composite ties so
+    the mask tie-break is exercised, not bypassed by always-distinct scores.
+    """
+    # Reuse each Sharpe up to three times so many combos share a composite score
+    # (the tie regime the stable-sort-only version mis-ordered). Masks stay unique.
+    cand = [(i, _m(sharpe_ratio=sharpes[i % len(sharpes)] if sharpes else 0.0)) for i in range(15)]
+    shuffled = list(cand)
+    perm_seed.shuffle(shuffled)
+    base = rank_combos(cand)
+    other = rank_combos(shuffled)
+    assert [rc.mask for rc in base] == [rc.mask for rc in other]
+    assert [rc.composite_score for rc in base] == [rc.composite_score for rc in other]
+    # Total order: masks strictly increase within every equal-score run.
+    for a, b in itertools.pairwise(base):
+        if a.composite_score == b.composite_score:
+            assert a.mask < b.mask
 
 
 @given(sharpes=st.lists(_sharpe, min_size=1, max_size=12))
