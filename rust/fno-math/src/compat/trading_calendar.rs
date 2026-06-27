@@ -525,16 +525,20 @@ mod tests {
     fn test_is_trading_day_today_returns_bool() {
         let config = make_test_config();
         let cal = TradingCalendar::from_config(&config).unwrap();
-        // Just verify it doesn't panic
-        let _is_trading = cal.is_trading_day_today();
+        // It must EQUAL the explicit-date query for today (kills the
+        // mutate-to-true / mutate-to-false survivors — the result is not a
+        // hard-coded constant, it tracks today's actual classification).
+        assert_eq!(cal.is_trading_day_today(), cal.is_trading_day(today_ist()));
     }
 
     #[test]
     fn test_is_muhurat_trading_today_returns_bool() {
         let config = make_test_config();
         let cal = TradingCalendar::from_config(&config).unwrap();
-        // Just verify it doesn't panic
-        let _is_muhurat = cal.is_muhurat_trading_today();
+        assert_eq!(
+            cal.is_muhurat_trading_today(),
+            cal.is_muhurat_trading_day(today_ist())
+        );
     }
 
     #[test]
@@ -986,8 +990,12 @@ mod tests {
     fn test_is_mock_trading_today_returns_bool() {
         let config = make_test_config();
         let cal = TradingCalendar::from_config(&config).unwrap();
-        // Just verify it doesn't panic
-        let _is_mock = cal.is_mock_trading_today();
+        // Must EQUAL the explicit-date query for today (kills the
+        // mutate-to-true / mutate-to-false survivors).
+        assert_eq!(
+            cal.is_mock_trading_today(),
+            cal.is_mock_trading_day(today_ist())
+        );
     }
 
     // =====================================================================
