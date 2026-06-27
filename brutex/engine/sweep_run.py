@@ -61,6 +61,7 @@ import structlog
 
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
+    MAX_VOCAB_BITS,
     count_combos,
     count_supermasks,
     iter_masks_k_of_bits,
@@ -382,6 +383,17 @@ class SweepRunConfig:
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
         if self.tf_minutes < 1:
             raise ValueError(f"SweepRunConfig.tf_minutes must be >= 1, got {self.tf_minutes}")
+        # Validate every condition bit is in the u64 vocabulary range AT CONFIG
+        # TIME (DEC-SWEEP-DEDUP-LMDB-001): an out-of-range bit otherwise slips
+        # past the k-bound check and fails LATE as a bare ValueError raised from
+        # the lazy ``iter_masks_k_of_bits`` generator mid-enumeration, aborting
+        # the whole grid. Reject it here (the fail-fast contract this class
+        # promises) so a bad combo is caught — and tuple-skipped — at planning.
+        out_of_range = sorted({bit for bit in self.condition_bits if not 0 <= bit < MAX_VOCAB_BITS})
+        if out_of_range:
+            raise ValueError(
+                f"SweepRunConfig.condition_bits {out_of_range} out of range [0, {MAX_VOCAB_BITS})"
+            )
         n_unique = len(set(self.condition_bits))
         if not 0 <= self.k <= n_unique:
             raise ValueError(
@@ -994,7 +1006,12 @@ def run_persisted_sweep(
     # the work rather than skipping it (redo-not-skip; Golden Rule #7). The
     # marks are ADVISORY on the digest path (the sentinel below is the redo
     # authority); they remain load-bearing only for legacy no-digest callers.
-    marked = dedup.mark_many(run_id for _, run_id in survivors)
+    # On ``bypass_dedup`` (the digest path) the probes were NEVER consulted —
+    # ``seen`` was skipped above — so marking is a pure, wasted O(survivors)
+    # write to the (now off-heap LMDB) exact tier; skip it (DEC-SWEEP-DEDUP-LMDB-001).
+    # The sentinel below is the redo authority on this path, so ``n_marked``
+    # honestly reads 0 (no marks were written).
+    marked = 0 if bypass_dedup else dedup.mark_many(run_id for _, run_id in survivors)
     # Completion sentinel STRICTLY LAST (DEC-MARK-MANY-SENTINEL-001): its
     # presence proves flush + sidecar + mark all completed; a crash anywhere
     # before this line leaves it absent → the next run redoes the FULL tuple.
