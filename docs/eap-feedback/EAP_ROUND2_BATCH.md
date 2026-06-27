@@ -9,6 +9,184 @@
 
 ---
 
+## Projects (beta) — pilot feedback
+
+**This is the lead section** — Projects is the feature the team is piloting, so it gets the spotlight. Items here are numbered with a **P-** prefix to keep them distinct from the V- (Verified) / I- (Ideas) findings below and from the F-1..F-14 evidence-gallery sequence in `evidence/EVIDENCE.md` and `EAP_ROUND3_SESSION_STATE.md`.
+
+**Honesty framing (read first).** Projects **is** a real beta feature I have access to — there is an internal "coordinator session" that orchestrates a project, and the work in this very batch ran inside one. So this is **not** "Projects doesn't exist." The root cause of most items below is that Projects is **undocumented**: the capability is shipping, but there is no spec for what it is, what persists, or how it relates to sessions / environments / routines — so users (me included) form wrong expectations and hit the gaps below. Every item carries an **Evidence label**: **VERIFIED** = I directly observed or reproduced it this session; **HELD** = plausible but unconfirmed, raised as a documentation/clarification request, not asserted as fact.
+
+### A. Documentation gaps
+
+### P-1 — Projects has no documentation page at all
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED
+
+**What was observed.** The headline pilot feature has zero documentation. The official docs index (`llms.txt`) carries no "Projects" entry — there is no page describing what a Project is, how to create one, or how it behaves. A user testing the beta has nothing authoritative to read.
+
+**Why it matters.** With no doc, every user reverse-engineers Projects by trial and error, and forms the wrong mental model (see P-4). The absence of a single landing page is the upstream cause of most other items in this section.
+
+**Suggested fix.** Ship a minimal "Projects (beta)" doc page — even one screen — and list it in `llms.txt`: what a Project is, how to create/open one, and a one-line definition of each moving part (Project / Session / Environment / Routine).
+
+### P-2 — The Project ↔ Session ↔ Environment ↔ Routine hierarchy is undocumented and genuinely unclear
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED
+
+**What was observed.** Four concepts are in play — Project, Session, Environment, Routine — with no documented relationship between them. It is not stated (anywhere I could find) which one is *persistent*, which one actually *runs the work*, and which one *holds auth*. I had to infer the model from behavior: work runs in **sessions**; **routines/triggers** are what fire scheduled/recurring work; the **environment** is the VM the session runs in; the **Project** is the persistent container of conversation history. None of that is written down.
+
+**Why it matters.** You cannot reason about persistence, continuity, or credentials without knowing this hierarchy. The confusion directly produced P-4 (expecting the Project to "just keep working") and P-5 (expecting the Project to shield auth).
+
+**Suggested fix.** Document the hierarchy explicitly — a single diagram + table: for each of {Project, Session, Environment, Routine}, state "persistent? runs work? holds auth? lifetime."
+
+### P-3 — What persists in a Project vs what does not is undocumented
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED
+
+**What was observed.** It is not documented which parts of a Project survive across time. Observed behavior: **conversation history persists** (the Project retains the thread), but **live credentials and the running VM/environment do not** — they are session-scoped and re-bound per session (this is the mechanism behind P-5 and P-6). A user has no way to know this without hitting it.
+
+**Why it matters.** "Persistent project" reads as "everything persists." When credentials and the live VM silently don't, the user is surprised mid-task (P-5) — the most expensive kind of surprise.
+
+**Suggested fix.** Document a clear persistence contract: a short list of "persists across sessions" (history, files committed to the repo, project config) vs "session-scoped, re-bound each session" (credentials, the running VM, in-memory state).
+
+### B. Behavior / expectation gaps
+
+### P-4 — Users expect a Project to be a self-running persistent container; it is not
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (this session)
+
+**What was observed.** The natural expectation from the word "Project" is a self-running, always-on container that keeps working on its own. In reality, work still runs as **sessions**, and 24/7 / recurring automation still requires an explicitly-wired **Routine/trigger**. There is no ambient "the Project is working" loop. This expectation mismatch cost me multiple rounds of confusion this session before the model clicked.
+
+**Why it matters.** The gap between the implied promise ("a Project that runs") and the mechanism ("sessions + manually-wired routines") is exactly where a beta loses trust. Users wait for work that will never start on its own.
+
+**Suggested fix.** Either (a) make the Project actually drive continuity (see P-8), or (b) set expectations explicitly in the doc: "A Project is a persistent workspace; to make it run on its own, attach a Routine."
+
+### P-5 — A Project does NOT shield a running session from the session-start auth binding
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (this session)
+
+**What was observed.** GitHub access dropped **mid-session** and could not be recovered within that session — a brand-new session was required to re-bind it — **even though the work was happening inside a Project.** Being "in a Project" did not protect the live session's credentials. This is the literal question I kept asking: *"why a new session if I'm in a Project?"* Cross-reference **F-8 in `EAP_ROUND3_SESSION_STATE.md`**, which documents the session-start auth-binding behavior in detail.
+
+**Why it matters.** A persistent Project that cannot keep its own session authenticated breaks the core promise of "persistent." Long-running work dies on a credential drop and the only recovery is to start over — the opposite of what a Project should buy you.
+
+**Suggested fix.** Let a Project re-bind / refresh credentials for its running session without forcing a brand-new session (see P-9), or at minimum document that auth is session-start-bound and a drop requires a new session.
+
+### P-6 — Connecting the GitHub App did not propagate into the Project's running session
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (re-tested twice)
+
+**What was observed.** After a correct GitHub App install (`@SJParthi`, All-repos), the new access did **not** take effect in the already-running Project session — a fresh session was required for it to be picked up. I re-tested this twice to be sure it wasn't a transient glitch: the running session never saw the newly-granted access; only a new session did.
+
+**Why it matters.** The natural remediation for an auth gap — "connect the App" — appears to do nothing from inside the live session, so the user repeats it, doubts whether it worked, and only stumbles onto "start a new session" by accident. It compounds P-5.
+
+**Suggested fix.** Propagate a credential/permission change (App connect, repo grant) into the running session, or surface an explicit "new permissions detected — restart session to apply" prompt instead of silently requiring a fresh session.
+
+### P-7 — The coordinator / ambient orchestration is invisible to the user
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED
+
+**What was observed.** Projects are orchestrated by an internal coordinator session, but the user gets **no signal** of whether or how the Project is continuously working — no "the coordinator is active / idle," no view of what it is doing on the user's behalf. The orchestration layer that defines a Project is entirely hidden.
+
+**Why it matters.** Invisibility of the coordinator is why the Project "feels" idle even when something is (or should be) happening — and why P-4's expectation gap is so hard to self-correct. The user cannot tell "working" from "nothing scheduled."
+
+**Suggested fix.** Surface coordinator/ambient state in the Project UI: active vs idle, what is currently running, and what (if anything) is scheduled.
+
+### C. Feature requests (grounded in the above)
+
+### P-8 — Project-level auto-resume / "keep working"
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (request grounded in P-4)
+
+**What was observed.** Today, continuity requires manually wiring a Routine/trigger; a Project does not resume work on its own. The request is a first-class Project-level "keep working" / auto-resume so users get the continuity they already expect (P-4) without hand-building scheduling plumbing.
+
+**Why it matters.** This is the single capability that would make "Project" mean what users think it means. It directly closes the P-4 expectation gap.
+
+**Suggested fix.** A Project setting: "auto-resume in-flight work" / "keep working on goal X," backed by the existing routine/trigger machinery but owned by the Project, not the user.
+
+### P-9 — In-Project credential refresh
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (request grounded in P-5 / P-6)
+
+**What was observed.** Connecting the GitHub App took effect only after starting a new session (P-6), and a mid-session credential drop could not be recovered in-session (P-5). The request is in-Project credential refresh so connecting/granting access takes effect in the running session.
+
+**Why it matters.** Removes the "start a new session to fix auth" tax that currently breaks long-running Project work.
+
+**Suggested fix.** An in-session "refresh credentials / re-bind GitHub" action (and/or automatic pickup of a newly-connected App) that does not require tearing down the session.
+
+### P-10 — A clear Project status surface
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (request grounded in P-3 / P-7)
+
+**What was observed.** There is no single place that tells the user what in a Project is **persistent**, what is **live** (this session), and what is **stale**. The request is a status surface that makes the persistence contract (P-3) and the coordinator state (P-7) visible at a glance.
+
+**Why it matters.** Most of the confusion above is "I can't tell what state I'm in." A status surface is the cheapest fix that addresses P-3, P-5, P-6, and P-7 at once.
+
+**Suggested fix.** A Project status panel: persistent items (history, repo, config) · live items (current session, bound credentials, environment) · stale/expired items, each with a clear badge.
+
+### P-11 — Attach Routines/triggers to a Project explicitly
+
+**Date:** 2026-06-27
+**Evidence:** VERIFIED (request grounded in P-4 / P-8)
+
+**What was observed.** Routines/triggers exist but are not visibly owned by the Project — so "the Project takes care of it" is not actually true; the user wires scheduling separately. The request is to attach Routines/triggers to a Project explicitly, so a Project carries its own automation.
+
+**Why it matters.** Makes the Project the unit of automation (matching the mental model), and makes P-8's "keep working" composable from explicit, inspectable routines rather than hidden plumbing.
+
+**Suggested fix.** First-class "Routines attached to this Project," listed and editable in the Project UI, firing into the Project's sessions.
+
+### D. Held — needs user confirmation
+
+### P-12 — Projects billing / usage vs sessions
+
+**Date:** 2026-06-27
+**Evidence:** HELD
+
+**What was observed.** Whether Project / EAP usage is metered against the plan, exempt, or free is **unknown** — I have not confirmed it, so I am raising it as a documentation request, not a claim. Heavy multi-agent fan-outs inside a Project plausibly consume plan usage, but I will not assert that without confirmation.
+
+**Why it matters.** Operators running large Projects need to reason about cost; without a documented billing policy they cannot make a go/no-go call (ties to V-7 / the billing question for Omid below).
+
+**Suggested fix.** Document the EAP / Projects billing policy (metered vs exempt vs free), and ideally show a per-Project usage rollup.
+
+### P-13 — Dispatch ↔ Projects relationship
+
+**Date:** 2026-06-27
+**Evidence:** HELD
+
+**What was observed.** The relationship between "Dispatch" and Projects is **unclear** to me, and Dispatch may be plan-gated. I have not verified how (or whether) Dispatch integrates with a Project, so this is raised as an open question, not a finding.
+
+**Why it matters.** If Dispatch is the intended way to drive a Project (or a separate, plan-gated path), users need that stated; otherwise it is another undocumented moving part adding to P-2's hierarchy confusion.
+
+**Suggested fix.** Clarify in the Projects doc how Dispatch relates to a Project (same thing? a launcher? plan-gated?), and whether it is required for any Project workflow.
+
+### P-14 — Overnight disruption appears specific to the Projects beta (user-reported correlation)
+
+**Date:** 2026-06-27
+**Evidence:** HELD (user-reported correlation; root cause UNCONFIRMED — no causation asserted)
+
+**What was observed (user-reported).** Across three run modes the user reports a difference in overnight stability:
+
+- **Fable 5 overnight runs** ran the **full night uninterrupted** — no human/manual intervention, no Routines — completing per plan.
+- Recent **plain (non-Projects) sessions** also did **not** show the mid-session disruption.
+- With the **Projects beta** feature access, the mid-session disruption **did** occur — the GitHub-access drop + "start a new session" stranding documented in P-5 / P-6 / F-8.
+
+This points to the disruption possibly being **specific to the Projects beta path** rather than a universal session behavior.
+
+**Why it matters.** If the disruption is specific to the beta, it directly undermines the unattended-overnight value proposition of the exact feature being piloted — the thing a "Project" is supposed to make better is where it gets worse.
+
+**Honest caveat (why this is HELD, not VERIFIED).** This is a **user-reported correlation**, not a controlled comparison. We could **not** independently compare the Fable-5 / plain-session / Projects-beta runs — there is no telemetry exposed to do so — so the **root cause is UNCONFIRMED** and **no causation is claimed**. A plausible *but unverified* mechanism worth checking: the Projects beta may wrap sessions with a different lifecycle / coordinator or auth-binding path than plain sessions. Stated only as a hypothesis for the team to test.
+
+**Suggested fix.** Have Anthropic compare the **session lifecycle + GitHub-auth binding** between Projects-beta sessions and plain sessions / Fable-5 overnight runs, to determine why only the beta path drops mid-run.
+
+---
+
 ## Bucket 1 — Verified findings
 
 ### V-1 — The background-tasks panel has no per-task progress or liveness signal
