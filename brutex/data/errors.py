@@ -81,3 +81,26 @@ class CatalogError(DataLakeError):
     * ``duckdb`` import fails at runtime
     * Integrity check across catalog + filesystem reports a drift
     """
+
+
+def parquet_read_skip_errors() -> tuple[type[BaseException], ...]:
+    """Exception types that mean a single Parquet file is unreadable → skip / quarantine it.
+
+    The ONE data-layer source of truth (CLAUDE.md §11 COMMON) for "this one Parquet
+    file is corrupt / version-incompatible / fault — do not crash the whole pass over
+    it". ``polars`` raises a :class:`polars.exceptions.PolarsError` (e.g. a
+    ``ComputeError`` *"could not read parquet"* on a truncated / garbage file), and
+    ``OSError`` covers file-level faults (a vanished / unreadable file). NARROW on
+    purpose: a genuine code bug (``ValueError`` / ``KeyError`` / …) still propagates,
+    so a logic error is never silently swallowed (Golden Rule #1).
+
+    The dashboard ``/movers`` + ``/db`` read paths *widen* this set with
+    :class:`duckdb.Error` (they read via DuckDB too) in
+    :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`, which DELEGATES
+    here — so the polars + OSError half lives in exactly one place. ``polars`` is
+    imported inside the call (the data layer already lazy-imports it in the writers),
+    so this stays importable without paying the polars import at module load.
+    """
+    import polars as pl
+
+    return (pl.exceptions.PolarsError, OSError)
