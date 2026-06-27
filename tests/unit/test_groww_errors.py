@@ -209,10 +209,147 @@ def test_transient_5xx_server_error_is_retryable_not_rate_limit() -> None:
     assert "Internal Server Error" in str(mapped)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Transient network / DNS errors → RETRYABLE GrowwNetworkError, NOT rate-limit
+# (DEC-GROWW-NETWORK-ERROR-RETRY-001 — the 218-contract DNS-outage quarantine).
+# Fakes named EXACTLY like the requests / urllib3 / socket transport classes
+# (matched by class NAME, so neither package need be importable).
+# ──────────────────────────────────────────────────────────────────────────
+class ConnectionError(Exception):  # noqa: A001 — mirrors requests.exceptions.ConnectionError / builtin
+    """Fake transport ``ConnectionError`` (requests / urllib3 wraps a DNS blip in it)."""
+
+
+class NameResolutionError(Exception):
+    """Fake ``urllib3.exceptions.NameResolutionError`` (a DNS failure)."""
+
+
+class NewConnectionError(Exception):
+    """Fake ``urllib3.exceptions.NewConnectionError`` (a refused/unresolvable connect)."""
+
+
+class MaxRetryError(Exception):
+    """Fake ``urllib3.exceptions.MaxRetryError`` (urllib3 gave up after retries)."""
+
+
+class ConnectionResetError(Exception):  # noqa: A001 — mirrors the builtin transport class
+    """Fake ``ConnectionResetError`` (a dropped socket)."""
+
+
+class ConnectionRefusedError(Exception):  # noqa: A001 — mirrors the builtin transport class
+    """Fake ``ConnectionRefusedError`` (a refused socket)."""
+
+
+class gaierror(Exception):
+    """Fake ``socket.gaierror`` (``"Name or service not known"``)."""
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # class-name matched (the message is irrelevant — caught by the transport class)
+        ConnectionError("Failed to resolve 'api.groww.in'"),
+        ConnectionError("nondescript connection failure"),  # name wins even with no hint
+        NameResolutionError("Failed to resolve 'api.groww.in' ([Errno -3])"),
+        NewConnectionError("Failed to establish a new connection"),
+        MaxRetryError("Max retries exceeded with url: /historical"),
+        ConnectionResetError("[Errno 104] Connection reset by peer"),
+        ConnectionRefusedError("[Errno 111] Connection refused"),
+        gaierror("[Errno -2] Name or service not known"),
+    ],
+)
+def test_transient_network_error_classified_retryable(exc: Exception) -> None:
+    """A transport-layer network / DNS failure → RETRYABLE :class:`GrowwNetworkError`.
+
+    DEC-GROWW-NETWORK-ERROR-RETRY-001 — the 28h-pull forensic: a transient
+    ``"Failed to resolve api.groww.in"`` DNS outage permanently quarantined 218
+    option contracts because the failure fell to the terminal base. It must now map
+    to a RETRYABLE error (matched by the transport class NAME, so neither
+    ``requests`` nor ``urllib3`` need be importable).
+    """
+    mapped = e.from_groww_exception(exc)
+    assert type(mapped) is e.GrowwNetworkError
+    assert e.is_retryable(mapped) is True
+    assert e.is_rate_limit(mapped) is False  # a DNS blip is NOT a quota signal
+    assert e.is_auth_failure(mapped) is False
+    assert isinstance(mapped, e.GrowwError)
+    assert isinstance(mapped, BruteXError)
+    assert type(exc).__name__ in str(mapped)  # message preserved for the audit log
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Failed to resolve 'api.groww.in'",
+        "Temporary failure in name resolution",
+        "nodename nor servname provided, or not known",
+        "Name resolution failure",
+        "Connection reset by peer",
+        "('Connection aborted.', ...)",
+        "Connection refused",
+        "Connection broken: ...",
+        "Max retries exceeded with url",
+    ],
+)
+def test_generic_exception_network_message_is_retryable(message: str) -> None:
+    """A GENERIC exception whose CLASS NAME is unknown but whose MESSAGE names a DNS /
+
+    connection failure is still recognised as a RETRYABLE :class:`GrowwNetworkError`
+    by the message-hint fallback (DEC-GROWW-NETWORK-ERROR-RETRY-001) — the belt to
+    the class-name suspenders, for a wrapper whose class is not a known transport
+    name.
+    """
+    mapped = e.from_groww_exception(_GenericGrowwAPIException(message))
+    assert type(mapped) is e.GrowwNetworkError
+    assert e.is_retryable(mapped) is True
+    assert e.is_rate_limit(mapped) is False
+
+
+def test_network_hint_priority_below_rate_limit_timeout_server() -> None:
+    """A message co-mentioning a connection AND a 429 / timeout / 5xx never reads as
+
+    a plain network error — the more specific transient class wins (priority order
+    preserved: rate-limit > timeout > server > network).
+    """
+    # rate-limit beats a co-mentioned connection
+    assert (
+        type(e.from_groww_exception(_GenericGrowwAPIException("rate limit hit; connection reset")))
+        is e.GrowwRateLimitError
+    )
+    # timeout beats a co-mentioned connection
+    assert (
+        type(
+            e.from_groww_exception(_GenericGrowwAPIException("request timed out: connection reset"))
+        )
+        is e.GrowwTimeoutError
+    )
+    # 5xx server error beats a co-mentioned connection
+    assert (
+        type(
+            e.from_groww_exception(
+                _GenericGrowwAPIException("internal server error; connection refused")
+            )
+        )
+        is e.GrowwServerError
+    )
+
+
+def test_typed_groww_class_wins_over_network_name_collision() -> None:
+    """A typed Groww SDK class always wins, even if its bare name could look network-ish.
+
+    The network class-name match is checked ONLY after the typed-SDK map, so a real
+    ``GrowwAPINotFoundException`` stays a terminal :class:`GrowwNotFoundError` and is
+    never re-classified as a retryable network error.
+    """
+    mapped = e.from_groww_exception(GrowwAPINotFoundException("symbol not found"))
+    assert type(mapped) is e.GrowwNotFoundError
+    assert e.is_retryable(mapped) is False
+
+
 def test_is_rate_limit() -> None:
     assert e.is_rate_limit(e.GrowwRateLimitError("x")) is True
     assert e.is_rate_limit(e.GrowwTimeoutError("x")) is False
     assert e.is_rate_limit(e.GrowwServerError("x")) is False  # 5xx must NOT step the rate ladder
+    assert e.is_rate_limit(e.GrowwNetworkError("x")) is False  # DNS blip must NOT step the ladder
 
 
 def test_is_auth_failure() -> None:
@@ -227,6 +364,7 @@ def test_is_auth_failure() -> None:
         (e.GrowwTimeoutError("x"), True),
         (e.GrowwEmptyResponseError("x"), True),
         (e.GrowwServerError("x"), True),
+        (e.GrowwNetworkError("x"), True),
         (e.GrowwBadRequestError("x"), False),
         (e.GrowwAuthError("x"), False),
         (e.GrowwNotFoundError("x"), False),
