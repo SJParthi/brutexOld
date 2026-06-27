@@ -944,6 +944,43 @@ def _observe_rate(
         monitor.observe(controller_snap, meter_snap)
 
 
+def make_window_observer(
+    inner: Callable[[], None],
+    rate_observer: RateObserver | None,
+    controller: RateController | None,
+    adapter: MarketAdapter,
+    monitor: PullHealthMonitor | None,
+) -> Callable[[], None]:
+    """Wrap a per-window ``on_window`` callback to ALSO observe the live pull each window.
+
+    DEC-PULL-STALL-DETECTION-001 (GAP 2). Before this, :class:`~brutex.observability.\
+pull_health.PullHealthMonitor.observe` was fed ONLY at pull / instrument BOUNDARIES (the
+    post-loop :func:`_observe_rate` call), so the dwell-gated ``pull.stalled`` rule — which
+    needs several CONSECUTIVE observe samples to fire — could never accumulate, and a
+    MID-pull stall was undetectable. The ingest spine already fires an ``on_window``
+    :data:`~brutex.adapters.groww.ingest.WindowTick` once per PROCESSED window (~1 s cadence
+    under load); this wraps it so each window ALSO pushes the live rate/throughput snapshot
+    to the panel + the monitor via :func:`_observe_rate`. The dwell now accumulates on the
+    pull's own activity cadence, so a sustained near-zero-throughput stall trips the
+    CRITICAL ``pull.stalled`` alert.
+
+    The wrapped *inner* (the dashboard live-sync, or a no-op for the CLI / dry-run) runs
+    FIRST so the existing per-window progress + ledger flush is byte-unchanged; the observe
+    follows. :func:`_observe_rate` is itself a no-op when neither a *rate_observer* nor a
+    *monitor* is wired and is best-effort (the monitor never raises), so wrapping per window
+    can never block or crash the pull. When there is nothing extra to observe (no observer
+    AND no monitor), *inner* is returned unwrapped (zero overhead).
+    """
+    if rate_observer is None and monitor is None:
+        return inner
+
+    def _on_window() -> None:
+        inner()
+        _observe_rate(rate_observer, controller, adapter, monitor)
+
+    return _on_window
+
+
 def _build_pull_health_monitor(
     controller: RateController | None,
 ) -> PullHealthMonitor | None:
@@ -1324,8 +1361,10 @@ def pull_all_spot(
             _live_rate_runtime(use_live_rate, session_rate)
         )
         # BIND the live pull-health monitor to the resolved controller
-        # (DEC-PULL-HEALTH-WIRING-001) — watches every _observe_rate tick + alerts on a
-        # degraded/stalled pull; best-effort (None for a dry-run, never crashes the pull).
+        # (DEC-PULL-HEALTH-WIRING-001) — its observe() is fed BOTH per-window (the
+        # window_observer below — DEC-PULL-STALL-DETECTION-001 GAP 2, so the dwell-gated
+        # pull.stalled rule actually accumulates) AND at the post-loop boundary; best-effort
+        # (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
@@ -1354,6 +1393,15 @@ def pull_all_spot(
         # otherwise the per-pair flush is byte-unchanged.
         live_sync = make_live_sync(ledger, ledger_flush, on_ledger_sync)
         live_sync_active = on_ledger_sync is not None and ledger is not None
+        # PER-WINDOW pull-health observe (DEC-PULL-STALL-DETECTION-001 GAP 2): wrap the
+        # window live-sync so each PROCESSED window also pushes the live rate/throughput
+        # snapshot to the panel + the monitor, so the dwell-gated pull.stalled rule
+        # accumulates on the pull's own activity cadence (it would never accumulate from
+        # the post-loop boundary call alone). A no-op extra when neither an observer nor a
+        # monitor is wired (the wrapper returns live_sync unchanged).
+        window_observer = make_window_observer(
+            live_sync, rate_observer, _rate_controller, adapter, _pull_health_monitor
+        )
 
         def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
@@ -1423,7 +1471,7 @@ def pull_all_spot(
                     ledger=ledger,
                     run_parallel=run_parallel,
                     auto_retry=do_retry,
-                    on_window=live_sync,
+                    on_window=window_observer,
                     symbol_windows=phase_windows,
                 )
                 passes.append(res)
@@ -2026,8 +2074,10 @@ def pull_candles(
             _live_rate_runtime(use_live_rate, session_rate)
         )
         # BIND the live pull-health monitor to the resolved controller
-        # (DEC-PULL-HEALTH-WIRING-001) — watches every _observe_rate tick + alerts on a
-        # degraded/stalled pull; best-effort (None for a dry-run, never crashes the pull).
+        # (DEC-PULL-HEALTH-WIRING-001) — its observe() is fed BOTH per-window (the
+        # window_observer below — DEC-PULL-STALL-DETECTION-001 GAP 2, so the dwell-gated
+        # pull.stalled rule actually accumulates) AND at the post-loop boundary; best-effort
+        # (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
@@ -2043,6 +2093,14 @@ def pull_candles(
         # status-sidecar flush was write-retired
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001).
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
+        # PER-WINDOW pull-health observe (DEC-PULL-STALL-DETECTION-001 GAP 2): this
+        # single-symbol path has no window-level ledger sync, so the inner per-window
+        # callback is a no-op — but the monitor's dwell-gated pull.stalled rule still needs
+        # a per-window observe to accumulate, so wrap a no-op inner. A no-op extra when
+        # neither an observer nor a monitor is wired (the wrapper returns the no-op).
+        window_observer = make_window_observer(
+            lambda: None, rate_observer, _rate_controller, adapter, _pull_health_monitor
+        )
 
         def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
@@ -2074,6 +2132,7 @@ def pull_candles(
                 on_progress=_progress_then_flush,
                 ledger=ledger,
                 run_parallel=run_parallel,
+                on_window=window_observer,
                 symbol_windows=phase_windows,
             )
             merged_pairs.update(phase_report.pairs)
@@ -2206,6 +2265,7 @@ __all__ = [
     "SessionRateController",
     "SymbolPullResult",
     "TimeframeResult",
+    "make_window_observer",
     "parse_symbol_list",
     "pull_all_spot",
     "pull_candles",
