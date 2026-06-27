@@ -51,99 +51,71 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <main class="wrap">
 <h1>Claude Code Projects (beta) — Round-2 Feedback</h1>
 <p><strong>For:</strong> Claude Code Early Access team — Diana Liu (claude-code-early-access@anthropic.com); Omid (eng lead), Jul 1 call <strong>From:</strong> Parthiban (sjparthi93@gmail.com) · <strong>Date:</strong> 2026-06-27 <strong>Workload under test:</strong> BruteX — a large multi-agent backtesting-engine repo, run as a real overnight batch inside the Projects beta.</p>
-<p>This is round-2 feedback on the <strong>Claude Code Projects beta</strong>, gathered from running a real, large, multi-agent batch inside it. The Projects/auth issues come first; a few smaller workflow and security items follow. Where I observed something but could not reproduce it reliably, I say so plainly in the issue's description.</p>
+<p>This is round-2 feedback on the <strong>Claude Code Projects beta</strong>, gathered from running a real, large, multi-agent batch inside it. The strongest item — a misleading GitHub error — comes first; the rest follow. Where I observed something but could not reproduce it reliably, I say so plainly rather than overstating it.</p>
 <hr/>
 <h2>Issues at a glance</h2>
 <table>
 <thead><tr><th>#</th><th>Issue</th></tr></thead>
 <tbody>
-<tr><td>1</td><td>GitHub access drops mid-session, with no way to recover it from inside the session — you have to start a new one.</td></tr>
-<tr><td>2</td><td>That auth drop forced me into creating a whole new Project for the same repo just to get a working session.</td></tr>
+<tr><td>1</td><td>The 403 that blocks GitHub is a misleading broker error: it blames an "org admin" on a personal account with no org, and isn't a real GitHub error.</td></tr>
+<tr><td>2</td><td>GitHub access drops mid-session with no in-session recovery — the only path back is a new session, and in my case a whole new Project.</td></tr>
 <tr><td>3</td><td>Connecting the GitHub App doesn't reach an already-running session; only a fresh session picks it up.</td></tr>
-<tr><td>4</td><td>A Project isn't a self-running container — overnight work still needs a separate Routine to keep going.</td></tr>
-<tr><td>5</td><td>The 403 error blames an "org admin" on a personal account that has no org, and isn't a real GitHub error.</td></tr>
-<tr><td>6</td><td>Long-running review agents sit idle for hours with no liveness signal and no cleanup.</td></tr>
-<tr><td>7</td><td>I observed overnight automation getting harder under Projects than it had been on plain sessions (couldn't fully isolate the cause).</td></tr>
-<tr><td>8</td><td>The effort tier seemed to drop back down after a long idle (observed, not reliably reproduced).</td></tr>
-<tr><td>9</td><td>Disk steadily accumulates across a long multi-agent run with no auto-cleanup.</td></tr>
-<tr><td>10</td><td>A failed CI check can't be re-run — the only workaround is an empty re-trigger change.</td></tr>
-<tr><td>11</td><td>Screenshots pasted into chat aren't readable by the file tools; only @-attached uploads are.</td></tr>
-<tr><td>12</td><td>One shared append-only file forces parallel-branch merges to happen one at a time.</td></tr>
-<tr><td>13</td><td>A typosquat <code>httpx2</code> wheel is installable from the managed environment's package index (security).</td></tr>
+<tr><td>4</td><td>Background/review agents sit idle for hours with no liveness signal and no cleanup.</td></tr>
+<tr><td>5</td><td>Screenshots pasted into chat aren't readable by the file tools; only @-attached uploads are.</td></tr>
+<tr><td>6</td><td>Disk and agent-worktree + scratchpad artifacts accumulate across a long multi-agent run with no auto-cleanup.</td></tr>
 </tbody>
 </table>
 <hr/>
 <h2>What we'd like</h2>
 <ul>
-<li><strong>Project auto-resume</strong> — a first-class "keep working on goal X" so a Project keeps work going without hand-wiring a schedule.</li>
+<li><strong>Project auto-resume</strong> — a first-class "keep working on goal X" so a Project keeps work going without hand-wiring a schedule. (A Project today isn't a self-running container; the work runs as sessions, and overnight continuity has to be arranged separately.)</li>
 <li><strong>In-session credential refresh</strong> — re-bind GitHub, or pick up a newly-connected App, without tearing down the session.</li>
-<li><strong>A Project status surface</strong> — one place showing what's persistent (history, repo), what's live (this session, bound credentials, environment), and what's stale.</li>
-<li><strong>Attach Routines to a Project</strong> — Routines listed and owned by the Project, firing into its sessions.</li>
+<li><strong>Idle-agent liveness and cleanup</strong> — a per-agent last-activity signal plus auto-termination of stalled or orphaned agents.</li>
+</ul>
+<hr/>
+<h2>Open questions</h2>
+<ul>
+<li>How is a Project meant to sustain overnight work without a hand-wired Routine? Plain sessions did it unaided; under Projects the same overnight work appeared to need one, but I couldn't isolate whether Projects is the cause.</li>
 </ul>
 <hr/>
 <h2>Details</h2>
-<h3>1 — GitHub access drops mid-session, with no in-session recovery</h3>
-<p>A long-running session was opening and merging pull requests normally for hours. Then every GitHub REST call started returning <strong>403</strong>, all at once. <code>git push</code> kept working, but opening and merging PRs through the API died — the session was stranded push-only mid-run. I retried in a fresh sub-agent and got the same 403, so this was a stable session-level state, not a momentary blip. There was no way to recover access from inside the running session.</p>
-<p><strong>Why it matters:</strong> an unattended overnight run can't survive a credential lapse it can't recover from — it just stalls.</p>
-<p><strong>Suggested fix:</strong> allow in-session re-auth, or auto-checkpoint and resume in a fresh session so the loop survives the lapse.</p>
-<h3>2 — The auth drop forced a whole new Project for the same repo</h3>
-<p>Because nothing recovered the running session (I retried several times), the only clean path back to a working session was to spin up a <strong>second Project pointing at the same repo</strong>. That split my context across two Projects, duplicated the coordinating session, and left it ambiguous which Project was canonical.</p>
-<p><strong>Why it matters:</strong> forking a second Project just to recover credentials is a heavy, confusing workaround for what should be a refresh.</p>
-<p><strong>Suggested fix:</strong> in-session or in-Project credential refresh, so recovering auth doesn't mean forking a second Project.</p>
-<h3>3 — Connecting the GitHub App doesn't reach a running session</h3>
-<p>After installing the GitHub App on my account (<strong>@SJParthi</strong>, All repositories, read/write), the already-running session never saw the new access. Only a brand-new session picked it up. From inside the live session, connecting the App appeared to do nothing.</p>
-<p><strong>Why it matters:</strong> the natural recovery step — connect/repair the App — has no effect on the session that actually needs it.</p>
-<p><strong>Suggested fix:</strong> propagate a credential change into the running session, or prompt <em>"new permissions detected — restart the session to apply."</em></p>
-<h3>4 — A Project isn't a self-running container</h3>
-<p>"Project" suggested a self-running, always-on container. In practice the work runs as <strong>sessions</strong>, and keeping work going overnight still needs a separately-wired <strong>Routine/trigger</strong> — there's no ambient "the Project is working on it" loop.</p>
-<p><strong>Why it matters:</strong> the mental model the name sets up (a Project that just keeps working) doesn't match how continuity actually has to be arranged.</p>
-<p><strong>Suggested fix:</strong> Project auto-resume, and/or set the expectation in-product (work runs as sessions; attach a Routine to make it run on its own).</p>
-<h3>5 — The 403 message is misleading</h3>
-<p>The 403 body says <em>"an org admin must connect the Claude GitHub App for this organization"</em> — but this is a <strong>personal account</strong> with no organization and no org admin, and the App was demonstrably connected (it had been opening and merging PRs minutes earlier). The response also doesn't look like a real GitHub error: its <code>documentation_url</code> points at <code>docs.anthropic.com</code>, the status is 403 (GitHub returns 401 for bad credentials), and it carries none of GitHub's signature headers (<code>x-github-request-id</code>, <code>x-ratelimit-*</code>). The exact body:</p>
+<h3>1 — The 403 that blocks GitHub is a misleading error</h3>
+<p>A long-running session was opening and merging pull requests normally for hours. Then every GitHub REST call started returning <strong>403</strong>, all at once. The 403 body says <em>"an org admin must connect the Claude GitHub App for this organization"</em> — but this is a <strong>personal account</strong> with no organization and no org admin, and the App was demonstrably connected (it had been opening and merging PRs minutes earlier). The response also doesn't look like a real GitHub error: its <code>documentation_url</code> points at <code>docs.anthropic.com</code>, the status is 403 (GitHub returns 401 for bad credentials), and it carries none of GitHub's signature headers (<code>x-github-request-id</code>, <code>x-ratelimit-*</code>). The exact body:</p>
 <pre><code>HTTP 403
 {"message":"GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.","documentation_url":".../claude-code/github-actions"}</code></pre>
 <p><strong>Why it matters:</strong> the message sends a personal-account user chasing an "org admin" that doesn't exist, instead of telling them their session's access lapsed.</p>
 <p><strong>Suggested fix:</strong> detect the personal-account, already-connected case and say what's true (<em>"this session's GitHub access was not enabled; start a new session to recover"</em>), and distinguish an access-not-enabled state from a real credential error.</p>
-<h3>6 — Long-running review agents sit idle for hours with no liveness or cleanup</h3>
+<h3>2 — GitHub access drops mid-session with no in-session recovery</h3>
+<p>When the 403 above hit, <code>git push</code> kept working, but opening and merging PRs through the API died — the session was stranded push-only mid-run. I retried in a fresh sub-agent and got the same 403, so this was a stable session-level state, not a momentary blip. There was no way to recover access from inside the running session.</p>
+<p>Because nothing recovered the running session (I retried several times), the only clean path back to a working session was to spin up a <strong>second Project pointing at the same repo</strong>. That split my context across two Projects, duplicated the coordinating session, and left it ambiguous which Project was canonical — a heavy, confusing workaround for what should be a refresh.</p>
+<p><strong>Why it matters:</strong> an unattended overnight run can't survive a credential lapse it can't recover from — it just stalls, and recovering it shouldn't require forking a second Project.</p>
+<p><strong>Suggested fix:</strong> allow in-session re-auth, or auto-checkpoint and resume in a fresh session, so the loop survives the lapse without a new Project.</p>
+<h3>3 — Connecting the GitHub App doesn't reach a running session</h3>
+<p>After installing the GitHub App on my account (<strong>@SJParthi</strong>, All repositories, read/write), the already-running session never saw the new access. Only a brand-new session picked it up. From inside the live session, connecting the App appeared to do nothing.</p>
+<p><strong>Why it matters:</strong> the natural recovery step — connect/repair the App — has no effect on the session that actually needs it.</p>
+<p><strong>Suggested fix:</strong> propagate a credential change into the running session, or prompt <em>"new permissions detected — restart the session to apply."</em></p>
+<h3>4 — Background/review agents sit idle for hours with no liveness or cleanup</h3>
 <p>The background-tasks panel showed multiple review agents marked "running" for <strong>5+ hours</strong> while having made as few as <strong>1 tool action</strong> the entire time — for example, one review at <strong>5 h 01 m with 1 tool use</strong>, another at <strong>5 h 01 m with 3 tool uses</strong>, and several more around <strong>5 h with 2 tool uses</strong>. They never auto-terminated and just accumulated: the panel showed a large "finished" pile (a few hundred) alongside a long column of agents stuck at ~5 hours.</p>
 <p><strong>Why it matters:</strong> there's no way to tell a stuck/idle agent (5 hours, 1 action) from one actively working — both just read "running," with no health signal. Orphaned agents pile up indefinitely with no cleanup, so a long unattended run becomes hard to trust: you can't tell progress from a hang.</p>
 <p><strong>Suggested fix:</strong> a per-agent liveness indicator (last-activity timestamp plus a "stalled" badge once idle past a threshold), and auto-termination/cleanup of idle or orphaned agents.</p>
-<h3>7 — Overnight automation seemed to get harder under Projects</h3>
-<p>Before the Projects beta, my plain (non-Projects) sessions ran overnight plan work to completion on their own, without any Routine and without the long-idle disruption — I never set up a Routine for overnight automation. Under the Projects beta, the same overnight work appeared to need a separate Routine to keep going.</p>
-<p>I want to be honest about the limits of this observation: I saw plain sessions run overnight fine without a Routine, and Projects seemed to need one, but I can't say for certain that Projects itself is the cause — I wasn't able to isolate it cleanly, and I'm happy to capture a side-by-side repro if that would help. Either way, the open question stands: if not a Routine, how is a Project meant to keep overnight work going? Project auto-resume or attach-Routines-to-a-Project (see "What we'd like") would resolve it.</p>
-<h3>8 — Effort tier seemed to drop after a long idle</h3>
-<p>After a long idle, the effort selector seemed to fall from the maximum I'd chosen back down to "Extra."</p>
-<p>I observed this but wasn't able to reproduce it consistently, and I can't fully rule out that two separate controls are in play (e.g. a mode versus an effort tier resting at its default rather than an actual revert). A before/after capture across an idle period would confirm whether it's a real revert — happy to grab one.</p>
-<h3>9 — Disk accumulates with no auto-cleanup on a long multi-agent run</h3>
-<p>On this environment the writable volume sat around half-full against an effective ~38 GB ceiling (roughly 19 GB free). Most of the space went to accumulated agent worktrees (around 30 of them, ~2.8 GB total) plus the scratchpad (~3.9 GB), neither of which was auto-cleaned. Local mutation-testing runs additionally left uncleaned temporary virtualenvs (~165 MB) and a cache directory behind, also with no cleanup.</p>
-<p><strong>Why it matters:</strong> across a long unattended multi-agent run, untended worktree, scratchpad, and mutation artifacts steadily eat a finite envelope — a slow slide toward disk pressure with nothing cleaning up after it. (It ties into the orphaned-agents item above: stale agents leave stale worktrees.)</p>
-<p>One honest caveat: I saw disk accumulation, but I did <strong>not</strong> capture an actual disk-full event during a mutation run — so I'm reporting the accumulation, not an out-of-space failure.</p>
-<p><strong>Suggested fix:</strong> auto-clean finished or orphaned agent worktrees, scratchpad temp, and mutation virtualenvs, and surface remaining disk headroom.</p>
-<h3>10 — A failed CI check can't be re-run</h3>
-<p>On a transient CI failure (a network flake or timeout), there's no way to "re-run failed jobs" from inside the workflow. The only workaround is an empty re-trigger change, which pollutes history and restarts the whole workflow rather than just the failed check. (The 403 in item 5 also blocks re-running CI through the API, leaving only this re-trigger path.)</p>
-<p><strong>Why it matters:</strong> routine transient failures force noisy history-polluting workarounds instead of a one-click re-run.</p>
-<p><strong>Suggested fix:</strong> a first-class "re-run this check / re-run failed jobs" capability.</p>
-<h3>11 — Chat-pasted screenshots aren't readable by the file tools</h3>
+<h3>5 — Chat-pasted screenshots aren't readable by the file tools</h3>
 <p>Images <strong>pasted into chat</strong> are visible to the model but never land at a path the file tools can open. <strong>@-attached uploads, by contrast, are readable</strong> at <code>/root/.claude/uploads/&lt;session-id&gt;/...</code> (I confirmed this by reading one). The two look identical in chat, so the difference isn't discoverable.</p>
 <p><strong>Why it matters:</strong> a user pastes a screenshot expecting the agent to work with it, and the agent silently can't reach the file — with no signal that paste and @-attach behave differently.</p>
 <p><strong>Suggested fix:</strong> materialise chat-pasted images to the same readable path so paste and @-attach behave identically.</p>
-<h3>12 — One shared append-only file serialises parallel merges</h3>
-<p>This repo requires every change to append to one shared ledger file. When several branches run in parallel, each edits that file's tail, so every pair conflicts at merge time — the parallelism collapses to sequential right at the merge step. Any repo with a hot append-only file (a changelog, a registry) will hit the same wall.</p>
-<p><strong>Why it matters:</strong> fan-out parallelism is undercut by a single shared file, and the conflicts are mechanical tail appends that a tool could resolve.</p>
-<p><strong>Suggested fix:</strong> a merge-queue mode that auto-rebases append-only conflicts (tail appends are associative), or detection of a hot shared file across a fan-out so it can warn up front.</p>
-<h3>13 — A typosquat <code>httpx2</code> wheel is installable from the managed index</h3>
-<p>The managed environment's package index serves a wheel named <strong><code>httpx2</code> 2.5.0</strong> whose metadata cribs the real, very popular <code>httpx</code> project (its description and authorship signals). A near-name of a high-popularity package, dressed in that package's description, is installable — a classic typosquat / supply-chain hazard, and especially risky for agents that install dependencies non-interactively. (This is separate from a small internal test stub in our own repo, which is handled and out of scope here.)</p>
-<p><strong>Why it matters:</strong> an agent resolving a near-name could silently pull a typosquatted package from the managed index.</p>
-<p><strong>Suggested fix:</strong> scan for and block typosquat-shaped packages in the managed index, or at minimum warn loudly when a near-name of a popular package resolves.</p>
+<h3>6 — Disk and agent-worktree + scratchpad artifacts accumulate with no auto-cleanup</h3>
+<p>On this environment the writable volume (~270 GB) sat ~50% used with ~20 GB free; accumulated agent worktrees (~2.8 GB across ~34 of them) and the scratchpad (~3.9 GB) were never auto-cleaned.</p>
+<p><strong>Why it matters:</strong> across a long unattended multi-agent run, untended worktree and scratchpad artifacts steadily eat the envelope with nothing cleaning up after them. (It ties into the idle-agents item above: stale agents leave stale worktrees.)</p>
+<p>One honest caveat: I saw accumulation, but I did <strong>not</strong> capture an actual disk-full event — so I'm reporting the accumulation, not an out-of-space failure.</p>
+<p><strong>Suggested fix:</strong> auto-clean finished or orphaned agent worktrees and scratchpad temp, and surface remaining disk headroom.</p>
 <hr/>
-<h2>Screenshots attached</h2>
+<h2>Screenshots (sent separately with the email)</h2>
+<p>No images are embedded in this document. The screenshots below are attached to the email; this list maps each one to the issue it illustrates.</p>
 <ul>
-<li><strong>Stranded push-only state</strong> — the overnight session showing the in-session 403 (relates to items 1, 2, 3, 5, 7).</li>
-<li><strong>GitHub App install</strong> — the App correctly installed on @SJParthi (All repositories, read/write), which the running session still didn't pick up (relates to item 3).</li>
-<li><strong>Background-tasks panel</strong> — review agents at 5 h+ runtimes with only 1–4 tool uses each, alongside the large finished pile (relates to item 6).</li>
-<li><strong>Effort tier before/after a long idle</strong> — to confirm item 8 (this one I still need to capture cleanly).</li>
+<li><strong>Stranded push-only state</strong> — the overnight session showing the in-session 403 (illustrates items 1 and 2).</li>
+<li><strong>GitHub App install</strong> — the App correctly installed on @SJParthi (All repositories, read/write), which the running session still didn't pick up (illustrates item 3).</li>
+<li><strong>Background-tasks panel</strong> — review agents at 5 h+ runtimes with only 1–4 tool uses each, alongside the large finished pile (illustrates item 4).</li>
 </ul>
-<p><em>Prepared 2026-06-27. For the few items I couldn't reproduce reliably (7, 8, and the disk-full-during-mutation point under 9), I've said so plainly in the description rather than overstating them.</em></p>
+<p><em>Prepared 2026-06-27. Still trying to capture cleanly: whether the effort tier reverts after a long idle (observed once, not reproduced). Where I couldn't reproduce something reliably, I've said so plainly rather than overstating it.</em></p>
 </main>
 </body>
 </html>
