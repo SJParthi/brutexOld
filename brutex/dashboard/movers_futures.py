@@ -652,6 +652,13 @@ def _read_future_session(
     missing or no bar falls on the day / within the cutoff (the caller counts it
     skipped, never fabricated — Golden Rule #1).
 
+    This is an **as-of cutoff SNAPSHOT** (cumulative session-to-cutoff: last close /
+    summed volume / last OI ≤ cutoff), NOT a single resampled TF bucket — the honest
+    partial-as-of of corrected_point #1b (DEC-FNO-TF-DERIVE-OI-001). A TRUE per-TF
+    resampled F&O bar (with the trailing forming-bucket dropped, corrected_point #1a)
+    is the COMMON :func:`brutex.data.fno_resample.resample_session_to_tf`, which carries
+    last-of-bucket OI via the SAME OI-aware resampler this snapshot's OI rule mirrors.
+
     Parameters
     ----------
     lake_root
