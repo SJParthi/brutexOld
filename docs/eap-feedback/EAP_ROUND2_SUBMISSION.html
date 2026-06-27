@@ -69,6 +69,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tr><td>10</td><td>Typosquat <code>httpx2</code> wheel is installable from the managed env's package index (security)</td><td>✅ Verified</td></tr>
 <tr><td>11</td><td><strong>Projects beta seems to REQUIRE an external Routine for overnight automation that plain sessions did NOT (a regression)</strong></td><td>🟡 Needs repro</td></tr>
 <tr><td>12</td><td>Effort tier appears to revert after long idle</td><td>🟡 Needs repro</td></tr>
+<tr><td>13</td><td>Disk accumulates with no auto-cleanup on long multi-agent sessions</td><td>✅ Verified</td></tr>
 </tbody>
 </table>
 <hr/>
@@ -110,6 +111,11 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p><strong>User-reported (first-hand, this past week):</strong> plain (non-Projects) sessions ran overnight plan activities <strong>to completion without any Routine</strong> and without the long-idle disruption — the user has <strong>not</strong> used Routines for overnight automation. With the <strong>Projects beta</strong>, the same overnight work now appears to <strong>need an external Routine</strong> to keep going — unattended overnight got harder, not easier. <strong>Open question / request:</strong> the user does not want to wire a Routine (it worked without one before) — so if not a Routine, <strong>how is the Project itself supposed to keep overnight work going?</strong> Resolution would be Project auto-resume or attach-Routines-to-a-Project (see feature requests). <em>Honesty: the session-vs-Projects experience is the user's first-hand testimony; "Projects causes it" is a correlation with root cause <strong>unconfirmed</strong> — no internal causation asserted.</em></p>
 <h3>12 — Effort tier appears to revert after long idle</h3>
 <p>After a long idle, the effort selector <strong>appears</strong> to fall from the chosen maximum back to "Extra." Held pending (a) confirming whether "ultracode" (a mode) and "Extra" (an effort tier) are two independent controls — if so this is the default control resting, not a revert — and (b) a 2–3× before/after screenshot pair. An agent can't inspect client-side UI state, so only the user can confirm.</p>
+<h3>13 — Disk accumulates with no auto-cleanup on long multi-agent sessions</h3>
+<p><strong>Observed (✅ Verified — <code>df</code>/<code>du</code> of this environment):</strong> the writable volume sits at <strong>~50% of an effective ~38 GB ceiling (≈19 GB free)</strong>. The bulk is consumed by <strong>~30 accumulated agent worktrees (2.8 GB total under <code>.claude/worktrees/</code>)</strong> plus the <strong>scratchpad (3.9 GB)</strong> — neither auto-cleaned. Local mutation-testing (<code>mutmut</code>) runs <strong>additionally</strong> leave uncleaned temp virtualenvs in <code>/tmp</code> (~165 MB) and a <code>.mutmut-cache</code>, with no cleanup.</p>
+<p><strong>Why it matters:</strong> on a long unattended multi-agent run, untended worktree + scratchpad + mutation-artifact accumulation steadily eats a finite ~38 GB envelope — a slow slide toward disk pressure with no built-in cleanup. (Ties to the orphaned-agents / long-idle finding #6.)</p>
+<p>🟡 <strong>Held:</strong> a disk-<strong>FULL</strong> specifically <strong>DURING</strong> mutation testing was <strong>NOT</strong> reproduced in this environment (CI mutation runs on disposable GitHub runners); claiming it would need a user screenshot/error of the actual ENOSPC. No disk-full event is asserted here.</p>
+<p><strong>Fix:</strong> auto-clean finished/orphaned agent worktrees, scratchpad temp, and mutation venvs; surface remaining disk headroom.</p>
 <hr/>
 <h2>Screenshots to attach</h2>
 <table>

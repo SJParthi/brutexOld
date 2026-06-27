@@ -24,6 +24,7 @@ Round-2 feedback on the **Claude Code Projects beta**, from running a real, larg
 | 10 | Typosquat `httpx2` wheel is installable from the managed env's package index (security) | ✅ Verified |
 | 11 | **Projects beta seems to REQUIRE an external Routine for overnight automation that plain sessions did NOT (a regression)** | 🟡 Needs repro |
 | 12 | Effort tier appears to revert after long idle | 🟡 Needs repro |
+| 13 | Disk accumulates with no auto-cleanup on long multi-agent sessions | ✅ Verified |
 
 ---
 
@@ -84,6 +85,15 @@ The managed environment's package index serves a wheel named **`httpx2` 2.5.0** 
 
 ### 12 — Effort tier appears to revert after long idle
 After a long idle, the effort selector **appears** to fall from the chosen maximum back to "Extra." Held pending (a) confirming whether "ultracode" (a mode) and "Extra" (an effort tier) are two independent controls — if so this is the default control resting, not a revert — and (b) a 2–3× before/after screenshot pair. An agent can't inspect client-side UI state, so only the user can confirm.
+
+### 13 — Disk accumulates with no auto-cleanup on long multi-agent sessions
+**Observed (✅ Verified — `df`/`du` of this environment):** the writable volume sits at **~50% of an effective ~38 GB ceiling (≈19 GB free)**. The bulk is consumed by **~30 accumulated agent worktrees (2.8 GB total under `.claude/worktrees/`)** plus the **scratchpad (3.9 GB)** — neither auto-cleaned. Local mutation-testing (`mutmut`) runs **additionally** leave uncleaned temp virtualenvs in `/tmp` (~165 MB) and a `.mutmut-cache`, with no cleanup.
+
+**Why it matters:** on a long unattended multi-agent run, untended worktree + scratchpad + mutation-artifact accumulation steadily eats a finite ~38 GB envelope — a slow slide toward disk pressure with no built-in cleanup. (Ties to the orphaned-agents / long-idle finding #6.)
+
+🟡 **Held:** a disk-**FULL** specifically **DURING** mutation testing was **NOT** reproduced in this environment (CI mutation runs on disposable GitHub runners); claiming it would need a user screenshot/error of the actual ENOSPC. No disk-full event is asserted here.
+
+**Fix:** auto-clean finished/orphaned agent worktrees, scratchpad temp, and mutation venvs; surface remaining disk headroom.
 
 ---
 
