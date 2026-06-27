@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -24,6 +25,8 @@ from brutex.data.spot_daily_resample import (
     DailyResampleWindow,
     derive_daily_for_targets,
     fill_daily_from_minute,
+    ist_span_partition_files,
+    ist_span_partition_months,
     plan_daily_resample_windows,
     reconcile_daily_from_minute,
     resample_1m_to_daily,
@@ -428,3 +431,103 @@ def test_derive_targets_mixed_batch() -> None:
         before=_BEFORE,
     )
     assert report == DailyDeriveReport(derived=1, no_minute=1, errored=0, bars=1)
+
+
+# ── Bounded post-pull read: month-partition selection (DEC-RESAMPLE-BOUND-GLOB-001) ──
+#
+# The post-pull 1-day derivation no longer reads each symbol's WHOLE 1-minute
+# partition tree (O(lake-depth)) — it globs ONLY the <yyyy>/<mm>.parquet months the
+# pulled IST span covers (O(pulled-window)). These pin the pure month-set computation
+# + the on-disk existing-file selection (single month, multi-month, cross-year, empty,
+# absent-month skip), so the integration round-trip can assert STRICTLY-FEWER files.
+
+
+class TestIstSpanPartitionMonths:
+    """Pure UTC ``(year, month)`` selection for an IST ``[start, end)`` span."""
+
+    def test_single_month(self) -> None:
+        assert ist_span_partition_months(date(2025, 3, 5), date(2025, 3, 20)) == [(2025, 3)]
+
+    def test_multi_month_same_year(self) -> None:
+        assert ist_span_partition_months(date(2025, 3, 5), date(2025, 5, 2)) == [
+            (2025, 3),
+            (2025, 4),
+            (2025, 5),
+        ]
+
+    def test_cross_year_boundary(self) -> None:
+        # Dec 2025 → Jan 2026; the Dec→Jan month rollover branch.
+        assert ist_span_partition_months(date(2025, 12, 20), date(2026, 1, 10)) == [
+            (2025, 12),
+            (2026, 1),
+        ]
+
+    def test_empty_span_is_no_op(self) -> None:
+        assert ist_span_partition_months(date(2025, 3, 5), date(2025, 3, 5)) == []
+
+    def test_inverted_span_is_no_op(self) -> None:
+        assert ist_span_partition_months(date(2025, 3, 10), date(2025, 3, 5)) == []
+
+    def test_first_of_month_pads_prior_month(self) -> None:
+        # ``start`` on the 1st → the −1-day pad reaches the PRIOR month, so a bar that
+        # somehow landed in the prior UTC partition is never globbed out. ``end`` on a
+        # month boundary likewise includes that boundary month via the +1-day pad.
+        assert ist_span_partition_months(date(2025, 3, 1), date(2025, 4, 1)) == [
+            (2025, 2),
+            (2025, 3),
+            (2025, 4),
+        ]
+
+    def test_jan_start_pads_to_prior_december(self) -> None:
+        # Pad across a year boundary on the LOW side: Jan 1 − 1 day = Dec 31 (prior yr).
+        assert ist_span_partition_months(date(2026, 1, 1), date(2026, 1, 15)) == [
+            (2025, 12),
+            (2026, 1),
+        ]
+
+
+def _touch_month(base: Path, year: int, month: int) -> Path:
+    """Create an empty ``<base>/<yyyy>/<mm>.parquet`` file and return its path."""
+    year_dir = base / f"{year:04d}"
+    year_dir.mkdir(parents=True, exist_ok=True)
+    f = year_dir / f"{month:02d}.parquet"
+    f.write_bytes(b"")
+    return f
+
+
+class TestIstSpanPartitionFiles:
+    """On-disk existing ``<yyyy>/<mm>.parquet`` selection for an IST span."""
+
+    def test_returns_only_existing_covered_months(self, tmp_path: Path) -> None:
+        base = tmp_path / "1minute"
+        f_mar = _touch_month(base, 2025, 3)
+        # April deliberately ABSENT — must be skipped cleanly, not error.
+        f_may = _touch_month(base, 2025, 5)
+        _touch_month(base, 2023, 1)  # far-outside the span → never globbed
+        # Covered span [Mar 5, May 15) → months {Feb(pad), Mar, Apr, May}; on disk only
+        # Mar + May exist within that set (Feb + Apr absent → skipped cleanly), and the
+        # out-of-span 2023 file is NOT read — proof the read is bounded, not whole-tree.
+        files = ist_span_partition_files(base, date(2025, 3, 5), date(2025, 5, 15))
+        assert files == [f_mar.as_posix(), f_may.as_posix()]
+
+    def test_empty_span_reads_nothing(self, tmp_path: Path) -> None:
+        base = tmp_path / "1minute"
+        _touch_month(base, 2025, 3)
+        assert ist_span_partition_files(base, date(2025, 3, 5), date(2025, 3, 5)) == []
+
+    def test_no_covered_month_on_disk(self, tmp_path: Path) -> None:
+        base = tmp_path / "1minute"
+        _touch_month(base, 2024, 6)  # exists, but OUTSIDE the queried span
+        assert ist_span_partition_files(base, date(2030, 1, 1), date(2030, 2, 1)) == []
+
+    def test_cross_year_existing_files(self, tmp_path: Path) -> None:
+        base = tmp_path / "1minute"
+        f_dec = _touch_month(base, 2025, 12)
+        f_jan = _touch_month(base, 2026, 1)
+        files = ist_span_partition_files(base, date(2025, 12, 20), date(2026, 1, 10))
+        assert files == [f_dec.as_posix(), f_jan.as_posix()]
+
+    def test_missing_base_dir_is_empty(self, tmp_path: Path) -> None:
+        # No ``1minute`` tree at all → honest empty (a clean no-op, never an error).
+        base = tmp_path / "1minute"
+        assert ist_span_partition_files(base, date(2025, 3, 1), date(2025, 4, 1)) == []

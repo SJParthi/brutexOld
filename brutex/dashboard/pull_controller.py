@@ -1032,6 +1032,29 @@ def _build_pull_health_monitor(
         return None
 
 
+def _emit_pull_pool_size(pull_id: str) -> None:
+    """Emit the resolved client connection-pool width once at pull start.
+
+    Logs one ``pull.pool_size`` structlog event carrying the resolved
+    :func:`~brutex.adapters.groww.constants.resolve_pool_size` (DEC-LAKE-WRITE-INSTRUMENT-001).
+    The 28-hour pull-log forensic could NOT see the pool width — it inferred it
+    from ``in_flight`` peaks (which actually reached 7, refuting the prior
+    "pool=2" assumption) because no ``pool_size`` was logged. Pairing the
+    resolved pool width with the per-partition ``lake.partition.write`` latency
+    lets the write/lake bottleneck be sized against the real connection budget.
+
+    Best-effort: ``resolve_pool_size`` is a pure env-read + clamp (no network), but
+    the whole call is GUARDED so even an unexpected error can never block, slow, or
+    crash the pull — the emission is purely observational (Golden Rule #10).
+    """
+    try:
+        from brutex.adapters.groww.constants import resolve_pool_size
+
+        _LOG.info("pull.pool_size", pull_id=pull_id, pool_size=resolve_pool_size())
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull.pool_size_emit_failed", pull_id=pull_id)
+
+
 def _live_rate_runtime(
     use_live_rate: bool,
     session_rate: SessionRateController | None = None,
@@ -1343,6 +1366,9 @@ def pull_all_spot(
         # pull.stalled rule actually accumulates) AND at the post-loop boundary; best-effort
         # (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
+        # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
+        # so the write/lake latency telemetry can be sized against the real budget.
+        _emit_pull_pool_size(pid)
         # NO per-pull RenewToken here (DEC-DHAN-RENEW-SINGLE-OWNER-001). RenewToken
         # ROTATES — it mints a new token and INVALIDATES the presented one
         # (DEC-DHAN-RENEWTOKEN-ROTATE-001). A renew fired at EVERY pull start (with
@@ -2053,6 +2079,9 @@ def pull_candles(
         # pull.stalled rule actually accumulates) AND at the post-loop boundary; best-effort
         # (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
+        # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
+        # so the write/lake latency telemetry can be sized against the real budget.
+        _emit_pull_pool_size(pid)
         # NO per-pull RenewToken here (DEC-DHAN-RENEW-SINGLE-OWNER-001) — RenewToken
         # ROTATES + invalidates the presented token, so an ungated per-pull renew
         # killed the live token and the pull ran on the corpse (DH-906). The 12h
