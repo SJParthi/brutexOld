@@ -172,6 +172,20 @@ def test_equity_curve_rejects_nonpositive_span() -> None:
         EquityCurve(equity_paisa=(1,), start_equity_paisa=1, span_years=0.0)
 
 
+@pytest.mark.parametrize("bad_span", [float("nan"), float("inf")])
+def test_equity_curve_rejects_non_finite_span(bad_span: float) -> None:
+    """A NaN/inf span is rejected (DEC-METRICS-NONFINITE-GUARD-001).
+
+    Without the finiteness guard ``nan <= 0.0`` is ``False`` (so a NaN span
+    would slip through and later annualise CAGR to NaN), and a ``+inf`` span
+    would silently flatten CAGR to ~0 — both contradict the "no NaN/inf"
+    contract. The integer paisa fields are not tested for NaN: they are typed
+    ``int`` and cannot carry a non-finite value (mypy --strict enforces it).
+    """
+    with pytest.raises(ValueError, match="span_years must be > 0"):
+        EquityCurve(equity_paisa=(1,), start_equity_paisa=1, span_years=bad_span)
+
+
 # ── compute_metrics: guard ──────────────────────────────────────────
 
 

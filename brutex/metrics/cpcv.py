@@ -202,7 +202,7 @@ def sharpe_of_returns(returns: Sequence[float] | npt.NDArray[np.float64]) -> flo
         return None
     mean = float(arr.mean())
     variance = float(np.mean((arr - mean) ** 2))
-    if variance <= 0.0:
+    if not math.isfinite(variance) or variance <= 0.0:
         return None
     return mean / math.sqrt(variance)
 
@@ -260,7 +260,7 @@ def _combine_moments(
     if n_total < _MIN_SAMPLES:
         return None
     variance = m2_total / n_total
-    if variance <= 0.0:
+    if not math.isfinite(variance) or variance <= 0.0:
         return None
     return mean_total / math.sqrt(variance)
 

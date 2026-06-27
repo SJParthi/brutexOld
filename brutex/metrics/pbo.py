@@ -182,8 +182,10 @@ def _validate(performance: Sequence[Sequence[float]], n_splits: int) -> tuple[in
     ValueError
         If ``n_splits`` is not an even integer ``>= 2``; the matrix is
         empty; the rows are ragged; there are fewer than two strategies;
-        or the row count is not a positive multiple of ``n_splits`` (the
-        sub-matrices must be non-empty and of equal size).
+        any cell is non-finite (NaN/inf), which would fabricate a finite
+        mid-rank; or the row count is not a positive multiple of
+        ``n_splits`` (the sub-matrices must be non-empty and of equal
+        size).
     """
     if n_splits < _MIN_SPLITS or n_splits % 2 != 0:
         raise ValueError(f"n_splits must be an even integer >= {_MIN_SPLITS}, got {n_splits}")
@@ -199,6 +201,14 @@ def _validate(performance: Sequence[Sequence[float]], n_splits: int) -> tuple[in
                 f"performance matrix is ragged: row {row_index} has {len(row)} "
                 f"columns, expected {n_strat}"
             )
+    for row_index, row in enumerate(performance):
+        for col_index, value in enumerate(row):
+            if not math.isfinite(value):
+                raise ValueError(
+                    "performance matrix has a non-finite entry at "
+                    f"[{row_index}][{col_index}]: {value!r}; "
+                    "CSCV requires finite real per-period returns"
+                )
     if n_obs % n_splits != 0:
         raise ValueError(
             f"row count ({n_obs}) must be a positive multiple of n_splits "
@@ -272,7 +282,8 @@ def pbo_probability(
     Raises
     ------
     ValueError
-        For any invalid input — see :func:`_validate`.
+        For any invalid input — including a non-finite (NaN/inf) cell;
+        see :func:`_validate`.
     """
     n_obs, n_strat = _validate(performance, n_splits)
     block_sum, block_sumsq, block_size = _block_moments(performance, n_splits, n_obs, n_strat)

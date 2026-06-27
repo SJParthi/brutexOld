@@ -9,7 +9,8 @@ test type). Inputs are plain Python lists so the oracle is dependency-light.
 
 from __future__ import annotations
 
-from brutex.metrics.cpcv import cpcv_pass_rate, cpcv_splits
+import numpy as np
+from brutex.metrics.cpcv import cpcv_pass_rate, cpcv_splits, sharpe_of_returns
 from brutex.metrics.wfo import WFOScheme, walk_forward_splits, wfo_pass_rate, wfo_pass_rates
 
 # ─────────────────────────────────────────────────────────────────────
@@ -79,3 +80,26 @@ def test_wfo_pass_rates_triple_golden() -> None:
     assert rates.rolling == 1.0 / 3.0
     assert rates.anchored == 1.0 / 3.0
     assert rates.expanding == 1.0 / 4.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# sharpe_of_returns — golden population-Sharpe constant + the overflow
+# degrade-to-None case (DEC-METRICS-NONFINITE-GUARD-001).
+# series [0.01, -0.02, 0.03, -0.01, 0.02]:
+#   mean = 0.03/5 = 0.006
+#   var  = Σ(x-mean)²/5 = 0.00172/5 = 0.000344  (population, ÷n)
+#   sharpe = 0.006 / sqrt(0.000344) = 0.3234983196103152
+# ─────────────────────────────────────────────────────────────────────
+_GOLDEN_SHARPE: float = 0.3234983196103152
+
+
+def test_sharpe_of_returns_golden() -> None:
+    """The population Sharpe of a fixed fractional series is locked full-precision."""
+    result = sharpe_of_returns([0.01, -0.02, 0.03, -0.01, 0.02])
+    assert result == _GOLDEN_SHARPE
+
+
+def test_sharpe_of_returns_overflow_is_none_golden() -> None:
+    """A finite-but-huge series whose squared deviations overflow degrades to ``None``."""
+    with np.errstate(all="ignore"):
+        assert sharpe_of_returns(np.array([1e300, 2e300, 3e300, 4e300])) is None
