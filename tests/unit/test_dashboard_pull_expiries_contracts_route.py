@@ -285,29 +285,37 @@ def test_reversed_year_range_400(client: TestClient, monkeypatch: pytest.MonkeyP
     assert "after to_date year" in resp.json()["detail"]
 
 
-# ── the button is repointed ──────────────────────────────────────────────────
+# ── the per-stage button is consolidated into the ONE pipeline button ─────────
 
 
-def test_universe_page_button_targets_metadata_route(client: TestClient) -> None:
-    """The /universe ⛓ button now POSTs the metadata-only route (no candles)."""
+def test_universe_page_metadata_route_driven_by_pipeline(client: TestClient) -> None:
+    """The separate ⛓ "Pull expiries + contracts" button is REMOVED — the metadata
+    pull is the pipeline's gated middle stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
+
+    The route ``/api/v1/universe/pull-expiries-contracts`` itself still exists (this
+    file's route tests cover it); it is simply no longer surfaced as its own button.
+    The ONE selection-aware ``pullPipelineBtn`` runs the gated chain that includes it.
+    """
     resp = client.get("/universe")
     assert resp.status_code == 200
-    assert "/api/v1/universe/pull-expiries-contracts" in resp.text
-    assert 'id="pullDerivBtn"' in resp.text
-    # the metadata-only tooltip wording is present
-    assert "no history" in resp.text
+    # the redundant per-stage metadata button is gone (no null .onclick at load)
+    assert 'id="pullDerivBtn"' not in resp.text
+    assert 'getElementById("pullDerivBtn")' not in resp.text
+    # the ONE pull button drives the gated pipeline (which includes the metadata stage)
+    assert 'id="pullPipelineBtn"' in resp.text
+    assert "/api/v1/universe/pull-pipeline" in resp.text
 
 
 def test_universe_page_no_longer_references_fused_candle_route(client: TestClient) -> None:
     """PR-6 (DEC-DERIV-DECOMMISSION-FUSED-001): no /universe surface still hits the
-    decommissioned fused candle path — the bulk derivative buttons POST the
-    metadata-only route, never ``/api/v1/universe/pull-derivatives``."""
+    decommissioned fused candle path. The bulk derivative buttons are now also
+    removed (DEC-UNIVERSE-PULL-CONSOLIDATE-001) — the pipeline drives metadata."""
     resp = client.get("/universe")
     assert resp.status_code == 200
     assert "/api/v1/universe/pull-derivatives" not in resp.text
-    # the bulk derivative buttons survive (repointed, not removed)
-    assert 'id="bulkIdxDeriv"' in resp.text
-    assert 'id="bulkStkDeriv"' in resp.text
+    # the bulk ③④ derivative buttons are removed with the rest of the matrix
+    assert 'id="bulkIdxDeriv"' not in resp.text
+    assert 'id="bulkStkDeriv"' not in resp.text
 
 
 # ── skip reference-only underlyings (DEC-SKIP-REF-METADATA-001) ────────────────
