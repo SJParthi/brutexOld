@@ -1,6 +1,6 @@
 """Deep-partition write-cost-vs-depth at-scale bench — the Lever-1 PROVE-FIRST gate.
 
-DEC-DEEP-PARTITION-BENCH-001 (MIGRATION.md #940). The scalability audit confirmed the
+DEC-DEEP-PARTITION-BENCH-001 (MIGRATION.md #946). The scalability audit confirmed the
 lake write (:meth:`brutex.data.parquet_writer.ParquetWriter._merge_write`) is
 **O(month-partition-size)** per straddling append: it reads + rebuilds + (on any change)
 re-renders + atomically rewrites the WHOLE month partition, on the fetch worker, under the
