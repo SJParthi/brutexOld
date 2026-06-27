@@ -696,6 +696,37 @@ def test_long_exit_fill_floored_at_one_tick() -> None:
     assert r.sell_notional_paisa == 5 * r.n_shares
 
 
+def test_realized_slippage_normal_path_two_ticks() -> None:
+    """NIT-1: on the normal path (fills ≥ 2 ticks) slippage_paisa == 2*tick*shares.
+
+    Both fills move a full tick adverse, so the realized slippage equals the
+    nominal ``2 × TICK_PAISA × n_shares`` — byte-identical to the pre-NIT-1
+    nominal value (the canonical §12.1 NIFTY fixture's 650 paisa is unchanged).
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=9_995, exit_open_paisa=12_005, side="long_call")
+    )
+    assert r.slippage_paisa == 2 * constants.TICK_PAISA * r.n_shares
+
+
+def test_realized_slippage_floored_exit_one_tick() -> None:
+    """NIT-1: a 5-paise (1-tick) long exit floors the sell fill, so the
+    realized slippage is 1*tick*shares — NOT the nominal 2*tick*shares.
+
+    ``exit_bar_open_paisa = 5`` slips to ``5 - 5 = 0``, floored UP to one
+    tick (5 paise). The sell leg therefore moved 0 paise — only the buy leg
+    actually slipped — so the realized slippage is exactly ``1 × TICK_PAISA ×
+    n_shares``, never over-stating the slippage carried by the notionals/PnL.
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=10_000, exit_open_paisa=5, side="long_call")
+    )
+    assert r.sell_fill_paisa == constants.TICK_PAISA  # floored to 5, not 0
+    # Realized: only the buy leg moved (1 tick); the floored sell leg moved 0.
+    assert r.slippage_paisa == 1 * constants.TICK_PAISA * r.n_shares
+    assert r.slippage_paisa != 2 * constants.TICK_PAISA * r.n_shares
+
+
 def test_long_exit_fill_above_floor_unchanged() -> None:
     """MINOR-3: the normal path (exit ≥ 2 ticks) is byte-unchanged by the floor.
 

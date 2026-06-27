@@ -246,8 +246,12 @@ class TradeCostBreakdown:
         GST 18% on (brokerage + exch + sebi + ipft). Total rounded
         ONCE per DEC-COST-001 (NOT CGST/SGST separately).
     slippage_paisa : int
-        Informational: ``2 * TICK_PAISA * n_shares`` (already baked
-        into buy_fill_paisa / sell_fill_paisa).
+        Informational: the slippage TRULY baked into the fills (NIT-1) —
+        the realized per-share fill deltas × n_shares. Normally
+        ``2 * TICK_PAISA * n_shares`` (±1 tick per leg), but ``1 *
+        TICK_PAISA * n_shares`` when the 1-tick floor caps a degenerate
+        sub-2-tick sell fill (the sell leg then moved 0). Always
+        internally consistent with buy_fill_paisa / sell_fill_paisa.
     total_charges_paisa : int
         Sum of brokerage + stt + exch + sebi + ipft + stamp + gst.
     gross_pnl_paisa : int

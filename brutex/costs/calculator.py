@@ -110,13 +110,13 @@ def _apply_slippage(
     entry_open_paisa: int,
     exit_open_paisa: int,
     side: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Apply 1-tick adverse slippage per side.
 
     Long side: buy 1 tick higher, sell 1 tick lower.
     Short side: sell 1 tick lower, buy 1 tick higher (cover).
 
-    Returns ``(buy_fill_paisa, sell_fill_paisa)``.
+    Returns ``(buy_fill_paisa, sell_fill_paisa, realized_slippage_per_share)``.
 
     For Track 2 (BUY-only, per DEC-EXEC-008), only the long branches
     fire. Short branches kept for forward-compat.
@@ -126,10 +126,21 @@ def _apply_slippage(
     ₹0.00 sell fill (a "free" sale), which is economically impossible —
     nothing trades below one tick. The floor only affects that degenerate
     tick-boundary case; the normal path (prices ≥ 2 ticks) is unchanged.
+
+    ``realized_slippage_per_share`` is the slippage TRULY baked into the
+    post-floor fills (NIT-1): the buy leg's adverse rise from its raw open
+    plus the sell leg's adverse drop to its raw open, both measured against
+    the floored fills. On the normal path (fills ≥ 2 ticks) it equals the
+    nominal ``2 × tick``; when the 1-tick floor fires on the sell leg the
+    realized sell-leg movement is 0, so the per-share value is exactly
+    ``1 × tick`` — never over-stating the slippage that the notionals/PnL
+    actually carry.
     """
     tick = C.TICK_PAISA
     if side.startswith("long"):
-        buy_fill, sell_fill = entry_open_paisa + tick, exit_open_paisa - tick
+        # buy leg ← entry bar, sell leg ← exit bar.
+        buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
+        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
     else:
         # short side: BUY at exit_open + tick (cover), SELL at entry_open + tick.
         #
@@ -142,9 +153,18 @@ def _apply_slippage(
         # (entry_open + tick) and pin it with a byte-exact test rather than
         # guess-changing an unused path. Resolve the spec contradiction before
         # any short-side track relies on this fill.
-        buy_fill, sell_fill = exit_open_paisa + tick, entry_open_paisa + tick
+        # buy leg (cover) ← exit bar, sell leg ← entry bar.
+        buy_raw, sell_raw = exit_open_paisa, entry_open_paisa
+        buy_fill, sell_fill = buy_raw + tick, sell_raw + tick
     # Floor every fill at one tick — no instrument trades below ₹0.05.
-    return max(buy_fill, tick), max(sell_fill, tick)
+    buy_fill, sell_fill = max(buy_fill, tick), max(sell_fill, tick)
+    # Realized per-share slippage = the adverse movement TRULY baked into the
+    # floored fills: |buy_fill − buy_raw| (buy moved against us, up) +
+    # |sell_raw − sell_fill| (sell moved against us, down, but the floor caps
+    # the drop). On the normal path this is 2×tick; a floored sell leg yields
+    # 1×tick (NIT-1: never over-states the slippage carried by the notionals).
+    realized_per_share = abs(buy_fill - buy_raw) + abs(sell_raw - sell_fill)
+    return buy_fill, sell_fill, realized_per_share
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -198,7 +218,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         raise UnsupportedTradeOutcomeError(msg)
 
     # ── Step 1: apply slippage (1-tick flat adverse) ────────────────────
-    buy_fill_paisa, sell_fill_paisa = _apply_slippage(
+    buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
         trade.entry_bar_open_paisa,
         trade.exit_bar_open_paisa,
         trade.side,
@@ -267,8 +287,12 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # ── Step 13: net PnL ────────────────────────────────────────────────
     net_pnl_paisa = gross_pnl_paisa - total_charges_paisa
 
-    # Slippage as informational line (2 ticks × n_shares: ±1 tick per leg)
-    slippage_paisa = 2 * C.TICK_PAISA * n_shares
+    # Slippage as informational line — derived from the REALIZED fill deltas
+    # (NIT-1) so it is always internally consistent with the notionals/PnL: on
+    # the normal path this is the nominal 2 ticks × n_shares (±1 tick per leg),
+    # but when the 1-tick floor caps a degenerate sub-2-tick sell fill the
+    # sell leg actually moved 0, so the realized slippage is 1 tick × n_shares.
+    slippage_paisa = realized_slip_per_share * n_shares
 
     return TradeCostBreakdown(
         n_shares_per_lot=n_shares_per_lot,
