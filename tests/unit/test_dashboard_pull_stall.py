@@ -292,7 +292,7 @@ class TestBackgroundPullJobWatchdog:
         assert spy.beats == 2  # one beat per real-progress window
         assert spy.stopped is True  # stopped in the worker's finally
         assert job.snapshot().state == STATE_DONE
-        assert job.running is False
+        assert not job.running
 
     def test_ledger_sync_beats_the_watchdog(self) -> None:
         built, factory = _spy_factory()
@@ -318,17 +318,41 @@ class TestBackgroundPullJobWatchdog:
             progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
         )
         assert job.start(lambda _h: None, total=1) is True
-        assert job.running is True  # worker captured, still "running"
+        assert job.running  # worker captured, still "running"
 
         # The timer thread declares the worker HUNG.
         built[0].trigger_hung()
 
         assert len(halts) == 1  # one CRITICAL pull-halt alert fired
         assert isinstance(halts[0], TimeoutError)
+        # MAJOR-2: the hung edge STOPS its own watchdog so the daemon timer cannot leak
+        # (a truly-hung worker never reaches _run.finally to stop it).
+        assert built[0].stopped is True
         snap = job.snapshot()
         assert snap.state == STATE_ERROR
         assert "stalled" in snap.detail
-        assert job.running is False  # _running CLEARED so future pulls are not refused
+        assert not job.running  # _running CLEARED so future pulls are not refused
+
+    def test_on_hung_swallows_a_raising_progress_fail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MINOR-4: a raise inside _on_hung (e.g. progress.fail) is swallowed, timer survives."""
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        built, factory = _spy_factory()
+
+        class _BoomProgress(PullProgress):
+            def fail(self, detail: str) -> None:
+                raise RuntimeError("progress.fail boom")
+
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=_BoomProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        job.start(lambda _h: None, total=1)
+        # The raising progress.fail must NOT propagate out of _on_hung (best-effort).
+        built[0].trigger_hung()
+        # The watchdog was still stopped (it runs before the raising fail), so no leak.
+        assert built[0].stopped is True
 
     def test_future_pull_accepted_after_hung(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """After a hung→stalled transition, a NEW pull starts (single-flight released)."""
@@ -340,16 +364,67 @@ class TestBackgroundPullJobWatchdog:
         )
         job.start(lambda _h: None, total=1)
         built[0].trigger_hung()
-        assert job.running is False
+        assert not job.running
         # A second pull is now ACCEPTED (would have been silently refused before the fix).
         accepted = job.start(lambda _h: None, total=1)
         assert accepted is True
         assert len(built) == 2  # a fresh watchdog for the new run
 
-    def test_stale_worker_finally_does_not_clobber_new_run(
+    def test_stale_finally_after_new_run_started_does_not_clobber(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A hung worker that LATER unwedges must not reset a freshly-started new run."""
+        """BLOCKER: the DANGEROUS ordering — run B STARTS before stale A's finally runs.
+
+        Interleaving that the shared-flag design got WRONG (and which a regression would
+        re-introduce): run A wedges → A's timer clears ``_running`` → run B starts (now the
+        current run, in flight) → THEN stale worker A unwedges and reaches its ``finally``.
+        The identity gate (``self._watchdog is watchdog``) means A's finally sees it is NOT
+        the current run and leaves run B's ``_running=True`` intact. Without the fix the
+        stale finally clobbers ``_running=False`` while B is in flight → a third pull could
+        start concurrently (single-flight violated). This is the dangerous ordering the prior
+        safe-ordering test never exercised.
+        """
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        # Run A starts and hangs (worker A captured, not run). Each ``job.running`` read is
+        # captured into a fresh local so a mypy ``is True``/``is False`` narrowing on the first
+        # read does not poison the property's type for the later reads in this same function.
+        job.start(lambda _h: None, total=1)
+        built[0].trigger_hung()  # A's timer: A is current → clears _running
+        running_after_a_hung = job.running
+        assert running_after_a_hung is False
+
+        # *** Run B starts BEFORE stale worker A's finally runs ***
+        b_started = job.start(lambda _h: None, total=1)
+        assert b_started is True
+        running_with_b = job.running
+        assert running_with_b is True  # B is the current run, in flight
+        assert len(built) == 2  # B has its own (current) watchdog
+
+        # Now stale worker A unwedges and reaches its finally (its captured body runs).
+        captured[0]()  # worker A's _run(work, watchdog_A) finally fires
+
+        # Identity gate: A is no longer current (self._watchdog is B), so A's finally did
+        # NOT clobber B's _running. B is still in flight → a third pull is REFUSED.
+        running_after_stale = job.running
+        assert running_after_stale is True
+        c_started = job.start(lambda _h: None, total=1)
+        assert c_started is False  # single-flight holds vs run B
+
+    def test_stale_on_hung_for_superseded_run_does_not_clobber(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A late _on_hung edge for an ALREADY-superseded run must not clear the new run's flag.
+
+        Covers the _on_hung identity gate's FALSE arm: run A hangs (A's _on_hung clears
+        running), run B starts (now current). If A's timer fires _on_hung(A) AGAIN — a late
+        duplicate — the gate (self._watchdog is watchdog_A) is False, so it leaves run B's
+        _running=True intact.
+        """
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
         built, factory = _spy_factory()
         captured: list[Callable[[], None]] = []
@@ -357,13 +432,22 @@ class TestBackgroundPullJobWatchdog:
             progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
         )
         job.start(lambda _h: None, total=1)
-        built[0].trigger_hung()  # declared hung; _declared_hung latched, _running cleared
-        # The stale worker finally unwedges and runs its captured body → its finally fires.
-        captured[0]()
-        # Because _declared_hung latched, the stale finally did NOT touch _running.
-        assert job.running is False
-        # And a new pull can still start cleanly.
+        built[0].trigger_hung()  # A current → clears running
+        job.start(lambda _h: None, total=1)  # B starts, now current
+        assert job.running
+        # A late duplicate hung edge for the SUPERSEDED run A.
+        built[0].trigger_hung()
+        # The _on_hung identity gate is False (current watchdog is B) → run B's flag untouched.
+        assert job.running
+
+    def test_normal_finish_clears_running_and_allows_next_pull(self) -> None:
+        """The SAFE path: a clean worker finish clears _running (identity gate True)."""
+        built, factory = _spy_factory()
+        job = _job(factory)  # synchronous worker spawner → runs + returns inline
         assert job.start(lambda _h: None, total=1) is True
+        assert not job.running  # cleared in _run.finally (this run is current)
+        assert built[0].stopped is True  # watchdog stopped on the clean path too
+        assert job.start(lambda _h: None, total=1) is True  # next pull accepted
 
     def test_beat_is_a_noop_before_a_run_starts(self) -> None:
         """``_beat`` (via sync_from_ledger / _on_progress) is a no-op when no run is active.
@@ -376,7 +460,7 @@ class TestBackgroundPullJobWatchdog:
         job.sync_from_ledger(completed=1, total=2, bars=10)  # hits _beat() with None watchdog
         job._on_progress("X 1minute", 5, False, False)  # also a no-op beat
         # No exception → the None-guard held; nothing started.
-        assert job.running is False
+        assert not job.running
 
     def test_default_watchdog_factory_builds_real_watchdog(self) -> None:
         """The default factory (no injection) builds a real daemon-timer PullWatchdog."""
@@ -393,7 +477,7 @@ class TestBackgroundPullJobWatchdog:
         job.start(lambda h: h("X 1minute", 1, False, False), total=1)
         assert done.is_set()
         assert job.snapshot().state == STATE_DONE
-        assert job.running is False
+        assert not job.running
 
 
 # ════════════════════════════════════════════════════════════════════════

@@ -28,11 +28,15 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
+import structlog
+
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.watchdog import WorkerEvent
+
+_LOG = structlog.get_logger(__name__)
 
 #: The positional progress hook the ingest drivers emit
 #: (``label, bars, failed, gap``) — identical to
@@ -147,14 +151,14 @@ class BackgroundPullJob:
         #: When True the per-pair hook does NOT advance the bar — an authoritative
         #: per-WINDOW ledger sync drives the counters instead (DEC-SPOT-WINDOW-PROGRESS-001).
         self._ledger_synced = False
-        #: The current run's stall watchdog (built per :meth:`start`, stopped in ``finally``).
-        #: ``None`` between runs. Guards the worker thread's heartbeat (:meth:`beat`).
+        #: The CURRENT run's stall watchdog (built per :meth:`start`, stopped in ``finally``).
+        #: ``None`` between runs. Serves two jobs under :attr:`_lock`: (a) the worker thread's
+        #: heartbeat (:meth:`beat`), and (b) per-RUN IDENTITY — both :meth:`_on_hung` and the
+        #: worker's ``finally`` clear ``_running`` ONLY when ``self._watchdog is`` THEIR run's
+        #: watchdog, so a stale (later-unwedged) worker can never clobber a NEWER run's state
+        #: (DEC-PULL-STALL-DETECTION-001 hostile-review BLOCKER fix). A fresh per-run watchdog
+        #: object is the run-identity token; no separate flag is needed.
         self._watchdog: PullWatchdog | None = None
-        #: Set True by the watchdog's hung-edge handler when it has ALREADY declared this
-        #: run stalled (failed the progress + cleared ``_running``). The worker's ``finally``
-        #: then leaves the error state intact instead of clobbering it (the hung worker may
-        #: unwedge much later and reach ``finally`` after a NEW pull has started).
-        self._declared_hung = False
 
     def start(
         self, work: PullWork, *, total: int, detail: str = "", ledger_synced: bool = False
@@ -176,50 +180,60 @@ class BackgroundPullJob:
                 return False
             self._running = True
         self._ledger_synced = ledger_synced
-        self._declared_hung = False
         self._progress.start(total=total, detail=detail)
         # Build + start the per-run stall watchdog (DEC-PULL-STALL-DETECTION-001): the
         # worker beats it on real progress (per window), and its daemon timer declares the
         # worker HUNG if no beat lands for the audited timeout — so a wedged worker (which
         # never reaches the finally below to clear ``_running``) is still detected + alerted
         # and the single-flight flag is released. Built here (not in __init__) so each run
-        # gets a fresh heartbeat / timer with no cross-run state.
-        watchdog = self._watchdog_factory(self._on_hung)
+        # gets a fresh heartbeat / timer with no cross-run state. The watchdog object IS this
+        # run's identity token: both _on_hung and _run's finally gate their ``_running`` clear
+        # on ``self._watchdog is`` this watchdog (under the lock), so they only ever act on
+        # the CURRENT run (a stale worker can never clobber a newer run — the BLOCKER fix).
+        watchdog = self._watchdog_factory(lambda event: self._on_hung(event, watchdog))
         self._watchdog = watchdog
         watchdog.start()
         self._spawn(lambda: self._run(work, watchdog))
         return True
 
-    def _on_hung(self, event: WorkerEvent) -> None:
-        """Watchdog HEALTHY→HUNG edge: alert the operator + release the stuck pull.
+    def _on_hung(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
+        """Watchdog HEALTHY→HUNG edge for *watchdog*'s run: alert + release the stuck pull.
 
         The pull worker has not beaten the heartbeat for the audited timeout — it is wedged
         (e.g. on the no-timeout partition flock, a deadlocked socket). Unlike a per-symbol
         failure this leaves the worker thread blocked forever, so it can never reach
         :meth:`_run`'s ``finally`` to clear ``_running`` — the single-flight guard would
-        then SILENTLY refuse every future pull. Here, on the timer thread, we (1) fire a
-        best-effort CRITICAL pull-halt alert so the operator learns IN REAL TIME, (2) mark
-        the progress failed so the dashboard reflects the stall, and (3) clear ``_running``
-        so the next pull can start. ``_declared_hung`` latches so the worker's eventual
-        ``finally`` (if it ever unwedges) does not clobber a NEW run's state.
+        then SILENTLY refuse every future pull. On the timer thread we (1) stop *watchdog*'s
+        own poll loop so its daemon thread cannot keep firing forever (the timer leaks on the
+        one path it exists for otherwise), (2) fire a best-effort CRITICAL pull-halt alert so
+        the operator learns IN REAL TIME, (3) mark the progress failed so the dashboard
+        reflects the stall, and (4) clear ``_running`` — but ONLY if THIS run is still the
+        current one (``self._watchdog is watchdog`` under the lock), so a late-fired timer for
+        a run already superseded by a newer pull can never clobber the newer run.
 
-        Best-effort: the alert is fire-and-forget (a disabled / failing notifier is a silent
-        no-op) and this runs under the underlying watchdog's own callback guard, so it can
-        never crash the timer.
+        The whole body is wrapped in its own ``try/except`` (best-effort): a ``progress.fail``
+        or alert that raises is logged + swallowed so it can never kill the daemon timer or
+        leave a half-applied state — independent of the underlying watchdog's narrower catch.
         """
-        emit_pull_halt_alert(
-            TimeoutError(
-                f"dashboard pull stalled: no progress for {event.last_beat_seconds_ago:.0f}s "
+        try:
+            watchdog.stop()  # MAJOR-2: stop this run's timer so its daemon does not leak
+            emit_pull_halt_alert(
+                TimeoutError(
+                    f"dashboard pull stalled: no progress for {event.last_beat_seconds_ago:.0f}s "
+                    f"(timeout {event.timeout_seconds:.0f}s)"
+                )
+            )
+            self._progress.fail(
+                f"pull stalled — no progress for {event.last_beat_seconds_ago:.0f}s "
                 f"(timeout {event.timeout_seconds:.0f}s)"
             )
-        )
-        self._progress.fail(
-            f"pull stalled — no progress for {event.last_beat_seconds_ago:.0f}s "
-            f"(timeout {event.timeout_seconds:.0f}s)"
-        )
-        with self._lock:
-            self._declared_hung = True
-            self._running = False
+            with self._lock:
+                # Identity gate: clear ``_running`` ONLY when THIS run is still current. A
+                # newer pull may already own the flag (this timer fired late) — never touch it.
+                if self._watchdog is watchdog:
+                    self._running = False
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
+            _LOG.exception("pull_stall.on_hung failed; the pull / timer is unaffected")
 
     def _run(self, work: PullWork, watchdog: PullWatchdog) -> None:
         """Worker body: run *work*, then mark the tracker done / errored.
@@ -245,13 +259,16 @@ class BackgroundPullJob:
         finally:
             # Stop this run's stall timer first (so it can never fire after the worker has
             # already returned / raised). Outside the lock: stop() only sets an Event,
-            # never blocks.
+            # never blocks. Idempotent with _on_hung's stop() (both target the SAME watchdog).
             watchdog.stop()
             with self._lock:
-                # If the watchdog already DECLARED this run hung, it has cleared ``_running``
-                # (and possibly a NEW pull is now in flight) — leave that alone. Otherwise
-                # this worker owns the flag and clears it normally.
-                if not self._declared_hung:
+                # Identity gate (the BLOCKER fix): clear ``_running`` ONLY when THIS run is
+                # still the current one. If the watchdog already declared this run hung it has
+                # cleared ``_running`` and a NEWER pull may now be in flight owning the flag —
+                # ``self._watchdog is watchdog`` is False then, so a stale (later-unwedged)
+                # worker can never clobber the newer run. When this IS the current run the
+                # worker owns the flag and clears it normally.
+                if self._watchdog is watchdog:
                     self._running = False
 
     def _on_progress(self, label: str, bars: int, failed: bool, gap: bool = False) -> None:
