@@ -11,7 +11,8 @@ inner-exception re-raise, and the TIMEOUT path (a fn that blocks on a
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 
 import pytest
 from brutex.adapters.groww.deadline import run_with_deadline
@@ -55,3 +56,45 @@ def test_is_generic_over_the_return_type() -> None:
     """The guard preserves a non-Mapping return type (e.g. a tuple — the re-mint shape)."""
     out = run_with_deadline(lambda: ("a", "b", "c"), 5.0)
     assert out == ("a", "b", "c")
+
+
+def test_daemon_threads_drain_after_a_timeout_storm() -> None:
+    """A timeout storm leaves no daemon backlog once the simulated sockets fire.
+
+    DEC-PULL-HEALTH-CONCURRENCY-001 GAP #18. Each timed-out call abandons ONE daemon
+    worker that blocks until its underlying SDK socket finally returns — the daemon dies
+    with the call. So the live-daemon count is bounded by the (finite) socket timeout,
+    NOT by :func:`run_with_deadline`. This pins that bound: fire N timed-out calls (each
+    blocking on a per-call release event that stands in for a short socket timeout), then
+    release every socket and assert ``threading.active_count()`` returns to its pre-storm
+    baseline — i.e. every abandoned daemon drained, none accumulated.
+    """
+    storm = 20
+    baseline = threading.active_count()
+    releases = [threading.Event() for _ in range(storm)]
+
+    def _make_hang(event: threading.Event) -> Callable[[], Mapping[str, object]]:
+        def _hang() -> Mapping[str, object]:
+            event.wait(timeout=5.0)  # stands in for the SDK socket timeout
+            return {"candles": []}
+
+        return _hang
+
+    try:
+        for event in releases:
+            with pytest.raises(TimeoutError, match="deadline exceeded"):
+                run_with_deadline(_make_hang(event), 0.05)
+        # The storm has abandoned `storm` daemon workers, each still blocked on its event.
+        # Now fire every "socket": each daemon returns and exits, so the count must drain.
+        for event in releases:
+            event.set()
+        deadline = time.monotonic() + 5.0
+        while threading.active_count() > baseline and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert threading.active_count() == baseline, (
+            "abandoned deadline daemons did not drain back to baseline after their "
+            "simulated sockets fired"
+        )
+    finally:
+        for event in releases:
+            event.set()  # belt-and-suspenders: never leave a daemon blocked
