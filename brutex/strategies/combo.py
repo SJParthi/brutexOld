@@ -274,6 +274,13 @@ def _canonicalise_value(value: Any, *, _depth: int = 0) -> Any:
             )
         if not math.isfinite(value):
             raise StrategyError("canonicalise_params: non-finite floats (NaN/inf) are not hashable")
+        # Canonicalise signed zero (-0.0 → +0.0) BEFORE repr so two
+        # mathematically-equal params hash to the SAME run-identity (Golden
+        # Rule #4 reproducibility) — repr(-0.0) is "-0.0" but repr(0.0) is
+        # "0.0", which would otherwise split one run into two. `value + 0.0` is
+        # exact (bit-unchanged) for every other finite double; only the sign of
+        # zero is normalised (the results_store / trial_stats precedent).
+        value = value + 0.0
         # repr(float) round-trips exactly in CPython — two floats with
         # the same bit pattern produce the same repr string, so this
         # is the safest stable form.
