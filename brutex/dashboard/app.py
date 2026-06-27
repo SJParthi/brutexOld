@@ -928,6 +928,13 @@ def build_app(
     # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
     _spot_cascade_cache = MoversSnapshotCache()
+    # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
+    # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
+    # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
+    # It is invariant between lake writes, so it is memoised behind the SAME write
+    # generation as the caches above (a pull bumps it → re-resolve; otherwise a default
+    # poll is an O(1) handoff). REUSES the COMMON `MoversSnapshotCache` (one date key).
+    _latest_movers_date_cache = MoversSnapshotCache()
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -3324,17 +3331,6 @@ def build_app(
                     )
                 )
             lake_root = store_path.parent
-            # Normalise the date once so the cache key is canonical. With NO explicit
-            # date, default to the LATEST available spot day (DEC-PULL-MOVERS-WARM-001),
-            # NOT today: a historical pull fills the lake only to the previous trading
-            # day, so a today-default would show an EMPTY snapshot on open (and miss the
-            # post-pull warm, which keys on that same latest day). Falls back to today
-            # only when the lake has no spot data yet (an honest empty payload). An
-            # EXPLICIT malformed date still raises HERE (synchronously) → 400.
-            if date is None:
-                date_str = latest_movers_date(lake_root) or parse_snapshot_date(None).isoformat()
-            else:
-                date_str = parse_snapshot_date(date).isoformat()
             # The current write-generation — a pull/materialize bumps it, so every
             # cached candidate set computed at an older generation is dirty (the
             # page never serves pre-pull data). Reused from the coverage cache.
@@ -3348,6 +3344,29 @@ def build_app(
                 ONLY on a miss / post-pull; a hit is an O(1) handoff + a cheap
                 in-memory rank (DEC-MOVERS-O1-LATENCY-001).
                 """
+                # Normalise the date so the candidate cache key is canonical. With NO
+                # explicit date, default to the LATEST available spot day
+                # (DEC-PULL-MOVERS-WARM-001), NOT today: a historical pull fills the lake
+                # only to the previous trading day, so a today-default would show an EMPTY
+                # snapshot on open (and miss the post-pull warm, which keys on that same
+                # latest day). Falls back to today only when the lake has no spot data yet
+                # (an honest empty payload). An EXPLICIT malformed date raises ValueError
+                # here → caught by the outer `except ValueError` → 400. The latest-date
+                # resolution is the O(datasets) `latest_movers_date` DuckDB MAX, so it runs
+                # HERE on the threadpool worker (never the event loop) AND is memoised
+                # behind the same write generation, so a repeat DEFAULT poll is an O(1)
+                # handoff and a pull invalidates it (GAP #4).
+                if date is None:
+                    date_str = (
+                        _latest_movers_date_cache.get_or_compute(
+                            "latest_movers_date",
+                            generation=generation,
+                            compute=lambda: latest_movers_date(lake_root),
+                        )
+                        or parse_snapshot_date(None).isoformat()
+                    )
+                else:
+                    date_str = parse_snapshot_date(date).isoformat()
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a

@@ -254,6 +254,145 @@ class TestWriterErrors:
             )
 
 
+class TestCorruptExistingPartition:
+    """A corrupt existing partition quarantines its symbol, never crashes the pull (GAP #1).
+
+    The merge READ of the EXISTING partition was unguarded, so a single corrupt /
+    version-incompatible Parquet on disk crashed the WHOLE pull. The read now raises a
+    QUARANTINABLE ``WriterError`` naming the bad path, so the ingest spine skips that one
+    symbol's window and every OTHER symbol still pulls.
+    """
+
+    def test_corrupt_existing_partition_raises_writer_error(self, tmp_path: Path) -> None:
+        """A garbage existing partition → a quarantinable WriterError naming the path."""
+        from brutex.data.errors import WriterError
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        # First write creates a real partition.
+        result = writer.write(
+            bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords
+        )
+        # Overwrite the on-disk Parquet with garbage so the REAL pl.read_parquet raises a
+        # PolarsError on the next (merge) write.
+        result.path.write_bytes(b"this is not a parquet file at all")
+        with pytest.raises(WriterError, match="corrupt existing partition"):
+            writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
+
+    def test_unreadable_existing_partition_bytes_raises_writer_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-ENOSPC OSError reading the partition bytes → a quarantinable WriterError.
+
+        A vanished / I/O-faulting partition file is a per-symbol problem, so it
+        quarantines (WriterError) rather than crashing the pull — distinct from an
+        ENOSPC/OOM which stays a pull-wide LakeWriteHalt.
+        """
+        from pathlib import Path as _Path
+
+        from brutex.data.errors import WriterError
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        writer.write(bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords)
+
+        original_read_bytes = _Path.read_bytes
+
+        def _io_fault(self: _Path) -> bytes:
+            if self.suffix == ".parquet":
+                raise OSError("simulated read I/O fault")
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(_Path, "read_bytes", _io_fault)
+        with pytest.raises(WriterError, match="unreadable existing partition"):
+            writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
+
+
+class TestNoOpReusesExistingBytes:
+    """The idempotent no-op merge reuses the already-read bytes — no second full read (GAP #11).
+
+    The ``added == 0 & not rewrite`` path used to ``dest.read_bytes()`` + ``dest.stat()``
+    a SECOND time (OUTSIDE the write guard) just to hash a file it had already loaded — an
+    unguarded OOM site on a deep partition. It now reuses the bytes read for the merge.
+    """
+
+    def test_idempotent_repull_does_not_reread_the_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pure re-pull reads the partition's bytes EXACTLY once (no second read for the hash)."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        bar = _bar(0, open_="100", high="110", low="90", close="105")
+        result = writer.write(bars=[bar], **coords)
+
+        reads: list[str] = []
+        original = ParquetWriter._read_existing_bytes  # the plain underlying function
+
+        def _counting_read(dest: Path) -> bytes:
+            reads.append(str(dest))
+            return original(dest)
+
+        monkeypatch.setattr(ParquetWriter, "_read_existing_bytes", staticmethod(_counting_read))
+        # Re-pull the SAME bar — added == 0, not rewrite → the no-op return path.
+        again = writer.write(bars=[bar], **coords)
+        # The bytes were read exactly ONCE (the merge read); the no-op hash reused them.
+        assert reads == [str(result.path)]
+        # The reused-byte hash + size match the first write's exactly (byte-stable no-op).
+        assert again.raw_hash == result.raw_hash
+        assert again.bytes_written == result.bytes_written
+
+    def test_no_op_repull_oom_on_byte_read_halts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OOM reading the partition bytes on an identical re-pull → LakeWriteHalt.
+
+        GAP #11 regression: the no-op path's stat/hash now reuses the GUARDED single byte
+        read, so an OOM there is a graceful pull-wide LakeWriteHalt('out_of_memory'),
+        never a raw crash.
+        """
+        from pathlib import Path as _Path
+
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        bar = _bar(0, open_="100", high="110", low="90", close="105")
+        writer.write(bars=[bar], **coords)
+
+        def _oom_read_bytes(self: _Path) -> bytes:
+            raise MemoryError("partition byte read OOM")
+
+        monkeypatch.setattr(_Path, "read_bytes", _oom_read_bytes)
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            writer.write(bars=[bar], **coords)
+        assert exc_info.value.reason == "out_of_memory"
+
+
 class TestBarConflict:
     """Keep-first conflict recording (DEC-LAKE-CONFLICT-KEEPFIRST-001).
 
@@ -499,22 +638,31 @@ class TestPartitionLock:
     serialises only same-file writers; different partitions never contend.
     """
 
-    def test_same_path_returns_same_lock(self, tmp_path: Path) -> None:
-        from brutex.data.parquet_writer import _partition_lock
+    def test_same_path_serialises(self, tmp_path: Path) -> None:
+        from brutex.data.parquet_writer import _PARTITION_LOCKS
 
         dest = tmp_path / "NSE" / "CASH" / "NIFTY" / "1minute" / "2021-01.parquet"
-        # The lock is interned by path: two calls for the same file → the SAME
-        # lock object (so two ParquetWriter instances serialise on one file).
-        assert _partition_lock(dest) is _partition_lock(dest)
+        # The lock is interned by path: a re-entrant acquire of the SAME path would
+        # deadlock (one shared non-reentrant Lock object), so a nested non-blocking
+        # acquire of the underlying lock must FAIL while the outer one is held.
+        with _PARTITION_LOCKS.acquire(dest):
+            with _PARTITION_LOCKS._guard:  # pyright: ignore[reportPrivateUsage]
+                entry = _PARTITION_LOCKS._locks[dest]  # pyright: ignore[reportPrivateUsage]
+            nested_acquired = entry.lock.acquire(blocking=False)
+            assert nested_acquired is False
 
-    def test_different_paths_get_distinct_locks(self, tmp_path: Path) -> None:
-        from brutex.data.parquet_writer import _partition_lock
+    def test_different_paths_do_not_contend(self, tmp_path: Path) -> None:
+        from brutex.data.parquet_writer import _PARTITION_LOCKS
 
         a = tmp_path / "a" / "2021-01.parquet"
         b = tmp_path / "b" / "2021-02.parquet"
-        # Distinct partitions get distinct locks → writers to different files
-        # never block each other (the fan-out keeps its parallelism).
-        assert _partition_lock(a) is not _partition_lock(b)
+        # Distinct partitions get distinct locks → holding a's lock never blocks b's
+        # (the fan-out keeps its parallelism). b's underlying lock acquires freely.
+        with _PARTITION_LOCKS.acquire(a):
+            with _PARTITION_LOCKS._guard:  # pyright: ignore[reportPrivateUsage]
+                b_entry = _PARTITION_LOCKS._locks.get(b)  # pyright: ignore[reportPrivateUsage]
+            # b was never acquired, so it is not even interned yet — proving no contention.
+            assert b_entry is None
 
     def test_concurrent_same_partition_writes_lose_no_bars(self, tmp_path: Path) -> None:
         """Two threads merge-writing the same month from a barrier keep ALL bars.
@@ -593,11 +741,11 @@ class TestCrossProcessPartitionLock:
         observed: dict[str, bool] = {}
         original_read = writer._read_existing_bars
 
-        def _spy_read(dest: Path) -> dict[datetime, CandleBar]:
+        def _spy_read(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
             observed["held_during_read"] = _partition_lock_is_held(
                 partition_lock_path(tmp_path, dest)
             )
-            return original_read(dest)
+            return original_read(dest, existing_bytes)
 
         monkeypatch.setattr(writer, "_read_existing_bars", _spy_read)
         writer.write(bars=[_bar(1, open_="101", high="101", low="101", close="101")], **coords)

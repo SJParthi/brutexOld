@@ -29,6 +29,7 @@ from brutex.adapters.groww.ingest import (
     clamp_window_end,
     ingest_spot,
 )
+from brutex.data.errors import PartitionLockTimeout
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
@@ -98,6 +99,28 @@ class _Sink:
         del exchange, segment, symbol, interval
         self.appends.append(len(bars))
         return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+
+
+class _LockTimeoutSink:
+    """Sink whose ``append`` raises :class:`PartitionLockTimeout` (a wedged peer)."""
+
+    def __init__(self, timeout_seconds: float = 0.5) -> None:
+        self._timeout_seconds = timeout_seconds
+        self.calls = 0
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, bars, merge_mode
+        self.calls += 1
+        raise PartitionLockTimeout(self._timeout_seconds)
 
 
 class _Adapter:
@@ -288,6 +311,51 @@ class TestIngestSpot:
         assert report.bars_appended == 0
         assert report.transient_failures == 8
         assert sink.appends == []
+
+    def test_partition_lock_timeout_defers_window_not_quarantine(self) -> None:
+        """A wedged-peer lock timeout on write DEFERS the window like a 429 (GAP #3).
+
+        The sink's append raises ``PartitionLockTimeout``; the window must be recorded
+        FAILED + counted transient (deferred to the next pull), NOT a symbol-wide
+        quarantine and NOT an infinite block (DEC-PULL-CONTENTION-ANTISTALL-001).
+        """
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        led = WindowLedger()
+        sink = _LockTimeoutSink()
+        report = ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),  # 8 windows
+            ledger=led,
+            max_retry_passes=0,
+        )
+        assert report.windows == 8
+        assert report.bars_appended == 0
+        assert report.transient_failures == 8  # every window deferred, not quarantined
+        # The ledger marked each window FAILED (re-tried next pull, never masked).
+        assert {r.status for r in led.records()} == {FAILED}
+        assert sink.calls == 8  # the fetch ran, the write hit the wedged lock per window
+
+    def test_partition_lock_timeout_logs_lock_deferred_without_ledger(self) -> None:
+        """The defer path works with NO ledger too (the ``ledger is None`` branch)."""
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                _LockTimeoutSink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 3, 1),
+                ledger=None,
+                max_retry_passes=0,
+            )
+        assert report.transient_failures >= 1
+        events = [r["event"] for r in logs]
+        assert "ingest.window.lock_deferred" in events
 
     def test_terminal_error_propagates(self) -> None:
         with pytest.raises(GrowwBadRequestError):

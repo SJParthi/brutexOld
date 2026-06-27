@@ -1,10 +1,10 @@
 """Durable sidecar store for :class:`~brutex.data.raw_integrity.RawIntegrityRecord`.
 
-DEC-RAW-DATA-INTEGRITY-001. The per-window raw-payload hash
-(:mod:`brutex.data.raw_integrity`) is only useful as a PROVABLE audit if it
-SURVIVES the pull that captured it — so this is its durable home: an
-**append-only JSON-lines sidecar** at
-``<lake_root>/raw_integrity/records.jsonl``.
+DEC-RAW-DATA-INTEGRITY-001 / DEC-PULL-CONTENTION-ANTISTALL-001. The per-window
+raw-payload hash (:mod:`brutex.data.raw_integrity`) is only useful as a PROVABLE
+audit if it SURVIVES the pull that captured it — so this is its durable home:
+**append-only JSON-lines sidecars** under ``<lake_root>/raw_integrity/``, SHARDED
+**per ``groww_symbol``** at ``<lake_root>/raw_integrity/<sha256(groww_symbol)>.jsonl``.
 
 Why a SEPARATE sidecar (not the candle lake, not the window ledger):
 
@@ -23,6 +23,18 @@ Why a SEPARATE sidecar (not the candle lake, not the window ledger):
   ``(exchange, segment, groww_symbol, interval, window_start, window_end)``
   coordinates, so a future ledger join is trivial if ever wanted.
 
+Why SHARDED per ``groww_symbol`` (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #14):
+the previous single shared ``records.jsonl`` serialised EVERY window completion —
+across all ~750 symbols — behind one process-global lock + one no-timeout
+cross-process ``flock``, so a parallel fan-out queued every fetch worker through
+ONE file. Sharding by ``groww_symbol`` means two DIFFERENT symbols' captures never
+contend (distinct files, distinct locks); :func:`load_records` globs ALL ``*.jsonl``
+shards (and the legacy ``records.jsonl``, so old sidecars still load). The
+cross-process ``flock`` is BOUNDED (``LOCK_EX | LOCK_NB`` retried under a short
+deadline) so a wedged peer can never pin a fetch worker — exhaustion is the existing
+best-effort SKIP (the hash is additive proof; a dropped record only costs a
+re-verify, never data).
+
 Reliability (never crash a pull): :func:`append_record` is best-effort at the
 call site (the ingest hook guards it); :func:`load_records` degrades to an empty
 result on a missing / unreadable / malformed file (a structured WARNING, never
@@ -36,8 +48,10 @@ pull.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -54,20 +68,32 @@ from brutex.data.raw_integrity import (
 #: Structured logger — surfaces a corrupt/absent integrity sidecar into ``/logs``.
 _LOG = structlog.get_logger("brutex.data.raw_integrity_store")
 
-#: The integrity sidecar directory + file under the lake root (NEVER under
-#: ``bars/`` / ``options/`` — it is proof alongside the data, not lake data).
+#: The integrity sidecar directory + legacy single-file name under the lake root
+#: (NEVER under ``bars/`` / ``options/`` — it is proof alongside the data, not lake
+#: data). The legacy ``records.jsonl`` is still LOADED (older sidecars), but new
+#: appends write to a per-``groww_symbol`` shard.
 INTEGRITY_DIRNAME: str = "raw_integrity"
 INTEGRITY_FILENAME: str = "records.jsonl"
 
-#: Serialise concurrent appends from the parallel window workers. An APPEND of
-#: one short JSON line under an exclusive lock is atomic enough for a sidecar
-#: (each line is independently parseable; a partial trailing line on a crash is
-#: skipped on load) — this lock only prevents two threads interleaving bytes
-#: WITHIN one process. Module-level so every store instance for a given process
-#: shares it (the conservative, never-interleave choice). CROSS-process safety —
-#: a CLI ``brutex fetch`` and a dashboard pull sharing one ``BRUTEX_LAKE_ROOT``
-#: both appending — is provided by the advisory :func:`fcntl.flock` taken on the
-#: sidecar fd inside :func:`append_record` (mirrors DEC-LAKE-PARTITION-FLOCK-001).
+#: Bounded cross-process ``flock`` deadline (seconds) for ONE shard append. Short —
+#: a single short JSON-line append holds the lock for microseconds, so a peer holding
+#: it longer than this is wedged; exhaustion degrades to a best-effort skip (the hash
+#: is additive proof). Sharding makes contention rare; this only bounds the worst case.
+SHARD_FLOCK_TIMEOUT_SECONDS: float = 5.0
+
+#: Sleep between non-blocking re-acquire attempts (seconds) for the shard ``flock``.
+SHARD_FLOCK_POLL_SECONDS: float = 0.02
+
+#: Serialise concurrent appends from the parallel window workers WITHIN this process.
+#: An APPEND of one short JSON line under an exclusive lock is atomic enough for a
+#: sidecar (each line is independently parseable; a partial trailing line on a crash
+#: is skipped on load). Module-level so every store instance for a given process shares
+#: it (the conservative, never-interleave choice). Now that the sidecar is SHARDED per
+#: ``groww_symbol``, distinct symbols' shards are distinct FILES — but they still share
+#: this one in-process lock; the lock is held only for the microsecond byte-append, so
+#: it is not a contention bottleneck (the cross-process ``flock`` per shard is what
+#: distinct symbols no longer contend on). CROSS-process safety is the BOUNDED advisory
+#: :func:`fcntl.flock` taken on each shard fd inside :func:`append_record`.
 _APPEND_LOCK = threading.Lock()
 
 
@@ -77,8 +103,25 @@ def integrity_dir(lake_root: Path) -> Path:
 
 
 def integrity_path(lake_root: Path) -> Path:
-    """Return the integrity sidecar path (``<lake_root>/raw_integrity/records.jsonl``)."""
+    """Return the LEGACY single-file sidecar path (``<lake_root>/raw_integrity/records.jsonl``).
+
+    Retained for back-compat: pre-sharding sidecars wrote here, and
+    :func:`load_records` still reads it. New appends go to a per-``groww_symbol``
+    :func:`shard_path` instead.
+    """
     return integrity_dir(lake_root) / INTEGRITY_FILENAME
+
+
+def shard_path(lake_root: Path, groww_symbol: str) -> Path:
+    """Return the per-symbol shard path (``<lake_root>/raw_integrity/<sha256(symbol)>.jsonl``).
+
+    Keyed by ``sha256(groww_symbol)`` so each symbol's captures land in their OWN file
+    (two different symbols never contend on one lock — DEC-PULL-CONTENTION-ANTISTALL-001
+    GAP #14) and the same symbol ALWAYS maps to the same shard (append order preserved
+    per symbol, so latest-wins-per-key still holds). O(1).
+    """
+    digest = hashlib.sha256(groww_symbol.encode("utf-8")).hexdigest()
+    return integrity_dir(lake_root) / f"{digest}.jsonl"
 
 
 def _record_to_json(record: RawIntegrityRecord) -> str:
@@ -98,22 +141,51 @@ def _record_to_json(record: RawIntegrityRecord) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def append_record(record: RawIntegrityRecord, lake_root: Path) -> None:
-    """Append *record* as one JSON line to the integrity sidecar (crash-safe append).
+def _try_flock_bounded(fd: int) -> bool:
+    """Take an exclusive shard ``flock`` NON-BLOCKING, retried under a short deadline.
 
-    Creates the ``raw_integrity/`` directory if absent and APPENDS one line. The
-    write is serialised on BOTH levels (so a CLI ``brutex fetch`` and a dashboard
-    pull sharing one ``BRUTEX_LAKE_ROOT`` can never interleave bytes):
+    Loops ``fcntl.flock(fd, LOCK_EX | LOCK_NB)`` catching ``BlockingIOError`` (a peer
+    process holds it) + sleeping :data:`SHARD_FLOCK_POLL_SECONDS` until taken or
+    :data:`SHARD_FLOCK_TIMEOUT_SECONDS` elapses. Returns ``True`` on acquire, ``False``
+    on deadline exhaustion (the caller then SKIPS the additive record — never blocks the
+    fetch worker; DEC-PULL-CONTENTION-ANTISTALL-001 GAP #14). O(1) on the uncontended
+    fast path (one non-blocking call).
+    """
+    deadline = time.monotonic() + SHARD_FLOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(SHARD_FLOCK_POLL_SECONDS)
+
+
+def append_record(record: RawIntegrityRecord, lake_root: Path) -> None:
+    """Append *record* as one JSON line to its per-symbol shard (crash-safe append).
+
+    Creates the ``raw_integrity/`` directory if absent and APPENDS one line to the
+    ``record.groww_symbol`` shard (:func:`shard_path`). The write is serialised on BOTH
+    levels (so a CLI ``brutex fetch`` and a dashboard pull sharing one
+    ``BRUTEX_LAKE_ROOT`` can never interleave bytes):
 
     * a process-local :data:`_APPEND_LOCK` (``threading.Lock``) serialises the
       parallel window workers WITHIN this process, and
-    * a CROSS-process advisory :func:`fcntl.flock` (``LOCK_EX``) taken on the open
-      sidecar fd for the duration of the write serialises SEPARATE processes
-      (mirrors :mod:`brutex.data.partition_lock` / DEC-LAKE-PARTITION-FLOCK-001).
-      The lock is held on the SAME append-mode fd that is written, which is safe
-      here because — unlike a Parquet partition — the sidecar is never replaced
-      (``os.replace`` would swap the inode); it is only ever appended to, so the
-      fd's inode is stable for the lifetime of the lock.
+    * a CROSS-process advisory :func:`fcntl.flock` taken on the open shard fd for the
+      duration of the write serialises SEPARATE processes — BOUNDED via
+      ``LOCK_EX | LOCK_NB`` retried under :data:`SHARD_FLOCK_TIMEOUT_SECONDS` so a
+      wedged peer can NEVER pin the fetch worker (DEC-PULL-CONTENTION-ANTISTALL-001).
+      The lock is held on the SAME append-mode fd that is written, which is safe here
+      because — unlike a Parquet partition — the sidecar is never replaced
+      (``os.replace`` would swap the inode); it is only ever appended to, so the fd's
+      inode is stable for the lifetime of the lock. On deadline exhaustion the record
+      is SKIPPED + logged (best-effort: the hash is additive proof; a dropped record
+      only costs a re-verify, never data).
+
+    SHARDING (GAP #14): distinct ``groww_symbol`` shards are distinct files with distinct
+    locks, so two symbols' captures never contend — only same-symbol appends queue, and
+    only on the microsecond byte-write.
 
     O(record) — never reads or rewrites prior lines, so a crash mid-append can at
     worst leave a partial trailing line (skipped on load), never corrupt earlier
@@ -127,13 +199,21 @@ def append_record(record: RawIntegrityRecord, lake_root: Path) -> None:
     directory = integrity_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
     line = _record_to_json(record)
-    path = integrity_path(lake_root)
+    path = shard_path(lake_root, record.groww_symbol)
     with _APPEND_LOCK, path.open("a", encoding="utf-8") as handle:
-        # Advisory exclusive lock across processes for the duration of the write;
-        # released automatically when the ``with`` block closes the fd. POSIX
-        # (Linux + macOS — the Track-1 envelope); Windows is out of scope, as for
-        # the partition lock.
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        # Bounded advisory exclusive lock across processes; released automatically when
+        # the ``with`` block closes the fd. POSIX (Linux + macOS — the Track-1 envelope);
+        # Windows is out of scope, as for the partition lock.
+        if not _try_flock_bounded(handle.fileno()):
+            _LOG.warning(
+                "raw_integrity.append_lock_timeout",
+                groww_symbol=record.groww_symbol,
+                interval=record.interval,
+                window_start=record.window_start,
+                window_end=record.window_end,
+                timeout_seconds=SHARD_FLOCK_TIMEOUT_SECONDS,
+            )
+            return  # best-effort skip — the additive hash is not worth blocking a pull
         handle.write(line + "\n")
 
 
@@ -173,37 +253,45 @@ def _record_from_obj(obj: object) -> RawIntegrityRecord | None:
 
 
 def load_records(lake_root: Path) -> dict[tuple[str, str, str, str, str, str], RawIntegrityRecord]:
-    """Load the integrity sidecar as a ``{key: latest record}`` map (latest-wins).
+    """Load every integrity shard as a ``{key: latest record}`` map (latest-wins).
 
-    **Never raises** (reliability): a missing file is an empty map; an unreadable
-    file logs a WARNING and also returns empty; a malformed individual line is
-    skipped (the append-only format means a crash can only damage the trailing
-    line). When the same window appears more than once (a re-pull re-captures it),
-    the LAST (most recent) record for that key wins — the file is read in append
-    order, so a later line overwrites an earlier one for the same key.
+    Globs ALL ``*.jsonl`` files under ``raw_integrity/`` — the per-``groww_symbol``
+    shards AND the legacy single ``records.jsonl`` (so pre-sharding sidecars still load,
+    DEC-PULL-CONTENTION-ANTISTALL-001 GAP #14). Shards are read in a DETERMINISTIC name
+    order so a key duplicated ACROSS shards resolves stably; WITHIN one shard a later
+    line wins (append order). A given window's key only ever lands in ONE shard (its
+    symbol's), so cross-shard collisions only arise from a legacy + sharded mix — handled
+    by the deterministic order.
+
+    **Never raises** (reliability): a missing directory / no shards is an empty map; an
+    unreadable shard logs a WARNING and is skipped (the others still load); a malformed
+    individual line is skipped (the append-only format means a crash can only damage the
+    trailing line). When the same window appears more than once (a re-pull re-captures
+    it), the LAST (most recent) record for that key wins.
 
     O(records) — paid only by the verify path, never the hot pull.
     """
-    path = integrity_path(lake_root)
-    if not path.is_file():
+    directory = integrity_dir(lake_root)
+    if not directory.is_dir():
         return {}
     records: dict[tuple[str, str, str, str, str, str], RawIntegrityRecord] = {}
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        _LOG.warning("raw_integrity.load_failed", path=str(path), error=str(exc))
-        return {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
+    for path in sorted(directory.glob("*.jsonl")):
         try:
-            obj = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue  # a partial/corrupt trailing line — skip, never crash
-        record = _record_from_obj(obj)
-        if record is not None:
-            records[record.key] = record
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            _LOG.warning("raw_integrity.load_failed", path=str(path), error=str(exc))
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue  # a partial/corrupt trailing line — skip, never crash
+            record = _record_from_obj(obj)
+            if record is not None:
+                records[record.key] = record
     return records
 
 
@@ -337,6 +425,8 @@ def make_capture_hook_factory(lake_root: Path) -> CaptureHookFactory:
 __all__ = [
     "INTEGRITY_DIRNAME",
     "INTEGRITY_FILENAME",
+    "SHARD_FLOCK_POLL_SECONDS",
+    "SHARD_FLOCK_TIMEOUT_SECONDS",
     "CaptureHookFactory",
     "append_record",
     "append_records",
@@ -346,4 +436,5 @@ __all__ = [
     "load_records",
     "make_capture_hook",
     "make_capture_hook_factory",
+    "shard_path",
 ]

@@ -29,7 +29,6 @@ follow-up.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -37,9 +36,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
+from brutex.data.errors import parquet_read_skip_errors
 from brutex.data.models import OptionBar
 from brutex.data.partition import partition_for_timestamp
-from brutex.data.partition_lock import partition_write_lock
+from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
 from brutex.models import BruteXError
 from brutex.money import round_money
 
@@ -105,30 +105,12 @@ _SAFE: str = "__"
 #: the lock MUST be shared across instances that resolve to the same on-disk file. This is
 #: belt-and-braces below the coarse :class:`~brutex.data.option_sink.OptionBarSink` audit
 #: lock: it makes the writer correct on its OWN, so the option write can be parallelised
-#: out from under that global serialisation without a lost-update race.
-_PARTITION_LOCKS: dict[Path, threading.Lock] = {}
-
-#: Guards :data:`_PARTITION_LOCKS` itself — held only for the O(1)
-#: get-or-create of a path's lock, never across a write.
-_PARTITION_LOCKS_GUARD: threading.Lock = threading.Lock()
-
-
-def _partition_lock(dest: Path) -> threading.Lock:
-    """Return the shared write lock for partition *dest* (interned, O(1)).
-
-    The first caller for a given path creates the lock under
-    :data:`_PARTITION_LOCKS_GUARD`; every later caller (any thread, any
-    :class:`OptionParquetWriter` instance) gets the SAME lock object, so concurrent
-    merge-writes to one partition file are serialised. The guard is held only for the
-    dict get-or-create — never across the write itself — so distinct partitions are
-    looked up without contention and the fan-out keeps its parallelism.
-    """
-    with _PARTITION_LOCKS_GUARD:
-        lock = _PARTITION_LOCKS.get(dest)
-        if lock is None:
-            lock = threading.Lock()
-            _PARTITION_LOCKS[dest] = lock
-        return lock
+#: out from under that global serialisation without a lost-update race. The intern is
+#: CAPACITY-BOUNDED (:class:`~brutex.data.partition_lock.BoundedLockRegistry`, LRU eviction
+#: of idle locks) so the huge option chain (every strike × CE/PE × month) can no longer
+#: accumulate a ``Lock`` object per partition forever (GAP #19); an in-flight (refcounted)
+#: write keeps its lock, so correctness is independent of the cap.
+_PARTITION_LOCKS: BoundedLockRegistry = BoundedLockRegistry()
 
 
 class OptionWriterError(BruteXError):
@@ -227,13 +209,22 @@ class OptionParquetWriter:
         # (DEC-LAKE-PARTITION-FLOCK-001); the flock is taken BEFORE the write guard so a
         # disk-full at lock creation also maps to LakeWriteHalt.
         with (
-            _partition_lock(dest),
+            _PARTITION_LOCKS.acquire(dest),
             partition_write_lock(self._lake_root, dest),
             lake_write_guard(),
         ):
             new_df = _render_df(coordinate, new_bars)  # validates the polars import
             if dest.exists():
-                existing = pl.read_parquet(dest)
+                # GAP #1: a CORRUPT existing partition (a polars PolarsError, or an
+                # OSError fault) must quarantine THIS one series — raising a
+                # quarantinable OptionWriterError naming the bad path — not crash the
+                # whole option pull. lake_write_guard (above) still maps MemoryError /
+                # ENOSPC to a pull-wide LakeWriteHalt, so an OOM here is NOT demoted to a
+                # per-contract quarantine; only an unreadable-FILE fault is.
+                try:
+                    existing = pl.read_parquet(dest)
+                except parquet_read_skip_errors() as exc:
+                    raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
                 # int() coercion keeps the return concretely int even in the CI
                 # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
                 # — there `.height` is Any (ignore_missing_imports) and an un-coerced

@@ -48,7 +48,7 @@ from brutex.adapters.groww.option_ingest import (
     scan_underlying_all_empty,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
@@ -231,6 +231,28 @@ class _RaisingSink:
     ) -> SinkAppendResult:
         del exchange, segment, symbol, interval, bars
         raise RuntimeError("genuine bug in the sink")
+
+
+class _LockTimeoutSink:
+    """A sink whose append raises :class:`PartitionLockTimeout` (a wedged peer)."""
+
+    def __init__(self, timeout_seconds: float = 0.5) -> None:
+        self._timeout_seconds = timeout_seconds
+        self.calls = 0
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, bars, merge_mode
+        self.calls += 1
+        raise PartitionLockTimeout(self._timeout_seconds)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -459,6 +481,62 @@ def test_ingest_ratelimit_exhausted_records_failed() -> None:
     # The transient FAILED row carries the in-pull fetch count (1 — 429'd on the first
     # fetch this pull; DEC-WINDOW-INPULL-FETCHES-001, the option spine's twin).
     assert ledger.records()[0].in_pull_fetches == 1
+
+
+def test_ingest_partition_lock_timeout_defers_window() -> None:
+    """A wedged-peer lock timeout on write DEFERS the window like a 429 (GAP #3).
+
+    The sink's append raises ``PartitionLockTimeout``; the contract's window must be
+    recorded FAILED + counted transient (deferred to the next pull), NOT a
+    contract-wide quarantine and NOT an infinite block (DEC-PULL-CONTENTION-ANTISTALL-001).
+    """
+    sdk = _FakeSDK(payload=_candles())
+    sink = _LockTimeoutSink()
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        max_attempts=0,
+        now_ist=_now,
+    )
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    assert report.transient_failures == 1 and report.still_failed_windows == 1
+    assert sink.calls == 1  # the fetch ran; the write hit the wedged lock once
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull
+
+
+def test_ingest_partition_lock_timeout_no_ledger_logs_deferred() -> None:
+    """The defer path works with NO ledger (the ``ledger is None`` branch)."""
+    sdk = _FakeSDK(payload=_candles())
+    sink = _LockTimeoutSink()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=None,
+            max_attempts=0,
+            now_ist=_now,
+        )
+    assert report.transient_failures == 1
+    events = [r["event"] for r in logs]
+    assert "option.ingest.window.lock_deferred" in events
 
 
 def test_ingest_transient_no_hooks_no_ledger() -> None:
