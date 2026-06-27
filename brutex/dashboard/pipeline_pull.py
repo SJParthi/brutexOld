@@ -87,6 +87,11 @@ PHASE_HISTORICAL = "historical"
 #: movers snapshot ONLY after every fetch phase succeeds (never on a partial/broken
 #: pull — the operator's "until/unless successful fetches happen, never run movers").
 PHASE_MOVERS = "movers"
+#: The OPTIONAL gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build the
+#: derived intraday timeframes ONLY after every fetch phase succeeds — the operator's
+#: "pre-build runs as the pipeline's final stage automatically". Like movers, it is a
+#: read-of-the-just-filled-lake accelerator that is gated on a fully-successful fetch.
+PHASE_PREBUILD = "prebuild"
 
 
 def spot_phase_ok(report: BulkSpotReport) -> bool:
@@ -212,6 +217,13 @@ class PipelinePullReport:
         its gate (the hard rule: movers is warmed ONLY after a fully-successful pull,
         never on a partial/broken one). ``0`` is an honest "ran, warmed nothing"
         (e.g. an empty lake), distinct from ``None`` "did not run".
+    prebuild_built
+        The number of symbols whose derived intraday timeframes were pre-built by the
+        OPTIONAL gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001), or ``None``
+        when that phase did NOT run — either no ``run_prebuild`` was injected, OR the
+        historical fetch did not pass its gate (the SAME hard rule as movers:
+        pre-build runs ONLY after a fully-successful pull). ``0`` is an honest "ran,
+        built nothing" (e.g. an empty lake), distinct from ``None`` "did not run".
     """
 
     spot: BulkSpotReport | None
@@ -220,6 +232,7 @@ class PipelinePullReport:
     stopped_after: str | None
     note: str
     movers_warmed: int | None = None
+    prebuild_built: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -245,6 +258,7 @@ class PipelinePullReport:
             "stopped_after": self.stopped_after,
             "note": self.note,
             "movers_warmed": self.movers_warmed,
+            "prebuild_built": self.prebuild_built,
             "spot": self.spot.to_dict() if self.spot is not None else None,
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
@@ -273,22 +287,30 @@ def _complete_note(
     metadata: MetadataPullReport,
     historical: CompositePullReport,
     movers_warmed: int | None = None,
+    prebuild_built: int | None = None,
 ) -> str:
     """Build the honest summary note for a fully-run pipeline.
 
-    Appends a movers-warm clause ONLY when the gated phase 4 ran (``movers_warmed``
-    is not ``None``) — honestly distinguishing "warmed N snapshots" from a run where
-    movers was skipped (no warmer injected) or gated-out (historical not clean).
+    Appends a movers-warm clause ONLY when the gated movers phase ran
+    (``movers_warmed`` is not ``None``) and a pre-build clause ONLY when the gated
+    FINAL pre-build phase ran (``prebuild_built`` is not ``None``) — honestly
+    distinguishing "warmed/built N" from a run where the phase was skipped (no
+    callable injected) or gated-out (historical not clean).
     """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
     contracts = hist.contracts_completed if hist is not None else 0
     movers = f", movers {movers_warmed} snapshot(s) warmed" if movers_warmed is not None else ""
+    prebuild = (
+        f", timeframes pre-built for {prebuild_built} symbol(s)"
+        if prebuild_built is not None
+        else ""
+    )
     return (
         f"pipeline complete — spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
-        f"contracts, historical {bars} bars over {contracts} contract(s){movers}"
+        f"contracts, historical {bars} bars over {contracts} contract(s){movers}{prebuild}"
     )
 
 
@@ -298,8 +320,9 @@ def run_full_pipeline(
     run_metadata: Callable[[], MetadataPullReport],
     run_historical: Callable[[], CompositePullReport],
     run_movers: Callable[[], int] | None = None,
+    run_prebuild: Callable[[], int] | None = None,
 ) -> PipelinePullReport:
-    """Run the gated spot→metadata→historical(→movers) pipeline over injected spines.
+    """Run the gated spot→metadata→historical(→movers→prebuild) pipeline over injected spines.
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -319,10 +342,21 @@ def run_full_pipeline(
     success (``stopped_after``/``ok``) is NEVER affected by the warm — it is a
     read-only post-success accelerator over the just-filled lake.
 
+    **Gated FINAL pre-build (DEC-UNIVERSE-PULL-CONSOLIDATE-001):** if ``run_prebuild``
+    is injected, it runs as the pipeline's FINAL stage, gated by the SAME
+    fully-successful-fetch rule as movers (:func:`historical_phase_ok` passes). This
+    is the operator's "pre-build runs as the pipeline's final stage automatically":
+    a completed-with-failures historical fetch leaves ``prebuild_built = None`` (NOT
+    pre-built). A clean run records the count ``run_prebuild`` returns (``0`` is an
+    honest "built nothing", distinct from ``None`` "did not run"). Like movers, the
+    pre-build NEVER affects the pull's own success — it is a post-success accelerator
+    that materialises the derived intraday timeframes over the just-filled lake.
+
     The callables are INJECTED so the entire control flow is unit-testable with no
     network (the route binds them to the real pull functions + the movers-cache
-    warmer). The sequencer itself is O(1) — four calls + the gate checks; the WORK
-    it triggers is the real multi-hour vendor fill (no throughput claim).
+    warmer + the timeframe materialiser). The sequencer itself is O(1) — at most five
+    calls + the gate checks; the WORK it triggers is the real multi-hour vendor fill
+    (no throughput claim).
 
     Parameters
     ----------
@@ -338,8 +372,13 @@ def run_full_pipeline(
     run_movers
         OPTIONAL zero-arg callable that warms the movers snapshot(s) over the
         just-filled lake and returns how many were warmed; called ONLY after a
-        fully-successful fetch (phase 4, gated). ``None`` (default) skips it
-        entirely — backward-compatible with the whole-universe pipeline.
+        fully-successful fetch (gated). ``None`` (default) skips it entirely —
+        backward-compatible with the whole-universe pipeline.
+    run_prebuild
+        OPTIONAL zero-arg callable that pre-builds the derived intraday timeframes
+        over the just-filled lake and returns how many symbols were built; the
+        pipeline's FINAL stage, called ONLY after a fully-successful fetch (gated).
+        ``None`` (default) skips it entirely.
 
     Returns
     -------
@@ -367,15 +406,22 @@ def run_full_pipeline(
         )
 
     historical = run_historical()
-    # Phase 4 (gated, optional): warm movers ONLY on a fully-successful fetch.
+    # Post-fetch phases (gated, optional): warm movers + pre-build the derived
+    # timeframes ONLY on a fully-successful fetch. Evaluate the gate ONCE so both
+    # phases share the same fully-successful-fetch decision.
+    fetch_clean = historical_phase_ok(historical)
     movers_warmed: int | None = None
-    if run_movers is not None and historical_phase_ok(historical):
+    if run_movers is not None and fetch_clean:
         movers_warmed = run_movers()
+    prebuild_built: int | None = None
+    if run_prebuild is not None and fetch_clean:
+        prebuild_built = run_prebuild()
     return PipelinePullReport(
         spot=spot,
         metadata=metadata,
         historical=historical,
         stopped_after=None,
-        note=_complete_note(spot, metadata, historical, movers_warmed),
+        note=_complete_note(spot, metadata, historical, movers_warmed, prebuild_built),
         movers_warmed=movers_warmed,
+        prebuild_built=prebuild_built,
     )
