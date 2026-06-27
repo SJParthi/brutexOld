@@ -46,7 +46,7 @@ def _1m_frame(
         "close": closes,
         "volume": [100] * n,
     }
-    schema: dict[str, pl.DataType] = {
+    schema: dict[str, pl.DataType | type[pl.DataType]] = {
         "ts_utc": pl.Datetime(time_zone="UTC"),
         "open": pl.Float64,
         "high": pl.Float64,
