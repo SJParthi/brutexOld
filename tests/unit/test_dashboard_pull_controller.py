@@ -36,6 +36,7 @@ from brutex.dashboard.pull_controller import (
     PullCandlesReport,
     SessionRateController,
     TimeframeResult,
+    _emit_pull_pool_size,
     default_date_range,
     make_live_sync,
     parse_symbol_list,
@@ -1896,3 +1897,59 @@ class TestObserveRate:
             cast(PullHealthMonitor, monitor),
         )
         assert monitor.observed == [({"current_rps": 5.0, "recent_hits": 0}, {})]
+
+
+class TestEmitPullPoolSize:
+    """`_emit_pull_pool_size` — the once-per-pull `pull.pool_size` telemetry.
+
+    DEC-LAKE-WRITE-INSTRUMENT-001: the 28-hour pull-log forensic could not see the
+    resolved connection-pool width (it inferred a wrong "pool=2" from `in_flight`
+    peaks that actually reached 7), so the resolved pool size is now logged once at
+    pull start to pair with the per-partition `lake.partition.write` latency.
+    """
+
+    @staticmethod
+    def _pool_events(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        return [e for e in logs if e.get("event") == "pull.pool_size"]
+
+    def test_emits_resolved_pool_size(self) -> None:
+        """One `pull.pool_size` event carrying the real `resolve_pool_size()`."""
+        from brutex.adapters.groww.constants import resolve_pool_size
+
+        with capture_logs() as logs:
+            _emit_pull_pool_size("pull-xyz")
+
+        events = self._pool_events(logs)
+        assert len(events) == 1
+        assert events[0]["log_level"] == "info"
+        assert events[0]["pull_id"] == "pull-xyz"
+        assert events[0]["pool_size"] == resolve_pool_size()
+
+    def test_respects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The emitted size tracks `BRUTEX_GROWW_POOL_SIZE` (the env knob)."""
+        monkeypatch.setenv("BRUTEX_GROWW_POOL_SIZE", "3")
+        with capture_logs() as logs:
+            _emit_pull_pool_size("pull-env")
+        events = self._pool_events(logs)
+        assert len(events) == 1
+        assert events[0]["pool_size"] == 3
+
+    def test_failure_is_swallowed_and_logged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unexpected error during resolution NEVER crashes the pull — it is logged.
+
+        `resolve_pool_size` is a pure env-read but the call is guarded; a forced
+        raise must yield a `pull.pool_size_emit_failed` log instead of propagating.
+        """
+
+        def _boom() -> int:
+            raise RuntimeError("simulated pool-size resolution failure")
+
+        # Patch the symbol the helper imports lazily inside its try block.
+        monkeypatch.setattr("brutex.adapters.groww.constants.resolve_pool_size", _boom)
+        with capture_logs() as logs:
+            _emit_pull_pool_size("pull-boom")  # must not raise
+
+        assert self._pool_events(logs) == []  # no success event
+        failed = [e for e in logs if e.get("event") == "pull.pool_size_emit_failed"]
+        assert len(failed) == 1
+        assert failed[0]["pull_id"] == "pull-boom"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +24,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter, _tick_round
 from brutex.data.partition_lock import partition_lock_path
+from structlog.testing import capture_logs
 
 
 def _partition_lock_is_held(lock_path: Path) -> bool:
@@ -604,3 +606,131 @@ class TestCrossProcessPartitionLock:
         # And released afterwards (a fresh acquire succeeds) — no leaked lock.
         (only,) = tmp_path.rglob("*.parquet")
         assert _partition_lock_is_held(partition_lock_path(tmp_path, only)) is False
+
+
+#: Shared partition coordinates for the telemetry tests (module-level so it is
+#: not a mutable class attribute — avoids RUF012).
+_TELEMETRY_COORDS: dict[str, str] = {
+    "exchange": "NSE",
+    "segment": "CASH",
+    "symbol": "NSE-NIFTY",
+    "interval": "1minute",
+}
+
+
+class TestLakePartitionWriteTelemetry:
+    """`lake.partition.write` instrumentation (DEC-LAKE-WRITE-INSTRUMENT-001).
+
+    The 28-hour pull-log forensic proved the pull is write/lake-bound DOWNSTREAM
+    of fetching but the write path emitted ZERO telemetry, so the serial-write
+    cost could only be INFERRED. Each successful :meth:`ParquetWriter.write` now
+    emits exactly one ``lake.partition.write`` event carrying the wall-clock
+    write cost (``append_ms``), the lock-acquire wait (``lock_wait_ms``), the
+    bars in this append (``rows``), the full partition size (``partition_rows``),
+    and the destination (``partition``). These tests capture the structlog output
+    and assert the event + its fields on BOTH the fresh-write and merge paths.
+    """
+
+    @staticmethod
+    def _write_events(
+        logs: Sequence[Mapping[str, object]],
+    ) -> list[Mapping[str, object]]:
+        return [e for e in logs if e.get("event") == "lake.partition.write"]
+
+    def test_fresh_write_emits_one_event_with_fields(self, tmp_path: Path) -> None:
+        """A first (fresh) write emits exactly one event with all six fields."""
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        with capture_logs() as logs:
+            result = writer.write(
+                bars=[
+                    _bar(0, open_="100", high="110", low="90", close="105"),
+                    _bar(1, open_="106", high="111", low="91", close="107"),
+                ],
+                **_TELEMETRY_COORDS,
+            )
+
+        events = self._write_events(logs)
+        assert len(events) == 1
+        event = events[0]
+        assert event["log_level"] == "info"
+        # rows = bars in THIS append batch; partition_rows = full partition size.
+        assert event["rows"] == 2
+        assert event["partition_rows"] == result.row_count == 2
+        # partition is the destination path string.
+        assert event["partition"] == str(result.path)
+        # Latencies are present, non-negative floats (wall-clock perf_counter deltas).
+        append_ms = event["append_ms"]
+        lock_wait_ms = event["lock_wait_ms"]
+        assert isinstance(append_ms, float) and append_ms >= 0.0
+        assert isinstance(lock_wait_ms, float) and lock_wait_ms >= 0.0
+
+    def test_merge_write_emits_event_with_full_partition_rows(self, tmp_path: Path) -> None:
+        """The merge (read-modify-write) path also emits, with the merged total.
+
+        ``rows`` reflects only the bars in the second append (1), while
+        ``partition_rows`` reflects the full merged month (2) — the real
+        disk-write-cost signal the forensic needs.
+        """
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            bars=[_bar(0, open_="100", high="110", low="90", close="105")], **_TELEMETRY_COORDS
+        )
+
+        with capture_logs() as logs:
+            result = writer.write(
+                bars=[_bar(1, open_="106", high="111", low="91", close="107")], **_TELEMETRY_COORDS
+            )
+
+        events = self._write_events(logs)
+        assert len(events) == 1
+        event = events[0]
+        assert event["rows"] == 1  # only this append's bars
+        assert event["partition_rows"] == result.row_count == 2  # full merged month
+
+    def test_idempotent_repull_still_emits_event(self, tmp_path: Path) -> None:
+        """A no-op re-pull (every bar already stored) STILL emits one event.
+
+        The merge short-circuits without rewriting the file, but the write call
+        succeeded — so the telemetry fires, reporting the unchanged partition.
+        """
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [_bar(0, open_="100", high="110", low="90", close="105")]
+        writer.write(bars=bars, **_TELEMETRY_COORDS)
+
+        with capture_logs() as logs:
+            writer.write(bars=bars, **_TELEMETRY_COORDS)  # identical re-pull → no rewrite
+
+        events = self._write_events(logs)
+        assert len(events) == 1
+        assert events[0]["rows"] == 1
+        assert events[0]["partition_rows"] == 1
+
+    def test_event_count_matches_partitions_for_multi_partition_sink(self, tmp_path: Path) -> None:
+        """One event per partition: a sink batch spanning two months → two events.
+
+        ``ParquetBarSink`` splits a cross-month batch into one
+        ``ParquetWriter.write`` call per ``(year, month)`` partition, so the
+        telemetry is one event per physical partition write (O(1) per write,
+        never per bar).
+        """
+        pytest.importorskip("polars")
+        from brutex.data.sink import ParquetBarSink
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+        jan = _bar(0, open_="100", high="110", low="90", close="105")
+        feb = CandleBar(
+            timestamp=datetime(2021, 2, 1, 4, 0, tzinfo=UTC),
+            open=Decimal("200"),
+            high=Decimal("210"),
+            low=Decimal("190"),
+            close=Decimal("205"),
+            volume=0,
+            open_interest=None,
+        )
+        with capture_logs() as logs:
+            sink.append(bars=[jan, feb], **_TELEMETRY_COORDS)
+
+        assert len(self._write_events(logs)) == 2

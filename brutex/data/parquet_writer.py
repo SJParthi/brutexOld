@@ -54,13 +54,17 @@ never affects the stored data (CLAUDE.md §2 Rule 7).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
+
+import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import WriterError
@@ -74,6 +78,19 @@ from brutex.money import round_money
 
 if TYPE_CHECKING:  # pragma: no cover
     pass
+
+
+#: Structured logger — emits one ``lake.partition.write`` event per successful
+#: partition write so the serial lake-write cost (the throughput-binding step
+#: DOWNSTREAM of fetching) is MEASURABLE in the pull log
+#: (DEC-LAKE-WRITE-INSTRUMENT-001). The prior 28-hour pull-log forensic proved
+#: the pull is write/lake-bound (achieved ~2.8 r/s vs ~4.6 allowed, connections
+#: idle 74% of the time) but could only INFER the serial-write cost — the
+#: write/lake path emitted ZERO telemetry (0 append/latency events in 343,914
+#: log lines), so the ``write_consumer`` (Lever 1 of DEC-FETCH-WRITE-OVERLAP)
+#: could not be sized or gated honestly. This event makes that cost a measurable
+#: fact. Cheap, always-on, O(1) (one ``info`` per PARTITION write, not per bar).
+_LOG = structlog.get_logger("brutex.data.parquet_writer")
 
 
 #: Fixed row-group size for parquet writes. Small enough to stream
@@ -265,6 +282,21 @@ class ParquetWriter:
         WriterError
             If *bars* is empty, spans multiple partitions, or *merge_mode* is
             not a recognised value.
+
+        Notes
+        -----
+        On a successful write this emits exactly one ``lake.partition.write``
+        structlog event (DEC-LAKE-WRITE-INSTRUMENT-001) carrying ``append_ms``
+        (the wall time of the serial read-modify-write op, lock-wait EXCLUDED),
+        ``lock_wait_ms`` (the wall time spent acquiring the per-partition + the
+        cross-process locks), ``rows`` (the bars in THIS append batch),
+        ``partition_rows`` (the total rows physically in the partition after the
+        write — the full month for a merge, the real disk-write-cost signal), and
+        ``partition`` (the destination path). It makes the serial lake-write cost
+        — the throughput-binding step the pull-log forensic could only INFER —
+        a measurable fact, so the overlap ``write_consumer`` (Lever 1 of
+        DEC-FETCH-WRITE-OVERLAP) can be sized + gated honestly. Cheap, always-on,
+        O(1) (one ``info`` per partition write, NOT per bar).
         """
         if merge_mode not in ("keep-first", "latest-wins"):
             raise WriterError(
@@ -340,20 +372,50 @@ class ParquetWriter:
         # process read AFTER the earlier one's `os.replace`, so its union includes
         # the earlier bars. Per partition + same lock ORDER as the threading lock,
         # so no cross-partition deadlock.
-        with _partition_lock(dest), partition_write_lock(self._lake_root, dest):
-            if dest.exists():
-                return self._merge_write(dest, sorted_bars, merge_mode=merge_mode)
+        #
+        # Both locks are entered via an ExitStack so the lock-acquire wall time
+        # (`lock_wait_ms`) is timed SEPARATELY from the write op itself
+        # (`append_ms`) — the two costs the pull-log forensic needs distinguished:
+        # contention waiting on a busy partition vs the serial Parquet
+        # read-modify-write cost (DEC-LAKE-WRITE-INSTRUMENT-001). Entering both
+        # locks inside ONE `with` keeps the SAME lock ORDER + scope as before, so
+        # the serialisation semantics are byte-unchanged — only the timing
+        # bookkeeping is added.
+        lock_acquire_start = time.perf_counter()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_partition_lock(dest))
+            stack.enter_context(partition_write_lock(self._lake_root, dest))
+            lock_wait_ms = (time.perf_counter() - lock_acquire_start) * 1000.0
 
-            content_bytes = self._render_bytes(sorted_bars)
-            self._atomic_write(dest, content_bytes)
-            return WriteResult(
-                path=dest,
-                row_count=len(sorted_bars),
-                raw_hash=hashlib.sha256(content_bytes).hexdigest(),
-                first_ts=first_ts,
-                last_ts=last_ts,
-                bytes_written=len(content_bytes),
-            )
+            write_start = time.perf_counter()
+            if dest.exists():
+                result = self._merge_write(dest, sorted_bars, merge_mode=merge_mode)
+            else:
+                content_bytes = self._render_bytes(sorted_bars)
+                self._atomic_write(dest, content_bytes)
+                result = WriteResult(
+                    path=dest,
+                    row_count=len(sorted_bars),
+                    raw_hash=hashlib.sha256(content_bytes).hexdigest(),
+                    first_ts=first_ts,
+                    last_ts=last_ts,
+                    bytes_written=len(content_bytes),
+                )
+            append_ms = (time.perf_counter() - write_start) * 1000.0
+
+        # Emit the per-partition write telemetry AFTER the locks are released (the
+        # log call is not itself part of the serialised critical section). One
+        # `info` per successful partition write — the throughput-binding cost the
+        # pull-log forensic could only INFER, now a measurable fact.
+        _LOG.info(
+            "lake.partition.write",
+            append_ms=round(append_ms, 3),
+            lock_wait_ms=round(lock_wait_ms, 3),
+            rows=len(sorted_bars),
+            partition_rows=result.row_count,
+            partition=str(dest),
+        )
+        return result
 
     def _merge_write(
         self, dest: Path, new_bars: list[CandleBar], *, merge_mode: str = "keep-first"
