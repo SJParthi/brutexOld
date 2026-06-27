@@ -207,6 +207,28 @@ class TestSweepRunConfig:
         cfg = _make_config(condition_bits=[0, 1], k=0)
         assert cfg.k == 0
 
+    def test_condition_bit_at_or_above_max_vocab_rejected_at_config_time(self) -> None:
+        # GAP #16 (DEC-SWEEP-DEDUP-LMDB-001): a bit >= MAX_VOCAB_BITS must be
+        # rejected AT CONFIG TIME, not surface late as a bare ValueError from
+        # the lazy iter_masks_k_of_bits generator mid-enumeration.
+        from brutex.engine.combo_mask import MAX_VOCAB_BITS
+
+        with pytest.raises(ValueError, match=r"condition_bits \[99\] out of range \[0, 64\)"):
+            _make_config(condition_bits=[0, 1, 99], k=1)
+        # The boundary bit (== MAX_VOCAB_BITS) is also out of the half-open range.
+        with pytest.raises(ValueError, match=r"out of range \[0, 64\)"):
+            _make_config(condition_bits=[MAX_VOCAB_BITS], k=1)
+
+    def test_negative_condition_bit_rejected_at_config_time(self) -> None:
+        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 64\)"):
+            _make_config(condition_bits=[-1, 0, 1], k=1)
+
+    def test_top_condition_bit_in_range_is_valid(self) -> None:
+        from brutex.engine.combo_mask import MAX_VOCAB_BITS
+
+        cfg = _make_config(condition_bits=[0, MAX_VOCAB_BITS - 1], k=1)
+        assert MAX_VOCAB_BITS - 1 in cfg.condition_bits
+
     @pytest.mark.parametrize("field", ["sl_paisa", "tp_paisa"])
     def test_nonpositive_paisa_knob_rejected(self, field: str) -> None:
         with pytest.raises(ValueError, match=f"{field} must be > 0 or None"):
@@ -737,7 +759,10 @@ class TestCompletionSentinel:
         assert sentinel.tuple_digest == self._DIGEST
         assert sentinel.store_content_hash == summary.store_content_hash
         assert sentinel.sidecar_written is True
-        assert sentinel.n_marked == summary.evaluated
+        # On the digest path the dedup probes are BYPASSED, so the unconditional
+        # advisory mark_many is SKIPPED (DEC-SWEEP-DEDUP-LMDB-001) — the sentinel
+        # is the redo authority, so n_marked honestly reads 0 (no marks written).
+        assert sentinel.n_marked == 0
 
     def test_no_digest_writes_no_sentinel(self, tmp_path: Path) -> None:
         from brutex.engine.tuple_complete import completion_sentinel_path
@@ -827,30 +852,38 @@ class TestCompletionSentinel:
         assert redone.persisted == 1  # never inflated
         assert store_path.read_bytes() == baseline
 
-    def test_mark_crash_leaves_no_sentinel_then_heals(self, tmp_path: Path) -> None:
-        # Ordering pin: the sentinel lands STRICTLY AFTER mark_many — a crash
-        # inside the mark loop leaves it absent, so the next run fully redoes.
-        from brutex.engine.tuple_complete import completion_sentinel_path
+    def test_digest_path_never_calls_mark_many(self, tmp_path: Path) -> None:
+        # Regression (DEC-SWEEP-DEDUP-LMDB-001): on the digest path the dedup
+        # probes are BYPASSED (`seen` is never consulted), so the unconditional
+        # advisory mark_many is now SKIPPED too — marking would be a wasted
+        # O(survivors) write to the off-heap LMDB exact tier. A dedup whose
+        # mark_many WOULD raise is therefore never invoked: the run completes
+        # cleanly and writes the sentinel. (Before the fix this crashed inside
+        # the mark loop, leaving no sentinel — the window this fix removes.)
+        from brutex.engine.tuple_complete import (
+            completion_sentinel_path,
+            read_completion_sentinel,
+        )
 
         cfg = _make_config()
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
-        with (
-            AuditWriter.open(tmp_path / "a.jsonl") as audit,
-            pytest.raises(RuntimeError, match="simulated crash inside the mark loop"),
-        ):
-            run_persisted_sweep(
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
                 bars,
                 cfg,
                 store=store,
-                dedup=_MarkCrashDedup(),
+                dedup=_MarkCrashDedup(),  # its mark_many RAISES if ever called
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
             )
-        assert not completion_sentinel_path(store.path).exists()
-        healed = self._redo(store.path, cfg, bars)
-        assert healed.resumed_complete is False
-        assert healed.sentinel_written is True
+        # The crash-on-mark dedup was NEVER asked to mark, so the sweep finished.
+        assert summary.sentinel_written is True
+        sentinel = read_completion_sentinel(completion_sentinel_path(store.path))
+        assert sentinel.n_marked == 0
+        # And it resumes-complete on a redo (a paired sentinel short-circuits).
+        resumed = self._redo(store.path, cfg, bars)
+        assert resumed.resumed_complete is True
 
     def test_sentinel_without_sidecar_record_skips_the_sidecar_check(self, tmp_path: Path) -> None:
         # A sentinel recording sidecar_written=False pairs WITHOUT consulting
