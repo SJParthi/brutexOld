@@ -17,11 +17,17 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
-import polars as pl
+import pytest
 from brutex.data.tf_resampler import resample_1m_to_tf
 
 from tests.bench._o1_tiers import ratio_ceiling
+
+if TYPE_CHECKING:
+    import polars as pl  # type-only: real module so `pl.X` annotations resolve
+else:
+    pl = pytest.importorskip("polars")  # runtime: frame construction needs the [data] extra
 
 #: Bar-count tiers (kept inside one synthetic multi-year span so the 5m grid has
 #: many buckets at the big tier — a real per-bar amortised measure).

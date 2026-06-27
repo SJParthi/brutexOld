@@ -12,12 +12,18 @@ Hypothesis over random sorted 1m+OI frames proves:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING
 
-import polars as pl
+import pytest
 from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
 from brutex.data.tf_resampler import resample_1m_to_tf
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
+if TYPE_CHECKING:
+    import polars as pl  # type-only: real module so `pl.X` annotations resolve
+else:
+    pl = pytest.importorskip("polars")  # runtime: frame construction needs the [data] extra
 
 # 09:15 IST == 03:45 UTC; a full session is 375 minutes, so cap the synthetic run
 # well under that to keep every bar inside ONE IST trading day.
