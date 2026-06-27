@@ -241,7 +241,7 @@ impl Walker {
             pos.entry_price_paisa - exit_price_paisa
         };
         self.position = None;
-        let holding = (exit_idx - pos.entry_idx + 1) as u64;
+        let holding = holding_bars(pos.entry_idx, exit_idx);
         (
             pnl,
             pos.mfe_paisa,
@@ -370,6 +370,24 @@ impl Walker {
         let exit_price = close_at(pos.last_idx);
         Some(self.close(pos, exit_price, pos.last_idx))
     }
+}
+
+/// Inclusive holding length in bars — `exit_idx − entry_idx`, plus one.
+///
+/// The forward-only walker always closes at or after the entry bar, so
+/// `exit_idx >= entry_idx` is an invariant and for every real call this equals
+/// the old `exit_idx − entry_idx + 1` byte-for-byte. The subtract uses
+/// `saturating_sub` purely as a **defensive guard**: were a future refactor to
+/// call `close` with `exit_idx < entry_idx`, the old unsigned subtract would
+/// underflow and — under this crate's `overflow-checks = true` plus
+/// `panic = "abort"` profile — `abort()` the process. `saturating_sub` instead
+/// clamps the difference to zero, yielding a defined minimum holding of one bar
+/// and never a panic. Valid inputs are unaffected, so the existing trade-sim
+/// tests stay bit-identical.
+#[inline]
+#[must_use]
+fn holding_bars(entry_idx: usize, exit_idx: usize) -> u64 {
+    (exit_idx.saturating_sub(entry_idx) as u64) + 1
 }
 
 /// Build the policy from the three boolean flags shared by the batch methods.
@@ -605,6 +623,27 @@ mod tests {
         let n = open.len();
         ResidentSweepSim::build(open, high, low, close, vec![false; n], bar_bits)
             .expect("equal-length test data")
+    }
+
+    // ── holding-length guard (defensive checked-subtract) ──────────────────
+
+    #[test]
+    fn holding_bars_normal_is_inclusive() {
+        // The invariant case: exit at or after entry → inclusive bar count,
+        // byte-identical to the old `exit_idx - entry_idx + 1`.
+        assert_eq!(holding_bars(0, 0), 1); // same-bar entry+exit
+        assert_eq!(holding_bars(3, 3), 1);
+        assert_eq!(holding_bars(2, 5), 4); // 2..=5 inclusive
+        assert_eq!(holding_bars(0, 99), 100);
+    }
+
+    #[test]
+    fn holding_bars_inverted_does_not_underflow() {
+        // Defensive: exit_idx < entry_idx (impossible from the public walker, but
+        // a future mis-call) must NOT underflow→abort under overflow-checks; it
+        // saturates to a defined minimum holding of 1 instead of panicking.
+        assert_eq!(holding_bars(5, 2), 1);
+        assert_eq!(holding_bars(usize::MAX, 0), 1);
     }
 
     // ── construction validation (via the pure `build`, no PyErr in tests) ──
