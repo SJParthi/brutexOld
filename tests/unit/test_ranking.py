@@ -144,6 +144,58 @@ class TestPassesGates:
         assert passes_gates(_m(max_consecutive_losses=10)) is True
 
 
+# ────── passes_gates — fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001) ──────
+
+
+class TestNonFiniteGatesFailClosed:
+    """A NaN / ±inf in a float-valued gate input must REJECT, not silently PASS.
+
+    ``NaN < x`` and ``NaN > x`` are both ``False``, and ``inf``/``-inf`` skew the
+    comparisons, so an unguarded ``<`` / ``>`` gate would wrongly ACCEPT malformed
+    data. The fail-closed guard rejects any present non-finite gate input; behaviour
+    for FINITE values and for ``None`` is byte-identical (pinned below).
+    """
+
+    def test_nan_profit_factor_rejected(self) -> None:
+        # NaN would pass `pf < 1.2` (False) AND the `is None` check (False) → without
+        # the guard this WRONGLY accepts. The guard must REJECT.
+        assert passes_gates(_m(profit_factor=math.nan)) is False
+
+    def test_positive_inf_max_drawdown_rejected(self) -> None:
+        # +inf drawdown would pass `dd > 30.0`? No — +inf > 30 is True → already
+        # rejected by the drawdown gate. So force the case the guard uniquely catches
+        # by also proving -inf (which `dd > 30.0` does NOT catch) is rejected below.
+        assert passes_gates(_m(max_drawdown_pct=math.inf)) is False
+
+    def test_negative_inf_max_drawdown_rejected(self) -> None:
+        # -inf drawdown PASSES `dd > 30.0` (-inf > 30 is False) → without the guard
+        # this wrongly accepts. The guard must REJECT (the uniquely-caught case).
+        assert passes_gates(_m(max_drawdown_pct=-math.inf)) is False
+
+    def test_inf_win_rate_rejected(self) -> None:
+        assert passes_gates(_m(win_rate=math.inf)) is False
+
+    def test_negative_inf_win_rate_rejected(self) -> None:
+        assert passes_gates(_m(win_rate=-math.inf)) is False
+
+    def test_nan_win_loss_ratio_rejected(self) -> None:
+        # NaN WLR would pass `wlr < 2.0` (False) → could wrongly accept a low-win-rate
+        # combo. The guard rejects the NaN before that comparison.
+        assert passes_gates(_m(win_rate=0.20, win_loss_ratio=math.nan)) is False
+
+    def test_finite_values_unchanged(self) -> None:
+        # Every finite default still PASSES — the guard never touches finite inputs.
+        assert passes_gates(_m()) is True
+        assert passes_gates(_m(profit_factor=1.2, max_drawdown_pct=30.0)) is True
+
+    def test_none_values_unchanged(self) -> None:
+        # None handling is byte-identical: None profit_factor still REJECTS via the
+        # existing `is None` path (not the new non-finite guard); None win_loss_ratio
+        # with a healthy win_rate still PASSES.
+        assert passes_gates(_m(profit_factor=None)) is False
+        assert passes_gates(_m(win_loss_ratio=None)) is True
+
+
 # ────── rank_combos ──────
 
 
@@ -203,6 +255,105 @@ class TestRankCombos:
         ]
         ranked = rank_combos(cand)
         assert len(ranked) == 2
+
+
+# ────── tie-break determinism (DEC-RANKING-TIEBREAK-001) ──────
+
+
+class TestTieBreakDeterminism:
+    """The ranking is a TOTAL order: ties break on the unique mask, so a leaderboard
+    ranks bit-identically regardless of input enumeration order (Golden Rules #4/#7).
+
+    The pre-fix sort keyed on ``composite_score`` alone left tied scores in INPUT
+    order (``list.sort`` is stable), so permuting the candidates permuted the output
+    for any tie. These cases pin the deterministic ``(-composite_score, mask)`` key.
+    """
+
+    def test_identical_metrics_tie_break_ascending_mask(self) -> None:
+        # Three combos with byte-identical metrics → identical composite (0.0, zero
+        # variance). They MUST come out in ascending-mask order, not input order.
+        cand = [(30, _m(sharpe_ratio=2.0)), (10, _m(sharpe_ratio=2.0)), (20, _m(sharpe_ratio=2.0))]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [10, 20, 30]
+
+    def test_tied_scores_are_input_order_independent(self) -> None:
+        # The same leaderboard in a DIFFERENT enumeration order yields the SAME
+        # ranking (the determinism the stable-sort-only version violated).
+        base = [(10, _m(sharpe_ratio=2.0)), (20, _m(sharpe_ratio=2.0)), (30, _m(sharpe_ratio=2.0))]
+        forward = [rc.mask for rc in rank_combos(base)]
+        reverse = [rc.mask for rc in rank_combos(list(reversed(base)))]
+        assert forward == reverse == [10, 20, 30]
+
+    def test_score_dominates_mask(self) -> None:
+        # The mask tie-break is STRICTLY secondary: a higher composite always wins
+        # even when its mask is larger. mask=99 (high Sharpe) must beat mask=1.
+        cand = [(99, _m(sharpe_ratio=3.0)), (1, _m(sharpe_ratio=0.1))]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [99, 1]
+        assert ranked[0].composite_score > ranked[1].composite_score
+
+    def test_partial_tie_groups_break_on_mask(self) -> None:
+        # Two score groups: the high-Sharpe pair ties at one composite, the
+        # low-Sharpe pair ties at another. Within each tied group the order is
+        # mask-ascending; the high group precedes the low group.
+        cand = [
+            (40, _m(sharpe_ratio=3.0)),
+            (10, _m(sharpe_ratio=3.0)),
+            (30, _m(sharpe_ratio=0.5)),
+            (20, _m(sharpe_ratio=0.5)),
+        ]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [10, 40, 20, 30]
+        # The two distinct score tiers really are distinct (not a single tie).
+        assert ranked[0].composite_score == ranked[1].composite_score
+        assert ranked[2].composite_score == ranked[3].composite_score
+        assert ranked[1].composite_score > ranked[2].composite_score
+
+    def test_overfit_path_tie_break_ascending_mask(self) -> None:
+        # The tie-break also governs the opt-in overfit path: survivors with an
+        # identical DSR-inclusive composite still break on ascending mask.
+        cfg = OverfitGateConfig(dsr_min=0.5)
+        cand = [
+            (30, _m(sharpe_ratio=2.0, total_trades=100)),
+            (10, _m(sharpe_ratio=2.0, total_trades=100)),
+            (20, _m(sharpe_ratio=2.0, total_trades=100)),
+        ]
+        ranked = rank_combos(cand, overfit=cfg)
+        # All three share metrics ⇒ zero cross-trial variance ⇒ ABSTAIN, legacy
+        # 7-term composite (all 0.0) ⇒ pure mask tie-break.
+        assert [rc.mask for rc in ranked] == [10, 20, 30]
+
+    def test_duplicate_survivor_mask_raises(self) -> None:
+        # The total-order tie-break keys on the mask, so a DUPLICATE mask among
+        # gate-passing survivors would silently reintroduce input-order-dependent
+        # ordering. rank_combos must FAIL LOUD (ValueError) instead — pins the
+        # enforced unique-mask precondition (DEC-RANKING-TIEBREAK-001).
+        cand = [(5, _m(sharpe_ratio=2.0)), (5, _m(sharpe_ratio=1.0))]
+        with pytest.raises(ValueError, match="unique mask") as exc:
+            rank_combos(cand)
+        # Byte-exact message naming the offending mask (mutation-gate discipline:
+        # a substring `match=` still passes mutmut's "XX…XX"-wrapped string mutant).
+        assert str(exc.value) == (
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            "tie-break keys on it); duplicate survivor mask(s): [5]"
+        )
+
+    def test_duplicate_among_rejected_does_not_raise(self) -> None:
+        # The uniqueness check is over the gate SURVIVORS only — a duplicate mask
+        # among gate-REJECTED combos never reaches the sort and must NOT raise.
+        cand = [
+            (5, _m(total_trades=10)),  # rejected (too few trades)
+            (5, _m(profit_factor=1.0)),  # rejected (no edge) — same mask, but rejected
+            (7, _m(sharpe_ratio=2.0)),  # the sole survivor
+        ]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [7]
+
+    def test_unique_mask_path_unaffected(self) -> None:
+        # The normal unique-mask path is byte-unchanged by the precondition check.
+        cand = [(3, _m(sharpe_ratio=2.0)), (1, _m(sharpe_ratio=2.0)), (2, _m(sharpe_ratio=2.0))]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [1, 2, 3]
 
 
 # ────── _zscores — the z-normalisation engine behind every composite term ──────

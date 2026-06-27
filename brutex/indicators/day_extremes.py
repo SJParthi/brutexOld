@@ -114,7 +114,12 @@ class DayExtremesState:
         Returns:
             Tuple of (running_day_high_paisa, running_day_low_paisa)
             AFTER this bar is incorporated.
+
+        Raises:
+            ValueError: if high_paisa < low_paisa (data corruption indicator).
         """
+        if high_paisa < low_paisa:
+            raise ValueError(f"day-extremes bar high < low: high={high_paisa} low={low_paisa}")
         bar_day = ts_ist.date()
         if bar_day != self.current_day:
             # New trading day → reset to this bar's H/L
