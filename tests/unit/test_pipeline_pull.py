@@ -15,6 +15,7 @@ from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pipeline_pull import (
     PHASE_METADATA,
+    PHASE_PREBUILD,
     PHASE_SPOT,
     PipelinePullReport,
     historical_phase_ok,
@@ -370,6 +371,101 @@ def test_pipeline_no_movers_phase_when_not_injected() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# run_full_pipeline — the GATED FINAL pre-build phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_prebuilds_timeframes_on_clean_run() -> None:
+    # All three fetch phases clean + a prebuild callable injected → the FINAL phase
+    # runs, the symbol count is recorded, and the note appends the pre-build clause.
+    spot, meta = _Spy(_spot()), _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+    prebuild = _Spy(4)
+    report = run_full_pipeline(
+        run_spot=spot, run_metadata=meta, run_historical=hist, run_prebuild=prebuild
+    )
+    assert report.ok is True
+    assert prebuild.called is True
+    assert report.prebuild_built == 4
+    assert "timeframes pre-built for 4 symbol(s)" in report.note
+    assert report.to_dict()["prebuild_built"] == 4
+
+
+def test_pipeline_prebuild_zero_is_honest_not_none() -> None:
+    # A prebuild that built nothing (e.g. an empty lake) returns 0 — recorded as 0
+    # (ran, built nothing), DISTINCT from None (did not run).
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_Spy(0),
+    )
+    assert report.prebuild_built == 0
+    assert "timeframes pre-built for 0 symbol(s)" in report.note
+
+
+def test_pipeline_skips_prebuild_when_historical_not_clean() -> None:
+    # The HARD gate: a historical fetch that completed-with-failures (failed_pairs)
+    # must NEVER pre-build timeframes (same rule as movers).
+    hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
+    prebuild = _Spy(3)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=hist,
+        run_prebuild=prebuild,
+    )
+    assert report.ok is False  # historical gate failed
+    assert prebuild.called is False  # pre-build NOT run
+    assert report.prebuild_built is None
+    assert "pre-built" not in report.note
+
+
+def test_pipeline_skips_prebuild_when_stopped_at_spot() -> None:
+    # An early stop never reaches the final phase — the prebuild is not consulted.
+    prebuild = _Spy(3)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot(auth_aborted=True)),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=prebuild,
+    )
+    assert report.stopped_after == PHASE_SPOT
+    assert prebuild.called is False
+    assert report.prebuild_built is None
+
+
+def test_pipeline_no_prebuild_phase_when_not_injected() -> None:
+    # Backward-compatible: with no prebuild callable, the final phase is skipped
+    # entirely and prebuild_built is None — never a fabricated count.
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert report.ok is True
+    assert report.prebuild_built is None
+    assert "pre-built" not in report.note
+    assert report.to_dict()["prebuild_built"] is None
+
+
+def test_pipeline_warms_movers_and_prebuilds_together() -> None:
+    # Both gated post-fetch phases run on a clean fetch; both counts + both note
+    # clauses are present (the shared gate is evaluated once, both phases fire).
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_movers=_Spy(2),
+        run_prebuild=_Spy(5),
+    )
+    assert report.movers_warmed == 2
+    assert report.prebuild_built == 5
+    assert "movers 2 snapshot(s) warmed" in report.note
+    assert "timeframes pre-built for 5 symbol(s)" in report.note
+
+
+# --------------------------------------------------------------------------- #
 # PipelinePullReport.ok — branch coverage of the conjunction chain
 # --------------------------------------------------------------------------- #
 
@@ -471,7 +567,7 @@ def test_to_dict_stopped_after_spot() -> None:
     assert payload["historical"] is None
 
 
-@pytest.mark.parametrize("phase", [PHASE_SPOT, PHASE_METADATA])
+@pytest.mark.parametrize("phase", [PHASE_SPOT, PHASE_METADATA, PHASE_PREBUILD])
 def test_phase_constants_are_distinct_labels(phase: str) -> None:
-    assert phase in {PHASE_SPOT, PHASE_METADATA}
-    assert PHASE_SPOT != PHASE_METADATA
+    assert phase in {PHASE_SPOT, PHASE_METADATA, PHASE_PREBUILD}
+    assert len({PHASE_SPOT, PHASE_METADATA, PHASE_PREBUILD}) == 3
