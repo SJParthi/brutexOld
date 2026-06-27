@@ -77,6 +77,9 @@ class GrowwAPITimeoutException(Exception): ...
 class GrowwAPIBadRequestException(Exception): ...
 
 
+class GrowwAPINotFoundException(Exception): ...
+
+
 class GrowwAPIAuthenticationException(Exception): ...
 
 
@@ -503,6 +506,139 @@ def test_ingest_terminal_error_propagates() -> None:
             end=date(2024, 1, 2),
             now_ist=_now,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Transient network / DNS failure → RETRYABLE (DEC-GROWW-NETWORK-ERROR-RETRY-001)
+# A RAW transport exception (socket.gaierror / requests ConnectionError shape)
+# the SDK raises is now classified `GrowwNetworkError` (retryable) by the client,
+# so a DNS-blipping contract is RETRIED / deferred, NOT terminally quarantined —
+# the 218-contract "Failed to resolve api.groww.in" data-loss class is closed.
+# ─────────────────────────────────────────────────────────────────────────
+class gaierror(Exception):
+    """Fake ``socket.gaierror`` raised raw by the SDK on a host DNS outage."""
+
+
+class ConnectionError(Exception):  # noqa: A001 — mirrors requests.exceptions.ConnectionError
+    """Fake ``requests.exceptions.ConnectionError`` (the ``"Failed to resolve …"`` shape)."""
+
+
+def test_ingest_dns_error_retried_then_success() -> None:
+    """A transient DNS failure then a clean response → the contract is RETRIED, bars land.
+
+    Proves the 218-contract loss class is recoverable: the raw transport error the
+    SDK raises is classified RETRYABLE, so the ingest-level retry re-issues it and
+    the contract is NOT terminally quarantined.
+    """
+    sdk = _FakeSDK(
+        payload=_candles(),
+        script=[gaierror("[Errno -2] Name or service not known"), None],
+    )
+    sink = _Sink()
+    ledger = WindowLedger()
+    timeouts: list[int] = []
+    slept: list[int] = []
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        on_timeout=lambda: timeouts.append(1),
+        backoff=slept.append,
+        ledger=ledger,
+        max_attempts=2,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1 and report.retried_windows == 1
+    assert report.still_failed_windows == 0  # recovered — NOT quarantined
+    # A DNS blip is NOT a rate-limit, so it rides the GENTLE timeout ladder (on_timeout),
+    # never the per-second rate stepdown (on_rate_limit).
+    assert timeouts == [1] and slept == [0]
+
+
+def test_ingest_dns_error_exhausted_is_deferred_not_terminal() -> None:
+    """A persistent DNS failure is DEFERRED (``still_failed``), NOT terminally quarantined.
+
+    When the in-pull retry budget is spent the window is left UNMARKED-as-success
+    (re-pulled next pass), NOT recorded as a terminal drop — exactly the recovery
+    path the 218 lost contracts never got.
+    """
+    sdk = _FakeSDK(script=[ConnectionError("Failed to resolve 'api.groww.in'")])
+    sink = _Sink()
+    ledger = WindowLedger()
+    timeouts: list[int] = []
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        on_timeout=lambda: timeouts.append(1),
+        ledger=ledger,
+        max_attempts=0,  # single attempt → immediate budget exhaustion
+        now_ist=_now,
+    )
+    assert report.still_failed_windows == 1 and report.transient_failures == 1
+    assert report.retried_windows == 0 and timeouts == [1]
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull, never dropped
+
+
+def test_run_multi_contract_dns_failure_does_not_terminally_quarantine() -> None:
+    """A whole-pull DNS outage leaves contracts DEFERRED, with ZERO terminal quarantines.
+
+    The driver-level proof: every contract hits a transient DNS error, so none is
+    recorded as a terminal :class:`OptionPairFailure` — they are all
+    ``still_failed`` (re-pulled next pass), in contrast to a 404 which DOES
+    quarantine (the next test).
+    """
+    sdk = _FakeSDK(script=[gaierror("Name or service not known")])
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE"), _ce("NSE-NIFTY-02Jan25-28600-CE")],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+    )
+    assert report.failed_pairs == 0  # ZERO terminal quarantines — all recoverable
+    assert report.auth_aborted is False
+    assert report.still_failed_windows == 2  # both deferred to the next pull
+
+
+def test_run_multi_contract_real_404_still_terminally_quarantines() -> None:
+    """A genuine 404 (a symbol truly absent) STILL terminally quarantines — the fix is narrow.
+
+    The retryable-network change must NOT make a real terminal error recoverable: a
+    ``GrowwAPINotFoundException`` is recorded as a terminal :class:`OptionPairFailure`
+    exactly as before.
+    """
+    sdk = _FakeSDK(raise_for={"NSE-NIFTY-02Jan25-28500-CE": GrowwAPINotFoundException("404")})
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE")],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+    )
+    assert report.failed_pairs == 1  # terminal — quarantined, NOT retried
+    assert report.still_failed_windows == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -301,3 +301,46 @@ def test_enospc_on_first_write_leaves_no_partition(
     # The writer recovers once space is back: the same write now lands cleanly.
     _write(writer, [_bar(i) for i in range(5)])
     assert _partition_file(lake_root).exists()
+
+
+def test_enospc_creating_fresh_partition_dir_halts_gracefully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``ENOSPC`` while FIRST-creating a brand-new partition directory raises a
+    graceful ``LakeWriteHalt('disk_full')`` — NOT a raw ``OSError``.
+
+    Regression for the spot-writer asymmetry (DEC-LAKE-WRITE-HALT-001 / MIGRATION.md
+    #885): the very first write to a partition creates its parent directory via
+    ``dest.parent.mkdir(parents=True, exist_ok=True)``. On a full disk that ``mkdir``
+    raises ``OSError(ENOSPC)``, and unless it runs inside ``lake_write_guard`` the raw
+    ``OSError`` (not a ``BruteXError``) escapes the per-symbol quarantine and the ingest
+    spines re-raise it as an "escaped code bug" — crashing the WHOLE pull. The option
+    writer already guards its equivalent ``mkdir``; this proves the spot writer now does
+    too, so a disk-full at the fresh-partition ``mkdir`` HALTS gracefully like every other
+    lake-write failure site. The ``mkdir`` is patched ONLY for the directory-creating
+    call (``exist_ok=True`` no-ops once the dir exists), so the round-0 fresh write is
+    exactly the failure point.
+    """
+    lake_root = tmp_path / "lake"
+    writer = ParquetWriter(lake_root=lake_root)
+
+    real_mkdir = Path.mkdir
+
+    def _boom_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        # The partition's parent dir does not yet exist on the very first write, so this
+        # is the genuine fresh-partition mkdir; raise the disk-full the writer must map.
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(Path, "mkdir", _boom_mkdir)
+    with pytest.raises(LakeWriteHalt) as excinfo:
+        _write(writer, [_bar(i) for i in range(5)])
+    assert excinfo.value.reason == "disk_full"
+
+    # Restore mkdir; nothing was created (the mkdir itself failed) and no .tmp leaked.
+    monkeypatch.setattr(Path, "mkdir", real_mkdir)
+    assert not list(lake_root.rglob("*.parquet")), "a torn first-write partition was left behind"
+    assert not _stray_tmp_files(lake_root), "the failed fresh-dir mkdir leaked a .tmp sidecar"
+
+    # The writer recovers once space is back: the same fresh write now lands cleanly.
+    _write(writer, [_bar(i) for i in range(5)])
+    assert _partition_file(lake_root).exists()

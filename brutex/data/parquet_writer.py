@@ -332,7 +332,15 @@ class ParquetWriter:
             year=year,
             month=month,
         )
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        # First-creating a BRAND-NEW partition directory on a full volume raises a raw
+        # OSError(ENOSPC) (`exist_ok=True` keeps the re-pull no-op free). Wrap it in
+        # `lake_write_guard()` so a disk-full here maps to a `LakeWriteHalt("disk_full")`
+        # pull-wide stop (a member of both ingest spines' `_GLOBAL_STOP_ERRORS`), instead
+        # of an un-mapped OSError that the spines re-raise as an "escaped code bug" and
+        # crash the whole pull RAW. The option writer guards its equivalent `mkdir` the
+        # same way (DEC-LAKE-WRITE-HALT-001 — "every allocation/failure site is guarded").
+        with lake_write_guard():
+            dest.parent.mkdir(parents=True, exist_ok=True)
 
         # MERGE-on-write: a 30/90-day fetch chunk straddles month boundaries,
         # so a single month partition is touched by more than one chunk — each
