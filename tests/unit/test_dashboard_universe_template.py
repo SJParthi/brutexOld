@@ -44,7 +44,8 @@ def test_js_flags_running_at_start_and_clears_it_on_finish() -> None:
     )
     cleared = html.count('classList.remove("running")') + html.count("classList.remove('running')")
     assert cleared >= 2, (
-        "the 'running' class must be cleared when a pull finishes (runPull finally + finishLive)"
+        "the 'running' class must be cleared when a pull finishes "
+        "(runMaterialize finally + finishLive)"
     )
 
 

@@ -2134,6 +2134,11 @@ def build_app(
         4. **Movers (gated)** — warm the default movers snapshots ONLY after a
            fully-successful fetch (DEC-PULL-SELECTED-PIPELINE-001 — "until/unless
            successful fetches happen, never run movers").
+        5. **Pre-build timeframes (gated, FINAL)** — materialise the 19 derived
+           intraday timeframes over the just-filled lake ONLY after a
+           fully-successful fetch (DEC-UNIVERSE-PULL-CONSOLIDATE-001 — "pre-build
+           runs as the pipeline's final stage automatically"), so the operator never
+           needs the separate manual button after a one-click pull.
 
         The GATE between phases is the pure
         :func:`~brutex.dashboard.pipeline_pull.run_full_pipeline`: a phase that ends
@@ -2330,11 +2335,65 @@ def build_app(
 
                 return warm_movers_snapshots([_spot_job, _fut_job, _opt_job])
 
+            def _prebuild_timeframes() -> int:
+                """Gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build derived TFs.
+
+                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate) — the
+                operator's "pre-build runs as the pipeline's final stage automatically". For
+                EVERY pulled target it materialises all 19 derived intraday timeframes to the
+                lake via the SHARED materialize_timeframes + the SHARED lake read/write
+                builders (CLAUDE.md §11 COMMON — the SAME pair the manual derive route uses),
+                run through the quarantining run_autoderive driver so one symbol's corrupt
+                partition never sinks the rest. Returns how many symbols built cleanly.
+
+                COMMON-resampler note: materialize_timeframes drives the canonical
+                tf_resampler, so once the in-flight F&O-OI resampler change lands this covers
+                F&O automatically with NO change here. A symbol with no stored 1-minute base
+                derives nothing (an honest 0, never a fabricated bar).
+
+                Whole-body best-effort: every failure is swallowed so a transient lake-read
+                race NEVER fails the already-successful pull (Correctness of the pull > the
+                pre-build's speed benefit, mirroring _warm_movers).
+                """
+                from brutex.data.tf_autoderive import run_autoderive
+
+                def _materialize_one(symbol: str) -> object:
+                    inst = _require_store().get(symbol)
+                    if inst is None:  # pragma: no cover — targets come from the store
+                        raise KeyError(symbol)
+                    return materialize_timeframes(
+                        tfs=MATERIALIZABLE_TFS,
+                        read_1m=make_lake_read_1m(
+                            lake_root=lake_root,
+                            exchange=inst.exch_id.value,
+                            segment=inst.segment.value,
+                            symbol=inst.symbol_name,
+                        ),
+                        write_tf=make_lake_write_tf(
+                            lake_root=lake_root,
+                            exchange=inst.exch_id.value,
+                            segment=inst.segment.value,
+                            symbol=inst.symbol_name,
+                        ),
+                    )
+
+                try:
+                    report = run_autoderive(
+                        symbols=[inst.symbol_name for inst in targets],
+                        materialize_one=_materialize_one,  # type: ignore[arg-type]
+                    )
+                except Exception as exc:  # pylint: disable=broad-except - best-effort prebuild
+                    _LOG.warning("universe.prebuild.failed", error=str(exc))
+                    return 0
+                _summary_cache.mark_dirty()  # the new derived partitions are fresh datasets
+                return report.symbols_ok
+
             report = run_full_pipeline(
                 run_spot=_run_spot,
                 run_metadata=_run_metadata,
                 run_historical=_run_historical,
                 run_movers=_warm_movers,
+                run_prebuild=_prebuild_timeframes,
             )
             if report.spot is not None:
                 _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()

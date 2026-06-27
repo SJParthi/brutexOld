@@ -9,9 +9,11 @@ mirroring ``test_dashboard_universe_template.py``):
 * the pull bar is **sticky** (never scrolls out of view);
 * every row has a **multi-select checkbox** that toggles ``selMulti`` WITHOUT
   triggering the row's single-select (``stopPropagation``);
-* ONE unified **"⤓ Pull spot"** button (DEC-UNIVERSE-PULL-UNIFY-001 — the old
-  separate ``pullmulti`` "⤓ Pull N selected" button is gone; the single
-  ``pullbtn`` now drives one OR many) + **select-all-shown** / **clear**
+* ONE selection-aware **"▶ Pull · full pipeline"** button
+  (DEC-UNIVERSE-PULL-CONSOLIDATE-001 — the redundant per-stage buttons "Pull spot"
+  / "Pull expiries + contracts" / "Pull historical" / "Load instruments" and the
+  separate "Pull selected" button are removed; the single ``pullPipelineBtn`` scopes
+  to the ticks or pulls the whole universe) + **select-all-shown** / **clear**
   controls;
 * the page states the pull **stores 1m + 1d only** and the 19 intraday
   timeframes are **derived on demand, not written to the drive** (pre-
@@ -54,67 +56,74 @@ def test_accessibility_focus_ring_and_reduced_motion_present() -> None:
 
 
 def test_multi_select_controls_present() -> None:
-    """The checkbox + the unified pull + select-all/clear controls are rendered."""
-    html = _render_universe_html()
-    for needle in ('id="pullbtn"', 'id="selallbtn"', 'id="clrselbtn"', 'class="msel"'):
-        assert needle in html, f"missing multi-select control: {needle}"
+    """The checkbox + the ONE pull button + select-all/clear controls are rendered.
 
-
-def test_pull_selected_pipeline_button_present_and_wired() -> None:
-    """The "▶ Pull selected — full pipeline" button + its selection-scoped wiring.
-
-    DEC-PULL-SELECTED-PIPELINE-001 — the one-click pipeline over ONLY the ticked
-    instruments: the button exists, posts ``/pull-pipeline?symbols=`` (the SAME route
-    as the whole-universe hero, scoped by the selection), and is enable/label-driven
-    by ``updateMultiBtn`` (so it activates only when ≥1 row is ticked).
+    DEC-UNIVERSE-PULL-CONSOLIDATE-001: the per-stage ``pullbtn`` (Pull spot) is gone;
+    the single selection-aware ``pullPipelineBtn`` is the one pull button.
     """
     html = _render_universe_html()
-    assert 'id="pullSelPipelineBtn"' in html, "the selected-pipeline button is missing"
-    assert "▶ Pull selected — full pipeline" in html, "the button label is missing"
-    # Posts the pipeline route WITH ?symbols= (scoped to the ticks), via startAndPoll.
-    assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids)' in html
-    # The hero whole-universe button is untouched (still posts the bare route).
-    assert 'id="pullPipelineBtn"' in html, "the whole-universe hero must remain"
+    for needle in ('id="pullPipelineBtn"', 'id="selallbtn"', 'id="clrselbtn"', 'class="msel"'):
+        assert needle in html, f"missing selection control: {needle}"
 
 
-def test_pull_button_is_unified_single_or_many() -> None:
-    """ONE "⤓ Pull spot" button drives single OR multi (DEC-UNIVERSE-PULL-UNIFY-001).
+def test_one_pull_button_is_selection_aware_full_pipeline() -> None:
+    """ONE "▶ Pull · full pipeline" button — selection-aware (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
 
-    The operator asked "why we have two pull spot" — the separate ``pullmulti``
-    "⤓ Pull N selected" button is removed and the single ``pullbtn`` now pulls
-    the highlighted instrument when nothing is ticked, or every ticked row in
-    turn when rows are selected. This guards: (a) the old button is GONE, so a
-    null ``getElementById("pullmulti").onclick`` can never throw at page load;
-    (b) the unified label + selection helper + re-entrancy guard are wired.
+    The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull
+    historical / Load instruments) AND the separate "Pull selected" button are GONE.
+    The single ``pullPipelineBtn`` posts the SHARED ``/pull-pipeline`` route: with
+    ticked rows it sends ``?symbols=`` (scoped to the selection); with NO ticks it
+    posts the bare route (the whole universe). It runs the fixed gated chain.
     """
     html = _render_universe_html()
-    # (a) the second "Pull spot" button must be gone — single source of truth.
-    assert 'id="pullmulti"' not in html, (
-        "the separate multi-pull button must be removed (one unified Pull spot)"
+    # The ONE pull button + its label span exist.
+    assert 'id="pullPipelineBtn"' in html, "the single full-pipeline button is missing"
+    assert 'id="pullPipelineLabel"' in html, "the selection-aware label span is missing"
+    assert "Pull · full pipeline" in html, "the consolidated button label is missing"
+    # Selection-aware: the ticked-rows branch posts ?symbols=, the empty branch the bare route.
+    assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids)' in html, (
+        "the ticked-selection branch must post the scoped pipeline route"
     )
-    assert 'getElementById("pullmulti")' not in html, (
-        "no code may reference the removed pullmulti element (would throw at load)"
+    assert '"/api/v1/universe/pull-pipeline",' in html, (
+        "the no-selection branch must post the bare (whole-universe) pipeline route"
     )
-    assert "Pull N selected" not in html and "Pull 0 selected" not in html, (
-        "the old 'Pull N/0 selected' button text must be gone"
+    assert "function pipelineSelection" in html, "the selection-scope helper is missing"
+    # The redundant per-stage + separate-selected buttons are REMOVED (no null
+    # getElementById().onclick can throw at load).
+    for gone in (
+        'id="pullbtn"',
+        'id="pullDerivBtn"',
+        'id="pullHistBtn"',
+        'id="pullSelPipelineBtn"',
+        'id="loadbtn"',
+        'id="bulkIdxSpot"',
+    ):
+        assert gone not in html, f"the redundant button {gone} must be removed"
+    for ref in (
+        'getElementById("pullbtn")',
+        'getElementById("pullDerivBtn")',
+        'getElementById("pullHistBtn")',
+        'getElementById("pullSelPipelineBtn")',
+        'getElementById("loadbtn")',
+    ):
+        assert ref not in html, f"no code may reference the removed element ({ref})"
+    # The removed per-stage button labels are gone from the UI.
+    assert "⤓ Pull spot" not in html, "the removed 'Pull spot' label must be gone"
+    assert "▶ Pull selected — full pipeline" not in html, (
+        "the separate 'Pull selected' button label must be gone"
     )
-    # (b) the unified wiring: the selection helper, the in-flight guard, and the
-    # single button's label all reference the one pullbtn.
-    assert "function spotSelection" in html, "the one-or-many selection helper is missing"
-    assert "spotPullInFlight" in html, "the double-click re-entrancy guard is missing"
-    assert "⤓ Pull spot" in html, "the unified button label is missing"
 
 
 def test_multi_select_wiring_present() -> None:
-    """The state + toggle + the sequential 'pull each' loop are wired."""
+    """The state + toggle + the selection-scoping of the ONE pull button are wired."""
     html = _render_universe_html()
     assert "selMulti" in html, "the multi-select state is missing"
     assert "function toggleMulti" in html
     assert "function updateMultiBtn" in html
     # the per-row checkbox must NOT trigger the row's single-select (independent)
     assert "stopPropagation" in html, "the checkbox must stopPropagation off the row click"
-    # the unified pull pulls each in turn via the existing (tested) runPull
-    assert "await runPull(" in html, "the multi-pull must reuse runPull sequentially"
+    # the ticks scope the ONE pull button via pipelineSelection (not a removed runPull loop).
+    assert "function pipelineSelection" in html, "the selection must scope the single pipeline pull"
 
 
 def test_timeframe_storage_is_explained_honestly() -> None:
