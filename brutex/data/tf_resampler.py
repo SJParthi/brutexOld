@@ -20,6 +20,18 @@ For each bucket [bucket_start, bucket_start + tf):
 | close    | last row's close (latest in bucket)            |
 | volume   | sum of all rows' volume                        |
 
+## Open interest (OPTIONAL column — F&O only)
+
+When the input frame carries an ``open_interest`` column (F&O futures /
+options 1-minute bars), the bucket's open interest is the **LAST source
+bar's** OI — a point-in-time SNAPSHOT (the count of outstanding contracts
+at an instant), NEVER summed like the volume FLOW. This is the SAME rule
+:func:`brutex.feed.resampler._aggregate` already uses
+(``open_interest=last.open_interest``, "snapshot semantics"). A null OI
+source bar yields a null bucket OI (preserved, NEVER fabricated as 0). When
+the input frame has NO ``open_interest`` column (spot / index, which carry
+no OI), the output is byte-identical to before — no OI column is added.
+
 ## Anchor
 
 All buckets anchored at 09:15 IST (session open) by FIXED ARITHMETIC
@@ -72,6 +84,10 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "volume",
 )
 
+#: OPTIONAL F&O column carried through with carry-last (snapshot) semantics
+#: when present. Spot/index frames omit it and the output stays the OHLCV-6.
+OPEN_INTEREST_COLUMN: str = "open_interest"
+
 
 def _validate_input(df_1m) -> None:  # type: ignore[no-untyped-def]
     """Validate input DataFrame schema and sort order."""
@@ -99,15 +115,20 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
 
     Args:
         df_1m: Polars DataFrame with columns [ts_utc, open, high, low,
-               close, volume]. ts_utc must be Datetime dtype. Caller
-               must sort by ts_utc ascending before calling.
+               close, volume] and OPTIONALLY ``open_interest`` (F&O). ts_utc
+               must be Datetime dtype. Caller must sort by ts_utc ascending
+               before calling.
         target_tf_minutes: Target timeframe in minutes. Must be one of
             the 21 TFs in `brutex.data.timeframes.ALL_TF_MINUTES`.
             Special value 375 = daily (1d).
 
     Returns:
-        Polars DataFrame with same column schema, but resampled to the
-        target TF. Bucket timestamps are left-closed, left-labeled.
+        Polars DataFrame with the same OHLCV column schema, resampled to the
+        target TF. When the input carried an ``open_interest`` column it is
+        carried through as the bucket's LAST source bar's OI (snapshot
+        semantics, never summed — F&O only); when it did not, the output is
+        byte-identical to the spot 6-column result (no OI column added).
+        Bucket timestamps are left-closed, left-labeled.
 
     Examples:
         >>> df_5m = resample_1m_to_tf(df_1m, 5)
@@ -123,9 +144,16 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
             f"Must be one of {sorted(ALL_TF_MINUTES)}."
         )
 
-    # 1m -> 1m is a no-op (shallow copy preserves immutability semantics).
+    # 1m -> 1m is a no-op (shallow copy preserves immutability semantics) —
+    # it carries WHATEVER columns the input has (OI present for F&O, absent
+    # for spot), unchanged.
     if target_tf_minutes == 1:
         return df_1m.clone()
+
+    # F&O frames carry an ``open_interest`` column; spot/index do not. Carry it
+    # through with carry-last (snapshot) semantics ONLY when present, so the
+    # spot output stays byte-identical to the OHLCV-6 (purely additive).
+    has_oi = OPEN_INTEREST_COLUMN in df_1m.columns
 
     # FIXED-ARITHMETIC session anchor (DEC-RESAMPLE-ANCHOR-002, hardening
     # DEC-RESAMPLE-ANCHOR-001): each row's bucket label is its IST date's
@@ -152,16 +180,23 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         # the 09:15 session open (NOT the first bar — same gap immunity).
         bucket_utc = session_open_ist - pl.duration(hours=5, minutes=30)
 
+    aggregations = [
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+        pl.col("volume").sum().alias("volume"),
+    ]
+    if has_oi:
+        # Carry-last OI: maintain_order=True over caller-sorted input makes
+        # ``.last()`` deterministically the latest-timestamp bar's OI (a STOCK
+        # snapshot, never the volume FLOW). A null last bar yields null OI.
+        aggregations.append(pl.col(OPEN_INTEREST_COLUMN).last().alias(OPEN_INTEREST_COLUMN))
+
     return (
         df_1m.with_columns(bucket_utc.alias("_bucket_ts"))
         .group_by("_bucket_ts", maintain_order=True)
-        .agg(
-            pl.col("open").first().alias("open"),
-            pl.col("high").max().alias("high"),
-            pl.col("low").min().alias("low"),
-            pl.col("close").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
-        )
+        .agg(*aggregations)
         .rename({"_bucket_ts": "ts_utc"})
         .sort("ts_utc")
     )
