@@ -1182,6 +1182,28 @@ jobs:
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
+          # 21c-fno-daily · brutex.data.fno_daily_resample (DEC-FNO-TF-DERIVE-OI-001):
+          #       the F&O twin of resample_1m_to_daily — OHLCV aggregation +
+          #       midnight-IST re-stamp + forming-session `before` guard, EXCEPT
+          #       it reads the carry-last open_interest (defensive `in columns`
+          #       guard) instead of hardcoding None. 100% line+branch via
+          #       tests/unit/test_fno_daily_resample.py.
+          if compgen -G "tests/unit/test_fno_daily_resample.py" > /dev/null; then
+            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py
+          else
+            echo "(brutex.data.fno_daily_resample test file not present yet — gate inactive)"
+          fi
+          # 21c-fno-resample · brutex.data.fno_resample (DEC-FNO-TF-DERIVE-OI-001):
+          #       the F&O twin of spot_resample.derive_intraday_tfs (OI carried)
+          #       + the on-the-fly /movers resample_session_to_tf (RENAMEs the
+          #       lake `timestamp -> ts_utc`, drops the trailing FORMING bucket —
+          #       no look-ahead, Property P-06). 100% line+branch via
+          #       tests/unit/test_fno_resample.py.
+          if compgen -G "tests/unit/test_fno_resample.py" > /dev/null; then
+            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py
+          else
+            echo "(brutex.data.fno_resample test file not present yet — gate inactive)"
+          fi
           # 21c-tf · brutex.data.timeframe_materialize (DEC-TF-MATERIALIZE-001):
           #          MANUAL derived-TF materialiser core — pure orchestration
           #          (de-dup, derive via the REUSED derive_intraday_tfs,
