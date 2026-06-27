@@ -238,3 +238,37 @@ def test_pull_pipeline_unknown_selection_fails_closed_400(
     resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "99999"})
     assert resp.status_code == 400
     assert "99999" in resp.json()["detail"]
+
+
+# ── the gated FINAL pre-build stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ────────
+
+
+def test_pull_pipeline_runs_prebuild_as_final_stage_on_clean_fetch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fully-successful offline pipeline runs the FINAL pre-build stage.
+
+    The route binds ``run_prebuild`` to a materialiser driven through
+    ``brutex.data.tf_autoderive.run_autoderive`` (lazily imported inside the job
+    body). We spy on it: a clean fetch (the offline fakes are all clean) must invoke
+    it ONCE over the pulled target(s), proving the unified pre-build runs as the
+    pipeline's automatic final stage — the operator never clicks it manually.
+    """
+    from brutex.data import tf_autoderive
+
+    seen: list[tuple[str, ...]] = []
+    real_report = tf_autoderive.AutoderiveReport(outcomes=())
+
+    def _spy_run_autoderive(*, symbols: Any, materialize_one: Any) -> Any:
+        seen.append(tuple(symbols))
+        return real_report
+
+    monkeypatch.setattr(tf_autoderive, "run_autoderive", _spy_run_autoderive)
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    # The FINAL pre-build stage ran exactly once over the pulled target (NIFTY).
+    assert len(seen) == 1, "the pre-build stage must run once on a clean fetch"
+    assert "NIFTY" in seen[0], "pre-build must cover the pulled target symbol"
