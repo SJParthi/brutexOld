@@ -154,12 +154,21 @@ class ResultBox:
         so settle-after-durable holds and a halt reaches the spine's global-stop handling.
         """
         self._done.wait()
-        if self._exc is not None:
-            raise self._exc
-        # `_result is None` is unreachable once `_done` is set without an exception:
-        # `set_result` is the only other settle path and it always passes a result.
-        assert self._result is not None  # noqa: S101 — invariant guard, never user-facing
-        return self._result
+        exc = self._exc
+        if exc is not None:
+            # Re-raise the captured failure on THIS (fetch-worker) thread. Bound to a
+            # local first so the narrowed `BaseException` (never `None`) is what is
+            # raised — a settled box with `_exc is not None` is the ONLY raise path.
+            raise exc
+        result = self._result
+        if result is None:
+            # Defensive: a settled box (``_done`` set) with neither a result nor an
+            # exception is an impossible state — ``set_result`` always passes a real
+            # result and ``set_exception`` always passes a real exception. Surface it
+            # as a RuntimeError rather than silently returning ``None`` (which would
+            # break the SinkAppendResult contract and corrupt settle-after-durable).
+            raise RuntimeError("ResultBox settled with neither a result nor an exception")
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,11 +329,17 @@ class ShardedWriteConsumer:
             # spine's _GLOBAL_STOP_ERRORS path (graceful pull halt).
             self._trip_halt(exc)
             request.box.set_exception(exc)
-        except BaseException as exc:  # surface ANY write failure, never settle success
+        except Exception as exc:  # surface ANY write FAILURE, never settle a success
             # A consumer thread must NEVER settle a SUCCESS for a write that did not
             # durably complete (Golden Rule #7). Capture the failure into the box; the
             # producer re-raises it (a domain error is quarantined per-symbol; a real bug
             # propagates). The shard thread stays alive to drain the rest of its queue.
+            #
+            # Narrow to ``Exception`` (NOT ``BaseException``) so a ``KeyboardInterrupt`` /
+            # ``SystemExit`` is NOT swallowed or mis-settled as a recoverable write
+            # failure — it propagates out of the shard worker so an interpreter shutdown /
+            # operator interrupt is honoured. That request stays UN-settled (hard-exit
+            # case in the failure matrix → re-fetched next pull, idempotent keep-first).
             request.box.set_exception(exc)
         else:
             # Durable: `append` returned → `atomic_write_via`'s `os.replace` completed.

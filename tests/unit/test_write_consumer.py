@@ -140,6 +140,18 @@ class TestResultBox:
         assert box.get() is result
         t.join()
 
+    def test_settled_with_neither_result_nor_exception_raises(self) -> None:
+        # Defensive guard: a box whose `_done` event is set but that carries NEITHER a
+        # result NOR an exception is an impossible state (`set_result`/`set_exception`
+        # are the only settle paths and each passes a real value). `get()` must surface
+        # it as a RuntimeError, NEVER silently return `None` (which would break the
+        # SinkAppendResult contract + corrupt settle-after-durable). Forced directly
+        # since no normal call sequence can reach it.
+        box = ResultBox()
+        box._done.set()  # whitebox: force the impossible settled-empty state
+        with pytest.raises(RuntimeError, match="settled with neither a result nor an exception"):
+            box.get()
+
 
 # ────────────────────────────────────────────────────────────────────────
 # WriteRequest — routing key
