@@ -17,13 +17,13 @@ This is round-2 feedback on the **Claude Code Projects beta**, gathered from run
 | 3 | Connecting the GitHub App doesn't reach an already-running session; only a fresh session picks it up. |
 | 4 | Background/review agents sit idle for hours with no liveness signal and no cleanup. |
 | 5 | Reasoning-effort tier appears to drop after a long idle: maximum was set, then later found reverted to a lower tier. |
-| 6 | Disk and agent-worktree + scratchpad artifacts accumulate across a long multi-agent run with no auto-cleanup. |
+| 6 | Finished/orphaned agent worktrees and scratchpad temp are never auto-cleaned across a long multi-agent run. |
 
 ---
 
 ## What we'd like
 
-- **Project auto-resume** — a first-class "keep working on goal X" so a Project keeps work going without hand-wiring a schedule. (A Project today isn't a self-running container; the work runs as sessions, and overnight continuity has to be arranged separately.)
+- **Make a Project auto-monitor and auto-run on its own** — Project-native continuity/scheduling so a Project keeps working toward its goal by itself, and unattended overnight work does **not** require separately wiring a Routine. The Project should do this itself; today the work runs as sessions and overnight continuity has to be arranged separately, instead of the Project sustaining it natively.
 - **In-session credential refresh** — re-bind GitHub, or pick up a newly-connected App, without tearing down the session.
 - **Idle-agent liveness and cleanup** — a per-agent last-activity signal plus auto-termination of stalled or orphaned agents.
 
@@ -79,14 +79,12 @@ I set the reasoning effort to its maximum, and after a long idle I found it had 
 
 **Suggested fix:** keep an explicitly-set effort tier sticky across idle periods (or, if maximum mode and the effort tier are separate controls, make that relationship visible so it's clear which one is active).
 
-### 6 — Disk and agent-worktree + scratchpad artifacts accumulate with no auto-cleanup
-On this environment the writable volume (~270 GB) sat ~50% used with ~20 GB free; accumulated agent worktrees (~2.8 GB across ~34 of them) and the scratchpad (~3.9 GB) were never auto-cleaned.
+### 6 — Agent worktrees and scratchpad temp are never auto-cleaned
+Finished/orphaned agent worktrees (~34 of them, ~2.8 GB) and scratchpad temp (~3.9 GB) accumulated across the run and were never cleaned up. This is a housekeeping gap tied to the idle-agents item above: stale agents leave stale worktrees behind, with nothing removing them.
 
-**Why it matters:** across a long unattended multi-agent run, untended worktree and scratchpad artifacts steadily eat the envelope with nothing cleaning up after them. (It ties into the idle-agents item above: stale agents leave stale worktrees.)
+**Why it matters:** across a long unattended multi-agent run, finished and orphaned agents pile up artifacts that nothing reclaims, so the workspace only grows messier the longer it runs.
 
-One honest caveat: I saw accumulation, but I did **not** capture an actual disk-full event — so I'm reporting the accumulation, not an out-of-space failure.
-
-**Suggested fix:** auto-clean finished or orphaned agent worktrees and scratchpad temp, and surface remaining disk headroom.
+**Suggested fix:** auto-clean finished or orphaned agent worktrees and scratchpad temp once their agent is done.
 
 ---
 

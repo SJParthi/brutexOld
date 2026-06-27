@@ -62,13 +62,13 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tr><td>3</td><td>Connecting the GitHub App doesn't reach an already-running session; only a fresh session picks it up.</td></tr>
 <tr><td>4</td><td>Background/review agents sit idle for hours with no liveness signal and no cleanup.</td></tr>
 <tr><td>5</td><td>Reasoning-effort tier appears to drop after a long idle: maximum was set, then later found reverted to a lower tier.</td></tr>
-<tr><td>6</td><td>Disk and agent-worktree + scratchpad artifacts accumulate across a long multi-agent run with no auto-cleanup.</td></tr>
+<tr><td>6</td><td>Finished/orphaned agent worktrees and scratchpad temp are never auto-cleaned across a long multi-agent run.</td></tr>
 </tbody>
 </table>
 <hr/>
 <h2>What we'd like</h2>
 <ul>
-<li><strong>Project auto-resume</strong> — a first-class "keep working on goal X" so a Project keeps work going without hand-wiring a schedule. (A Project today isn't a self-running container; the work runs as sessions, and overnight continuity has to be arranged separately.)</li>
+<li><strong>Make a Project auto-monitor and auto-run on its own</strong> — Project-native continuity/scheduling so a Project keeps working toward its goal by itself, and unattended overnight work does <strong>not</strong> require separately wiring a Routine. The Project should do this itself; today the work runs as sessions and overnight continuity has to be arranged separately, instead of the Project sustaining it natively.</li>
 <li><strong>In-session credential refresh</strong> — re-bind GitHub, or pick up a newly-connected App, without tearing down the session.</li>
 <li><strong>Idle-agent liveness and cleanup</strong> — a per-agent last-activity signal plus auto-termination of stalled or orphaned agents.</li>
 </ul>
@@ -102,11 +102,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p>I set the reasoning effort to its maximum, and after a long idle I found it had reverted to a lower tier ("Extra"). I'm not yet sure of the mechanism: it's an open question whether the maximum mode ("ultracode") is a separate control from the effort tier, or whether the tier itself reset on its own. Reported from direct experience; I haven't isolated the trigger yet.</p>
 <p><strong>Why it matters:</strong> if effort silently drops back from maximum during a long unattended run, work that was meant to run at full reasoning quietly continues at a lower tier, with no indication that the setting changed.</p>
 <p><strong>Suggested fix:</strong> keep an explicitly-set effort tier sticky across idle periods (or, if maximum mode and the effort tier are separate controls, make that relationship visible so it's clear which one is active).</p>
-<h3>6 — Disk and agent-worktree + scratchpad artifacts accumulate with no auto-cleanup</h3>
-<p>On this environment the writable volume (~270 GB) sat ~50% used with ~20 GB free; accumulated agent worktrees (~2.8 GB across ~34 of them) and the scratchpad (~3.9 GB) were never auto-cleaned.</p>
-<p><strong>Why it matters:</strong> across a long unattended multi-agent run, untended worktree and scratchpad artifacts steadily eat the envelope with nothing cleaning up after them. (It ties into the idle-agents item above: stale agents leave stale worktrees.)</p>
-<p>One honest caveat: I saw accumulation, but I did <strong>not</strong> capture an actual disk-full event — so I'm reporting the accumulation, not an out-of-space failure.</p>
-<p><strong>Suggested fix:</strong> auto-clean finished or orphaned agent worktrees and scratchpad temp, and surface remaining disk headroom.</p>
+<h3>6 — Agent worktrees and scratchpad temp are never auto-cleaned</h3>
+<p>Finished/orphaned agent worktrees (~34 of them, ~2.8 GB) and scratchpad temp (~3.9 GB) accumulated across the run and were never cleaned up. This is a housekeeping gap tied to the idle-agents item above: stale agents leave stale worktrees behind, with nothing removing them.</p>
+<p><strong>Why it matters:</strong> across a long unattended multi-agent run, finished and orphaned agents pile up artifacts that nothing reclaims, so the workspace only grows messier the longer it runs.</p>
+<p><strong>Suggested fix:</strong> auto-clean finished or orphaned agent worktrees and scratchpad temp once their agent is done.</p>
 <hr/>
 <h2>Screenshots (sent separately with the email)</h2>
 <p>No images are embedded in this document. The screenshots below are attached to the email; this list maps each one to the issue it illustrates.</p>
