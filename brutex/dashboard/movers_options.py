@@ -42,7 +42,11 @@ For each option contract (strike × CE/PE × expiry) found in the lake:
 * **LTP / volume / OI** come from the contract's own session bars (raw 1-minute,
   sliced to the selected ``time`` by the SAME minute math the Spot reader uses).
   ``ltp`` is the last bar's close (2dp money), ``volume`` is the cumulative
-  fresh-session quantity, ``oi`` is the last bar's open interest (``None``-safe).
+  fresh-session quantity, ``oi`` is the last bar's open interest (``None``-safe) —
+  the as-of cutoff SNAPSHOT (corrected_point #1b, DEC-FNO-TF-DERIVE-OI-001), NOT a
+  single resampled TF bucket. The TRUE per-TF resampled option bar (last-of-bucket
+  OI, trailing forming bucket dropped) is the COMMON
+  :func:`brutex.data.fno_resample.resample_session_to_tf`.
 * **Value (₹)** is the cumulative traded value (turnover) over those session bars
   (``Σ round_money((high+low+close)/3) × volume`` — the per-bar HLC3 typical-price ×
   volume VWAP-proxy turnover of DEC-MOVERS-VWAP-VALUE-001), kept as int64 paisa. It

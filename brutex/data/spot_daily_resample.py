@@ -237,6 +237,7 @@ def derive_daily_for_targets(
     build_read_1m: Callable[[DailyDeriveTarget], Callable[[], pl.DataFrame]],
     build_write_1day: Callable[[DailyDeriveTarget], Callable[[Sequence[CandleBar]], int]],
     before: date,
+    resample_fn: Callable[[pl.DataFrame, date], list[CandleBar]] | None = None,
 ) -> DailyDeriveReport:
     """Derive ``1day`` from 1-minute for every *target* — always-on, pure orchestration.
 
@@ -260,7 +261,13 @@ def derive_daily_for_targets(
     build_write_1day
         ``(target) -> ((bars) -> bars_written)`` — binds the target's ``1day`` writer.
     before
-        The forming-session cutoff (today IST), forwarded to :func:`resample_1m_to_daily`.
+        The forming-session cutoff (today IST), forwarded to the resampler.
+    resample_fn
+        The 1-minute → daily resampler ``(frame, before) -> list[CandleBar]``.
+        Defaults to the spot :func:`resample_1m_to_daily` (OI ``None``); the F&O
+        derive injects :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily`
+        (carry-last OI) — the ONE knob that makes this driver serve both spot AND
+        F&O without a second loop (DEC-FNO-TF-DERIVE-OI-001, CLAUDE.md §11 COMMON).
 
     Returns
     -------
@@ -274,6 +281,7 @@ def derive_daily_for_targets(
                 read_1m=build_read_1m(target),
                 write_1day=build_write_1day(target),
                 before=before,
+                resample_fn=resample_fn,
             )
         except Exception as exc:
             errored += 1
@@ -372,20 +380,33 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
     return bars
 
 
+def resample_1m_to_daily_default(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:
+    """Positional ``(frame, before)`` adapter over :func:`resample_1m_to_daily`.
+
+    :func:`resample_1m_to_daily` takes *before* keyword-only; the injectable
+    ``resample_fn`` seam (:func:`fill_daily_from_minute`) uses a uniform positional
+    ``(frame, before) -> list[CandleBar]`` signature so spot's default and the F&O
+    :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily` are
+    interchangeable. This is the DEFAULT spot binding (OI ``None``).
+    """
+    return resample_1m_to_daily(df_1m, before=before)
+
+
 def fill_daily_from_minute(
     *,
     read_1m: Callable[[], pl.DataFrame],
     write_1day: Callable[[Sequence[CandleBar]], int],
     before: date,
+    resample_fn: Callable[[pl.DataFrame, date], list[CandleBar]] | None = None,
 ) -> DailyFillResult:
     """Read 1-minute, resample to midnight-IST daily, write — pure orchestration.
 
     Reads the window's 1-minute slice (via the injected *read_1m*), resamples it to
-    daily (:func:`resample_1m_to_daily`), and — only when that yields at least one
-    bar — writes the bars via the injected *write_1day*, returning the count. An
-    empty 1-minute slice is an honest no-op (``bars_written == 0``, no write call),
-    NEVER an invented bar. All lake/disk I/O is injected, so this is 100%
-    unit-testable.
+    daily (via *resample_fn*, default :func:`resample_1m_to_daily`), and — only when
+    that yields at least one bar — writes the bars via the injected *write_1day*,
+    returning the count. An empty 1-minute slice is an honest no-op
+    (``bars_written == 0``, no write call), NEVER an invented bar. All lake/disk I/O
+    is injected, so this is 100% unit-testable.
 
     Parameters
     ----------
@@ -396,15 +417,21 @@ def fill_daily_from_minute(
         ``(bars) -> bars_written`` callable persisting the resampled daily bars to
         the ``1day`` partition (the sink snaps prices + merges idempotently).
     before
-        The forming-session cutoff (today IST), forwarded to
-        :func:`resample_1m_to_daily`.
+        The forming-session cutoff (today IST), forwarded to the resampler.
+    resample_fn
+        The 1-minute → daily resampler ``(frame, before) -> list[CandleBar]``.
+        Defaults to the spot :func:`resample_1m_to_daily` (OI ``None``); the F&O
+        derive injects the carry-last-OI
+        :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily`
+        (DEC-FNO-TF-DERIVE-OI-001).
 
     Returns
     -------
     DailyFillResult
         The written count + the resampled span (``first_ts`` / ``last_ts``).
     """
-    bars = resample_1m_to_daily(read_1m(), before=before)
+    resample = resample_1m_to_daily_default if resample_fn is None else resample_fn
+    bars = resample(read_1m(), before)
     if not bars:
         return DailyFillResult(bars_written=0, first_ts=None, last_ts=None)
     written = write_1day(bars)
@@ -633,13 +660,15 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     symbol: str,
     start: date,
     end: date,
+    include_oi: bool = False,
 ) -> Callable[[], pl.DataFrame]:
     """Build the injected 1-minute reader for one ``[start, end)`` daily window.
 
     Returns a zero-arg callable reading the symbol's stored ``1minute`` Parquet,
     filtered to the bars whose IST trading date falls in the half-open window
     ``[start, end)``, into a sorted polars frame with exactly the resampler's columns
-    (``ts_utc, open, high, low, close, volume``). The read is BOUNDED to ONLY the
+    (``ts_utc, open, high, low, close, volume`` — plus ``open_interest`` when
+    *include_oi* is True). The read is BOUNDED to ONLY the
     ``<yyyy>/<mm>.parquet`` month partitions the IST span covers
     (:func:`ist_span_partition_files`) instead of the whole ``/**/*.parquet`` tree, so
     the post-pull derivation is O(pulled-window) months, not O(lake-depth)
@@ -648,6 +677,12 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` (which RAISES when no
     1-minute exists), no covered partition on disk returns an EMPTY frame so "no
     1-minute to fill from" is a clean no-op, never an error (the verify-first default).
+
+    *include_oi* (DEC-FNO-TF-DERIVE-OI-001): spot callers leave it False (the
+    OHLCV-6 frame, unchanged). The F&O daily derive passes ``include_oi=True`` so the
+    ``open_interest`` column is read — both the ``.select(...)`` and the empty-schema
+    fallback frame gain it (``pl.Int64``) — and the OI-aware resampler carries
+    last-of-day OI into the derived ``1day`` partition.
     Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
@@ -655,7 +690,26 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
         files = ist_span_partition_files(base, start, end)
+        columns = ["ts_utc", "open", "high", "low", "close", "volume"]
+        if include_oi:
+            columns.append("open_interest")
         if not files:
+            # The F&O reader appends the nullable Int64 ``open_interest`` column so a
+            # no-partition F&O target still returns a 7-col frame the OI-aware daily
+            # resampler reads (DEC-FNO-TF-DERIVE-OI-001); spot stays the OHLCV-6. Two
+            # literal schemas (not a merged dict) so polars' typed ``schema=`` is exact.
+            if include_oi:
+                return pl.DataFrame(
+                    schema={
+                        "ts_utc": pl.Datetime(time_unit="us", time_zone="UTC"),
+                        "open": pl.Float64,
+                        "high": pl.Float64,
+                        "low": pl.Float64,
+                        "close": pl.Float64,
+                        "volume": pl.Int64,
+                        "open_interest": pl.Int64,
+                    }
+                )
             return pl.DataFrame(
                 schema={
                     "ts_utc": pl.Datetime(time_unit="us", time_zone="UTC"),
@@ -674,7 +728,7 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
             .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
-            .select("ts_utc", "open", "high", "low", "close", "volume")
+            .select(*columns)
             .sort("ts_utc")
         )
 
