@@ -101,6 +101,8 @@ On this environment the writable volume sat around half-full against an effectiv
 
 **Why it matters:** across a long unattended multi-agent run, untended worktree, scratchpad, and mutation artifacts steadily eat a finite envelope — a slow slide toward disk pressure with nothing cleaning up after it. (It ties into the orphaned-agents item above: stale agents leave stale worktrees.)
 
+One honest caveat: I saw disk accumulation, but I did **not** capture an actual disk-full event during a mutation run — so I'm reporting the accumulation, not an out-of-space failure.
+
 **Suggested fix:** auto-clean finished or orphaned agent worktrees, scratchpad temp, and mutation virtualenvs, and surface remaining disk headroom.
 
 ### 10 — A failed CI check can't be re-run
