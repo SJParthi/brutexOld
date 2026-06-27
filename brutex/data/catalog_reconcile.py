@@ -33,13 +33,19 @@ from pathlib import Path
 from typing import cast
 
 import polars as pl
+import structlog
 
 from brutex.data.catalog import Catalog
-from brutex.data.errors import PartitionError
+from brutex.data.errors import PartitionError, parquet_read_skip_errors
 from brutex.data.models import CatalogEntry
 from brutex.data.partition import BAR_DIR_NAME, parse_partition_path
 
 __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
+
+#: One ``catalog.reconcile.parquet_skip`` warning per unreadable partition file, so a
+#: corrupt Parquet that would otherwise crash the FIRST step of every sweep load + F&O
+#: window derivation is surfaced + skipped, never silent (GAP #9).
+_LOG = structlog.get_logger("brutex.data.catalog_reconcile")
 
 
 @dataclass(frozen=True)
@@ -54,7 +60,9 @@ class ReconcileResult:
         Total bars across every reconciled partition.
     skipped
         Partition files skipped because they could not be parsed as a
-        valid partition path or held zero rows.
+        valid partition path, held zero rows, or were UNREADABLE (corrupt /
+        version-incompatible Parquet — logged ``catalog.reconcile.parquet_skip``
+        and skipped instead of crashing the whole reconcile, GAP #9).
     """
 
     partitions_reconciled: int
@@ -137,13 +145,25 @@ def reconcile_catalog_from_lake(
         except PartitionError:
             skipped += 1
             continue
-        timestamps = pl.read_parquet(path, columns=["timestamp"]).get_column("timestamp")
-        row_count = timestamps.len()
-        if row_count == 0:
+        # GAP #9: a single corrupt / version-incompatible Parquet file (a polars
+        # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
+        # runs at the START of every sweep load + F&O window derivation. Log + skip that
+        # one file (counted in `skipped`) and continue; every readable partition still
+        # reconciles. NARROW set (`parquet_read_skip_errors`): a genuine code bug still
+        # propagates (Golden Rule #1).
+        try:
+            timestamps = pl.read_parquet(path, columns=["timestamp"]).get_column("timestamp")
+            row_count = timestamps.len()
+            if row_count == 0:
+                skipped += 1
+                continue
+            first_ts = timestamps.min()
+            last_ts = timestamps.max()
+            raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        except parquet_read_skip_errors() as exc:
+            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
             continue
-        first_ts = timestamps.min()
-        last_ts = timestamps.max()
         entry = CatalogEntry(
             exchange=cast(str, coords["exchange"]),
             segment=cast(str, coords["segment"]),
@@ -151,7 +171,7 @@ def reconcile_catalog_from_lake(
             interval=cast(str, coords["interval"]),
             year=cast(int, coords["year"]),
             month=cast(int, coords["month"]),
-            raw_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
+            raw_hash=raw_hash,
             row_count=row_count,
             first_ts=_as_utc(first_ts),
             last_ts=_as_utc(last_ts),

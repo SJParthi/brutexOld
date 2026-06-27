@@ -90,7 +90,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.raw_integrity_store import CaptureHookFactory
@@ -436,13 +436,44 @@ def ingest_option_contract(
             empty_backoff(empty_attempt)
 
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
-    result = sink.append(
-        exchange=exchange,
-        segment=OPTION_SEGMENT,
-        symbol=contract.symbol,
-        interval=interval,
-        bars=bars,
-    )
+    try:
+        result = sink.append(
+            exchange=exchange,
+            segment=OPTION_SEGMENT,
+            symbol=contract.symbol,
+            interval=interval,
+            bars=bars,
+        )
+    except PartitionLockTimeout as exc:
+        # A WEDGED peer held this partition's cross-process lock past the bounded
+        # deadline (DEC-PULL-CONTENTION-ANTISTALL-001): DEFER this window to the next
+        # pull, exactly like a 429 / timeout transient — record FAILED + return the
+        # transient IngestReport (NOT a contract-quarantine, NOT a rate-controller step:
+        # this is OUR contention, not vendor pressure). The peer genuinely progressing
+        # finishes its write and this window succeeds on the re-pull; the worker is freed
+        # instead of pinned until the 600 s watchdog kill.
+        _LOG.warning(
+            "option.ingest.window.lock_deferred",
+            pull_id=pull_id,
+            timeout_seconds=exc.timeout_seconds,
+            **fields,
+        )
+        if ledger is not None:
+            ledger.record(
+                key,
+                raw_bars=0,
+                error_type=type(exc).__name__,
+                bars_appended=0,
+                now=datetime.now(UTC),
+                in_pull_fetches=fetch_count,
+            )
+        return IngestReport(
+            windows=1,
+            bars_appended=0,
+            transient_failures=1,
+            retried_windows=1 if attempt > 0 else 0,
+            still_failed_windows=1,
+        )
     conflicts = [c for wr in result.write_results for c in wr.conflicts]
     if conflicts:
         _LOG.warning(

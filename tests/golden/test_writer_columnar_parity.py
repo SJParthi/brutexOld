@@ -35,17 +35,21 @@ if TYPE_CHECKING:  # pragma: no cover
 pytest.importorskip("polars")
 
 
-def _legacy_read_existing_bars(dest: Path) -> dict[datetime, CandleBar]:
+def _legacy_read_existing_bars(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
     """The PRE-DEC-WRITER-COLUMNAR-4A-001 per-row reconstruction, verbatim.
 
     Reproduces the exact ``df.iter_rows(named=True)`` + ``Decimal(str(...))`` +
     ``_tick_round`` path the production reader replaced, so the parity test is a
-    genuine old-vs-new byte comparison rather than a self-comparison.
+    genuine old-vs-new byte comparison rather than a self-comparison. Now takes the
+    already-read ``existing_bytes`` (the GAP #11 single-read signature) and parses
+    from them, byte-identical to the legacy ``pl.read_parquet(dest)``.
     """
+    import io
+
     import polars as pl
 
     with lake_write_guard():
-        df = pl.read_parquet(dest)
+        df = pl.read_parquet(io.BytesIO(existing_bytes))
         out: dict[datetime, CandleBar] = {}
         for row in df.iter_rows(named=True):
             oi = row["open_interest"]

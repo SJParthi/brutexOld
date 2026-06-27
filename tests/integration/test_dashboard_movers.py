@@ -520,6 +520,23 @@ class TestMoversApi:
         assert body["instrument_count"] == 0
         assert "Spot" in body["note"]
 
+    def test_reflected_asset_note_carries_no_unescaped_tag(self, store: InstrumentStore) -> None:
+        # DEC-DASHBOARD-XSS-HARDENING-001 (GAP B, server defense-in-depth): the
+        # unknown-asset note echoes the raw ?asset= query param. A reflected
+        # `<img src=x onerror=alert(1)>` must come back HTML-escaped in the JSON
+        # note (never a live tag) so any consumer of the payload is safe.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/movers", params={"asset": "<img src=x onerror=alert(1)>"})
+        assert resp.status_code == 200
+        note = resp.json()["note"]
+        # NO literal angle bracket survives → the browser can never re-form a
+        # live `<img …>` tag from the reflected note (the XSS sink is closed).
+        assert "<" not in note
+        assert ">" not in note
+        assert "<img" not in note  # no live tag in the reflected note
+        # The inert escaped form is present (title-cased to "&lt;Img …" by .title()).
+        assert "&lt;img" in note.lower()
+
     def test_empty_lake_degrades_honestly(self, store: InstrumentStore) -> None:
         # Store wired but no parquet written → honest empty payload (never 500).
         client = TestClient(build_app(DashboardState(), instrument_store=store))
