@@ -16,9 +16,11 @@ from datetime import date, datetime, time, timedelta
 import pytest
 from brutex.calendars.nse import (
     ALL_HOLIDAYS,
+    FORCED_EXIT_IST,
     HOLIDAY_COVERAGE_FIRST_YEAR,
     HOLIDAY_COVERAGE_LAST_YEAR,
     IST,
+    MUHURAT_SESSIONS,
     SESSION_CLOSE_IST,
     SESSION_DURATION_MINUTES,
     SESSION_OPEN_IST,
@@ -26,16 +28,20 @@ from brutex.calendars.nse import (
     HolidayDataUnavailableError,
     SessionType,
     expected_bars_per_day_for_tf,
+    forced_exit_time_for_session,
     get_session,
     has_muhurat_session,
     is_forced_exit_bar,
     is_holiday,
     is_holiday_checked,
     is_holiday_data_available,
+    is_nifty_rebalance_day,
     is_pre_open,
+    is_special_weekend_session,
     is_trading_day,
     is_trading_day_checked,
     is_weekend,
+    nifty_rebalance_event_on,
     session_minutes_per_day,
     trading_days_between,
 )
@@ -315,19 +321,16 @@ class TestSpecialWeekendSessions:
     """DEC-P0-046 / Q-09: Budget Day Saturday/Sunday full sessions."""
 
     def test_budget_day_2025_is_special_weekend_session(self) -> None:
-        from brutex.calendars.nse import is_special_weekend_session
 
         # 2025-02-01 was a Saturday — Union Budget 2025-26 special session.
         assert is_special_weekend_session(date(2025, 2, 1))
 
     def test_budget_day_2026_is_special_weekend_session(self) -> None:
-        from brutex.calendars.nse import is_special_weekend_session
 
         # 2026-02-01 is a Sunday — Union Budget 2026-27 special session.
         assert is_special_weekend_session(date(2026, 2, 1))
 
     def test_regular_saturday_is_not_special(self) -> None:
-        from brutex.calendars.nse import is_special_weekend_session
 
         # 2024-05-11 was a regular Saturday — no special session.
         assert not is_special_weekend_session(date(2024, 5, 11))
@@ -511,3 +514,268 @@ class TestLeapYear:
         # Wed 28, Thu 29, Fri 1 — all weekday trading days.
         assert date(2024, 2, 29) in days
         assert len(days) == 3
+
+
+class TestExpectedBarsValidation:
+    """Regression: tf < 1 must raise ValueError, never ZeroDivisionError or
+    a negative bar count (mirrors is_forced_exit_bar). Bug fix DEC-CALENDAR-HARDEN-001."""
+
+    def test_zero_timeframe_raises_valueerror_not_zerodivision(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            expected_bars_per_day_for_tf(0)
+
+    def test_negative_timeframe_raises_valueerror(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            expected_bars_per_day_for_tf(-5)
+
+    def test_minimum_valid_timeframe_is_one(self) -> None:
+        assert expected_bars_per_day_for_tf(1) == 375
+
+    def test_timeframe_at_session_length_is_one_bar(self) -> None:
+        assert expected_bars_per_day_for_tf(375) == 1
+
+    def test_timeframe_above_session_length_is_one_bar(self) -> None:
+        assert expected_bars_per_day_for_tf(376) == 1
+
+
+class TestRebalanceLookupIsO1:
+    """Regression: rebalance lookups are O(1) dict lookups consistent with the
+    authoritative NIFTY50_REBALANCE_EVENTS tuple (DEC-CALENDAR-HARDEN-001)."""
+
+    def test_map_keys_match_event_effective_dates(self) -> None:
+        from brutex.calendars.nse import (
+            _REBALANCE_BY_DATE,
+            NIFTY50_REBALANCE_EVENTS,
+        )
+
+        assert set(_REBALANCE_BY_DATE) == {e.effective_date for e in NIFTY50_REBALANCE_EVENTS}
+        assert len(_REBALANCE_BY_DATE) == len(NIFTY50_REBALANCE_EVENTS)
+
+    def test_map_lookup_resolves_every_event_by_identity(self) -> None:
+        # Every authoritative event resolves through the dict by `is`-identity
+        # (the prior O(n) linear scan was removed in favour of the O(1) map).
+        from brutex.calendars.nse import NIFTY50_REBALANCE_EVENTS
+
+        for event in NIFTY50_REBALANCE_EVENTS:
+            assert is_nifty_rebalance_day(event.effective_date)
+            assert nifty_rebalance_event_on(event.effective_date) is event
+
+    def test_non_event_date_returns_false_and_none(self) -> None:
+        assert not is_nifty_rebalance_day(date(2024, 2, 20))
+        assert nifty_rebalance_event_on(date(2024, 2, 20)) is None
+
+
+class TestISTOffsetFixedNoDst:
+    """IST must be a fixed +05:30 offset with NO daylight saving across the
+    full in-scope range (2020-2026), including a leap-year February."""
+
+    @pytest.mark.parametrize(
+        "dt",
+        [
+            datetime(2020, 1, 15, 12, 0, tzinfo=IST),
+            datetime(2021, 7, 1, 9, 15, tzinfo=IST),
+            datetime(2024, 2, 29, 15, 30, tzinfo=IST),  # leap day
+            datetime(2025, 6, 21, 0, 0, tzinfo=IST),
+            datetime(2026, 12, 31, 23, 59, tzinfo=IST),
+        ],
+    )
+    def test_offset_is_exactly_5h30m_and_no_dst(self, dt: datetime) -> None:
+        assert dt.utcoffset() == timedelta(hours=5, minutes=30)
+        assert dt.dst() == timedelta(0)
+
+    def test_offset_identical_in_winter_and_summer(self) -> None:
+        jan = datetime(2024, 1, 1, 12, 0, tzinfo=IST).utcoffset()
+        jul = datetime(2024, 7, 1, 12, 0, tzinfo=IST).utcoffset()
+        assert jan == jul == timedelta(hours=5, minutes=30)
+
+
+class TestForcedExitTimeForSession:
+    """forced_exit_time_for_session: one COMMON rule (close - 10min) that
+    yields 15:20 for a regular session and scales for short sessions."""
+
+    def test_regular_session_yields_canonical_1520(self) -> None:
+        session = get_session(date(2024, 2, 20))  # regular Tuesday
+        assert session is not None
+        assert forced_exit_time_for_session(session) == FORCED_EXIT_IST
+        assert forced_exit_time_for_session(session) == time(15, 20)
+
+    def test_special_weekend_session_yields_1520(self) -> None:
+        session = get_session(date(2025, 2, 1))  # Budget-day full hours
+        assert session is not None
+        assert forced_exit_time_for_session(session) == time(15, 20)
+
+    def test_muhurat_afternoon_2025_scales_to_close_minus_10(self) -> None:
+        session = get_session(date(2025, 10, 21))  # 13:45-14:45 afternoon
+        assert session is not None
+        assert forced_exit_time_for_session(session) == time(14, 35)
+
+    def test_muhurat_evening_2021_scales_to_close_minus_10(self) -> None:
+        session = get_session(date(2021, 11, 4))  # 18:15-19:15 evening
+        assert session is not None
+        assert forced_exit_time_for_session(session) == time(19, 5)
+
+
+class TestBoundaryTimestamps:
+    """Exact boundary instants for pre-open / forced-exit windows."""
+
+    def test_preopen_start_0900_inclusive(self) -> None:
+        assert is_pre_open(time(9, 0, 0))
+
+    def test_preopen_last_second_before_open(self) -> None:
+        assert is_pre_open(time(9, 14, 59))
+
+    def test_preopen_excludes_exact_open(self) -> None:
+        assert not is_pre_open(time(9, 15, 0))
+
+    def test_preopen_excludes_just_before_0900(self) -> None:
+        assert not is_pre_open(time(8, 59, 59))
+
+    def test_forced_exit_1m_bar_opening_exactly_1519_not_forced(self) -> None:
+        # [15:19:00, 15:20:00) closes exactly at 15:20 -> NOT strictly after.
+        assert not is_forced_exit_bar(time(15, 19, 0), tf_minutes=1)
+
+    def test_forced_exit_1m_bar_opening_1519_01_is_forced(self) -> None:
+        # [15:19:01, 15:20:01) reaches past 15:20:00 -> forced.
+        assert is_forced_exit_bar(time(15, 19, 1), tf_minutes=1)
+
+
+class TestOutOfRangeDates:
+    """Dates outside the curated 2021-2026 holiday window degrade gracefully
+    (never crash): only the weekend rule applies, holidays read False."""
+
+    def test_pre_2021_date_not_a_listed_holiday(self) -> None:
+        assert not is_holiday(date(2019, 1, 1))
+
+    def test_post_2026_date_not_a_listed_holiday(self) -> None:
+        assert not is_holiday(date(2030, 1, 1))
+
+    def test_far_future_weekday_is_trading_day_scope_limitation(self) -> None:
+        # 2030-01-01 is a Tuesday; outside the curated holiday list it reads as
+        # a trading day. Documents the honest scope limitation, not a bug.
+        assert date(2030, 1, 1).weekday() == 1
+        assert is_trading_day(date(2030, 1, 1))
+
+    def test_trading_days_span_a_year_boundary(self) -> None:
+        # 2024-12-30 (Mon) .. 2025-01-02 (Thu): no weekend, no listed holiday.
+        days = trading_days_between(date(2024, 12, 30), date(2025, 1, 2))
+        assert days == [
+            date(2024, 12, 30),
+            date(2024, 12, 31),
+            date(2025, 1, 1),
+            date(2025, 1, 2),
+        ]
+
+
+class TestLeapYearTradingDay:
+    """2024 is a leap year; Feb 29 is a regular Thursday trading day."""
+
+    def test_feb_29_2024_is_thursday_trading_day(self) -> None:
+        d = date(2024, 2, 29)
+        assert d.weekday() == 3  # Thursday
+        assert is_trading_day(d)
+
+    def test_trading_days_include_leap_day(self) -> None:
+        days = trading_days_between(date(2024, 2, 26), date(2024, 3, 1))
+        assert date(2024, 2, 29) in days
+        assert len(days) == 5  # Mon..Fri, no holiday in span
+
+
+class TestMuhuratSessionsAllYears:
+    """Every Muhurat session is a valid ~1-hour window; resolution honours
+    weekend precedence and the 2025 afternoon shift."""
+
+    def test_every_muhurat_session_is_a_valid_one_hour_window(self) -> None:
+        for d, (open_t, close_t) in MUHURAT_SESSIONS.items():
+            assert open_t < close_t
+            session = get_session(d)
+            assert session is not None
+            assert session.session_type == SessionType.MUHURAT
+            assert 0 < session.duration_minutes <= 90
+            assert session.open_time_ist == open_t
+            assert session.close_time_ist == close_t
+
+    def test_muhurat_2023_on_a_sunday_still_returns_session(self) -> None:
+        # 2023-11-12 is a Sunday; Muhurat precedence overrides the weekend rule.
+        d = date(2023, 11, 12)
+        assert d.weekday() == 6  # Sunday
+        assert is_weekend(d)
+        session = get_session(d)
+        assert session is not None
+        assert session.session_type == SessionType.MUHURAT
+
+    def test_muhurat_2025_is_afternoon(self) -> None:
+        session = get_session(date(2025, 10, 21))
+        assert session is not None
+        assert session.open_time_ist == time(13, 45)
+        assert session.close_time_ist == time(14, 45)
+
+    def test_non_muhurat_date_has_no_muhurat_session(self) -> None:
+        assert not has_muhurat_session(date(2024, 2, 20))
+
+
+class TestGoldenTradingDaysJan2024:
+    """Golden snapshot: the exact trading-day list for January 2024
+    (weekends + Republic Day Jan 26 excluded)."""
+
+    def test_january_2024_trading_days_exact(self) -> None:
+        expected = [
+            date(2024, 1, 1),
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            date(2024, 1, 4),
+            date(2024, 1, 5),
+            date(2024, 1, 8),
+            date(2024, 1, 9),
+            date(2024, 1, 10),
+            date(2024, 1, 11),
+            date(2024, 1, 12),
+            date(2024, 1, 15),
+            date(2024, 1, 16),
+            date(2024, 1, 17),
+            date(2024, 1, 18),
+            date(2024, 1, 19),
+            date(2024, 1, 22),
+            date(2024, 1, 23),
+            date(2024, 1, 24),
+            date(2024, 1, 25),
+            date(2024, 1, 29),
+            date(2024, 1, 30),
+            date(2024, 1, 31),
+        ]
+        assert trading_days_between(date(2024, 1, 1), date(2024, 1, 31)) == expected
+        assert date(2024, 1, 26) not in expected  # Republic Day
+
+
+class TestStressLongRange:
+    """Stress: the full 6-year span resolves without error and is consistent."""
+
+    def test_full_2021_2026_span_is_sane(self) -> None:
+        days = trading_days_between(date(2021, 1, 1), date(2026, 12, 31))
+        assert 1400 <= len(days) <= 1560  # ~250 trading days/yr x 6
+        assert days == sorted(days)
+        assert len(set(days)) == len(days)
+        assert all(is_trading_day(d) for d in days)
+        assert date(2025, 2, 1) in days  # Budget-day special weekend session
+        assert date(2026, 2, 1) in days
+        assert date(2024, 1, 26) not in days  # Republic Day excluded
+
+
+class TestFacadeIntegration:
+    """Integration: the public facade re-exports the new helper and the
+    end-to-end session -> forced-exit flow works through brutex.calendars."""
+
+    def test_facade_exports_forced_exit_helper(self) -> None:
+        import brutex.calendars as cal
+
+        assert "forced_exit_time_for_session" in cal.__all__
+        assert hasattr(cal, "forced_exit_time_for_session")
+
+    def test_end_to_end_session_to_forced_exit_via_facade(self) -> None:
+        import brutex.calendars as cal
+
+        session = cal.get_session(date(2024, 2, 20))
+        assert session is not None
+        exit_t = cal.forced_exit_time_for_session(session)
+        assert exit_t == cal.FORCED_EXIT_IST
+        assert cal.is_forced_exit_bar(exit_t, tf_minutes=1)
+        assert cal.expected_bars_per_day_for_tf(5) == 75

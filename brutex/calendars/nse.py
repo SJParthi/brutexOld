@@ -67,6 +67,12 @@ _FORCED_EXIT_SECONDS: Final[int] = (
     FORCED_EXIT_IST.hour * _SECONDS_PER_HOUR + FORCED_EXIT_IST.minute * _SECONDS_PER_MINUTE
 )
 
+#: Track-1 forced-exit margin before the session close (10 minutes). For the
+#: standard 15:30 close this yields the canonical 15:20 forced exit
+#: (== :data:`FORCED_EXIT_IST`); for a short / half-day session it scales with
+#: the actual close (docs/TRACK1_MICROSTRUCTURE.md §1.2 + §2). One COMMON rule.
+_FORCED_EXIT_MARGIN: Final[timedelta] = timedelta(minutes=10)
+
 
 class SessionType(Enum):
     """Trading session classification: REGULAR / MUHURAT / HALF_DAY / HOLIDAY."""
@@ -442,7 +448,17 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     - 15m -> 25 bars
     - 60m -> 6 bars (well, 6.25 — partial bar at end)
     - 1d  -> 1 bar
+
+    Raises
+    ------
+    ValueError
+        If ``tf_minutes < 1``. Mirrors :func:`is_forced_exit_bar`; a zero or
+        negative timeframe is meaningless and previously raised
+        :class:`ZeroDivisionError` (tf == 0) or returned a negative bar count
+        (tf < 0).
     """
+    if tf_minutes < 1:
+        raise ValueError(f"expected_bars_per_day_for_tf.tf_minutes must be >= 1, got {tf_minutes}")
     if tf_minutes >= SESSION_DURATION_MINUTES:
         return 1
     return SESSION_DURATION_MINUTES // tf_minutes
@@ -487,6 +503,24 @@ def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
     open_seconds = t.hour * _SECONDS_PER_HOUR + t.minute * _SECONDS_PER_MINUTE + t.second
     close_seconds = open_seconds + tf_minutes * _SECONDS_PER_MINUTE
     return close_seconds > _FORCED_EXIT_SECONDS
+
+
+def forced_exit_time_for_session(session: TradingSession) -> time:
+    """Return the IST forced-exit time-of-day for ``session``.
+
+    Track 1 force-closes all open positions :data:`_FORCED_EXIT_MARGIN`
+    (10 minutes) before the session's close (`docs/TRACK1_MICROSTRUCTURE.md`
+    §1.2 + §2). For the standard 09:15-15:30 session this is exactly
+    15:20 IST (== :data:`FORCED_EXIT_IST`); for a short / half-day session
+    (e.g. a Diwali Muhurat hour) the exit scales with the actual close, so a
+    single COMMON rule replaces a hardcoded 15:20.
+
+    Assumes the session close is at or after 00:10 IST (always true for every
+    NSE/BSE session — the earliest in-scope close is the 14:45 Muhurat); below
+    that the 10-minute subtraction would roll back into the previous day.
+    """
+    close_dt = datetime.combine(session.date, session.close_time_ist)
+    return (close_dt - _FORCED_EXIT_MARGIN).time()
 
 
 def is_pre_open(t: time) -> bool:
@@ -646,22 +680,33 @@ NIFTY50_REBALANCE_EVENTS: Final[tuple[NiftyRebalanceEvent, ...]] = (
 )
 
 
+#: O(1) ``date`` -> event map for :func:`is_nifty_rebalance_day` /
+#: :func:`nifty_rebalance_event_on`. Built once from the authoritative
+#: :data:`NIFTY50_REBALANCE_EVENTS` tuple (the single source of truth);
+#: effective dates are unique (asserted by tests) so there is no key
+#: collision. Replaces the previous O(n) linear scan with a true O(1)
+#: dict lookup (Golden Rule #5: O(1) discipline).
+_REBALANCE_BY_DATE: Final[dict[date, NiftyRebalanceEvent]] = {
+    event.effective_date: event for event in NIFTY50_REBALANCE_EVENTS
+}
+
+
 def is_nifty_rebalance_day(d: date) -> bool:
     """Return True if ``d`` is a NIFTY 50 semi-annual rebalance effective date.
 
     Used by the backtest engine to stamp a `rebalance_flag` on bars on
     or after each effective date. The audit log records the event so
-    post-hoc regime-break analysis is possible.
+    post-hoc regime-break analysis is possible. O(1) dict lookup.
     """
-    return any(event.effective_date == d for event in NIFTY50_REBALANCE_EVENTS)
+    return d in _REBALANCE_BY_DATE
 
 
 def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
-    """Return the :class:`NiftyRebalanceEvent` for ``d`` if any, else None."""
-    for event in NIFTY50_REBALANCE_EVENTS:
-        if event.effective_date == d:
-            return event
-    return None
+    """Return the :class:`NiftyRebalanceEvent` for ``d`` if any, else None.
+
+    O(1) dict lookup against :data:`_REBALANCE_BY_DATE`.
+    """
+    return _REBALANCE_BY_DATE.get(d)
 
 
 # ────────────────────────────────────────────────────────────────────────
