@@ -22,7 +22,7 @@ Whitebox: the test grabs the store's private ``_lock`` (the same RLock the
 in tests (file-top ``reportPrivateUsage=none`` pragma; ruff does not enable
 ``SLF001``), mirroring the existing whitebox store suites.
 
-Skipped when ``fastapi`` / ``httpx2`` / ``duckdb`` are absent (matches the other
+Skipped when ``fastapi`` / ``httpx`` / ``duckdb`` are absent (matches the other
 dashboard integration suites).
 """
 
@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("fastapi")
-pytest.importorskip("httpx2")
+pytest.importorskip("httpx", reason="Starlette TestClient needs httpx")
 pytest.importorskip("duckdb")
 
 from brutex.dashboard.app import DashboardState, build_app

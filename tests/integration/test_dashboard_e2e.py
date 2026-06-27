@@ -25,12 +25,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-# Skip the whole module if fastapi isn't installed. Guard on `httpx2`
-# (not `httpx`) because Starlette's TestClient imports `httpx2` as its HTTP
-# backend — guarding on bare `httpx` would let the module run without httpx2
-# and raise a RuntimeError instead of skipping (DEC-DASHBOARD-CI-UNMASK-001).
+# Skip the whole module if fastapi isn't installed. Guard on `httpx`
+# because Starlette's TestClient imports `httpx` as its HTTP backend — without
+# it the TestClient raises a RuntimeError instead of skipping
+# (DEC-DASHBOARD-CI-UNMASK-001; the `httpx2` typo removed in
+# DEC-HTTPX2-ROT-FIX-001, MIGRATION.md #941 — httpx2 was a fabricated package).
 pytest.importorskip("fastapi")
-pytest.importorskip("httpx2")
+pytest.importorskip("httpx", reason="Starlette TestClient needs httpx")
 
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.orchestrator.pipeline import (
