@@ -20,6 +20,8 @@ Test types present (CLAUDE.md §12 / Golden Rule #12):
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.notifications.telegram import TelegramEvent
@@ -338,3 +340,99 @@ class TestSweepAlerterWiring:
             {"effective_rps": 1.0, "latency_ms_p95": 100.0, "in_flight": 4},
         )
         assert len(notifier.published) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Concurrency regression (DEC-PULL-HEALTH-CONCURRENCY-001 GAP #8)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestObserveConcurrency:
+    """``observe()`` is atomic across the up-to-8 parallel pool workers.
+
+    Before the fix the snapshot assignment, the :class:`DwellProvider` streak increment,
+    and the :class:`~brutex.observability.sla.SLADetector` OK↔BREACH transition mutated
+    shared state with NO lock under the per-window parallel observe wiring, so the dwell
+    increment and the state edge could interleave — ``pull.stalled`` could flip more than
+    once (a double-counted edge) or its observed value tear. The fix holds ONE lock around
+    the whole ``observe()`` body. These tests drive N threads through a :class:`\
+threading.Barrier` so they all fire ``observe()`` at once, then assert the breach edge
+    fired EXACTLY once and no state interleaved.
+    """
+
+    def test_stalled_fires_exactly_once_under_barrier_storm(self) -> None:
+        """N concurrent stalled ticks trip ``pull.stalled`` once, never N times.
+
+        The dwell needs ``stalled_dwell`` consecutive stalled samples to fire. With N
+        threads each firing one stalled tick simultaneously, the streak must advance by
+        exactly one per tick (no torn read), so the breach edge fires once and the
+        ``on_degraded`` callback records exactly one ``pull.stalled`` entry — even though
+        a stalled snapshot ALSO breaches ``pull.achieved_below_allowed`` (counted
+        separately, still once).
+        """
+        threads = 8
+        cb = RecordingDegraded()
+        # Dwell == N so every one of the N concurrent stalled ticks is needed to fire,
+        # exercising the streak increment under contention from the first tick to the last.
+        monitor, _, _ = _monitor(cb, pool_size=4, stalled_dwell=threads)
+        stalled_ctrl = {"current_rps": 5.0, "recent_hits": 0}
+        stalled_meter = {"effective_rps": 0.1, "latency_ms_p95": 100.0, "in_flight": 4}
+
+        barrier = threading.Barrier(threads)
+
+        def _worker() -> None:
+            barrier.wait()  # release all workers at the same instant → maximal overlap
+            monitor.observe(stalled_ctrl, stalled_meter)
+
+        workers = [threading.Thread(target=_worker, name=f"obs-{i}") for i in range(threads)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5.0)
+            assert not worker.is_alive(), "an observe() worker deadlocked"
+
+        # The dwell streak reached exactly N → the stalled rule fired its single edge.
+        assert monitor.state_of("pull.stalled") == SLAState.BREACH
+        stalled_calls = [c for c in cb.calls if c[0] == "pull.stalled"]
+        assert len(stalled_calls) == 1, f"pull.stalled fired {len(stalled_calls)}× (expected 1)"
+        # The co-breached achieved-below-allowed rule also flipped exactly once (one edge).
+        achieved_calls = [c for c in cb.calls if c[0] == "pull.achieved_below_allowed"]
+        assert len(achieved_calls) == 1
+
+    def test_no_lost_updates_under_repeated_barrier_storms(self) -> None:
+        """Repeated barrier storms never tear the last-snapshot / gauge state.
+
+        Each storm fires N identical healthy ticks at once; the mirrored gauges must end
+        at the exact last-observed values (no half-written snapshot pair from interleaved
+        assignment), proving the assignment + mirror run atomically under the lock.
+        """
+        threads = 8
+        monitor, cb, registry = _monitor(pool_size=4)
+        ctrl = {"current_rps": 5.0, "recent_hits": 3}
+        meter = {"effective_rps": 4.8, "latency_ms_p95": 120.0, "in_flight": 2}
+
+        def _one_storm() -> None:
+            barrier = threading.Barrier(threads)
+
+            def _worker() -> None:
+                barrier.wait()
+                monitor.observe(ctrl, meter)
+
+            workers = [threading.Thread(target=_worker) for _ in range(threads)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=5.0)
+                assert not worker.is_alive()
+
+        for _ in range(5):
+            _one_storm()
+
+        # Healthy snapshot → no rule ever fired across every storm.
+        assert cb.calls == []
+        # Gauges reflect the exact (un-torn) last snapshot pair.
+        assert registry.gauge_value("brutex_pull_achieved_rps") == 4.8
+        assert registry.gauge_value("brutex_pull_allowed_rps") == 5.0
+        assert registry.gauge_value("brutex_pull_in_flight") == 2.0
+        assert registry.gauge_value("brutex_pull_pool_idle_fraction") == 0.5
+        assert registry.gauge_value("brutex_pull_recent_hits") == 3.0
