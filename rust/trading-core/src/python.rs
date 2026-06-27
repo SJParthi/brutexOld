@@ -94,6 +94,115 @@ fn check_prev_day_hl(pdh: i64, pdl: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Overflow-safe magnitude ceiling for a per-bar price / level (paisa) consumed
+/// by the EVALUATOR (`evaluate_atoms`), distinct from the anchor ceiling.
+///
+/// The evaluator's hot path (which this crate keeps GOLDEN-sensitive and does NOT
+/// touch) does several unbounded integer multiplies on the per-bar inputs —
+/// `body * 10`, `total_range * 7`, `(close - day_low) * 3`, `*_wick * 2`,
+/// `pdc * 50` — plus `(close - level).abs()` and `close * bps`. With `body` and
+/// `total_range` up to `2·ceiling`, the worst multiply is `body * 10 ≤ 20·ceiling`;
+/// `i64::MAX / 65536` makes `20·ceiling ≈ 3·10⁻⁴ · i64::MAX` — provably
+/// overflow-free — AND keeps `(close − level)` (≤ `2·ceiling`) far from `i64::MIN`
+/// so `.abs()` never panics. The ceiling is ≈ 1.4·10¹⁴ paisa (₹1.4 trillion),
+/// ~17 million× SENSEX (~8·10⁶ paisa) and far above the proptest domain
+/// (`MAX_PAISA = 10¹²`), so NO valid bar is ever rejected (golden unchanged).
+const MAX_BAR_PAISA: i64 = i64::MAX / 65536;
+
+/// Generous absolute ceiling for a proximity `bps` parameter (rejects an absurd
+/// standalone value early — the real overflow guard is the i128 `close × bps`
+/// product check in [`check_evaluate_inputs`]).
+///
+/// Real bps are tiny (the golden max is 50, the proptest domain is 0..=200); a
+/// 1,000,000-bps cap (= 10,000 %) is astronomically above any real tolerance, so
+/// it never rejects a valid input. A bps anywhere up to this cap is still
+/// **product-checked against the actual `close`** in i128, so `close × bps` can
+/// never overflow `i64` regardless of how the two ceilings interact.
+const MAX_BPS: i64 = 1_000_000;
+
+/// True iff `|value| <= MAX_BAR_PAISA` (a finite per-bar price/level magnitude).
+fn bar_in_range(value: i64) -> bool {
+    (-MAX_BAR_PAISA..=MAX_BAR_PAISA).contains(&value)
+}
+
+/// Validate EVERY per-bar input the evaluator multiplies / subtracts / `.abs()`es,
+/// so a VALID anchor with a garbage bar input (huge `close_paisa`, `i64::MIN`
+/// price, absurd `*_bps`) is rejected with a clean `ValueError` instead of
+/// tripping an inner `overflow-checks`/`abs` panic → `abort` (SIGABRT) under
+/// `panic = "abort"`.
+///
+/// Closes the `is_near` (`close * bps`, `(close - level).abs()`) + Group-5 shape
+/// (`body * 10`, `total_range * 7`, wick `* 2`) + Group-7/9 (`(close - day_low) * 3`,
+/// `pdc * 50`, `open_of_day ± gap`) arithmetic. The pivot/fib LEVELS are bounded
+/// by their own anchor/length validators (anchor path) or by this function's
+/// `levels` slice (pre-built path). Pure (no `PyErr`) so `cargo test` covers every
+/// branch.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat per-bar ABI mirrored from the evaluator snapshot"
+)]
+fn check_evaluate_inputs(
+    open: i64,
+    high: i64,
+    low: i64,
+    close: i64,
+    ema20: Option<i64>,
+    ema200: Option<i64>,
+    day_high: i64,
+    day_low: i64,
+    open_of_day: i64,
+    pdc: i64,
+    pivot_bps: i64,
+    pdh_pdl_bps: i64,
+    fib_bps: i64,
+) -> Result<(), String> {
+    // 1. Every per-bar price + optional EMA + `pdc` (the ONLY level the evaluator
+    //    MULTIPLIES — `pdc * 50` in Group 9) must sit in the bar range so the
+    //    subtractions / `.abs()` / `*N` multiplies cannot overflow or hit
+    //    `i64::MIN`. The pivot/fib R/S/retracement levels are only SUBTRACTED in
+    //    `is_near` (never multiplied); with a bar-bounded `close` and an
+    //    anchor-bounded level, `(close - level)` stays well inside i64 and
+    //    `.abs()` never reaches `i64::MIN`, so they need no extra bound here.
+    let mut prices = vec![open, high, low, close, day_high, day_low, open_of_day, pdc];
+    if let Some(e) = ema20 {
+        prices.push(e);
+    }
+    if let Some(e) = ema200 {
+        prices.push(e);
+    }
+    for v in prices {
+        if !bar_in_range(v) {
+            return Err(format!(
+                "bar price/level magnitude {v} out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
+    }
+
+    // 2. Every proximity bps: `close * bps` must fit i64 (exact i128 check), and
+    //    bps must be non-negative + non-absurd. A negative bps would make the
+    //    tolerance negative (harmless to overflow but nonsensical); reject it.
+    for (name, bps) in [
+        ("pivot_bps", pivot_bps),
+        ("pdh_pdl_bps", pdh_pdl_bps),
+        ("fib_bps", fib_bps),
+    ] {
+        if !(0..=MAX_BPS).contains(&bps) {
+            return Err(format!(
+                "{name} ({bps}) out of the overflow-safe range [0, {MAX_BPS}]"
+            ));
+        }
+        // close is already bar-bounded above, but check the actual product in
+        // i128 so the guarantee is exact regardless of the ceilings' arithmetic.
+        if (close as i128 * bps as i128).unsigned_abs() > i64::MAX as u128 {
+            return Err(format!(
+                "{name} ({bps}) × close_paisa ({close}) overflows i64"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Evaluate one bar's 52-condition `u64` mask, RECOMPUTING pivots+fib from the
 /// previous day's `pdh/pdl/pdc`. Used by the standalone parity check; BruteX
 /// itself uses [`evaluate_with_levels`] (it already holds the levels).
@@ -187,6 +296,27 @@ fn evaluate_from_raw_impl(
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
     check_prev_day_ohlc(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa)?;
+    // Also bound every per-bar input the EVALUATOR multiplies/subtracts/`.abs()`es
+    // (close × bps, body × 10, (close − day_low) × 3, pdc × 50, …). The
+    // recomputed pivot/fib R/S/retrace levels are bounded by the validated anchor
+    // (only SUBTRACTED in `is_near`, never multiplied), so a bar-bounded close
+    // keeps `(close − level).abs()` inside i64; `pdc` (the one multiplied level)
+    // is bar-bounded here.
+    check_evaluate_inputs(
+        open_paisa,
+        high_paisa,
+        low_paisa,
+        close_paisa,
+        ema20_paisa,
+        ema200_paisa,
+        day_high_paisa,
+        day_low_paisa,
+        open_of_day_paisa,
+        prev_pdc_paisa,
+        pivot_bps,
+        pdh_pdl_bps,
+        fib_bps,
+    )?;
     let pivots = compute_pivot_levels(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa);
     let fib = compute_fib_levels(prev_pdh_paisa, prev_pdl_paisa);
     let snapshot = IndicatorSnapshot {
@@ -318,6 +448,36 @@ fn evaluate_with_levels_impl(
             fib_levels.len()
         ));
     }
+    // Every CALLER-SUPPLIED level is bar-bounded: unlike the anchor path these are
+    // NOT derived from a validated anchor, so a garbage level (e.g. `i64::MIN`)
+    // would make `(close - level).abs()` overflow/panic in `is_near`, and
+    // `pivot_levels[9]` (pdc) is multiplied by 50 in Group 9. Bound them all to
+    // the bar range BEFORE building the snapshot.
+    for v in pivot_levels.iter().chain(fib_levels.iter()) {
+        if !bar_in_range(*v) {
+            return Err(format!(
+                "level magnitude {v} out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
+    }
+    // Bound the per-bar inputs + bps the evaluator multiplies/subtracts/`.abs()`es
+    // (`pdc` = pivot_levels[9] is already bar-bounded above).
+    check_evaluate_inputs(
+        open_paisa,
+        high_paisa,
+        low_paisa,
+        close_paisa,
+        ema20_paisa,
+        ema200_paisa,
+        day_high_paisa,
+        day_low_paisa,
+        open_of_day_paisa,
+        pivot_levels[9],
+        pivot_bps,
+        pdh_pdl_bps,
+        fib_bps,
+    )?;
     let pivots = PivotLevels {
         p_paisa: pivot_levels[0],
         r1_paisa: pivot_levels[1],
@@ -650,6 +810,206 @@ mod tests {
         assert!(raw(MAX_ANCHOR_PAISA + 1, 0, 0).is_err()); // overflow magnitude
     }
 
+    // ── check_evaluate_inputs (per-bar / bps overflow guard) ───────────────
+
+    /// `evaluate_from_raw_impl` with a VALID anchor but caller-chosen bar inputs.
+    #[expect(clippy::too_many_arguments, reason = "mirrors the evaluator ABI")]
+    fn raw_bar(
+        open: i64,
+        high: i64,
+        low: i64,
+        close: i64,
+        ema20: Option<i64>,
+        ema200: Option<i64>,
+        day_high: i64,
+        day_low: i64,
+        open_of_day: i64,
+        pivot_bps: i64,
+        pdh_pdl_bps: i64,
+        fib_bps: i64,
+    ) -> Result<u64, String> {
+        evaluate_from_raw_impl(
+            10 * 3600,
+            open,
+            high,
+            low,
+            close,
+            ema20,
+            ema200,
+            PDH,
+            PDL,
+            PDC, // VALID anchor
+            day_high,
+            day_low,
+            open_of_day,
+            pivot_bps,
+            pdh_pdl_bps,
+            fib_bps,
+            0,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn raw_impl_rejects_out_of_range_bar_prices() {
+        let big = MAX_BAR_PAISA + 1;
+        // Each per-bar price individually out of range → rejected (no abort).
+        assert!(raw_bar(big, PDC, PDC, PDC, None, None, PDC, PDC, PDC, 10, 10, 10).is_err());
+        assert!(raw_bar(PDC, big, PDC, PDC, None, None, PDC, PDC, PDC, 10, 10, 10).is_err());
+        assert!(raw_bar(PDC, PDC, big, PDC, None, None, PDC, PDC, PDC, 10, 10, 10).is_err());
+        assert!(raw_bar(PDC, PDC, PDC, big, None, None, PDC, PDC, PDC, 10, 10, 10).is_err());
+        assert!(raw_bar(PDC, PDC, PDC, PDC, None, None, big, PDC, PDC, 10, 10, 10).is_err());
+        assert!(raw_bar(PDC, PDC, PDC, PDC, None, None, PDC, big, PDC, 10, 10, 10).is_err());
+        assert!(raw_bar(PDC, PDC, PDC, PDC, None, None, PDC, PDC, big, 10, 10, 10).is_err());
+        // i64::MIN price (would panic in `.abs()`) → rejected.
+        assert!(
+            raw_bar(
+                i64::MIN,
+                PDC,
+                PDC,
+                PDC,
+                None,
+                None,
+                PDC,
+                PDC,
+                PDC,
+                10,
+                10,
+                10
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_impl_rejects_out_of_range_ema() {
+        let big = MAX_BAR_PAISA + 1;
+        assert!(
+            raw_bar(
+                PDC,
+                PDC,
+                PDC,
+                PDC,
+                Some(big),
+                None,
+                PDC,
+                PDC,
+                PDC,
+                10,
+                10,
+                10
+            )
+            .is_err()
+        );
+        assert!(
+            raw_bar(
+                PDC,
+                PDC,
+                PDC,
+                PDC,
+                None,
+                Some(big),
+                PDC,
+                PDC,
+                PDC,
+                10,
+                10,
+                10
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_impl_rejects_bad_bps() {
+        // Each bps slot: negative and over-ceiling both rejected.
+        assert!(raw_bar(PDC, PDC, PDC, PDC, None, None, PDC, PDC, PDC, -1, 10, 10).is_err());
+        assert!(raw_bar(PDC, PDC, PDC, PDC, None, None, PDC, PDC, PDC, 10, -1, 10).is_err());
+        assert!(raw_bar(PDC, PDC, PDC, PDC, None, None, PDC, PDC, PDC, 10, 10, -1).is_err());
+        assert!(
+            raw_bar(
+                PDC,
+                PDC,
+                PDC,
+                PDC,
+                None,
+                None,
+                PDC,
+                PDC,
+                PDC,
+                MAX_BPS + 1,
+                10,
+                10
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_impl_rejects_close_times_bps_overflow() {
+        // A big close (at the bar ceiling) × a big-but-in-cap bps overflows i64 —
+        // the i128 product guard rejects it (the close × bps DoS the reviewer
+        // found). MAX_BAR_PAISA × MAX_BPS ≈ 1.4·10²⁰ ≫ i64::MAX ≈ 9.2·10¹⁸.
+        let close = MAX_BAR_PAISA;
+        let err = raw_bar(
+            close, close, close, close, None, None, close, close, close, MAX_BPS, 0, 0,
+        )
+        .unwrap_err();
+        assert!(err.contains("overflows i64"), "got: {err}");
+    }
+
+    #[test]
+    fn check_evaluate_inputs_product_overflow_direct() {
+        // The i128 product guard fires for a close × bps that overflows i64 …
+        let err = check_evaluate_inputs(
+            0,
+            0,
+            0,
+            MAX_BAR_PAISA,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            MAX_BPS,
+            0,
+            0,
+        )
+        .unwrap_err();
+        assert!(err.contains("overflows i64"), "got: {err}");
+        // … and for a NEGATIVE close of the same magnitude (unsigned_abs path).
+        assert!(
+            check_evaluate_inputs(
+                0,
+                0,
+                0,
+                -MAX_BAR_PAISA,
+                None,
+                None,
+                0,
+                0,
+                0,
+                0,
+                MAX_BPS,
+                0,
+                0
+            )
+            .is_err()
+        );
+        // A small close × MAX_BPS fits → accepted (the product guard does not
+        // over-reject a legitimate large bps on a normal-priced bar).
+        assert!(
+            check_evaluate_inputs(0, 0, 0, 1_000_000, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0)
+                .is_ok()
+        );
+        // pdc out of range → rejected.
+        assert!(
+            check_evaluate_inputs(0, 0, 0, 0, None, None, 0, 0, 0, MAX_BAR_PAISA + 1, 0, 0, 0)
+                .is_err()
+        );
+    }
+
     // ── evaluate_with_levels_impl ──────────────────────────────────────────
     fn with_levels(pivots: Vec<i64>, fibs: Vec<i64>) -> Result<u64, String> {
         evaluate_with_levels_impl(
@@ -691,6 +1051,73 @@ mod tests {
     fn with_levels_rejects_wrong_fib_len() {
         let err = with_levels(vec![0; PIVOT_LEVELS_LEN], vec![0; FIB_LEVELS_LEN + 1]).unwrap_err();
         assert!(err.contains("fib_levels must have"), "got: {err}");
+    }
+
+    #[test]
+    fn with_levels_rejects_out_of_range_level() {
+        // A garbage pivot level (i64::MIN would make `(close - level).abs()` panic
+        // in `is_near`) is rejected before the snapshot is built.
+        let mut pivots = vec![0i64; PIVOT_LEVELS_LEN];
+        pivots[3] = i64::MIN;
+        let err = with_levels(pivots, vec![0; FIB_LEVELS_LEN]).unwrap_err();
+        assert!(err.contains("level magnitude"), "got: {err}");
+        // A garbage fib level too.
+        let mut fibs = vec![0i64; FIB_LEVELS_LEN];
+        fibs[7] = MAX_BAR_PAISA + 1;
+        let err = with_levels(vec![0; PIVOT_LEVELS_LEN], fibs).unwrap_err();
+        assert!(err.contains("level magnitude"), "got: {err}");
+    }
+
+    #[test]
+    fn with_levels_rejects_out_of_range_bar_or_bps() {
+        // VALID levels, but a garbage bar input / bps still rejected (the
+        // evaluate-input guard runs on the pre-built path too).
+        let ok_p = vec![0i64; PIVOT_LEVELS_LEN];
+        let ok_f = vec![0i64; FIB_LEVELS_LEN];
+        let big = MAX_BAR_PAISA + 1;
+        let err = evaluate_with_levels_impl(
+            10 * 3600,
+            big, // open out of range
+            0,
+            0,
+            0,
+            None,
+            None,
+            ok_p.clone(),
+            ok_f.clone(),
+            0,
+            0,
+            0,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(err.contains("overflow-safe"), "got: {err}");
+        // close × bps overflow on the pre-built path.
+        let err = evaluate_with_levels_impl(
+            10 * 3600,
+            0,
+            0,
+            0,
+            MAX_BAR_PAISA, // close
+            None,
+            None,
+            ok_p,
+            ok_f,
+            0,
+            0,
+            0,
+            MAX_BPS, // huge bps
+            0,
+            0,
+            0,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(err.contains("overflows i64"), "got: {err}");
     }
 
     #[test]
@@ -811,6 +1238,37 @@ mod tests {
             let pdh = MAX_ANCHOR_PAISA.saturating_add(extra);
             prop_assert!(check_prev_day_hl(pdh, 0).is_err());
             prop_assert!(check_prev_day_ohlc(pdh, 0, 0).is_err());
+        }
+
+        /// VALID-DOMAIN bar inputs + bps (real-price magnitudes, real tolerances)
+        /// are NEVER rejected by the per-bar evaluate guard, and `evaluate_from_raw`
+        /// runs to a `u64` mask without panic — the "no valid input is rejected"
+        /// guarantee for the NEW per-bar/bps bounds. The domain (±10⁹ paisa = ±₹10M,
+        /// 0..=10000 bps) sits far inside MAX_BAR_PAISA/MAX_BPS, mirroring the
+        /// `tests/proptests.rs` finance-safe envelope.
+        #[test]
+        fn valid_bar_inputs_never_rejected(
+            open in -1_000_000_000i64..=1_000_000_000,
+            high in -1_000_000_000i64..=1_000_000_000,
+            low in -1_000_000_000i64..=1_000_000_000,
+            close in -1_000_000_000i64..=1_000_000_000,
+            day_high in -1_000_000_000i64..=1_000_000_000,
+            day_low in -1_000_000_000i64..=1_000_000_000,
+            open_of_day in -1_000_000_000i64..=1_000_000_000,
+            bps in 0i64..=10_000,
+        ) {
+            // the per-bar guard accepts every in-domain combination …
+            prop_assert!(check_evaluate_inputs(
+                open, high, low, close, Some(close), Some(close),
+                day_high, day_low, open_of_day, 1_000_000, bps, bps, bps,
+            ).is_ok());
+            // … and a full valid-anchor evaluate runs without panic.
+            let mask = evaluate_from_raw_impl(
+                10 * 3600, open, high, low, close, Some(close), Some(close),
+                1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
+                bps, bps, bps, 0, vec![],
+            );
+            prop_assert!(mask.is_ok());
         }
     }
 }
