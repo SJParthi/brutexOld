@@ -449,6 +449,86 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert actions[-1] == "SUPERVISOR_ABORT"
 
+    def test_keyboard_interrupt_aborts_grid_not_a_tuple_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A KeyboardInterrupt from a tuple ESCAPES the per-tuple catch + ABORTS the grid.
+
+        The supervisor's tuple loop catches only ``SweepComboError`` (the
+        Resilient skip path); the outer guard catches ``Exception``
+        (record-then-reraise ``SUPERVISOR_ABORT``). A ``KeyboardInterrupt`` is a
+        ``BaseException`` (NOT an ``Exception``) so it is caught by NEITHER — an
+        operator Ctrl-C propagates BARE through the ``finally`` (which only stops
+        the watchdog) and aborts the WHOLE (33B-trial) grid instead of being
+        silently downgraded to a single-tuple skip + continue
+        (DEC-ENGINE-DEDUP-NAN-CANON-001 / the audit H1 guard). The interrupted
+        tuple must NOT bump ``tuples_failed``, NOT write a ``TUPLE_FAILED`` audit
+        line, NOT record its cache key, and NOT advance the checkpoint, and the
+        sibling tuple must never run. It is NOT downgraded to a SUPERVISOR_ABORT
+        either (the outer except is ``Exception``, not ``BaseException``).
+        """
+        pytest.importorskip("polars")
+
+        # 2 tuples: index 0 NIFTY raises Ctrl-C, index 1 BANKNIFTY would run.
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        tuples = list(iter_sweep_tuples(grid))
+        ran: list[str] = []
+
+        def _interrupt(grid_: object, tuple_: object, **_kwargs: object) -> object:
+            ran.append(tuple_.instrument)  # type: ignore[attr-defined]
+            raise KeyboardInterrupt("operator ctrl-c")
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _interrupt)
+
+        seen: list[str] = []
+        # Capture the escaping exception with a plain try/except (NOT
+        # pytest.raises) so the still-open guards can be probed inside the
+        # handler — the KeyboardInterrupt unwinds the `with`, which closes the
+        # cache, so the probe must happen before the block exits.
+        raised: BaseException | None = None
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            try:
+                run_supervised_grid(
+                    grid,
+                    bars_for=lambda _i, _t: bars,
+                    store_for=make_store_for(tmp_path / "results", grid),
+                    dedup=_dedup(),
+                    ingest_audit=ingest,
+                    guards=guards,
+                    on_tuple=lambda t, _s: seen.append(t.instrument),
+                )
+            except KeyboardInterrupt as exc:
+                raised = exc
+                # Probe the still-open guards: neither tuple was cached and the
+                # checkpoint never advanced (stays at the fresh -1 sentinel, so a
+                # resume re-runs from index 0).
+                assert not guards.cache.seen_digest(tuple_cache_key(tuples[0], grid))
+                assert not guards.cache.seen_digest(tuple_cache_key(tuples[1], grid))
+                assert guards.checkpoint.last_completed_index == -1
+        # The Ctrl-C escaped the grid (the handler captured it, did not re-raise
+        # for the assertions below).
+        assert isinstance(raised, KeyboardInterrupt)
+        assert str(raised) == "operator ctrl-c"
+        # It is NOT downgraded to a SweepComboError (the per-tuple skip path).
+        assert not isinstance(raised, SweepComboError)
+        assert not isinstance(raised, Exception)
+        # The grid aborted on the FIRST tuple — the second never ran, on_tuple
+        # never fired.
+        assert ran == ["NIFTY"]
+        assert seen == []
+        # The Ctrl-C escaped BARE: no TUPLE_FAILED (the per-tuple catch is
+        # narrow), no SUPERVISOR_COMPLETE (the loop aborted), and — because the
+        # outer except is ``Exception`` not ``BaseException`` — NOT even a
+        # SUPERVISOR_ABORT (it is never recorded as an in-band failure).
+        actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
+        assert "TUPLE_FAILED" not in actions
+        assert "SUPERVISOR_COMPLETE" not in actions
+        assert "SUPERVISOR_ABORT" not in actions
+
     def test_combo_error_skips_tuple_without_cache_or_checkpoint(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
