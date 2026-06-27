@@ -899,6 +899,7 @@ def _execute_parquet_resilient(
     source: str,
     skip_event: str = "db.parquet_skip",
     unreadable_event: str = "db.parquet_unreadable",
+    skip_sink: list[bool] | None = None,
 ) -> list[tuple[Any, ...]]:
     """Execute *sql* over the ``directory`` Parquet glob, **resilient to an unreadable file**.
 
@@ -927,17 +928,28 @@ def _execute_parquet_resilient(
     *unreadable_event* let each surface keep its own log namespace (the coverage
     summaries log ``coverage.*``, the candle pager ``db.*``) over the SAME logic.
 
+    *skip_sink* (optional): when a list is passed, ``True`` is appended to it iff the
+    degraded path OMITTED at least one file (a real skip OR the all-unreadable case).
+    The adjacency-sensitive prior-close baseline readers consume this to emit an honest
+    BLANK %-change instead of bridging to a non-adjacent earlier day after a skip
+    (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix; Golden Rule #1 — never a fabricated number).
+    The fast (no-error) path never touches *skip_sink*.
+
     The skip set is the COMMON :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`
     (``duckdb.Error`` covers a corrupt ``read_parquet``; ``OSError`` covers a file-level
-    fault) — NARROW, so a genuine code bug still propagates (never swallowed). The
-    per-file probing is paid ONLY when a read actually fails; the happy path stays a
-    single query (Golden Rule #5 O(1) steady-state).
+    fault). ``duckdb.Error`` is deliberately BROAD (DuckDB exposes no version-stable
+    *unreadable-file* subclass), but a genuine SQL bug is STILL never swallowed: the
+    per-file probe finds every file readable (``omitted`` stays ``False``), so the
+    degraded re-run over the SAME files RE-RAISES the original error — it propagates as a
+    500, not a silent empty result (proven in the tests). The per-file probing is paid
+    ONLY when a read actually fails; the happy path stays a single query (Golden Rule #5
+    O(1) steady-state).
     """
     glob = directory.as_posix() + "/**/*.parquet"
     try:
         return list(conn.execute(sql, [glob, *extra_params]).fetchall())
     except movers_read_skip_errors() as whole_glob_error:
-        readable = _readable_parquet_subset(
+        readable, omitted = _readable_parquet_subset(
             conn,
             directory,
             whole_glob_error,
@@ -945,6 +957,8 @@ def _execute_parquet_resilient(
             skip_event=skip_event,
             unreadable_event=unreadable_event,
         )
+        if omitted and skip_sink is not None:
+            skip_sink.append(True)
         if not readable:
             return []
         return list(conn.execute(sql, [readable, *extra_params]).fetchall())
@@ -958,8 +972,8 @@ def _readable_parquet_subset(
     source: str,
     skip_event: str,
     unreadable_event: str,
-) -> list[str]:
-    """Probe each ``*.parquet`` under *directory*; return the readable subset, skipping bad files.
+) -> tuple[list[str], bool]:
+    """Probe each ``*.parquet`` under *directory*; return ``(readable_subset, any_omitted)``.
 
     The shared degraded-path resolver (CLAUDE.md §11 COMMON) reached ONLY after a
     whole-glob ``read_parquet`` already raised an unreadable-Parquet error
@@ -969,20 +983,31 @@ def _readable_parquet_subset(
     *unreadable_event* so the caller degrades to an empty result instead of re-raising.
     The skip set is the COMMON
     :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`.
+
+    The second tuple element ``any_omitted`` is ``True`` when at least one file was
+    DROPPED from the read (a real skip OR the all-unreadable case). The adjacency-sensitive
+    prior-close baseline readers (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix) consume this flag:
+    once any file is omitted, the partition is no longer trustworthy for ADJACENCY (the
+    true predecessor day's bar may have lived in the dropped file), so they must emit a
+    BLANK %-change rather than bridge to a non-adjacent earlier day — never a fabricated
+    number (Golden Rule #1).
     """
     skip_errors = movers_read_skip_errors()
     readable: list[str] = []
+    omitted = False
     for path in sorted(directory.rglob("*.parquet")):
         candidate = path.as_posix()
         try:
             conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
         except skip_errors as skip_reason:
             _LOG.warning(skip_event, source=source, path=candidate, error=str(skip_reason))
+            omitted = True
         else:
             readable.append(candidate)
     if not readable:
         _LOG.error(unreadable_event, source=source, error=str(whole_glob_error))
-    return readable
+        omitted = True
+    return readable, omitted
 
 
 def _aggregate_parquet_resilient(
@@ -1033,7 +1058,7 @@ def _execute_candle_page_resilient(
     try:
         cursor = conn.execute(sql, [glob, *extra_params])
     except movers_read_skip_errors() as whole_glob_error:
-        readable = _readable_parquet_subset(
+        readable, _omitted = _readable_parquet_subset(
             conn,
             directory,
             whole_glob_error,
@@ -1813,10 +1838,17 @@ def _intraday_prev_close_by_page_date(
     lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
     hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
     skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
+    # ADJACENCY GUARD (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix): the prior-day-close baseline
+    # is ONLY valid if the partition read in full — `_prev_trading_close` maps each page
+    # date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds "the
+    # bar just before `lo`". If ANY file in this 1-minute partition was skipped (corrupt),
+    # the true adjacent predecessor may have lived in the dropped file, so any %-change we
+    # computed would be baselined on a NON-ADJACENT earlier day — a confidently-WRONG
+    # number. So we record whether either read omitted a file and, if so, return {} → every
+    # affected bar gets an honest BLANK %-change, never a fabricated one (Golden Rule #1).
+    skip_sink: list[bool] = []
     # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob is
     #    built from validated coordinates (no free user text); path + instants bound.
-    #    Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt baseline Parquet degrades
-    #    to its readable subset (blank %-change for the affected bars), never a 500.
     span = _execute_parquet_resilient(
         conn,
         base,
@@ -1825,6 +1857,7 @@ def _intraday_prev_close_by_page_date(
         'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d',
         [lo_instant, hi_instant],
         source=skip_source,
+        skip_sink=skip_sink,
     )
     last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
     # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
@@ -1837,7 +1870,11 @@ def _intraday_prev_close_by_page_date(
         'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1',
         [lo_instant],
         source=skip_source,
+        skip_sink=skip_sink,
     )
+    if skip_sink:
+        # A corrupt file was skipped → adjacency is no longer guaranteed → honest blank.
+        return {}
     if pred_rows:
         pred = pred_rows[0]
         last_close[pred[0]] = _to_decimal(pred[1])
@@ -1862,15 +1899,23 @@ def _daily_close_by_date(
     base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
-    # Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt 1-day Parquet degrades the
-    # 1-day-view baseline to its readable subset (blank %-change), never a 500.
+    # ADJACENCY GUARD (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix): this map feeds
+    # `_prev_trading_close`, which maps each day to its IMMEDIATE predecessor by walking
+    # the sorted dates. If a corrupt 1-day file is skipped, the walk would BRIDGE across
+    # the missing day(s) and baseline a %-change on a NON-ADJACENT earlier close — a
+    # confidently-WRONG number. So on ANY skip we return {} → honest BLANK %-change for
+    # every bar, never a fabricated one (Golden Rule #1). A clean read is byte-unchanged.
+    skip_sink: list[bool] = []
     rows = _execute_parquet_resilient(
         conn,
         base,
         'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
         [],
         source=f"candle-dayclose:{exchange}/{segment}/{symbol}",
+        skip_sink=skip_sink,
     )
+    if skip_sink:
+        return {}
     return {_bar_ist_date(ts): _to_decimal(close) for ts, close in rows}
 
 

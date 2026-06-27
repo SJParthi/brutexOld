@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pytest
 from brutex.dashboard.db_view import (
     ALLOWED_OPERATORS,
@@ -873,6 +874,38 @@ def _write_two_month_candles(
     return files[0], files[1]
 
 
+def _write_three_adjacency_months(
+    lake_root: Path, *, interval: str = "1minute"
+) -> tuple[Path, Path, Path]:
+    """Write Feb / March / April single-day partitions for the adjacency-baseline tests.
+
+    Closes are chosen so the WRONG-baseline branch yields a DIFFERENT number from the
+    true one: Feb=99.5 (non-adjacent predecessor) · March=100.0 (the TRUE predecessor of
+    April) · April=101.0 (the viewed page). True April change = (101−100)/100 = +1.0%;
+    bridging to Feb (after a corrupt March) = (101−99.5)/99.5 ≈ +1.51% — a confidently
+    WRONG number. The honest answer when March is corrupt is BLANK (``None``). Closes
+    stay inside the fixture ``_bar`` ``[low=99, high=101]`` band. Returns the three month
+    Parquet paths ``(feb, march, april)`` in calendar order.
+    """
+    writer = ParquetWriter(lake_root=lake_root)
+    for day, close in (
+        (datetime(2024, 2, 1, 9, 15, tzinfo=UTC), "99.5"),
+        (datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.0"),
+        (datetime(2024, 4, 1, 9, 15, tzinfo=UTC), "101.0"),
+    ):
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval=interval,
+            bars=[_bar(day, close)],
+        )
+    base = lake_root / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / interval
+    files = sorted(base.rglob("*.parquet"))
+    assert len(files) == 3, "expected one Parquet per month (Feb, March, April)"
+    return files[0], files[1], files[2]
+
+
 def test_query_candles_skips_one_corrupt_file_count_and_page(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
@@ -906,16 +939,16 @@ def test_query_candles_skips_one_corrupt_file_count_and_page(
     assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
 
 
-def test_query_candles_skips_corrupt_derived_baseline(
+def test_query_candles_corrupt_predecessor_yields_blank_not_wrong_pct(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
-    # The page month is readable, but a SECOND month in the SAME 1-minute partition
-    # is corrupt — that month feeds the prior-day-close %-change baseline reads
-    # (_intraday_prev_close_by_page_date). The derived baseline degrades to its
-    # readable subset (a blank %-change for the affected bars) instead of 500-ing the
-    # whole page. Covers a derived-column read path.
-    march, april = _write_two_month_candles(tmp_path)
-    april.write_bytes(_CORRUPT_PARQUET)
+    # BLOCKER regression (DEC-DB-CORRUPT-SKIP-001): when the TRUE predecessor month is
+    # corrupt, the intraday prev-close baseline must NOT bridge to the non-adjacent
+    # earlier month and fabricate a confidently-WRONG %-change — it must emit an honest
+    # BLANK. WITHOUT the adjacency guard this asserts a number (≈ +1.51% vs Feb=99.5);
+    # WITH the guard it is None. The page (April) itself still renders + does not 500.
+    feb, march, april = _write_three_adjacency_months(tmp_path)
+    march.write_bytes(_CORRUPT_PARQUET)  # corrupt the TRUE predecessor of the April page
     with capture_logs() as logs:
         out = query_candles(
             store.connection,
@@ -924,22 +957,77 @@ def test_query_candles_skips_corrupt_derived_baseline(
             segment="CASH",
             symbol="NSE-NIFTY",
             interval="1minute",
-            start="2024-03-01",
-            end="2024-03-01",
+            start="2024-04-01",
+            end="2024-04-01",
             limit=50,
         )
-    # The March page renders; the corrupt April file is skipped under the
-    # candle-prevclose source (the derived %-change baseline reader).
-    assert len(out["rows"]) == 1
-    assert "change_pct" in out["columns"]
+    assert len(out["rows"]) == 1  # the April page renders
+    change_idx = out["columns"].index("change_pct")
+    # The load-bearing assertion the prior len-only test MASKED: an HONEST blank, never
+    # the wrong number computed against the non-adjacent February close.
+    assert out["rows"][0][change_idx] is None
     baseline_skips = [
         e
         for e in logs
         if e["event"] == "db.parquet_skip" and e["source"].startswith("candle-prevclose:")
     ]
-    assert baseline_skips, "expected the prior-close baseline read to skip the corrupt file"
-    assert all(s["path"].endswith(april.name) for s in baseline_skips)
-    assert march.exists()  # the readable file is untouched — quarantine is the operator's call
+    assert baseline_skips, "expected the prior-close baseline read to skip the corrupt predecessor"
+    assert all(s["path"].endswith(march.name) for s in baseline_skips)
+    assert feb.exists() and april.exists()  # readable files untouched — operator quarantines
+
+
+def test_query_candles_clean_baseline_keeps_true_pct(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Control for the BLOCKER test: with NO corruption the same April page reports the
+    # TRUE +1.0% (vs the adjacent March=100.0), proving the adjacency guard does NOT
+    # blank a clean baseline — only a skip blanks it.
+    _write_three_adjacency_months(tmp_path)
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        start="2024-04-01",
+        end="2024-04-01",
+        limit=50,
+    )
+    change_idx = out["columns"].index("change_pct")
+    # The cell is JSON-rendered (2-dp display string); the TRUE +1.0% (vs March=100.0),
+    # never None and never the wrong Feb-baselined number.
+    assert out["rows"][0][change_idx] == "1.00"  # (101 − 100) / 100 × 100
+
+
+def test_query_candles_daily_corrupt_predecessor_yields_blank_not_wrong_pct(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The 1-DAY-view twin of the BLOCKER regression: the 1-day prev-close baseline
+    # (_daily_close_by_date → _prev_trading_close) must also blank rather than bridge
+    # across a corrupt 1-day predecessor month.
+    _feb, march, _april = _write_three_adjacency_months(tmp_path, interval="1day")
+    march.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            start="2024-04-01",
+            end="2024-04-01",
+            limit=50,
+        )
+    assert len(out["rows"]) == 1
+    change_idx = out["columns"].index("change_pct")
+    assert out["rows"][0][change_idx] is None  # honest blank, never the wrong Feb baseline
+    assert [
+        e
+        for e in logs
+        if e["event"] == "db.parquet_skip" and e["source"].startswith("candle-dayclose:")
+    ], "expected the 1-day prev-close baseline read to skip the corrupt predecessor"
 
 
 def test_query_candles_all_corrupt_returns_empty_page_not_500(
@@ -1012,12 +1100,13 @@ def test_readable_parquet_subset_logs_skip_and_keeps_good(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
     # Direct cover of the shared degraded-path resolver: a mixed dir returns only the
-    # readable file, logs one skip for the bad one, no unreadable error.
+    # readable file + ``omitted=True`` (a file was dropped), logs one skip for the bad
+    # one, no unreadable error.
     march, april = _write_two_month_candles(tmp_path)
     april.write_bytes(_CORRUPT_PARQUET)
     base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
     with capture_logs() as logs:
-        readable = _readable_parquet_subset(
+        readable, omitted = _readable_parquet_subset(
             store.connection,
             base,
             RuntimeError("whole-glob failed"),
@@ -1026,10 +1115,53 @@ def test_readable_parquet_subset_logs_skip_and_keeps_good(
             unreadable_event="db.parquet_unreadable",
         )
     assert [Path(p).name for p in readable] == [march.name]
+    assert omitted is True  # a corrupt file WAS dropped → adjacency no longer guaranteed
     skips = [e for e in logs if e["event"] == "db.parquet_skip"]
     assert len(skips) == 1
     assert skips[0]["path"].endswith(april.name)
     assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
+
+
+def test_readable_parquet_subset_all_readable_reports_not_omitted(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The transient-error branch: the whole-glob read raised but EVERY file probes
+    # readable → ``omitted=False`` (nothing dropped), so an adjacency-sensitive caller
+    # keeps its baseline. (A genuine SQL bug rides this branch and is re-raised by the
+    # caller's re-run — see test_execute_parquet_resilient_genuine_sql_error_propagates.)
+    march, april = _write_two_month_candles(tmp_path)
+    base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    with capture_logs() as logs:
+        readable, omitted = _readable_parquet_subset(
+            store.connection,
+            base,
+            RuntimeError("transient"),
+            source="unit",
+            skip_event="db.parquet_skip",
+            unreadable_event="db.parquet_unreadable",
+        )
+    assert {Path(p).name for p in readable} == {march.name, april.name}
+    assert omitted is False
+    assert not [e for e in logs if e["event"].startswith("db.parquet")]
+
+
+def test_execute_parquet_resilient_genuine_sql_error_propagates(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # A genuine SQL bug (a non-existent column) is NEVER swallowed by the resilient
+    # helper: the whole-glob read raises duckdb.Error, every file probes readable
+    # (omitted=False), and the degraded re-run over the SAME files RE-RAISES — so a real
+    # bug surfaces as a 500, not a silent empty result (the over-broad-catch MINOR).
+    _write_two_month_candles(tmp_path)
+    base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    with pytest.raises(duckdb.Error):
+        _execute_parquet_resilient(
+            store.connection,
+            base,
+            "SELECT definitely_not_a_column FROM read_parquet(?, union_by_name=true)",
+            [],
+            source="unit",
+        )
 
 
 def test_aggregate_parquet_resilient_uses_coverage_namespace(
