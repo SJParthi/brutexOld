@@ -22,10 +22,13 @@ from brutex.dashboard.db_view import (
     CANDLE_COLUMNS,
     OPTION_CANDLE_COLUMNS,
     SPOT_DERIVED_COLUMNS,
+    _aggregate_parquet_resilient,
     _bar_ist_date,
     _bar_ist_time,
     _daily_close_by_date,
     _daily_open_by_date,
+    _execute_candle_page_resilient,
+    _execute_parquet_resilient,
     _format_candle_timestamp,
     _intraday_last_close_by_date,
     _intraday_open_by_date,
@@ -34,6 +37,7 @@ from brutex.dashboard.db_view import (
     _page_ist_dates,
     _prev_trading_close,
     _quote_ident,
+    _readable_parquet_subset,
     _spot_derived_rows,
     _to_decimal,
     _validate_candle_coords,
@@ -833,6 +837,221 @@ def test_query_candles_rejects_impossible_but_well_shaped_date(
             end="2024-13-45",
             limit=50,
         )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# query_candles — corrupt-Parquet resilience (DEC-DB-CORRUPT-SKIP-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _write_two_month_candles(
+    lake_root: Path, symbol: str = "NSE-NIFTY", interval: str = "1minute"
+) -> tuple[Path, Path]:
+    """Write a March + an April single-day partition → two separate month Parquet files.
+
+    Returns ``(march_file, april_file)`` so a test can corrupt ONE and keep the other
+    readable (a single month would collapse into one file, leaving nothing to skip).
+    """
+    writer = ParquetWriter(lake_root=lake_root)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol=symbol,
+        interval=interval,
+        bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol=symbol,
+        interval=interval,
+        bars=[_bar(datetime(2024, 4, 1, 9, 15, tzinfo=UTC), "100.8")],
+    )
+    base = lake_root / "bars" / "NSE" / "CASH" / symbol / interval
+    files = sorted(base.rglob("*.parquet"))
+    assert len(files) == 2, "expected one Parquet per month"
+    return files[0], files[1]
+
+
+def test_query_candles_skips_one_corrupt_file_count_and_page(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # One readable month + ONE corrupt *.parquet in the SAME partition. The
+    # whole-glob COUNT + page reads raise duckdb.Error; the resilient pager skips
+    # the bad file (logged + counted out), still returns the readable month's bar,
+    # and does NOT 500 (DEC-DB-CORRUPT-SKIP-001). Covers the COUNT path + the page path.
+    _march, april = _write_two_month_candles(tmp_path)
+    april.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            limit=50,
+        )
+    # Only the readable March bar survives — the corrupt April month is omitted,
+    # never a fabricated bar.
+    assert out["total"] == 1
+    assert len(out["rows"]) == 1
+    skips = [e for e in logs if e["event"] == "db.parquet_skip"]
+    # Every skip names the one corrupt file, never the readable March file.
+    assert skips, "expected db.parquet_skip for the corrupt April file"
+    assert all(s["path"].endswith(april.name) for s in skips)
+    # The COUNT + page reads both probe under the candle: source.
+    page_skips = [s for s in skips if s["source"] == "candle:NSE/CASH/NSE-NIFTY/1minute"]
+    assert page_skips, "expected the COUNT/page reads to skip the corrupt file"
+    assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
+
+
+def test_query_candles_skips_corrupt_derived_baseline(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The page month is readable, but a SECOND month in the SAME 1-minute partition
+    # is corrupt — that month feeds the prior-day-close %-change baseline reads
+    # (_intraday_prev_close_by_page_date). The derived baseline degrades to its
+    # readable subset (a blank %-change for the affected bars) instead of 500-ing the
+    # whole page. Covers a derived-column read path.
+    march, april = _write_two_month_candles(tmp_path)
+    april.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            start="2024-03-01",
+            end="2024-03-01",
+            limit=50,
+        )
+    # The March page renders; the corrupt April file is skipped under the
+    # candle-prevclose source (the derived %-change baseline reader).
+    assert len(out["rows"]) == 1
+    assert "change_pct" in out["columns"]
+    baseline_skips = [
+        e
+        for e in logs
+        if e["event"] == "db.parquet_skip" and e["source"].startswith("candle-prevclose:")
+    ]
+    assert baseline_skips, "expected the prior-close baseline read to skip the corrupt file"
+    assert all(s["path"].endswith(april.name) for s in baseline_skips)
+    assert march.exists()  # the readable file is untouched — quarantine is the operator's call
+
+
+def test_query_candles_all_corrupt_returns_empty_page_not_500(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # EVERY Parquet in the partition is corrupt. The rglob guard passes (files exist),
+    # the whole-glob scan fails, NO file is readable → a degraded-but-correct EMPTY page
+    # (total 0, no rows, never a fabricated bar) plus a db.parquet_unreadable error log
+    # so the operator can quarantine the lake — never a 500.
+    march, april = _write_two_month_candles(tmp_path)
+    march.write_bytes(_CORRUPT_PARQUET)
+    april.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            limit=50,
+        )
+    assert out["total"] == 0
+    assert out["rows"] == []
+    unreadable = [e for e in logs if e["event"] == "db.parquet_unreadable"]
+    assert unreadable, "expected a db.parquet_unreadable error when nothing is readable"
+    assert all(u["source"] == "candle:NSE/CASH/NSE-NIFTY/1minute" for u in unreadable)
+
+
+def test_execute_parquet_resilient_fast_path_no_probe(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # All files readable → the fast path executes the bound glob once and never
+    # probes per-file (no skip logs). Byte-identical to a direct query.
+    _write_two_month_candles(tmp_path)
+    base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    with capture_logs() as logs:
+        rows = _execute_parquet_resilient(
+            store.connection,
+            base,
+            "SELECT COUNT(*) FROM read_parquet(?, union_by_name=true)",
+            [],
+            source="unit",
+        )
+    assert rows == [(2,)]
+    assert not [e for e in logs if e["event"].startswith("db.parquet")]
+
+
+def test_execute_candle_page_resilient_all_corrupt_returns_empty_columns(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Direct cover of the page helper's no-readable-file branch: every file corrupt
+    # → ([], []) (empty columns + rows) so the caller renders a degraded empty page.
+    march, april = _write_two_month_candles(tmp_path)
+    march.write_bytes(_CORRUPT_PARQUET)
+    april.write_bytes(_CORRUPT_PARQUET)
+    base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    out_columns, raw_rows = _execute_candle_page_resilient(
+        store.connection,
+        base,
+        'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+        [],
+        source="unit",
+    )
+    assert out_columns == []
+    assert raw_rows == []
+
+
+def test_readable_parquet_subset_logs_skip_and_keeps_good(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Direct cover of the shared degraded-path resolver: a mixed dir returns only the
+    # readable file, logs one skip for the bad one, no unreadable error.
+    march, april = _write_two_month_candles(tmp_path)
+    april.write_bytes(_CORRUPT_PARQUET)
+    base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    with capture_logs() as logs:
+        readable = _readable_parquet_subset(
+            store.connection,
+            base,
+            RuntimeError("whole-glob failed"),
+            source="unit",
+            skip_event="db.parquet_skip",
+            unreadable_event="db.parquet_unreadable",
+        )
+    assert [Path(p).name for p in readable] == [march.name]
+    skips = [e for e in logs if e["event"] == "db.parquet_skip"]
+    assert len(skips) == 1
+    assert skips[0]["path"].endswith(april.name)
+    assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
+
+
+def test_aggregate_parquet_resilient_uses_coverage_namespace(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The coverage wrapper keeps its own ``coverage.*`` log namespace over the SHARED
+    # probe-and-skip logic (a corrupt file → coverage.parquet_skip, not db.*).
+    _march, april = _write_two_month_candles(tmp_path)
+    april.write_bytes(_CORRUPT_PARQUET)
+    base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    with capture_logs() as logs:
+        rows = _aggregate_parquet_resilient(
+            store.connection,
+            base,
+            "SELECT COUNT(*) FROM read_parquet(?, union_by_name=true)",
+            source="spot:unit",
+        )
+    assert rows == [(1,)]  # only the readable March bar
+    assert [e["event"] for e in logs if e["event"].startswith("coverage.parquet")] == [
+        "coverage.parquet_skip"
+    ]
+    assert not [e for e in logs if e["event"].startswith("db.parquet")]
 
 
 def test_query_table_contains_escapes_underscore_wildcard(store: InstrumentStore) -> None:

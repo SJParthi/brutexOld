@@ -50,6 +50,7 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -889,51 +890,162 @@ def fno_candle_lake_schema() -> list[dict[str, Any]]:
     ]
 
 
+def _execute_parquet_resilient(
+    conn: Any,
+    directory: Path,
+    sql: str,
+    extra_params: list[Any],
+    *,
+    source: str,
+    skip_event: str = "db.parquet_skip",
+    unreadable_event: str = "db.parquet_unreadable",
+) -> list[tuple[Any, ...]]:
+    """Execute *sql* over the ``directory`` Parquet glob, **resilient to an unreadable file**.
+
+    The ONE COMMON probe-and-skip primitive (CLAUDE.md §11 COMMON) for every direct
+    ``read_parquet`` read in this module: the coverage summaries
+    (:func:`_aggregate_parquet_resilient`) AND the ``/db`` candle pager
+    (:func:`query_candles` + its derived-column helpers, DEC-DB-CORRUPT-SKIP-001). *sql*
+    MUST reference the source as its FIRST bound ``?`` (e.g.
+    ``read_parquet(?, union_by_name=true)``); *extra_params* are the remaining bound
+    values (date bounds / page LIMIT-OFFSET / instant bounds), in order.
+
+    Fast path (steady state): bind ``<directory>/**/*.parquet`` to the source ``?`` plus
+    *extra_params* and ``fetchall()`` — byte-identical to a direct query, one scan.
+
+    Degraded path: a single corrupt / version-incompatible Parquet file in the partition
+    (seen in the wild as DuckDB ``don't know what type: \\r`` / *"No magic bytes found at
+    end of file"*) makes the whole-glob scan raise an unreadable-Parquet error, which
+    would otherwise 500 the whole page on EVERY paging click until the file is manually
+    quarantined. So on that error we probe each matched file, **skip** the unreadable
+    one(s) — each logged as *skip_event* with its path + reason so the operator can
+    quarantine it — and re-run *sql* over the readable subset (bound as a LIST to the
+    SAME source ``?``; DuckDB ``read_parquet`` accepts a path list). When NO file is
+    readable we log *unreadable_event* and return ``[]`` (a degraded-but-correct empty
+    result, never an exception, never a fabricated bar). Honest envelope (Golden Rule
+    #1 / #10): a skipped file is OMITTED, never silently counted. *skip_event* /
+    *unreadable_event* let each surface keep its own log namespace (the coverage
+    summaries log ``coverage.*``, the candle pager ``db.*``) over the SAME logic.
+
+    The skip set is the COMMON :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`
+    (``duckdb.Error`` covers a corrupt ``read_parquet``; ``OSError`` covers a file-level
+    fault) — NARROW, so a genuine code bug still propagates (never swallowed). The
+    per-file probing is paid ONLY when a read actually fails; the happy path stays a
+    single query (Golden Rule #5 O(1) steady-state).
+    """
+    glob = directory.as_posix() + "/**/*.parquet"
+    try:
+        return list(conn.execute(sql, [glob, *extra_params]).fetchall())
+    except movers_read_skip_errors() as whole_glob_error:
+        readable = _readable_parquet_subset(
+            conn,
+            directory,
+            whole_glob_error,
+            source=source,
+            skip_event=skip_event,
+            unreadable_event=unreadable_event,
+        )
+        if not readable:
+            return []
+        return list(conn.execute(sql, [readable, *extra_params]).fetchall())
+
+
+def _readable_parquet_subset(
+    conn: Any,
+    directory: Path,
+    whole_glob_error: BaseException,
+    *,
+    source: str,
+    skip_event: str,
+    unreadable_event: str,
+) -> list[str]:
+    """Probe each ``*.parquet`` under *directory*; return the readable subset, skipping bad files.
+
+    The shared degraded-path resolver (CLAUDE.md §11 COMMON) reached ONLY after a
+    whole-glob ``read_parquet`` already raised an unreadable-Parquet error
+    (*whole_glob_error*). Each file is probed with a cheap ``SELECT 1 ... LIMIT 1``; an
+    unreadable one is logged as *skip_event* (path + reason) and OMITTED — never a
+    fabricated bar. An empty return (NO readable file) is logged once as
+    *unreadable_event* so the caller degrades to an empty result instead of re-raising.
+    The skip set is the COMMON
+    :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`.
+    """
+    skip_errors = movers_read_skip_errors()
+    readable: list[str] = []
+    for path in sorted(directory.rglob("*.parquet")):
+        candidate = path.as_posix()
+        try:
+            conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
+        except skip_errors as skip_reason:
+            _LOG.warning(skip_event, source=source, path=candidate, error=str(skip_reason))
+        else:
+            readable.append(candidate)
+    if not readable:
+        _LOG.error(unreadable_event, source=source, error=str(whole_glob_error))
+    return readable
+
+
 def _aggregate_parquet_resilient(
     conn: Any, directory: Path, sql: str, *, source: str
 ) -> list[tuple[Any, ...]]:
     """Run *sql* — one ``read_parquet(?, union_by_name=true)`` aggregate over the
     ``directory`` glob — and return its rows, **resilient to an unreadable file**.
 
-    Fast path (steady state): bind ``<directory>/**/*.parquet`` to the single
-    ``?`` and ``fetchall()`` — byte-identical to a direct query, one scan.
+    The coverage-summary caller (:func:`summarize_spot_datasets` /
+    :func:`summarize_option_datasets`): an aggregate ``SELECT`` with the source as its
+    only bound ``?`` and no further params. A thin wrapper over the COMMON
+    :func:`_execute_parquet_resilient` (no extra params, ``coverage.*`` log namespace) —
+    the SAME probe-and-skip the ``/db`` candle pager uses (DEC-DB-CORRUPT-SKIP-001), so a
+    corrupt file degrades to its readable subset (or 0 rows) here too, never a 500.
+    """
+    return _execute_parquet_resilient(
+        conn,
+        directory,
+        sql,
+        [],
+        source=source,
+        skip_event="coverage.parquet_skip",
+        unreadable_event="coverage.parquet_unreadable",
+    )
 
-    Degraded path: a single corrupt / version-incompatible Parquet file in the
-    lake (seen in the wild as DuckDB ``don't know what type: \\r``) makes the
-    whole-glob scan raise :class:`duckdb.Error`, which would 500 a coverage
-    endpoint that documents *"never a 500"*. So on that error we probe each
-    matched file, **skip** the unreadable one(s) — each logged as
-    ``coverage.parquet_skip`` with its path + DuckDB reason so the operator can
-    quarantine it — and re-run *sql* over the readable subset (bound as a LIST).
-    When NO file is readable we log ``coverage.parquet_unreadable`` and return
-    ``[]`` (an empty summary, never an exception). Honest envelope (Golden Rule
-    #10): a skipped file is OMITTED from coverage, never silently counted.
 
-    The per-file probing is paid ONLY when a read actually fails; the happy path
-    stays a single query (Golden Rule #5 O(1) steady-state).
+def _execute_candle_page_resilient(
+    conn: Any,
+    directory: Path,
+    sql: str,
+    extra_params: list[Any],
+    *,
+    source: str,
+) -> tuple[list[str], list[tuple[Any, ...]]]:
+    """Execute a candle-page ``SELECT`` and return ``(out_columns, raw_rows)``, resilient.
+
+    The :func:`query_candles` page cursor needs the cursor *description* (the projected
+    column names, which drive every downstream derived-column join) in addition to the
+    rows, so it cannot use the row-only :func:`_execute_parquet_resilient`. SAME COMMON
+    probe-and-skip (``db.*`` log namespace, DEC-DB-CORRUPT-SKIP-001) via the shared
+    :func:`_readable_parquet_subset`: fast path binds the glob; on an unreadable-Parquet
+    error the readable subset is re-bound (the SELECT list is identical, so the column
+    description is byte-identical to the fast path). When NO file is readable, returns
+    ``([], [])`` — the caller renders an empty (degraded-but-correct) page, never a 500,
+    never a fabricated bar.
     """
     glob = directory.as_posix() + "/**/*.parquet"
     try:
-        return list(conn.execute(sql, [glob]).fetchall())
-    except duckdb.Error as whole_glob_error:
-        readable: list[str] = []
-        for path in sorted(directory.rglob("*.parquet")):
-            candidate = path.as_posix()
-            try:
-                conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
-            except duckdb.Error as skip_reason:
-                _LOG.warning(
-                    "coverage.parquet_skip",
-                    source=source,
-                    path=candidate,
-                    error=str(skip_reason),
-                )
-            else:
-                readable.append(candidate)
+        cursor = conn.execute(sql, [glob, *extra_params])
+    except movers_read_skip_errors() as whole_glob_error:
+        readable = _readable_parquet_subset(
+            conn,
+            directory,
+            whole_glob_error,
+            source=source,
+            skip_event="db.parquet_skip",
+            unreadable_event="db.parquet_unreadable",
+        )
         if not readable:
-            _LOG.error("coverage.parquet_unreadable", source=source, error=str(whole_glob_error))
-            return []
-        return list(conn.execute(sql, [readable]).fetchall())
+            return [], []
+        cursor = conn.execute(sql, [readable, *extra_params])
+    out_columns = [str(col[0]) for col in (cursor.description or [])]
+    return out_columns, list(cursor.fetchall())
 
 
 def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
@@ -1365,11 +1477,9 @@ def query_candles(
     where_clauses, where_params = _date_bounds(start, end)
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    glob = (
-        lake_root / "bars" / exchange / segment / symbol / interval
-    ).as_posix() + "/**/*.parquet"
     # Empty / not-yet-pulled partition set → return an empty page instead of
-    # letting read_parquet raise "No files found".
+    # letting read_parquet raise "No files found". The resilient candle reads below
+    # rebuild the glob from *base* internally (DEC-DB-CORRUPT-SKIP-001).
     base = lake_root / "bars" / exchange / segment / symbol / interval
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         empty_cols = list(columns) if columns is not None else list(CANDLE_COLUMNS)
@@ -1390,9 +1500,15 @@ def query_candles(
 
     # The glob is built from coordinates validated above (no free user text),
     # so interpolating it is safe; the source is given to read_parquet as a
-    # bound parameter and every date/page value is parameter-bound.
+    # bound parameter and every date/page value is parameter-bound. Every read
+    # below routes through the resilient probe-and-skip helpers
+    # (DEC-DB-CORRUPT-SKIP-001): a single corrupt / version-incompatible Parquet file
+    # in this partition no longer 500s the WHOLE page on every paging click — it is
+    # logged (``db.parquet_skip``), counted out, and the page degrades to its readable
+    # subset (never a fabricated bar).
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    skip_source = f"candle:{exchange}/{segment}/{symbol}/{interval}"
 
     # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
     # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
@@ -1406,11 +1522,14 @@ def query_candles(
     # no cache is injected (the pure-function default), the COUNT runs inline,
     # behaviour-identical to before.
     def _count_total() -> int:
-        row = conn.execute(
+        rows = _execute_parquet_resilient(
+            conn,
+            base,
             f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-            [glob, *where_params],
-        ).fetchone()
-        return int(row[0]) if row else 0
+            list(where_params),
+            source=skip_source,
+        )
+        return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     if count_cache is None:
         total = _count_total()
@@ -1420,15 +1539,15 @@ def query_candles(
             generation=generation,
             compute=_count_total,
         )
-    cursor = conn.execute(
-        f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
-        [glob, *where_params, safe_limit, safe_offset],
-    )
-    description = cursor.description or []
-    out_columns = [str(col[0]) for col in description]
     # Fetch ONCE: the rendered rows AND the derived %-change columns are both
     # built from the same page (DEC-DB-CANDLE-DERIVED-001).
-    raw_rows = cursor.fetchall()
+    out_columns, raw_rows = _execute_candle_page_resilient(
+        conn,
+        base,
+        f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+        [*where_params, safe_limit, safe_offset],
+        source=skip_source,
+    )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
@@ -1596,16 +1715,20 @@ def _intraday_last_close_by_date(
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
-    glob = base.as_posix() + "/**/*.parquet"
     # glob is built from validated coordinates (no free user text); the path is
     # given to read_parquet as a bound parameter. arg_max(close, timestamp) is
-    # the close of the day's LAST bar (the 15:29 IST close).
-    cursor = conn.execute(
+    # the close of the day's LAST bar (the 15:29 IST close). Resilient read
+    # (DEC-DB-CORRUPT-SKIP-001): a corrupt 1-minute Parquet degrades the baseline to
+    # its readable subset (a blank %-change for the affected bars), never a 500.
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
         'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
-        [glob],
+        [],
+        source=f"candle-prevclose:{exchange}/{segment}/{symbol}",
     )
-    return {day: _to_decimal(last_close) for day, last_close in cursor.fetchall()}
+    return {day: _to_decimal(last_close) for day, last_close in rows}
 
 
 def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
@@ -1682,7 +1805,6 @@ def _intraday_prev_close_by_page_date(
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
-    glob = base.as_posix() + "/**/*.parquet"
     lo, hi = min(page_dates), max(page_dates)
     # IST-midnight instants bound the scan to the page's own span (+ predecessor);
     # session bars (09:15–15:29 IST) never fall before 09:15, so CAST(ts AS DATE)
@@ -1690,24 +1812,34 @@ def _intraday_prev_close_by_page_date(
     # SAME keying as _intraday_last_close_by_date (session-tz-independent here).
     lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
     hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
+    skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
     # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob is
     #    built from validated coordinates (no free user text); path + instants bound.
-    span = conn.execute(
+    #    Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt baseline Parquet degrades
+    #    to its readable subset (blank %-change for the affected bars), never a 500.
+    span = _execute_parquet_resilient(
+        conn,
+        base,
         'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
         "FROM read_parquet(?, union_by_name=true) "
         'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d',
-        [glob, lo_instant, hi_instant],
-    ).fetchall()
+        [lo_instant, hi_instant],
+        source=skip_source,
+    )
     last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
     # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
     #    page date (ORDER BY DESC LIMIT 1 reads ~one row-group, not the whole past).
-    pred = conn.execute(
+    pred_rows = _execute_parquet_resilient(
+        conn,
+        base,
         'SELECT CAST("timestamp" AS DATE) AS d, close '
         "FROM read_parquet(?, union_by_name=true) "
         'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1',
-        [glob, lo_instant],
-    ).fetchone()
-    if pred is not None:
+        [lo_instant],
+        source=skip_source,
+    )
+    if pred_rows:
+        pred = pred_rows[0]
         last_close[pred[0]] = _to_decimal(pred[1])
     return _prev_trading_close(last_close)
 
@@ -1730,12 +1862,16 @@ def _daily_close_by_date(
     base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
-    glob = base.as_posix() + "/**/*.parquet"
-    cursor = conn.execute(
+    # Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt 1-day Parquet degrades the
+    # 1-day-view baseline to its readable subset (blank %-change), never a 500.
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
         'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
-        [glob],
+        [],
+        source=f"candle-dayclose:{exchange}/{segment}/{symbol}",
     )
-    return {_bar_ist_date(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
+    return {_bar_ist_date(ts): _to_decimal(close) for ts, close in rows}
 
 
 def _daily_open_by_date(
@@ -1753,12 +1889,16 @@ def _daily_open_by_date(
     base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
-    glob = base.as_posix() + "/**/*.parquet"
-    cursor = conn.execute(
+    # Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt 1-day Parquet degrades the
+    # pre-open IEP baseline to its readable subset, never a 500.
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
         'SELECT "timestamp", open FROM read_parquet(?, union_by_name=true)',
-        [glob],
+        [],
+        source=f"candle-dayopen:{exchange}/{segment}/{symbol}",
     )
-    return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in cursor.fetchall()}
+    return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in rows}
 
 
 def _intraday_open_by_date(
@@ -1782,15 +1922,19 @@ def _intraday_open_by_date(
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
-    glob = base.as_posix() + "/**/*.parquet"
     # glob built from validated coordinates (no free user text); path is a bound
     # parameter. arg_min(open, timestamp) = the open of the day's FIRST (09:15) bar.
-    cursor = conn.execute(
+    # Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt 1-minute Parquet degrades the
+    # minute-basis IEP to its readable subset, never a 500.
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
         'SELECT CAST("timestamp" AS DATE) AS d, arg_min(open, "timestamp") AS first_open '
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
-        [glob],
+        [],
+        source=f"candle-dayopen-min:{exchange}/{segment}/{symbol}",
     )
-    return {day: _to_decimal(first_open) for day, first_open in cursor.fetchall()}
+    return {day: _to_decimal(first_open) for day, first_open in rows}
 
 
 def _spot_derived_rows(
@@ -1889,18 +2033,22 @@ def _underlying_spot_close_by_ts(
         base = lake_root / "bars" / exchange / segment / underlying / interval
         if not (base.is_dir() and any(base.rglob("*.parquet"))):
             continue
-        glob = base.as_posix() + "/**/*.parquet"
         # glob built from validated coordinates (no free user text); path + both bounds
         # are bound parameters (same SQL/path-injection guard as query_candles). A NULL
         # close is filtered in SQL so a stray null spot bar degrades that instant to
         # UNKNOWN (the no-spot bucket) rather than raising in `_to_decimal(None)` —
-        # honouring the "never raises / honest UNKNOWN" contract.
-        cursor = conn.execute(
+        # honouring the "never raises / honest UNKNOWN" contract. Resilient read
+        # (DEC-DB-CORRUPT-SKIP-001): a corrupt underlying-spot Parquet degrades the join
+        # to its readable subset (the affected option bars classify UNKNOWN), never a 500.
+        rows = _execute_parquet_resilient(
+            conn,
+            base,
             'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
             'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
-            [glob, min_ts, max_ts],
+            [min_ts, max_ts],
+            source=f"candle-spotjoin:{exchange}/{segment}/{underlying}/{interval}",
         )
-        return {_utc_instant(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
+        return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
     return {}
 
 
