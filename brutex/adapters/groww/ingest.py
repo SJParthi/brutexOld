@@ -80,6 +80,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.session import filter_intraday_session, is_session_exempt
@@ -642,13 +643,40 @@ def _ingest_one_window(
         session_bars=len(bars),
         **series_fields,
     )
-    result = sink.append(
-        exchange=instrument.exch_id.value,
-        segment=instrument.segment.value,
-        symbol=instrument.symbol_name,
-        interval=interval,
-        bars=bars,
-    )
+    try:
+        result = sink.append(
+            exchange=instrument.exch_id.value,
+            segment=instrument.segment.value,
+            symbol=instrument.symbol_name,
+            interval=interval,
+            bars=bars,
+        )
+    except PartitionLockTimeout as exc:
+        # A WEDGED peer held this partition's cross-process lock past the bounded
+        # deadline (DEC-PULL-CONTENTION-ANTISTALL-001): DEFER this window to the next
+        # pull, exactly like a 429 / timeout transient — record FAILED + return a
+        # transient outcome (NOT a symbol-quarantine, NOT a rate-controller step: this is
+        # OUR contention, not vendor pressure, so the rate stays unchanged). The peer
+        # genuinely progressing finishes its write and this window succeeds on the
+        # re-pull; the worker is freed instead of pinned until the 600 s watchdog kill.
+        _LOG.warning(
+            "ingest.window.lock_deferred",
+            pull_id=pull_id,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            timeout_seconds=exc.timeout_seconds,
+            **series_fields,
+        )
+        if ledger is not None:
+            ledger.record(
+                key,
+                raw_bars=0,
+                error_type=type(exc).__name__,
+                bars_appended=0,
+                now=datetime.now(UTC),
+                in_pull_fetches=fetch_count,
+            )
+        return _WindowOutcome(transient=1, window=window, error_type=type(exc).__name__)
     _LOG.debug(
         "ingest.window",
         pull_id=pull_id,

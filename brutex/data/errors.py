@@ -48,6 +48,31 @@ class LakeWriteHalt(DataLakeError):
         self.reason = reason
 
 
+class PartitionLockTimeout(DataLakeError):
+    """A cross-process partition write-lock could not be acquired within the deadline.
+
+    The lake partition :func:`~brutex.data.partition_lock.partition_write_lock` acquires
+    a bounded (never unconditionally blocking) advisory ``flock``: it retries a
+    non-blocking ``LOCK_EX | LOCK_NB`` under a short deadline so a WEDGED peer holding the
+    lock can NEVER pin a worker until the 600 s pull watchdog force-fails it. When the
+    deadline expires this is raised — a TRANSIENT / RETRYABLE signal (it subclasses
+    :class:`DataLakeError`, NOT :class:`LakeWriteHalt`, so it is NOT a pull-wide stop):
+    the ingest spines catch it at the window boundary, record the window ``FAILED``, and
+    DEFER it to the next pull, exactly like a 429 / timeout transient — never a crash,
+    never fabricated data (Golden Rule #1). The peer that is genuinely making progress
+    finishes its read-modify-write and the deferred window succeeds on the re-pull.
+
+    ``timeout_seconds`` is the deadline that was exhausted (non-secret) for the log.
+    """
+
+    def __init__(self, timeout_seconds: float) -> None:
+        super().__init__(
+            f"partition write-lock not acquired within {timeout_seconds:g}s "
+            "(peer holding the lock); window deferred to the next pull"
+        )
+        self.timeout_seconds = timeout_seconds
+
+
 class CatalogError(DataLakeError):
     """Raised when a DuckDB catalog operation fails or is malformed.
 
