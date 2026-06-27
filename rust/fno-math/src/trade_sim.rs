@@ -668,10 +668,7 @@ mod tests {
         Walker::update_excursion(&mut pos, true, 130, 90);
         assert_eq!(pos.mfe_paisa, 30);
         assert_eq!(pos.mae_paisa, 10);
-        // A second, less-extreme bar must NOT lower them (the `>` keeps the max);
-        // equal values must NOT overwrite (kills `>`->`>=` — observable only via
-        // a side-effect-free no-op, but the value is identical either way, so we
-        // instead assert a strictly-smaller bar leaves them unchanged).
+        // A strictly-smaller bar leaves MFE/MAE unchanged (the running max holds).
         Walker::update_excursion(&mut pos, true, 120, 95);
         assert_eq!(pos.mfe_paisa, 30);
         assert_eq!(pos.mae_paisa, 10);
