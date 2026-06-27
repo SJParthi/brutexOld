@@ -38,6 +38,7 @@ pulled**, NOT a live feed (Track-1 has no live feed — CLAUDE.md §1). Prices a
 
 from __future__ import annotations
 
+import html
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -403,7 +404,17 @@ def pending_asset_payload(
     note still render) with no rows and a note that names the asset — never a
     500, never a fabricated row (Golden Rule #1 / #10). The page reads
     ``j[category]`` and falls back to ``[]`` for the absent category keys.
+
+    **Defense-in-depth (DEC-DASHBOARD-XSS-HARDENING-001):** ``asset`` is the raw
+    ``?asset=`` query param echoed back into the note, so it is HTML-escaped here
+    before formatting. Even though the page now sets the note via ``textContent``
+    (so an unescaped tag could not execute), the JSON payload is sanitised at the
+    source so any future consumer of it is safe too — a label like
+    ``<img src=x onerror=alert(1)>`` becomes inert ``&lt;img …`` text.
     """
+    # Title-case FIRST, then escape — escaping is the LAST step so ``.title()``
+    # cannot mangle the entities (`&lt;` → `&Lt;`) and the output is byte-clean.
+    safe_asset = html.escape(asset.title())
     return {
         "interval": interval,
         "date": date,
@@ -412,7 +423,7 @@ def pending_asset_payload(
         "instrument_count": 0,
         "skipped_count": 0,
         "note": (
-            f"{asset.title()} movers ship after Spot — this milestone wires the Spot tab; "
+            f"{safe_asset} movers ship after Spot — this milestone wires the Spot tab; "
             "Futures + Options follow. Reference-only lake view (CLAUDE.md §3)."
         ),
     }
