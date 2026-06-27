@@ -45,6 +45,7 @@ from brutex.execution.errors import (
     FreezeQuantityExceededError,
     InsufficientFundsError,
     InvalidLotSizeError,
+    InvalidPriceError,
 )
 from brutex.execution.types import (
     EquityPoint,
@@ -120,6 +121,7 @@ class ExecutionSimulator:
         if default_qty <= 0:
             raise ValueError(f"default_qty must be positive, got {default_qty}")
 
+        self._initial_cash = initial_cash
         self._cash = initial_cash
         self._instruments = dict(instruments)
         self._cost_model = cost_model or IndianCostModel()
@@ -152,16 +154,36 @@ class ExecutionSimulator:
         """Return every :class:`EquityPoint` recorded so far."""
         return tuple(self._equity_curve)
 
+    def reset(self) -> None:
+        """Restore the simulator to its freshly-constructed state.
+
+        Clears every fill, equity point, and open position, and
+        restores the cash balance to the ``initial_cash`` passed at
+        construction. Enables a deterministic re-run on the same
+        instance (``FR-STR-003``): a second
+        :meth:`brutex.execution.driver.BacktestDriver.run` over the
+        same feed reproduces the first byte-for-byte instead of
+        concatenating fills / carrying cash. On a never-used
+        simulator this is a no-op-equivalent.
+        """
+        self._cash = self._initial_cash
+        self._positions.clear()
+        self._fills.clear()
+        self._equity_curve.clear()
+
     def execute(self, signal: Signal, bar: CandleBar) -> Fill | None:
         """Try to execute *signal* against the current *bar*.
 
         Returns the resulting :class:`Fill` on success, or ``None``
         when the signal was a ``HOLD`` (and therefore non-fillable).
         Raises on a contract violation \u2014 unknown symbol, invalid
-        lot size, freeze quantity exceeded, or insufficient funds.
+        lot size, freeze quantity exceeded, insufficient funds, or a
+        non-tradeable bar price.
         """
         if signal.side == Side.HOLD:
             return None
+
+        self._require_tradeable_price(bar.close, symbol=signal.symbol, timestamp=bar.timestamp)
 
         meta = self._instruments.get(signal.symbol)
         if meta is None:
@@ -220,6 +242,7 @@ class ExecutionSimulator:
         place, then appends and returns a fresh
         :class:`EquityPoint` reflecting the new portfolio value.
         """
+        self._require_tradeable_price(price, symbol=symbol, timestamp=timestamp)
         pos = self._positions.get(symbol)
         if pos is not None and pos.qty != 0:
             pos.last_mark_price = price
@@ -240,6 +263,29 @@ class ExecutionSimulator:
         return self._snapshot_equity(timestamp)
 
     # ── Private ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _require_tradeable_price(
+        price: Decimal,
+        *,
+        symbol: str,
+        timestamp: datetime,
+    ) -> None:
+        """Reject a non-finite or non-positive reference *price*.
+
+        A fill / mark-to-market price must be a finite, strictly
+        positive :class:`~decimal.Decimal`. ``is_finite()`` is checked
+        FIRST so the ``price <= 0`` comparison runs only on a finite
+        value — comparing a ``NaN`` ``Decimal`` would otherwise raise
+        :class:`decimal.InvalidOperation`. A bad price raises a typed
+        :class:`InvalidPriceError`, consistent with the simulator's
+        other order-validation contracts.
+        """
+        if not price.is_finite() or price <= 0:
+            raise InvalidPriceError(
+                f"non-tradeable price {price} for {symbol} at {timestamp.isoformat()}: "
+                f"bar prices must be finite and strictly positive"
+            )
 
     def _validate_order(self, *, qty: int, meta: InstrumentMeta) -> None:
         """Enforce FR-EXEC-004 and FR-EXEC-005 before touching state."""

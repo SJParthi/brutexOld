@@ -10,6 +10,8 @@ look-ahead). Closes the omitted-module coverage gap for `execution/driver.py`
 (DEC-COVERAGE-DRIVER-001).
 """
 
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -19,10 +21,10 @@ from typing import cast
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.execution.driver import BacktestDriver
-from brutex.execution.errors import ExecutionError
+from brutex.execution.driver import BacktestDriver, _freeze_positions
+from brutex.execution.errors import ExecutionError, NonMonotonicBarError
 from brutex.execution.simulator import ExecutionSimulator
-from brutex.execution.types import Fill
+from brutex.execution.types import Fill, Position
 from brutex.feed.lookahead import LookAheadBarrier
 from brutex.feed.replay import FeedEvent, ReplayFeed
 from brutex.strategies.errors import StrategyContractError
@@ -93,6 +95,10 @@ class _FakeSimulator:
         self.positions: dict[str, object] = {}
         self.cash = Decimal("0")
         self.marks: list[str] = []
+        self.reset_count = 0
+
+    def reset(self) -> None:
+        self.reset_count += 1
 
     def execute(self, signal: object, bar: object) -> Fill | None:
         del signal, bar
@@ -233,3 +239,110 @@ def test_barrier_resets_between_runs() -> None:
     driver.run()
     driver.run()  # second run must NOT accumulate the first run's trail
     assert barrier.touched_indices == (0,)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX 1 — the driver resets the simulator at the top of run()
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_run_resets_simulator() -> None:
+    """run() calls simulator.reset() once per run so a re-run is reproducible."""
+    sim = _FakeSimulator()
+    driver = _driver(_FakeStrategy(_meta()), _FakeFeed("1minute", []), sim)
+    driver.run()
+    assert sim.reset_count == 1
+    driver.run()
+    assert sim.reset_count == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX 2 — monotonic-bar feed-integrity guard (NonMonotonicBarError)
+# ────────────────────────────────────────────────────────────────────────
+
+_TS_LATER = datetime(2024, 1, 1, 9, 16, 0, tzinfo=UTC)
+
+
+def test_monotonic_guard_allows_strictly_increasing_feed() -> None:
+    """A normal strictly-increasing per-symbol feed never raises."""
+    events = [
+        FeedEvent(symbol=_SYMBOL, bar=_bar(100, ts=_TS)),
+        FeedEvent(symbol=_SYMBOL, bar=_bar(101, ts=_TS_LATER)),
+    ]
+    sim = _FakeSimulator()
+    # First event covers the symbol-unseen (prev_ts is None) branch; the
+    # second covers the seen-and-increasing branch.
+    _driver(_FakeStrategy(_meta()), _FakeFeed("1minute", events), sim).run()
+    assert sim.marks == [_SYMBOL, _SYMBOL]
+
+
+def test_monotonic_guard_rejects_backwards_within_symbol() -> None:
+    """A backwards bar timestamp within one symbol raises NonMonotonicBarError."""
+    events = [
+        FeedEvent(symbol=_SYMBOL, bar=_bar(100, ts=_TS_LATER)),
+        FeedEvent(symbol=_SYMBOL, bar=_bar(101, ts=_TS)),  # earlier → backwards
+    ]
+    with pytest.raises(NonMonotonicBarError, match="non-monotonic"):
+        _driver(_FakeStrategy(_meta()), _FakeFeed("1minute", events), _FakeSimulator()).run()
+
+
+def test_monotonic_guard_rejects_duplicate_within_symbol() -> None:
+    """An equal (duplicate) bar timestamp within one symbol raises."""
+    events = [
+        FeedEvent(symbol=_SYMBOL, bar=_bar(100, ts=_TS)),
+        FeedEvent(symbol=_SYMBOL, bar=_bar(101, ts=_TS)),  # same ts → duplicate
+    ]
+    with pytest.raises(NonMonotonicBarError, match="non-monotonic"):
+        _driver(_FakeStrategy(_meta()), _FakeFeed("1minute", events), _FakeSimulator()).run()
+
+
+def test_monotonic_guard_allows_equal_ts_across_symbols() -> None:
+    """Equal timestamps across DIFFERENT symbols are legit interleave — no raise."""
+    other = "NSE-OTHER"
+    meta = _meta(symbols=(_SYMBOL, other))
+    events = [
+        FeedEvent(symbol=_SYMBOL, bar=_bar(100, ts=_TS)),
+        FeedEvent(symbol=other, bar=_bar(200, ts=_TS)),  # same ts, other symbol
+    ]
+    sim = _FakeSimulator()
+    _driver(_FakeStrategy(meta), _FakeFeed("1minute", events), sim).run()
+    assert sim.marks == [_SYMBOL, other]
+
+
+def test_monotonic_guard_fires_before_symbol_filter() -> None:
+    """The guard runs even for an out-of-scope symbol (feed-integrity, not strategy)."""
+    out = "NSE-OUT"
+    events = [
+        FeedEvent(symbol=out, bar=_bar(100, ts=_TS_LATER)),
+        FeedEvent(symbol=out, bar=_bar(101, ts=_TS)),  # backwards on out-of-scope symbol
+    ]
+    # Strategy declares only _SYMBOL, so `out` is out-of-scope — but the
+    # guard precedes the symbol filter, so the backwards bar still raises.
+    with pytest.raises(NonMonotonicBarError, match="non-monotonic"):
+        _driver(_FakeStrategy(_meta()), _FakeFeed("1minute", events), _FakeSimulator()).run()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX 4 — _freeze_positions snapshots each Position independently
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_freeze_positions_decouples_from_live_book() -> None:
+    """A later mutation of the live Position does not touch the frozen snapshot."""
+    live = Position(symbol=_SYMBOL, qty=10, avg_price=Decimal("100"))
+    snapshot = _freeze_positions({_SYMBOL: live})
+
+    # Values are byte-identical at snapshot time.
+    assert snapshot[_SYMBOL].qty == 10
+    assert snapshot[_SYMBOL].avg_price == Decimal("100")
+
+    # Mutate the live position the way a later mark/run would.
+    live.qty = 0
+    live.avg_price = Decimal("0")
+    live.last_mark_price = Decimal("999")
+
+    # The frozen snapshot is unchanged — it is an independent copy.
+    assert snapshot[_SYMBOL].qty == 10
+    assert snapshot[_SYMBOL].avg_price == Decimal("100")
+    assert snapshot[_SYMBOL].last_mark_price == Decimal("0")
+    assert snapshot[_SYMBOL] is not live
