@@ -109,7 +109,24 @@ def combo_digest(
     Raises
     ------
     SweepCacheError
-        If *params* contains a value that is not JSON-serialisable.
+        If *params* contains a value that is not JSON-serialisable, or a
+        non-finite float (``NaN`` / ``inf`` / ``-inf``).
+
+    Notes
+    -----
+    ``allow_nan=False`` rejects non-finite floats (``NaN`` / ``inf`` /
+    ``-inf``) so the dedup-key canonicalisation obeys the SAME one-NaN-policy
+    (CLAUDE.md §2 Rule 11 COMMON) as the two sibling canonicalisers:
+    :func:`brutex.strategies.combo.canonicalise_params` (run-identity hash,
+    rejects ``NaN``) and
+    :func:`brutex.engine.tuple_complete.render_completion_sentinel`
+    (completion sentinel, ``allow_nan=False``). Without it the default
+    ``json.dumps`` would silently emit the non-standard ``NaN`` / ``Infinity``
+    tokens — a membership key the run-identity hash would have refused. The
+    guard is defensive (the engine feeds no non-finite params today); for any
+    FINITE input the serialisation — and therefore the digest — is byte-for-byte
+    identical to before (``allow_nan=False`` only ever rejects, never reshapes a
+    finite value).
     """
     try:
         canonical = json.dumps(
@@ -123,9 +140,12 @@ def combo_digest(
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
+            allow_nan=False,
         )
     except TypeError as exc:
         raise SweepCacheError(f"combo params are not JSON-serialisable: {exc}") from exc
+    except ValueError as exc:
+        raise SweepCacheError(f"combo params contain a non-finite float: {exc}") from exc
     return blake3.blake3(canonical.encode("utf-8")).digest()
 
 
