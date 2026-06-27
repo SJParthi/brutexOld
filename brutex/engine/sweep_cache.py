@@ -145,7 +145,11 @@ def combo_digest(
     except TypeError as exc:
         raise SweepCacheError(f"combo params are not JSON-serialisable: {exc}") from exc
     except ValueError as exc:
-        raise SweepCacheError(f"combo params contain a non-finite float: {exc}") from exc
+        raise SweepCacheError(
+            "combo params are not JSON-serialisable as a canonical digest "
+            "(non-finite float such as NaN/inf, or a circular reference): "
+            f"{exc}"
+        ) from exc
     return blake3.blake3(canonical.encode("utf-8")).digest()
 
 
