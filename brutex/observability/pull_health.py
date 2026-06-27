@@ -59,6 +59,7 @@ explicitly so the operator does not chase our code for a vendor signal.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
@@ -141,7 +142,15 @@ class DwellProvider:
     Notes
     -----
     Stateful — one :class:`DwellProvider` instance tracks one rule's streak. The
-    detector evaluates rules synchronously on the caller's thread, so no lock is needed.
+    instance is NOT itself thread-safe: under the live pull, up to eight parallel pool
+    workers each fire a per-window :meth:`PullHealthMonitor.observe` tick (via
+    :func:`brutex.dashboard.pull_controller._observe_rate`), and an unsynchronised
+    ``_streak`` increment racing with the OK↔BREACH transition would interleave. The
+    serialisation is provided by :class:`PullHealthMonitor`, which holds a single
+    :class:`threading.Lock` around the WHOLE :meth:`PullHealthMonitor.observe` body
+    (snapshot assignment + gauge mirror + ``check_once``), so every provider — this one
+    included — is only ever invoked under that lock. The dwell streak therefore advances
+    by exactly one per logical tick with no torn read (DEC-PULL-HEALTH-CONCURRENCY-001).
     """
 
     value_provider: Callable[[], float | None]
@@ -201,6 +210,7 @@ SweepAlerter` Telegram alert) + structlog.
         "_detector",
         "_last_controller",
         "_last_meter",
+        "_observe_lock",
         "_on_degraded",
         "_pool_size",
         "_registry",
@@ -224,6 +234,13 @@ SweepAlerter` Telegram alert) + structlog.
         self._pool_size = pool_size
         self._last_controller: Mapping[str, object] = {}
         self._last_meter: Mapping[str, object] = {}
+        # One lock serialises the WHOLE observe() body so each per-window tick is atomic
+        # across the up-to-8 parallel pool workers that call observe() concurrently
+        # (DEC-PULL-HEALTH-CONCURRENCY-001). Without it the snapshot assignment, the
+        # DwellProvider streak increment, and the SLADetector OK↔BREACH transition could
+        # interleave (a torn read / a double-counted dwell). The on_degraded Telegram
+        # alert is async / best-effort, so no network I/O is ever held under this lock.
+        self._observe_lock = threading.Lock()
         self._register_gauges()
         self._detector = SLADetector(
             rules=self._build_rules(
@@ -414,6 +431,15 @@ SweepAlerter` Telegram alert) + structlog.
         Called from the existing :func:`brutex.dashboard.pull_controller._observe_rate`
         seam on the pull's own cadence, so the monitor adds NO background thread.
 
+        Thread-safety (DEC-PULL-HEALTH-CONCURRENCY-001): the up-to-8 parallel Groww pool
+        workers each fire this per-window tick concurrently, so the WHOLE body — the
+        last-snapshot assignment, the gauge mirror, AND ``check_once`` (which advances the
+        :class:`DwellProvider` streak + flips the OK↔BREACH state) — runs under a single
+        :attr:`_observe_lock`, making each tick atomic. The breach callback fires inside
+        ``check_once`` under the lock, but it only ENQUEUES an async, best-effort Telegram
+        alert (no synchronous network I/O), so the lock is held only for the cheap
+        in-memory rule evaluation.
+
         Parameters
         ----------
         controller_snap
@@ -424,10 +450,11 @@ SweepAlerter` Telegram alert) + structlog.
             (``effective_rps`` / ``latency_ms_p95`` / ``in_flight`` / …).
         """
         try:
-            self._last_controller = controller_snap
-            self._last_meter = meter_snap
-            self._mirror_gauges()
-            self._detector.check_once()
+            with self._observe_lock:
+                self._last_controller = controller_snap
+                self._last_meter = meter_snap
+                self._mirror_gauges()
+                self._detector.check_once()
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
             logger.exception("pull_health.observe failed; the pull is unaffected")
 
