@@ -207,9 +207,17 @@ fn check_evaluate_inputs(
 /// previous day's `pdh/pdl/pdc`. Used by the standalone parity check; BruteX
 /// itself uses [`evaluate_with_levels`] (it already holds the levels).
 ///
-/// Invalid prev-day OHLC (`pdh < pdl`, `pdc` outside `[pdl, pdh]`, or an
-/// overflow-prone magnitude) raises a clean `ValueError` at the boundary rather
-/// than tripping the inner indicators' panic (which `abort`s under `panic="abort"`).
+/// Every input is validated at the FFI boundary so a garbage value raises a clean
+/// `ValueError` rather than tripping an inner panic (which `abort`s the whole
+/// interpreter under `panic="abort"`). Bounded inputs: the prev-day anchor
+/// (`pdh < pdl`, `pdc` outside `[pdl, pdh]`, or an overflow-prone magnitude →
+/// [`check_prev_day_ohlc`]) AND every per-bar evaluate input (`open/high/low/close`,
+/// the optional EMAs, `day_high/day_low/open_of_day`, `pdc`, and the three
+/// proximity `bps` — including the exact i128 `close × bps` product check →
+/// [`check_evaluate_inputs`]). With both passing, the evaluate path is panic-safe
+/// at the boundary for the audited arithmetic (`is_near`'s `close*bps` /
+/// `(close-level).abs()`, the Group-5/7/9 multiplies); the inner evaluator math is
+/// unchanged (the boundary rejects before it runs).
 #[pyfunction]
 #[expect(
     clippy::too_many_arguments,
@@ -355,6 +363,12 @@ fn evaluate_from_raw_impl(
 /// Because the levels are passed verbatim, this is bit-identical to the Python
 /// evaluator for ANY snapshot — including hand-built levels with `pdc == 0`
 /// (the gap conditions' own `pdc > 0` guard handles that, no recompute to reject it).
+///
+/// The length guards (10 / 15) are validated FIRST (a mismatch would otherwise
+/// index out of bounds → SIGABRT), then every caller-supplied level AND every
+/// per-bar input + bps is bounded ([`check_evaluate_inputs`]) so a garbage value
+/// raises a clean `ValueError` instead of overflowing/`.abs()`-panicking the inner
+/// evaluator under `panic="abort"`.
 #[pyfunction]
 #[expect(
     clippy::too_many_arguments,
