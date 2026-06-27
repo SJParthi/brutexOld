@@ -9,6 +9,22 @@ Per `docs/TRACK1_BACKTEST_SPEC.md` Phase 1 Validation Gate 1:
 
 Source-of-truth: NSE/BSE published calendars + India PIB notifications.
 Holidays verified against the published NSE FAOP circulars for each year.
+
+Coverage honesty (DEC-CALENDAR-HARDEN-001): the hardcoded holiday list spans
+:data:`HOLIDAY_COVERAGE_FIRST_YEAR`-:data:`HOLIDAY_COVERAGE_LAST_YEAR`
+(inclusive). For a date outside that span :func:`is_holiday` returns ``False``
+because the date is simply not in the (incomplete) set — that is an ABSENCE of
+information, not a verified "trading day". Callers that need the distinction
+(e.g. the 2020-anchored data pull whose floor predates the 2021 list start)
+must gate on :func:`is_holiday_data_available` or use the strict
+:func:`is_holiday_checked` / :func:`is_trading_day_checked`, which raise
+:class:`HolidayDataUnavailableError` rather than guess. The unguarded
+:func:`is_holiday` / :func:`is_trading_day` keep their byte-identical
+back-compat behaviour (an out-of-coverage date reads as not-a-holiday), so this
+is a DETECT-and-opt-in surface, not a behaviour change; wiring the strict
+variants into the spot-anchor consumers is a deferred cross-package follow-up.
+Per Golden Rule #1 we do NOT hallucinate the missing-year holiday dates; we
+surface the gap honestly.
 """
 
 from __future__ import annotations
@@ -19,6 +35,17 @@ from enum import Enum
 from typing import Final
 from zoneinfo import ZoneInfo
 
+import structlog
+
+_LOG = structlog.get_logger(__name__)
+
+#: IST is a FIXED +05:30 offset with NO daylight-saving transition (India has
+#: observed no DST since 1945). ``ZoneInfo("Asia/Kolkata")`` is therefore a
+#: constant-offset zone — every instant maps to UTC+05:30 — which is the
+#: deliberate, correct choice over a hand-rolled ``timezone(timedelta(...))``
+#: because the IANA database is the authoritative source and a future
+#: (hypothetical) policy change would be picked up without a code edit. A
+#: ``pytz`` / naive / machine-local construction would be a bug; this is not.
 IST = ZoneInfo("Asia/Kolkata")
 SESSION_OPEN_IST = time(9, 15)
 SESSION_CLOSE_IST = time(15, 30)
@@ -39,6 +66,12 @@ _SECONDS_PER_MINUTE: Final[int] = 60
 _FORCED_EXIT_SECONDS: Final[int] = (
     FORCED_EXIT_IST.hour * _SECONDS_PER_HOUR + FORCED_EXIT_IST.minute * _SECONDS_PER_MINUTE
 )
+
+#: Track-1 forced-exit margin before the session close (10 minutes). For the
+#: standard 15:30 close this yields the canonical 15:20 forced exit
+#: (== :data:`FORCED_EXIT_IST`); for a short / half-day session it scales with
+#: the actual close (docs/TRACK1_MICROSTRUCTURE.md §1.2 + §2). One COMMON rule.
+_FORCED_EXIT_MARGIN: Final[timedelta] = timedelta(minutes=10)
 
 
 class SessionType(Enum):
@@ -200,8 +233,95 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 }
 
 
+#: The INCLUSIVE calendar-year span the hardcoded NSE/BSE holiday list above
+#: actually covers. Derived from the per-year frozensets so the two can never
+#: silently drift: the first/last keys ARE the smallest/largest holiday year.
+#:
+#: Why this matters (DEC-CALENDAR-HARDEN-001): the Track-1 data pull floor is
+#: 2020-01-01 (``GROWW_HISTORY_FLOOR``; CLAUDE.md §3, MIGRATION.md #722) but the
+#: holiday list starts in 2021, and it ends in 2026. For ANY date outside this
+#: span :func:`is_holiday` returns ``False`` — which is the HONEST answer for
+#: "is this date IN the published list" but, if a caller treats it as "is this a
+#: trading day", an out-of-coverage 2020 weekday holiday (e.g. Holi 2020-03-10)
+#: reads as a trading day via the UNGUARDED :func:`is_trading_day`. That
+#: unguarded behaviour is UNCHANGED by this module (back-compat); what is NEW is
+#: an OPT-IN detection surface — the coverage range +
+#: :func:`is_holiday_data_available` / :func:`is_holiday_checked` /
+#: :func:`is_trading_day_checked` let a caller DETECT the out-of-coverage case
+#: and refuse to guess, instead of trusting a silent ``False``. Actually WIRING
+#: those strict variants into the spot-anchor consumers
+#: (``indicators/prev_day_ohlc.py``, ``dashboard/preopen_report.py``) is a
+#: deliberately-DEFERRED cross-package follow-up, NOT done here. The 2020 holiday
+#: list itself is likewise a deliberately-deferred, never-invented follow-up
+#: (MIGRATION.md #722): per Golden Rule #1 we do NOT hallucinate holiday dates —
+#: we surface the gap honestly rather than guess at it.
+HOLIDAY_COVERAGE_FIRST_YEAR: Final[int] = min(h.year for h in ALL_HOLIDAYS)
+HOLIDAY_COVERAGE_LAST_YEAR: Final[int] = max(h.year for h in ALL_HOLIDAYS)
+
+
+class HolidayDataUnavailableError(LookupError):
+    """Raised when a holiday lookup is requested for an out-of-coverage date.
+
+    The hardcoded NSE/BSE holiday list covers
+    ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` inclusive
+    (currently 2021-2026). A date outside that span has NO published-holiday
+    information, so :func:`is_holiday` would silently return ``False`` — which
+    a strict caller can refuse via :func:`is_holiday_checked` to avoid treating
+    an unknown date as a guaranteed non-holiday (Golden Rule #1).
+    """
+
+
+def is_holiday_data_available(d: date) -> bool:
+    """Return True iff ``d`` falls within the covered holiday-list year span.
+
+    O(1) — a single integer-range test against
+    ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``. When this is
+    ``False`` the result of :func:`is_holiday` is an absence of information, not
+    a verified "not a holiday".
+    """
+    return HOLIDAY_COVERAGE_FIRST_YEAR <= d.year <= HOLIDAY_COVERAGE_LAST_YEAR
+
+
 def is_holiday(d: date) -> bool:
-    """Return True if ``d`` is in the NSE/BSE published holiday list (2021-2026)."""
+    """Return True if ``d`` is in the NSE/BSE published holiday list.
+
+    The list covers ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``
+    inclusive (currently 2021-2026). For a date OUTSIDE that span this returns
+    ``False`` because the date is not in the (incomplete) set — that ``False``
+    means "not a known holiday", NOT "verified trading day". A caller that
+    needs the distinction must gate on :func:`is_holiday_data_available` or use
+    the strict :func:`is_holiday_checked`. O(1) ``frozenset`` membership.
+    """
+    return d in ALL_HOLIDAYS
+
+
+def is_holiday_checked(d: date) -> bool:
+    """Strict :func:`is_holiday` — raise on an out-of-coverage date.
+
+    Identical to :func:`is_holiday` for dates within the covered span, but
+    raises :class:`HolidayDataUnavailableError` (after emitting a structlog
+    warning) when ``d`` lies outside ``[HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR]``. A caller that uses THIS variant never
+    silently mistakes an unknown date for a confirmed non-holiday; callers that
+    keep using the unguarded :func:`is_holiday` retain its back-compat ``False``.
+    O(1).
+
+    Raises
+    ------
+    HolidayDataUnavailableError
+        If ``d.year`` is outside the covered holiday-list span.
+    """
+    if not is_holiday_data_available(d):
+        _LOG.warning(
+            "calendar.holiday_data_unavailable",
+            requested_date=d.isoformat(),
+            covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
+            covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
+        )
+        raise HolidayDataUnavailableError(
+            f"no published NSE/BSE holiday data for {d.isoformat()}: covered span is "
+            f"{HOLIDAY_COVERAGE_FIRST_YEAR}-{HOLIDAY_COVERAGE_LAST_YEAR} (inclusive)"
+        )
     return d in ALL_HOLIDAYS
 
 
@@ -224,6 +344,40 @@ def is_trading_day(d: date) -> bool:
     if is_special_weekend_session(d):
         return True
     return not is_weekend(d) and not is_holiday(d)
+
+
+def is_trading_day_checked(d: date) -> bool:
+    """Strict :func:`is_trading_day` — raise on an out-of-coverage date.
+
+    Identical to :func:`is_trading_day` within the covered holiday span. For a
+    date whose year is OUTSIDE ``[HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR]`` it raises :class:`HolidayDataUnavailableError`
+    **only when the verdict would actually depend on the missing holiday
+    list** — i.e. a weekday. Two cases resolve WITHOUT raising because their
+    answer is data-complete regardless of the holiday list:
+
+    * a special-weekend session (data the package explicitly holds) → ``True``;
+    * a plain weekend with no special session → ``False`` (a weekend is never a
+      trading day; the holiday list cannot change that).
+
+    A weekday outside the span is the genuinely-ambiguous case: it would be a
+    trading day UNLESS it is an (unknown) holiday, so the strict variant
+    refuses rather than silently assume a trading day. O(1).
+
+    Raises
+    ------
+    HolidayDataUnavailableError
+        If ``d`` is an out-of-coverage WEEKDAY that is not a special session.
+    """
+    if is_special_weekend_session(d):
+        return True
+    if is_weekend(d):
+        # A weekend is non-trading independent of the holiday list — no
+        # missing data is consulted, so this answer is honest even out of span.
+        return False
+    # A weekday: the verdict turns on the holiday list. ``is_holiday_checked``
+    # raises for an out-of-coverage date rather than guess "not a holiday".
+    return not is_holiday_checked(d)
 
 
 def has_muhurat_session(d: date) -> bool:
@@ -294,7 +448,17 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     - 15m -> 25 bars
     - 60m -> 6 bars (well, 6.25 — partial bar at end)
     - 1d  -> 1 bar
+
+    Raises
+    ------
+    ValueError
+        If ``tf_minutes < 1``. Mirrors :func:`is_forced_exit_bar`; a zero or
+        negative timeframe is meaningless and previously raised
+        :class:`ZeroDivisionError` (tf == 0) or returned a negative bar count
+        (tf < 0).
     """
+    if tf_minutes < 1:
+        raise ValueError(f"expected_bars_per_day_for_tf.tf_minutes must be >= 1, got {tf_minutes}")
     if tf_minutes >= SESSION_DURATION_MINUTES:
         return 1
     return SESSION_DURATION_MINUTES // tf_minutes
@@ -339,6 +503,24 @@ def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
     open_seconds = t.hour * _SECONDS_PER_HOUR + t.minute * _SECONDS_PER_MINUTE + t.second
     close_seconds = open_seconds + tf_minutes * _SECONDS_PER_MINUTE
     return close_seconds > _FORCED_EXIT_SECONDS
+
+
+def forced_exit_time_for_session(session: TradingSession) -> time:
+    """Return the IST forced-exit time-of-day for ``session``.
+
+    Track 1 force-closes all open positions :data:`_FORCED_EXIT_MARGIN`
+    (10 minutes) before the session's close (`docs/TRACK1_MICROSTRUCTURE.md`
+    §1.2 + §2). For the standard 09:15-15:30 session this is exactly
+    15:20 IST (== :data:`FORCED_EXIT_IST`); for a short / half-day session
+    (e.g. a Diwali Muhurat hour) the exit scales with the actual close, so a
+    single COMMON rule replaces a hardcoded 15:20.
+
+    Assumes the session close is at or after 00:10 IST (always true for every
+    NSE/BSE session — the earliest in-scope close is the 14:45 Muhurat); below
+    that the 10-minute subtraction would roll back into the previous day.
+    """
+    close_dt = datetime.combine(session.date, session.close_time_ist)
+    return (close_dt - _FORCED_EXIT_MARGIN).time()
 
 
 def is_pre_open(t: time) -> bool:
@@ -498,22 +680,33 @@ NIFTY50_REBALANCE_EVENTS: Final[tuple[NiftyRebalanceEvent, ...]] = (
 )
 
 
+#: O(1) ``date`` -> event map for :func:`is_nifty_rebalance_day` /
+#: :func:`nifty_rebalance_event_on`. Built once from the authoritative
+#: :data:`NIFTY50_REBALANCE_EVENTS` tuple (the single source of truth);
+#: effective dates are unique (asserted by tests) so there is no key
+#: collision. Replaces the previous O(n) linear scan with a true O(1)
+#: dict lookup (Golden Rule #5: O(1) discipline).
+_REBALANCE_BY_DATE: Final[dict[date, NiftyRebalanceEvent]] = {
+    event.effective_date: event for event in NIFTY50_REBALANCE_EVENTS
+}
+
+
 def is_nifty_rebalance_day(d: date) -> bool:
     """Return True if ``d`` is a NIFTY 50 semi-annual rebalance effective date.
 
     Used by the backtest engine to stamp a `rebalance_flag` on bars on
     or after each effective date. The audit log records the event so
-    post-hoc regime-break analysis is possible.
+    post-hoc regime-break analysis is possible. O(1) dict lookup.
     """
-    return any(event.effective_date == d for event in NIFTY50_REBALANCE_EVENTS)
+    return d in _REBALANCE_BY_DATE
 
 
 def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
-    """Return the :class:`NiftyRebalanceEvent` for ``d`` if any, else None."""
-    for event in NIFTY50_REBALANCE_EVENTS:
-        if event.effective_date == d:
-            return event
-    return None
+    """Return the :class:`NiftyRebalanceEvent` for ``d`` if any, else None.
+
+    O(1) dict lookup against :data:`_REBALANCE_BY_DATE`.
+    """
+    return _REBALANCE_BY_DATE.get(d)
 
 
 # ────────────────────────────────────────────────────────────────────────
