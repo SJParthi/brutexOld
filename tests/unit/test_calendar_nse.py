@@ -381,11 +381,12 @@ class TestISTOffset:
 
 
 class TestHolidayCoverageRange:
-    """DEC-CALENDAR-HARDEN-001: out-of-coverage dates must not silently read False.
+    """DEC-CALENDAR-HARDEN-001: detection primitives for out-of-coverage dates.
 
     The hardcoded holiday list starts in 2021 but the Track-1 data pull floor
     is 2020-01-01 (CLAUDE.md §3 / MIGRATION.md #722). A 2020 weekday holiday
-    used to read as a trading day; callers can now DETECT the gap.
+    STILL reads as a trading day via the unguarded path (back-compat); these
+    NEW opt-in primitives let a caller DETECT the gap and refuse to guess.
     """
 
     def test_coverage_range_derived_from_list(self) -> None:
@@ -438,8 +439,9 @@ class TestTradingDayChecked:
         assert is_trading_day_checked(date(2024, 5, 11)) is False  # Saturday
 
     def test_out_of_range_weekday_raises(self) -> None:
-        # Holi 2020-03-10 (Tuesday) — unchecked silently returns True, the
-        # exact phantom-trading-day bug this hardens against.
+        # Holi 2020-03-10 (Tuesday): the UNGUARDED is_trading_day still returns
+        # True (back-compat, unchanged) — the NEW strict variant DETECTS the
+        # out-of-coverage case and refuses to guess instead.
         assert is_trading_day(date(2020, 3, 10)) is True
         with pytest.raises(HolidayDataUnavailableError):
             is_trading_day_checked(date(2020, 3, 10))

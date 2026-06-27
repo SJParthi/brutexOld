@@ -18,8 +18,13 @@ information, not a verified "trading day". Callers that need the distinction
 (e.g. the 2020-anchored data pull whose floor predates the 2021 list start)
 must gate on :func:`is_holiday_data_available` or use the strict
 :func:`is_holiday_checked` / :func:`is_trading_day_checked`, which raise
-:class:`HolidayDataUnavailableError` rather than guess. Per Golden Rule #1 we
-do NOT hallucinate the missing-year holiday dates; we surface the gap honestly.
+:class:`HolidayDataUnavailableError` rather than guess. The unguarded
+:func:`is_holiday` / :func:`is_trading_day` keep their byte-identical
+back-compat behaviour (an out-of-coverage date reads as not-a-holiday), so this
+is a DETECT-and-opt-in surface, not a behaviour change; wiring the strict
+variants into the spot-anchor consumers is a deferred cross-package follow-up.
+Per Golden Rule #1 we do NOT hallucinate the missing-year holiday dates; we
+surface the gap honestly.
 """
 
 from __future__ import annotations
@@ -230,15 +235,20 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 #: 2020-01-01 (``GROWW_HISTORY_FLOOR``; CLAUDE.md §3, MIGRATION.md #722) but the
 #: holiday list starts in 2021, and it ends in 2026. For ANY date outside this
 #: span :func:`is_holiday` returns ``False`` — which is the HONEST answer for
-#: "is this date IN the published list" but a SILENTLY-WRONG answer for "is this
-#: a trading day" (a 2020 weekday holiday like Holi 2020-03-10 would read as a
-#: trading day, fabricating a phantom session in the lake's earliest in-scope
-#: year). The coverage range + :func:`is_holiday_data_available` /
-#: :func:`is_holiday_checked` let a caller DETECT that out-of-coverage case
-#: instead of trusting a silent ``False`` (Golden Rule #1 — no fabricated data).
-#: The 2020 holiday list itself is a deliberately-deferred, never-invented
-#: follow-up (MIGRATION.md #722): per Golden Rule #1 we do NOT hallucinate
-#: holiday dates — we surface the gap honestly rather than guess at it.
+#: "is this date IN the published list" but, if a caller treats it as "is this a
+#: trading day", an out-of-coverage 2020 weekday holiday (e.g. Holi 2020-03-10)
+#: reads as a trading day via the UNGUARDED :func:`is_trading_day`. That
+#: unguarded behaviour is UNCHANGED by this module (back-compat); what is NEW is
+#: an OPT-IN detection surface — the coverage range +
+#: :func:`is_holiday_data_available` / :func:`is_holiday_checked` /
+#: :func:`is_trading_day_checked` let a caller DETECT the out-of-coverage case
+#: and refuse to guess, instead of trusting a silent ``False``. Actually WIRING
+#: those strict variants into the spot-anchor consumers
+#: (``indicators/prev_day_ohlc.py``, ``dashboard/preopen_report.py``) is a
+#: deliberately-DEFERRED cross-package follow-up, NOT done here. The 2020 holiday
+#: list itself is likewise a deliberately-deferred, never-invented follow-up
+#: (MIGRATION.md #722): per Golden Rule #1 we do NOT hallucinate holiday dates —
+#: we surface the gap honestly rather than guess at it.
 HOLIDAY_COVERAGE_FIRST_YEAR: Final[int] = min(h.year for h in ALL_HOLIDAYS)
 HOLIDAY_COVERAGE_LAST_YEAR: Final[int] = max(h.year for h in ALL_HOLIDAYS)
 
@@ -285,8 +295,10 @@ def is_holiday_checked(d: date) -> bool:
     Identical to :func:`is_holiday` for dates within the covered span, but
     raises :class:`HolidayDataUnavailableError` (after emitting a structlog
     warning) when ``d`` lies outside ``[HOLIDAY_COVERAGE_FIRST_YEAR,
-    HOLIDAY_COVERAGE_LAST_YEAR]``, so an unknown date can never be silently
-    mistaken for a confirmed non-holiday. O(1).
+    HOLIDAY_COVERAGE_LAST_YEAR]``. A caller that uses THIS variant never
+    silently mistakes an unknown date for a confirmed non-holiday; callers that
+    keep using the unguarded :func:`is_holiday` retain its back-compat ``False``.
+    O(1).
 
     Raises
     ------
