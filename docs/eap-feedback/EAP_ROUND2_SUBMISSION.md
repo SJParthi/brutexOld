@@ -29,7 +29,7 @@
 
 ## Table of contents
 
-1. **Projects (beta) — pilot feedback** (P-1..P-12): behavior · expectation gaps · feature requests · held
+1. **Projects (beta) — pilot feedback** (P-1..P-13): behavior · expectation gaps · feature requests · held
 2. **Session-state findings** (F-8..F-14): auth lapse, effort-revert, Routine limits, typosquat, Dispatch, billing
 3. **Bucket-1 — verified findings** (V-1..V-7)
 4. **Bucket-2 — ideas** (I-1..I-5) + 3 questions for Omid
@@ -118,6 +118,32 @@ gap in P-4 is so hard to self-correct. The user cannot tell "working" from
 **Request.** Surface coordinator/ambient state in the Project UI: active vs
 idle, what is currently running, and what (if anything) is scheduled
 (see **P-10**).
+
+### P-13 — Auth-binding limitation forced creating an entirely NEW Project for the same repo
+
+**Date:** 2026-06-27 · **Severity:** high (forced workaround / context split) · **Evidence: VERIFIED (this session)**
+
+**What was observed (VERIFIED, this session).** The mid-session GitHub access
+drop (the auth-binding behavior in P-1 / P-2 / F-8) could only be resolved by a
+session that **starts after** the App is connected. Reconnecting / installing
+the App did **not** reach the already-running session — re-tested **4×**, the
+running session never picked up the newly-granted access. As a direct
+consequence, the user created a **whole new Project pointing at the same bruteX
+repository** just to obtain a working session.
+
+**Why it matters.** This is a heavy real-world workaround for what should be an
+in-session credential refresh. It also risks **two Projects (two coordinator
+sessions) on one repository** — split context, duplicate work, and ambiguity
+about which Project is canonical. It is the concrete downstream impact of the
+auth-binding (P-1 / P-2) + no-in-session-refresh findings: when the only recovery
+path is "a new session," and a new session can only be obtained cleanly by
+spinning up a new Project, the user ends up with a second Project they never
+wanted.
+
+**Suggested fix.** Provide **in-session / in-Project credential refresh** so a
+newly-connected App takes effect without a new session or a new Project (ties to
+the existing in-Project credential-refresh feature request, **P-6**). That single
+capability removes the need to fork a second Project just to recover auth.
 
 ## B. Expectation gaps (the mental model I formed vs what actually happened)
 

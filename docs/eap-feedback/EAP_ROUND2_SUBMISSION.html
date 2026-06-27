@@ -57,7 +57,7 @@ padding:4px 22px;margin:18px 0 8px;}
 <hr/>
 <h2>Table of contents</h2>
 <ul>
-<li><strong>Projects (beta) — pilot feedback</strong> (P-1..P-12): behavior · expectation gaps · feature requests · held</li>
+<li><strong>Projects (beta) — pilot feedback</strong> (P-1..P-13): behavior · expectation gaps · feature requests · held</li>
 <li><strong>Session-state findings</strong> (F-8..F-14): auth lapse, effort-revert, Routine limits, typosquat, Dispatch, billing</li>
 <li><strong>Bucket-1 — verified findings</strong> (V-1..V-7)</li>
 <li><strong>Bucket-2 — ideas</strong> (I-1..I-5) + 3 questions for Omid</li>
@@ -86,6 +86,11 @@ padding:4px 22px;margin:18px 0 8px;}
 <p><strong>What happened.</strong> Projects are orchestrated by an internal coordinator session, but the user gets <strong>no signal</strong> of whether or how the Project is continuously working — no "the coordinator is active / idle," no view of what it is doing on the user's behalf. The orchestration layer that defines a Project is hidden.</p>
 <p><strong>Why it matters.</strong> Invisibility of the coordinator is why the Project "feels" idle even when something is (or should be) happening — and why the expectation gap in P-4 is so hard to self-correct. The user cannot tell "working" from "nothing scheduled."</p>
 <p><strong>Request.</strong> Surface coordinator/ambient state in the Project UI: active vs idle, what is currently running, and what (if anything) is scheduled (see <strong>P-10</strong>).</p>
+<h3>P-13 — Auth-binding limitation forced creating an entirely NEW Project for the same repo</h3>
+<p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> high (forced workaround / context split) · <strong>Evidence: VERIFIED (this session)</strong></p>
+<p><strong>What was observed (VERIFIED, this session).</strong> The mid-session GitHub access drop (the auth-binding behavior in P-1 / P-2 / F-8) could only be resolved by a session that <strong>starts after</strong> the App is connected. Reconnecting / installing the App did <strong>not</strong> reach the already-running session — re-tested <strong>4×</strong>, the running session never picked up the newly-granted access. As a direct consequence, the user created a <strong>whole new Project pointing at the same bruteX repository</strong> just to obtain a working session.</p>
+<p><strong>Why it matters.</strong> This is a heavy real-world workaround for what should be an in-session credential refresh. It also risks <strong>two Projects (two coordinator sessions) on one repository</strong> — split context, duplicate work, and ambiguity about which Project is canonical. It is the concrete downstream impact of the auth-binding (P-1 / P-2) + no-in-session-refresh findings: when the only recovery path is "a new session," and a new session can only be obtained cleanly by spinning up a new Project, the user ends up with a second Project they never wanted.</p>
+<p><strong>Suggested fix.</strong> Provide <strong>in-session / in-Project credential refresh</strong> so a newly-connected App takes effect without a new session or a new Project (ties to the existing in-Project credential-refresh feature request, <strong>P-6</strong>). That single capability removes the need to fork a second Project just to recover auth.</p>
 <h2>B. Expectation gaps (the mental model I formed vs what actually happened)</h2>
 <h3>P-4 — I expected a Project to be a self-running, persistent container; it runs as sessions + a manually-wired Routine</h3>
 <p><strong>Date:</strong> 2026-06-27 · <strong>Severity:</strong> medium (expectation-setting) · <strong>Evidence: VERIFIED (this session)</strong></p>
