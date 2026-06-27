@@ -61,7 +61,7 @@ _ACTION_ALPHABET = st.characters(min_codepoint=0x41, max_codepoint=0x5A)  # A-Z
 action_st = st.text(alphabet=_ACTION_ALPHABET, min_size=1, max_size=12)
 
 # The "|" hash-preimage delimiter is forbidden inside the free-form fields
-# (DEC-ORCH-AUDIT-DELIM-001 — keeps the preimage injective), so an HONEST chain
+# (DEC-ORCH-AUDIT-RATE-HARDEN-001 — keeps the preimage injective), so an HONEST chain
 # never contains one; exclude it from the printable-ASCII subject alphabet.
 subject_st = st.text(
     alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E, exclude_characters="|"),

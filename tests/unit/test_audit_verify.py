@@ -331,7 +331,7 @@ def test_golden_hashes_differ_across_algorithms() -> None:
 
 
 # The orchestrator format forbids the ``"|"`` hash-preimage delimiter inside the
-# free-form fields (DEC-ORCH-AUDIT-DELIM-001 — keeps the preimage injective), so
+# free-form fields (DEC-ORCH-AUDIT-RATE-HARDEN-001 — keeps the preimage injective), so
 # an HONEST chain never contains one; exclude it from the generated ``subject``
 # text so the property models only honest chains (the sweep path is unaffected).
 # ``codec="utf-8"`` also drops lone surrogates the audit writer cannot UTF-8

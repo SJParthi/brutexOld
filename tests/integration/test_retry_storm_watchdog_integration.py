@@ -100,7 +100,7 @@ def test_storm_gives_up_at_boundary_alerts_once_and_audits(tmp_path: Path) -> No
     ]
     give_up_subjects = {e.subject for e in entries if e.action == AUDIT_ACTION_GIVE_UP}
     # ``~`` (not ``|``) joins the (symbol, window) pair — ``|`` is the audit
-    # hash-preimage delimiter forbidden inside a field (DEC-ORCH-AUDIT-DELIM-001).
+    # hash-preimage delimiter forbidden inside a field (DEC-ORCH-AUDIT-RATE-HARDEN-001).
     assert give_up_subjects == {"NIFTY~w0", "NIFTY~w1", "NIFTY~w2"}
     symbol_row = entries[-1]
     assert symbol_row.subject == "NIFTY"

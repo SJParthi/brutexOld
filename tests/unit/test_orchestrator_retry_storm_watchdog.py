@@ -281,7 +281,7 @@ def test_audit_rows_written_for_give_up_and_symbol_failure() -> None:
         AUDIT_ACTION_SYMBOL_FAILURE,
     ]
     # ``~`` (not ``|``) joins (symbol, window) — ``|`` is the audit hash-preimage
-    # delimiter forbidden inside a field (DEC-ORCH-AUDIT-DELIM-001).
+    # delimiter forbidden inside a field (DEC-ORCH-AUDIT-RATE-HARDEN-001).
     assert sink.rows[0]["subject"] == "NIFTY~w0"
     assert sink.rows[0]["payload"]["reason"] == "terminal"
     assert sink.rows[-1]["subject"] == "NIFTY"

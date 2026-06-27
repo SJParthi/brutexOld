@@ -1003,7 +1003,7 @@ class TestKillRecovery:
 
 # ────────────────────────────────────────────────────────────────────────
 # FIX B — the hash-preimage delimiter "|" is forbidden in the free-form
-# fields (DEC-ORCH-AUDIT-DELIM-001). compute_hash joins actor/action/subject
+# fields (DEC-ORCH-AUDIT-RATE-HARDEN-001). compute_hash joins actor/action/subject
 # into the preimage with a literal "|", so a "|" inside any of them would make
 # the encoding non-injective: action="A|B", subject="C" and action="A",
 # subject="B|C" both flatten to "…|A|B|C|…" → one hash. AuditEntry.__post_init__

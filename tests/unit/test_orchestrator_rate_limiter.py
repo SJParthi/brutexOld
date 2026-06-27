@@ -636,7 +636,7 @@ class TestUpshift:
 
     def test_upshift_gated_on_upshift_recovery_not_downshift_window(self, clock: FakeClock) -> None:
         """The upshift gate is :attr:`upshift_recovery`, NOT
-        :attr:`downshift_window` (DEC-ORCH-UPSHIFT-RECOVERY-001 regression).
+        :attr:`downshift_window` (DEC-ORCH-AUDIT-RATE-HARDEN-001 regression).
 
         With ``downshift_window=60`` and ``upshift_recovery=120``, the
         previously-shipped (defective) code gated the upshift on the 60 s

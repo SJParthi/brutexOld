@@ -298,7 +298,7 @@ class DailyQuotaTracker:
         # release that reference before the constructor re-raises — otherwise
         # the instance never binds, close() is unreachable, and the
         # (env, refcount) entry leaks in _ENV_REGISTRY, growing on every
-        # corrupt load (DEC-QUOTA-ENV-REFCOUNT-LEAK-001). Mirror close()'s
+        # corrupt load (DEC-ORCH-AUDIT-RATE-HARDEN-001). Mirror close()'s
         # teardown exactly: flag closed + release the shared env.
         try:
             # Compute absolute threshold counts from percentages x daily_limit.

@@ -557,7 +557,7 @@ class TestCorruptionGuards:
 
 # ────────────────────────────────────────────────────────────────────────
 # FIX J — a corrupt-state __post_init__ raise must NOT orphan the shared-env
-# refcount (DEC-QUOTA-ENV-REFCOUNT-LEAK-001). __post_init__ opens (refcount++)
+# refcount (DEC-ORCH-AUDIT-RATE-HARDEN-001). __post_init__ opens (refcount++)
 # BEFORE _read_state, which raises on corrupt persisted state; since the
 # constructor then raises, the instance never binds and close() is unreachable,
 # so without the release-on-failure guard the (env, refcount) entry leaked and

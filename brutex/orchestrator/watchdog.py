@@ -301,7 +301,7 @@ class RetryStormWatchdog:
             action=AUDIT_ACTION_GIVE_UP,
             # ``~`` joins the (symbol, window) pair into one readable audit
             # subject. NOT ``|`` — that is the audit hash-preimage delimiter
-            # forbidden inside a free-form field (DEC-ORCH-AUDIT-DELIM-001);
+            # forbidden inside a free-form field (DEC-ORCH-AUDIT-RATE-HARDEN-001);
             # a ``|`` here would make ``_stamp_audit`` raise AuditFieldError and
             # the give-up row would be silently dropped.
             subject=f"{symbol}~{window}",
@@ -357,7 +357,7 @@ class RetryStormWatchdog:
             self.on_give_up(event)
         except (OSError, ValueError, RuntimeError):
             logger.exception(
-                "RetryStormWatchdog: on_give_up raised for %s|%s; watchdog continues",
+                "RetryStormWatchdog: on_give_up raised for %s~%s; watchdog continues",
                 event.symbol,
                 event.window,
             )
