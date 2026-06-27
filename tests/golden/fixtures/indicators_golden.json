@@ -1,0 +1,87 @@
+{
+  "schema": "brutex.indicators golden vectors v1",
+  "description": "Frozen oracle-anchored answer-key for brutex/indicators. Pivot + Fib cases are copied verbatim from the operator-verified TradingView / AmiBroker screenshots already pinned in tests/unit/test_pivots.py and tests/unit/test_fib_levels.py, so the golden is grounded, not self-referential.",
+  "pivots": [
+    {
+      "id": "nifty-14may2026",
+      "source": "TradingView Pivots Traditional Auto (NIFTY 14-May-2026), via tests/unit/test_pivots.py",
+      "trading_day": "2026-05-14",
+      "pdh_paisa": 2377715,
+      "pdl_paisa": 2342650,
+      "pdc_paisa": 2368965,
+      "expected": {
+        "p_paisa": 2363110,
+        "r1_paisa": 2383570,
+        "r2_paisa": 2398175,
+        "r3_paisa": 2418635,
+        "r4_paisa": 2439095,
+        "s1_paisa": 2348505,
+        "s2_paisa": 2328045,
+        "s3_paisa": 2313440,
+        "s4_paisa": 2298835
+      }
+    }
+  ],
+  "fib": [
+    {
+      "id": "banknifty-13may2026-bearish",
+      "source": "ES Trading Academy AmiBroker v11 (BANKNIFTY 13-May-2026 BEARISH), via tests/unit/test_fib_levels.py",
+      "trading_day": "2026-05-13",
+      "pdh_paisa": 5400000,
+      "pdl_paisa": 5359440,
+      "expected_range_paisa": 40560,
+      "expected_bearish": {
+        "0": 5400000,
+        "23": 5390428,
+        "38": 5384506,
+        "50": 5379720,
+        "62": 5374934,
+        "78": 5368120,
+        "100": 5359440
+      }
+    }
+  ],
+  "ema": [
+    {
+      "id": "hand-computed-period-3",
+      "source": "tests/unit/test_ema.py hand-computed oracle (alpha=0.5)",
+      "values": [10.0, 20.0, 30.0, 40.0, 50.0],
+      "period": 3,
+      "expected": [null, null, 20.0, 30.0, 40.0]
+    },
+    {
+      "id": "flat-series-period-4",
+      "source": "constant input -> constant EMA from the SMA seed onward; warm-up bars are null",
+      "values": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+      "period": 4,
+      "expected": [null, null, null, 100.0, 100.0, 100.0]
+    },
+    {
+      "id": "single-bar-period-1-identity",
+      "source": "EMA period 1 collapses to identity",
+      "values": [42.0],
+      "period": 1,
+      "expected": [42.0]
+    }
+  ],
+  "day_extremes": [
+    {
+      "id": "single-day-running-then-2day-reset",
+      "source": "running max/min within a day, then a fresh reset on the next IST trading day",
+      "bars": [
+        {"ts_ist": "2026-05-13T09:15:00+05:30", "high_paisa": 5400000, "low_paisa": 5395000},
+        {"ts_ist": "2026-05-13T09:16:00+05:30", "high_paisa": 5410000, "low_paisa": 5398000},
+        {"ts_ist": "2026-05-13T09:17:00+05:30", "high_paisa": 5405000, "low_paisa": 5390000},
+        {"ts_ist": "2026-05-14T09:15:00+05:30", "high_paisa": 5350000, "low_paisa": 5340000},
+        {"ts_ist": "2026-05-14T09:16:00+05:30", "high_paisa": 5360000, "low_paisa": 5345000}
+      ],
+      "expected": [
+        {"day_high_paisa": 5400000, "day_low_paisa": 5395000},
+        {"day_high_paisa": 5410000, "day_low_paisa": 5395000},
+        {"day_high_paisa": 5410000, "day_low_paisa": 5390000},
+        {"day_high_paisa": 5350000, "day_low_paisa": 5340000},
+        {"day_high_paisa": 5360000, "day_low_paisa": 5340000}
+      ]
+    }
+  ]
+}
