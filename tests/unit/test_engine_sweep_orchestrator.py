@@ -200,6 +200,24 @@ class TestSweepGridConfig:
         grid = _grid(k_values=[0])
         assert grid.k_values == (0,)
 
+    def test_condition_bit_out_of_range_rejected_at_config_time(self) -> None:
+        # GAP #16 (DEC-SWEEP-DEDUP-LMDB-001): a bit >= MAX_VOCAB_BITS in the
+        # shared axis must fail AT CONFIG TIME (the CLI catches ValueError and
+        # exits cleanly), NOT abort the whole grid mid-enumeration with a bare
+        # ValueError from one tuple's lazy mask enumeration.
+        with pytest.raises(ValueError, match=r"condition_bits \[99\] out of range \[0, 64\)"):
+            _grid(condition_bits=[0, 1, 99])
+
+    def test_negative_condition_bit_rejected_at_config_time(self) -> None:
+        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 64\)"):
+            _grid(condition_bits=[-1, 0, 1])
+
+    def test_top_condition_bit_in_range_is_valid(self) -> None:
+        from brutex.engine.combo_mask import MAX_VOCAB_BITS
+
+        grid = _grid(condition_bits=[0, MAX_VOCAB_BITS - 1])
+        assert MAX_VOCAB_BITS - 1 in grid.condition_bits
+
     @pytest.mark.parametrize("axis", ["stop_losses", "take_profits"])
     def test_nonpositive_paisa_rejected(self, axis: str) -> None:
         with pytest.raises(ValueError, match=f"{axis} entries must be > 0 or None"):
