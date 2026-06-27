@@ -55,7 +55,7 @@ HTTP 403
 ### 2 — GitHub access drops mid-session with no in-session recovery
 When the 403 above hit, `git push` kept working, but opening and merging PRs through the API stopped — the session was stranded push-only mid-run. A retry in a fresh sub-agent returned the same 403, so this was a stable session-level state, not a momentary blip. There was no way to recover access from inside the running session.
 
-With nothing recovering the running session after several retries, the only clean path back was to spin up a **second Project pointing at the same repo**. That split my context across two Projects, duplicated the coordinating session, and left it ambiguous which Project was canonical — a heavy, confusing workaround for what should be a refresh.
+When several retries failed to recover the running session, the only clean path back was to spin up a **second Project pointing at the same repo**. That split my context across two Projects, duplicated the coordinating session, and left it ambiguous which Project was canonical — a heavy, confusing workaround for what should be a refresh.
 
 **Why it matters:** an unattended overnight run can't survive a credential lapse it can't recover from — it just stalls, and recovering it shouldn't require forking a second Project.
 
@@ -69,7 +69,7 @@ After installing the GitHub App on my account (**@SJParthi**, All repositories, 
 **Suggested fix:** propagate a credential change into the running session, or prompt *"new permissions detected — restart the session to apply."*
 
 ### 4 — Background/review agents sit idle for hours with no liveness or cleanup
-The background-tasks panel showed multiple review agents marked "running" for **5+ hours** while having made as few as **1 tool action** the entire time — for example, one at **5 h 01 m with 1 tool use**, another at **5 h 01 m with 3 tool uses**, and several more around **5 h with 2 tool uses**. They never auto-terminated and simply accumulated: a large "finished" pile (a few hundred) alongside a long column of agents stuck at ~5 hours.
+The background-tasks panel showed multiple review agents marked "running" for **5+ hours** while having made as few as **1 tool action** in that whole time — for example, one at **5 h 01 m with 1 tool use**, another at **5 h 01 m with 3 tool uses**, and several more around **5 h with 2 tool uses**. They never auto-terminated and simply accumulated: a large "finished" pile (a few hundred) alongside a long column of agents stuck at ~5 hours.
 
 **Why it matters:** there's no way to tell a stuck agent (5 hours, 1 action) from one actively working — both just read "running," with no health signal. Orphaned agents pile up with no cleanup, so a long unattended run becomes hard to trust: you can't tell progress from a hang.
 
