@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, Final
 import blake3
 import structlog
 
-from brutex.engine.combo_mask import count_combos
+from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
@@ -280,6 +280,17 @@ class SweepGridConfig:
             if not getattr(self, name):
                 raise ValueError(f"SweepGridConfig.{name} must be non-empty")
 
+        # Validate every condition bit is in the u64 vocabulary range AT CONFIG
+        # TIME (DEC-SWEEP-DEDUP-LMDB-001): the shared axis otherwise fails LATE
+        # as a bare ValueError from the lazy enumeration inside one tuple's
+        # ``SweepRunConfig`` — which the grid loop does NOT catch (only
+        # SweepComboError is a tuple-skip), aborting the WHOLE grid mid-run.
+        # Caught here, the CLI surfaces it as a clean user-config error.
+        out_of_range = sorted({bit for bit in self.condition_bits if not 0 <= bit < MAX_VOCAB_BITS})
+        if out_of_range:
+            raise ValueError(
+                f"SweepGridConfig.condition_bits {out_of_range} out of range [0, {MAX_VOCAB_BITS})"
+            )
         n_unique = len(set(self.condition_bits))
         for k in self.k_values:
             if not 0 <= k <= n_unique:
