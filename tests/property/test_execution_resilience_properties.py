@@ -74,7 +74,7 @@ class _FakeStrategy:
         self.META = meta
 
     def on_event(self, event: object, state: object) -> list[object]:
-        del event, state
+        """No-op strategy double; emits no signals for the property suite."""
         return []
 
 
@@ -87,7 +87,7 @@ class _FakeFeed:
         return iter(self._events)
 
     def ensure_no_lookahead(self, ts: datetime) -> None:
-        del ts
+        """No-op look-ahead guard; the property suite never trips it."""
 
 
 class _FakeSimulator:
@@ -101,11 +101,11 @@ class _FakeSimulator:
         pass
 
     def execute(self, signal: object, bar: object) -> Fill | None:
-        del signal, bar
+        """No-op execution double; never produces a fill for the property suite."""
         return None
 
     def mark_to_market(self, *, symbol: str, price: object, timestamp: object) -> None:
-        del symbol, price, timestamp
+        """No-op mark-to-market double; records nothing for the property suite."""
 
 
 def _driver(events: Sequence[FeedEvent]) -> BacktestDriver:
