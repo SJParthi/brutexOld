@@ -58,6 +58,35 @@ class TestCanonicaliseParams:
         with pytest.raises(StrategyError, match="NaN"):
             canonicalise_params({"k": math.nan})
 
+    def test_signed_zero_collapses_to_positive(self) -> None:
+        """GAP #17 (DEC-SWEEP-DEDUP-LMDB-001): -0.0 and +0.0 are mathematically
+        equal, so they MUST canonicalise to the same string — otherwise two
+        equal params hash to different run-identities (breaks reproducibility /
+        Golden Rule #4)."""
+        assert canonicalise_params({"k": -0.0}) == canonicalise_params({"k": 0.0})
+
+    def test_signed_zero_collapses_nested(self) -> None:
+        """The -0.0 → +0.0 normalisation applies recursively (nested + in lists)."""
+        assert canonicalise_params({"o": {"k": -0.0}}) == canonicalise_params({"o": {"k": 0.0}})
+        assert canonicalise_params({"k": [-0.0, 1.5]}) == canonicalise_params({"k": [0.0, 1.5]})
+
+    def test_signed_zero_run_identity_is_stable(self) -> None:
+        """Two combos differing only by the sign of a zero param share one
+        run-identity (the reproducibility intent of the fix)."""
+        ctx = {
+            "strategy_id": "mask:0000000000000001",
+            "direction": "bull",
+            "instrument": "NIFTY",
+            "tf": "1m",
+            "mode": "A",
+            "data_snapshot_hash": "snap0001",
+            "indicator_version": "ind-v1",
+            "code_commit_sha": "deadbeef",
+        }
+        neg = combo_hash(params={"k": -0.0}, **ctx)
+        pos = combo_hash(params={"k": 0.0}, **ctx)
+        assert neg == pos
+
     def test_non_string_key_rejected(self) -> None:
         with pytest.raises(StrategyError, match="dict keys must be str"):
             canonicalise_params({1: "x"})  # type: ignore[dict-item]
