@@ -37,7 +37,33 @@ __all__ = [
     "TradeInput",
     "TradeOutcome",
     "TradeSide",
+    "UnsupportedTradeOutcomeError",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Domain errors
+# ─────────────────────────────────────────────────────────────────
+
+
+class UnsupportedTradeOutcomeError(ValueError):
+    """Raised when ``compute_trade_cost`` is asked to price a non-NORMAL
+    trade outcome.
+
+    Track 2 (per DEC-RISK-011) is intraday-only with a forced 15:20 exit,
+    so every trade resolves as ``NORMAL_CLOSE``. The expiry outcomes
+    (``EXPIRY_EXERCISE`` / ``EXPIRY_ASSIGN`` / ``EXPIRY_WORTHLESS``) require
+    the ``CALCULATOR_SPEC §4.2`` charge state machine (STT on intrinsic,
+    zero-STT assignment, brokerage-only worthless), which is NOT yet
+    implemented. Rather than silently return premium-based NORMAL_CLOSE
+    numbers for an expiry outcome (a silently-wrong cost), the calculator
+    fails loud with this specific exception.
+
+    A ``ValueError`` subclass so existing callers that catch ``ValueError``
+    for input validation still catch it, while a caller can pin this exact
+    type. NOT ``NotImplementedError`` — that is coverage-excluded and we
+    require a real, tested branch.
+    """
 
 
 # ─────────────────────────────────────────────────────────────────
