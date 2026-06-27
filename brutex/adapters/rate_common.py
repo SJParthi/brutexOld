@@ -45,6 +45,7 @@ from collections.abc import Callable
 
 import structlog
 
+from brutex.observability.progress_beat import emit_progress_beat
 from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 
@@ -398,6 +399,12 @@ class RateController:
         with self._lock:
             bucket = self._bucket
         bucket.acquire()
+        # Liveness beat (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15): a pull pacing
+        # through the per-minute governor / token bucket IS making progress — beat the
+        # watchdog so a slow-but-progressing pull (heavily throttled, but advancing) is
+        # never falsely declared hung. A no-op when no watchdog is registered (every
+        # non-dashboard caller); best-effort, never raises into the pacer.
+        emit_progress_beat()
         # ── Periodic telemetry: a throttled rate.snapshot so a HOLDING rate is visible
         #    in /logs even with no rung change (DEC-GROWW-RATE-SNAPSHOT-LOG-001). ──
         self._maybe_log_snapshot()
