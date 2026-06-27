@@ -233,6 +233,25 @@ class TestAlerts:
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
 
+    def test_correlated_failure(self) -> None:
+        """correlated_failure: CRITICAL PHASE_BLOCKED naming the root + symptoms (DEC-FAILURE-CORRELATION-001)."""
+        fake = FakeNotifier()
+        sent = SweepAlerter(notifier=fake).correlated_failure(
+            root="disk_full",
+            symptoms=("rate_limit", "timeout"),
+            summary="disk_full is the root; downstream symptoms: rate_limit, timeout",
+        )
+        assert sent is True
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        # the dedupe key folds root + the pipe-joined symptom shape (RAW, unescaped).
+        assert ev.dedupe_key == "correlated:disk_full:rate_limit|timeout"
+        # the body is MarkdownV2-escaped (underscore → `\_`), so assert the escaped forms.
+        assert escape_markdown_v2("disk_full") in ev.message
+        assert escape_markdown_v2("rate_limit, timeout") in ev.message
+        assert escape_markdown_v2("Fix the ROOT first") in ev.message
+
     def test_pull_degraded(self) -> None:
         """pull_degraded mirrors rate_breach: WARN, deduped per rule, carries the detail."""
         fake = FakeNotifier()

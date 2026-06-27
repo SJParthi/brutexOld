@@ -414,6 +414,52 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def correlated_failure(
+        self,
+        *,
+        root: str,
+        symptoms: tuple[str, ...],
+        summary: str,
+    ) -> bool:
+        """Alert that several distinct failures CO-OCCURRED with one likely root (CRITICAL).
+
+        Fired by :class:`brutex.observability.failure_correlation.FailureCorrelator`
+        when more than one distinct failure kind lands inside its co-occurrence
+        window (DEC-FAILURE-CORRELATION-001) — a disk-fill ``ENOSPC`` DURING a
+        vendor-429 storm, an OOM DURING a reauth, etc. Instead of N uncorrelated
+        per-failure alerts the operator gets ONE message naming the likely ROOT and
+        the downstream SYMPTOMS, so they fix the cause (free the disk) rather than
+        chasing a symptom (the vendor 429s).
+
+        CRITICAL because a multi-failure co-occurrence is, by the priority order,
+        almost always rooted in a hard pull-wide condition (disk/OOM/quota). The
+        ``dedupe_key`` is the root+symptoms shape so a sustained co-occurrence
+        coalesces into one push and a NEW symptom joining re-fires.
+
+        Parameters
+        ----------
+        root
+            The likely root failure kind (e.g. ``"disk_full"``).
+        symptoms
+            The downstream co-occurring failure kinds, highest-priority first
+            (e.g. ``("rate_limit", "timeout")``).
+        summary
+            The pre-built human root-and-symptoms sentence (the verdict's
+            ``summary()``), surfaced verbatim after MarkdownV2 escaping.
+        """
+        symptom_list = ", ".join(symptoms)
+        message = escape_markdown_v2(
+            f"🛑 Correlated pull failure — likely root: {root}; "
+            f"downstream symptoms: {symptom_list}. {summary}. "
+            "Fix the ROOT first (the symptoms should clear with it)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"correlated:{root}:{'|'.join(symptoms)}",
+        )
+
     def symbol_window_failure(
         self,
         *,
