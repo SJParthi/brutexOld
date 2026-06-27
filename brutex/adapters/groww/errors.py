@@ -24,13 +24,22 @@ without ``growwapi`` installed.
 
 :func:`is_retryable` is the single source of truth the orchestrator's retry
 policy consults (CLAUDE.md §11 COMMON). Rate-limit + timeout + empty-body +
-transient 5xx server errors are retryable. The Groww SDK has no distinct
-server-error CLASS (only a generic ``GrowwAPIException(msg, code)``), so a 5xx is
-mapped to the neutral :class:`GrowwServerError` by its HTTP ``code``
-(``500``/``502``/``503``) or an unambiguous message signature — never by inventing
-an SDK class (DEC-GROWW-SERVER-ERROR-RETRY-001; Golden Rule #1). A ``504``
-gateway-timeout stays a :class:`GrowwTimeoutError` (already retryable) so the
-gentle timeout ladder, not a new path, governs it.
+transient 5xx server errors + transient network/DNS failures are retryable. The
+Groww SDK has no distinct server-error CLASS (only a generic
+``GrowwAPIException(msg, code)``), so a 5xx is mapped to the neutral
+:class:`GrowwServerError` by its HTTP ``code`` (``500``/``502``/``503``) or an
+unambiguous message signature — never by inventing an SDK class
+(DEC-GROWW-SERVER-ERROR-RETRY-001; Golden Rule #1). A ``504`` gateway-timeout
+stays a :class:`GrowwTimeoutError` (already retryable) so the gentle timeout
+ladder, not a new path, governs it. A transient transport-layer failure (a DNS
+outage like ``"Failed to resolve api.groww.in"``, a reset/refused/broken
+connection — the ``requests`` / ``urllib3`` / :class:`socket.gaierror` classes)
+is mapped to the neutral :class:`GrowwNetworkError` by the transport exception's
+CLASS NAME (:data:`_NETWORK_ERROR_NAMES`) or an unambiguous message signature: the
+request never reached Groww, so it is RETRYABLE, not a terminal quarantine
+(DEC-GROWW-NETWORK-ERROR-RETRY-001). Like a 5xx, a network blip is NOT a quota
+signal — it rides the gentle timeout ladder, never stepping the per-second rate
+ceiling down (:func:`is_rate_limit` stays ``False`` for it).
 """
 
 from __future__ import annotations
@@ -62,6 +71,33 @@ class GrowwRateLimitError(GrowwError):
 
 class GrowwTimeoutError(GrowwError):
     """Network read/connect timeout (retry)."""
+
+
+class GrowwNetworkError(GrowwError):
+    """Transient network / DNS connectivity failure — RETRYABLE.
+
+    A momentary host-level connectivity blip — a DNS resolution failure
+    (``"Failed to resolve api.groww.in"`` — :class:`socket.gaierror` /
+    urllib3 ``NameResolutionError`` wrapped by ``requests.exceptions.\
+    ConnectionError``), a dropped/reset connection (:class:`ConnectionResetError`),
+    or a refused connect — is **not** a vendor-side rejection: the request never
+    reached Groww, so re-issuing it once the host's DNS/network recovers is safe.
+
+    The classifier previously had no network class, so such a failure fell to the
+    terminal base :class:`GrowwError` (``is_retryable() == False``) and a whole
+    contract was PERMANENTLY quarantined with no retry. A 28h-pull forensic found
+    218 option contracts lost exactly this way during a transient
+    ``"Failed to resolve api.groww.in"`` DNS outage
+    (DEC-GROWW-NETWORK-ERROR-RETRY-001). This maps such a failure to a RETRYABLE
+    error: the in-call fast-retry re-issues it and any residual is left UNMARKED so
+    the until-clean / next-pass loop re-pulls it — never dropped, never faked.
+
+    It is deliberately NOT a :class:`GrowwRateLimitError`: a DNS / connection blip
+    is not a quota signal, so it must not step the per-second rate ladder down — it
+    rides the gentler timeout ladder (:func:`is_rate_limit` stays ``False`` for it).
+    A genuine ``404`` still maps to a terminal :class:`GrowwNotFoundError`, so this
+    never makes a real "not on Groww" retryable.
+    """
 
 
 class GrowwServerError(GrowwError):
@@ -121,6 +157,31 @@ _SDK_NAME_TO_ERROR: dict[str, type[GrowwError]] = {
     "GrowwFeedNotSubscribedException": GrowwFeedError,
 }
 
+#: Transport-layer exception class-NAMES that mark a transient network / DNS blip —
+#: a RETRYABLE :class:`GrowwNetworkError` (DEC-GROWW-NETWORK-ERROR-RETRY-001). The
+#: Groww SDK rides ``requests`` / ``urllib3`` under the hood, so a host DNS outage
+#: surfaces as one of these by CLASS NAME (matched as a string, like the SDK map
+#: above, so neither ``requests`` nor ``urllib3`` need be importable — the
+#: optional-extra resilience). The names cover the stdlib builtin + ``requests``
+#: ``ConnectionError`` (which wraps a DNS / refused / reset connect; the live
+#: ``"Failed to resolve api.groww.in"`` shape), ``urllib3`` ``NameResolutionError``
+#: / ``NewConnectionError`` / ``MaxRetryError``, the builtin ``ConnectionResetError``
+#: / ``ConnectionRefusedError`` subclasses, and ``socket.gaierror`` (the
+#: ``"Name or service not known"`` resolver failure). Checked AFTER the typed Groww
+#: SDK map so a vendor-typed error always wins; a bare ``GrowwAPIException`` is never
+#: matched here (it is not a transport class).
+_NETWORK_ERROR_NAMES: frozenset[str] = frozenset(
+    {
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "NameResolutionError",
+        "NewConnectionError",
+        "MaxRetryError",
+        "gaierror",
+    }
+)
+
 
 #: HTTP-ish status codes the SDK may carry on a GENERIC ``GrowwAPIException(msg,
 #: code)`` when it does NOT raise the typed subclass — mapped to the retryable
@@ -158,6 +219,26 @@ _SERVER_ERROR_HINTS: tuple[str, ...] = (
     "service unavailable",
     "server error",
 )
+#: Unambiguous transient-network / DNS message signatures for a GENERIC exception
+#: whose CLASS NAME is not in :data:`_NETWORK_ERROR_NAMES` but whose message still
+#: names the host-level failure (DEC-GROWW-NETWORK-ERROR-RETRY-001) — the live
+#: ``"Failed to resolve api.groww.in"`` shape + the OS resolver / socket signatures.
+#: Checked LAST (after rate-limit + timeout + server hints), since a network blip is
+#: the most generic transient class — so a co-mentioned 429 / timeout / 5xx always
+#: wins. Phrase-only (no bare numeric substrings) so an unrelated number never
+#: false-matches (Golden Rule #1).
+_NETWORK_ERROR_HINTS: tuple[str, ...] = (
+    "failed to resolve",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname",
+    "name resolution",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "connection broken",
+    "max retries exceeded",
+)
 
 
 def _classify_generic(exc: Exception) -> type[GrowwError]:
@@ -168,10 +249,11 @@ def _classify_generic(exc: Exception) -> type[GrowwError]:
     HTTP-ish ``code`` first (``429``→rate-limit, ``408``/``504``→timeout,
     ``500``/``502``/``503``→server-error, int or digit-string), then sniffs the
     message for the transient classes in priority order (rate-limit, then timeout,
-    then 5xx server error — so a 429 or timeout that also mentions a server never
-    mis-reads as a plain server error). Anything unrecognised stays the terminal
-    base :class:`GrowwError` (conservative — an unknown failure is never retried,
-    Golden Rule #1).
+    then 5xx server error, then a transient network / DNS blip — so a 429 / timeout
+    / 5xx that also mentions a connection never mis-reads as a plain network error,
+    and a network failure is recognised LAST as the most generic transient class).
+    Anything unrecognised stays the terminal base :class:`GrowwError` (conservative
+    — an unknown failure is never retried, Golden Rule #1).
     """
     code = getattr(exc, "code", None)
     if isinstance(code, bool):  # bool is an int subclass — never a status code
@@ -187,6 +269,8 @@ def _classify_generic(exc: Exception) -> type[GrowwError]:
         return GrowwTimeoutError
     if any(hint in message for hint in _SERVER_ERROR_HINTS):
         return GrowwServerError
+    if any(hint in message for hint in _NETWORK_ERROR_HINTS):
+        return GrowwNetworkError
     return GrowwError
 
 
@@ -211,11 +295,23 @@ def from_groww_exception(exc: Exception) -> GrowwError:
     safe). Narrow on purpose: ONLY a ``json.JSONDecodeError`` is treated this way,
     NOT every :class:`ValueError`, so a genuine code bug surfacing as a plain
     ``ValueError`` still maps to the terminal base (never blindly retried).
+
+    **A transient network / DNS failure** (the ``requests`` / ``urllib3`` /
+    :class:`socket.gaierror` transport classes — :data:`_NETWORK_ERROR_NAMES`,
+    matched by CLASS NAME so neither package need be importable) is recognised as a
+    RETRYABLE :class:`GrowwNetworkError` (DEC-GROWW-NETWORK-ERROR-RETRY-001) — the
+    request never reached Groww (a host DNS outage like ``"Failed to resolve
+    api.groww.in"``), so it is re-issued rather than terminally quarantined. This
+    name-match is checked AFTER the typed Groww SDK map (a vendor-typed error always
+    wins) but BEFORE :func:`_classify_generic` (so a ``requests.ConnectionError``
+    whose message has no recognised hint is still caught by its class name).
     """
     name = type(exc).__name__
     if isinstance(exc, json.JSONDecodeError):
         return GrowwEmptyResponseError(f"{name}: {exc}")
     error_cls = _SDK_NAME_TO_ERROR.get(name)
+    if error_cls is None and name in _NETWORK_ERROR_NAMES:
+        error_cls = GrowwNetworkError
     if error_cls is None:
         error_cls = _classify_generic(exc)
     return error_cls(f"{name}: {exc}")
@@ -236,13 +332,20 @@ def is_retryable(exc: GrowwError) -> bool:
 
     Retryable: rate-limit + timeout + empty/non-JSON body (a transient throttle —
     DEC-GROWW-EMPTY-BODY-RETRY-001) + transient 5xx server error (a momentary
-    upstream blip — DEC-GROWW-SERVER-ERROR-RETRY-001). Terminal: bad-request,
-    not-found, auth (needs re-auth), feed (out of scope), and any bare
-    :class:`GrowwError`.
+    upstream blip — DEC-GROWW-SERVER-ERROR-RETRY-001) + transient network / DNS
+    failure (a host connectivity blip — DEC-GROWW-NETWORK-ERROR-RETRY-001).
+    Terminal: bad-request, not-found, auth (needs re-auth), feed (out of scope),
+    and any bare :class:`GrowwError`.
     """
     return isinstance(
         exc,
-        (GrowwRateLimitError, GrowwTimeoutError, GrowwEmptyResponseError, GrowwServerError),
+        (
+            GrowwRateLimitError,
+            GrowwTimeoutError,
+            GrowwEmptyResponseError,
+            GrowwServerError,
+            GrowwNetworkError,
+        ),
     )
 
 
@@ -252,6 +355,7 @@ __all__ = [
     "GrowwEmptyResponseError",
     "GrowwError",
     "GrowwFeedError",
+    "GrowwNetworkError",
     "GrowwNotFoundError",
     "GrowwRateLimitError",
     "GrowwServerError",

@@ -330,6 +330,55 @@ def test_empty_body_exhausts_and_raises_retryable() -> None:
     assert is_retryable(caught.value) is True  # residual stays re-queueable
 
 
+# Transient network / DNS failure → RETRYABLE (DEC-GROWW-NETWORK-ERROR-RETRY-001).
+# A RAW transport exception (socket.gaierror / requests ConnectionError shape) the
+# SDK raises is now retried by the client's in-call fast-retry arm, instead of
+# escaping terminally — the 218-contract "Failed to resolve api.groww.in" loss class.
+class gaierror(Exception):
+    """Fake ``socket.gaierror`` raised raw by the SDK on a host DNS outage."""
+
+
+class ConnectionError(Exception):  # noqa: A001 — mirrors requests.exceptions.ConnectionError
+    """Fake ``requests.exceptions.ConnectionError`` (the ``"Failed to resolve …"`` shape)."""
+
+
+def test_dns_error_then_success_retries() -> None:
+    """A transient DNS failure then a clean response → the client RETRIES, returns the payload.
+
+    The raw transport error the SDK raises is classified RETRYABLE, so the in-call
+    fast-retry re-issues it rather than letting it escape terminally.
+    """
+    sdk = _FakeSDK(raises=[gaierror("[Errno -2] Name or service not known")], payload={"ok": True})
+    client, slept = _client(sdk)
+    out = client.expiries(exchange="NSE", underlying_symbol="NIFTY", year=2024, month=1)
+    assert out == {"ok": True}
+    assert sdk.calls == 2  # one DNS failure + one success
+    assert slept == [0.1]  # one bounded backoff (the gentle timeout ladder, base * attempt 1)
+
+
+def test_dns_error_exhausts_and_raises_retryable() -> None:
+    """A SUSTAINED DNS outage exhausts the in-call budget then raises a RETRYABLE network error.
+
+    The exhausted residual is then re-queued by the per-window transient path /
+    until-clean loop — NEVER a terminal quarantine (the 218-contract loss class).
+    """
+    from brutex.adapters.groww.errors import GrowwNetworkError, is_rate_limit, is_retryable
+
+    sdk = _FakeSDK(
+        raises=[
+            ConnectionError("Failed to resolve 'api.groww.in'"),
+            ConnectionError("Failed to resolve 'api.groww.in'"),
+            ConnectionError("Failed to resolve 'api.groww.in'"),
+        ]
+    )
+    client, _slept = _client(sdk)
+    with pytest.raises(GrowwNetworkError) as caught:
+        client.contracts(exchange="NSE", underlying_symbol="NIFTY", expiry_date="2024-01-25")
+    assert sdk.calls == 3  # all attempts used (NOT a single terminal drop)
+    assert is_retryable(caught.value) is True  # residual stays re-queueable
+    assert is_rate_limit(caught.value) is False  # a DNS blip never steps the rate ladder
+
+
 class _RecordingSDK:
     """Captures the exact kwargs forwarded to ``get_expiries`` (DEC-GROWW-OPTION-INGEST-001)."""
 
