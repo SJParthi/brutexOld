@@ -16,7 +16,7 @@ This is round-2 feedback on the **Claude Code Projects beta**, gathered from run
 | 2 | GitHub access drops mid-session with no in-session recovery — the only path back is a new session, and in my case a whole new Project. |
 | 3 | Connecting the GitHub App doesn't reach an already-running session; only a fresh session picks it up. |
 | 4 | Background/review agents sit idle for hours with no liveness signal and no cleanup. |
-| 5 | Screenshots pasted into chat aren't readable by the file tools; only @-attached uploads are. |
+| 5 | Reasoning-effort tier appears to drop after a long idle: maximum was set, then later found reverted to a lower tier. |
 | 6 | Disk and agent-worktree + scratchpad artifacts accumulate across a long multi-agent run with no auto-cleanup. |
 
 ---
@@ -72,12 +72,12 @@ The background-tasks panel showed multiple review agents marked "running" for **
 
 **Suggested fix:** a per-agent liveness indicator (last-activity timestamp plus a "stalled" badge once idle past a threshold), and auto-termination/cleanup of idle or orphaned agents.
 
-### 5 — Chat-pasted screenshots aren't readable by the file tools
-Images **pasted into chat** are visible to the model but never land at a path the file tools can open. **@-attached uploads, by contrast, are readable** at `/root/.claude/uploads/<session-id>/...` (I confirmed this by reading one). The two look identical in chat, so the difference isn't discoverable.
+### 5 — Reasoning-effort tier appears to drop after a long idle
+I set the reasoning effort to its maximum, and after a long idle I found it had reverted to a lower tier ("Extra"). I'm not yet sure of the mechanism: it's an open question whether the maximum mode ("ultracode") is a separate control from the effort tier, or whether the tier itself reset on its own. Reported from direct experience; I haven't isolated the trigger yet.
 
-**Why it matters:** a user pastes a screenshot expecting the agent to work with it, and the agent silently can't reach the file — with no signal that paste and @-attach behave differently.
+**Why it matters:** if effort silently drops back from maximum during a long unattended run, work that was meant to run at full reasoning quietly continues at a lower tier, with no indication that the setting changed.
 
-**Suggested fix:** materialise chat-pasted images to the same readable path so paste and @-attach behave identically.
+**Suggested fix:** keep an explicitly-set effort tier sticky across idle periods (or, if maximum mode and the effort tier are separate controls, make that relationship visible so it's clear which one is active).
 
 ### 6 — Disk and agent-worktree + scratchpad artifacts accumulate with no auto-cleanup
 On this environment the writable volume (~270 GB) sat ~50% used with ~20 GB free; accumulated agent worktrees (~2.8 GB across ~34 of them) and the scratchpad (~3.9 GB) were never auto-cleaned.
@@ -98,4 +98,4 @@ No images are embedded in this document. The screenshots below are attached to t
 - **GitHub App install** — the App correctly installed on @SJParthi (All repositories, read/write), which the running session still didn't pick up (illustrates item 3).
 - **Background-tasks panel** — review agents at 5 h+ runtimes with only 1–4 tool uses each, alongside the large finished pile (illustrates item 4).
 
-*Prepared 2026-06-27. Still trying to capture cleanly: whether the effort tier reverts after a long idle (observed once, not reproduced). Where I couldn't reproduce something reliably, I've said so plainly rather than overstating it.*
+*Prepared 2026-06-27. Where I couldn't reproduce something reliably, I've said so plainly rather than overstating it.*

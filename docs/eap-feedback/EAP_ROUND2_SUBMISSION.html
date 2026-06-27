@@ -61,7 +61,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tr><td>2</td><td>GitHub access drops mid-session with no in-session recovery — the only path back is a new session, and in my case a whole new Project.</td></tr>
 <tr><td>3</td><td>Connecting the GitHub App doesn't reach an already-running session; only a fresh session picks it up.</td></tr>
 <tr><td>4</td><td>Background/review agents sit idle for hours with no liveness signal and no cleanup.</td></tr>
-<tr><td>5</td><td>Screenshots pasted into chat aren't readable by the file tools; only @-attached uploads are.</td></tr>
+<tr><td>5</td><td>Reasoning-effort tier appears to drop after a long idle: maximum was set, then later found reverted to a lower tier.</td></tr>
 <tr><td>6</td><td>Disk and agent-worktree + scratchpad artifacts accumulate across a long multi-agent run with no auto-cleanup.</td></tr>
 </tbody>
 </table>
@@ -98,10 +98,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p>The background-tasks panel showed multiple review agents marked "running" for <strong>5+ hours</strong> while having made as few as <strong>1 tool action</strong> the entire time — for example, one review at <strong>5 h 01 m with 1 tool use</strong>, another at <strong>5 h 01 m with 3 tool uses</strong>, and several more around <strong>5 h with 2 tool uses</strong>. They never auto-terminated and just accumulated: the panel showed a large "finished" pile (a few hundred) alongside a long column of agents stuck at ~5 hours.</p>
 <p><strong>Why it matters:</strong> there's no way to tell a stuck/idle agent (5 hours, 1 action) from one actively working — both just read "running," with no health signal. Orphaned agents pile up indefinitely with no cleanup, so a long unattended run becomes hard to trust: you can't tell progress from a hang.</p>
 <p><strong>Suggested fix:</strong> a per-agent liveness indicator (last-activity timestamp plus a "stalled" badge once idle past a threshold), and auto-termination/cleanup of idle or orphaned agents.</p>
-<h3>5 — Chat-pasted screenshots aren't readable by the file tools</h3>
-<p>Images <strong>pasted into chat</strong> are visible to the model but never land at a path the file tools can open. <strong>@-attached uploads, by contrast, are readable</strong> at <code>/root/.claude/uploads/&lt;session-id&gt;/...</code> (I confirmed this by reading one). The two look identical in chat, so the difference isn't discoverable.</p>
-<p><strong>Why it matters:</strong> a user pastes a screenshot expecting the agent to work with it, and the agent silently can't reach the file — with no signal that paste and @-attach behave differently.</p>
-<p><strong>Suggested fix:</strong> materialise chat-pasted images to the same readable path so paste and @-attach behave identically.</p>
+<h3>5 — Reasoning-effort tier appears to drop after a long idle</h3>
+<p>I set the reasoning effort to its maximum, and after a long idle I found it had reverted to a lower tier ("Extra"). I'm not yet sure of the mechanism: it's an open question whether the maximum mode ("ultracode") is a separate control from the effort tier, or whether the tier itself reset on its own. Reported from direct experience; I haven't isolated the trigger yet.</p>
+<p><strong>Why it matters:</strong> if effort silently drops back from maximum during a long unattended run, work that was meant to run at full reasoning quietly continues at a lower tier, with no indication that the setting changed.</p>
+<p><strong>Suggested fix:</strong> keep an explicitly-set effort tier sticky across idle periods (or, if maximum mode and the effort tier are separate controls, make that relationship visible so it's clear which one is active).</p>
 <h3>6 — Disk and agent-worktree + scratchpad artifacts accumulate with no auto-cleanup</h3>
 <p>On this environment the writable volume (~270 GB) sat ~50% used with ~20 GB free; accumulated agent worktrees (~2.8 GB across ~34 of them) and the scratchpad (~3.9 GB) were never auto-cleaned.</p>
 <p><strong>Why it matters:</strong> across a long unattended multi-agent run, untended worktree and scratchpad artifacts steadily eat the envelope with nothing cleaning up after them. (It ties into the idle-agents item above: stale agents leave stale worktrees.)</p>
@@ -115,7 +115,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <li><strong>GitHub App install</strong> — the App correctly installed on @SJParthi (All repositories, read/write), which the running session still didn't pick up (illustrates item 3).</li>
 <li><strong>Background-tasks panel</strong> — review agents at 5 h+ runtimes with only 1–4 tool uses each, alongside the large finished pile (illustrates item 4).</li>
 </ul>
-<p><em>Prepared 2026-06-27. Still trying to capture cleanly: whether the effort tier reverts after a long idle (observed once, not reproduced). Where I couldn't reproduce something reliably, I've said so plainly rather than overstating it.</em></p>
+<p><em>Prepared 2026-06-27. Where I couldn't reproduce something reliably, I've said so plainly rather than overstating it.</em></p>
 </main>
 </body>
 </html>
