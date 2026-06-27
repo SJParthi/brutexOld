@@ -90,7 +90,7 @@ import queue
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -307,9 +307,11 @@ class ShardedWriteConsumer:
             item = q.get()
             if item is self._poison:
                 return
-            # `item` is a WriteRequest here (the only other thing ever enqueued).
-            assert isinstance(item, WriteRequest)  # noqa: S101 — queue-content invariant
-            self._write_one(item)
+            # `item` is a WriteRequest here: the queue only ever carries a WriteRequest or
+            # the unique poison-pill sentinel, and the sentinel already returned above.
+            # `cast` narrows the type for the checkers without a strippable `assert`
+            # (which bandit B101 flags) and without an unreachable runtime branch.
+            self._write_one(cast(WriteRequest, item))
 
     def _write_one(self, request: WriteRequest) -> None:
         """Durably write ONE request and settle its box (result XOR captured exception)."""
