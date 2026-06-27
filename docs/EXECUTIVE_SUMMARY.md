@@ -36,7 +36,7 @@ design, not by omission.
 | **Performance / O(1)** — Golden-Rule-5 hot paths | ✅ Pass | Low | All 4 hot paths have dedicated passing O(1) ratio gates on shared CI. Full bench suite: 143 passed, 4 skipped, 1 transient flake (non-flaky in isolation). | Verified | Each Golden-Rule-5 hot path (bar lookup, indicator lookup, combo dedup Bloom+LMDB, mask u64-AND, result append) has a dedicated passing O(1) ratio gate on every push. Two-tier ceiling (3–10× shared CI / strict 1.1× on quiet M4-Pro) honestly resolves the DEC-P0-020 shared-runner variance. |
 | **Monitoring / observability** — `brutex/observability` + `brutex/notifications` | ✅ Pass | Low | 100.00% line + branch (1,263 stmts / 248 branches, 0 missing) across all 11 observability + 3 notifications modules | Verified | Strong, evidence-backed. 14 modules at 100%; 369+118 tests green; ruff + `mypy --strict` clean. The `pull_health` monitor (previously a dormant FAST-FOLLOW per its docstring) is NOW genuinely bound into both live-pull build sites; gauges flow to `/metrics`, alerts to Telegram. |
 | **CI/CD pipelines** | ✅ Pass | Low | 100% line+branch gate (`--cov-fail-under=100`, whole package, omit list empty); verified on sampled critical modules (money.py 14/14 stmts 100.00%). Full-package aggregate run NOT executed locally (25-min CI job). | Verified | Gate matrix comprehensive, real, and fail-closed. 31 hard gates aggregated by `ci-ok` with a strict result loop. Verified functional: coverage (sampled), ruff lint/format, `mypy --strict`, bandit, golden (140), property (263), redteam gate-integrity (62), smoke (15), guard scripts. |
-| **Testing / coverage** | ✅ Pass | Low | 100.00% line + 100.00% branch (23,044 stmts, 5,378 branches, 0 missing each; 259 files) | Verified | All 7 charter test types (unit, integration, property/hypothesis, golden, bench, stress, chaos) + mutation, smoke, redteam exist and are wired into CI. Package-wide 100% gate RUNS GREEN locally: 8,114 passed / 33 skipped / 0 failed. |
+| **Testing / coverage** | ✅ Pass | Low | 100.00% line + 100.00% branch (23,044 stmts, 5,378 branches, 0 missing each; 259 files) | Verified | All 7 charter test types (unit, integration, property/hypothesis, golden, bench, stress, chaos) + mutation, smoke, redteam exist and are wired into CI. Full `pytest tests/` measured in a genuinely CLEAN Python 3.12 venv (off origin/main `748c1696`): **8,532 passed / 39 skipped / 0 failed / 0 errors** (exit 0). See the "Test-count integrity note" below — the earlier "8,114 passed / 33 skipped" figure was measured in an environment containing a fabricated `httpx2` stub that masked 30 dashboard tests. |
 | **Dependencies / recovery** | ✅ Pass | Low | 100% line+branch on the 5 resilience modules (atomic_io 42/6, partition_lock 23/0, reauth 48/2, deadline 20/4, errors 10/0); 115 resilience unit tests pass; pip-audit + bandit clean | Verified | No defects. Dependency hygiene strong: ranged bounds with decision-ID rationale, exact-pin justified for cma, Rust crates locked + deny.toml-guarded, multi-layer CI scanning (pip-audit/bandit/pip-licenses/SBOM per-push + safety/cargo-audit/cargo-deny weekly). |
 | **Deployment infrastructure** — Kubernetes / containers / message-queues / event-systems / multi-service-deploy / external caching | N/A | N/A | n/a | Verified | N/A justified by evidence (see "Honestly N/A" below). BruteX is a backtest-only engine plus a single local FastAPI dashboard process; no deployment/orchestration infrastructure by design and by repo scope (CLAUDE.md §1 out-of-scope list). |
 
@@ -70,6 +70,35 @@ stated for transparency per Golden Rule #10:
   not an audit defect. *What's needed:* a live Groww probe transcript to
   promote the rate fact from UNVERIFIED to VERIFIED.
 
+### Test-count integrity note
+
+The earlier headline of **"8,114 passed / 33 skipped / 0 failed"** was
+measured in an environment whose `pyproject.toml` declared a **fabricated
+`httpx2` dependency** (a typo / typosquat — Starlette's `TestClient` imports
+`httpx`, not `httpx2`). Two dashboard integration suites
+(`tests/integration/test_dashboard_e2e.py` and
+`test_dashboard_responsive_under_write.py`) guarded on
+`pytest.importorskip("httpx2")`, so **30 test functions were silently skipped
+behind a package that does not exist**. A clean re-measurement (Python 3.12
+venv from the real package index, `import httpx2` → `ModuleNotFoundError`, real
+`starlette 0.49.3` using `httpx`, the Rust `trading_core`/`fno_math` kernels
+built from source, off origin/main `748c1696`) yields the corrected, honest
+figure: **8,532 passed / 39 skipped / 0 failed / 0 errors**.
+
+- The corrected total (8,532) is *higher* than the earlier 8,114 — the suite
+  grew between the two measurements; "0 failed" was technically accurate on
+  any clean run, but the original headline **hid** that 30 tests never executed.
+- Of the 39 clean-venv skips, exactly **2 module-level skips** were the `httpx2`
+  typo (the 30 hidden tests). The other 37 are legitimate (M4-Pro absolute-SLA
+  gates, Phase-2-pending stubs, invariant-catalog→implementation redirects, one
+  fib follow-up).
+- **Root-cause fix:** `DEC-HTTPX2-ROT-FIX-001` (MIGRATION.md #941) removes the
+  fabricated `httpx2` line from `pyproject.toml` and repoints both guards to the
+  real `httpx`. After the fix the two files COLLECT + RUN: **30 passed, 0
+  failed** — *no newly-surfaced failures* (the illusion was hiding passing
+  tests, not masking failures). Until that fix merges, any "100% pass" headline
+  must be read against this note (Golden Rule #1 / #10: honest, not inflated).
+
 ---
 
 ## Honestly N/A (not in this repo)
@@ -101,6 +130,10 @@ Transparency rule.
 
 BruteX passes the charter audit cleanly across all 11 in-scope areas at the
 mandated 100% line + 100% branch coverage and strict type-checking, with no
-WARN or FAIL findings. The only "gaps" are honest scope boundaries
-(deployment infra out of scope; the vendor rate-cap is operator-directed
-pending a live probe) — explicitly documented rather than papered over.
+WARN or FAIL findings. The full clean-venv suite is **8,532 passed / 39
+skipped / 0 failed / 0 errors** (see the "Test-count integrity note" — the
+earlier 8,114 figure was measured against a fabricated `httpx2` stub that
+masked 30 dashboard tests; the root-cause removal is `DEC-HTTPX2-ROT-FIX-001`,
+MIGRATION.md #941). The only "gaps" are honest scope boundaries (deployment
+infra out of scope; the vendor rate-cap is operator-directed pending a live
+probe) — explicitly documented rather than papered over.
