@@ -62,7 +62,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tr><td>3</td><td>Connecting the GitHub App doesn't reach an already-running session</td><td>✅ Verified</td></tr>
 <tr><td>4</td><td>A Project isn't a self-running container; 24/7 needs a manually-wired Routine</td><td>✅ Verified</td></tr>
 <tr><td>5</td><td>The 403 is a broker message with misleading "org admin" wording on a <strong>personal</strong> account</td><td>✅ Verified</td></tr>
-<tr><td>6</td><td>No per-task liveness/progress signal — a batch "felt stalled" while landing PRs</td><td>✅ Verified</td></tr>
+<tr><td>6</td><td>Long-running agents sit idle/orphaned for hours with no liveness or stalled signal</td><td>✅ Verified (screenshot-backed)</td></tr>
 <tr><td>7</td><td>Can't re-run a failed CI check — must push an empty commit</td><td>✅ Verified</td></tr>
 <tr><td>8</td><td>Chat-pasted screenshots aren't file-readable (only @-attached uploads are)</td><td>✅ Verified</td></tr>
 <tr><td>9</td><td>One shared ledger file serialises parallel-branch merges</td><td>✅ Verified</td></tr>
@@ -94,8 +94,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <pre><code>HTTP 403
 {"message":"GitHub access is not enabled for this session. An org admin must connect the Claude GitHub App for this organization.","documentation_url":".../claude-code/github-actions"}</code></pre>
 <p><strong>Fix:</strong> detect the personal-account + already-connected state and say what's true (<em>"this session's GitHub access was not enabled; start a new session to recover"</em>); distinguish broker-gate from credential errors.</p>
-<h3>6 — No per-task liveness/progress signal</h3>
-<p>In a big fan-out, agents that were almost certainly stuck (≈5 h elapsed, 2–4 tool uses) sat in the same "Running" list as obviously-live ones (8 m, 53 tool uses) — indistinguishable. The panel shows elapsed time and a tool-use count but <strong>no "last active N min ago," heartbeat, progress %, or stalled badge.</strong> The run repeatedly <em>felt</em> stalled while it was in fact landing PRs: between 2026-06-24 and 2026-06-26, <strong>20 commits landed on <code>origin/main</code>, 13 with a <code>(#NNN)</code> PR marker.</strong> <strong>Fix:</strong> per-task liveness (last-tool-use + stalled badge), a tool-use-rate progress hint, batch-level "N PRs opened/merged."</p>
+<h3>6 — Long-running agents sit idle/orphaned for hours with no liveness or stalled signal</h3>
+<p><strong>Observed (✅ Verified — screenshot-backed):</strong> the Background-tasks panel showed multiple agents marked "running" for <strong>5+ hours</strong> while making as few as <strong>1 tool action</strong> the whole time — e.g. <em>"Reuse review of PR #887"</em> at <strong>5 h 01 m with 1 tool use</strong>, <em>"Altitude review of PR #887"</em> at <strong>5 h 01 m with 3 tool uses</strong>, and several PR #888-docs reviews at <strong>~5 h with 2 tool uses</strong>. They never auto-terminate and accumulate: the panel shows a large <strong>"Finished 294"</strong> pile alongside a long column of 5 h-running reviews.</p>
+<p><strong>Why it matters:</strong> there is no way to distinguish a <strong>stuck/idle</strong> agent (5 hours, 1 action) from one that is actively working — same "running" state, no health signal. Orphaned agents pile up indefinitely with no cleanup. This makes long unattended runs untrustworthy: you can't tell progress from a hang.</p>
+<p><strong>Fix:</strong> a per-agent liveness indicator (last-activity timestamp + a "stalled" badge once idle past a threshold), and auto-termination/cleanup of idle/orphaned agents.</p>
 <h3>7 — Can't re-run a failed CI check</h3>
 <p>On a transient CI failure (network flake, timeout) the agent has no way to "re-run failed jobs" — the only workaround is an <strong>empty re-trigger commit</strong>, which pollutes history and restarts the whole workflow. There are <strong>48 <code>chore(ci): re-trigger …</code> commits</strong> across this session's refs. (The broker 403 in #5 also blocks re-running CI via the API, leaving only the empty-commit path.) <strong>Fix:</strong> a first-class "re-run this check / re-run failed jobs" capability.</p>
 <h3>8 — Chat-pasted screenshots aren't file-readable</h3>
@@ -115,7 +117,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tbody>
 <tr><td>Overnight stranded push-only state (the in-session 403)</td><td>items 1 / 2 / 3 / 5 / 11</td><td>operator has it; text-sufficient</td></tr>
 <tr><td>Correct GitHub-App install (<code>@SJParthi</code>, All-repos, read/write)</td><td>item 3</td><td>operator has it; text-sufficient</td></tr>
-<tr><td>Background-tasks panel — stuck ~5 h / 2–4-tool agents next to live ones</td><td>item 6</td><td>shared in chat; not on disk</td></tr>
+<tr><td>Background-tasks panel — 5 h+ runtimes with 1–4 tool uses (the "Reuse/Altitude/Efficiency/Simplification review of PR #887/#888" rows + the "Finished 294" counter)</td><td>item 6</td><td>✅ screenshot-backed</td></tr>
 <tr><td>Effort tier <strong>before</strong> long idle (= max) → <strong>after</strong> (= "Extra")</td><td>item 12</td><td><strong>still needed</strong> — the before/after pair to move it Verified</td></tr>
 </tbody>
 </table>

@@ -17,7 +17,7 @@ Round-2 feedback on the **Claude Code Projects beta**, from running a real, larg
 | 3 | Connecting the GitHub App doesn't reach an already-running session | ✅ Verified |
 | 4 | A Project isn't a self-running container; 24/7 needs a manually-wired Routine | ✅ Verified |
 | 5 | The 403 is a broker message with misleading "org admin" wording on a **personal** account | ✅ Verified |
-| 6 | No per-task liveness/progress signal — a batch "felt stalled" while landing PRs | ✅ Verified |
+| 6 | Long-running agents sit idle/orphaned for hours with no liveness or stalled signal | ✅ Verified (screenshot-backed) |
 | 7 | Can't re-run a failed CI check — must push an empty commit | ✅ Verified |
 | 8 | Chat-pasted screenshots aren't file-readable (only @-attached uploads are) | ✅ Verified |
 | 9 | One shared ledger file serialises parallel-branch merges | ✅ Verified |
@@ -60,8 +60,12 @@ HTTP 403
 
 **Fix:** detect the personal-account + already-connected state and say what's true (*"this session's GitHub access was not enabled; start a new session to recover"*); distinguish broker-gate from credential errors.
 
-### 6 — No per-task liveness/progress signal
-In a big fan-out, agents that were almost certainly stuck (≈5 h elapsed, 2–4 tool uses) sat in the same "Running" list as obviously-live ones (8 m, 53 tool uses) — indistinguishable. The panel shows elapsed time and a tool-use count but **no "last active N min ago," heartbeat, progress %, or stalled badge.** The run repeatedly *felt* stalled while it was in fact landing PRs: between 2026-06-24 and 2026-06-26, **20 commits landed on `origin/main`, 13 with a `(#NNN)` PR marker.** **Fix:** per-task liveness (last-tool-use + stalled badge), a tool-use-rate progress hint, batch-level "N PRs opened/merged."
+### 6 — Long-running agents sit idle/orphaned for hours with no liveness or stalled signal
+**Observed (✅ Verified — screenshot-backed):** the Background-tasks panel showed multiple agents marked "running" for **5+ hours** while making as few as **1 tool action** the whole time — e.g. *"Reuse review of PR #887"* at **5 h 01 m with 1 tool use**, *"Altitude review of PR #887"* at **5 h 01 m with 3 tool uses**, and several PR #888-docs reviews at **~5 h with 2 tool uses**. They never auto-terminate and accumulate: the panel shows a large **"Finished 294"** pile alongside a long column of 5 h-running reviews.
+
+**Why it matters:** there is no way to distinguish a **stuck/idle** agent (5 hours, 1 action) from one that is actively working — same "running" state, no health signal. Orphaned agents pile up indefinitely with no cleanup. This makes long unattended runs untrustworthy: you can't tell progress from a hang.
+
+**Fix:** a per-agent liveness indicator (last-activity timestamp + a "stalled" badge once idle past a threshold), and auto-termination/cleanup of idle/orphaned agents.
 
 ### 7 — Can't re-run a failed CI check
 On a transient CI failure (network flake, timeout) the agent has no way to "re-run failed jobs" — the only workaround is an **empty re-trigger commit**, which pollutes history and restarts the whole workflow. There are **48 `chore(ci): re-trigger …` commits** across this session's refs. (The broker 403 in #5 also blocks re-running CI via the API, leaving only the empty-commit path.) **Fix:** a first-class "re-run this check / re-run failed jobs" capability.
@@ -89,7 +93,7 @@ After a long idle, the effort selector **appears** to fall from the chosen maxim
 |---|---|---|
 | Overnight stranded push-only state (the in-session 403) | items 1 / 2 / 3 / 5 / 11 | operator has it; text-sufficient |
 | Correct GitHub-App install (`@SJParthi`, All-repos, read/write) | item 3 | operator has it; text-sufficient |
-| Background-tasks panel — stuck ~5 h / 2–4-tool agents next to live ones | item 6 | shared in chat; not on disk |
+| Background-tasks panel — 5 h+ runtimes with 1–4 tool uses (the "Reuse/Altitude/Efficiency/Simplification review of PR #887/#888" rows + the "Finished 294" counter) | item 6 | ✅ screenshot-backed |
 | Effort tier **before** long idle (= max) → **after** (= "Extra") | item 12 | **still needed** — the before/after pair to move it Verified |
 
 *Prepared 2026-06-27. Every Verified item is reproducible from this repo and session; every 🟡 item is labelled needs-repro per the project's verify-before-claim bar (CLAUDE.md §2 Golden Rule #10).*
