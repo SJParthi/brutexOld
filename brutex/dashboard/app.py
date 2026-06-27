@@ -2250,29 +2250,36 @@ def build_app(
                         until_clean=True,
                     )
 
-            def _warm_movers() -> int:
-                """Gated phase 4 (DEC-PULL-MOVERS-WARM-001): warm the default movers snapshots.
+            def _warm_for_date() -> tuple[str, int] | None:
+                """Resolve the warm target ``(latest_movers_date, generation)``, or ``None``.
 
-                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate). Targets the
-                LATEST available spot day (never 'today' — the pull fills only to the previous
-                trading day, so a today-warm would cache empties), at the current post-pull
-                generation, so the operator's first /movers open is an O(1) cache hit. Reuses
-                the EXACT candidate_key + compute the /api/v1/movers route uses (no drift,
-                CLAUDE.md §11 COMMON). Returns how many of spot/futures/options warmed non-empty.
-
-                Whole-body best-effort: the date resolution + every job is wrapped so a
-                transient lake-read race NEVER propagates to fail the already-successful pull
-                (Correctness of the pull > the warm's latency benefit, DEC-PULL-MOVERS-WARM-001).
+                Best-effort: the date resolution is wrapped so a transient lake-read race
+                NEVER propagates to fail the already-successful segment (Correctness of the
+                pull > the warm's latency benefit). Targets the LATEST available spot day
+                (never 'today' — the pull fills only to the previous trading day, so a
+                today-warm would cache empties); ``None`` when the lake has no spot day yet.
                 """
                 try:
                     warm_date = latest_movers_date(lake_root)
                 except Exception as exc:  # pylint: disable=broad-except - best-effort warm
                     _LOG.warning("movers.warm.latest_date_failed", error=str(exc))
-                    return 0
+                    return None
                 if warm_date is None:
+                    return None
+                # post-pull generation (the pull bumped it) — the SAME the /movers route reads.
+                return warm_date, _summary_cache.generation
+
+            def _warm_spot_movers() -> int:
+                """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
+
+                Reuses the EXACT candidate_key + compute the /api/v1/movers route uses (no
+                drift, CLAUDE.md §11 COMMON). Best-effort via ``warm_movers_snapshots`` — a
+                warmer that raises is logged + counted 0, never failing the successful pull.
+                """
+                resolved = _warm_for_date()
+                if resolved is None:
                     return 0
-                gen = _summary_cache.generation  # post-pull generation (the pull bumped it)
-                tier, trk = normalize_options_selectors(None, None)  # near / all
+                warm_date, gen = resolved
 
                 def _spot_job() -> int:
                     cands = _movers_cache.get_or_compute(
@@ -2293,6 +2300,16 @@ def build_app(
                         ),
                     )
                     return len(cands.snapshots)
+
+                return warm_movers_snapshots([_spot_job])
+
+            def _warm_futures_movers() -> int:
+                """Per-segment FUTURES warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds."""
+                resolved = _warm_for_date()
+                if resolved is None:
+                    return 0
+                warm_date, gen = resolved
+                tier = normalize_futures_tier(None)  # near
 
                 def _fut_job() -> int:
                     cands = _movers_cache.get_or_compute(
@@ -2315,6 +2332,16 @@ def build_app(
                         ),
                     )
                     return len(cands.movers)
+
+                return warm_movers_snapshots([_fut_job])
+
+            def _warm_options_movers() -> int:
+                """Per-segment OPTIONS warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds."""
+                resolved = _warm_for_date()
+                if resolved is None:
+                    return 0
+                warm_date, gen = resolved
+                tier, trk = normalize_options_selectors(None, None)  # near / all
 
                 def _opt_job() -> int:
                     cands = _movers_cache.get_or_compute(
@@ -2340,7 +2367,7 @@ def build_app(
                     )
                     return len(cands.movers)
 
-                return warm_movers_snapshots([_spot_job, _fut_job, _opt_job])
+                return warm_movers_snapshots([_opt_job])
 
             def _prebuild_timeframes() -> int:
                 """Gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build derived TFs.
@@ -2360,7 +2387,7 @@ def build_app(
 
                 Whole-body best-effort: every failure is swallowed so a transient lake-read
                 race NEVER fails the already-successful pull (Correctness of the pull > the
-                pre-build's speed benefit, mirroring _warm_movers).
+                pre-build's speed benefit, mirroring the per-segment movers warmers).
                 """
                 from brutex.data.tf_autoderive import run_autoderive
 
@@ -2399,7 +2426,9 @@ def build_app(
                 run_spot=_run_spot,
                 run_metadata=_run_metadata,
                 run_historical=_run_historical,
-                run_movers=_warm_movers,
+                warm_spot_movers=_warm_spot_movers,
+                warm_futures_movers=_warm_futures_movers,
+                warm_options_movers=_warm_options_movers,
                 run_prebuild=_prebuild_timeframes,
             )
             if report.spot is not None:
