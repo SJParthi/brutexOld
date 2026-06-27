@@ -48,25 +48,39 @@ def _filled(path: Path, n: int) -> SweepAuditWriter:
 
 
 class TestAppendIsO1:
-    def test_append_at_small_scale(self, benchmark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-        writer = _filled(tmp_path / "small.jsonl", _SMALL)
-        try:
-            entry = benchmark(
-                lambda: writer.append(action="COMBO_DONE", subject="combo:bench", payload=_PAYLOAD)
-            )
-            assert entry.entry_hash
-        finally:
-            writer.close()
+    def test_append_throughput_smoke_small(self, benchmark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+        """Throughput smoke at a 1k-line base.
 
-    def test_append_at_large_scale(self, benchmark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-        writer = _filled(tmp_path / "large.jsonl", _LARGE)
-        try:
+        NOTE: each ``benchmark`` round appends to the SAME growing file, so this
+        measures end-to-end append THROUGHPUT, not a fixed-base O(1) latency. The
+        O(1) latency claim is proved exclusively by :meth:`test_append_ratio_is_o1`.
+        """
+        with _filled(tmp_path / "small.jsonl", _SMALL) as writer:
             entry = benchmark(
                 lambda: writer.append(action="COMBO_DONE", subject="combo:bench", payload=_PAYLOAD)
             )
-            assert entry.entry_hash
-        finally:
-            writer.close()
+            # Last round's entry must be a well-formed chain link: a 64-char hex
+            # BLAKE3 hash, and the writer's seq must have advanced past the base.
+            assert len(entry.entry_hash) == 64
+            assert all(c in "0123456789abcdef" for c in entry.entry_hash)
+            assert writer.seq > _SMALL
+
+    def test_append_throughput_smoke_large(self, benchmark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+        """Throughput smoke at a 100k-line base.
+
+        NOTE: each ``benchmark`` round appends to the SAME growing file, so this
+        measures end-to-end append THROUGHPUT, not a fixed-base O(1) latency. The
+        O(1) latency claim is proved exclusively by :meth:`test_append_ratio_is_o1`.
+        """
+        with _filled(tmp_path / "large.jsonl", _LARGE) as writer:
+            entry = benchmark(
+                lambda: writer.append(action="COMBO_DONE", subject="combo:bench", payload=_PAYLOAD)
+            )
+            # Last round's entry must be a well-formed chain link: a 64-char hex
+            # BLAKE3 hash, and the writer's seq must have advanced past the base.
+            assert len(entry.entry_hash) == 64
+            assert all(c in "0123456789abcdef" for c in entry.entry_hash)
+            assert writer.seq > _LARGE
 
     def test_append_ratio_is_o1(self, tmp_path: Path) -> None:
         """Appending one line costs the same at a 100k-line base as at a 1k base.
@@ -78,16 +92,13 @@ class TestAppendIsO1:
         """
 
         def _time(name: str, n: int, *, iterations: int = 2_000) -> float:
-            writer = _filled(tmp_path / name, n)
-            try:
+            with _filled(tmp_path / name, n) as writer:
                 for _ in range(50):  # warm
                     writer.append(action="WARM", subject="combo:warm", payload=_PAYLOAD)
                 t0 = time.perf_counter_ns()
                 for _ in range(iterations):
                     writer.append(action="COMBO_DONE", subject="combo:t", payload=_PAYLOAD)
                 t1 = time.perf_counter_ns()
-            finally:
-                writer.close()
             return (t1 - t0) / iterations
 
         t_small = _time("ratio_small.jsonl", _SMALL)
