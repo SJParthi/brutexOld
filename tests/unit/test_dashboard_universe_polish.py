@@ -13,8 +13,9 @@ What this pins:
   surfaces align to one rhythm instead of ad-hoc per-element pixels;
 * the ``--line`` custom property is finally DEFINED (the date/select inline
   styles referenced it but the palette never declared it → invisible borders);
-* the pull toolbar is grouped (``pull-row`` / ``daterange`` / ``ctl-field``)
-  with a shared control height, and carries ``role="toolbar"``;
+* the pull toolbar is grouped (``pull-row`` / ``ctl-field``) with a shared control
+  height, and carries ``role="toolbar"`` (the ``daterange`` group was REMOVED by
+  DEC-UNIVERSE-PULL-CONSOLIDATE-001 — the pipeline accepts no from/to);
 * the responsive grid collapses (no fixed-3-col overflow on laptop/tablet/phone);
 * the nav is class-driven with an ``aria-current`` "you are here" pill (was
   inline-styled, which blocked hover/focus states);
@@ -50,7 +51,10 @@ def test_pull_toolbar_is_grouped_and_labelled() -> None:
     html = _render_universe_html()
     assert 'class="pullbar" role="toolbar"' in html, "the pull bar must be a labelled toolbar"
     assert 'class="pull-row"' in html, "the control row grouping is missing"
-    assert 'class="daterange"' in html, "the from→to date group is missing"
+    # The from→to date GROUP was REMOVED (DEC-UNIVERSE-PULL-CONSOLIDATE-001 FIX-FIRST
+    # follow-up — the pipeline accepts no from/to, so the picker was dead UI). The
+    # toolbar still groups the static window + granularity fields.
+    assert 'class="daterange"' not in html, "the dead date-range group must be removed"
     assert 'class="ctl-field"' in html, "the granularity field group is missing"
     # every pull-bar button shares ONE height so the row aligns.
     assert re.search(r"\.pullbtn, \.loadbtn \{[^}]*min-height:var\(--ctl-h\)", html), (

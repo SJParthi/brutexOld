@@ -15,8 +15,6 @@ gate, beam not ``display:none``, no ``.running`` toggle) and pass after it.
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from brutex.dashboard.app import _render_universe_html
 
@@ -44,23 +42,27 @@ def test_js_flags_running_at_start_and_clears_it_on_finish() -> None:
     )
     cleared = html.count('classList.remove("running")') + html.count("classList.remove('running')")
     assert cleared >= 2, (
-        "the 'running' class must be cleared when a pull finishes (runPull finally + finishLive)"
+        "the 'running' class must be cleared when a pull finishes "
+        "(runMaterialize finally + finishLive)"
     )
 
 
-def test_date_pickers_prefilled_with_canonical_default() -> None:
-    """DEC-DEFAULT-DATE-RANGE-001: the from/to pickers are PRE-FILLED with the
-    canonical [2020-01-01, previous day] default, and no token leaks through."""
+def test_date_pickers_removed_for_static_fixed_window_label() -> None:
+    """DEC-UNIVERSE-PULL-CONSOLIDATE-001 (FIX-FIRST follow-up): the from/to date
+    pickers are REMOVED — the consolidated pipeline button accepts no from/to and
+    always pulls the fixed default window, so an inert picker was dead/misleading UI.
+
+    The pickers (and their ``__BRUTEX_DATE_*__`` tokens) are gone, replaced by a
+    static "window · 2020 → prev-day (fixed)" label; the report page keeps its own
+    pickers via the shared ``_fill_default_dates`` (unaffected — the universe page
+    simply carries no token for it to fill)."""
     from brutex.dashboard.app import _render_universe_html
-    from brutex.dashboard.pull_controller import default_date_range
 
     html = _render_universe_html()
-    from_iso, to_iso = default_date_range()
-    max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
-    assert from_iso == "2020-01-01"
-    assert f'id="fromDate" min="2020-01-01" max="{max_iso}" value="{from_iso}"' in html
-    assert f'id="toDate" min="2020-01-01" max="{max_iso}" value="{to_iso}"' in html
-    assert "__BRUTEX_DATE_" not in html  # the placeholder tokens were all substituted
+    assert 'id="fromDate"' not in html  # the dead from-date input is removed
+    assert 'id="toDate"' not in html  # the dead to-date input is removed
+    assert "__BRUTEX_DATE_" not in html  # no placeholder token leaks (none remain to fill)
+    assert "window · <b>2020 → prev-day</b> (fixed)" in html  # the honest static label
 
 
 def test_spot_interval_dropdown_is_retired() -> None:
