@@ -281,10 +281,14 @@ def rank_combos(
     Returns
     -------
     list[RankedCombo]
-        The gate-passing combos sorted by composite score (descending). Empty if
-        no candidate survives the gates. When ``overfit`` is supplied and the pool
-        was deflatable, each :class:`RankedCombo` carries its ``deflated_sharpe``
-        and the composite includes the weighted Deflated-Sharpe z-term.
+        The gate-passing combos sorted by composite score (descending), with the
+        combo's unique ``mask`` (ascending) as the deterministic final tie-break, so
+        the ranking is a TOTAL order: a leaderboard ranks bit-identically regardless
+        of the order ``candidates`` was enumerated in (Golden Rules #4/#7;
+        DEC-RANKING-TIEBREAK-001). Empty if no candidate survives the gates. When
+        ``overfit`` is supplied and the pool was deflatable, each :class:`RankedCombo`
+        carries its ``deflated_sharpe`` and the composite includes the weighted
+        Deflated-Sharpe z-term.
     """
     survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
 
@@ -344,7 +348,18 @@ def rank_combos(
         )
         for i, (mask, m) in enumerate(survivors)
     ]
-    ranked.sort(key=lambda rc: rc.composite_score, reverse=True)
+    # Deterministic TOTAL order (DEC-RANKING-TIEBREAK-001): primary key is the
+    # composite score DESCENDING, with the combo's unique ``mask`` ASCENDING as the
+    # final tie-break. ``mask`` is the per-(instrument, TF) combo identity, so the
+    # key ``(-composite_score, mask)`` is a strict total order — two distinct
+    # survivors can never compare equal. A bare ``key=composite_score, reverse=True``
+    # left tied scores in INPUT order (``list.sort`` is stable), so permuting the
+    # candidate enumeration permuted the leaderboard for any score tie — a violation
+    # of idempotence/reproducibility (Golden Rules #4/#7). The negation orders the
+    # score descending while keeping ``mask`` ascending in ONE ``reverse=False`` sort
+    # (composite scores are finite — every z-term is clamped to ``[-_Z_CLAMP,
+    # +_Z_CLAMP]``, so ``-score`` is finite and well-ordered, never ``NaN``).
+    ranked.sort(key=lambda rc: (-rc.composite_score, rc.mask))
     return ranked
 
 

@@ -205,6 +205,73 @@ class TestRankCombos:
         assert len(ranked) == 2
 
 
+# ────── tie-break determinism (DEC-RANKING-TIEBREAK-001) ──────
+
+
+class TestTieBreakDeterminism:
+    """The ranking is a TOTAL order: ties break on the unique mask, so a leaderboard
+    ranks bit-identically regardless of input enumeration order (Golden Rules #4/#7).
+
+    The pre-fix sort keyed on ``composite_score`` alone left tied scores in INPUT
+    order (``list.sort`` is stable), so permuting the candidates permuted the output
+    for any tie. These cases pin the deterministic ``(-composite_score, mask)`` key.
+    """
+
+    def test_identical_metrics_tie_break_ascending_mask(self) -> None:
+        # Three combos with byte-identical metrics → identical composite (0.0, zero
+        # variance). They MUST come out in ascending-mask order, not input order.
+        cand = [(30, _m(sharpe_ratio=2.0)), (10, _m(sharpe_ratio=2.0)), (20, _m(sharpe_ratio=2.0))]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [10, 20, 30]
+
+    def test_tied_scores_are_input_order_independent(self) -> None:
+        # The same leaderboard in a DIFFERENT enumeration order yields the SAME
+        # ranking (the determinism the stable-sort-only version violated).
+        base = [(10, _m(sharpe_ratio=2.0)), (20, _m(sharpe_ratio=2.0)), (30, _m(sharpe_ratio=2.0))]
+        forward = [rc.mask for rc in rank_combos(base)]
+        reverse = [rc.mask for rc in rank_combos(list(reversed(base)))]
+        assert forward == reverse == [10, 20, 30]
+
+    def test_score_dominates_mask(self) -> None:
+        # The mask tie-break is STRICTLY secondary: a higher composite always wins
+        # even when its mask is larger. mask=99 (high Sharpe) must beat mask=1.
+        cand = [(99, _m(sharpe_ratio=3.0)), (1, _m(sharpe_ratio=0.1))]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [99, 1]
+        assert ranked[0].composite_score > ranked[1].composite_score
+
+    def test_partial_tie_groups_break_on_mask(self) -> None:
+        # Two score groups: the high-Sharpe pair ties at one composite, the
+        # low-Sharpe pair ties at another. Within each tied group the order is
+        # mask-ascending; the high group precedes the low group.
+        cand = [
+            (40, _m(sharpe_ratio=3.0)),
+            (10, _m(sharpe_ratio=3.0)),
+            (30, _m(sharpe_ratio=0.5)),
+            (20, _m(sharpe_ratio=0.5)),
+        ]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [10, 40, 20, 30]
+        # The two distinct score tiers really are distinct (not a single tie).
+        assert ranked[0].composite_score == ranked[1].composite_score
+        assert ranked[2].composite_score == ranked[3].composite_score
+        assert ranked[1].composite_score > ranked[2].composite_score
+
+    def test_overfit_path_tie_break_ascending_mask(self) -> None:
+        # The tie-break also governs the opt-in overfit path: survivors with an
+        # identical DSR-inclusive composite still break on ascending mask.
+        cfg = OverfitGateConfig(dsr_min=0.5)
+        cand = [
+            (30, _m(sharpe_ratio=2.0, total_trades=100)),
+            (10, _m(sharpe_ratio=2.0, total_trades=100)),
+            (20, _m(sharpe_ratio=2.0, total_trades=100)),
+        ]
+        ranked = rank_combos(cand, overfit=cfg)
+        # All three share metrics ⇒ zero cross-trial variance ⇒ ABSTAIN, legacy
+        # 7-term composite (all 0.0) ⇒ pure mask tie-break.
+        assert [rc.mask for rc in ranked] == [10, 20, 30]
+
+
 # ────── _zscores — the z-normalisation engine behind every composite term ──────
 
 
