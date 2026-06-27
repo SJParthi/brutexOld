@@ -2,9 +2,14 @@
 
 100% line+branch via a REAL temp lake (polars round-trip, no mocks): write +
 read back, the 2dp money rounding (with full-precision iv), idempotent
-re-pull (0 new), partial merge, month-split, empty input, and the
-path-safety guards.
+re-pull (0 new), partial merge, month-split, empty input, the path-safety
+guards, and the corrupt-existing-partition quarantine + bounded lock registry.
+
+Whitebox: drives the private ``_PARTITION_LOCKS`` registry, so per the
+DEC-P0-017 convention the file silences ``reportPrivateUsage`` at the top.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -253,22 +258,28 @@ class TestPartitionLock:
     correct on its own.
     """
 
-    def test_same_path_returns_same_lock(self, tmp_path: Path) -> None:
-        from brutex.data.option_parquet_writer import _partition_lock
+    def test_same_path_serialises(self, tmp_path: Path) -> None:
+        from brutex.data.option_parquet_writer import _PARTITION_LOCKS
 
         dest = tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL" / "2021-01.parquet"
-        # Interned by path: two calls for the same file → the SAME lock object (so two
-        # OptionParquetWriter instances serialise on one file).
-        assert _partition_lock(dest) is _partition_lock(dest)
+        # Interned by path: a nested non-blocking acquire of the underlying lock must
+        # FAIL while the outer one is held (two OptionParquetWriter instances serialise).
+        with _PARTITION_LOCKS.acquire(dest):
+            with _PARTITION_LOCKS._guard:  # pyright: ignore[reportPrivateUsage]
+                entry = _PARTITION_LOCKS._locks[dest]  # pyright: ignore[reportPrivateUsage]
+            assert entry.lock.acquire(blocking=False) is False
 
-    def test_different_paths_get_distinct_locks(self, tmp_path: Path) -> None:
-        from brutex.data.option_parquet_writer import _partition_lock
+    def test_different_paths_do_not_contend(self, tmp_path: Path) -> None:
+        from brutex.data.option_parquet_writer import _PARTITION_LOCKS
 
         a = tmp_path / "options" / "a" / "2021-01.parquet"
         b = tmp_path / "options" / "b" / "2021-02.parquet"
-        # Distinct partitions get distinct locks → writers to different files never
-        # block each other (the fan-out keeps its parallelism).
-        assert _partition_lock(a) is not _partition_lock(b)
+        # Distinct partitions get distinct locks → holding a's lock never blocks b's
+        # (the fan-out keeps its parallelism); b is not even interned while a is held.
+        with _PARTITION_LOCKS.acquire(a):
+            with _PARTITION_LOCKS._guard:  # pyright: ignore[reportPrivateUsage]
+                b_entry = _PARTITION_LOCKS._locks.get(b)  # pyright: ignore[reportPrivateUsage]
+            assert b_entry is None
 
     def test_concurrent_same_partition_writes_lose_no_bars(self, tmp_path: Path) -> None:
         """16 threads merge-writing the same month from a barrier keep ALL bars.
@@ -306,6 +317,47 @@ class TestPartitionLock:
         assert df.height == n_threads
         minutes = sorted(ts.minute for ts in df["timestamp"].to_list())
         assert minutes == list(range(n_threads))
+
+
+class TestCorruptExistingPartition:
+    """A corrupt existing option partition quarantines its series, never crashes (GAP #1).
+
+    The merge READ of the EXISTING partition was unguarded, so a single corrupt Parquet
+    on disk crashed the WHOLE option pull. The read now raises a QUARANTINABLE
+    ``OptionWriterError`` naming the bad path, so the spine skips that one contract and
+    every OTHER contract still pulls.
+    """
+
+    def test_corrupt_existing_partition_raises_option_writer_error(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        # First write creates a real partition.
+        assert w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)]) == 1
+        (dest,) = (tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL").glob("*.parquet")
+        # Overwrite with garbage so the REAL pl.read_parquet raises a PolarsError on merge.
+        dest.write_bytes(b"this is not a parquet file at all")
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=1)])
+
+    def test_one_corrupt_series_does_not_block_a_distinct_series(self, tmp_path: Path) -> None:
+        """A garbage partition for ONE series quarantines it; a DIFFERENT series still writes.
+
+        The lock + read are PER PATH, so a corrupt partition for series A raises only when
+        A is re-written — series B (a different partition key) writes cleanly throughout.
+        """
+        w = _writer(tmp_path)
+        other_pk = "NSE_FNO|13|WEEK|0|ATM|PUT"
+        # Series A gets a real partition, then is corrupted on disk.
+        assert w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)]) == 1
+        (dest_a,) = (tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL").glob("*.parquet")
+        dest_a.write_bytes(b"garbage")
+        # Series B (distinct partition) writes cleanly — never blocked by A's corruption.
+        assert w.write(partition_key=other_pk, coordinate=_COORD, bars=[_bar(side="PE")]) == 1
+        # A re-write of the corrupt series A still quarantines (raises), in isolation.
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=2)])
+        # B's partition is intact + readable (the quarantine of A did not touch it).
+        df_b = _read(tmp_path, segment="NSE_FNO__13__WEEK__0__ATM__PUT")
+        assert df_b.height == 1
 
 
 class TestPathSafety:

@@ -54,17 +54,146 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-from collections.abc import Generator
+import threading
+from collections import OrderedDict
+from collections.abc import Generator, Hashable
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
 
 from brutex.data.atomic_io import lake_write_guard
 
-__all__ = ["partition_lock_path", "partition_write_lock"]
+__all__ = [
+    "DEFAULT_LOCK_REGISTRY_CAPACITY",
+    "BoundedLockRegistry",
+    "partition_lock_path",
+    "partition_write_lock",
+]
 
 #: Sidecar lock directory under the lake root. A dot-prefixed sibling of ``bars/``
 #: + ``options/`` so it is never matched by a dataset glob or a lake scanner.
 _LOCK_SUBDIR = ".locks"
+
+#: Default cap on the number of interned per-partition :class:`threading.Lock`
+#: objects kept resident in a :class:`BoundedLockRegistry`. A full multi-year pull
+#: touches 10^5–10^6 distinct month partitions over its life, but only a handful are
+#: ever in flight at once (the fetch fan-out is pool-bounded), so an unbounded intern
+#: dict (the prior ``_PARTITION_LOCKS``) leaked a ``Lock`` per partition forever. 4096
+#: dwarfs the live working set while staying tiny in memory; an IN-USE lock is NEVER
+#: evicted (refcounted), so correctness is independent of the cap.
+DEFAULT_LOCK_REGISTRY_CAPACITY: Final[int] = 4096
+
+
+class _RefCountedLock:
+    """A :class:`threading.Lock` plus the number of holders/waiters intending to use it.
+
+    ``refs`` is incremented BEFORE a caller blocks on :attr:`lock` and decremented
+    AFTER it releases, so a lock with ``refs > 0`` has at least one thread mid-acquire
+    or holding it. The registry evicts only ``refs == 0`` entries, so an in-flight
+    partition write can never have its lock dropped + re-created underneath it (which
+    would split mutual exclusion across two distinct ``Lock`` objects).
+    """
+
+    __slots__ = ("lock", "refs")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.refs = 0
+
+
+class BoundedLockRegistry:
+    """Capacity-bounded intern of per-key :class:`threading.Lock` objects (CLAUDE.md §11 COMMON).
+
+    The lake writers serialise concurrent same-partition merge-writes with one shared
+    :class:`threading.Lock` per destination path. Interning those locks in a plain
+    ``dict`` (the prior ``_PARTITION_LOCKS``) grew one ``Lock`` per partition path
+    FOREVER, so a full multi-year pull could accumulate 10^5–10^6 ``Lock`` objects.
+
+    This registry caps the resident set at *capacity* with LRU eviction, evicting ONLY
+    locks with no current holders/waiters (``refs == 0``) — so an in-flight write keeps
+    its lock (correctness is independent of the cap). The exclusive section is entered
+    via :meth:`acquire`, an O(1) context manager that interns-or-reuses the key's lock,
+    refcounts it across the blocking acquire, and releases + decrements on exit. Two
+    callers for the SAME key always get the SAME live lock object (so they serialise);
+    once both finish, the lock becomes evictable.
+
+    Parameters
+    ----------
+    capacity
+        Maximum number of ``refs == 0`` (idle) locks kept resident; must be ``>= 1``.
+        IN-USE locks are never counted against eviction, so the live set may briefly
+        exceed *capacity* under heavy fan-out — bounded by the concurrent-writer count,
+        not by the number of partitions ever written.
+    """
+
+    def __init__(self, *, capacity: int = DEFAULT_LOCK_REGISTRY_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = capacity
+        self._guard = threading.Lock()
+        self._locks: OrderedDict[Hashable, _RefCountedLock] = OrderedDict()
+
+    @property
+    def capacity(self) -> int:
+        """The maximum number of idle (evictable) interned locks — O(1)."""
+        return self._capacity
+
+    def size(self) -> int:
+        """The number of interned locks currently resident — O(1)."""
+        with self._guard:
+            return len(self._locks)
+
+    def _checkout(self, key: Hashable) -> _RefCountedLock:
+        """Intern-or-reuse *key*'s lock, refcount it, and prune idle locks. O(1) amortised."""
+        with self._guard:
+            entry = self._locks.get(key)
+            if entry is None:
+                entry = _RefCountedLock()
+                self._locks[key] = entry
+            entry.refs += 1
+            self._locks.move_to_end(key)  # most-recently-used.
+            self._prune_locked()
+            return entry
+
+    def _checkin(self, key: Hashable, entry: _RefCountedLock) -> None:
+        """Drop *key*'s refcount; once idle it becomes eligible for eviction. O(1)."""
+        with self._guard:
+            entry.refs -= 1
+            self._prune_locked()
+
+    def _prune_locked(self) -> None:
+        """Evict least-recently-used IDLE (``refs == 0``) locks while over capacity.
+
+        Called only under :attr:`_guard`. Walks oldest-first and removes only idle
+        entries, so an in-use lock is never dropped — it merely defers pruning until it
+        goes idle. Counting only idle locks against the cap means the live (in-use) set
+        is bounded by the concurrent-writer count, never the partition count.
+        """
+        # The IDLE (evictable, ``refs == 0``) keys oldest-first; in-use keys are excluded so
+        # they are NEVER evicted (correctness independent of the cap). Drop exactly the
+        # oldest ``len(idle) - capacity`` of them, so the resident idle set lands at the cap.
+        # ``[:negative]`` / ``[:0]`` is the empty slice — a no-op when already within budget,
+        # so there is no separate "nothing to do" branch.
+        idle_keys = [key for key, entry in self._locks.items() if entry.refs == 0]
+        for key in idle_keys[: len(idle_keys) - self._capacity]:
+            del self._locks[key]
+
+    @contextmanager
+    def acquire(self, key: Hashable) -> Generator[None, None, None]:
+        """Hold *key*'s shared exclusive lock for the ``with`` block (interned, O(1)).
+
+        The first caller for a key creates the lock; every later caller (any thread)
+        gets the SAME live object, so same-key sections serialise. The lock is
+        refcounted across the (blocking) acquire so it can never be evicted while a
+        thread is mid-acquire or holding it; on exit the lock is released and the
+        refcount dropped, after which the entry is eligible for LRU eviction.
+        """
+        entry = self._checkout(key)
+        try:
+            with entry.lock:
+                yield
+        finally:
+            self._checkin(key, entry)
 
 
 def partition_lock_path(lake_root: Path, dest: Path) -> Path:

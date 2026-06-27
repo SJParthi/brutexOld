@@ -13,11 +13,16 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import threading
 from pathlib import Path
 
 import pytest
 from brutex.data.errors import LakeWriteHalt
-from brutex.data.partition_lock import partition_lock_path, partition_write_lock
+from brutex.data.partition_lock import (
+    BoundedLockRegistry,
+    partition_lock_path,
+    partition_write_lock,
+)
 
 
 def _raise(exc: BaseException) -> None:
@@ -125,3 +130,90 @@ def test_disk_full_at_lock_creation_maps_to_halt(
     with pytest.raises(LakeWriteHalt) as exc_info:
         cm.__enter__()
     assert exc_info.value.reason == "disk_full"
+
+
+# ── BoundedLockRegistry (GAP #19) ────────────────────────────────────────────
+class TestBoundedLockRegistry:
+    """The capacity-bounded per-key lock intern (GAP #19).
+
+    The lake writers used to intern one ``threading.Lock`` per partition path in a plain
+    ``dict`` that grew FOREVER — a full multi-year pull could accumulate 10^5–10^6 ``Lock``
+    objects. This registry caps the resident set with LRU eviction of IDLE locks, while
+    NEVER evicting an in-use (refcounted) lock, so correctness is independent of the cap.
+    """
+
+    def test_rejects_non_positive_capacity(self) -> None:
+        with pytest.raises(ValueError, match="capacity must be >= 1"):
+            BoundedLockRegistry(capacity=0)
+
+    def test_capacity_and_initial_size(self) -> None:
+        reg = BoundedLockRegistry(capacity=8)
+        assert reg.capacity == 8
+        assert reg.size() == 0
+
+    def test_same_key_serialises(self) -> None:
+        """The same key gets ONE shared lock — a nested non-blocking acquire FAILS while held."""
+        reg = BoundedLockRegistry(capacity=4)
+        with reg.acquire("p"):
+            with reg._guard:  # pyright: ignore[reportPrivateUsage]
+                entry = reg._locks["p"]  # pyright: ignore[reportPrivateUsage]
+                assert entry.refs == 1  # the holder is refcounted (so it can't be evicted)
+            assert entry.lock.acquire(blocking=False) is False
+        # Released + refcount dropped after the block → idle (evictable).
+        with reg._guard:  # pyright: ignore[reportPrivateUsage]
+            assert reg._locks["p"].refs == 0  # pyright: ignore[reportPrivateUsage]
+
+    def test_idle_locks_are_evicted_when_over_capacity(self) -> None:
+        """A pull touching MANY distinct partitions keeps the resident set bounded by the cap."""
+        reg = BoundedLockRegistry(capacity=2)
+        for i in range(50):  # 50 distinct one-shot partitions, each used then released
+            with reg.acquire(f"partition-{i}"):
+                pass
+        # Idle locks were LRU-evicted down to the cap — not 50 leaked Lock objects.
+        assert reg.size() <= 2
+
+    def test_in_use_lock_is_never_evicted(self) -> None:
+        """An IN-USE (held) lock survives eviction pressure — correctness over the cap.
+
+        Hold one key's lock, then churn many OTHER keys past the cap. The held lock must
+        NOT be dropped + re-created (which would split mutual exclusion across two objects).
+        """
+        reg = BoundedLockRegistry(capacity=1)
+        with reg.acquire("held"):
+            with reg._guard:  # pyright: ignore[reportPrivateUsage]
+                held_entry = reg._locks["held"]  # pyright: ignore[reportPrivateUsage]
+            # Churn many other one-shot keys, each blowing past capacity=1.
+            for i in range(20):
+                with reg.acquire(f"other-{i}"):
+                    pass
+            # The held key is STILL the SAME interned object (never evicted while in use).
+            with reg._guard:  # pyright: ignore[reportPrivateUsage]
+                assert reg._locks["held"] is held_entry  # pyright: ignore[reportPrivateUsage]
+                assert reg._locks["held"].refs == 1  # pyright: ignore[reportPrivateUsage]
+
+    def test_concurrent_same_key_threads_mutually_exclude(self) -> None:
+        """Two threads acquiring the SAME key never overlap inside the critical section."""
+        reg = BoundedLockRegistry(capacity=4)
+        order: list[str] = []
+        start = threading.Barrier(2)
+        inside = threading.Lock()
+        overlap = {"seen": False}
+
+        def _worker(name: str) -> None:
+            start.wait()
+            with reg.acquire("shared"):
+                # If another thread is already inside, the section overlapped (a bug).
+                if not inside.acquire(blocking=False):
+                    overlap["seen"] = True
+                else:
+                    order.append(name)
+                    inside.release()
+
+        t1 = threading.Thread(target=_worker, args=("a",))
+        t2 = threading.Thread(target=_worker, args=("b",))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+        assert overlap["seen"] is False
+        assert sorted(order) == ["a", "b"]
