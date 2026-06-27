@@ -159,9 +159,7 @@ _MODES = [ROUND_HALF_EVEN, ROUND_HALF_UP, ROUND_DOWN]
     half_step=st.booleans(),
     mode=st.sampled_from(_MODES),
 )
-def test_quantise_invariant_to_ambient_rounding(
-    paise: int, half_step: bool, mode: str
-) -> None:
+def test_quantise_invariant_to_ambient_rounding(paise: int, half_step: bool, mode: str) -> None:
     """_quantise is byte-identical regardless of the ambient context mode."""
     # Build a value that may sit exactly on a half-paise tie (the only place
     # the rounding mode could ever differ).
@@ -186,9 +184,7 @@ def test_quantise_invariant_to_ambient_rounding(
     price_paise=st.integers(min_value=1, max_value=10_000_000),
     mode=st.sampled_from(_MODES),
 )
-def test_compute_costs_invariant_to_ambient_rounding(
-    qty: int, price_paise: int, mode: str
-) -> None:
+def test_compute_costs_invariant_to_ambient_rounding(qty: int, price_paise: int, mode: str) -> None:
     """A full FillCosts is byte-identical across ambient rounding modes."""
     model = IndianCostModel()
     fill_price = Decimal(price_paise) / Decimal("100")
