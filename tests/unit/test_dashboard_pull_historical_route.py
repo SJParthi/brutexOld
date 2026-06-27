@@ -347,17 +347,25 @@ def test_bad_expiry_400(
     assert "expiry must be an ISO date" in resp.json()["detail"]
 
 
-# ── the button is present + targets the route ─────────────────────────────────
+# ── the per-stage button is consolidated into the ONE pipeline button ─────────
 
 
-def test_universe_page_has_pull_historical_button(client: TestClient) -> None:
-    """The /universe page carries the ⤓ Pull historical button POSTing the route."""
+def test_universe_page_pull_historical_button_removed(client: TestClient) -> None:
+    """The separate ⤓ "Pull historical" button is REMOVED — the historical candle
+    fill is the pipeline's gated final fetch stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
+
+    The route ``/api/v1/universe/pull-historical`` itself still exists (covered by
+    this file's route tests); it is no longer surfaced as its own button. The ONE
+    ``pullPipelineBtn`` runs the gated chain that includes the historical pull.
+    """
     resp = client.get("/universe")
     assert resp.status_code == 200
-    assert "/api/v1/universe/pull-historical" in resp.text
-    assert 'id="pullHistBtn"' in resp.text
-    # the tooltip wording the operator asked for
-    assert "auto-retries until clean" in resp.text
+    # the redundant per-stage historical button is gone (no null .onclick at load)
+    assert 'id="pullHistBtn"' not in resp.text
+    assert 'getElementById("pullHistBtn")' not in resp.text
+    # the ONE pull button drives the gated pipeline (which includes the historical stage)
+    assert 'id="pullPipelineBtn"' in resp.text
+    assert "/api/v1/universe/pull-pipeline" in resp.text
 
 
 # ── the selection-resolution helper (direct, all grammar arms) ────────────────
@@ -626,9 +634,12 @@ def test_single_underlying_back_compat_preserved(
     assert _wait_for_job(client)["state"] == "done"
 
 
-def test_universe_page_pull_historical_sends_multiselect(client: TestClient) -> None:
-    """The /universe page wires the ⤓ Pull historical button to the composite multi-select."""
+def test_universe_page_no_longer_sends_standalone_historical_query(client: TestClient) -> None:
+    """The standalone ⤓ Pull historical multi-select query is GONE — the historical
+    pull runs inside the ONE gated pipeline (DEC-UNIVERSE-PULL-CONSOLIDATE-001)."""
     resp = client.get("/universe")
     assert resp.status_code == 200
-    # the one-click composite query the button now sends for a multi-select
-    assert "pull-historical?enumerate=true&symbols=" in resp.text
+    # the removed button's one-click composite query is no longer emitted by the page
+    assert "pull-historical?enumerate=true&symbols=" not in resp.text
+    # the single pipeline button posts the consolidated route instead
+    assert "/api/v1/universe/pull-pipeline" in resp.text
