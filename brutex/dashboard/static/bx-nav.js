@@ -39,6 +39,72 @@
   }
   window[SWAP_FLAG] = true;
 
+  /* ---------------------------------------------------------------------------
+   * Timer registry (BLOCKER: leaked pollers).
+   *
+   * The in-place body swap throws away the previous page's DOM but NOT its
+   * live `setInterval`/`setTimeout` timers. Every dashboard page installs its
+   * own pollers (coverage, universe's 6 intervals, …) — left running they keep
+   * fetching the server forever and `runScripts` re-registers a fresh set on
+   * every revisit, so memory + server load GROW with each navigation (the exact
+   * opposite of the latency goal).
+   *
+   * Fix (page-agnostic, COMMON — no per-page edits): wrap the timer factories
+   * ONCE here so we record every timer id installed since the last swap, then
+   * clear them right before the next swap and reset the registry. Pages keep
+   * calling the plain `setInterval`/`setTimeout` — the bookkeeping is invisible
+   * to them. Idempotent + defensive: a missing factory or a throwing clear can
+   * never break navigation. */
+  var liveIntervals = [];
+  var liveTimeouts = [];
+
+  (function wrapTimers() {
+    var realSetInterval = window.setInterval;
+    var realSetTimeout = window.setTimeout;
+    if (typeof realSetInterval === "function") {
+      window.setInterval = function () {
+        var id = realSetInterval.apply(window, arguments);
+        liveIntervals.push(id);
+        return id;
+      };
+    }
+    if (typeof realSetTimeout === "function") {
+      window.setTimeout = function () {
+        var id = realSetTimeout.apply(window, arguments);
+        liveTimeouts.push(id);
+        return id;
+      };
+    }
+  })();
+
+  /* Tear down every timer installed since the last swap + announce teardown so
+   * any future per-page cleanup can hook in. Called immediately BEFORE the body
+   * is replaced (while the old DOM + its handlers are still attached). */
+  function teardownPage() {
+    try {
+      window.dispatchEvent(new Event("bx:teardown"));
+    } catch (e) {
+      /* Event ctor can be unavailable in exotic sandboxes — never fatal. */
+    }
+    var i;
+    for (i = 0; i < liveIntervals.length; i++) {
+      try {
+        window.clearInterval(liveIntervals[i]);
+      } catch (e) {
+        /* ignore — a stale/cleared id must not abort the teardown loop. */
+      }
+    }
+    for (i = 0; i < liveTimeouts.length; i++) {
+      try {
+        window.clearTimeout(liveTimeouts[i]);
+      } catch (e) {
+        /* ignore — as above. */
+      }
+    }
+    liveIntervals = [];
+    liveTimeouts = [];
+  }
+
   /* Is this an in-page top-nav anchor we should intercept? Only same-origin,
    * non-modified, left-click, http(s) navigations inside the canonical topnav.
    * Everything else (external links, downloads, target=_blank, hash-only,
@@ -90,11 +156,21 @@
     }
   }
 
-  /* Reconcile the <head> page-specific assets (per-page <style> + <link
-   * rel=stylesheet>) so the swapped body is themed correctly. The shared
-   * /static/bx-theme.css + bx-nav.js are already present on every page, so we
-   * only ADD the assets the incoming page declares that the current head lacks,
-   * keyed by a stable signature; we never tear the head down (avoids a flash). */
+  /* Reconcile the <head> page-specific assets so the swapped body is themed AND
+   * scripted correctly. We ADD only the assets the incoming page declares that
+   * the current head lacks; we never tear the head down (avoids a flash).
+   *
+   * Two asset classes:
+   *   - <style> + <link rel=stylesheet>: cloned 1:1, keyed by exact outerHTML.
+   *   - <script src> (e.g. bx-datepicker.js, loaded in <head> on db/movers/
+   *     reports/universe): innerHTML/appendChild of a CLONED <script> does NOT
+   *     execute, so we build a FRESH executable <script> (the runScripts trick),
+   *     deduped by `src` so a script already present from a prior page is not
+   *     re-run. WITHOUT this, navigating to a datepicker page from one that did
+   *     not already load it gives a styled-but-DEAD datepicker (MAJOR). Inline
+   *     head <script> (no src) is left alone — pages keep their boot logic in
+   *     the body, which runScripts handles, and an unkeyable inline head script
+   *     would re-run on every swap. */
   function syncHeadAssets(newHead) {
     var have = {};
     var current = document.head.querySelectorAll("style,link[rel=stylesheet]");
@@ -109,6 +185,30 @@
         have[node.outerHTML] = true;
       }
     }
+    syncHeadScripts(newHead);
+  }
+
+  /* Add any <head> <script src> the incoming page declares that the live head
+   * is missing, as a fresh executable script (deduped by resolved src). */
+  function syncHeadScripts(newHead) {
+    var present = {};
+    var live = document.head.querySelectorAll("script[src]");
+    for (var i = 0; i < live.length; i++) {
+      present[live[i].src] = true; // .src is the resolved absolute URL
+    }
+    var incoming = newHead.querySelectorAll("script[src]");
+    for (var k = 0; k < incoming.length; k++) {
+      var old = incoming[k];
+      if (present[old.src]) continue;
+      var fresh = document.createElement("script");
+      for (var j = 0; j < old.attributes.length; j++) {
+        var attr = old.attributes[j];
+        fresh.setAttribute(attr.name, attr.value);
+      }
+      fresh.async = false; // preserve order against any sibling head scripts
+      document.head.appendChild(fresh);
+      present[fresh.src] = true;
+    }
   }
 
   /* Swap the parsed document into the live page. Returns true on success. */
@@ -117,6 +217,10 @@
     if (!doc || !doc.body) return false;
     var title = doc.querySelector("title");
     if (title) document.title = title.textContent || document.title;
+    // Tear down the OUTGOING page's timers + fire pagehide BEFORE we drop its
+    // DOM, so its pollers stop and any per-page cleanup runs while its handlers
+    // are still attached (BLOCKER: leaked pollers / MAJOR: stale listeners).
+    teardownPage();
     syncHeadAssets(doc.head);
     // Replace the whole body content in one shot, then boot its scripts.
     document.body.innerHTML = doc.body.innerHTML;
@@ -147,6 +251,12 @@
       });
   }
 
+  /* bx-nav's OWN document-level listeners are registered exactly ONCE per page
+   * lifetime: bx-nav.js loads from <head> (shared on every page, deduped by src
+   * in syncHeadScripts so a swap never re-adds it) and the `SWAP_FLAG` guard
+   * above hard-stops a second init. They are NOT touched by teardownPage (that
+   * clears page pollers, not the nav controller) and survive every swap intact,
+   * so they can never accumulate (MAJOR: no duplicated bx-nav handlers). */
   document.addEventListener("click", function (event) {
     var url = navTarget(event);
     if (!url) return;
