@@ -130,8 +130,9 @@ STEP_DOWN_TIMEOUT_HITS: int = 5
 #: → step UP 1 r/s (the INCREMENTAL half of the AIMD ladder). Set to ONE
 #: :data:`STEP_DOWN_WINDOW` (60 s) — symmetric with the rolling window the step-DOWN
 #: ladder watches: after a single clean 60 s window the controller probes up one rung,
-#: so it climbs the soft floor (3) back to the operator-DIRECTED 5 r/s ceiling
-#: (``GROWW_RATE_LIMIT_RPS_CEILING``) in ~2 clean windows (~2 min) instead of the prior
+#: so it climbs the soft floor (3) back to the operator-DIRECTED 8 r/s ceiling
+#: (``GROWW_RATE_LIMIT_RPS_CEILING``, DEC-GROWW-RATE-CEILING-8-002, raised 5 → 8 on
+#: 2026-06-24) in a few clean windows instead of the prior
 #: 300 s/rung (~25 min — longer than a whole pull, so a stepped-down pull never reached
 #: the ceiling; the operator-observed "stuck at ~3 r/s with 2.4x headroom",
 #: DEC-GROWW-RATE-RECOVER-8-001). SAFETY is unchanged: the DECREMENTAL ladder still steps
@@ -238,10 +239,11 @@ class RateController:
             ladder: a 429/timeout step-down lowers ``_rps`` but NEVER changes this
             cap, and a recovery step-up never raises it — it is a true fixed
             ceiling (DEC-GROWW-RATE-PERMIN-001). The Groww live path injects the
-            operator-confirmed backtesting cap (500/min); at ``ceiling_rps ≤ 5``
-            the governor is mathematically never the binding gate (5×60 = 300 < a
-            300/500 cap), so existing 5 r/s behaviour is unchanged even when a cap
-            is injected.
+            operator-confirmed backtesting cap (500/min) with the operator-DIRECTED
+            8 r/s ceiling (DEC-GROWW-RATE-CEILING-8-002, raised 5 → 8 on 2026-06-24);
+            at ``ceiling_rps ≤ 8`` the governor is mathematically never the binding
+            gate (8×60 = 480 < 500, ~4% headroom), so the per-second ceiling stays
+            the binding gate without ever fighting the per-minute cap.
         """
         self._clock = clock
         self._sleep = sleep

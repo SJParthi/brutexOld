@@ -105,7 +105,17 @@ class _Entry:
         The cached summary (the ``recompute`` result).
     generation
         The :class:`SummaryCache` generation counter value at compute time. The
-        entry is *clean* iff this equals the cache's current generation.
+        entry is *clean* iff this equals the cache's current generation AND its
+        :attr:`content_token` equals the caller's current token.
+    content_token
+        The cheap lake content fingerprint passed to :meth:`get_or_refresh` at
+        compute time (DEC-CROSS-PROCESS-CACHE-FRESH-001). The in-process
+        ``generation`` only moves on a DASHBOARD pull; a cross-process CLI
+        ``brutex fetch`` writes Parquet without bumping it, so the entry is *clean*
+        only when this token ALSO still matches — a cross-process write moves the
+        token (a new/touched partition directory) → recompute. ``""`` (the default)
+        means "no cross-process token supplied", preserving the pure
+        generation-only behaviour for callers that don't pass one.
     computed_at
         The injected clock value when the payload was computed — the TTL floor
         is measured against this.
@@ -122,6 +132,7 @@ class _Entry:
 
     payload: SummaryPayload
     generation: int
+    content_token: str
     computed_at: float
     compute_duration: float
 
@@ -188,13 +199,15 @@ class SummaryCache:
         with self._lock:
             return self._generation
 
-    def get_or_refresh(self, kind: str, *, recompute: Recompute) -> SummaryPayload:
+    def get_or_refresh(
+        self, kind: str, *, recompute: Recompute, content_token: str = ""
+    ) -> SummaryPayload:
         """Return the cached *kind* payload, recomputing only if dirty past the TTL.
 
         Decision (all under the lock, O(1)):
 
-        * **Hit** — a clean entry exists (its generation == the current
-          generation): return it, no recompute.
+        * **Hit** — a clean entry exists (its generation == the current generation
+          AND its content_token == *content_token*): return it, no recompute.
         * **Stale-but-throttled** — the entry is dirty but recomputed less than
           the ADAPTIVE floor ago (``max(ttl_floor_s, last scan duration)`` capped
           at :data:`MAX_ADAPTIVE_FLOOR_S`): return the stale entry anyway (the
@@ -202,7 +215,7 @@ class SummaryCache:
           scan storm; an expensive scan self-throttles to a ≤50% duty cycle).
         * **Miss / eligible** — no entry yet, OR dirty and past the floor:
           invoke ``recompute`` (OUTSIDE the lock) and store the result stamped
-          with the generation observed *before* the recompute.
+          with the generation + token observed *before* the recompute.
 
         Parameters
         ----------
@@ -214,6 +227,17 @@ class SummaryCache:
             the store's locked connection inside itself (it runs on the caller's
             thread — typically a threadpool worker — so the store lock is
             acquired+released there).
+        content_token
+            A cheap cross-process content fingerprint of the lake the *recompute*
+            scans (DEC-CROSS-PROCESS-CACHE-FRESH-001; default ``""``). The
+            in-process ``generation`` only moves on a DASHBOARD pull, so a clean
+            hit ALSO requires the entry's stored token to equal this one — a
+            cross-process CLI ``brutex fetch`` that wrote Parquet without bumping
+            the generation moves the token (see
+            :func:`brutex.dashboard.lake_revision.lake_revision_token`) →
+            recompute, never stale. Passing the default ``""`` preserves the pure
+            generation-only invalidation (the entry's token is then always ``""``,
+            so it never blocks a hit) for callers without a cross-process writer.
 
         Returns
         -------
@@ -221,7 +245,7 @@ class SummaryCache:
             The cached or freshly-computed summary for *kind*.
         """
         with self._lock:
-            decision = self._plan(kind)
+            decision = self._plan(kind, content_token)
         if decision is None:
             # Hit or stale-but-throttled: a payload is available without a scan.
             return self._entries[kind].payload
@@ -237,6 +261,7 @@ class SummaryCache:
             self._entries[kind] = _Entry(
                 payload=payload,
                 generation=gen_at_start,
+                content_token=content_token,
                 computed_at=finished_at,
                 # The measured cost of THIS scan drives the adaptive floor for the
                 # next one. A non-monotonic clock could make the delta negative, but the
@@ -246,16 +271,24 @@ class SummaryCache:
             )
         return payload
 
-    def _plan(self, kind: str) -> int | None:
+    def _plan(self, kind: str, content_token: str) -> int | None:
         """Decide whether *kind* needs a recompute — caller holds the lock.
 
         Returns the generation to stamp a fresh entry with when a recompute is
         needed (and marks the kind in-flight), or ``None`` when the cached entry
         should be served as-is (hit, throttled, or already being refreshed by a
-        concurrent reader).
+        concurrent reader). *content_token* is the caller's current cross-process
+        fingerprint: a clean hit requires BOTH the generation AND the token to
+        still match (DEC-CROSS-PROCESS-CACHE-FRESH-001), so a cross-process write
+        that moved the token forces a recompute exactly like an in-process
+        generation bump.
         """
         entry = self._entries.get(kind)
-        if entry is not None and entry.generation == self._generation:
+        if (
+            entry is not None
+            and entry.generation == self._generation
+            and entry.content_token == content_token
+        ):
             # Clean hit — fast path, no scan.
             return None
         if entry is not None and kind in self._refreshing:

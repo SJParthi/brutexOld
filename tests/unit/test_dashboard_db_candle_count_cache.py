@@ -116,15 +116,32 @@ def conn() -> Any:
 
 
 def test_candle_count_key_format_and_none_bounds() -> None:
-    """The key joins coords + bounds with ``|``; ``None`` bounds render empty."""
+    """The key joins coords + bounds + mtime with ``|``; ``None`` bounds render empty.
+
+    The trailing ``mtime_ns`` segment (default ``0``) is the cross-process freshness
+    token (DEC-CROSS-PROCESS-CACHE-FRESH-001), mirroring ``window-counts|…|{mtime_ns}``.
+    """
     assert (
         candle_count_key("NSE", "CASH", "NSE-NIFTY", "1minute", None, None)
-        == "NSE|CASH|NSE-NIFTY|1minute||"
+        == "NSE|CASH|NSE-NIFTY|1minute|||0"
     )
     assert (
         candle_count_key("BSE", "FNO", "BSE-SENSEX", "5minute", "2024-01-01", "2024-06-30")
-        == "BSE|FNO|BSE-SENSEX|5minute|2024-01-01|2024-06-30"
+        == "BSE|FNO|BSE-SENSEX|5minute|2024-01-01|2024-06-30|0"
     )
+
+
+def test_candle_count_key_mtime_segment_distinguishes_partition_recency() -> None:
+    """A different partition mtime → a different key (the cross-process freshness fold).
+
+    DEC-CROSS-PROCESS-CACHE-FRESH-001: a cross-process append rewrites a month file
+    in place, moving the partition mtime; folding that mtime into the key forces a
+    recount instead of serving a stale total (the bug-fix regression at the key level).
+    """
+    a = candle_count_key("NSE", "CASH", "NSE-NIFTY", "1minute", None, None, 111)
+    b = candle_count_key("NSE", "CASH", "NSE-NIFTY", "1minute", None, None, 222)
+    assert a != b
+    assert a == "NSE|CASH|NSE-NIFTY|1minute|||111"
 
 
 def test_candle_count_key_is_paging_invariant() -> None:
@@ -189,6 +206,30 @@ def test_generation_bump_recomputes_the_total(conn: Any, tmp_path: Path) -> None
     second = _candles(counting, tmp_path, limit=1, count_cache=cache, generation=2)
     assert second["total"] == 3, "a fresh generation must reflect the new bars"
     assert counting.count_execs == 2, "the bumped generation must force a recount"
+
+
+def test_cross_process_append_without_generation_bump_recounts(conn: Any, tmp_path: Path) -> None:
+    """A cross-process append (mtime moves, generation does NOT) → the total recounts.
+
+    DEC-CROSS-PROCESS-CACHE-FRESH-001 (GAP #12 regression): a CLI ``brutex fetch``
+    running alongside the dashboard appends bars to a partition WITHOUT bumping the
+    dashboard's in-process generation. The candle-count key now folds the partition's
+    newest Parquet ``st_mtime_ns``, so the SAME generation but a newer partition keys
+    differently → recount, never the stale 2-bar total a generation-only cache served.
+    """
+    _write(tmp_path, n_days=2)
+    counting = _CountingConn(conn)
+    cache = MoversSnapshotCache()
+    first = _candles(counting, tmp_path, limit=1, count_cache=cache, generation=5)
+    assert first["total"] == 2
+    assert counting.count_execs == 1
+    # Simulate the cross-process writer: append a third day, atomically rewriting the
+    # month file (bumps its mtime) — but DO NOT bump the generation (it's another
+    # process; the dashboard never saw it). A generation-only cache would stay stale.
+    _write(tmp_path, n_days=3)
+    second = _candles(counting, tmp_path, limit=1, count_cache=cache, generation=5)
+    assert second["total"] == 3, "the moved partition mtime must force a fresh recount"
+    assert counting.count_execs == 2, "the cross-process append must invalidate the cached total"
 
 
 def test_distinct_datasets_cached_independently(conn: Any, tmp_path: Path) -> None:

@@ -127,3 +127,27 @@ def test_single_symbol_pull_invalidates_coverage_cache(store: InstrumentStore) -
         headline = _spot_headline(client)
         assert headline["datasets"] == 1
         assert headline["total_bars"] == 1
+
+
+def test_cross_process_write_refreshes_spot_coverage(store: InstrumentStore) -> None:
+    """A CROSS-PROCESS spot write refreshes /coverage/spot with NO generation bump.
+
+    DEC-CROSS-PROCESS-CACHE-FRESH-001 (GAP #7 regression): a CLI ``brutex fetch`` in a
+    SEPARATE process writes Parquet into ``<lake>/bars`` WITHOUT touching the
+    dashboard's in-process generation. The SPOT aggregate cache now folds a cheap
+    ``bars/`` content token into its hit predicate, so the moved token forces a
+    recompute — the stale "0 datasets" snapshot can never be served forever.
+    """
+    lake_root = Path(store.path).parent
+    cache = SummaryCache(ttl_floor_s=0.0)  # deterministic re-read (the page poll clears it live)
+    app = build_app(DashboardState(), instrument_store=store, summary_cache=cache)
+    with TestClient(app) as client:
+        # 1) Cold start: empty lake → SPOT caches an empty snapshot at generation 0.
+        assert _spot_headline(client)["datasets"] == 0
+        # 2) A SEPARATE process writes spot bars — NO mark_dirty, generation stays 0.
+        _write_spot_bar(lake_root)
+        assert cache.generation == 0  # the cross-process write did NOT bump it
+        # 3) The next poll recomputes because the bars/ content token moved.
+        headline = _spot_headline(client)
+        assert headline["datasets"] == 1
+        assert headline["total_bars"] == 1

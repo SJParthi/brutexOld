@@ -276,3 +276,40 @@ def test_cache_rebuilds_on_generation_bump() -> None:
     cache.get(generation=1, build=_build)
     cache.get(generation=2, build=_build)  # a pull bumped the generation → rebuild
     assert calls["n"] == 2
+
+
+def test_cache_rebuilds_on_revision_change_same_generation() -> None:
+    """A cross-process lake write moves the revision (NOT the generation) → rebuild.
+
+    GAP #13 regression (DEC-CROSS-PROCESS-CACHE-FRESH-001): a CLI ``brutex fetch``
+    creating a new F&O partition leaves the dashboard's in-process generation
+    untouched, so a generation-only memo would never surface the new contract. The
+    cascade cache also keys on the cheap lake directory-revision token, so a moved
+    revision at the SAME generation rebuilds.
+    """
+    calls = {"n": 0}
+
+    def _build() -> Any:
+        calls["n"] += 1
+        return build_fno_cascade([])
+
+    cache = FnoCascadeCache()
+    cache.get(generation=3, build=_build, revision="rev-1")
+    cache.get(generation=3, build=_build, revision="rev-1")  # same key → O(1) hit
+    assert calls["n"] == 1
+    cache.get(generation=3, build=_build, revision="rev-2")  # cross-process write moved it
+    assert calls["n"] == 2  # the moved revision rebuilt at the SAME generation
+
+
+def test_cache_default_revision_preserves_generation_only_behaviour() -> None:
+    # No revision passed (default "") → the pure generation-only memo is unchanged.
+    calls = {"n": 0}
+
+    def _build() -> Any:
+        calls["n"] += 1
+        return build_fno_cascade([])
+
+    cache = FnoCascadeCache()
+    cache.get(generation=1, build=_build)
+    cache.get(generation=1, build=_build)  # clean hit (same gen, same "" revision)
+    assert calls["n"] == 1

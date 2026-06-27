@@ -254,21 +254,42 @@ class FnoCascadeCache:
     (DEC-MOVERS-O1-LATENCY-001 / DEC-DB-CANDLE-COUNT-CACHE-001) — a pull/materialize
     bumps the generation, so the next cascade read rebuilds; otherwise every
     underlying/expiry/contract click is an O(1) handoff of the cached index, never a
-    re-scan. No lock: two concurrent threadpool requests on the SAME stale generation
-    could each run *build*, but the build is pure + deterministic, so the result is
-    identical whichever write wins — the only cost is one wasted rebuild (the frontend
-    fires the levels sequentially anyway). The int+ref swap is atomic under the GIL, so a
-    reader never observes a torn state.
+    re-scan. To ALSO catch a CROSS-PROCESS write (a CLI ``brutex fetch`` that creates
+    new F&O partitions without bumping the in-process generation,
+    DEC-CROSS-PROCESS-CACHE-FRESH-001), :meth:`get` additionally keys on a cheap
+    lake directory-revision *revision* token: the entry is fresh only when BOTH the
+    generation AND the revision still match, so an out-of-process new partition
+    rediscovers. No lock: two concurrent threadpool requests on the SAME stale
+    (generation, revision) could each run *build*, but the build is pure +
+    deterministic, so the result is identical whichever write wins — the only cost is
+    one wasted rebuild (the frontend fires the levels sequentially anyway). The
+    int/str + ref swaps are atomic under the GIL, so a reader never observes a torn
+    state.
     """
 
     _generation: int = -1
+    _revision: str = ""
     _index: FnoCascadeIndex | None = field(default=None, repr=False)
 
-    def get(self, *, generation: int, build: Callable[[], FnoCascadeIndex]) -> FnoCascadeIndex:
-        """Return the cached index for *generation*, running *build* on a miss/stale gen."""
+    def get(
+        self,
+        *,
+        generation: int,
+        build: Callable[[], FnoCascadeIndex],
+        revision: str = "",
+    ) -> FnoCascadeIndex:
+        """Return the cached index for ``(generation, revision)``, building on a miss/stale key.
+
+        *revision* is a cheap cross-process lake directory-revision token
+        (DEC-CROSS-PROCESS-CACHE-FRESH-001; default ``""`` preserves the pure
+        generation-only behaviour). A miss/stale on EITHER the generation OR the
+        revision rebuilds — so a cross-process write that moved the revision
+        rediscovers exactly like an in-process generation bump.
+        """
         cached = self._index
-        if cached is None or self._generation != generation:
+        if cached is None or self._generation != generation or self._revision != revision:
             cached = build()
             self._index = cached
             self._generation = generation
+            self._revision = revision
         return cached

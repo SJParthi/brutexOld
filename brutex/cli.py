@@ -2105,11 +2105,12 @@ def cmd_fetch(
             if inspect:
                 sink = NullBarSink()
             # Token-bucket pacing for the live pull. The per-second ceiling is the
-            # operator-DIRECTED 5 r/s (constants.GROWW_RATE_LIMIT_RPS_CEILING,
-            # lowered 8 → 5 on 2026-06-22) — the backtesting per-second cap itself
-            # stays officially UNVERIFIED (Golden Rule #1/#10); 5 is an operator
-            # decision, fed as the controller's CEILING into the existing adaptive
-            # token-bucket MECHANISM rather than a hardcoded verified rate.
+            # operator-DIRECTED 8 r/s (constants.GROWW_RATE_LIMIT_RPS_CEILING,
+            # DEC-GROWW-RATE-CEILING-8-002, raised 5 → 8 on 2026-06-24) — the
+            # backtesting per-second cap itself stays officially UNVERIFIED (Golden
+            # Rule #1/#10); 8 is an operator decision, fed as the controller's CEILING
+            # into the existing adaptive token-bucket MECHANISM rather than a hardcoded
+            # verified rate.
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
@@ -2117,11 +2118,12 @@ def cmd_fetch(
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
 
-            # Operator-DIRECTED 5 r/s per-second ceiling (the per-second cap stays
+            # Operator-DIRECTED 8 r/s per-second ceiling (the per-second cap stays
             # officially UNVERIFIED); the operator-confirmed 500/min governor
-            # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 5×60 = 300 < 500,
-            # so the per-second ceiling is the binding gate without fighting the
-            # governor; the AIMD ladder still steps DOWN on 429s (lowered 8 → 5 on 2026-06-22).
+            # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500
+            # (~4% headroom), so the per-second ceiling is the binding gate without
+            # fighting the governor; the AIMD ladder still steps DOWN on 429s (raised
+            # 5 → 8 on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,

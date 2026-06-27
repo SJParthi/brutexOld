@@ -377,6 +377,70 @@ def test_concurrent_mark_dirty_and_get_are_thread_safe() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# SummaryCache — cross-process content_token (DEC-CROSS-PROCESS-CACHE-FRESH-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_same_content_token_is_a_clean_hit() -> None:
+    # A repeat read with the SAME generation AND token serves the cache (no scan).
+    cache = SummaryCache(clock=_FakeClock())
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc, content_token="t1")
+    cache.get_or_refresh(SPOT, recompute=rc, content_token="t1")
+    assert rc.calls == 1  # clean hit despite the same token
+
+
+def test_changed_content_token_forces_recompute() -> None:
+    """A cross-process write moves the token (NOT the generation) → recompute.
+
+    GAP #7 regression: the in-process generation only moves on a DASHBOARD pull, so a
+    CLI ``brutex fetch`` that wrote Parquet leaves the generation untouched. The token
+    is the cross-process signal: a different token on the next read is dirty even at
+    the SAME generation, so the cached counts can never go stale forever.
+    """
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=0.0)  # no floor → an eligible dirty read scans
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc, content_token="rev-1")  # call 1
+    # No mark_dirty (no in-process pull), but a cross-process write moved the token.
+    payload = cache.get_or_refresh(SPOT, recompute=rc, content_token="rev-2")
+    assert payload == [{"call": 2}]
+    assert rc.calls == 2  # the moved token forced a recompute at the SAME generation
+
+
+def test_changed_token_within_floor_is_still_throttled() -> None:
+    # A token change is a dirty signal exactly like a generation bump, so it is bound
+    # by the SAME TTL floor — a cross-process write inside the floor serves stale (the
+    # floor rate-limits ALL dirty reads, bounded staleness; consistent with #920).
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc, content_token="rev-1")  # call 1
+    clock.advance(1.0)  # within the 2 s floor
+    payload = cache.get_or_refresh(SPOT, recompute=rc, content_token="rev-2")
+    assert payload == [{"call": 1}]  # throttled — stale served
+    assert rc.calls == 1
+    clock.advance(1.5)  # now past the floor
+    cache.get_or_refresh(SPOT, recompute=rc, content_token="rev-2")
+    assert rc.calls == 2  # past the floor → the moved token recomputes
+
+
+def test_default_empty_token_preserves_generation_only_behaviour() -> None:
+    # Callers that pass no token (the default "") get the pure generation-only path:
+    # a clean hit at the same generation, a recompute after mark_dirty past the floor.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 1, token ""
+    cache.get_or_refresh(SPOT, recompute=rc)  # clean hit (same gen, same "" token)
+    assert rc.calls == 1
+    cache.mark_dirty()
+    clock.advance(2.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # dirty past floor → recompute
+    assert rc.calls == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
 # CoverageCounters — incremental, idempotent O(1) tally
 # ────────────────────────────────────────────────────────────────────────
 

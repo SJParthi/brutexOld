@@ -68,6 +68,7 @@ from brutex.dashboard.coverage_view import (
     build_spot_coverage_payload,
 )
 from brutex.dashboard.db_view import (
+    OPTIONS_DIR_NAME,
     fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
@@ -96,6 +97,7 @@ from brutex.dashboard.fno_cascade import (
     contract_to_json,
 )
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.lake_revision import lake_revision_token
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
@@ -952,8 +954,46 @@ def build_app(
     _mapping_integrity_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
-    # pull restarting at the 5 r/s ceiling and re-storming the vendor.
+    # pull restarting at the operator-DIRECTED 8 r/s ceiling (DEC-GROWW-RATE-CEILING-8-002,
+    # raised 5 → 8 on 2026-06-24) and re-storming the vendor.
     _session_rate = SessionRateController()
+
+    def _spot_content_token(lake: Path) -> str:
+        """Cheap cross-process fingerprint of the SPOT lake (``<lake>/bars``).
+
+        DEC-CROSS-PROCESS-CACHE-FRESH-001: the SPOT coverage aggregate is otherwise
+        invalidated only by an IN-PROCESS dashboard pull (the ``_summary_cache``
+        generation bump), so a CLI ``brutex fetch`` writing into ``bars/`` alongside
+        the dashboard would leave the cached counts stale forever. Folding this
+        directory-revision token into ``get_or_refresh(SPOT, …)`` makes a
+        cross-process write (a new/touched ``bars/`` partition) move the token →
+        recompute. O(dirs) — one ``stat`` per partition directory.
+        """
+        return lake_revision_token([lake / "bars"])
+
+    def _option_content_token(lake: Path) -> str:
+        """Cheap cross-process fingerprint of the OPTIONS lake (``<lake>/options``).
+
+        The options twin of :func:`_spot_content_token`
+        (DEC-CROSS-PROCESS-CACHE-FRESH-001): a cross-process write into ``options/``
+        moves the token so ``get_or_refresh(OPTIONS, …)`` recomputes instead of
+        serving stale per-underlying counts.
+        """
+        return lake_revision_token([lake / OPTIONS_DIR_NAME])
+
+    def _lake_dir_revision(lake: Path) -> str:
+        """Cheap whole-lake directory-revision token (``<lake>/bars`` + ``<lake>/options``).
+
+        DEC-CROSS-PROCESS-CACHE-FRESH-001: the three ``/db`` DISCOVERY caches (the
+        candle-datasets list + the spot/F&O cascade indices) are otherwise
+        invalidated only by an IN-PROCESS dashboard pull (the ``_summary_cache``
+        generation), so a cross-process CLI ``brutex fetch`` that creates new
+        symbol/contract partitions would never surface in the picker. Compositing
+        this ``(dir-count, max-dir-mtime)`` token with the in-process generation in
+        each discovery cache's key makes a new out-of-process partition rediscover —
+        a NEW leaf directory moves the count, a touched one moves the mtime. O(dirs).
+        """
+        return lake_revision_token([lake / "bars", lake / OPTIONS_DIR_NAME])
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -1545,8 +1585,9 @@ def build_app(
         All forms route to :func:`brutex.dashboard.pull_controller.pull_all_spot`
         on the **background job** (returns at once; poll ``/pull-progress``): its
         cross-symbol ``(symbol, interval, window)`` fan-out keeps the ONE shared
-        :class:`SessionRateController` SATURATED at the operator-DIRECTED 5 r/s
-        ceiling (lowered 8 → 5 on 2026-06-22), replacing the old serial per-symbol
+        :class:`SessionRateController` SATURATED at the operator-DIRECTED 8 r/s
+        ceiling (DEC-GROWW-RATE-CEILING-8-002, raised 5 → 8 on 2026-06-24), replacing
+        the old serial per-symbol
         ``/universe/pull`` loop that only kept ~3 r/s in flight. ``from_date`` / ``to_date`` / ``year`` carry the date picker; when
         ALL are blank the full Track-1 history applies (the Pull-ALL default, so
         the ``?kind=`` callers are byte-for-byte unchanged). Single-flight; an empty
@@ -2722,7 +2763,9 @@ def build_app(
             write. ``spot_window_rollup`` carries its own mtime-keyed cache, so
             the per-request cost is O(datasets) between ledger flushes.
             """
-            rows = _summary_cache.get_or_refresh(SPOT, recompute=_recompute)
+            rows = _summary_cache.get_or_refresh(
+                SPOT, recompute=_recompute, content_token=_spot_content_token(lake)
+            )
             return build_spot_coverage_payload(rows, spot_window_rollup(lake))
 
         return JSONResponse(await run_in_threadpool(_rows_and_rollup))
@@ -2782,7 +2825,9 @@ def build_app(
         )
         spot_rows = build_spot_coverage_payload(
             _summary_cache.get_or_refresh(
-                SPOT, recompute=lambda: summarize_spot_datasets(store.connection, lake)
+                SPOT,
+                recompute=lambda: summarize_spot_datasets(store.connection, lake),
+                content_token=_spot_content_token(lake),
             ),
             spot_window_rollup(lake),
         )["rows"]
@@ -3169,7 +3214,12 @@ def build_app(
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await run_in_threadpool(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        rows = await run_in_threadpool(
+            _summary_cache.get_or_refresh,
+            OPTIONS,
+            recompute=_recompute,
+            content_token=_option_content_token(lake),
+        )
         return JSONResponse(build_option_coverage_payload(rows))
 
     # ── Movers (reference-only lake screens — DEC-MOVERS-DASHBOARD-PAGE-001) ──
@@ -4149,24 +4199,30 @@ def build_app(
         # generation — a tab switch within one generation is an O(1) cached handoff, a
         # pull bumps the generation → rediscover. The build still runs on the threadpool
         # worker (the store read + dir-walks stay off the event loop) on a cache miss.
+        # DEC-CROSS-PROCESS-CACHE-FRESH-001: composite the cheap whole-lake
+        # directory-revision token into the key so a CROSS-PROCESS CLI `brutex fetch`
+        # that creates new symbol/contract partitions — which does NOT bump the
+        # in-process generation — still rediscovers; the O(dirs) token walk rides the
+        # SAME threadpool worker as the build.
         gen = _summary_cache.generation
-        return JSONResponse(
-            await run_in_threadpool(
-                lambda: _db_datasets_cache.get_or_compute(
-                    "db_candle_datasets", generation=gen, compute=_datasets
-                )
-            )
-        )
+
+        def _discover() -> dict[str, Any]:
+            key = f"db_candle_datasets|{_lake_dir_revision(lake)}"
+            return _db_datasets_cache.get_or_compute(key, generation=gen, compute=_datasets)
+
+        return JSONResponse(await run_in_threadpool(_discover))
 
     async def _fno_cascade_or_none() -> FnoCascadeIndex | None:
         """Resolve the cached F&O cascade index (DEC-DB-FNO-CASCADE-001), or ``None``.
 
         ONE source of truth for the three cascade routes (CLAUDE.md §11 COMMON):
         resolves the lake, then hands the ``O(datasets)`` dir-walk + grouping to a
-        threadpool worker MEMOISED behind ``_summary_cache.generation`` — so a pull
-        rebuilds the index but every cascade click is an O(1) cached handoff. Returns
-        ``None`` when no lake path is configured (the route then ships an empty shape,
-        never a 500 — mirrors the datasets endpoint).
+        threadpool worker MEMOISED behind ``_summary_cache.generation`` PLUS the cheap
+        whole-lake directory-revision token (DEC-CROSS-PROCESS-CACHE-FRESH-001) — so a
+        pull OR a cross-process CLI ``brutex fetch`` creating new F&O partitions
+        rebuilds the index, otherwise every cascade click is an O(1) cached handoff.
+        Returns ``None`` when no lake path is configured (the route then ships an empty
+        shape, never a 500 — mirrors the datasets endpoint).
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -4174,12 +4230,15 @@ def build_app(
             return None
         lake = lake_root.parent
         gen = _summary_cache.generation
-        return await run_in_threadpool(
-            lambda: _fno_cascade_cache.get(
+
+        def _resolve() -> FnoCascadeIndex:
+            return _fno_cascade_cache.get(
                 generation=gen,
                 build=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
+                revision=_lake_dir_revision(lake),
             )
-        )
+
+        return await run_in_threadpool(_resolve)
 
     @app.get("/api/v1/db/fno/underlyings")
     async def api_db_fno_underlyings() -> JSONResponse:
@@ -4257,11 +4316,15 @@ def build_app(
             ]
             return build_spot_cascade(spot)
 
-        return await run_in_threadpool(
-            lambda: _spot_cascade_cache.get_or_compute(
-                "db_spot_cascade", generation=gen, compute=_build
-            )
-        )
+        # DEC-CROSS-PROCESS-CACHE-FRESH-001: composite the whole-lake directory-revision
+        # token into the key (the spot-cascade twin of the datasets endpoint) so a
+        # cross-process CLI `brutex fetch` creating a new spot partition rediscovers,
+        # even though it never bumps the in-process generation.
+        def _resolve() -> SpotCascadeIndex:
+            key = f"db_spot_cascade|{_lake_dir_revision(lake)}"
+            return _spot_cascade_cache.get_or_compute(key, generation=gen, compute=_build)
+
+        return await run_in_threadpool(_resolve)
 
     @app.get("/api/v1/db/spot/symbols")
     async def api_db_spot_symbols() -> JSONResponse:

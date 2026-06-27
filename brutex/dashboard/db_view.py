@@ -50,6 +50,7 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+from brutex.dashboard.lake_revision import partition_parquet_mtime_token
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
@@ -1404,20 +1405,36 @@ class CandleCountCache(Protocol):
 
 
 def candle_count_key(
-    exchange: str, segment: str, symbol: str, interval: str, start: str | None, end: str | None
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    start: str | None,
+    end: str | None,
+    mtime_ns: int = 0,
 ) -> str:
     """Build the stable cache key for a candle-page **total** (DEC-DB-CANDLE-COUNT-CACHE-001).
 
     The total ``COUNT(*)`` depends ONLY on the partition coordinates + the inclusive
-    date bounds — NOT on ``limit`` / ``offset`` / ``descending`` / the projected
-    ``columns`` (paging, sort, and column subsetting never change how many rows match).
-    So every page of the same ``(coords, start, end)`` shares ONE cached total: a
-    prev/next click is an O(1) hit instead of re-reading every Parquet footer. ``|``
-    cannot appear in a validated coordinate or an ISO date, so the join is
-    unambiguous; ``None`` bounds render as an empty segment (``start=None`` keys
-    identically to an explicit open lower bound).
+    date bounds + the partition's on-disk recency — NOT on ``limit`` / ``offset`` /
+    ``descending`` / the projected ``columns`` (paging, sort, and column subsetting
+    never change how many rows match). So every page of the same
+    ``(coords, start, end, mtime)`` shares ONE cached total: a prev/next click is an
+    O(1) hit instead of re-reading every Parquet footer. ``|`` cannot appear in a
+    validated coordinate or an ISO date, so the join is unambiguous; ``None`` bounds
+    render as an empty segment (``start=None`` keys identically to an explicit open
+    lower bound).
+
+    The trailing *mtime_ns* is the partition's newest Parquet ``st_mtime_ns``
+    (DEC-CROSS-PROCESS-CACHE-FRESH-001), mirroring the ``window-counts|…|{mtime_ns}``
+    shape the windows-counts cache uses: the generation-stamped cache is otherwise
+    invalidated only by an IN-PROCESS dashboard pull, so a cross-process CLI
+    ``brutex fetch`` that appends bars to this partition without bumping the
+    dashboard's generation moves the *mtime_ns* → a fresh key → recount, never a
+    stale total. ``0`` (the default) keeps the legacy generation-only key for callers
+    that don't pass a partition mtime.
     """
-    return f"{exchange}|{segment}|{symbol}|{interval}|{start or ''}|{end or ''}"
+    return f"{exchange}|{segment}|{symbol}|{interval}|{start or ''}|{end or ''}|{mtime_ns}"
 
 
 def query_candles(
@@ -1559,8 +1576,23 @@ def query_candles(
     if count_cache is None:
         total = _count_total()
     else:
+        # Fold the partition's newest Parquet mtime into the key
+        # (DEC-CROSS-PROCESS-CACHE-FRESH-001) so a CROSS-PROCESS CLI `brutex fetch`
+        # appending bars to this partition — which does NOT bump the dashboard's
+        # in-process generation — still moves the key → recount, never a stale total
+        # (the candle twin of the `window-counts|…|{mtime_ns}` shape). A repeat
+        # prev/next click on an unchanged partition keeps the same (generation, mtime)
+        # key → O(1) hit.
         total = count_cache.get_or_compute(
-            candle_count_key(exchange, segment, symbol, interval, start, end),
+            candle_count_key(
+                exchange,
+                segment,
+                symbol,
+                interval,
+                start,
+                end,
+                partition_parquet_mtime_token(base),
+            ),
             generation=generation,
             compute=_count_total,
         )

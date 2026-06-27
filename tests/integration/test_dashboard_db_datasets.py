@@ -188,6 +188,50 @@ class TestDbCandleDatasetsApi:
         assert calls["n"] == 2  # the bumped generation forced exactly one re-discovery
         assert after_pull == first  # same lake → same payload, just freshly discovered
 
+    def test_cross_process_new_partition_is_rediscovered(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-CROSS-PROCESS-CACHE-FRESH-001 (GAP #13 regression): a CLI `brutex fetch`
+        # running alongside the dashboard writes a NEW spot partition WITHOUT bumping
+        # the dashboard's in-process generation. The discovery cache now composites the
+        # whole-lake directory-revision token into its key, so the new partition is
+        # rediscovered on the next load even with NO mark_dirty.
+        from datetime import datetime
+        from decimal import Decimal
+
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+
+        def _write_spot(symbol: str) -> None:
+            bar = CandleBar(
+                timestamp=datetime(2024, 3, 1, 9, 15, tzinfo=UTC),
+                open=Decimal("100.00"),
+                high=Decimal("101.00"),
+                low=Decimal("99.00"),
+                close=Decimal("100.00"),
+                volume=10,
+                open_interest=None,
+            )
+            ParquetWriter(lake_root=tmp_path).write(
+                exchange="NSE", segment="INDEX", symbol=symbol, interval="1minute", bars=[bar]
+            )
+
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        _write_spot("NSE-NIFTY")
+        summary_cache = SummaryCache()
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
+        )
+        first = client.get("/api/v1/db/candles/datasets").json()
+        assert [d["symbol"] for d in first["datasets"]] == ["NSE-NIFTY"]
+        # A SEPARATE process writes a second symbol partition — generation NOT bumped.
+        _write_spot("NSE-BANKNIFTY")
+        second = client.get("/api/v1/db/candles/datasets").json()
+        # The moved directory-revision token rediscovered the new partition (a
+        # generation-only cache would have served the stale single-symbol list).
+        assert sorted(d["symbol"] for d in second["datasets"]) == ["NSE-BANKNIFTY", "NSE-NIFTY"]
+
     def test_no_lake_root_returns_empty_payload(self) -> None:
         from types import SimpleNamespace
 
