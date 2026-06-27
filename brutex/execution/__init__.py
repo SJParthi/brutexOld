@@ -57,6 +57,8 @@ from brutex.execution.errors import (
     FreezeQuantityExceededError,
     InsufficientFundsError,
     InvalidLotSizeError,
+    InvalidPriceError,
+    NonMonotonicBarError,
 )
 from brutex.execution.simulator import ExecutionSimulator
 from brutex.execution.types import (
@@ -81,5 +83,7 @@ __all__ = [
     "InstrumentMeta",
     "InsufficientFundsError",
     "InvalidLotSizeError",
+    "InvalidPriceError",
+    "NonMonotonicBarError",
     "Position",
 ]

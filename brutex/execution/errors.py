@@ -34,3 +34,31 @@ class InsufficientFundsError(ExecutionError):
     notional + fees at fill time. Strategies that over-commit are
     rejected at :meth:`ExecutionSimulator.execute` with this error.
     """
+
+
+class InvalidPriceError(ExecutionError):
+    """Raised when a bar carries a non-tradeable price.
+
+    Guards feed integrity: a fill / mark-to-market reference price
+    must be a finite, strictly-positive :class:`~decimal.Decimal`.
+    A zero / negative price or a ``NaN`` / ``Infinity`` (vendor
+    corruption) is rejected at
+    :meth:`ExecutionSimulator.execute` /
+    :meth:`ExecutionSimulator.mark_to_market` with this typed error
+    instead of leaking a cryptic ``ValueError`` /
+    :class:`decimal.InvalidOperation` out of the cost model.
+    """
+
+
+class NonMonotonicBarError(ExecutionError):
+    """Raised when a symbol's bar timestamps are not strictly increasing.
+
+    Guards feed integrity: within a single symbol the
+    :class:`~brutex.feed.replay.ReplayFeed` must emit bars in
+    strictly-ascending timestamp order. A backwards step (out-of-order)
+    or an equal timestamp (duplicate bar) is rejected at
+    :meth:`brutex.execution.driver.BacktestDriver.run` time so a
+    corrupt feed cannot silently double-count or replay a bar. Equal
+    timestamps ACROSS different symbols are legitimate multi-symbol
+    interleave and are allowed.
+    """
