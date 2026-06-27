@@ -292,82 +292,156 @@ def test_pipeline_complete_note_with_no_candle_subreport() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# run_full_pipeline — the GATED phase-4 movers warm (DEC-PULL-SELECTED-PIPELINE-001)
+# run_full_pipeline — the PER-SEGMENT movers warm (DEC-PIPELINE-SEGMENT-MOVERS-001)
 # --------------------------------------------------------------------------- #
 
 
-def test_pipeline_warms_movers_on_clean_run() -> None:
-    # All three fetch phases clean + a warmer injected → phase 4 runs, the count is
-    # recorded, and the note appends the warm clause.
-    spot, meta = _Spy(_spot()), _Spy(_metadata())
-    hist = _Spy(_composite(historical=_historical_inner()))
-    movers = _Spy(7)
+def _clean_phases() -> tuple[
+    _Spy[BulkSpotReport], _Spy[MetadataPullReport], _Spy[CompositePullReport]
+]:
+    """Three clean phase spies (spot / metadata / historical) for a fully-successful run."""
+    return (
+        _Spy(_spot()),
+        _Spy(_metadata()),
+        _Spy(_composite(historical=_historical_inner())),
+    )
+
+
+def test_pipeline_warms_each_segment_as_it_finishes() -> None:
+    # All three fetch phases clean + all three per-segment warmers injected → each
+    # segment warms, the per-segment map carries each count, the total is the sum,
+    # and the note names every warmed segment in order.
+    spot, meta, hist = _clean_phases()
+    w_spot, w_fut, w_opt = _Spy(3), _Spy(1), _Spy(4)
     report = run_full_pipeline(
-        run_spot=spot, run_metadata=meta, run_historical=hist, run_movers=movers
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=w_spot,
+        warm_futures_movers=w_fut,
+        warm_options_movers=w_opt,
     )
     assert report.ok is True
-    assert movers.called is True
-    assert report.movers_warmed == 7
-    assert "movers 7 snapshot(s) warmed" in report.note
-    assert report.to_dict()["movers_warmed"] == 7
+    assert w_spot.called and w_fut.called and w_opt.called
+    assert report.segment_movers_warmed == {"spot": 3, "futures": 1, "options": 4}
+    assert report.movers_warmed == 8
+    assert "movers spot 3 + futures 1 + options 4 snapshot(s) warmed" in report.note
+    payload = report.to_dict()
+    assert payload["movers_warmed"] == 8
+    assert payload["segment_movers_warmed"] == {"spot": 3, "futures": 1, "options": 4}
 
 
-def test_pipeline_warms_movers_zero_is_honest_not_none() -> None:
-    # A warmer that warmed nothing (e.g. an empty lake) returns 0 — recorded as 0
-    # (ran, warmed nothing), DISTINCT from None (did not run).
+def test_pipeline_spot_only_success_warms_spot_only() -> None:
+    # The operator's headline: spot succeeds → SPOT movers warm the moment the spot
+    # phase finishes; a LATER metadata failure stops the chain, but the already-clean
+    # spot movers stay warmed (and futures/options are NEVER warmed).
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata(contract_failures=1))  # metadata FAILS after spot
+    hist = _Spy(_composite(historical=_historical_inner()))
+    w_spot, w_fut, w_opt = _Spy(5), _Spy(9), _Spy(9)
     report = run_full_pipeline(
-        run_spot=_Spy(_spot()),
-        run_metadata=_Spy(_metadata()),
-        run_historical=_Spy(_composite(historical=_historical_inner())),
-        run_movers=_Spy(0),
-    )
-    assert report.movers_warmed == 0
-    assert "movers 0 snapshot(s) warmed" in report.note
-
-
-def test_pipeline_skips_movers_when_historical_not_clean() -> None:
-    # The HARD gate: a historical fetch that completed-with-failures (failed_pairs)
-    # must NEVER warm movers ("until/unless successful fetches happen, never run").
-    hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
-    movers = _Spy(5)
-    report = run_full_pipeline(
-        run_spot=_Spy(_spot()),
-        run_metadata=_Spy(_metadata()),
+        run_spot=spot,
+        run_metadata=meta,
         run_historical=hist,
-        run_movers=movers,
+        warm_spot_movers=w_spot,
+        warm_futures_movers=w_fut,
+        warm_options_movers=w_opt,
+    )
+    assert report.stopped_after == PHASE_METADATA
+    assert hist.called is False  # historical never ran
+    assert w_spot.called is True  # spot warmed (it succeeded)
+    assert w_fut.called is False and w_opt.called is False  # historical never succeeded
+    assert report.segment_movers_warmed == {"spot": 5}
+    assert report.movers_warmed == 5
+    assert report.to_dict()["segment_movers_warmed"] == {"spot": 5}
+
+
+def test_pipeline_futures_and_options_warm_only_after_historical_success() -> None:
+    # spot + metadata clean, then historical succeeds → futures + options warm; spot
+    # (no warmer here) stays absent, proving per-segment independence.
+    spot, meta, hist = _clean_phases()
+    w_fut, w_opt = _Spy(2), _Spy(6)
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_futures_movers=w_fut,
+        warm_options_movers=w_opt,
+    )
+    assert report.ok is True
+    assert w_fut.called and w_opt.called
+    assert report.segment_movers_warmed == {"futures": 2, "options": 6}
+    assert report.movers_warmed == 8
+    assert "movers futures 2 + options 6 snapshot(s) warmed" in report.note
+
+
+def test_pipeline_segment_warm_zero_is_honest_not_absent() -> None:
+    # A segment whose warmer ran but warmed nothing (empty lake) records 0 — present
+    # in the map (ran, warmed nothing), DISTINCT from absent (did not run).
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=_Spy(0),
+    )
+    assert report.segment_movers_warmed == {"spot": 0}
+    assert report.movers_warmed == 0
+    assert "movers spot 0 snapshot(s) warmed" in report.note
+
+
+def test_pipeline_skips_futures_options_when_historical_not_clean() -> None:
+    # The HARD gate: a historical fetch that completed-with-failures (failed_pairs)
+    # must NEVER warm futures/options ("a segment that did not fully succeed must NOT
+    # warm its movers"). Spot still warmed (it succeeded earlier).
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
+    w_spot, w_fut, w_opt = _Spy(3), _Spy(5), _Spy(5)
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=w_spot,
+        warm_futures_movers=w_fut,
+        warm_options_movers=w_opt,
     )
     assert report.ok is False  # historical gate failed
-    assert movers.called is False  # movers NOT warmed
-    assert report.movers_warmed is None
-    assert "warmed" not in report.note
+    assert w_spot.called is True  # spot succeeded → warmed
+    assert w_fut.called is False and w_opt.called is False  # historical not clean → NOT warmed
+    assert report.segment_movers_warmed == {"spot": 3}
+    assert report.movers_warmed == 3
+    assert "futures" not in report.note and "options" not in report.note
 
 
-def test_pipeline_skips_movers_when_stopped_at_spot() -> None:
-    # An early stop never reaches phase 4 — the warmer is not even consulted.
-    movers = _Spy(3)
+def test_pipeline_skips_all_warms_when_stopped_at_spot() -> None:
+    # An early spot stop never warms ANY segment — no warmer is consulted.
+    w_spot, w_fut, w_opt = _Spy(3), _Spy(3), _Spy(3)
     report = run_full_pipeline(
         run_spot=_Spy(_spot(auth_aborted=True)),
         run_metadata=_Spy(_metadata()),
         run_historical=_Spy(_composite(historical=_historical_inner())),
-        run_movers=movers,
+        warm_spot_movers=w_spot,
+        warm_futures_movers=w_fut,
+        warm_options_movers=w_opt,
     )
     assert report.stopped_after == PHASE_SPOT
-    assert movers.called is False
+    assert not (w_spot.called or w_fut.called or w_opt.called)
+    assert report.segment_movers_warmed == {}
     assert report.movers_warmed is None
 
 
-def test_pipeline_no_movers_phase_when_not_injected() -> None:
-    # Backward-compatible: with no warmer (the whole-universe pipeline), phase 4 is
-    # skipped entirely and movers_warmed is None — never a fabricated count.
-    report = run_full_pipeline(
-        run_spot=_Spy(_spot()),
-        run_metadata=_Spy(_metadata()),
-        run_historical=_Spy(_composite(historical=_historical_inner())),
-    )
+def test_pipeline_no_movers_phase_when_no_warmers_injected() -> None:
+    # Backward-compatible: with no warmers (the whole-universe pipeline), no segment
+    # warms and movers_warmed is None — never a fabricated count.
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(run_spot=spot, run_metadata=meta, run_historical=hist)
     assert report.ok is True
     assert report.movers_warmed is None
+    assert report.segment_movers_warmed == {}
     assert "warmed" not in report.note
     assert report.to_dict()["movers_warmed"] is None
+    assert report.to_dict()["segment_movers_warmed"] == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -450,18 +524,22 @@ def test_pipeline_no_prebuild_phase_when_not_injected() -> None:
 
 
 def test_pipeline_warms_movers_and_prebuilds_together() -> None:
-    # Both gated post-fetch phases run on a clean fetch; both counts + both note
-    # clauses are present (the shared gate is evaluated once, both phases fire).
+    # Both gated post-fetch phases run on a clean fetch; the per-segment movers
+    # counts + the prebuild count + both note clauses are present (the shared
+    # historical gate is evaluated once, every post-fetch phase fires).
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
         run_historical=_Spy(_composite(historical=_historical_inner())),
-        run_movers=_Spy(2),
+        warm_spot_movers=_Spy(2),
+        warm_futures_movers=_Spy(1),
+        warm_options_movers=_Spy(1),
         run_prebuild=_Spy(5),
     )
-    assert report.movers_warmed == 2
+    assert report.movers_warmed == 4  # 2 (spot) + 1 (futures) + 1 (options)
+    assert report.segment_movers_warmed == {"spot": 2, "futures": 1, "options": 1}
     assert report.prebuild_built == 5
-    assert "movers 2 snapshot(s) warmed" in report.note
+    assert "movers spot 2 + futures 1 + options 1 snapshot(s) warmed" in report.note
     assert "timeframes pre-built for 5 symbol(s)" in report.note
 
 
