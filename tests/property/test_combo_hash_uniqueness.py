@@ -45,10 +45,11 @@ Invariants covered
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 import pytest
-from brutex.strategies.combo import combo_hash
+from brutex.strategies.combo import canonicalise_params, combo_hash
 from brutex.strategies.errors import StrategyError
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -266,3 +267,70 @@ class TestEmptyStringRejection:
         mutated[field] = ""
         with pytest.raises(StrategyError, match=field):
             _hash(mutated)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 7 — signed-zero split (the SAFE dedup direction)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSignedZero:
+    @given(value=st.floats(allow_nan=False, allow_infinity=False))
+    @settings(max_examples=200, deadline=None)
+    def test_signed_zero_distinct_when_reprs_differ(self, value: float) -> None:
+        """``0.0`` and ``-0.0`` canonicalise distinctly (their ``repr`` differs);
+        any two finite floats with the same ``repr`` canonicalise identically."""
+        pos = canonicalise_params({"x": value})
+        neg = canonicalise_params({"x": -value})
+        if repr(value) == repr(-value):
+            assert pos == neg
+        else:
+            assert pos != neg
+
+    def test_signed_zero_explicit(self) -> None:
+        assert canonicalise_params({"x": 0.0}) != canonicalise_params({"x": -0.0})
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 8 — float / str / Decimal alias holds; distinct text stays distinct
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestFloatStrDecimalAlias:
+    @given(value=st.floats(allow_nan=False, allow_infinity=False))
+    @settings(max_examples=200, deadline=None)
+    def test_float_str_alias(self, value: float) -> None:
+        """A float and the ``str`` of its ``repr`` ALWAYS collapse to one token —
+        both canonicalise to ``repr(value)`` (wire-locked alias; mitigated by
+        one-type-per-axis at ParamGrid)."""
+        text = repr(value)
+        as_float = canonicalise_params({"k": value})
+        as_str = canonicalise_params({"k": text})
+        assert as_float == as_str
+
+    @given(value=st.floats(allow_nan=False, allow_infinity=False))
+    @settings(max_examples=200, deadline=None)
+    def test_decimal_aliases_float_iff_str_matches_repr(self, value: float) -> None:
+        """A ``Decimal`` aliases the float IFF ``str(Decimal)`` equals the float
+        ``repr`` — Decimal can normalise exponent CASE (``1e+16`` -> ``1E+16``),
+        an honest non-universal alias (Golden Rule #10). The token is exactly
+        the ``Decimal``'s ``str`` form either way."""
+        text = repr(value)
+        as_float = canonicalise_params({"k": value})
+        dec = Decimal(text)
+        as_decimal = canonicalise_params({"k": dec})
+        if str(dec) == text:
+            assert as_decimal == as_float
+        else:
+            # Decimal's str diverged from the float repr (case/scale normalise).
+            assert as_decimal != as_float
+        # The Decimal token is its own str(), always.
+        assert as_decimal == f'{{"k":"{dec!s}"}}'
+
+    @given(a=_FIELD_TEXT, b=_FIELD_TEXT)
+    @settings(max_examples=200, deadline=None)
+    def test_distinct_text_stays_distinct(self, a: str, b: str) -> None:
+        """Two distinct string param values never collide on canonicalisation."""
+        if a == b:
+            return
+        assert canonicalise_params({"k": a}) != canonicalise_params({"k": b})
