@@ -6,10 +6,13 @@ The custom calendar + dropdowns now live in ONE shared static asset
 page (no inline copy — the duplication gate stays clean). This locks:
 
 * the picker internals live in the static component (read the file directly);
-* ``/universe`` WIRES the component — links the asset, marks its range container
-  ``data-bxdp="range"`` + its selects ``data-bxsel``, and keeps the native
-  ``<input type=date>``/``<select>`` as the hidden value source (every prior pin
-  survives).
+* ``/universe`` LINKS the shared component asset (other pages — e.g. ``/`` reports
+  — still wire a real range container to it). The ``/universe`` from→to range
+  container ITSELF was REMOVED by DEC-UNIVERSE-PULL-CONSOLIDATE-001 (FIX-FIRST
+  follow-up): the consolidated pipeline button accepts no from/to, so an inert
+  picker was dead/misleading UI. The asset links stay (the component simply finds
+  no range container to enhance on this page), so the shared single source of truth
+  is unchanged.
 """
 
 from __future__ import annotations
@@ -54,19 +57,22 @@ def test_component_is_progressive_enhancement() -> None:
     assert "window.BXDatePicker" in _JS, "the public API is missing"
 
 
-def test_universe_wires_the_shared_component() -> None:
-    """/universe links the asset + marks its range container and selects."""
+def test_universe_links_the_shared_component() -> None:
+    """/universe still LINKS the shared picker asset (other pages reuse it).
+
+    The from→to RANGE container itself was REMOVED by the pull consolidation
+    (DEC-UNIVERSE-PULL-CONSOLIDATE-001 FIX-FIRST follow-up — the pipeline accepts no
+    from/to, so the picker was dead UI), so there is NO ``data-bxdp`` container left
+    to wire on this page; the asset links stay (harmless — the component finds no
+    range container to enhance) so the shared single source of truth is unchanged.
+    The granularity dropdown was retired by DEC-1MINUTE-ONLY-DERIVE-1DAY-001, and the
+    two derivatives dropdowns were removed with the bulk derivative buttons
+    (DEC-DERIV-DECOMMISSION-FUSED-001) — so NO ``data-bxsel`` select remains either.
+    """
     html = _render_universe_html()
     assert "/static/bx-datepicker.css" in html, "the component stylesheet is not linked"
     assert "/static/bx-datepicker.js" in html, "the component script is not linked"
-    # the from->to RANGE container. The granularity dropdown was retired by
-    # DEC-1MINUTE-ONLY-DERIVE-1DAY-001 (1-minute is the only granularity fetched; 1-day is
-    # derived from it), and the two derivatives dropdowns (interval / contract-type) were
-    # removed when the bulk derivative buttons became metadata-only
-    # (DEC-DERIV-DECOMMISSION-FUSED-001) — so NO ``data-bxsel`` select remains to wire.
-    assert 'data-bxdp="range" data-from="fromDate" data-to="toDate"' in html, (
-        "the date-range container is not wired to the component"
-    )
+    assert 'data-bxdp="range"' not in html, "the dead date-range container must be removed"
     assert html.count("data-bxsel") == 0, "no granularity select remains (the dropdown is retired)"
     # the inline picker must be GONE (single source of truth in the static file).
     assert "function enhanceCalendar" not in html and "function buildCalendar" not in html, (
@@ -74,11 +80,11 @@ def test_universe_wires_the_shared_component() -> None:
     )
 
 
-def test_universe_keeps_native_controls_as_value_source() -> None:
-    """Progressive enhancement: the test-pinned native date inputs still exist
-    so the pull JS reads real values + the pins hold. The granularity dropdown is
-    retired (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 — 1-minute is the only fetched granularity)."""
+def test_universe_has_no_dead_date_inputs() -> None:
+    """The native from/to date inputs are GONE (the consolidated pipeline takes no
+    from/to). The granularity dropdown is likewise retired
+    (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 — 1-minute is the only fetched granularity)."""
     html = _render_universe_html()
-    assert 'id="fromDate" min="2020-01-01"' in html
-    assert 'id="toDate" min="2020-01-01"' in html
+    assert 'id="fromDate"' not in html
+    assert 'id="toDate"' not in html
     assert 'id="spotInterval"' not in html  # the granularity dropdown is removed
