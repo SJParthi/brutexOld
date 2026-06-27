@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal
+from typing import Final, Literal, get_args
 
 __all__ = [
     "Broker",
@@ -102,6 +102,21 @@ TradeOutcome = Literal[
 Track 2 hard-codes ``NORMAL_CLOSE`` per DEC-RISK-011 (intraday-only,
 forced 15:20 exit, no held-to-expiry). The other three values are
 forward-compat stubs for future tracks that may hold to expiry."""
+
+
+# ─────────────────────────────────────────────────────────────────
+# Allowed-member sets — derived ONCE from the Literal aliases above
+# via ``typing.get_args`` so there is a SINGLE source of truth (no
+# hand-maintained duplicate list that could silently drift). Used by
+# ``TradeInput.__post_init__`` to fail loud on a typo'd enum string.
+# ─────────────────────────────────────────────────────────────────
+
+_INSTRUMENT_VALUES: Final[frozenset[str]] = frozenset(get_args(Instrument))
+_OPTION_TYPE_VALUES: Final[frozenset[str]] = frozenset(get_args(OptionType))
+_TRADE_SIDE_VALUES: Final[frozenset[str]] = frozenset(get_args(TradeSide))
+_BROKER_VALUES: Final[frozenset[str]] = frozenset(get_args(Broker))
+_GST_SPLIT_VALUES: Final[frozenset[str]] = frozenset(get_args(GstSplit))
+_TRADE_OUTCOME_VALUES: Final[frozenset[str]] = frozenset(get_args(TradeOutcome))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -196,6 +211,23 @@ class TradeInput:
         if self.strike < 1:
             msg = f"strike {self.strike} must be >= 1"
             raise ValueError(msg)
+        # Fail loud on a typo'd enum string. The fields are typed
+        # ``Literal[...]`` but a static type is NOT a runtime guard: a bad
+        # value like ``side="banana"`` would otherwise be SILENTLY ACCEPTED
+        # and route into the short-leg / inverted-PnL branch, producing a
+        # silently-WRONG cost. Each allowed set is derived from its own
+        # Literal alias (single source of truth — see above).
+        for field_name, value, allowed in (
+            ("instrument", self.instrument, _INSTRUMENT_VALUES),
+            ("option_type", self.option_type, _OPTION_TYPE_VALUES),
+            ("side", self.side, _TRADE_SIDE_VALUES),
+            ("broker", self.broker, _BROKER_VALUES),
+            ("gst_split", self.gst_split, _GST_SPLIT_VALUES),
+            ("trade_outcome", self.trade_outcome, _TRADE_OUTCOME_VALUES),
+        ):
+            if value not in allowed:
+                msg = f"{field_name} {value!r} is not a valid value; allowed: {sorted(allowed)}"
+                raise ValueError(msg)
 
 
 # ─────────────────────────────────────────────────────────────────

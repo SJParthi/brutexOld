@@ -429,6 +429,86 @@ def test_trade_input_rejects_zero_strike() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+# CHANGE 7 — runtime Literal-membership validation (fail loud on typo)
+# ─────────────────────────────────────────────────────────────────
+
+
+def _make_trade_kwargs() -> dict[str, object]:
+    """A valid kwargs baseline for direct ``TradeInput(**kwargs)`` builds.
+
+    Used by the Literal-membership tests so a single bad field can be
+    overridden while every other field stays valid.
+    """
+    return {
+        "entry_dt_ist": datetime(2026, 5, 15, 10, 0),
+        "exit_dt_ist": datetime(2026, 5, 15, 11, 0),
+        "instrument": "NIFTY",
+        "option_type": "CE",
+        "strike": 2_500_000,
+        "expiry_date": date(2026, 5, 21),
+        "entry_bar_open_paisa": 10_000,
+        "exit_bar_open_paisa": 10_000,
+        "side": "long_call",
+        "n_lots": 1,
+        "broker": "groww",
+        "gst_split": "intra_state",
+        "trade_outcome": "NORMAL_CLOSE",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    [
+        ("instrument", "banana"),
+        ("option_type", "XX"),
+        ("side", "banana"),
+        ("broker", "robinhood"),
+        ("gst_split", "off_world"),
+        ("trade_outcome", "EXPIRED_MAYBE"),
+    ],
+)
+def test_trade_input_rejects_invalid_literal(field_name: str, bad_value: str) -> None:
+    """CHANGE 7: a value outside a Literal field's allowed set fails loud.
+
+    A typo'd enum string is SILENTLY ACCEPTED by the ``Literal`` type alone
+    (it is a static-only annotation). ``__post_init__`` now runtime-validates
+    membership and raises ``ValueError`` naming the field, the bad value, and
+    the allowed set — never a silently-wrong cost.
+    """
+    kwargs = _make_trade_kwargs()
+    kwargs[field_name] = bad_value
+    with pytest.raises(ValueError, match=rf"{field_name} '{bad_value}' is not a valid value"):
+        TradeInput(**kwargs)  # type: ignore[arg-type]
+
+
+def test_trade_input_accepts_every_valid_literal_member() -> None:
+    """CHANGE 7: every VALID member of every Literal field is accepted.
+
+    Exercises the not-raised branch of the membership guard for each field,
+    so the new validation loop is fully covered (line + branch).
+    """
+    valid_by_field: dict[str, tuple[str, ...]] = {
+        "instrument": ("NIFTY", "BANKNIFTY", "SENSEX"),
+        "option_type": ("CE", "PE"),
+        "side": ("long_call", "long_put", "short_call", "short_put"),
+        "broker": ("groww", "zerodha"),
+        "gst_split": ("intra_state", "inter_state"),
+        "trade_outcome": (
+            "NORMAL_CLOSE",
+            "EXPIRY_EXERCISE",
+            "EXPIRY_ASSIGN",
+            "EXPIRY_WORTHLESS",
+        ),
+    }
+    for field_name, members in valid_by_field.items():
+        for member in members:
+            kwargs = _make_trade_kwargs()
+            kwargs[field_name] = member
+            trade = TradeInput(**kwargs)  # type: ignore[arg-type]
+            assert getattr(trade, field_name) == member
+
+
+# ─────────────────────────────────────────────────────────────────
 # Short-side branches (forward-compat stubs per DEC-EXEC-008)
 # ─────────────────────────────────────────────────────────────────
 
