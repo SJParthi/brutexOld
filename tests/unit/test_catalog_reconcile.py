@@ -229,6 +229,36 @@ class TestReconcile:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             assert result == ReconcileResult(partitions_reconciled=0, bars_total=0, skipped=0)
 
+    def test_corrupt_partition_is_skipped_others_reconcile(self, tmp_path: Path) -> None:
+        """GAP #9: a corrupt Parquet is logged + skipped; every readable partition still reconciles.
+
+        The per-file read runs at the START of every sweep load + F&O window derivation, so
+        a single garbage file must NOT crash the whole reconcile — it is counted in
+        ``skipped`` (and a ``catalog.reconcile.parquet_skip`` warning emitted), while the
+        GOOD partition reconciles normally.
+        """
+        from structlog.testing import capture_logs
+
+        _write_partition(tmp_path, symbol="NIFTY", n=4)  # one GOOD partition
+        # A SECOND file that glob-matches the layout but is GARBAGE bytes (a corrupt /
+        # version-incompatible Parquet), so the REAL pl.read_parquet raises a PolarsError.
+        corrupt = (
+            tmp_path / "bars" / "NSE" / "INDEX" / "BANKNIFTY" / "1minute" / "2021" / "01.parquet"
+        )
+        corrupt.parent.mkdir(parents=True)
+        corrupt.write_bytes(b"not a parquet file at all")
+        with _open(tmp_path) as cat, capture_logs() as logs:
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+            # The good partition reconciled; the corrupt one was skipped (not a crash).
+            assert result == ReconcileResult(partitions_reconciled=1, bars_total=4, skipped=1)
+            parts = cat.list_partitions(
+                exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
+            )
+            assert len(parts) == 1
+        skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
+        assert len(skips) == 1
+        assert "BANKNIFTY" in skips[0]["path"]
+
     def test_reconciled_partition_is_get_bars_readable(self, tmp_path: Path) -> None:
         # The whole point: after reconcile, get_bars (the sweep read path) returns bars.
         _write_partition(tmp_path, n=6)

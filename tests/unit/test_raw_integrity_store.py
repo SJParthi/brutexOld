@@ -24,6 +24,7 @@ from brutex.data.raw_integrity_store import (
     load_records,
     make_capture_hook,
     make_capture_hook_factory,
+    shard_path,
 )
 
 _PAYLOAD = {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 777, 42]]}
@@ -242,12 +243,14 @@ def test_append_takes_cross_process_flock(tmp_path: Path, monkeypatch: pytest.Mo
     locked: list[int] = []
 
     def _spy_flock(fd: int, operation: int) -> None:
-        assert operation == fcntl.LOCK_EX  # exclusive, held for the write
+        # The bounded acquire takes a NON-BLOCKING exclusive lock (LOCK_EX | LOCK_NB)
+        # so a wedged peer can never pin the worker (DEC-PULL-CONTENTION-ANTISTALL-001).
+        assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
         locked.append(operation)
 
     monkeypatch.setattr("brutex.data.raw_integrity_store.fcntl.flock", _spy_flock)
     append_record(_record(), tmp_path)
-    assert locked == [fcntl.LOCK_EX]  # the advisory lock was taken once
+    assert locked == [fcntl.LOCK_EX | fcntl.LOCK_NB]  # acquired on the first try
     # The record still landed despite the spied lock — append is unaffected.
     (record,) = load_records(tmp_path).values()
     assert record.groww_symbol == "NSE-NIFTY"
@@ -271,3 +274,131 @@ def test_append_concurrent_threads_no_interleave(tmp_path: Path) -> None:
         thread.join()
     loaded = load_records(tmp_path)
     assert len(loaded) == 8  # every line landed, none corrupted/interleaved
+
+
+# --------------------------------------------------------------------------- #
+# Per-symbol sharding (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #14)
+# --------------------------------------------------------------------------- #
+def test_shard_path_is_per_symbol_and_deterministic(tmp_path: Path) -> None:
+    a = shard_path(tmp_path, "NSE-NIFTY")
+    b = shard_path(tmp_path, "BSE-SENSEX")
+    assert a.parent == integrity_dir(tmp_path)
+    assert a.suffix == ".jsonl"
+    assert a != b  # different symbols → different shards (never contend)
+    assert shard_path(tmp_path, "NSE-NIFTY") == a  # same symbol → same shard (stable)
+
+
+def test_two_symbols_write_distinct_shards(tmp_path: Path) -> None:
+    """Two symbols' captures land in DIFFERENT files, so they never contend on one lock."""
+    append_record(_record("NSE-NIFTY"), tmp_path)
+    append_record(_record("BSE-SENSEX"), tmp_path)
+    nifty_shard = shard_path(tmp_path, "NSE-NIFTY")
+    sensex_shard = shard_path(tmp_path, "BSE-SENSEX")
+    assert nifty_shard.is_file()
+    assert sensex_shard.is_file()
+    assert nifty_shard != sensex_shard
+    # Both still load through the shard glob.
+    symbols = {r.groww_symbol for r in load_records(tmp_path).values()}
+    assert symbols == {"NSE-NIFTY", "BSE-SENSEX"}
+
+
+def test_load_reads_legacy_unsharded_file(tmp_path: Path) -> None:
+    """A pre-sharding ``records.jsonl`` is still loaded (back-compat glob)."""
+    import json
+
+    legacy = _record("NSE-LEGACY")
+    integrity_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    legacy_line = json.dumps(
+        {
+            "exchange": legacy.exchange,
+            "segment": legacy.segment,
+            "groww_symbol": legacy.groww_symbol,
+            "interval": legacy.interval,
+            "window_start": legacy.window_start,
+            "window_end": legacy.window_end,
+            "payload_hash": legacy.payload_hash,
+            "row_count": legacy.row_count,
+            "algorithm": legacy.algorithm,
+            "captured_at": None,
+        }
+    )
+    with integrity_path(tmp_path).open("a", encoding="utf-8") as handle:
+        handle.write(legacy_line + "\n")
+    # A sharded record alongside the legacy file: BOTH load.
+    append_record(_record("NSE-NEW"), tmp_path)
+    symbols = {r.groww_symbol for r in load_records(tmp_path).values()}
+    assert symbols == {"NSE-LEGACY", "NSE-NEW"}
+
+
+def test_load_skips_one_unreadable_shard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One unreadable shard logs a WARNING + is skipped; the others still load."""
+    append_record(_record("NSE-GOOD"), tmp_path)
+    append_record(_record("NSE-BAD"), tmp_path)
+    bad_shard = shard_path(tmp_path, "NSE-BAD")
+    real_read_text = Path.read_text
+
+    def _selective_boom(self: Path, *a: object, **k: object) -> str:
+        if self == bad_shard:
+            raise OSError("disk gone")
+        return real_read_text(self, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _selective_boom)
+    symbols = {r.groww_symbol for r in load_records(tmp_path).values()}
+    assert symbols == {"NSE-GOOD"}  # the good shard survives the bad one
+
+
+# --------------------------------------------------------------------------- #
+# Bounded cross-process flock (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #14)
+# --------------------------------------------------------------------------- #
+def test_append_uses_nonblocking_flock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    ops: list[int] = []
+
+    def _spy_flock(fd: int, operation: int) -> None:
+        ops.append(operation)
+
+    monkeypatch.setattr("brutex.data.raw_integrity_store.fcntl.flock", _spy_flock)
+    append_record(_record(), tmp_path)
+    assert ops == [fcntl.LOCK_EX | fcntl.LOCK_NB]  # bounded, non-blocking acquire
+
+
+def test_append_lock_timeout_skips_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged peer holding the shard flock → the record is SKIPPED, never a block."""
+    import fcntl
+
+    def _always_blocked(fd: int, operation: int) -> None:
+        raise BlockingIOError("peer holds the shard lock")
+
+    # No real sleeping; a clock that jumps past the deadline immediately.
+    monkeypatch.setattr("brutex.data.raw_integrity_store.fcntl.flock", _always_blocked)
+    monkeypatch.setattr("brutex.data.raw_integrity_store.time.sleep", lambda _s: None)
+    ticks = iter([0.0, 100.0])
+    monkeypatch.setattr("brutex.data.raw_integrity_store.time.monotonic", lambda: next(ticks))
+    append_record(_record("NSE-WEDGED"), tmp_path)  # must NOT raise / block
+    # The additive record was dropped (best-effort skip — the hash is not worth blocking).
+    assert load_records(tmp_path) == {}
+    assert fcntl.LOCK_NB  # sanity: the constant exists on this platform
+
+
+def test_append_lock_timeout_then_retry_acquires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer that releases AFTER one poll → the bounded acquire wins on the retry."""
+    import fcntl
+
+    real_flock = fcntl.flock
+    calls = {"n": 0}
+
+    def _blocked_once(fd: int, operation: int) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise BlockingIOError("peer holds it briefly")
+        real_flock(fd, operation)  # second attempt wins
+
+    monkeypatch.setattr("brutex.data.raw_integrity_store.fcntl.flock", _blocked_once)
+    monkeypatch.setattr("brutex.data.raw_integrity_store.time.sleep", lambda _s: None)
+    append_record(_record("NSE-RETRY"), tmp_path)
+    (record,) = load_records(tmp_path).values()
+    assert record.groww_symbol == "NSE-RETRY"
+    assert calls["n"] == 2  # one block, then a winning retry

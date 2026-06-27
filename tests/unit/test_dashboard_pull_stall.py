@@ -307,6 +307,40 @@ class TestBackgroundPullJobWatchdog:
         job.start(work, total=10, ledger_synced=True)
         assert built[0].beats == 1  # the per-window ledger sync beat the watchdog
 
+    def test_progress_beat_seam_keeps_watchdog_alive_under_contention(self) -> None:
+        """A slow-but-progressing pull (no COMPLETED window, only lock-wait/pace beats)
+        still beats the watchdog via the process-global seam — DEC-PULL-CONTENTION-
+        ANTISTALL-001 GAP #15. The worker emits NO ``on_progress`` (no finished window);
+        it only fires ``emit_progress_beat`` (as the bounded lock-wait + the pacer do),
+        and that must reach the watchdog because ``_run`` registered the job's beat.
+        """
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            unregister_progress_beat,
+        )
+
+        unregister_progress_beat()  # clean slate
+        built, factory = _spy_factory()
+        job = _job(factory)
+        seen_running: list[bool] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            # Simulate three lock-wait polls / pace returns — NO completed window.
+            for _ in range(3):
+                emit_progress_beat()
+            # While the run is live the beat is registered (and the job is running).
+            seen_running.append(job.running)
+
+        assert job.start(work, total=1) is True
+        spy = built[0]
+        # The seam beat reached the watchdog 3× even with zero on_progress windows —
+        # a slow-but-progressing pull is never falsely declared hung.
+        assert spy.beats == 3
+        assert seen_running == [True]
+        # After the run the beat is unregistered — a stray emit no longer reaches it.
+        emit_progress_beat()
+        assert spy.beats == 3
+
     def test_hung_edge_alerts_and_clears_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A HUNG worker → CRITICAL pull-halt alert + progress error + _running cleared."""
         halts: list[BaseException] = []

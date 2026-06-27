@@ -34,6 +34,10 @@ from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
+from brutex.observability.progress_beat import (
+    register_progress_beat,
+    unregister_progress_beat,
+)
 from brutex.observability.watchdog import WorkerEvent
 
 _LOG = structlog.get_logger(__name__)
@@ -247,6 +251,13 @@ class BackgroundPullJob:
         *watchdog* is THIS run's stall watchdog (passed in by :meth:`start`, so it is never
         ``None`` here), stopped in the ``finally`` once the worker has returned / raised.
         """
+        # Install the process-global liveness beat for this run (DEC-PULL-CONTENTION-
+        # ANTISTALL-001 GAP #15): the bounded partition lock-wait + the rate pacer fire
+        # ``emit_progress_beat`` on the FAN-OUT worker threads, which reaches this beat
+        # and keeps the watchdog alive while a pull is slow-but-progressing under lock
+        # contention — so the watchdog never false-positive-kills it. Removed in the
+        # ``finally`` so a finished run leaves no stale beat.
+        register_progress_beat(self._beat)
         try:
             work(self._on_progress)
         except Exception as exc:  # report ANY failure to the live feed, never crash the thread
@@ -263,6 +274,9 @@ class BackgroundPullJob:
         else:
             self._progress.finish(detail="done")
         finally:
+            # Remove this run's liveness beat so a later poll can never fire into a dead
+            # watchdog (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15).
+            unregister_progress_beat()
             # Stop this run's stall timer first (so it can never fire after the worker has
             # already returned / raised). Outside the lock: stop() only sets an Event,
             # never blocks. Idempotent with _on_hung's stop() (both target the SAME watchdog).

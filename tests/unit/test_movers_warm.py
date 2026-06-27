@@ -80,6 +80,21 @@ def test_latest_movers_date_none_when_only_non_spot_segments(tmp_path: Path) -> 
     assert latest_movers_date(tmp_path) is None
 
 
+def test_latest_movers_date_none_on_corrupt_lake(tmp_path: Path) -> None:
+    """GAP #4: a corrupt / unreadable spot 1day Parquet → None (degrade), never a raise.
+
+    `latest_movers_date` backs the DEFAULT `/movers` poll, so an unguarded DuckDB error on
+    a corrupt file would 500 the whole page. Treat an unreadable lake the same as an empty
+    one — return None so the route degrades to an honest empty/today payload.
+    """
+    # Lay down a file at the spot 1day glob path that is GARBAGE bytes (not Parquet), so
+    # DuckDB's read_parquet raises an InvalidInputException ("No magic bytes …").
+    corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day" / "2024" / "06.parquet"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"this is not a parquet file at all")
+    assert latest_movers_date(tmp_path) is None
+
+
 def test_warm_counts_only_non_empty_jobs() -> None:
     # 3 jobs: spot warmed 5, futures warmed 0 (empty), options warmed 2 → 2 non-empty.
     assert warm_movers_snapshots([lambda: 5, lambda: 0, lambda: 2]) == 2
