@@ -277,18 +277,21 @@ class TestEmptyStringRejection:
 class TestSignedZero:
     @given(value=st.floats(allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, deadline=None)
-    def test_signed_zero_distinct_when_reprs_differ(self, value: float) -> None:
-        """``0.0`` and ``-0.0`` canonicalise distinctly (their ``repr`` differs);
-        any two finite floats with the same ``repr`` canonicalise identically."""
+    def test_signed_zero_collapses_when_only_sign_differs(self, value: float) -> None:
+        """DEC-SWEEP-DEDUP-LMDB-001: signed zero is normalised (``-0.0`` → ``+0.0``)
+        BEFORE repr, so two floats whose ``repr`` differs ONLY by the sign of a
+        zero collapse to one token; any other repr difference stays distinct.
+        The canonical token is exactly ``repr(value + 0.0)``."""
         pos = canonicalise_params({"x": value})
         neg = canonicalise_params({"x": -value})
-        if repr(value) == repr(-value):
+        if repr(value + 0.0) == repr(-value + 0.0):
             assert pos == neg
         else:
             assert pos != neg
 
     def test_signed_zero_explicit(self) -> None:
-        assert canonicalise_params({"x": 0.0}) != canonicalise_params({"x": -0.0})
+        # DEC-SWEEP-DEDUP-LMDB-001: -0.0 collapses to +0.0 (was: distinct).
+        assert canonicalise_params({"x": 0.0}) == canonicalise_params({"x": -0.0})
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -300,10 +303,12 @@ class TestFloatStrDecimalAlias:
     @given(value=st.floats(allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, deadline=None)
     def test_float_str_alias(self, value: float) -> None:
-        """A float and the ``str`` of its ``repr`` ALWAYS collapse to one token —
-        both canonicalise to ``repr(value)`` (wire-locked alias; mitigated by
+        """A float and the ``str`` of its canonical ``repr`` ALWAYS collapse to one
+        token — the float canonicalises to ``repr(value + 0.0)`` (signed zero is
+        normalised first, DEC-SWEEP-DEDUP-LMDB-001), so the aliasing str is the
+        repr of the SIGN-NORMALISED value (wire-locked alias; mitigated by
         one-type-per-axis at ParamGrid)."""
-        text = repr(value)
+        text = repr(value + 0.0)
         as_float = canonicalise_params({"k": value})
         as_str = canonicalise_params({"k": text})
         assert as_float == as_str
@@ -311,15 +316,16 @@ class TestFloatStrDecimalAlias:
     @given(value=st.floats(allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, deadline=None)
     def test_decimal_aliases_float_iff_str_matches_repr(self, value: float) -> None:
-        """A ``Decimal`` aliases the float IFF ``str(Decimal)`` equals the float
-        ``repr`` — Decimal can normalise exponent CASE (``1e+16`` -> ``1E+16``),
-        an honest non-universal alias (Golden Rule #10). The token is exactly
-        the ``Decimal``'s ``str`` form either way."""
-        text = repr(value)
+        """A ``Decimal`` aliases the float IFF ``str(Decimal)`` equals the float's
+        CANONICAL ``repr`` (``repr(value + 0.0)`` — signed zero normalised first,
+        DEC-SWEEP-DEDUP-LMDB-001) — Decimal can normalise exponent CASE
+        (``1e+16`` -> ``1E+16``), an honest non-universal alias (Golden Rule #10).
+        The token is exactly the ``Decimal``'s ``str`` form either way."""
+        canonical_text = repr(value + 0.0)
         as_float = canonicalise_params({"k": value})
-        dec = Decimal(text)
+        dec = Decimal(canonical_text)
         as_decimal = canonicalise_params({"k": dec})
-        if str(dec) == text:
+        if str(dec) == canonical_text:
             assert as_decimal == as_float
         else:
             # Decimal's str diverged from the float repr (case/scale normalise).

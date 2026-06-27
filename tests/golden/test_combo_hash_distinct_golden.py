@@ -155,9 +155,11 @@ def test_wire_locked_alias_frozen() -> None:
 
 
 def test_signed_zero_frozen() -> None:
-    """Signed zero is split — the SAFE dedup direction (never a silent drop)."""
+    """Signed zero is COLLAPSED to +0.0 (DEC-SWEEP-DEDUP-LMDB-001) — two
+    mathematically-equal zero params share ONE run-identity (Golden Rule #4
+    reproducibility); ``-0.0`` normalises to ``"0.0"`` BEFORE repr."""
     assert canonicalise_params({"x": 0.0}) == '{"x":"0.0"}'
-    assert canonicalise_params({"x": -0.0}) == '{"x":"-0.0"}'
+    assert canonicalise_params({"x": -0.0}) == '{"x":"0.0"}'
 
 
 def test_decimal_scale_frozen() -> None:

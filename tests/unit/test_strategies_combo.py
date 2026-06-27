@@ -664,10 +664,13 @@ class TestWireLockedCanonical:
         assert one_0 != one_00 != one_e2 != hundred
         assert len({one_0, one_00, one_e2, hundred}) == 4
 
-    def test_signed_zero_distinct(self) -> None:
+    def test_signed_zero_collapses(self) -> None:
+        # DEC-SWEEP-DEDUP-LMDB-001: -0.0 is normalised to +0.0 BEFORE repr so
+        # two mathematically-equal zero params share ONE run-identity (Golden
+        # Rule #4 reproducibility) — superseding the earlier split-zero pin.
         assert canonicalise_params({"x": 0.0}) == '{"x":"0.0"}'
-        assert canonicalise_params({"x": -0.0}) == '{"x":"-0.0"}'
-        assert canonicalise_params({"x": 0.0}) != canonicalise_params({"x": -0.0})
+        assert canonicalise_params({"x": -0.0}) == '{"x":"0.0"}'
+        assert canonicalise_params({"x": 0.0}) == canonicalise_params({"x": -0.0})
 
     def test_tuple_list_range_canonicalise_identically(self) -> None:
         as_list = canonicalise_params({"k": [0, 1, 2]})
