@@ -52,6 +52,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <h1>Claude Code Projects (beta) — Round-2 Feedback</h1>
 <p><strong>For:</strong> Claude Code Early Access team — Diana Liu (claude-code-early-access@anthropic.com); Omid (eng lead), Jul 1 call <strong>From:</strong> Parthiban (sjparthi93@gmail.com) · <strong>Date:</strong> 2026-06-27 <strong>Workload under test:</strong> BruteX — a large multi-agent backtesting-engine repo, run as a real overnight batch inside the Projects beta.</p>
 <p>This is round-2 feedback on the <strong>Claude Code Projects beta</strong>, gathered from running a real, large, multi-agent batch inside it. The strongest item — a misleading GitHub error — comes first; the rest follow. Where I observed something but could not reproduce it reliably, I say so plainly rather than overstating it.</p>
+<p>For context: I've run overnight multi-agent batches and normal day-to-day sessions before <strong>without ever wiring a Routine</strong>, and without hitting these problems. Those prior runs used the <strong>same model (Opus 4.8) and the same maximum reasoning setting</strong> I use normally, so the model and the effort setting did not change between them and this run — the one differentiator was running inside the <strong>Projects beta</strong>, where these problems surfaced. Holding the model and the reasoning setting constant makes Projects the standout difference, but I still couldn't isolate Projects as the definitive cause of each individual issue, so I present this as a strong pattern from direct experience rather than proven causation — the contrast is consistent: my prior overnight and normal day-to-day sessions needed no Routine and didn't show this, and the Projects run did.</p>
 <hr/>
 <h2>Issues at a glance</h2>
 <table>
@@ -75,7 +76,7 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <hr/>
 <h2>Open questions</h2>
 <ul>
-<li>How is a Project meant to sustain overnight work without a hand-wired Routine? Plain sessions did it unaided; under Projects the same overnight work appeared to need one, but I couldn't isolate whether Projects is the cause.</li>
+<li>How is a Project meant to sustain overnight work without a hand-wired Routine? I have never used a Routine — not in prior overnight runs, not in normal day-to-day sessions — and they ran fine unaided. Under the Projects beta the same overnight work appeared to need one. I couldn't isolate whether Projects is the cause, but that's the consistent difference I saw.</li>
 </ul>
 <hr/>
 <h2>Details</h2>

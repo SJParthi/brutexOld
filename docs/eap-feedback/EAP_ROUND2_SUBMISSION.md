@@ -6,6 +6,8 @@
 
 This is round-2 feedback on the **Claude Code Projects beta**, gathered from running a real, large, multi-agent batch inside it. The strongest item — a misleading GitHub error — comes first; the rest follow. Where I observed something but could not reproduce it reliably, I say so plainly rather than overstating it.
 
+For context: I've run overnight multi-agent batches and normal day-to-day sessions before **without ever wiring a Routine**, and without hitting these problems. Those prior runs used the **same model (Opus 4.8) and the same maximum reasoning setting** I use normally, so the model and the effort setting did not change between them and this run — the one differentiator was running inside the **Projects beta**, where these problems surfaced. Holding the model and the reasoning setting constant makes Projects the standout difference, but I still couldn't isolate Projects as the definitive cause of each individual issue, so I present this as a strong pattern from direct experience rather than proven causation — the contrast is consistent: my prior overnight and normal day-to-day sessions needed no Routine and didn't show this, and the Projects run did.
+
 ---
 
 ## Issues at a glance
@@ -31,7 +33,7 @@ This is round-2 feedback on the **Claude Code Projects beta**, gathered from run
 
 ## Open questions
 
-- How is a Project meant to sustain overnight work without a hand-wired Routine? Plain sessions did it unaided; under Projects the same overnight work appeared to need one, but I couldn't isolate whether Projects is the cause.
+- How is a Project meant to sustain overnight work without a hand-wired Routine? I have never used a Routine — not in prior overnight runs, not in normal day-to-day sessions — and they ran fine unaided. Under the Projects beta the same overnight work appeared to need one. I couldn't isolate whether Projects is the cause, but that's the consistent difference I saw.
 
 ---
 
