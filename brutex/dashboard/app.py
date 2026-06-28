@@ -316,6 +316,34 @@ class RateLimitPanel:
     quota_used: int = 0
     quota_remaining: int = 0
     quota_limit: int = -1
+    #: The controller's MEASURED rolling-60s ISSUE count (``recent_minute``) and the HARD
+    #: per-minute governor cap (``ceiling_per_min``) — straight from the controller
+    #: snapshot (DEC-GROWW-RATE-PERMIN-001). Feed the live-pull-rate monitor's req/min
+    #: gauge + its observed req/hour extrapolation (DEC-LIVE-RATE-MONITOR-001). ``0`` /
+    #: ``-1`` when no per-minute governor is wired (the dry-run / no-live default).
+    recent_minute: int = 0
+    ceiling_per_min: int = -1
+    #: The monotonic timestamp of the LAST live rate tick (a pull pushed a snapshot via
+    #: :func:`make_rate_observer`). ``-inf`` (the default) means "never updated" — the
+    #: live-pull-rate monitor reads this to tell an ACTIVE pull from an IDLE / ended one,
+    #: so an ended pull never lingers as a fake "live" reading (DEC-LIVE-RATE-MONITOR-001,
+    #: Golden Rule #1). Monotonic (not wall-clock) so it is immune to clock adjustments.
+    last_update_monotonic: float = float("-inf")
+
+    def to_json_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe panel mapping, DROPPING the monotonic freshness baseline.
+
+        ``last_update_monotonic`` is an internal bookkeeping value (a ``time.monotonic``
+        reading, ``-inf`` until the first tick) that is NOT JSON-serialisable (``-inf``)
+        and not wall-clock-meaningful to a client — the derived staleness is surfaced by
+        the dedicated ``/api/v1/pull/rate`` poll instead. ONE source of truth for the
+        serialised panel shape, shared by ``/api/v1/state`` (:meth:`to_dict`) and
+        ``/api/v1/rate`` so the two payloads never drift (CLAUDE.md §11 COMMON;
+        DEC-LIVE-RATE-MONITOR-001).
+        """
+        panel = asdict(self)
+        panel.pop("last_update_monotonic", None)
+        return panel
 
 
 @dataclass(slots=True)
@@ -527,6 +555,8 @@ class DashboardState:
         quota_used: int = 0,
         quota_remaining: int = 0,
         quota_limit: int = -1,
+        recent_minute: int = 0,
+        ceiling_per_min: int = -1,
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
@@ -534,6 +564,13 @@ class DashboardState:
         quota gauge (DEC-AUTO-RESUME-QUOTA-001), defaulting to the "no tracker
         wired" sentinel (``quota_limit=-1``) so a caller that has no quota snapshot
         leaves the gauge hidden rather than showing a false 0.
+
+        ``recent_minute`` / ``ceiling_per_min`` are the controller's rolling-60s issue
+        count + the HARD per-minute governor cap (DEC-GROWW-RATE-PERMIN-001), feeding the
+        live-pull-rate monitor's req/min gauge (DEC-LIVE-RATE-MONITOR-001). A live tick
+        ALSO stamps :attr:`RateLimitPanel.last_update_monotonic` (the staleness baseline
+        the monitor reads to tell an active pull from an idle one) via
+        :meth:`_stamp_rate_update`.
         """
         with self._lock:
             self.rate_limit.current_rps = current_rps
@@ -542,6 +579,19 @@ class DashboardState:
             self.rate_limit.quota_used = quota_used
             self.rate_limit.quota_remaining = quota_remaining
             self.rate_limit.quota_limit = quota_limit
+            self.rate_limit.recent_minute = recent_minute
+            self.rate_limit.ceiling_per_min = ceiling_per_min
+            self._stamp_rate_update()
+
+    def _stamp_rate_update(self) -> None:
+        """Stamp the panel's live-tick monotonic timestamp (caller holds ``self._lock``).
+
+        The freshness baseline the live-pull-rate monitor reads (DEC-LIVE-RATE-MONITOR-001):
+        a pull pushing a snapshot moves it to ``monotonic()`` so a poll can compute the age
+        and flip to idle once a pull ends. Wrapped in a method (rather than inlined at the
+        two writer sites) so the SINGLE ``time.monotonic`` call site is patchable in tests.
+        """
+        self.rate_limit.last_update_monotonic = time.monotonic()
 
     def update_throughput(
         self,
@@ -565,6 +615,10 @@ class DashboardState:
             self.rate_limit.latency_ms_p95 = latency_ms_p95
             self.rate_limit.rps_1s = rps_1s
             self.rate_limit.rps_1s_max = rps_1s_max
+            # The measured-throughput half of a live tick is just as much pull activity as
+            # the controller half — stamp the freshness baseline here too so the monitor
+            # reads "active" even on a tick where only the meter moved (DEC-LIVE-RATE-MONITOR-001).
+            self._stamp_rate_update()
 
     # ── Sweep funnel passthrough (DEC-DASHBOARD-LIVE-1) ────────────
 
@@ -679,7 +733,7 @@ class DashboardState:
                 ],
                 "workers": [asdict(w) for w in self.workers.values()],
                 "telegram": asdict(self.telegram),
-                "rate_limit": asdict(self.rate_limit),
+                "rate_limit": self.rate_limit.to_json_dict(),
                 "recent_events": list(self.recent_events),
                 # DEC-DASHBOARD-LIVE-1: sweep_funnel is None until the
                 # brute-force loop calls update_sweep_funnel(). The
@@ -721,6 +775,10 @@ def make_rate_observer(
         # Quota gauge (DEC-AUTO-RESUME-QUOTA-001): the controller snapshot carries
         # ``quota_*`` only when a DailyQuotaTracker is wired (the live path); absent
         # → ``quota_limit=-1`` sentinel so the panel hides the gauge, not a false 0.
+        # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired
+        # (DEC-GROWW-RATE-PERMIN-001) — map that to the ``-1`` "no cap" panel sentinel so
+        # the live-rate monitor shows no per-minute limit rather than a false 0.
+        per_min_cap = rate.get("ceiling_per_min")
         state.update_rate_limit(
             current_rps=float(rate.get("current_rps", 0.0)),
             available_tokens=float(rate.get("available_tokens", 0.0)),
@@ -728,6 +786,8 @@ def make_rate_observer(
             quota_used=int(rate.get("quota_used", 0)),
             quota_remaining=int(rate.get("quota_remaining", 0)),
             quota_limit=int(rate.get("quota_limit", -1)),
+            recent_minute=int(rate.get("recent_minute", 0)),
+            ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
         )
         state.update_throughput(
             effective_rps=float(meter.get("effective_rps", 0.0)),
@@ -1058,8 +1118,53 @@ def build_app(
         :func:`make_rate_observer` (DEC-DASHBOARD-RATE-PANEL-001 +
         DEC-DASHBOARD-RPS1S-PANEL-001). A pure in-memory dict copy — never touches
         the lake or the store lock.
+
+        The internal ``last_update_monotonic`` freshness baseline (``-inf`` until a pull
+        ticks — DEC-LIVE-RATE-MONITOR-001) is DROPPED from this payload (via the shared
+        :meth:`RateLimitPanel.to_json_dict`): it is a monotonic bookkeeping value (not
+        wall-clock-meaningful to a client) and ``-inf`` is not valid JSON. The dedicated
+        ``/api/v1/pull/rate`` poll surfaces the derived staleness.
         """
-        return JSONResponse(asdict(state.rate_limit))
+        return JSONResponse(state.rate_limit.to_json_dict())
+
+    @app.get("/api/v1/pull/rate")
+    async def api_pull_rate() -> JSONResponse:
+        """GET /api/v1/pull/rate — live pull req/sec·min·hour + a STALL verdict.
+
+        DEC-LIVE-RATE-MONITOR-001. The dedicated, O(1) in-memory poll the live-rate
+        monitor WIDGET reads (every ~2-4 s, site-wide). It projects the in-memory
+        :class:`RateLimitPanel` — populated during a live Groww pull by
+        :func:`make_rate_observer` from the REAL
+        :meth:`~brutex.adapters.rate_common.RateController.snapshot` (``current_rps`` /
+        ``recent_minute`` / ``recent_hits``) + the transport
+        :meth:`~brutex.adapters.call_meter.CallMeter.snapshot` (``effective_rps``) — into
+        a :class:`~brutex.dashboard.pull_rate_view.PullRateView`:
+
+        * **req/sec** achieved (measured ``effective_rps``) vs allowed (``current_rps``);
+        * **req/min** — the controller's measured rolling-60s issue count;
+        * **req/hour** — an OBSERVED extrapolation (``req/min × 60``, so labelled);
+        * a **stall signal** — ``seconds_since_update`` + the ``stalled`` / ``idle`` /
+          ``flowing`` verdict — plus the configured ``ceiling_rps`` (8) /
+          ``ceiling_per_min`` (500) LIMITS.
+
+        When NO pull is running (no live tick within the staleness window) every live
+        number is ZEROED and ``flow_state`` is ``idle`` — never a fabricated "live"
+        figure (Golden Rule #1). A pure in-memory read: never touches the lake / store
+        lock, never blocks the pull.
+        """
+        from brutex.dashboard.pull_rate_view import build_pull_rate_view
+
+        with state._lock:  # pyright: ignore[reportPrivateUsage]
+            panel = state.rate_limit
+            view = build_pull_rate_view(
+                effective_rps=panel.effective_rps,
+                current_rps=panel.current_rps,
+                recent_minute=panel.recent_minute,
+                recent_429_count=panel.recent_429_count,
+                last_update_monotonic=panel.last_update_monotonic,
+                now_monotonic=time.monotonic(),
+            )
+        return JSONResponse(view.to_dict())
 
     @app.get("/api/v1/quota")
     async def api_quota() -> JSONResponse:
