@@ -72,6 +72,47 @@ def test_worker_exception_becomes_error_state() -> None:
     assert job.running is False  # flag reset even on failure
 
 
+def test_on_success_fires_only_on_a_successful_run() -> None:
+    """A clean return fires the success hook exactly once (MAJOR-1, DEC-DASHBOARD-RESULTS-PAGE-001)."""
+    job = _job()
+    calls: list[int] = []
+
+    def work(on_progress: ProgressHook) -> None:
+        on_progress("NIFTY 1minute", 10, False, False)
+
+    assert job.start(work, total=1, on_success=lambda: calls.append(1)) is True
+    assert job.snapshot().state == STATE_DONE
+    assert calls == [1]  # fired once on success
+
+
+def test_on_success_does_not_fire_on_a_failed_run() -> None:
+    """A worker exception NEVER fires the success hook (the leaderboard cache stays untouched)."""
+    job = _job()
+    calls: list[int] = []
+
+    def work(on_progress: ProgressHook) -> None:
+        raise RuntimeError("boom")
+
+    assert job.start(work, total=1, on_success=lambda: calls.append(1)) is True
+    assert job.snapshot().state == STATE_ERROR
+    assert calls == []  # never fired on failure
+
+
+def test_on_success_raising_is_swallowed_and_never_crashes_the_worker() -> None:
+    """A success hook that raises is logged + swallowed; the job still reaches DONE + clears running."""
+    job = _job()
+
+    def work(on_progress: ProgressHook) -> None:
+        return None
+
+    def boom() -> None:
+        raise RuntimeError("hook blew up")
+
+    assert job.start(work, total=1, on_success=boom) is True
+    assert job.snapshot().state == STATE_DONE  # success state unaffected by the raising hook
+    assert job.running is False  # the finally still cleared the single-flight flag
+
+
 def test_pull_halt_global_stop_fires_alert_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A pull-wide LakeWriteHalt → error state AND a best-effort halt alert fires once.
 

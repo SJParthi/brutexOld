@@ -3959,7 +3959,18 @@ def build_app(
             """Background body: run the grid sweep; the live tick streams to the progress file."""
             return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
 
-        started = _pull_job.start(_work, total=1, detail=f"sweep {request.symbols}")
+        # On a SUCCESSFUL sweep, bump the dashboard write-generation so the next
+        # /results poll re-reads the new winners instead of serving the stale
+        # leaderboard cache (the sweep _work never reports per-bar progress, so the
+        # _on_progress mark_dirty funnel never fires for a sweep — MAJOR-1 fix,
+        # DEC-DASHBOARD-RESULTS-PAGE-001). Fires only on success, never on a failed
+        # sweep (see BackgroundPullJob._run).
+        started = _pull_job.start(
+            _work,
+            total=1,
+            detail=f"sweep {request.symbols}",
+            on_success=_summary_cache.mark_dirty,
+        )
         payload = request.to_dict()
         payload["started"] = started
         return JSONResponse(payload)
@@ -4003,9 +4014,13 @@ def build_app(
 
         **Latency (DEC-DASHBOARD-RESULTS-PAGE-001):** the ``<lake>/sweeps`` read is
         a pure function of the sweep tree, so the projected leaderboard is memoised
-        behind the dashboard write-generation (``_summary_cache.generation`` — a
-        sweep run / pull bumps it). A repeat poll, or a filter the operator already
-        viewed, is an O(1) cache hit; the first read of a coordinate still pays the
+        behind the dashboard write-generation (``_summary_cache.generation``). It is
+        bumped by a pull (the write funnel's ``mark_dirty``) AND by a
+        SUCCESSFULLY-completed dashboard sweep (the ``on_success`` hook on
+        ``/api/v1/sweep/run`` — a failed sweep never bumps it), so a sweep's winners
+        appear on the next poll instead of behind a stale ``available: false``. A
+        repeat poll, or a filter the operator already viewed, is an O(1) cache hit;
+        the first read of a coordinate (or the first after a bump) still pays the
         real ``O(stores × rows)`` scan (honest envelope, Golden Rule #10).
 
         **Honest envelope (Golden Rule #10):** an empty / absent ``<lake>/sweeps``
@@ -4029,9 +4044,13 @@ def build_app(
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
         generation = _summary_cache.generation
+        # Casefold the filter axes in the cache key: build_sweep_leaderboard's
+        # _matches filters them case-insensitively, so ``NIFTY`` and ``nifty`` yield
+        # the SAME leaderboard and must share ONE cache slot (rank_by stays raw — it
+        # is matched exactly against RANKABLE_COLUMNS, not casefolded).
         key = (
-            f"sweep_leaderboard|i={instrument or ''}|tf={tf or ''}"
-            f"|d={direction or ''}|r={rank_by or ''}|n={top}"
+            f"sweep_leaderboard|i={(instrument or '').casefold()}|tf={(tf or '').casefold()}"
+            f"|d={(direction or '').casefold()}|r={rank_by or ''}|n={top}"
         )
 
         def _resolve() -> dict[str, Any]:

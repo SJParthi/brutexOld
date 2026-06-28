@@ -246,13 +246,19 @@ def _matches(
     return not (direction is not None and row.direction.casefold() != direction.casefold())
 
 
-def _rank_value(row: ResultRow, rank_by: str) -> float:
-    """Return *row*'s numeric value for the ranking column (int columns coerce to float).
+def _rank_value(row: ResultRow, rank_by: str) -> int | float:
+    """Return *row*'s RAW numeric value for the ranking column (int stays int).
 
-    Money / count columns are int at rest; the ``float`` return is the numeric-tower
-    upper bound used only as a sort key (the displayed value keeps full fidelity).
+    Each rankable column is uniformly typed across rows — money / count columns are
+    ``int`` (int64 paisa / trade counts), the metric columns are ``float`` — so the
+    raw value is returned UNCOERCED: an int64 paisa value beyond ``2**53`` keeps its
+    exact magnitude (a ``float`` cast would silently lose the low bits and mis-rank
+    high-PnL combos). This is the SAME key + tie-break the engine's
+    :meth:`brutex.engine.results_store.ResultsStore.top_k` uses (raw column getter,
+    ``run_id`` ascending tie-break, descending sort), so the leaderboard's total
+    order is byte-identical to ``top_k``'s.
     """
-    return float(getattr(row, rank_by))
+    return getattr(row, rank_by)  # type: ignore[no-any-return]
 
 
 def _project_row(row: ResultRow, rank: int) -> dict[str, Any]:

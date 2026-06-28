@@ -208,6 +208,68 @@ def test_leaderboard_generation_cache(
     assert fresh["total_rows"] == 2
 
 
+def test_completed_sweep_refreshes_leaderboard_cache(
+    client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+) -> None:
+    """MAJOR-1: a SUCCESSFULLY-completed dashboard sweep bumps the generation so the
+    NEXT ``/results`` poll re-reads the new winners instead of the stale empty board.
+
+    Drives the REAL sweep-completion path: a :class:`BackgroundPullJob` started with
+    the SAME ``on_success=summary_cache.mark_dirty`` callback the ``/api/v1/sweep/run``
+    route wires. Before the fix the sweep ``_work`` never reported per-bar progress, so
+    nothing ever bumped the leaderboard cache and the page kept serving ``available:
+    false``.
+    """
+    from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+
+    # 1) A first poll with no sweep tree warms the cache at the empty / unavailable state.
+    empty = client.get("/api/v1/sweep/leaderboard").json()
+    assert empty["available"] is False
+
+    # 2) A sweep "runs": the engine writes a per-tuple store, then the job COMPLETES
+    #    successfully and fires the route's on_success hook (mark_dirty).
+    lake_root = store.path.parent
+
+    def _work(on_progress: ProgressHook) -> None:
+        _write_sweeps(lake_root, [_row(1)])
+
+    job = BackgroundPullJob(
+        spawn=lambda fn: fn(),  # synchronous: the success path runs inline
+        summary_cache=summary_cache,
+    )
+    assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
+
+    # 3) The NEXT poll re-reads (cache invalidated by the completed sweep) and SEES it.
+    fresh = client.get("/api/v1/sweep/leaderboard").json()
+    assert fresh["available"] is True
+    assert fresh["total_rows"] == 1
+
+
+def test_failed_sweep_does_not_refresh_leaderboard_cache(
+    client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+) -> None:
+    """A FAILED sweep never bumps the generation, so the stale cache is preserved
+    (the success-only contract of the on_success hook — MAJOR-1).
+    """
+    from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+
+    # Warm the cache at the empty state.
+    assert client.get("/api/v1/sweep/leaderboard").json()["available"] is False
+    lake_root = store.path.parent
+
+    def _work(on_progress: ProgressHook) -> None:
+        # The store IS written, but the sweep then CRASHES — on_success must NOT fire.
+        _write_sweeps(lake_root, [_row(1)])
+        raise RuntimeError("sweep boom")
+
+    job = BackgroundPullJob(spawn=lambda fn: fn(), summary_cache=summary_cache)
+    assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
+
+    # The cache is NOT invalidated by the failed sweep → the next poll is still stale.
+    stale = client.get("/api/v1/sweep/leaderboard").json()
+    assert stale["available"] is False
+
+
 def test_leaderboard_no_lake_root_degrades(store: InstrumentStore) -> None:
     """A store with no Path lake root returns the honest empty payload, not a 500."""
 

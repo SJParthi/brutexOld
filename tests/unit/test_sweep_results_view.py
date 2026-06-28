@@ -223,6 +223,28 @@ def test_rank_by_net_pnl(tmp_path: Path) -> None:
     assert board.rows[0]["net_pnl_rupees"] > board.rows[1]["net_pnl_rupees"]
 
 
+def test_rank_by_int_money_preserves_precision_beyond_float53(tmp_path: Path) -> None:
+    """A money column ranks on the RAW int64 — two values that collapse to the SAME
+    float when cast (``2**53`` vs ``2**53 + 1``) still rank in the correct order
+    (MINOR-1, the same total order as ``ResultsStore.top_k`` — Golden Rule #4).
+    """
+    big = 2**53  # the largest int every float can represent exactly
+    bigger = big + 1  # float(bigger) == float(big) — a float cast would TIE them
+    assert float(bigger) == float(big)  # the precision trap the fix avoids
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1, net_pnl_paisa=big), _row(seed=2, net_pnl_paisa=bigger)],
+    )
+    board = build_sweep_leaderboard(tmp_path, rank_by="net_pnl_paisa")
+    # The +1 combo (run 2) must rank ABOVE the smaller one — a float-coerced key would
+    # tie them and fall back to the run_id tie-break (run 1 first), the bug this guards.
+    assert board.rows[0]["run_id"] == _run_id(2)
+    assert board.rows[1]["run_id"] == _run_id(1)
+
+
 def test_dedup_same_run_id_across_stores(tmp_path: Path) -> None:
     """The same combo (run_id) in two stores is counted once."""
     shared = _row(seed=7)
