@@ -140,3 +140,36 @@ def test_pbo_rejects_indivisible_row_count() -> None:
     """A row count that is not a multiple of ``n_splits`` is rejected."""
     with pytest.raises(ValueError, match="must be a positive multiple"):
         pbo_probability([[1.0, 2.0]] * 5, n_splits=2)
+
+
+# ── Non-finite cell rejection (DEC-METRICS-NONFINITE-GUARD-001) ──────
+#
+# A NaN/inf cell would fabricate a finite mid-rank (the ranking compares the
+# IS-best's OOS Sharpe, which a non-finite input silently corrupts). The
+# explicit finiteness sweep rejects it, matching the module's validation
+# philosophy. The bad cell is placed at [1][2] (not the origin) to prove the
+# sweep scans the whole matrix, not just the first cell.
+
+
+def test_pbo_rejects_nan_cell() -> None:
+    """A NaN cell anywhere in the matrix is rejected with its coordinates."""
+    matrix = [
+        [0.1, 0.2, 0.3],
+        [0.1, 0.2, float("nan")],
+        [0.1, 0.2, 0.3],
+        [0.1, 0.2, 0.3],
+    ]
+    with pytest.raises(ValueError, match=r"non-finite entry at \[1\]\[2\]"):
+        pbo_probability(matrix, n_splits=2)
+
+
+def test_pbo_rejects_inf_cell() -> None:
+    """An inf cell anywhere in the matrix is rejected with its coordinates."""
+    matrix = [
+        [0.1, 0.2, 0.3],
+        [0.1, 0.2, float("inf")],
+        [0.1, 0.2, 0.3],
+        [0.1, 0.2, 0.3],
+    ]
+    with pytest.raises(ValueError, match=r"non-finite entry at \[1\]\[2\]"):
+        pbo_probability(matrix, n_splits=2)

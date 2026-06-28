@@ -28,6 +28,16 @@ def _nan(positions: np.ndarray) -> float:
     return float("nan")
 
 
+def _pos_inf(positions: np.ndarray) -> float:
+    """Exit-logic stub that always returns ``+inf`` (beats any finite observed)."""
+    return float("inf")
+
+
+def _neg_inf(positions: np.ndarray) -> float:
+    """Exit-logic stub that always returns ``-inf`` (cannot beat any finite observed)."""
+    return float("-inf")
+
+
 def _too_good(positions: np.ndarray) -> float:
     """Exit-logic stub that always beats any observed <= 1e9."""
     return 1.0e9
@@ -91,6 +101,43 @@ def test_nonfinite_permutation_does_not_beat() -> None:
     assert res.n_beaten == 0
     assert res.pvalue == pytest.approx(1 / 201)
     assert res.passed is True
+
+
+def test_neg_inf_permutation_does_not_beat() -> None:
+    # A -inf exit statistic can never beat a finite observed one (``-inf >= x``
+    # is False) → did-not-beat, mirroring the NaN case.
+    res = monte_carlo_permutation_test(
+        observed_statistic=1.0,
+        n_bars=100,
+        n_entries=10,
+        evaluate=_neg_inf,
+        seed=1,
+        n_permutations=200,
+    )
+    assert res.n_beaten == 0
+    assert res.pvalue == pytest.approx(1 / 201)
+    assert res.passed is True
+
+
+def test_pos_inf_permutation_counts_as_beating() -> None:
+    """A ``+inf`` permuted statistic IS counted as beating a finite observed one.
+
+    Locks the corrected docstring/comment behaviour (DEC-METRICS-NONFINITE-GUARD-001):
+    ``+inf >= observed`` is True, so every such permutation beats it, driving
+    ``n_beaten == n_permutations`` and the p-value to its maximum ``1.0`` — the
+    conservative (fail-safe) direction.
+    """
+    res = monte_carlo_permutation_test(
+        observed_statistic=1.0,
+        n_bars=100,
+        n_entries=10,
+        evaluate=_pos_inf,
+        seed=1,
+        n_permutations=200,
+    )
+    assert res.n_beaten == res.n_permutations
+    assert res.pvalue == 1.0
+    assert res.passed is False
 
 
 def test_n_entries_equals_n_bars() -> None:

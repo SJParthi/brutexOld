@@ -161,7 +161,11 @@ def probabilistic_sharpe_ratio(
     Raises
     ------
     ValueError
-        If ``sample_length < 2``, or the estimator-variance radicand
+        If ``sample_length < 2``; any of ``observed_sharpe``,
+        ``benchmark_sharpe``, ``skew`` or ``kurtosis`` is non-finite
+        (NaN/inf), which would otherwise bypass the radicand guard and
+        silently return ``NaN`` (per spec line 746 "No NaN/inf in result
+        rows"); or the estimator-variance radicand
         ``1 - g3 * SR_hat + (g4 - 1) / 4 * SR_hat^2`` is not strictly
         positive (an invalid moment combination for which the PSR is
         undefined — surfaced rather than silently returning ``NaN``,
@@ -169,6 +173,15 @@ def probabilistic_sharpe_ratio(
     """
     if sample_length < _MIN_SAMPLE_LENGTH:
         raise ValueError(f"sample_length must be >= {_MIN_SAMPLE_LENGTH}, got {sample_length}")
+    if not all(
+        math.isfinite(value) for value in (observed_sharpe, benchmark_sharpe, skew, kurtosis)
+    ):
+        raise ValueError(
+            "PSR inputs must be finite; got "
+            f"observed_sharpe={observed_sharpe!r}, "
+            f"benchmark_sharpe={benchmark_sharpe!r}, "
+            f"skew={skew!r}, kurtosis={kurtosis!r}"
+        )
     radicand = (
         1.0 - skew * observed_sharpe + (kurtosis - 1.0) / 4.0 * observed_sharpe * observed_sharpe
     )
