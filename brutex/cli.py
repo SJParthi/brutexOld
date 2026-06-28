@@ -4195,6 +4195,11 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point — parse args and dispatch to handler."""
+    from brutex.config.dotenv import bootstrap_env
+
+    # GAP C6 — load a persisted ``.env`` ONCE at startup (no-op when absent;
+    # never overrides an already-set env var, secret values never logged).
+    bootstrap_env()
     parser = build_parser()
     args = parser.parse_args(argv)
 
