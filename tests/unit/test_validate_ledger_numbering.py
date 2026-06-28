@@ -92,6 +92,21 @@ class TestScan:
         assert violations == []
         assert len(entries) == 1
 
+    def test_empty_ledger_has_no_entries_and_no_violations(self, gate: ModuleType) -> None:
+        # An empty ledger is trivially sound — zero headers, zero clashes.
+        violations, entries = gate.scan("")
+        assert violations == []
+        assert entries == []
+
+    def test_gaps_are_not_a_violation(self, gate: ModuleType) -> None:
+        # The gate enforces UNIQUENESS, not contiguity — a numbering gap
+        # (611 then 999, no 612..998) is deliberately allowed.
+        violations, entries = gate.scan(
+            _ledger("611. **DEC-A-001 — low**", "999. **DEC-B-001 — high**")
+        )
+        assert violations == []
+        assert len(entries) == 2
+
 
 class TestCli:
     """The CLI contract: exit codes + override env."""

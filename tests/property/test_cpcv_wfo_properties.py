@@ -161,3 +161,73 @@ def test_sharpe_sign_matches_mean(returns: list[float]) -> None:
         mean = float(np.mean(returns))
         # sign(sharpe) == sign(mean); both zero is also agreement.
         assert math.copysign(1.0, sharpe) == math.copysign(1.0, mean) or mean == 0.0
+
+
+# ── Non-finite robustness (DEC-METRICS-NONFINITE-GUARD-001) ──────────
+
+
+@given(st.lists(_finite_floats, min_size=2, max_size=50))
+def test_sharpe_never_returns_non_finite(returns: list[float]) -> None:
+    """``sharpe_of_returns`` is ``None`` or a finite float — never NaN/inf.
+
+    The "no NaN/inf in result rows" contract (spec line 746): an undefined or
+    overflow fold degrades to ``None``, never a non-finite scalar.
+    """
+    sharpe = sharpe_of_returns(returns)
+    assert sharpe is None or math.isfinite(sharpe)
+
+
+@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    st.lists(_finite_floats, min_size=4, max_size=40),
+    st.integers(min_value=2, max_value=4),
+)
+def test_cpcv_pass_rate_is_finite_in_unit_interval(returns: list[float], n_groups: int) -> None:
+    """The CPCV pass-rate is always a finite probability in ``[0, 1]``."""
+    n_test_groups = max(1, n_groups // 2)
+    if n_groups > len(returns):  # keep the config valid
+        return
+    rate = cpcv_pass_rate(returns, n_groups=n_groups, n_test_groups=n_test_groups)
+    assert math.isfinite(rate)
+    assert 0.0 <= rate <= 1.0
+
+
+@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    st.lists(_finite_floats, min_size=4, max_size=40),
+    st.integers(min_value=2, max_value=4),
+)
+def test_cpcv_pass_rate_deterministic(returns: list[float], n_groups: int) -> None:
+    """Same input ⇒ identical pass-rate (Golden Rule #4 — reproducibility)."""
+    n_test_groups = max(1, n_groups // 2)
+    if n_groups > len(returns):
+        return
+    first = cpcv_pass_rate(returns, n_groups=n_groups, n_test_groups=n_test_groups)
+    second = cpcv_pass_rate(returns, n_groups=n_groups, n_test_groups=n_test_groups)
+    assert first == second
+
+
+@settings(max_examples=200)
+@given(_wfo_config(), st.sampled_from(list(WFOScheme)))
+def test_wfo_no_look_ahead_indices(
+    config: tuple[int, int, int, int, int], scheme: WFOScheme
+) -> None:
+    """Index-level no-look-ahead: ``max(train_indices) < min(test_indices)``.
+
+    Strengthens :func:`test_wfo_train_before_test` from the half-open-bound
+    statement (``train_stop <= test_start``) to the materialised index arrays
+    every walk would actually train / test on.
+    """
+    n_samples, train_size, test_size, step, embargo = config
+    for walk in walk_forward_splits(
+        n_samples,
+        scheme,
+        train_size=train_size,
+        test_size=test_size,
+        step=step,
+        embargo=embargo,
+    ):
+        train_idx = walk.train
+        test_idx = walk.test
+        if train_idx.size and test_idx.size:
+            assert int(train_idx.max()) < int(test_idx.min())

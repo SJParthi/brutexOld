@@ -21,16 +21,29 @@ def movers_read_skip_errors() -> tuple[type[BaseException], ...]:
     """Exception types that mean a single instrument's Parquet is unreadable → skip it.
 
     ``polars`` raises a :class:`polars.exceptions.PolarsError` (e.g. ``ComputeError`` on
-    a corrupt / version-incompatible file — confirmed against polars 1.41) and
-    ``OSError`` covers file-level faults. NARROW on purpose: a genuine code bug
-    (``ValueError`` / ``KeyError`` / …) still propagates, so a logic error is never
-    silently swallowed as a "skipped symbol" (Golden Rule #1). ``polars`` is imported
-    inside the call (not at module load) to keep this tiny helper module importable
-    without paying the polars import cost — the candidate-loop readers import it anyway.
+    a corrupt / version-incompatible file — confirmed against polars 1.41), ``duckdb``
+    raises a :class:`duckdb.Error` (e.g. ``InvalidInputException`` — *"No magic bytes
+    found at end of file"* — on the SAME corrupt file read via ``read_parquet``,
+    confirmed against duckdb 1.5), and ``OSError`` covers file-level faults. The ONE
+    source of truth for the unreadable-Parquet skip set (CLAUDE.md §11 COMMON): the
+    polars + ``OSError`` half is DELEGATED to the data-layer
+    :func:`brutex.data.errors.parquet_read_skip_errors` (shared with the lake writers'
+    corrupt-partition quarantine), and this dashboard twin WIDENS it with
+    :class:`duckdb.Error` because the ``/movers`` candidate loops read via ``polars``
+    while the ``/db`` candle pager
+    (:func:`brutex.dashboard.db_view._execute_parquet_resilient`) reads via ``duckdb`` —
+    so the union covers BOTH engines from one place, no copy-pasted set. NARROW on
+    purpose: a genuine code bug (``ValueError`` / ``KeyError`` / …) still propagates, so
+    a logic error is never silently swallowed as a "skipped symbol" (Golden Rule #1).
+    ``duckdb`` is imported inside the call (not at module load) to keep this tiny helper
+    module importable without paying the import cost — both consumers import the engines
+    anyway.
     """
-    import polars as pl
+    import duckdb
 
-    return (pl.exceptions.PolarsError, OSError)
+    from brutex.data.errors import parquet_read_skip_errors
+
+    return (*parquet_read_skip_errors(), duckdb.Error)
 
 
 def log_movers_skip(*, source: str, symbol: str, error: str) -> None:

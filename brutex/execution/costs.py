@@ -36,7 +36,7 @@ computed costs to \u00b1\u20b90.01 lives under
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Final
 
 from brutex.execution.types import FillCosts
@@ -87,13 +87,19 @@ _PAISE: Final[Decimal] = Decimal("0.01")
 
 
 def _quantise(amount: Decimal) -> Decimal:
-    """Round *amount* to the nearest paise (\u20b90.01), half-up.
+    """Round *amount* to the nearest paise (\u20b90.01).
 
     The simulator's realism assumption is that a broker quotes in
     paise, not sub-paise. Rounding here keeps the equity curve
     rational and makes the output stable across CPython / PyPy.
+
+    The rounding mode is pinned EXPLICITLY to ``ROUND_HALF_EVEN`` \u2014
+    the current effective default \u2014 so the result no longer depends
+    on the ambient process-global ``decimal.getcontext().rounding``
+    (a cross-module non-determinism vector). Output is byte-identical
+    to the unpinned default (``NFR-DET-001``).
     """
-    return amount.quantize(_PAISE)
+    return amount.quantize(_PAISE, rounding=ROUND_HALF_EVEN)
 
 
 # ────────────────────────────────────────────────────────────────────────

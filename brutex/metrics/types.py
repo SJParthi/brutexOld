@@ -28,6 +28,7 @@ here so every downstream caller imports from exactly one place
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -42,6 +43,9 @@ class ClosedTrade:
 
     All money fields are signed (or, where the schema says so, absolute)
     int64 **paisa** — never floats — per ``TRACK1_BACKTEST_SPEC.md`` rule 1.
+    The integer paisa fields rely on the ``int`` type contract +
+    ``mypy --strict`` for finiteness (an ``int`` can never be NaN/inf), so
+    no runtime ``math.isfinite`` guard is added to them.
 
     Parameters
     ----------
@@ -138,7 +142,15 @@ class EquityCurve:
     ------
     ValueError
         If the curve is empty, ``start_equity_paisa`` is not strictly
-        positive, or ``span_years`` is not strictly positive.
+        positive, or ``span_years`` is not strictly positive (a non-finite
+        NaN/inf span is also rejected here).
+
+    Notes
+    -----
+    The integer paisa fields rely on the ``int`` type contract +
+    ``mypy --strict`` for finiteness (an ``int`` can never be NaN/inf);
+    only the float ``span_years`` is guarded against non-finite values at
+    runtime.
     """
 
     equity_paisa: tuple[int, ...]
@@ -152,5 +164,5 @@ class EquityCurve:
             raise ValueError(
                 f"EquityCurve.start_equity_paisa must be > 0, got {self.start_equity_paisa}"
             )
-        if self.span_years <= 0.0:
+        if not math.isfinite(self.span_years) or self.span_years <= 0.0:
             raise ValueError(f"EquityCurve.span_years must be > 0, got {self.span_years}")

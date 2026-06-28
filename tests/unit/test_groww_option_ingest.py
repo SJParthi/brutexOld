@@ -48,7 +48,7 @@ from brutex.adapters.groww.option_ingest import (
     scan_underlying_all_empty,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
@@ -75,6 +75,9 @@ class GrowwAPITimeoutException(Exception): ...
 
 
 class GrowwAPIBadRequestException(Exception): ...
+
+
+class GrowwAPINotFoundException(Exception): ...
 
 
 class GrowwAPIAuthenticationException(Exception): ...
@@ -228,6 +231,28 @@ class _RaisingSink:
     ) -> SinkAppendResult:
         del exchange, segment, symbol, interval, bars
         raise RuntimeError("genuine bug in the sink")
+
+
+class _LockTimeoutSink:
+    """A sink whose append raises :class:`PartitionLockTimeout` (a wedged peer)."""
+
+    def __init__(self, timeout_seconds: float = 0.5) -> None:
+        self._timeout_seconds = timeout_seconds
+        self.calls = 0
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, bars, merge_mode
+        self.calls += 1
+        raise PartitionLockTimeout(self._timeout_seconds)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -458,6 +483,62 @@ def test_ingest_ratelimit_exhausted_records_failed() -> None:
     assert ledger.records()[0].in_pull_fetches == 1
 
 
+def test_ingest_partition_lock_timeout_defers_window() -> None:
+    """A wedged-peer lock timeout on write DEFERS the window like a 429 (GAP #3).
+
+    The sink's append raises ``PartitionLockTimeout``; the contract's window must be
+    recorded FAILED + counted transient (deferred to the next pull), NOT a
+    contract-wide quarantine and NOT an infinite block (DEC-PULL-CONTENTION-ANTISTALL-001).
+    """
+    sdk = _FakeSDK(payload=_candles())
+    sink = _LockTimeoutSink()
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        max_attempts=0,
+        now_ist=_now,
+    )
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    assert report.transient_failures == 1 and report.still_failed_windows == 1
+    assert sink.calls == 1  # the fetch ran; the write hit the wedged lock once
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull
+
+
+def test_ingest_partition_lock_timeout_no_ledger_logs_deferred() -> None:
+    """The defer path works with NO ledger (the ``ledger is None`` branch)."""
+    sdk = _FakeSDK(payload=_candles())
+    sink = _LockTimeoutSink()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=None,
+            max_attempts=0,
+            now_ist=_now,
+        )
+    assert report.transient_failures == 1
+    events = [r["event"] for r in logs]
+    assert "option.ingest.window.lock_deferred" in events
+
+
 def test_ingest_transient_no_hooks_no_ledger() -> None:
     # timeout with on_timeout=None + ledger=None — exercises the no-hook branches.
     sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall")])
@@ -503,6 +584,139 @@ def test_ingest_terminal_error_propagates() -> None:
             end=date(2024, 1, 2),
             now_ist=_now,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Transient network / DNS failure → RETRYABLE (DEC-GROWW-NETWORK-ERROR-RETRY-001)
+# A RAW transport exception (socket.gaierror / requests ConnectionError shape)
+# the SDK raises is now classified `GrowwNetworkError` (retryable) by the client,
+# so a DNS-blipping contract is RETRIED / deferred, NOT terminally quarantined —
+# the 218-contract "Failed to resolve api.groww.in" data-loss class is closed.
+# ─────────────────────────────────────────────────────────────────────────
+class gaierror(Exception):
+    """Fake ``socket.gaierror`` raised raw by the SDK on a host DNS outage."""
+
+
+class ConnectionError(Exception):  # noqa: A001 — mirrors requests.exceptions.ConnectionError
+    """Fake ``requests.exceptions.ConnectionError`` (the ``"Failed to resolve …"`` shape)."""
+
+
+def test_ingest_dns_error_retried_then_success() -> None:
+    """A transient DNS failure then a clean response → the contract is RETRIED, bars land.
+
+    Proves the 218-contract loss class is recoverable: the raw transport error the
+    SDK raises is classified RETRYABLE, so the ingest-level retry re-issues it and
+    the contract is NOT terminally quarantined.
+    """
+    sdk = _FakeSDK(
+        payload=_candles(),
+        script=[gaierror("[Errno -2] Name or service not known"), None],
+    )
+    sink = _Sink()
+    ledger = WindowLedger()
+    timeouts: list[int] = []
+    slept: list[int] = []
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        on_timeout=lambda: timeouts.append(1),
+        backoff=slept.append,
+        ledger=ledger,
+        max_attempts=2,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1 and report.retried_windows == 1
+    assert report.still_failed_windows == 0  # recovered — NOT quarantined
+    # A DNS blip is NOT a rate-limit, so it rides the GENTLE timeout ladder (on_timeout),
+    # never the per-second rate stepdown (on_rate_limit).
+    assert timeouts == [1] and slept == [0]
+
+
+def test_ingest_dns_error_exhausted_is_deferred_not_terminal() -> None:
+    """A persistent DNS failure is DEFERRED (``still_failed``), NOT terminally quarantined.
+
+    When the in-pull retry budget is spent the window is left UNMARKED-as-success
+    (re-pulled next pass), NOT recorded as a terminal drop — exactly the recovery
+    path the 218 lost contracts never got.
+    """
+    sdk = _FakeSDK(script=[ConnectionError("Failed to resolve 'api.groww.in'")])
+    sink = _Sink()
+    ledger = WindowLedger()
+    timeouts: list[int] = []
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        on_timeout=lambda: timeouts.append(1),
+        ledger=ledger,
+        max_attempts=0,  # single attempt → immediate budget exhaustion
+        now_ist=_now,
+    )
+    assert report.still_failed_windows == 1 and report.transient_failures == 1
+    assert report.retried_windows == 0 and timeouts == [1]
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull, never dropped
+
+
+def test_run_multi_contract_dns_failure_does_not_terminally_quarantine() -> None:
+    """A whole-pull DNS outage leaves contracts DEFERRED, with ZERO terminal quarantines.
+
+    The driver-level proof: every contract hits a transient DNS error, so none is
+    recorded as a terminal :class:`OptionPairFailure` — they are all
+    ``still_failed`` (re-pulled next pass), in contrast to a 404 which DOES
+    quarantine (the next test).
+    """
+    sdk = _FakeSDK(script=[gaierror("Name or service not known")])
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE"), _ce("NSE-NIFTY-02Jan25-28600-CE")],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+    )
+    assert report.failed_pairs == 0  # ZERO terminal quarantines — all recoverable
+    assert report.auth_aborted is False
+    assert report.still_failed_windows == 2  # both deferred to the next pull
+
+
+def test_run_multi_contract_real_404_still_terminally_quarantines() -> None:
+    """A genuine 404 (a symbol truly absent) STILL terminally quarantines — the fix is narrow.
+
+    The retryable-network change must NOT make a real terminal error recoverable: a
+    ``GrowwAPINotFoundException`` is recorded as a terminal :class:`OptionPairFailure`
+    exactly as before.
+    """
+    sdk = _FakeSDK(raise_for={"NSE-NIFTY-02Jan25-28500-CE": GrowwAPINotFoundException("404")})
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE")],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+    )
+    assert report.failed_pairs == 1  # terminal — quarantined, NOT retried
+    assert report.still_failed_windows == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -768,6 +982,56 @@ def test_run_multi_contract_success_and_quarantine() -> None:
     assert report.windows == 2 and not report.auth_aborted
     assert (f"{bad.symbol} 1day", 0, True) in progress
     assert (f"{ok1.symbol} 1day", 1, False) in progress
+
+
+def test_run_write_pool_routes_through_consumer() -> None:
+    """DEC-FETCH-WRITE-OVERLAP-LEVER1-001: a write_pool routes the F&O write through the pool.
+
+    The underlying ``_Sink`` (wrapped by the pool's WriteConsumerSink) STILL receives every
+    contract's append — proving the write is durably handed off through the background shard
+    and the settle-after-durable ordering preserves the recorded outcome.
+    """
+    from brutex.data.write_consumer import ShardedWriteConsumer
+
+    ok1, ok2 = _ce(), _ce2()
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    pool = ShardedWriteConsumer(sink=sink, workers=2)
+    try:
+        report = run_groww_option_ingest(
+            _client(sdk),
+            sink,
+            contracts=[ok1, ok2],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            write_pool=pool,
+        )
+    finally:
+        pool.drain()
+    assert set(report.pairs) == {(ok1.symbol, "1day"), (ok2.symbol, "1day")}
+    assert report.bars_appended == 2
+    # Each contract's durable append reached the real sink THROUGH the pool.
+    assert {a[2] for a in sink.appends} == {ok1.symbol, ok2.symbol}
+
+
+def test_run_write_pool_none_uses_raw_sink() -> None:
+    """write_pool=None (default) is byte-identical — the raw sink records the appends directly."""
+    ok = _ce()
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    report = run_groww_option_ingest(
+        _client(sdk),
+        sink,
+        contracts=[ok],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1
+    assert {a[2] for a in sink.appends} == {ok.symbol}
 
 
 def test_run_auth_failure_sets_auth_aborted() -> None:

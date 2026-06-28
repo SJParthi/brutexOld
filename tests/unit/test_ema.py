@@ -8,6 +8,8 @@ Verified against:
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from brutex.indicators.ema import EMAState, alpha, compute_ema, latest_ema
 
@@ -190,6 +192,46 @@ class TestLatestEma:
 
     def test_empty_returns_none(self) -> None:
         assert latest_ema([], period=20) is None
+
+
+class TestNonFiniteGuard:
+    """`EMAState.update` must fail-fast on a non-finite close so a NaN/inf
+    can never silently poison every subsequent EMA value."""
+
+    def test_update_nan_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be finite"):
+            EMAState.new(20).update(float("nan"))
+
+    def test_update_inf_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be finite"):
+            EMAState.new(20).update(float("inf"))
+
+    def test_update_neg_inf_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be finite"):
+            EMAState.new(20).update(float("-inf"))
+
+    def test_guard_runs_before_state_mutation(self) -> None:
+        # A rejected close must NOT advance bars_seen or accumulate seed_sum.
+        state = EMAState.new(5)
+        state.update(100.0)
+        before = state.to_dict()
+        with pytest.raises(ValueError, match="must be finite"):
+            state.update(math.nan)
+        assert state.to_dict() == before
+
+    def test_compute_ema_with_nan_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be finite"):
+            compute_ema([100.0, float("nan"), 102.0], period=2)
+
+    def test_latest_ema_with_inf_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be finite"):
+            latest_ema([100.0, float("inf")], period=2)
+
+    def test_finite_series_unchanged(self) -> None:
+        # Regression: a normal finite series computes exactly as before the
+        # guard was added (the hand-computed period=3 oracle).
+        values = [10.0, 20.0, 30.0, 40.0, 50.0]
+        assert compute_ema(values, period=3) == [None, None, 20.0, 30.0, 40.0]
 
 
 class TestNoLookAhead:

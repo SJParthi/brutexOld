@@ -5,7 +5,14 @@ Targets 100% line + branch coverage of the module (Golden Rule #12 /
 embargo row removal, every validation guard, the ``sharpe_of_returns``
 edge cases (single sample, zero variance), and the three ``cpcv_pass_rate``
 fold outcomes (pass / fail / undefined).
+
+Whitebox module: the non-finite-variance regression imports the private
+moment helpers (``_combine_moments`` / ``_group_bounds`` / ``_group_moments``)
+to exercise the cross-group merge guard directly, so the module-level
+``reportPrivateUsage`` warning is silenced (the established convention for
+whitebox tests, DEC-P0-017).
 """
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -17,6 +24,9 @@ from brutex.metrics.cpcv import (
     DEFAULT_N_GROUPS,
     DEFAULT_N_TEST_GROUPS,
     CPCVSplit,
+    _combine_moments,
+    _group_bounds,
+    _group_moments,
     cpcv_pass_rate,
     cpcv_splits,
     sharpe_of_returns,
@@ -174,6 +184,67 @@ class TestSharpeOfReturns:
     def test_validation_errors(self, bad: object, match: str) -> None:
         with pytest.raises(ValueError, match=match):
             sharpe_of_returns(bad)  # type: ignore[arg-type]
+
+    def test_overflow_variance_returns_none_not_zero(self) -> None:
+        """A finite but huge series whose squared deviations overflow → ``None``.
+
+        The inputs are individually finite (so ``_validate_returns`` admits
+        them), but ``(arr - mean) ** 2`` overflows to ``inf``; the bare
+        ``variance <= 0.0`` guard is ``False`` for ``inf`` and would return a
+        wrong ``mean / sqrt(inf) == 0.0``. The non-finite-variance guard
+        (DEC-METRICS-NONFINITE-GUARD-001) degrades honestly to ``None``.
+        """
+        with np.errstate(all="ignore"):
+            result = sharpe_of_returns(np.array([1e300, 2e300, 3e300, 4e300]))
+        assert result is None
+
+
+class TestNonFiniteVariance:
+    """Overflow-magnitude folds never leak a NaN into ``cpcv_pass_rate``.
+
+    Regression for DEC-METRICS-NONFINITE-GUARD-001: for ``|returns| ~ 1e160``
+    the per-group ``M2`` accumulates to ``inf`` and the combined fold variance
+    becomes ``NaN`` — which the bare ``variance <= 0.0`` guard misses
+    (``nan <= 0`` is ``False``), leaking ``mean / sqrt(nan) == nan`` into the
+    pass-rate. The ``not math.isfinite(variance)`` guard makes every such fold
+    a non-pass, so the rate stays a finite value in ``[0, 1]``.
+    """
+
+    def test_pass_rate_finite_for_overflow_magnitude_series(self) -> None:
+        with np.errstate(all="ignore"):
+            big = np.array([1e160 * (i + 1) for i in range(96)], dtype=np.float64)
+            rate = cpcv_pass_rate(big, n_groups=4, n_test_groups=2)
+        assert math.isfinite(rate)
+        assert 0.0 <= rate <= 1.0
+
+    def test_combine_moments_returns_none_when_merge_overflows_to_nan(self) -> None:
+        """``_combine_moments`` must return ``None`` (not ``NaN``) on a
+        non-finite *combined* variance.
+
+        Mutation-survivor regression (DEC-METRICS-INVARIANTS-ROUND2-001):
+        the per-group ``M2`` here is exactly ``0`` (each group is constant,
+        so ``_group_moments`` produces finite triples), yet two groups whose
+        means differ by ``2e160`` make the cross-group merge term
+        ``delta * delta * n_total * n_b / combined`` overflow to ``inf`` and
+        the combined variance ``NaN`` — a non-finiteness that arises *purely
+        inside* :func:`_combine_moments`. The bare ``variance <= 0.0`` guard
+        is ``False`` for ``NaN`` and would return ``mean / sqrt(NaN) == NaN``;
+        the ``not math.isfinite(variance)`` arm degrades honestly to ``None``.
+        Asserting the *exact* ``None`` (rather than only "the pass-rate stays
+        finite", which a ``NaN`` Sharpe also satisfies because ``NaN > 0`` is
+        ``False``) is what kills the dropped-``isfinite`` mutant.
+        """
+        big = 1e160
+        # Four constant groups (zero within-group variance ⇒ finite group M2),
+        # alternating sign so any mixed-sign fold overflows on merge.
+        values = [v for mean in (big, -big, big, -big) for v in (mean, mean, mean)]
+        arr = np.asarray(values, dtype=np.float64)
+        bounds = _group_bounds(arr.size, 4)
+        count, mean, m2 = _group_moments(arr, bounds)
+        assert bool(np.all(np.isfinite(m2)))  # the overflow is NOT at group level
+        with np.errstate(all="ignore"):
+            merged = _combine_moments(count, mean, m2, (0, 1))
+        assert merged is None
 
 
 class TestPassRate:

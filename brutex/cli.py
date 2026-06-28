@@ -2590,6 +2590,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     store per tuple (idempotent, lossless re-run — Golden Rule #7).
     """
     from brutex.data.catalog import Catalog
+    from brutex.data.lmdb_membership import LmdbMembership
     from brutex.data.option_dedup import OptionDedupIndex
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_audit import SweepAuditWriter
@@ -2775,7 +2776,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
 
-    dedup = ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid), fpr_target=1e-7))
+    # The exact-confirm dedup tier is the off-heap LMDB membership set, NOT an
+    # in-memory ``set()`` (DEC-SWEEP-DEDUP-LMDB-001): a production grid enumerates
+    # O(combos) run-identities and an in-RAM set grows unbounded → OOM on the 48 GB
+    # envelope. ``LmdbMembership`` keeps the membership state memory-mapped (O(1)
+    # per-op RAM regardless of count), mirroring how ``SweepCache.open`` already
+    # wires LMDB for the tuple tier. Built inside the ``with`` block below so the
+    # environment is closed deterministically.
+    bloom_capacity = bloom_capacity_hint(grid)
     audit_path = out_root / "audit" / "sweep-all.jsonl"
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     # G&A layer (DEC-SWEEP-WIRE-GA-001): one BLAKE3 supervisor audit chain, a
@@ -2822,7 +2830,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
         SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
         SweepCache.open(cache_path) as cache,
+        LmdbMembership.open(out_root / "combo-dedup") as exact_membership,
     ):
+        dedup = ComboDedup(
+            OptionDedupIndex(capacity=bloom_capacity, fpr_target=1e-7, exact=exact_membership)
+        )
         guards = SweepGuards(
             audit=sup_audit,
             progress=SweepProgress(),
@@ -3441,6 +3453,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
 
         from brutex.data.catalog import Catalog
         from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+        from brutex.data.lmdb_membership import LmdbMembership
         from brutex.data.option_dedup import OptionDedupIndex
         from brutex.engine.sweep_orchestrator import (
             bloom_capacity_hint,
@@ -3610,13 +3623,24 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             audit_path = scratch / "audit.jsonl"
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             train_hash_ok = True
-            with AuditWriter.open(audit_path) as audit:
+            # Off-heap LMDB exact-confirm dedup (DEC-SWEEP-DEDUP-LMDB-001): the
+            # shadow re-sweep enumerates the SAME O(combos) run-identities as the
+            # production grid, so its dedup tier must also stay memory-mapped to
+            # avoid an OOM on a large grid.
+            with (
+                AuditWriter.open(audit_path) as audit,
+                LmdbMembership.open(scratch / "combo-dedup") as exact_membership,
+            ):
                 resweep_summary = run_sweep_grid(
                     grid,
                     bars_for=lambda s, i: slices.get((s, i), []),
                     store_for=make_store_for(scratch, grid),
                     dedup=ComboDedup(
-                        OptionDedupIndex(capacity=bloom_capacity_hint(grid), fpr_target=1e-7)
+                        OptionDedupIndex(
+                            capacity=bloom_capacity_hint(grid),
+                            fpr_target=1e-7,
+                            exact=exact_membership,
+                        )
                     ),
                     audit=audit,
                 )

@@ -71,8 +71,15 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final, Protocol
 
+import structlog
+
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contracts import resolve_contracts, resolve_expiries
+from brutex.dashboard.fno_underlying import (
+    primary_fno_underlying,
+    resolve_fno_index_aliases,
+    resolve_fno_underlying_forms,
+)
 from brutex.data.coverage_ledger import (
     STATUS_COMPLETE,
     STATUS_EXPIRIES_ONLY,
@@ -97,6 +104,21 @@ from brutex.orchestrator.universe_phases import (
 if TYPE_CHECKING:
     from brutex.dashboard.pull_controller import SessionRateController
     from brutex.models import Instrument
+
+_LOG = structlog.get_logger(__name__)
+
+#: Observe-only structlog event for an underlying whose F&O expiry chain came back
+#: EMPTY across EVERY year tried (DEC-FNO-UNDERLYING-RESOLVE-001 — the metadata-pull
+#: twin of the post-fetch ``pull.underlying_all_empty`` of DEC-SUSPICIOUS-EMPTY-FLAG
+#: -001 #919). Surfaced as a WARNING naming the resolved F&O underlying so a whole
+#: F&O-eligible stock can never silently vanish — DETECT-only, no return/ledger
+#: change, no auto-recovery.
+METADATA_UNDERLYING_NO_EXPIRIES_EVENT: Final[str] = "metadata.underlying_no_expiries"
+
+#: Max underlyings inlined in the zero-expiry WARNING's sample list — the full count
+#: is always logged via ``count``; only the inlined ``sample`` is capped so a
+#: pathological all-empty pull can never bloat one log line.
+_NO_EXPIRIES_LOG_CAP: Final[int] = 50
 
 #: FNO history floor — Groww FNO data is "available from 2020" (CLAUDE.md §6); the
 #: metadata pull mirrors the derivatives pull's floor so the year grid agrees.
@@ -295,22 +317,146 @@ def _resolve_client_factory(
     return _live
 
 
-def _underlying_grid(instruments: Sequence[Instrument]) -> list[tuple[str, str]]:
-    """Project instruments to the de-duplicated ``(exchange, underlying_symbol)`` grid.
+def _resolve_underlying_forms(
+    instruments: Sequence[Instrument],
+) -> tuple[list[tuple[str, str]], dict[tuple[str, str], tuple[str, ...]]]:
+    """Project instruments to the ``(exchange, F&O underlying)`` grid + a forms map.
 
-    The Phase-1 ``phase1_cells`` keys on ``(exchange, underlying)``; an index/stock
-    underlying IS the symbol the expiry discovery queries, so ``symbol_name`` is the
-    underlying for the chain enumeration. Order-preserving, first-wins dedup so the
-    pull order is reproducible (CLAUDE.md §4).
+    DEC-FNO-UNDERLYING-RESOLVE-001. The Phase-1 ``phase1_cells`` keys on
+    ``(exchange, underlying)`` and that ``underlying`` is the symbol Groww's
+    ``get_expiries`` / ``get_contracts`` query — so it MUST be the **F&O
+    ``underlying_symbol``** the vendor stamps on the contract legs (``BAJAJAUTO`` /
+    ``NIFTYNXT50``), NOT the SPOT ``trading_symbol`` (``symbol_name`` = ``BAJAJ-AUTO``
+    / ``NIFTYJR``). Passing the spot form made ``get_expiries`` return a
+    clean-but-EMPTY ``200`` → 0 expiries → the whole F&O-eligible underlying silently
+    missed.
+
+    Returns a 2-tuple ``(grid, forms_by_key)``:
+
+    * **grid** — the de-duplicated ``(exchange, PRIMARY F&O underlying)`` pairs, the
+      stable, reproducible coverage/registry KEY (the head of
+      :func:`~brutex.dashboard.fno_underlying.fno_underlying_forms`, via the COMMON
+      :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` resolver — the
+      sourced index alias, else the case/space/hyphen normalization, else the spot
+      spelling). A no-op for an already-canonical symbol (NIFTY / BANKNIFTY / SENSEX),
+      so those are byte-unchanged.
+    * **forms_by_key** — ``(exchange, primary) -> the FULL ordered forms tuple`` so
+      the fetchers can try each fallback form when the primary yields ZERO data (the
+      first non-empty wins; each form composes the ``&`` → ``%26`` ampersand fallback
+      INSIDE ``resolve_expiries`` / ``resolve_contracts``). A canonical symbol maps to
+      a single-element tuple → exactly one SDK call, byte-unchanged.
+
+    Order-preserving, first-wins dedup on the RESOLVED key so the pull order is
+    reproducible (CLAUDE.md §4) and two spot spellings that map to the same F&O
+    primary underlying are enumerated once (the FIRST spot symbol's forms win the
+    map — deterministic by grid order).
     """
+    aliases = resolve_fno_index_aliases()
     grid: list[tuple[str, str]] = []
+    forms_by_key: dict[tuple[str, str], tuple[str, ...]] = {}
     seen: set[tuple[str, str]] = set()
     for instrument in instruments:
-        pair = (str(instrument.exch_id), instrument.symbol_name)
+        exchange = str(instrument.exch_id)
+        forms = resolve_fno_underlying_forms(instrument.symbol_name)
+        pair = (exchange, primary_fno_underlying(instrument.symbol_name, aliases=aliases))
         if pair not in seen:
             seen.add(pair)
             grid.append(pair)
-    return grid
+            forms_by_key[pair] = forms
+    return grid, forms_by_key
+
+
+def _first_nonempty_over_forms[T](
+    forms: tuple[str, ...],
+    fetch: Callable[[str], T],
+    *,
+    is_empty: Callable[[T], bool],
+) -> T:
+    """Try each underlying *form* in order; return the FIRST non-empty *fetch* result.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001 — the F&O-underlying spelling axis of the
+    empty-retry, the metadata-pull twin of
+    :func:`~brutex.adapters.groww.contracts._fetch_first_nonempty_form` (the ``&`` →
+    ``%26`` ampersand axis, which composes INSIDE each per-form ``resolve_expiries`` /
+    ``resolve_contracts`` call). The PRIMARY form (``forms[0]``) is ALWAYS called; a
+    later form is tried ONLY when every prior form was empty, and the LAST form's
+    (empty) result is returned when all are empty — so a genuinely-absent chain records
+    the SAME empty as before (never a fabricated chain, Golden Rule #1). O(forms):
+    exactly ONE call for a canonical single-form symbol (NIFTY / BANKNIFTY / SENSEX —
+    byte-unchanged), at most three for a stock needing the alias + normalized + spot
+    bridge.
+    """
+    result = fetch(forms[0])
+    for form in forms[1:]:
+        if not is_empty(result):
+            return result
+        result = fetch(form)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _CellOutcome:
+    """Rolled-up Phase-1 outcome for one ``(exchange, underlying)`` across its cells.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001. Tracks two booleans the zero-expiry audit needs:
+    whether ANY of the underlying's pulled expiry cells discovered ≥1 expiry, and
+    whether ANY cell ERRORED. An underlying that errored on a cell is NOT flagged
+    (the failure is already recorded as ``STATUS_FAILED``); the audit fires only for a
+    clean-but-empty whole-underlying miss.
+    """
+
+    any_expiry: bool = False
+    errored: bool = False
+
+    def merge(self, *, any_expiry: bool, errored: bool) -> _CellOutcome:
+        """Return a new outcome OR-ing this cell's result into the accumulator."""
+        return _CellOutcome(
+            any_expiry=self.any_expiry or any_expiry,
+            errored=self.errored or errored,
+        )
+
+
+def underlyings_with_no_expiries(
+    cell_outcomes: dict[tuple[str, str], _CellOutcome],
+) -> list[tuple[str, str]]:
+    """Return the ``(exchange, underlying)`` pairs pulled clean yet with ZERO expiries.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001. The pure, deterministic predicate behind the
+    observe-only zero-expiry audit: an underlying is flagged iff it was pulled (it has
+    an outcome), it errored on NO cell, AND it discovered NO expiry on any cell. An
+    underlying that errored is EXCLUDED (already recorded as a failure, never
+    double-counted as a silent miss). Order-preserving over *cell_outcomes*'
+    insertion order (the grid order), so the report is reproducible.
+    """
+    return [
+        pair
+        for pair, outcome in cell_outcomes.items()
+        if not outcome.errored and not outcome.any_expiry
+    ]
+
+
+def _log_underlyings_with_no_expiries(
+    cell_outcomes: dict[tuple[str, str], _CellOutcome], *, run_id: str
+) -> None:
+    """Emit ONE observe-only WARNING when ≥1 underlying came back clean-but-empty.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001 — the metadata-pull twin of the post-fetch
+    ``pull.underlying_all_empty`` flag (DEC-SUSPICIOUS-EMPTY-FLAG-001 #919). Names the
+    resolved F&O underlyings (capped sample) so a whole F&O-eligible stock can never
+    silently vanish. DETECT-only: no return value, no ledger/registry change, no
+    auto-recovery. A no-op when nothing is flagged (the common healthy pull).
+    """
+    flagged = underlyings_with_no_expiries(cell_outcomes)
+    if not flagged:
+        return
+    _LOG.warning(
+        METADATA_UNDERLYING_NO_EXPIRIES_EVENT,
+        run_id=run_id,
+        count=len(flagged),
+        sample=[
+            f"{exchange}-{underlying}" for exchange, underlying in flagged[:_NO_EXPIRIES_LOG_CAP]
+        ],
+    )
 
 
 def _build_note(*, dry_run: bool, expiries_persisted: int, contracts_persisted: int) -> str:
@@ -480,7 +626,7 @@ def pull_expiries_contracts(
         run_parallel = PoolRunParallel()
     client = _resolve_client_factory(client_factory, dry_run=dry_run, session_rate=session_rate)()
 
-    grid = _underlying_grid(instruments)
+    grid, forms_by_key = _resolve_underlying_forms(instruments)
     all_cells = phase1_cells(grid, years)
     expiry_skip = settled_expiry_cells(
         (rec.exch_id, rec.underlying_symbol, rec.year, rec.status)
@@ -517,6 +663,12 @@ def pull_expiries_contracts(
     progress_completed = 0
     expiries_seen: dict[ExpiryCell, Sequence[date]] = {}
     cells_observed = 0
+    # Per-cell Phase-1 outcome for the zero-expiry audit (DEC-FNO-UNDERLYING-RESOLVE-001):
+    # ``(exchange, underlying) -> CellOutcome`` rolled up across that underlying's pulled
+    # cells (any expiry discovered? any cell errored?). The audit fires for an underlying
+    # that was pulled, errored on NO cell, yet discovered 0 expiries on every cell — the
+    # silent-vanish signal a wrong F&O underlying form used to produce.
+    cell_outcomes: dict[tuple[str, str], _CellOutcome] = {}
 
     def _emit_progress(current: str) -> None:
         """Fire *on_progress* with the absolute ``(completed, total, current)`` — no-op when unset."""
@@ -537,9 +689,23 @@ def pull_expiries_contracts(
         progress_total = len(cells) + len(jobs)
 
     def _fetch_expiries(cell: ExpiryCell) -> Sequence[date]:
-        """Phase-1 fetcher: resolve one cell's expiry dates (metadata only)."""
+        """Phase-1 fetcher: resolve one cell's expiry dates (metadata only).
+
+        Tries the cell's PRIMARY F&O underlying form first and, only if it returns
+        ZERO expiries, the resolver's fallback forms in order — first non-empty wins
+        (DEC-FNO-UNDERLYING-RESOLVE-001). Each form composes the ``&`` → ``%26``
+        ampersand fallback inside :func:`resolve_expiries`. A canonical symbol carries
+        one form → exactly one call, byte-unchanged.
+        """
         exchange, underlying, year = cell
-        return resolve_expiries(client, exchange=exchange, underlying_symbol=underlying, year=year)
+        forms = forms_by_key.get((exchange, underlying), (underlying,))
+        return _first_nonempty_over_forms(
+            forms,
+            lambda form: resolve_expiries(
+                client, exchange=exchange, underlying_symbol=form, year=year
+            ),
+            is_empty=lambda r: not r,
+        )
 
     def _on_expiry_cell(
         cell: ExpiryCell, expiries: Sequence[date], exc: BaseException | None
@@ -550,6 +716,12 @@ def pull_expiries_contracts(
         for expiry in expiries:
             registry.upsert_expiry(exchange, underlying, expiry, run_id=run_id, fetched_at=now)
         expiries_persisted += len(expiries)
+        # Roll this cell's outcome into the per-underlying zero-expiry audit accumulator
+        # (DEC-FNO-UNDERLYING-RESOLVE-001).
+        prior = cell_outcomes.get((exchange, underlying), _CellOutcome())
+        cell_outcomes[(exchange, underlying)] = prior.merge(
+            any_expiry=bool(expiries), errored=exc is not None
+        )
         # Live progress: a successful cell contributes its expiries to the Phase-2
         # worklist; tick the bar per cell and, when the LAST cell settles, re-scale
         # ``total`` to include the now-known contract jobs (DEC-METADATA-LIVE-PROGRESS-001).
@@ -584,11 +756,23 @@ def pull_expiries_contracts(
         )
 
     def _fetch_contracts(job: ContractJob) -> int:
-        """Phase-2 fetcher: resolve + persist one expiry's contracts (metadata only)."""
+        """Phase-2 fetcher: resolve + persist one expiry's contracts (metadata only).
+
+        Like :func:`_fetch_expiries`, tries the PRIMARY F&O underlying form first and
+        the resolver's fallback forms only on a ZERO-contract reply — first non-empty
+        wins (DEC-FNO-UNDERLYING-RESOLVE-001). The persisted registry ``underlying`` is
+        always the PRIMARY (Phase-1) key, so the registry stays keyed consistently
+        regardless of which form answered the vendor.
+        """
         nonlocal contracts_persisted
         exchange, underlying, expiry = job
-        contracts = resolve_contracts(
-            client, exchange=exchange, underlying_symbol=underlying, expiry=expiry
+        forms = forms_by_key.get((exchange, underlying), (underlying,))
+        contracts = _first_nonempty_over_forms(
+            forms,
+            lambda form: resolve_contracts(
+                client, exchange=exchange, underlying_symbol=form, expiry=expiry
+            ),
+            is_empty=lambda r: not r,
         )
         for contract in contracts:
             registry.upsert_contract(
@@ -656,6 +840,11 @@ def pull_expiries_contracts(
         run_id=run_id,
         now=now,
     )
+
+    # Observe-only: WARN about any underlying that was pulled, errored on no cell, yet
+    # discovered ZERO expiries on every cell — the silent-vanish signal a wrong F&O
+    # underlying form used to produce (DEC-FNO-UNDERLYING-RESOLVE-001).
+    _log_underlyings_with_no_expiries(cell_outcomes, run_id=run_id)
 
     note = _build_note(
         dry_run=dry_run,

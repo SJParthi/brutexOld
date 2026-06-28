@@ -82,6 +82,7 @@ import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.timeframes import DAILY_TF_MINUTES
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger, WindowLedgerRecord
 
@@ -111,6 +112,8 @@ __all__ = [
     "DailyResampleWindow",
     "derive_daily_for_targets",
     "fill_daily_from_minute",
+    "ist_span_partition_files",
+    "ist_span_partition_months",
     "make_lake_read_1m_window",
     "make_lake_write_1day",
     "plan_daily_resample_windows",
@@ -234,6 +237,7 @@ def derive_daily_for_targets(
     build_read_1m: Callable[[DailyDeriveTarget], Callable[[], pl.DataFrame]],
     build_write_1day: Callable[[DailyDeriveTarget], Callable[[Sequence[CandleBar]], int]],
     before: date,
+    resample_fn: Callable[[pl.DataFrame, date], list[CandleBar]] | None = None,
 ) -> DailyDeriveReport:
     """Derive ``1day`` from 1-minute for every *target* — always-on, pure orchestration.
 
@@ -257,7 +261,13 @@ def derive_daily_for_targets(
     build_write_1day
         ``(target) -> ((bars) -> bars_written)`` — binds the target's ``1day`` writer.
     before
-        The forming-session cutoff (today IST), forwarded to :func:`resample_1m_to_daily`.
+        The forming-session cutoff (today IST), forwarded to the resampler.
+    resample_fn
+        The 1-minute → daily resampler ``(frame, before) -> list[CandleBar]``.
+        Defaults to the spot :func:`resample_1m_to_daily` (OI ``None``); the F&O
+        derive injects :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily`
+        (carry-last OI) — the ONE knob that makes this driver serve both spot AND
+        F&O without a second loop (DEC-FNO-TF-DERIVE-OI-001, CLAUDE.md §11 COMMON).
 
     Returns
     -------
@@ -271,6 +281,7 @@ def derive_daily_for_targets(
                 read_1m=build_read_1m(target),
                 write_1day=build_write_1day(target),
                 before=before,
+                resample_fn=resample_fn,
             )
         except Exception as exc:
             errored += 1
@@ -369,20 +380,33 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
     return bars
 
 
+def resample_1m_to_daily_default(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:
+    """Positional ``(frame, before)`` adapter over :func:`resample_1m_to_daily`.
+
+    :func:`resample_1m_to_daily` takes *before* keyword-only; the injectable
+    ``resample_fn`` seam (:func:`fill_daily_from_minute`) uses a uniform positional
+    ``(frame, before) -> list[CandleBar]`` signature so spot's default and the F&O
+    :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily` are
+    interchangeable. This is the DEFAULT spot binding (OI ``None``).
+    """
+    return resample_1m_to_daily(df_1m, before=before)
+
+
 def fill_daily_from_minute(
     *,
     read_1m: Callable[[], pl.DataFrame],
     write_1day: Callable[[Sequence[CandleBar]], int],
     before: date,
+    resample_fn: Callable[[pl.DataFrame, date], list[CandleBar]] | None = None,
 ) -> DailyFillResult:
     """Read 1-minute, resample to midnight-IST daily, write — pure orchestration.
 
     Reads the window's 1-minute slice (via the injected *read_1m*), resamples it to
-    daily (:func:`resample_1m_to_daily`), and — only when that yields at least one
-    bar — writes the bars via the injected *write_1day*, returning the count. An
-    empty 1-minute slice is an honest no-op (``bars_written == 0``, no write call),
-    NEVER an invented bar. All lake/disk I/O is injected, so this is 100%
-    unit-testable.
+    daily (via *resample_fn*, default :func:`resample_1m_to_daily`), and — only when
+    that yields at least one bar — writes the bars via the injected *write_1day*,
+    returning the count. An empty 1-minute slice is an honest no-op
+    (``bars_written == 0``, no write call), NEVER an invented bar. All lake/disk I/O
+    is injected, so this is 100% unit-testable.
 
     Parameters
     ----------
@@ -393,15 +417,21 @@ def fill_daily_from_minute(
         ``(bars) -> bars_written`` callable persisting the resampled daily bars to
         the ``1day`` partition (the sink snaps prices + merges idempotently).
     before
-        The forming-session cutoff (today IST), forwarded to
-        :func:`resample_1m_to_daily`.
+        The forming-session cutoff (today IST), forwarded to the resampler.
+    resample_fn
+        The 1-minute → daily resampler ``(frame, before) -> list[CandleBar]``.
+        Defaults to the spot :func:`resample_1m_to_daily` (OI ``None``); the F&O
+        derive injects the carry-last-OI
+        :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily`
+        (DEC-FNO-TF-DERIVE-OI-001).
 
     Returns
     -------
     DailyFillResult
         The written count + the resampled span (``first_ts`` / ``last_ts``).
     """
-    bars = resample_1m_to_daily(read_1m(), before=before)
+    resample = resample_1m_to_daily_default if resample_fn is None else resample_fn
+    bars = resample(read_1m(), before)
     if not bars:
         return DailyFillResult(bars_written=0, first_ts=None, last_ts=None)
     written = write_1day(bars)
@@ -538,6 +568,90 @@ def _parse_window_date(value: str) -> date:
     return datetime.fromisoformat(value).date()
 
 
+def ist_span_partition_months(start: date, end: date) -> list[tuple[int, int]]:
+    """The UTC ``(year, month)`` lake partitions an IST ``[start, end)`` span can touch.
+
+    The 1-minute lake partitions by **UTC** ``(year, month)``
+    (:func:`~brutex.data.partition.partition_for_timestamp`), but
+    :func:`make_lake_read_1m_window` filters by each bar's **IST trading date**
+    ``(ts_utc + 05:30).date()``. An intraday spot bar lives at 09:15–15:30 IST =
+    03:45–10:00 UTC, so its IST calendar day equals its UTC calendar day and hence its
+    UTC partition month equals its IST month — so the partitions covering the IST span
+    are exactly the UTC months the IST date range covers (DEC-RESAMPLE-BOUND-GLOB-001).
+
+    To stay byte-correct even if a future / non-spot 1-minute bar ever sat within 05:30
+    of a UTC month boundary (so its IST date and UTC partition month differ), the span
+    is **padded by one calendar day on each side** before the month set is collected.
+    That pad can at most add the immediately-adjacent month, so the result is still
+    O(pulled-window) months (NOT O(lake-depth)); it merely guarantees no IST-edge bar
+    is ever globbed out.
+
+    Parameters
+    ----------
+    start, end
+        The half-open IST date window ``[start, end)`` to derive ``1day`` over.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        The ascending ``(year, month)`` UTC partitions to read. An empty or inverted
+        span (``end <= start``) yields ``[]`` — an honest no-op, exactly as the old
+        whole-tree read produced an empty frame when the IST filter matched nothing.
+    """
+    if end <= start:
+        return []
+    # Pad one day each side so an IST-edge bar whose UTC partition month differs from
+    # its IST month is never excluded (a proven no-op for intraday spot; a cheap safety
+    # net for any boundary bar). ``[start, end)`` is half-open, so the last covered IST
+    # date is ``end - 1 day``; pad that to ``end`` (inclusive) for the +1-day side.
+    lo = start - timedelta(days=1)
+    hi = end  # == (end - 1 day) + 1 day, the padded inclusive upper IST date
+    months: list[tuple[int, int]] = []
+    year, month = lo.year, lo.month
+    while (year, month) <= (hi.year, hi.month):
+        months.append((year, month))
+        if month == MONTHS_PER_YEAR:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    return months
+
+
+def ist_span_partition_files(base: Path, start: date, end: date) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files for an IST ``[start, end)`` span.
+
+    Bounds the post-pull 1-day derivation read to ONLY the month partitions the pulled
+    window covers, instead of the whole ``<base>/**/*.parquet`` tree
+    (DEC-RESAMPLE-BOUND-GLOB-001): the read is O(pulled-window) months, not
+    O(lake-depth). The UTC partitions to consider come from
+    :func:`ist_span_partition_months`; only those that EXIST on disk are returned (an
+    absent month is skipped cleanly), as POSIX path strings ready for
+    :func:`polars.read_parquet`. The in-memory IST-date filter in
+    :func:`make_lake_read_1m_window` stays the precise final cut, so the resampled
+    ``1day`` output is byte-identical to the old whole-tree read.
+
+    Parameters
+    ----------
+    base
+        The symbol's ``1minute`` partition root
+        (``<lake_root>/bars/<exchange>/<segment>/<symbol>/1minute``).
+    start, end
+        The half-open IST date window ``[start, end)``.
+
+    Returns
+    -------
+    list[str]
+        Ascending POSIX paths of the existing month-partition Parquet files. Empty when
+        the span is empty/inverted OR no covered month exists on disk.
+    """
+    files: list[str] = []
+    for year, month in ist_span_partition_months(start, end):
+        candidate = base / f"{year:04d}" / f"{month:02d}.parquet"
+        if candidate.is_file():
+            files.append(candidate.as_posix())
+    return files
+
+
 def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration-tested
     *,
     lake_root: Path,
@@ -546,23 +660,56 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     symbol: str,
     start: date,
     end: date,
+    include_oi: bool = False,
 ) -> Callable[[], pl.DataFrame]:
     """Build the injected 1-minute reader for one ``[start, end)`` daily window.
 
     Returns a zero-arg callable reading the symbol's stored ``1minute`` Parquet,
     filtered to the bars whose IST trading date falls in the half-open window
     ``[start, end)``, into a sorted polars frame with exactly the resampler's columns
-    (``ts_utc, open, high, low, close, volume``). UNLIKE
+    (``ts_utc, open, high, low, close, volume`` — plus ``open_interest`` when
+    *include_oi* is True). The read is BOUNDED to ONLY the
+    ``<yyyy>/<mm>.parquet`` month partitions the IST span covers
+    (:func:`ist_span_partition_files`) instead of the whole ``/**/*.parquet`` tree, so
+    the post-pull derivation is O(pulled-window) months, not O(lake-depth)
+    (DEC-RESAMPLE-BOUND-GLOB-001); the in-memory IST-date filter below is the precise
+    final cut, so the output is byte-identical to the old whole-tree read. UNLIKE
     :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` (which RAISES when no
-    1-minute exists), a missing partition tree returns an EMPTY frame so "no 1-minute
-    to fill from" is a clean no-op, never an error (the verify-first default). Raw
-    lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
+    1-minute exists), no covered partition on disk returns an EMPTY frame so "no
+    1-minute to fill from" is a clean no-op, never an error (the verify-first default).
+
+    *include_oi* (DEC-FNO-TF-DERIVE-OI-001): spot callers leave it False (the
+    OHLCV-6 frame, unchanged). The F&O daily derive passes ``include_oi=True`` so the
+    ``open_interest`` column is read — both the ``.select(...)`` and the empty-schema
+    fallback frame gain it (``pl.Int64``) — and the OI-aware resampler carries
+    last-of-day OI into the derived ``1day`` partition.
+    Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        files = ist_span_partition_files(base, start, end)
+        columns = ["ts_utc", "open", "high", "low", "close", "volume"]
+        if include_oi:
+            columns.append("open_interest")
+        if not files:
+            # The F&O reader appends the nullable Int64 ``open_interest`` column so a
+            # no-partition F&O target still returns a 7-col frame the OI-aware daily
+            # resampler reads (DEC-FNO-TF-DERIVE-OI-001); spot stays the OHLCV-6. Two
+            # literal schemas (not a merged dict) so polars' typed ``schema=`` is exact.
+            if include_oi:
+                return pl.DataFrame(
+                    schema={
+                        "ts_utc": pl.Datetime(time_unit="us", time_zone="UTC"),
+                        "open": pl.Float64,
+                        "high": pl.Float64,
+                        "low": pl.Float64,
+                        "close": pl.Float64,
+                        "volume": pl.Int64,
+                        "open_interest": pl.Int64,
+                    }
+                )
             return pl.DataFrame(
                 schema={
                     "ts_utc": pl.Datetime(time_unit="us", time_zone="UTC"),
@@ -573,7 +720,7 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
                     "volume": pl.Int64,
                 }
             )
-        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        df = pl.read_parquet(files)
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
@@ -581,7 +728,7 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
             .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
-            .select("ts_utc", "open", "high", "low", "close", "volume")
+            .select(*columns)
             .sort("ts_utc")
         )
 

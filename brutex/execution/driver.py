@@ -27,10 +27,12 @@ execution-simulator wiring.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from brutex.execution.errors import ExecutionError
+from brutex.execution.errors import ExecutionError, NonMonotonicBarError
 from brutex.execution.simulator import ExecutionSimulator
 from brutex.execution.types import (
     BacktestResult,
@@ -125,16 +127,39 @@ class BacktestDriver:
         StrategyContractError
             Propagated from signal validation (non-``Signal``
             emission, out-of-scope symbol, future timestamp).
+        NonMonotonicBarError
+            Raised when a symbol's bar timestamps are not strictly
+            increasing (out-of-order or duplicate bar).
         """
         self._state.reset()
         self._barrier.reset()
+        self._simulator.reset()
         meta = self._strategy.META
         lookback = meta.lookback_bars
+
+        # Per-symbol last-seen bar timestamp — a LOCAL so it resets each run.
+        # Bars must be strictly increasing WITHIN a symbol; equal timestamps
+        # ACROSS symbols (legit interleave) are allowed.
+        last_ts_by_symbol: dict[str, datetime] = {}
 
         for step, event in enumerate(self._feed):
             # Advance the runtime look-ahead barrier (Property P-06) before
             # the symbol filter so the cursor tracks every feed position.
             self._barrier.advance_to(step)
+
+            # Feed-integrity guard (before any state mutation / strategy /
+            # execute / mark): reject an out-of-order or duplicate bar for a
+            # symbol already seen.
+            this_ts = event.bar.timestamp
+            prev_ts = last_ts_by_symbol.get(event.symbol)
+            if prev_ts is not None and this_ts <= prev_ts:
+                raise NonMonotonicBarError(
+                    f"non-monotonic bar for {event.symbol!r}: timestamp "
+                    f"{this_ts.isoformat()} <= previous {prev_ts.isoformat()} "
+                    f"(bars must be strictly increasing within a symbol)"
+                )
+            last_ts_by_symbol[event.symbol] = this_ts
+
             if event.symbol not in self._allowed_symbols:
                 continue
 
@@ -244,10 +269,13 @@ class BacktestDriver:
 
 
 def _freeze_positions(positions: Mapping[str, Position]) -> Mapping[str, Position]:
-    """Return an immutable view of *positions* for the frozen result.
+    """Return an immutable snapshot of *positions* for the frozen result.
 
-    The simulator owns the mutable dict; the :class:`BacktestResult`
-    needs a read-only snapshot so consumers can't accidentally
-    mutate it back into the live simulator state.
+    The simulator owns the mutable :class:`Position` objects; the
+    :class:`BacktestResult` needs an INDEPENDENT snapshot so a later
+    :meth:`BacktestDriver.run` / mark-to-market on the live simulator
+    cannot mutate a previously-returned result. Each position is
+    copied via :func:`dataclasses.replace` so the values are
+    byte-identical but decoupled from the live book.
     """
-    return dict(positions)  # shallow copy \u2014 positions are not frozen themselves
+    return {symbol: replace(pos) for symbol, pos in positions.items()}

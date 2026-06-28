@@ -1,14 +1,22 @@
 """Unit tests for :mod:`brutex.strategies.combo` — FR-BF-003 + NFR-UNIQ-002."""
 
+# The depth-cap boundary test imports the private ``_MAX_CANONICALISE_DEPTH``
+# constant deliberately (it is the contract under test); silence the
+# import-time private-usage diagnostic file-wide (the repo convention).
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
 import array
 import math
 from decimal import Decimal
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
-from brutex.strategies.combo import canonicalise_params, combo_hash
+from brutex.strategies.combo import (
+    _MAX_CANONICALISE_DEPTH,
+    canonicalise_params,
+    combo_hash,
+)
 from brutex.strategies.errors import StrategyError
 
 
@@ -58,13 +66,42 @@ class TestCanonicaliseParams:
         with pytest.raises(StrategyError, match="NaN"):
             canonicalise_params({"k": math.nan})
 
+    def test_signed_zero_collapses_to_positive(self) -> None:
+        """GAP #17 (DEC-SWEEP-DEDUP-LMDB-001): -0.0 and +0.0 are mathematically
+        equal, so they MUST canonicalise to the same string — otherwise two
+        equal params hash to different run-identities (breaks reproducibility /
+        Golden Rule #4)."""
+        assert canonicalise_params({"k": -0.0}) == canonicalise_params({"k": 0.0})
+
+    def test_signed_zero_collapses_nested(self) -> None:
+        """The -0.0 → +0.0 normalisation applies recursively (nested + in lists)."""
+        assert canonicalise_params({"o": {"k": -0.0}}) == canonicalise_params({"o": {"k": 0.0}})
+        assert canonicalise_params({"k": [-0.0, 1.5]}) == canonicalise_params({"k": [0.0, 1.5]})
+
+    def test_signed_zero_run_identity_is_stable(self) -> None:
+        """Two combos differing only by the sign of a zero param share one
+        run-identity (the reproducibility intent of the fix)."""
+        ctx = {
+            "strategy_id": "mask:0000000000000001",
+            "direction": "bull",
+            "instrument": "NIFTY",
+            "tf": "1m",
+            "mode": "A",
+            "data_snapshot_hash": "snap0001",
+            "indicator_version": "ind-v1",
+            "code_commit_sha": "deadbeef",
+        }
+        neg = combo_hash(params={"k": -0.0}, **ctx)
+        pos = combo_hash(params={"k": 0.0}, **ctx)
+        assert neg == pos
+
     def test_non_string_key_rejected(self) -> None:
         with pytest.raises(StrategyError, match="dict keys must be str"):
             canonicalise_params({1: "x"})  # type: ignore[dict-item]
 
     def test_unsupported_type_rejected(self) -> None:
         with pytest.raises(StrategyError, match="unsupported"):
-            canonicalise_params({"k": {1, 2, 3}})  # type: ignore[dict-item]
+            canonicalise_params({"k": {1, 2, 3}})
 
     def test_none_value(self) -> None:
         out = canonicalise_params({"k": None})
@@ -404,3 +441,239 @@ class TestComboHash:
                 data_snapshot_hash=self._SNAPSHOT,
                 code_commit_sha="",
             )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# (A) \x1f unit-separator injection rejection
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestComboHashSeparatorRejection:
+    """The 9-field payload joins raw fields on ``\\x1f``; a field carrying
+    that byte could forge a different combo's identity — it must be rejected
+    BEFORE any digest byte is produced (REJECT-ONLY: no valid digest changes)."""
+
+    _SNAPSHOT = "a" * 64
+    _COMMIT = "b" * 12
+    _BASE: ClassVar[dict[str, str]] = {
+        "strategy_id": "x",
+        "direction": "bull",
+        "instrument": "NIFTY",
+        "tf": "15m",
+        "mode": "A",
+        "data_snapshot_hash": _SNAPSHOT,
+        "indicator_version": "v1",
+        "code_commit_sha": _COMMIT,
+    }
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "strategy_id",
+            "direction",
+            "instrument",
+            "tf",
+            "mode",
+            "data_snapshot_hash",
+            "indicator_version",
+            "code_commit_sha",
+        ],
+    )
+    def test_combo_hash_rejects_unit_separator_in_each_field(self, field: str) -> None:
+        kwargs = dict(self._BASE)
+        kwargs[field] = "x\x1fy"
+        with pytest.raises(StrategyError, match=field):
+            combo_hash(**kwargs, params={})
+
+    def test_combo_hash_injection_collision_now_rejected(self) -> None:
+        """The classic split-injection pair (instrument=``NIFTY\\x1fX``,tf=``Y``
+        vs instrument=``NIFTY``,tf=``X\\x1fY``) would have collided on the old
+        join; both now raise instead of forging an identity."""
+        kwargs = dict(self._BASE)
+        kwargs.pop("instrument")
+        kwargs.pop("tf")
+        with pytest.raises(StrategyError, match="instrument"):
+            combo_hash(instrument="NIFTY\x1fX", tf="Y", **kwargs, params={})
+        with pytest.raises(StrategyError, match="tf"):
+            combo_hash(instrument="NIFTY", tf="X\x1fY", **kwargs, params={})
+
+
+# ────────────────────────────────────────────────────────────────────────
+# (B) Non-finite float / Decimal rejection (NaN already covered above)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNonFiniteRejection:
+    @pytest.mark.parametrize("value", [math.inf, -math.inf])
+    def test_infinity_float_rejected(self, value: float) -> None:
+        with pytest.raises(StrategyError, match="non-finite floats"):
+            canonicalise_params({"k": value})
+
+    @pytest.mark.parametrize("text", ["NaN", "sNaN"])
+    def test_decimal_nan_rejected(self, text: str) -> None:
+        with pytest.raises(StrategyError, match="non-finite Decimals"):
+            canonicalise_params({"k": Decimal(text)})
+
+    @pytest.mark.parametrize("text", ["Infinity", "-Infinity"])
+    def test_decimal_infinity_rejected(self, text: str) -> None:
+        with pytest.raises(StrategyError, match="non-finite Decimals"):
+            canonicalise_params({"k": Decimal(text)})
+
+    def test_nested_nan_in_list_rejected(self) -> None:
+        with pytest.raises(StrategyError, match="non-finite floats"):
+            canonicalise_params({"k": [1.0, math.nan, 2.0]})
+
+    def test_nested_nan_in_nested_dict_rejected(self) -> None:
+        with pytest.raises(StrategyError, match="non-finite floats"):
+            canonicalise_params({"outer": {"inner": math.nan}})
+
+
+# ────────────────────────────────────────────────────────────────────────
+# (C) Top-level Mapping guard
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestTopLevelMappingGuard:
+    @pytest.mark.parametrize(
+        "value",
+        [None, [1, 2], 5, "hi", (1, 2), 3.5, True],
+    )
+    def test_non_mapping_top_level_rejected(self, value: Any) -> None:
+        with pytest.raises(StrategyError, match="must be a Mapping"):
+            canonicalise_params(value)
+
+    def test_empty_mapping_still_accepted(self) -> None:
+        assert canonicalise_params({}) == "{}"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# (D) numpy scalar / array rejection (float subclass + unsupported types)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNumpyRejection:
+    def test_numpy_float64_rejected(self) -> None:
+        np = pytest.importorskip("numpy")
+        with pytest.raises(StrategyError, match="float subclasses"):
+            canonicalise_params({"k": np.float64(1.5)})
+
+    def test_numpy_int64_rejected(self) -> None:
+        np = pytest.importorskip("numpy")
+        with pytest.raises(StrategyError, match="unsupported value type"):
+            canonicalise_params({"k": np.int64(5)})
+
+    def test_numpy_bool_rejected(self) -> None:
+        np = pytest.importorskip("numpy")
+        with pytest.raises(StrategyError, match="unsupported value type"):
+            canonicalise_params({"k": np.bool_(True)})
+
+    def test_numpy_ndarray_rejected(self) -> None:
+        np = pytest.importorskip("numpy")
+        with pytest.raises(StrategyError, match="unsupported value type"):
+            canonicalise_params({"k": np.array([1, 2, 3])})
+
+    def test_builtin_float_unaffected(self) -> None:
+        np = pytest.importorskip("numpy")
+        del np  # only gating: a built-in float is never rejected
+        assert canonicalise_params({"k": 1.5}) == '{"k":"1.5"}'
+
+
+# ────────────────────────────────────────────────────────────────────────
+# (I) Depth cap — no RecursionError, clean StrategyError
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDepthCap:
+    def test_deeply_nested_param_raises_strategyerror(self) -> None:
+        value: Any = "leaf"
+        for _ in range(200):
+            value = {"k": value}
+        with pytest.raises(StrategyError) as excinfo:
+            canonicalise_params(value)
+        assert "nesting deeper" in str(excinfo.value)
+        # The guard must pre-empt the interpreter's RecursionError.
+        assert not isinstance(excinfo.value, RecursionError)
+
+    def test_depth_boundary(self) -> None:
+        """A structure at the max accepted depth passes; one deeper raises.
+
+        The top params dict is visited at ``_depth=0`` and recurses into its
+        value at ``_depth=1``; a string leaf wrapped in ``_MAX_CANONICALISE_DEPTH``
+        dict levels is visited at exactly that depth (``depth > MAX`` False), so
+        it passes, while one more level raises (calibrated empirically)."""
+
+        def nested(levels: int) -> Any:
+            value: Any = "leaf"
+            for _ in range(levels):
+                value = {"k": value}
+            return value
+
+        # Exactly at the cap — accepted.
+        canonicalise_params(nested(_MAX_CANONICALISE_DEPTH))
+        # One level deeper — rejected.
+        with pytest.raises(StrategyError, match="nesting deeper"):
+            canonicalise_params(nested(_MAX_CANONICALISE_DEPTH + 1))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Part-5 type-acceptance pins (current behaviour, wire-locked)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestTypeAcceptancePins:
+    def test_bytes_value_rejected(self) -> None:
+        with pytest.raises(StrategyError, match="unsupported value type bytes"):
+            canonicalise_params({"k": b"x"})
+
+    def test_bytearray_currently_accepted_as_array(self) -> None:
+        # bytearray is a mutable Sequence of ints — pinned to the array form.
+        assert canonicalise_params({"k": bytearray(b"x")}) == '{"k":[120]}'
+
+    def test_memoryview_currently_accepted_as_array(self) -> None:
+        assert canonicalise_params({"k": memoryview(b"x")}) == '{"k":[120]}'
+
+    def test_set_rejected(self) -> None:
+        with pytest.raises(StrategyError, match="unsupported value type set"):
+            canonicalise_params({"k": {1, 2, 3}})
+
+
+# ────────────────────────────────────────────────────────────────────────
+# (H) Wire-locked alias / scale / signed-zero pins (canonical-string level)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestWireLockedCanonical:
+    def test_float_str_decimal_alias_same_canonical(self) -> None:
+        """A float, str, and Decimal carrying the same text collapse to one
+        token — wire-locked (mitigated by one-type-per-axis at ParamGrid)."""
+        as_float = canonicalise_params({"sl": 1.5})
+        as_str = canonicalise_params({"sl": "1.5"})
+        as_decimal = canonicalise_params({"sl": Decimal("1.5")})
+        assert as_float == as_str == as_decimal == '{"sl":"1.5"}'
+
+    def test_int_does_not_alias_numeric_string(self) -> None:
+        assert canonicalise_params({"x": 5}) == '{"x":5}'
+        assert canonicalise_params({"x": 5}) != canonicalise_params({"x": "5.0"})
+        assert canonicalise_params({"x": 5}) != canonicalise_params({"x": Decimal("5")})
+
+    def test_decimal_scale_significant(self) -> None:
+        one_0 = canonicalise_params({"x": Decimal("1.0")})
+        one_00 = canonicalise_params({"x": Decimal("1.00")})
+        one_e2 = canonicalise_params({"x": Decimal("1E+2")})
+        hundred = canonicalise_params({"x": Decimal("100")})
+        assert one_0 != one_00 != one_e2 != hundred
+        assert len({one_0, one_00, one_e2, hundred}) == 4
+
+    def test_signed_zero_collapses(self) -> None:
+        # DEC-SWEEP-DEDUP-LMDB-001: -0.0 is normalised to +0.0 BEFORE repr so
+        # two mathematically-equal zero params share ONE run-identity (Golden
+        # Rule #4 reproducibility) — superseding the earlier split-zero pin.
+        assert canonicalise_params({"x": 0.0}) == '{"x":"0.0"}'
+        assert canonicalise_params({"x": -0.0}) == '{"x":"0.0"}'
+        assert canonicalise_params({"x": 0.0}) == canonicalise_params({"x": -0.0})
+
+    def test_tuple_list_range_canonicalise_identically(self) -> None:
+        as_list = canonicalise_params({"k": [0, 1, 2]})
+        as_tuple = canonicalise_params({"k": (0, 1, 2)})
+        as_range = canonicalise_params({"k": range(3)})
+        assert as_list == as_tuple == as_range == '{"k":[0,1,2]}'

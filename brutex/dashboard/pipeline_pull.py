@@ -71,8 +71,8 @@ A clean run reaches all three and reports ``stopped_after = None``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from brutex.dashboard.composite_pull import CompositePullReport
@@ -87,6 +87,23 @@ PHASE_HISTORICAL = "historical"
 #: movers snapshot ONLY after every fetch phase succeeds (never on a partial/broken
 #: pull — the operator's "until/unless successful fetches happen, never run movers").
 PHASE_MOVERS = "movers"
+#: The OPTIONAL gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build the
+#: derived intraday timeframes ONLY after every fetch phase succeeds — the operator's
+#: "pre-build runs as the pipeline's final stage automatically". Like movers, it is a
+#: read-of-the-just-filled-lake accelerator that is gated on a fully-successful fetch.
+PHASE_PREBUILD = "prebuild"
+
+#: The three PER-SEGMENT movers-warm labels (DEC-PIPELINE-SEGMENT-MOVERS-001): each
+#: segment's movers are computed AS THAT SEGMENT FINISHES — SPOT the moment the spot
+#: phase succeeds, FUTURES + OPTIONS the moment the historical phase succeeds (the
+#: historical phase pulls futures-before-options, DEC-FNO-PULL-ORDER-LOOKBACK-001, but
+#: its combined :class:`~brutex.dashboard.historical_pull.HistoricalPullReport` does NOT
+#: split FUT vs CE/PE counts, so both gate honestly on the same historical success —
+#: claiming a separate futures-only verdict the report cannot prove would fabricate one,
+#: Golden Rule #1). The labels are audit keys for the per-segment ``movers_warmed`` map.
+SEGMENT_SPOT = "spot"
+SEGMENT_FUTURES = "futures"
+SEGMENT_OPTIONS = "options"
 
 
 def spot_phase_ok(report: BulkSpotReport) -> bool:
@@ -206,12 +223,27 @@ class PipelinePullReport:
     note
         An honest one-line outcome summary.
     movers_warmed
-        The number of movers snapshots warmed by the OPTIONAL gated post-pull phase
-        (DEC-PULL-SELECTED-PIPELINE-001), or ``None`` when that phase did NOT run —
-        either no ``run_movers`` was injected, OR the historical fetch did not pass
-        its gate (the hard rule: movers is warmed ONLY after a fully-successful pull,
-        never on a partial/broken one). ``0`` is an honest "ran, warmed nothing"
-        (e.g. an empty lake), distinct from ``None`` "did not run".
+        The TOTAL number of movers snapshots warmed across every segment that warmed
+        (the sum of :attr:`segment_movers_warmed`), or ``None`` when NO segment warmer
+        ran at all. DEC-PIPELINE-SEGMENT-MOVERS-001 supersedes the single post-pull
+        warm of DEC-PULL-SELECTED-PIPELINE-001: movers are now warmed PER SEGMENT the
+        moment that segment fully succeeds (SPOT after the spot phase, FUTURES +
+        OPTIONS after the historical phase). ``0`` is an honest "a segment ran but
+        warmed nothing" (e.g. an empty lake), distinct from ``None`` "no segment ran".
+    segment_movers_warmed
+        The per-segment warmed-count map (:data:`SEGMENT_SPOT` / :data:`SEGMENT_FUTURES`
+        / :data:`SEGMENT_OPTIONS` → count) for every segment whose warmer was injected
+        AND whose own segment gate passed. A segment that did NOT fully succeed is
+        ABSENT from the map (never a fabricated count — the operator's "a segment that
+        did not fully succeed must NOT warm its movers", Golden Rule #1). Empty when no
+        segment warmed.
+    prebuild_built
+        The number of symbols whose derived intraday timeframes were pre-built by the
+        OPTIONAL gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001), or ``None``
+        when that phase did NOT run — either no ``run_prebuild`` was injected, OR the
+        historical fetch did not pass its gate (the SAME hard rule as movers:
+        pre-build runs ONLY after a fully-successful pull). ``0`` is an honest "ran,
+        built nothing" (e.g. an empty lake), distinct from ``None`` "did not run".
     """
 
     spot: BulkSpotReport | None
@@ -220,6 +252,8 @@ class PipelinePullReport:
     stopped_after: str | None
     note: str
     movers_warmed: int | None = None
+    segment_movers_warmed: dict[str, int] = field(default_factory=dict)
+    prebuild_built: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -245,6 +279,8 @@ class PipelinePullReport:
             "stopped_after": self.stopped_after,
             "note": self.note,
             "movers_warmed": self.movers_warmed,
+            "segment_movers_warmed": dict(self.segment_movers_warmed),
+            "prebuild_built": self.prebuild_built,
             "spot": self.spot.to_dict() if self.spot is not None else None,
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
@@ -268,28 +304,70 @@ def _metadata_stop_note(report: MetadataPullReport) -> str:
     )
 
 
+def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
+    """Build the ``, movers …`` note clause from the per-segment warmed-count map.
+
+    Empty when no segment warmed (no clause). Otherwise lists each warmed segment
+    in the fixed :data:`SEGMENT_SPOT` → :data:`SEGMENT_FUTURES` → :data:`SEGMENT_OPTIONS`
+    order (e.g. ``", movers spot 3 + futures 1 snapshot(s) warmed"``), so the note
+    honestly distinguishes WHICH segments warmed — a segment whose gate failed (or
+    whose warmer was not injected) is absent from the map and from the clause.
+    """
+    ordered = [
+        (segment, segment_movers_warmed[segment])
+        for segment in (SEGMENT_SPOT, SEGMENT_FUTURES, SEGMENT_OPTIONS)
+        if segment in segment_movers_warmed
+    ]
+    if not ordered:
+        return ""
+    parts = " + ".join(f"{segment} {count}" for segment, count in ordered)
+    return f", movers {parts} snapshot(s) warmed"
+
+
 def _complete_note(
     spot: BulkSpotReport,
     metadata: MetadataPullReport,
     historical: CompositePullReport,
-    movers_warmed: int | None = None,
+    segment_movers_warmed: Mapping[str, int],
+    prebuild_built: int | None = None,
 ) -> str:
     """Build the honest summary note for a fully-run pipeline.
 
-    Appends a movers-warm clause ONLY when the gated phase 4 ran (``movers_warmed``
-    is not ``None``) — honestly distinguishing "warmed N snapshots" from a run where
-    movers was skipped (no warmer injected) or gated-out (historical not clean).
+    Appends a per-segment movers-warm clause ONLY for the segments that actually
+    warmed (:func:`_movers_note_clause`) — honestly naming "spot 3 + futures 1
+    warmed" vs a run where no segment warmed (no clause: warmer not injected, or
+    every segment's own gate failed) — AND a pre-build clause ONLY when the gated
+    FINAL pre-build phase ran (``prebuild_built`` is not ``None``), honestly
+    distinguishing "built N" from a run where it was skipped (no callable injected)
+    or gated-out (historical not clean).
     """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
     contracts = hist.contracts_completed if hist is not None else 0
-    movers = f", movers {movers_warmed} snapshot(s) warmed" if movers_warmed is not None else ""
+    prebuild = (
+        f", timeframes pre-built for {prebuild_built} symbol(s)"
+        if prebuild_built is not None
+        else ""
+    )
     return (
         f"pipeline complete — spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
-        f"contracts, historical {bars} bars over {contracts} contract(s){movers}"
+        f"contracts, historical {bars} bars over {contracts} contract(s)"
+        f"{_movers_note_clause(segment_movers_warmed)}{prebuild}"
     )
+
+
+def _total_warmed(segment_movers_warmed: Mapping[str, int]) -> int | None:
+    """Sum the per-segment warmed counts, or ``None`` when no segment warmed.
+
+    ``None`` (no segment ran a warmer) is honestly distinct from ``0`` (a segment
+    ran but warmed nothing — an empty lake), so :attr:`PipelinePullReport.movers_warmed`
+    never conflates "did not run" with "warmed nothing" (Golden Rule #1).
+    """
+    if not segment_movers_warmed:
+        return None
+    return sum(segment_movers_warmed.values())
 
 
 def run_full_pipeline(
@@ -297,9 +375,12 @@ def run_full_pipeline(
     run_spot: Callable[[], BulkSpotReport],
     run_metadata: Callable[[], MetadataPullReport],
     run_historical: Callable[[], CompositePullReport],
-    run_movers: Callable[[], int] | None = None,
+    warm_spot_movers: Callable[[], int] | None = None,
+    warm_futures_movers: Callable[[], int] | None = None,
+    warm_options_movers: Callable[[], int] | None = None,
+    run_prebuild: Callable[[], int] | None = None,
 ) -> PipelinePullReport:
-    """Run the gated spot→metadata→historical(→movers) pipeline over injected spines.
+    """Run the gated spot→metadata→historical pipeline, warming movers PER SEGMENT.
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -308,21 +389,45 @@ def run_full_pipeline(
     "metadata"``, historical ``None``). Otherwise ``run_historical`` runs and the
     report carries all three with ``stopped_after = None``.
 
-    **Gated movers warm (DEC-PULL-SELECTED-PIPELINE-001):** if ``run_movers`` is
-    injected, it runs ONLY after a fully-successful fetch — i.e. spot + metadata
-    already passed their gates (to reach here) AND :func:`historical_phase_ok`
-    passes. This is the operator's hard rule "until/unless successful fetches
-    happen, NEVER run movers": a historical fetch that completed-with-failures
-    (``historical_phase_ok`` False) leaves ``movers_warmed = None`` (movers NOT
-    warmed). A clean run records the count ``run_movers`` returns (``0`` is an
-    honest "warmed nothing", distinct from ``None`` "did not run"). The pull's own
-    success (``stopped_after``/``ok``) is NEVER affected by the warm — it is a
-    read-only post-success accelerator over the just-filled lake.
+    **Per-segment movers warm (DEC-PIPELINE-SEGMENT-MOVERS-001):** each segment's
+    movers are computed AS THAT SEGMENT FINISHES — the operator's "the moment the
+    SPOT stage fully succeeds compute SPOT movers; when FUTURES succeeds → FUTURES
+    movers; when OPTIONS succeeds → OPTIONS movers":
 
-    The callables are INJECTED so the entire control flow is unit-testable with no
-    network (the route binds them to the real pull functions + the movers-cache
-    warmer). The sequencer itself is O(1) — four calls + the gate checks; the WORK
-    it triggers is the real multi-hour vendor fill (no throughput claim).
+    * ``warm_spot_movers`` (if injected) fires the moment :func:`spot_phase_ok`
+      passes — BEFORE the metadata phase even runs. So a clean spot pull warms its
+      movers even if a LATER phase (metadata / historical) then fails: the spot data
+      is already clean + usable, so its movers are honest (this is the headline new
+      behaviour over the single post-historical warm of DEC-PULL-SELECTED-PIPELINE-001).
+    * ``warm_futures_movers`` + ``warm_options_movers`` (if injected) fire the moment
+      :func:`historical_phase_ok` passes. The historical phase pulls futures-before-
+      options (DEC-FNO-PULL-ORDER-LOOKBACK-001), but its combined
+      :class:`~brutex.dashboard.historical_pull.HistoricalPullReport` does NOT split
+      FUT vs CE/PE success, so BOTH gate on the SAME historical success — claiming a
+      futures-only verdict the report cannot prove would fabricate one (Golden Rule #1).
+
+    A segment whose own gate did NOT pass is NEVER warmed (the hard rule "a segment
+    that did not fully succeed must NOT warm its movers") and is ABSENT from
+    :attr:`PipelinePullReport.segment_movers_warmed`. A warmed segment records its
+    count there (``0`` is an honest "ran, warmed nothing", e.g. an empty lake);
+    :attr:`PipelinePullReport.movers_warmed` is the SUM (``None`` only when no
+    segment warmed). The pull's own success (``stopped_after`` / ``ok``) is NEVER
+    affected by any warm — each is a read-only post-success accelerator over the
+    just-filled lake (the warmer is best-effort at its own call site).
+
+    **Gated FINAL pre-build (DEC-UNIVERSE-PULL-CONSOLIDATE-001):** if ``run_prebuild``
+    is injected, it runs as the pipeline's FINAL stage, gated by the SAME
+    fully-successful-fetch rule as movers (:func:`historical_phase_ok` passes). This
+    is the operator's "pre-build runs as the pipeline's final stage automatically":
+    a completed-with-failures historical fetch leaves ``prebuild_built = None`` (NOT
+    pre-built). A clean run records the count ``run_prebuild`` returns (``0`` is an
+    honest "built nothing", distinct from ``None`` "did not run"). Like movers, the
+    pre-build NEVER affects the pull's own success — it is a post-success accelerator
+    that materialises the derived intraday timeframes over the just-filled lake.
+
+    warmers + the timeframe materialiser). The sequencer itself is O(1) — the phase
+    calls + the gate checks + the per-segment warms + the final pre-build; the WORK it
+    triggers is the real multi-hour vendor fill (no throughput claim).
 
     Parameters
     ----------
@@ -335,17 +440,32 @@ def run_full_pipeline(
     run_historical
         Zero-arg callable returning a
         :class:`~brutex.dashboard.composite_pull.CompositePullReport` (phase 3).
-    run_movers
-        OPTIONAL zero-arg callable that warms the movers snapshot(s) over the
-        just-filled lake and returns how many were warmed; called ONLY after a
-        fully-successful fetch (phase 4, gated). ``None`` (default) skips it
-        entirely — backward-compatible with the whole-universe pipeline.
+    warm_spot_movers
+        OPTIONAL zero-arg callable that warms the SPOT movers snapshot over the
+        just-filled lake and returns how many were warmed; fired ONLY after the spot
+        phase passes its gate (before metadata). ``None`` skips the spot warm.
+    warm_futures_movers
+        OPTIONAL zero-arg callable that warms the FUTURES movers snapshot; fired ONLY
+        after the historical phase passes its gate. ``None`` skips the futures warm.
+    warm_options_movers
+        OPTIONAL zero-arg callable that warms the OPTIONS movers snapshot; fired ONLY
+        after the historical phase passes its gate. ``None`` skips the options warm.
+        (All three ``None`` ⇒ no movers phase — backward-compatible with the
+        whole-universe pipeline.)
+    run_prebuild
+        OPTIONAL zero-arg callable that pre-builds the derived intraday timeframes
+        over the just-filled lake and returns how many symbols were built; the
+        pipeline's FINAL stage, called ONLY after a fully-successful fetch (gated).
+        ``None`` (default) skips it entirely.
 
     Returns
     -------
     PipelinePullReport
-        The combined, auditable outcome of every phase that ran.
+        The combined, auditable outcome of every phase that ran, with the
+        per-segment movers-warm map.
     """
+    segment_movers_warmed: dict[str, int] = {}
+
     spot = run_spot()
     if not spot_phase_ok(spot):
         return PipelinePullReport(
@@ -355,6 +475,10 @@ def run_full_pipeline(
             stopped_after=PHASE_SPOT,
             note=_spot_stop_note(spot),
         )
+    # Spot succeeded → warm SPOT movers NOW (the moment the segment finishes), even
+    # if a later phase fails: the spot data is already clean + usable.
+    if warm_spot_movers is not None:
+        segment_movers_warmed[SEGMENT_SPOT] = warm_spot_movers()
 
     metadata = run_metadata()
     if not metadata_phase_ok(metadata):
@@ -364,18 +488,32 @@ def run_full_pipeline(
             historical=None,
             stopped_after=PHASE_METADATA,
             note=_metadata_stop_note(metadata),
+            movers_warmed=_total_warmed(segment_movers_warmed),
+            segment_movers_warmed=segment_movers_warmed,
         )
 
     historical = run_historical()
-    # Phase 4 (gated, optional): warm movers ONLY on a fully-successful fetch.
-    movers_warmed: int | None = None
-    if run_movers is not None and historical_phase_ok(historical):
-        movers_warmed = run_movers()
+    # Post-fetch phases (gated, optional): warm the FUTURES + OPTIONS movers
+    # (futures-before-options was the pull order; both ride the SAME combined
+    # historical success gate) + pre-build the derived timeframes — ONLY on a
+    # fully-successful fetch. Evaluate the gate ONCE so every post-fetch phase
+    # shares the same fully-successful-fetch decision.
+    fetch_clean = historical_phase_ok(historical)
+    if fetch_clean:
+        if warm_futures_movers is not None:
+            segment_movers_warmed[SEGMENT_FUTURES] = warm_futures_movers()
+        if warm_options_movers is not None:
+            segment_movers_warmed[SEGMENT_OPTIONS] = warm_options_movers()
+    prebuild_built: int | None = None
+    if run_prebuild is not None and fetch_clean:
+        prebuild_built = run_prebuild()
     return PipelinePullReport(
         spot=spot,
         metadata=metadata,
         historical=historical,
         stopped_after=None,
-        note=_complete_note(spot, metadata, historical, movers_warmed),
-        movers_warmed=movers_warmed,
+        note=_complete_note(spot, metadata, historical, segment_movers_warmed, prebuild_built),
+        movers_warmed=_total_warmed(segment_movers_warmed),
+        segment_movers_warmed=segment_movers_warmed,
+        prebuild_built=prebuild_built,
     )

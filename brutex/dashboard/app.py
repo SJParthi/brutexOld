@@ -928,6 +928,13 @@ def build_app(
     # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
     _spot_cascade_cache = MoversSnapshotCache()
+    # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
+    # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
+    # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
+    # It is invariant between lake writes, so it is memoised behind the SAME write
+    # generation as the caches above (a pull bumps it → re-resolve; otherwise a default
+    # poll is an O(1) handoff). REUSES the COMMON `MoversSnapshotCache` (one date key).
+    _latest_movers_date_cache = MoversSnapshotCache()
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -2134,6 +2141,11 @@ def build_app(
         4. **Movers (gated)** — warm the default movers snapshots ONLY after a
            fully-successful fetch (DEC-PULL-SELECTED-PIPELINE-001 — "until/unless
            successful fetches happen, never run movers").
+        5. **Pre-build timeframes (gated, FINAL)** — materialise the 19 derived
+           intraday timeframes over the just-filled lake ONLY after a
+           fully-successful fetch (DEC-UNIVERSE-PULL-CONSOLIDATE-001 — "pre-build
+           runs as the pipeline's final stage automatically"), so the operator never
+           needs the separate manual button after a one-click pull.
 
         The GATE between phases is the pure
         :func:`~brutex.dashboard.pipeline_pull.run_full_pipeline`: a phase that ends
@@ -2238,29 +2250,36 @@ def build_app(
                         until_clean=True,
                     )
 
-            def _warm_movers() -> int:
-                """Gated phase 4 (DEC-PULL-MOVERS-WARM-001): warm the default movers snapshots.
+            def _warm_for_date() -> tuple[str, int] | None:
+                """Resolve the warm target ``(latest_movers_date, generation)``, or ``None``.
 
-                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate). Targets the
-                LATEST available spot day (never 'today' — the pull fills only to the previous
-                trading day, so a today-warm would cache empties), at the current post-pull
-                generation, so the operator's first /movers open is an O(1) cache hit. Reuses
-                the EXACT candidate_key + compute the /api/v1/movers route uses (no drift,
-                CLAUDE.md §11 COMMON). Returns how many of spot/futures/options warmed non-empty.
-
-                Whole-body best-effort: the date resolution + every job is wrapped so a
-                transient lake-read race NEVER propagates to fail the already-successful pull
-                (Correctness of the pull > the warm's latency benefit, DEC-PULL-MOVERS-WARM-001).
+                Best-effort: the date resolution is wrapped so a transient lake-read race
+                NEVER propagates to fail the already-successful segment (Correctness of the
+                pull > the warm's latency benefit). Targets the LATEST available spot day
+                (never 'today' — the pull fills only to the previous trading day, so a
+                today-warm would cache empties); ``None`` when the lake has no spot day yet.
                 """
                 try:
                     warm_date = latest_movers_date(lake_root)
                 except Exception as exc:  # pylint: disable=broad-except - best-effort warm
                     _LOG.warning("movers.warm.latest_date_failed", error=str(exc))
-                    return 0
+                    return None
                 if warm_date is None:
+                    return None
+                # post-pull generation (the pull bumped it) — the SAME the /movers route reads.
+                return warm_date, _summary_cache.generation
+
+            def _warm_spot_movers() -> int:
+                """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
+
+                Reuses the EXACT candidate_key + compute the /api/v1/movers route uses (no
+                drift, CLAUDE.md §11 COMMON). Best-effort via ``warm_movers_snapshots`` — a
+                warmer that raises is logged + counted 0, never failing the successful pull.
+                """
+                resolved = _warm_for_date()
+                if resolved is None:
                     return 0
-                gen = _summary_cache.generation  # post-pull generation (the pull bumped it)
-                tier, trk = normalize_options_selectors(None, None)  # near / all
+                warm_date, gen = resolved
 
                 def _spot_job() -> int:
                     cands = _movers_cache.get_or_compute(
@@ -2281,6 +2300,16 @@ def build_app(
                         ),
                     )
                     return len(cands.snapshots)
+
+                return warm_movers_snapshots([_spot_job])
+
+            def _warm_futures_movers() -> int:
+                """Per-segment FUTURES warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds."""
+                resolved = _warm_for_date()
+                if resolved is None:
+                    return 0
+                warm_date, gen = resolved
+                tier = normalize_futures_tier(None)  # near
 
                 def _fut_job() -> int:
                     cands = _movers_cache.get_or_compute(
@@ -2303,6 +2332,16 @@ def build_app(
                         ),
                     )
                     return len(cands.movers)
+
+                return warm_movers_snapshots([_fut_job])
+
+            def _warm_options_movers() -> int:
+                """Per-segment OPTIONS warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds."""
+                resolved = _warm_for_date()
+                if resolved is None:
+                    return 0
+                warm_date, gen = resolved
+                tier, trk = normalize_options_selectors(None, None)  # near / all
 
                 def _opt_job() -> int:
                     cands = _movers_cache.get_or_compute(
@@ -2328,13 +2367,69 @@ def build_app(
                     )
                     return len(cands.movers)
 
-                return warm_movers_snapshots([_spot_job, _fut_job, _opt_job])
+                return warm_movers_snapshots([_opt_job])
+
+            def _prebuild_timeframes() -> int:
+                """Gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build derived TFs.
+
+                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate) — the
+                operator's "pre-build runs as the pipeline's final stage automatically". For
+                EVERY pulled target it materialises all 19 derived intraday timeframes to the
+                lake via the SHARED materialize_timeframes + the SHARED lake read/write
+                builders (CLAUDE.md §11 COMMON — the SAME pair the manual derive route uses),
+                run through the quarantining run_autoderive driver so one symbol's corrupt
+                partition never sinks the rest. Returns how many symbols built cleanly.
+
+                COMMON-resampler note: materialize_timeframes drives the canonical
+                tf_resampler, so once the in-flight F&O-OI resampler change lands this covers
+                F&O automatically with NO change here. A symbol with no stored 1-minute base
+                derives nothing (an honest 0, never a fabricated bar).
+
+                Whole-body best-effort: every failure is swallowed so a transient lake-read
+                race NEVER fails the already-successful pull (Correctness of the pull > the
+                pre-build's speed benefit, mirroring the per-segment movers warmers).
+                """
+                from brutex.data.tf_autoderive import run_autoderive
+
+                def _materialize_one(symbol: str) -> object:
+                    inst = _require_store().get(symbol)
+                    if inst is None:  # pragma: no cover — targets come from the store
+                        raise KeyError(symbol)
+                    return materialize_timeframes(
+                        tfs=MATERIALIZABLE_TFS,
+                        read_1m=make_lake_read_1m(
+                            lake_root=lake_root,
+                            exchange=inst.exch_id.value,
+                            segment=inst.segment.value,
+                            symbol=inst.symbol_name,
+                        ),
+                        write_tf=make_lake_write_tf(
+                            lake_root=lake_root,
+                            exchange=inst.exch_id.value,
+                            segment=inst.segment.value,
+                            symbol=inst.symbol_name,
+                        ),
+                    )
+
+                try:
+                    report = run_autoderive(
+                        symbols=[inst.symbol_name for inst in targets],
+                        materialize_one=_materialize_one,  # type: ignore[arg-type]
+                    )
+                except Exception as exc:  # pylint: disable=broad-except - best-effort prebuild
+                    _LOG.warning("universe.prebuild.failed", error=str(exc))
+                    return 0
+                _summary_cache.mark_dirty()  # the new derived partitions are fresh datasets
+                return report.symbols_ok
 
             report = run_full_pipeline(
                 run_spot=_run_spot,
                 run_metadata=_run_metadata,
                 run_historical=_run_historical,
-                run_movers=_warm_movers,
+                warm_spot_movers=_warm_spot_movers,
+                warm_futures_movers=_warm_futures_movers,
+                warm_options_movers=_warm_options_movers,
+                run_prebuild=_prebuild_timeframes,
             )
             if report.spot is not None:
                 _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
@@ -2468,8 +2563,11 @@ def build_app(
         Returns the background job's O(1)
         :meth:`brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot` — ``state``
         (idle/running/done/error), ``total`` / ``completed`` / ``failed`` /
-        ``bars`` / ``percent`` / ``current``. The page polls this while a pull
-        runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001).
+        ``gaps`` / ``bars`` / ``percent`` / ``current``. The page polls this while
+        a pull runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001);
+        the terminal-header builder (``terminalPullHeader``) reads ``gaps`` to
+        distinguish a clean finish from a no-data-gap partial, so it is documented
+        here as a first-class snapshot key (it is NOT dead code).
         """
         return JSONResponse(_pull_job.snapshot().to_dict())
 
@@ -3295,17 +3393,6 @@ def build_app(
                     )
                 )
             lake_root = store_path.parent
-            # Normalise the date once so the cache key is canonical. With NO explicit
-            # date, default to the LATEST available spot day (DEC-PULL-MOVERS-WARM-001),
-            # NOT today: a historical pull fills the lake only to the previous trading
-            # day, so a today-default would show an EMPTY snapshot on open (and miss the
-            # post-pull warm, which keys on that same latest day). Falls back to today
-            # only when the lake has no spot data yet (an honest empty payload). An
-            # EXPLICIT malformed date still raises HERE (synchronously) → 400.
-            if date is None:
-                date_str = latest_movers_date(lake_root) or parse_snapshot_date(None).isoformat()
-            else:
-                date_str = parse_snapshot_date(date).isoformat()
             # The current write-generation — a pull/materialize bumps it, so every
             # cached candidate set computed at an older generation is dirty (the
             # page never serves pre-pull data). Reused from the coverage cache.
@@ -3319,6 +3406,29 @@ def build_app(
                 ONLY on a miss / post-pull; a hit is an O(1) handoff + a cheap
                 in-memory rank (DEC-MOVERS-O1-LATENCY-001).
                 """
+                # Normalise the date so the candidate cache key is canonical. With NO
+                # explicit date, default to the LATEST available spot day
+                # (DEC-PULL-MOVERS-WARM-001), NOT today: a historical pull fills the lake
+                # only to the previous trading day, so a today-default would show an EMPTY
+                # snapshot on open (and miss the post-pull warm, which keys on that same
+                # latest day). Falls back to today only when the lake has no spot data yet
+                # (an honest empty payload). An EXPLICIT malformed date raises ValueError
+                # here → caught by the outer `except ValueError` → 400. The latest-date
+                # resolution is the O(datasets) `latest_movers_date` DuckDB MAX, so it runs
+                # HERE on the threadpool worker (never the event loop) AND is memoised
+                # behind the same write generation, so a repeat DEFAULT poll is an O(1)
+                # handoff and a pull invalidates it (GAP #4).
+                if date is None:
+                    date_str = (
+                        _latest_movers_date_cache.get_or_compute(
+                            "latest_movers_date",
+                            generation=generation,
+                            compute=lambda: latest_movers_date(lake_root),
+                        )
+                        or parse_snapshot_date(None).isoformat()
+                    )
+                else:
+                    date_str = parse_snapshot_date(date).isoformat()
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a

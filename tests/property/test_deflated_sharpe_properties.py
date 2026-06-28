@@ -53,6 +53,35 @@ def test_psr_is_a_finite_probability(
     assert math.isfinite(psr)
 
 
+#: A float that is either an in-domain finite value or one of the three
+#: non-finite sentinels. (``st.floats`` cannot combine bounds with
+#: ``allow_nan``/``allow_infinity``, so the non-finite values are sampled
+#: separately and unioned in.)
+_maybe_non_finite = st.one_of(
+    _sharpe,
+    st.sampled_from([float("nan"), float("inf"), float("-inf")]),
+)
+
+
+@given(_maybe_non_finite, _maybe_non_finite, _maybe_non_finite, _n)
+def test_psr_rejects_any_non_finite_moment(
+    observed: float, skew: float, kurt: float, n: int
+) -> None:
+    """A non-finite (NaN/inf) ``observed_sharpe``/``skew``/``kurtosis`` always raises.
+
+    Hypothesis is steered to draw at least one non-finite value among the three;
+    such an input must raise ``ValueError`` rather than silently returning NaN
+    (DEC-METRICS-NONFINITE-GUARD-001).
+    """
+    if all(math.isfinite(v) for v in (observed, skew, kurt)):
+        return  # in-domain draw — covered by the finite-probability property above
+    try:
+        probabilistic_sharpe_ratio(observed, 0.0, n, skew, kurt)
+    except ValueError:
+        return
+    raise AssertionError("a non-finite PSR moment must raise ValueError")
+
+
 @given(_sharpe, _trials, _variance, _n, _skew, _kurt)
 def test_dsr_is_a_finite_probability_and_le_undeflated(
     observed: float, trials: int, variance: float, n: int, skew: float, kurt: float

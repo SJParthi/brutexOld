@@ -207,6 +207,28 @@ class TestSweepRunConfig:
         cfg = _make_config(condition_bits=[0, 1], k=0)
         assert cfg.k == 0
 
+    def test_condition_bit_at_or_above_max_vocab_rejected_at_config_time(self) -> None:
+        # GAP #16 (DEC-SWEEP-DEDUP-LMDB-001): a bit >= MAX_VOCAB_BITS must be
+        # rejected AT CONFIG TIME, not surface late as a bare ValueError from
+        # the lazy iter_masks_k_of_bits generator mid-enumeration.
+        from brutex.engine.combo_mask import MAX_VOCAB_BITS
+
+        with pytest.raises(ValueError, match=r"condition_bits \[99\] out of range \[0, 64\)"):
+            _make_config(condition_bits=[0, 1, 99], k=1)
+        # The boundary bit (== MAX_VOCAB_BITS) is also out of the half-open range.
+        with pytest.raises(ValueError, match=r"out of range \[0, 64\)"):
+            _make_config(condition_bits=[MAX_VOCAB_BITS], k=1)
+
+    def test_negative_condition_bit_rejected_at_config_time(self) -> None:
+        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 64\)"):
+            _make_config(condition_bits=[-1, 0, 1], k=1)
+
+    def test_top_condition_bit_in_range_is_valid(self) -> None:
+        from brutex.engine.combo_mask import MAX_VOCAB_BITS
+
+        cfg = _make_config(condition_bits=[0, MAX_VOCAB_BITS - 1], k=1)
+        assert MAX_VOCAB_BITS - 1 in cfg.condition_bits
+
     @pytest.mark.parametrize("field", ["sl_paisa", "tp_paisa"])
     def test_nonpositive_paisa_knob_rejected(self, field: str) -> None:
         with pytest.raises(ValueError, match=f"{field} must be > 0 or None"):
@@ -737,7 +759,10 @@ class TestCompletionSentinel:
         assert sentinel.tuple_digest == self._DIGEST
         assert sentinel.store_content_hash == summary.store_content_hash
         assert sentinel.sidecar_written is True
-        assert sentinel.n_marked == summary.evaluated
+        # On the digest path the dedup probes are BYPASSED, so the unconditional
+        # advisory mark_many is SKIPPED (DEC-SWEEP-DEDUP-LMDB-001) — the sentinel
+        # is the redo authority, so n_marked honestly reads 0 (no marks written).
+        assert sentinel.n_marked == 0
 
     def test_no_digest_writes_no_sentinel(self, tmp_path: Path) -> None:
         from brutex.engine.tuple_complete import completion_sentinel_path
@@ -827,30 +852,38 @@ class TestCompletionSentinel:
         assert redone.persisted == 1  # never inflated
         assert store_path.read_bytes() == baseline
 
-    def test_mark_crash_leaves_no_sentinel_then_heals(self, tmp_path: Path) -> None:
-        # Ordering pin: the sentinel lands STRICTLY AFTER mark_many — a crash
-        # inside the mark loop leaves it absent, so the next run fully redoes.
-        from brutex.engine.tuple_complete import completion_sentinel_path
+    def test_digest_path_never_calls_mark_many(self, tmp_path: Path) -> None:
+        # Regression (DEC-SWEEP-DEDUP-LMDB-001): on the digest path the dedup
+        # probes are BYPASSED (`seen` is never consulted), so the unconditional
+        # advisory mark_many is now SKIPPED too — marking would be a wasted
+        # O(survivors) write to the off-heap LMDB exact tier. A dedup whose
+        # mark_many WOULD raise is therefore never invoked: the run completes
+        # cleanly and writes the sentinel. (Before the fix this crashed inside
+        # the mark loop, leaving no sentinel — the window this fix removes.)
+        from brutex.engine.tuple_complete import (
+            completion_sentinel_path,
+            read_completion_sentinel,
+        )
 
         cfg = _make_config()
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
-        with (
-            AuditWriter.open(tmp_path / "a.jsonl") as audit,
-            pytest.raises(RuntimeError, match="simulated crash inside the mark loop"),
-        ):
-            run_persisted_sweep(
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
                 bars,
                 cfg,
                 store=store,
-                dedup=_MarkCrashDedup(),
+                dedup=_MarkCrashDedup(),  # its mark_many RAISES if ever called
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
             )
-        assert not completion_sentinel_path(store.path).exists()
-        healed = self._redo(store.path, cfg, bars)
-        assert healed.resumed_complete is False
-        assert healed.sentinel_written is True
+        # The crash-on-mark dedup was NEVER asked to mark, so the sweep finished.
+        assert summary.sentinel_written is True
+        sentinel = read_completion_sentinel(completion_sentinel_path(store.path))
+        assert sentinel.n_marked == 0
+        # And it resumes-complete on a redo (a paired sentinel short-circuits).
+        resumed = self._redo(store.path, cfg, bars)
+        assert resumed.resumed_complete is True
 
     def test_sentinel_without_sidecar_record_skips_the_sidecar_check(self, tmp_path: Path) -> None:
         # A sentinel recording sidecar_written=False pairs WITHOUT consulting
@@ -1318,6 +1351,104 @@ class TestSweepComboError:
         assert not trial_stats_sidecar_path(store.path).exists()
         assert not completion_sentinel_path(store.path).exists()
 
+    def test_keyboard_interrupt_propagates_bare_not_a_combo_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A KeyboardInterrupt ESCAPES the per-tuple SweepComboError catch BARE.
+
+        An operator Ctrl-C is a ``BaseException`` (NOT an ``Exception``), so the
+        combo loop's ``except Exception`` MUST NOT catch it — it propagates
+        unchanged so the whole (33B-trial) sweep aborts instead of being silently
+        downgraded to a single-tuple skip + continue (DEC-ENGINE-DEDUP-NAN-CANON-001
+        / the audit H1 guard, the BaseException twin of the MemoryError test). The
+        store / sidecar / sentinel stay unwritten + ``tuples_failed`` is irrelevant
+        (the single-tuple runner does not even reach the grid driver's count).
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _interrupt(*_args: object, **_kwargs: object) -> object:
+            raise KeyboardInterrupt("operator ctrl-c")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _interrupt)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(KeyboardInterrupt, match="operator ctrl-c") as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # It is NOT downgraded to a SweepComboError (the per-tuple skip path).
+        assert not isinstance(excinfo.value, SweepComboError)
+        # Bare re-raise (escaped `except Exception`): no SweepComboError chained.
+        assert excinfo.value.__cause__ is None
+        cause = excinfo.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # No artifact was written (the raise is before flush/mark/sentinel).
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_base_exception_subclass_propagates_bare_not_a_combo_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generic BaseException subclass ESCAPES the ``except Exception`` catch.
+
+        The combo loop catches only ``Exception`` (and re-raises ``MemoryError``
+        bare BEFORE it). Anything deriving from ``BaseException`` but NOT
+        ``Exception`` — Ctrl-C, ``SystemExit``, or any custom ``BaseException``
+        subclass — must propagate UNWRAPPED, pinning that a future refactor
+        widening the catch to ``except BaseException`` (which would silently
+        downgrade a fatal signal into a tuple skip) is caught (audit H1).
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        class _FatalSignal(BaseException):
+            """A BaseException that is NOT an Exception (mirrors Ctrl-C / SystemExit)."""
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _fatal(*_args: object, **_kwargs: object) -> object:
+            raise _FatalSignal("not an Exception")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _fatal)
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(_FatalSignal, match="not an Exception") as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # Not an Exception, so it cannot be wrapped by the SweepComboError catch.
+        assert not isinstance(excinfo.value, Exception)
+        assert not isinstance(excinfo.value, SweepComboError)
+        assert excinfo.value.__cause__ is None
+        # No artifact was written (raise is before flush/mark/sentinel).
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
     def test_store_flush_error_aborts_not_a_combo_skip(self, tmp_path: Path) -> None:
         """A ResultsStoreError from store.flush() propagates OUT — NOT a tuple skip.
 
@@ -1360,3 +1491,177 @@ class TestSweepComboError:
         while cause is not None:
             assert not isinstance(cause, SweepComboError)
             cause = cause.__context__
+
+    def test_store_append_error_aborts_not_a_combo_skip(self, tmp_path: Path) -> None:
+        """A ResultsStoreError from a per-row store.append() propagates OUT (redo-not-skip).
+
+        The finalists ``store.append(row)`` loop runs AFTER the combo
+        ``metrics_for_mask`` loop (and BEFORE the flush already covered by
+        ``test_store_flush_error_aborts_not_a_combo_skip``). A failure here — a
+        run-identity conflict, a store-internal infra fault — must NOT be caught
+        by the narrow ``except SweepComboError`` (which only wraps the per-combo
+        ``metrics_for_mask`` raise): it propagates unchanged as a
+        ``ResultsStoreError`` so the grid drivers ABORT instead of downgrading it
+        to a single-tuple skip, and — because the raise is BEFORE the trial-stats
+        sidecar / mark / completion-sentinel writes — the tuple is left
+        UN-sentineled and the dedup UN-marked, so a resume deterministically
+        REDOES the whole tuple (Golden Rule #7).
+        """
+        from brutex.engine.results_store import ResultsStoreError
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        class _AppendFailsStore(ResultsStore):
+            """A real store whose per-row append() raises an infra failure.
+
+            The base ``flush`` is left intact — the append raise aborts the
+            finalists loop BEFORE the flush is ever reached (asserted below by
+            the absent store file), so no flush override is needed.
+            """
+
+            def append(self, row: object) -> bool:  # type: ignore[override]
+                raise ResultsStoreError("simulated disk failure during append")
+
+        store = _AppendFailsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ResultsStoreError, match="simulated disk failure during append") as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The raw store error, NOT a SweepComboError tuple-skip, anywhere in the chain.
+        assert not isinstance(exc.value, SweepComboError)
+        assert exc.value.__cause__ is None
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # No store / sidecar / completion sentinel was written → the tuple redoes.
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_completion_sentinel_write_error_propagates_un_sentineled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError from the STRICTLY-LAST completion-sentinel write propagates (redo-not-skip).
+
+        ``write_completion_sentinel`` is written last of all — after the store
+        flush, the trial-stats sidecar, and ``mark_many`` — so its presence
+        proves the whole sequence completed (DEC-MARK-MANY-SENTINEL-001). If the
+        disk fails AT that final write, the error must PROPAGATE OUT (not be
+        swallowed into a tuple-skip) AND leave the sentinel ABSENT, so a resume —
+        which consults ONLY the sentinel — finds the tuple INCOMPLETE and
+        deterministically REDOES it (Golden Rule #7). This pins the
+        completion-sentinel boundary, the twin of the flush-error boundary.
+        """
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+
+        def _sentinel_write_fails(*_args: object, **_kwargs: object) -> object:
+            raise OSError("simulated disk failure writing completion sentinel")
+
+        # Patch the name as resolved inside run_persisted_sweep (the sweep_run
+        # module namespace) — the string target avoids the re-export attr check.
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.write_completion_sentinel", _sentinel_write_fails
+        )
+
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(
+                OSError, match="simulated disk failure writing completion sentinel"
+            ) as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The raw OSError is NOT downgraded into a SweepComboError tuple-skip.
+        assert not isinstance(exc.value, SweepComboError)
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # The sentinel — the redo authority — is ABSENT, so a resume redoes the tuple.
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_trial_stats_write_error_propagates_un_sentineled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError from the trial-stats sidecar write propagates (redo-not-skip).
+
+        ``write_tuple_trial_stats`` is written AFTER the store flush but BEFORE
+        the strictly-last ``write_completion_sentinel`` (DEC-TRIAL-STATS-WRITE-001
+        / DEC-MARK-MANY-SENTINEL-001). It sits OUTSIDE the narrow
+        ``except SweepComboError`` that wraps only the per-combo
+        ``metrics_for_mask`` loop, so a disk fault at this sidecar write must
+        PROPAGATE OUT unchanged — never downgraded into a ``SweepComboError``
+        tuple-skip (only a ``SweepComboError`` triggers the grid drivers'
+        single-tuple skip + ``tuples_failed`` bump, so propagating a raw
+        ``OSError`` keeps the failure a sweep-wide ABORT, not a combo-skip) — AND
+        leave the completion sentinel ABSENT. A resume consults ONLY the
+        sentinel, so an absent sentinel forces a deterministic FULL redo of the
+        tuple (Golden Rule #7). This pins the trial-stats sidecar-write
+        boundary — the twin of the flush-error, store-append-error, and
+        completion-sentinel-write fault tests — completing the per-tuple
+        finalize write-fault-injection matrix.
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+
+        def _trial_stats_write_fails(*_args: object, **_kwargs: object) -> object:
+            raise OSError("simulated disk failure writing trial-stats sidecar")
+
+        # Patch the name as resolved inside run_persisted_sweep (the sweep_run
+        # module namespace) — the string target avoids the re-export attr check.
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.write_tuple_trial_stats", _trial_stats_write_fails
+        )
+
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(
+                OSError, match="simulated disk failure writing trial-stats sidecar"
+            ) as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The raw OSError is NOT downgraded into a SweepComboError tuple-skip
+        # (so the grid drivers ABORT instead of bumping tuples_failed + skipping).
+        assert not isinstance(exc.value, SweepComboError)
+        assert exc.value.__cause__ is None or not isinstance(exc.value.__cause__, SweepComboError)
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # The sidecar write FAILED → no sidecar, and the strictly-last sentinel
+        # was never reached → ABSENT, so a resume redoes the whole tuple.
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()

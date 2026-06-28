@@ -235,6 +235,12 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+        with:
+          # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
+          # coverage gate can diff the PR against origin/main (the merge
+          # base) to find the TOUCHED modules. Shallow (depth-1) checkout
+          # has no base to diff against.
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -1167,14 +1173,42 @@ jobs:
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
-          # 21c · brutex.data.tf_resampler (26 stmts, 12 branches, 16 tests)
+          # 21c · brutex.data.tf_resampler (36 stmts, 14 branches)
           #       Closes 94.74→100% via 1 surgical test
           #       (`test_non_dataframe_input_raises_typeerror` covers line
           #       77 TypeError for non-polars.DataFrame input).
+          #       DEC-FNO-TF-DERIVE-OI-001: the OPTIONAL carry-last
+          #       open_interest branch (the `has_oi` aggregation append) is
+          #       reachable ONLY from a frame carrying an `open_interest`
+          #       column, which test_fno_resample.py provides (the
+          #       OHLCV-only test_tf_resampler.py never grows that column).
+          #       Both files are required to keep this module 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
+          fi
+          # 21c-fno-daily · brutex.data.fno_daily_resample (DEC-FNO-TF-DERIVE-OI-001):
+          #       the F&O twin of resample_1m_to_daily — OHLCV aggregation +
+          #       midnight-IST re-stamp + forming-session `before` guard, EXCEPT
+          #       it reads the carry-last open_interest (defensive `in columns`
+          #       guard) instead of hardcoding None. 100% line+branch via
+          #       tests/unit/test_fno_daily_resample.py.
+          if compgen -G "tests/unit/test_fno_daily_resample.py" > /dev/null; then
+            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py
+          else
+            echo "(brutex.data.fno_daily_resample test file not present yet — gate inactive)"
+          fi
+          # 21c-fno-resample · brutex.data.fno_resample (DEC-FNO-TF-DERIVE-OI-001):
+          #       the F&O twin of spot_resample.derive_intraday_tfs (OI carried)
+          #       + the on-the-fly /movers resample_session_to_tf (RENAMEs the
+          #       lake `timestamp -> ts_utc`, drops the trailing FORMING bucket —
+          #       no look-ahead, Property P-06). 100% line+branch via
+          #       tests/unit/test_fno_resample.py.
+          if compgen -G "tests/unit/test_fno_resample.py" > /dev/null; then
+            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py
+          else
+            echo "(brutex.data.fno_resample test file not present yet — gate inactive)"
           fi
           # 21c-tf · brutex.data.timeframe_materialize (DEC-TF-MATERIALIZE-001):
           #          MANUAL derived-TF materialiser core — pure orchestration
@@ -1530,10 +1564,22 @@ jobs:
           # (_build_pull_health_monitor + the _observe_rate monitor thread) is
           # covered by tests/unit/test_dashboard_pull_health_wiring.py, which MUST
           # join the per-module gate so its coverage of those lines registers.
+          # DEC-PULL-STALL-DETECTION-001: the per-window observe wiring
+          # (make_window_observer + the _on_window closure) is covered by
+          # tests/unit/test_dashboard_pull_stall.py, which MUST likewise join the
+          # per-module gate so its coverage of those lines registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-STALL-DETECTION-001: the NEW pull-stall watchdog module
+          # (PullWatchdog + resolve_stall_timeout_seconds) ships at 100% line+branch
+          # from the start.
+          if compgen -G "tests/unit/test_dashboard_pull_stall.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_stall --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_stall.py
+          else
+            echo "(brutex.dashboard.pull_stall test file not present yet — gate inactive)"
           fi
           # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
           # 100% line+branch from the start (read-side fix that makes an
@@ -1587,9 +1633,15 @@ jobs:
           # responsive-under-write + e2e dashboard suites are co-run so the
           # write-funnel hooks stay exercised end-to-end (and the module stays
           # 100% if a future change shifts a branch into the integration path).
+          # DEC-PULL-STALL-DETECTION-001: the BackgroundPullJob stall-watchdog
+          # wiring (the per-run watchdog build + beat + the _on_hung hung-edge
+          # branch that releases the single-flight flag) is covered by
+          # tests/unit/test_dashboard_pull_stall.py, which MUST join this gate so
+          # its coverage of those lines registers.
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
+              tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
               tests/integration/test_dashboard_e2e.py
           else
@@ -1736,6 +1788,23 @@ jobs:
           else
             echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
           fi
+      - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
+        # COMPLEMENTS (does not replace) the static per-module list above
+        # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
+        # the brutex/**/*.py modules this PR TOUCHED (vs the merge base),
+        # maps each to its import-VERIFIED test(s), and asserts 100% line +
+        # branch per touched file. A NEWLY ADDED module with no dedicated
+        # test FAILS honestly (it must ship one); a MODIFIED legacy module
+        # with no dedicated test is WARN-skipped (it still rides the static
+        # gate + the whole-package floor — no false-fail on a legacy edit).
+        # The diff base is the PR's merge base; on a push to main the diff
+        # is empty and the gate passes (nothing touched vs itself).
+        run: |
+          BASE="origin/main"
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          fi
+          python scripts/ci/coverage_gate_discovery.py --base "$BASE"
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
@@ -2356,7 +2425,27 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run scanner
         run: bash scripts/ci/scan-banned-patterns.sh
-      - name: Ledger numbering gate (DEC-LEDGER-RENUMBER-001)
+
+  # ─────────────────────────────────────────────────────────────────
+  # LEDGER NUMBERING — MIGRATION.md entry numbers stay unique.
+  # DEC-CICD-GATE-HONESTY-001: de-conflated from the `banned:` job, which
+  # previously ran BOTH the banned-pattern scan AND this ledger validator
+  # under the single displayed name "Banned pattern scan" — so a ledger
+  # collision was mislabeled as a banned-pattern failure. The validator
+  # now has its own honestly-named gate, while the required
+  # branch-protection context "Banned pattern scan" keeps reporting
+  # (now accurately scan-only — no required check is renamed, so no
+  # admin action is needed). This new job is enforced via the required
+  # `CI OK` aggregate (ci-ok.needs), so a ledger failure still blocks
+  # merge; it is NOT itself a branch-protection required context.
+  # ─────────────────────────────────────────────────────────────────
+  ledger-numbering:
+    name: Ledger-numbering validator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate MIGRATION.md ledger numbering
         # MIGRATION.md entry numbers stay machine-checked unique — the
         # parallel-session collision era (30 groups reconciled 2026-06-10)
         # cannot recur. Stdlib-only script; fails closed.
@@ -3117,6 +3206,12 @@ jobs:
       # can never recur silently.
       - run-smoke
       - banned
+      # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,
+      # de-conflated from the banned-pattern scan into its own job. It is
+      # NOT a branch-protection required context (so the drift detector is
+      # untouched); it is enforced HERE via the required `CI OK` aggregate
+      # so a MIGRATION.md entry-number collision still blocks merge.
+      - ledger-numbering
       - secrets
       # fno-math-drift moved to advisory-only on 2026-05-15.
       # Per docs/drift-check.yml design intent (line 12: "It should
@@ -3193,6 +3288,7 @@ jobs:
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
+          echo "  ledger-numbering:${{ needs.ledger-numbering.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
           echo "  semgrep:       ${{ needs.semgrep.result }}"
@@ -3224,6 +3320,7 @@ jobs:
             "${{ needs.rust-trading-core.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
+            "${{ needs.ledger-numbering.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \
             "${{ needs.semgrep.result }}" \

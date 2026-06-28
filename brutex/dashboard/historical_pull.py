@@ -762,6 +762,15 @@ def _derive_daily_from_minute(
     truth; the derived ``1day`` partition is written latest-wins so a later complete pull
     self-heals a partial-session bar (FIX-2).
 
+    DEC-FNO-TF-DERIVE-OI-001: unlike the spot daily (cash carries no OI), the F&O 1-minute
+    carries a real ``open_interest`` column, so the reader is built with ``include_oi=True``
+    and the driver's ``resample_fn`` is bound to
+    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily_positional`, which
+    carries the **last-of-day** OI (a snapshot, never summed) into the derived ``1day`` bar.
+    Already-stored derived ``1day`` partitions written before this change carry ``OI=None``
+    and self-heal on the NEXT pull (latest-wins overwrite — ``_bar_values_equal`` compares
+    ``open_interest``); this change does NOT retroactively rewrite on-disk daily OI.
+
     QUARANTINED on TWO planes: (a) a contract whose ``exchange`` is unresolvable is
     SKIPPED here (logged ``contract_skipped``, never a target); (b) a per-target
     derivation error (corrupt slice / write failure) is quarantined by the driver
@@ -769,6 +778,7 @@ def _derive_daily_from_minute(
     safely in the lake; the derived daily partition is a convenience layer, so its failure
     must not regress the authoritative minute data (Golden Rule #10).
     """
+    from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
     from brutex.data.spot_daily_resample import (
         DailyDeriveTarget,
         derive_daily_for_targets,
@@ -811,6 +821,7 @@ def _derive_daily_from_minute(
             symbol=t.symbol,
             start=t.start,
             end=t.end,
+            include_oi=True,  # F&O 1-minute carries OI — carry it into the derived 1day
         ),
         build_write_1day=lambda t: make_lake_write_1day(
             lake_root=lake_root,
@@ -819,6 +830,9 @@ def _derive_daily_from_minute(
             symbol=t.symbol,
         ),
         before=before,
+        # F&O daily carries last-of-day OI (DEC-FNO-TF-DERIVE-OI-001) — the ONE
+        # knob that makes the SHARED spot daily driver OI-correct for derivatives.
+        resample_fn=resample_1m_to_fno_daily_positional,
     )
     _LOG.info(
         "historical.derive_daily.done",
