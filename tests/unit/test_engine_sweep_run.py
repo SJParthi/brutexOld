@@ -1491,3 +1491,113 @@ class TestSweepComboError:
         while cause is not None:
             assert not isinstance(cause, SweepComboError)
             cause = cause.__context__
+
+    def test_store_append_error_aborts_not_a_combo_skip(self, tmp_path: Path) -> None:
+        """A ResultsStoreError from a per-row store.append() propagates OUT (redo-not-skip).
+
+        The finalists ``store.append(row)`` loop runs AFTER the combo
+        ``metrics_for_mask`` loop (and BEFORE the flush already covered by
+        ``test_store_flush_error_aborts_not_a_combo_skip``). A failure here — a
+        run-identity conflict, a store-internal infra fault — must NOT be caught
+        by the narrow ``except SweepComboError`` (which only wraps the per-combo
+        ``metrics_for_mask`` raise): it propagates unchanged as a
+        ``ResultsStoreError`` so the grid drivers ABORT instead of downgrading it
+        to a single-tuple skip, and — because the raise is BEFORE the trial-stats
+        sidecar / mark / completion-sentinel writes — the tuple is left
+        UN-sentineled and the dedup UN-marked, so a resume deterministically
+        REDOES the whole tuple (Golden Rule #7).
+        """
+        from brutex.engine.results_store import ResultsStoreError
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        class _AppendFailsStore(ResultsStore):
+            """A real store whose per-row append() raises an infra failure.
+
+            The base ``flush`` is left intact — the append raise aborts the
+            finalists loop BEFORE the flush is ever reached (asserted below by
+            the absent store file), so no flush override is needed.
+            """
+
+            def append(self, row: object) -> bool:  # type: ignore[override]
+                raise ResultsStoreError("simulated disk failure during append")
+
+        store = _AppendFailsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ResultsStoreError, match="simulated disk failure during append") as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The raw store error, NOT a SweepComboError tuple-skip, anywhere in the chain.
+        assert not isinstance(exc.value, SweepComboError)
+        assert exc.value.__cause__ is None
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # No store / sidecar / completion sentinel was written → the tuple redoes.
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_completion_sentinel_write_error_propagates_un_sentineled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError from the STRICTLY-LAST completion-sentinel write propagates (redo-not-skip).
+
+        ``write_completion_sentinel`` is written last of all — after the store
+        flush, the trial-stats sidecar, and ``mark_many`` — so its presence
+        proves the whole sequence completed (DEC-MARK-MANY-SENTINEL-001). If the
+        disk fails AT that final write, the error must PROPAGATE OUT (not be
+        swallowed into a tuple-skip) AND leave the sentinel ABSENT, so a resume —
+        which consults ONLY the sentinel — finds the tuple INCOMPLETE and
+        deterministically REDOES it (Golden Rule #7). This pins the
+        completion-sentinel boundary, the twin of the flush-error boundary.
+        """
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+
+        def _sentinel_write_fails(*_args: object, **_kwargs: object) -> object:
+            raise OSError("simulated disk failure writing completion sentinel")
+
+        # Patch the name as resolved inside run_persisted_sweep (the sweep_run
+        # module namespace) — the string target avoids the re-export attr check.
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.write_completion_sentinel", _sentinel_write_fails
+        )
+
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(
+                OSError, match="simulated disk failure writing completion sentinel"
+            ) as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The raw OSError is NOT downgraded into a SweepComboError tuple-skip.
+        assert not isinstance(exc.value, SweepComboError)
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # The sentinel — the redo authority — is ABSENT, so a resume redoes the tuple.
+        assert not completion_sentinel_path(store.path).exists()
