@@ -395,18 +395,22 @@ class WriteConsumer(Protocol):
     """
 
     def submit(self, request: WriteRequest) -> SinkAppendResult:
-        # Enqueue *request*; block on back-pressure then on the durable result.
-        # The body is a bare `...` on its OWN line preceded by a COMMENT (not a
-        # docstring): CodeQL py/ineffectual-statement only flags a `...` that FOLLOWS
-        # a docstring expression-statement, so a comment-then-`...` is the idiomatic
-        # Protocol stub it accepts; the lone `...` also matches the coverage
-        # exclude_lines anchor `^\s*\.\.\.\s*$` so the stub is not measured.
+        """Enqueue *request*; block on back-pressure then on the durable result.
+
+        Parameters
+        ----------
+        request:
+            The write request to enqueue and settle durably.
+
+        Returns
+        -------
+        SinkAppendResult
+            The durable append outcome for *request*.
+        """
         ...
 
     def drain(self) -> None:
-        # Flush every pending request durably, then stop + join all workers. Bare `...`
-        # Protocol stub on its own line, comment (not docstring) preceding it — see
-        # `submit` above for the CodeQL + coverage rationale.
+        """Flush every pending request durably, then stop + join all workers."""
         ...
 
 
