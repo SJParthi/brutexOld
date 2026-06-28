@@ -30,6 +30,7 @@ from brutex.adapters.groww.fetch_pipeline import (
     FetchPipeline,
     FetchTail,
     RawFetchResult,
+    _shard_index,
     resolve_fetch_pipeline_size,
 )
 from brutex.data.errors import LakeWriteHalt
@@ -621,3 +622,106 @@ class TestNoDeadlock:
             assert not p.is_alive(), "a producer deadlocked on a full queue"
         pipeline.drain()
         assert sum(done) == 100  # every window made progress (no deadlock, no loss)
+
+    def test_blocked_submit_released_when_peer_consumer_trips_stop(self) -> None:
+        """B1 liveness fix: a producer blocked in submit()'s put on a WEDGED-FOREVER consumer
+        is RELEASED the moment a PEER consumer trips the pool-wide stop.
+
+        Regression for the SUBMIT-path liveness gap (distinct from the drain() poison-put fix):
+        before the fix, ``submit``'s ``put`` was UNBOUNDED with no ``_stopped`` recheck, so a
+        producer back-pressured on a full shard queue whose consumer was wedged forever would
+        wedge the fetch thread FOREVER even after the pull halted ("looks alive but stuck").
+        This test HANGS against the old unbounded put and PASSES after the bounded, stop-aware
+        retry. workers=2 / queue_maxsize=1 with a deterministic shard split.
+        """
+        # Route a known key to shard 0 (the wedged consumer) and another to shard 1 (the peer
+        # that will trip the stop) so the split is deterministic, not luck.
+        wedge_key = next(k for k in (f"w{i}" for i in range(1000)) if _shard_index(k, 2) == 0)
+        peer_key = next(k for k in (f"p{i}" for i in range(1000)) if _shard_index(k, 2) == 1)
+
+        wedged_in = threading.Event()
+        never = threading.Event()  # never set → the wedged consumer hangs forever
+
+        def _wedge(_tail: FetchTail) -> None:
+            wedged_in.set()
+            never.wait(timeout=30.0)
+
+        def _halt(_tail: FetchTail) -> None:
+            raise LakeWriteHalt("disk_full")
+
+        pipeline = FetchPipeline(workers=2, queue_maxsize=1)
+        # Consumer 0 pulls this and hangs forever inside the tail.
+        pipeline.submit(_result(wedge_key, _wedge))
+        assert wedged_in.wait(timeout=3.0)
+        # Fill shard 0's bounded queue (maxsize=1) so the NEXT submit to shard 0 blocks.
+        pipeline.submit(_result(wedge_key, _wedge))
+
+        entered = threading.Event()
+        released = threading.Event()
+        outcome: list[BaseException | None] = []
+
+        def _blocked_producer() -> None:
+            entered.set()
+            try:
+                pipeline.submit(_result(wedge_key, _wedge))
+                outcome.append(None)
+            except BaseException as exc:  # a stop re-raise IS a valid release
+                outcome.append(exc)
+            released.set()
+
+        producer = threading.Thread(target=_blocked_producer, daemon=True)
+        producer.start()
+        assert entered.wait(timeout=3.0)
+        # The producer must be BLOCKED (back-pressure) while the pull is live + the queue is full.
+        assert not released.wait(timeout=0.6), "producer should block before the stop"
+        # Trip the pool-wide stop via the PEER consumer (shard 1).
+        pipeline.submit(_result(peer_key, _halt))
+        # The blocked producer is RELEASED within a bound (the B1 fix) — never wedged forever.
+        assert released.wait(timeout=10.0), "blocked producer was NOT released by the stop (B1)"
+        producer.join(timeout=5.0)
+        assert not producer.is_alive()
+        # It was released by the captured halt re-raising on the producer thread (not a silent
+        # drop) — the stop reaches the spine's _GLOBAL_STOP_ERRORS path.
+        assert isinstance(outcome[0], LakeWriteHalt)
+        never.set()
+        with pytest.raises(LakeWriteHalt):
+            pipeline.drain()
+
+    def test_blocked_submit_dropped_when_draining(self) -> None:
+        """B1 fix drain branch: a producer blocked in submit()'s put when a pull-end DRAIN is
+        signalled (its shard consumer wedged, queue full) DROPS the window fail-fast and returns
+        — the window re-fetches next pull (idempotent keep-first), never an unbounded wedge.
+        """
+        wedged_in = threading.Event()
+        never = threading.Event()
+
+        def _wedge(_tail: FetchTail) -> None:
+            wedged_in.set()
+            never.wait(timeout=30.0)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1)
+        pipeline.submit(_result("s", _wedge))  # consumer pulls + hangs forever
+        assert wedged_in.wait(timeout=3.0)
+        pipeline.submit(_result("s", _wedge))  # fills the queue (maxsize=1)
+
+        entered = threading.Event()
+        released = threading.Event()
+
+        def _blocked_producer() -> None:
+            entered.set()
+            pipeline.submit(_result("s", _wedge))  # blocks in the put
+            released.set()
+
+        producer = threading.Thread(target=_blocked_producer, daemon=True)
+        producer.start()
+        assert entered.wait(timeout=3.0)
+        assert not released.wait(timeout=0.6), "producer should block before draining"
+        # Signal drain → the blocked producer's full-queue retry sees _draining and DROPS the
+        # window (returns), instead of wedging forever on the wedged consumer.
+        pipeline._draining.set()
+        assert released.wait(timeout=10.0), "blocked producer was NOT released by drain (B1)"
+        producer.join(timeout=5.0)
+        assert not producer.is_alive()
+        never.set()
+        # A clean drain (no consumer failure) — the wedged consumer is REPORTED, never hangs.
+        pipeline.drain()

@@ -521,6 +521,18 @@ class FetchPipeline:
         :class:`~brutex.data.errors.LakeWriteHalt`), the request is REJECTED immediately by
         re-raising that exception on the producer thread, so a pull-wide stop reaches the
         spine's ``_GLOBAL_STOP_ERRORS`` path without waiting for the rest of the pull.
+
+        The back-pressure ``put`` is BOUNDED + stop-aware (the B1 liveness fix): a producer
+        blocked on a FULL shard queue whose OWN consumer is wedged forever (a stalled external
+        SSD / NFS hiccup inside ``sink.append``) is RELEASED the moment ANY consumer trips the
+        pool-wide stop — instead of an UNBOUNDED ``put`` that could wedge the fetch thread
+        FOREVER even though the pull has logically halted ("looks alive but stuck"). The ``put``
+        is a loop of ``put(result, timeout=_CONSUMER_GET_POLL_SECONDS)`` that, on
+        :class:`queue.Full`, rechecks :meth:`_raise_if_stopped` (a peer halt re-raises and
+        releases the producer) AND :attr:`_draining` (a pull-end drain drops the window — it
+        re-fetches next pull, idempotent keep-first) before retrying. A HEALTHY-but-slow
+        consumer keeps the producer blocked across retries (back-pressure preserved — the window
+        is NEVER dropped while the pull is live), so isolation + no-OOM are intact.
         """
         self._raise_if_stopped()
         # Count the window in flight BEFORE the (possibly blocking) put, so the watchdog sees
@@ -530,7 +542,27 @@ class FetchPipeline:
         with self._progress_lock:
             self._submitted += 1
         shard = _shard_index(result.shard_key(), self._workers)
-        self._queues[shard].put(result)
+        q = self._queues[shard]
+        # Bounded, stop-aware back-pressure: retry the put on a full queue, but on EACH timeout
+        # recheck the pool-wide stop / drain so a wedged-consumer queue can NEVER block the fetch
+        # lane forever (the B1 fix — distinct from the drain() poison-put fix).
+        while True:
+            try:
+                q.put(result, timeout=_CONSUMER_GET_POLL_SECONDS)
+                return
+            except queue.Full:
+                # A peer-consumer halt RE-RAISES here, releasing the blocked producer so the stop
+                # reaches the spine's ``_GLOBAL_STOP_ERRORS`` path (never an unbounded wedge).
+                self._raise_if_stopped()
+                # A pull-end drain with this window still un-enqueued: the consumer for this shard
+                # is wedged (its queue stays full), so DROP the window fail-fast — it re-fetches
+                # next pull (idempotent keep-first). Account for it so in-flight stays accurate.
+                if self._draining.is_set():
+                    self._mark_completed()
+                    _LOG.warning("fetch_pipeline.submit_dropped_draining", shard=shard)
+                    return
+                # Otherwise the consumer is healthy-but-slow: keep blocking (retry) — the window
+                # is never dropped while the pull is live (back-pressure preserved).
 
     def _raise_if_stopped(self) -> None:
         """Re-raise the first captured consumer exception if the pool hard-stopped."""
