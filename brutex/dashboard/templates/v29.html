@@ -2158,6 +2158,9 @@
   .modal kbd { background: var(--surface-3); padding: 3px 8px; border-radius: 4px; font-family: "SF Mono", monospace; font-size: 11px; border: 1px solid var(--border); }
   .modal button { background: linear-gradient(135deg, var(--blue), var(--purple)); border: none; color: white; padding: 9px 18px; border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer; }
 </style>
+<!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
+     polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
+<script defer src="/static/bx-rate-monitor.js"></script>
 </head>
 <body class="operator-mode">
 
