@@ -2699,6 +2699,7 @@ def build_app(
             contract_exchange: dict[str, str] = {}
 
             def _futures_for(instrument: Instrument) -> list[str]:
+                """Discover *instrument*'s F&O-lake futures contract symbols (+ remember each exchange)."""
                 discovered = discover_futures_contracts(instrument, cascade)
                 for c in discovered:
                     contract_exchange[c.symbol] = c.exchange
@@ -4584,6 +4585,7 @@ def build_app(
         gen = _summary_cache.generation
 
         def _build() -> SpotCascadeIndex:
+            """Build the spot symbol→interval cascade from the non-F&O lake datasets."""
             spot = [
                 d for d in list_candle_datasets(lake) if d["segment"] != FNO_CANDLE_LAKE_SEGMENT
             ]
