@@ -73,8 +73,14 @@ def test_lock_released_on_error_inside_block(tmp_path: Path) -> None:
     class _Boom(Exception):
         pass
 
-    with pytest.raises(_Boom), pull_singleflight_lock(tmp_path):
-        raise _Boom
+    def _raise_inside_lock() -> None:
+        with pull_singleflight_lock(tmp_path):
+            raise _Boom
+
+    # ``pytest.raises`` catches the error raised inside the lock block; the lock's
+    # ``finally`` runs during unwinding so the fd is closed before we return here.
+    with pytest.raises(_Boom):
+        _raise_inside_lock()
     # The lock is now free → re-acquire succeeds.
     with pull_singleflight_lock(tmp_path):
         pass
