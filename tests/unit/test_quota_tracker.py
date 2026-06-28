@@ -556,6 +556,106 @@ class TestCorruptionGuards:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# FIX J — a corrupt-state __post_init__ raise must NOT orphan the shared-env
+# refcount (DEC-ORCH-AUDIT-RATE-HARDEN-001). __post_init__ opens (refcount++)
+# BEFORE _read_state, which raises on corrupt persisted state; since the
+# constructor then raises, the instance never binds and close() is unreachable,
+# so without the release-on-failure guard the (env, refcount) entry leaked and
+# grew on every corrupt load.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEnvRefcountLeakOnCorruptState:
+    @staticmethod
+    def _write_corrupt(path: Path) -> None:
+        import lmdb
+
+        path.mkdir(parents=True, exist_ok=True)
+        env = lmdb.open(str(path), map_size=1024 * 1024, subdir=True, create=True)
+        try:
+            with env.begin(write=True) as txn:
+                txn.put(b"quota", b"not-json-at-all")
+        finally:
+            env.close()
+
+    def test_corrupt_construct_releases_env_refcount(self, tmp_path: Path) -> None:
+        from brutex.orchestrator import quota_tracker as qt
+
+        path = tmp_path / "quota.lmdb"
+        self._write_corrupt(path)
+        key = str(path.resolve())
+
+        with qt._ENV_REGISTRY_LOCK:
+            assert key not in qt._ENV_REGISTRY
+            registry_size_before = len(qt._ENV_REGISTRY)
+
+        clock = _make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST))
+        with pytest.raises(QuotaInvariantError):
+            DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+
+        # The failed construct must have released the reference it took: no
+        # entry for this path, and the registry is back to its prior size.
+        with qt._ENV_REGISTRY_LOCK:
+            assert key not in qt._ENV_REGISTRY
+            assert len(qt._ENV_REGISTRY) == registry_size_before
+
+    def test_repeated_corrupt_constructs_do_not_grow_registry(self, tmp_path: Path) -> None:
+        from brutex.orchestrator import quota_tracker as qt
+
+        path = tmp_path / "quota.lmdb"
+        self._write_corrupt(path)
+        key = str(path.resolve())
+        clock = _make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST))
+
+        with qt._ENV_REGISTRY_LOCK:
+            registry_size_before = len(qt._ENV_REGISTRY)
+
+        # N repeated corrupt loads on the SAME path — the leak (if present)
+        # would push the refcount 1→2→3… and keep the entry resident.
+        for _ in range(5):
+            with pytest.raises(QuotaInvariantError):
+                DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+
+        with qt._ENV_REGISTRY_LOCK:
+            assert key not in qt._ENV_REGISTRY
+            assert len(qt._ENV_REGISTRY) == registry_size_before
+
+    def test_good_tracker_coexists_after_corrupt_release(self, tmp_path: Path) -> None:
+        # After the failed-construct release, a SUBSEQUENT good tracker on the
+        # same path opens cleanly at refcount 1 (the env was fully released,
+        # not left half-open). Proves the release mirrors close() exactly.
+        from brutex.orchestrator import quota_tracker as qt
+
+        path = tmp_path / "quota.lmdb"
+        self._write_corrupt(path)
+        key = str(path.resolve())
+        clock = _make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST))
+
+        with pytest.raises(QuotaInvariantError):
+            DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+
+        # Overwrite the corrupt payload with a valid one, then construct.
+        import lmdb
+
+        env = lmdb.open(str(path), map_size=1024 * 1024, subdir=True, create=True)
+        try:
+            with env.begin(write=True) as txn:
+                txn.put(b"quota", b'{"date":"2026-05-18","count":3}')
+        finally:
+            env.close()
+
+        good = DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+        try:
+            with qt._ENV_REGISTRY_LOCK:
+                assert qt._ENV_REGISTRY[key][1] == 1  # refcount exactly 1
+            assert good.current_count() == 3
+        finally:
+            good.close()
+        with qt._ENV_REGISTRY_LOCK:
+            assert key not in qt._ENV_REGISTRY
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Concurrency — Agent 1 §G + Agent 3 §D
 # ────────────────────────────────────────────────────────────────────────
 
