@@ -1,0 +1,257 @@
+"""Cross-process single-flight wiring in `BackgroundPullJob` (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
+
+100% line+branch on the NEW branches added to ``pull_jobs.py``:
+
+* the account-wide guard is taken on ``start`` and RELEASED on a clean finish (so a
+  re-pull succeeds) and on an exception finish;
+* a held lock (peer process mid-pull) REFUSES the second pull — ``start`` returns
+  ``False``, rolls back the in-process ``_running`` flag, marks the progress failed, and
+  logs — never spawning work that would double the Groww account rate (Golden Rule #6);
+* a ``None`` lake-root resolver DISABLES the guard (dry-run / test);
+* ``_on_hung`` releases the held lock so a wedged run still admits a future pull.
+
+The cross-process lock itself is exercised with the REAL
+:func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock` against a tmp
+lake root (a separate fd in-process proves mutual exclusion), plus a capturing fake for
+the deterministic lifecycle assertions.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from pathlib import Path
+
+import pytest
+from brutex.adapters.groww.pull_singleflight import (
+    PullAlreadyRunningError,
+    pull_singleflight_lock,
+    pull_singleflight_lock_path,
+)
+from brutex.dashboard.pull_jobs import (
+    BackgroundPullJob,
+    ProgressHook,
+    _default_lake_root_resolver,  # pyright: ignore[reportPrivateUsage]
+)
+from brutex.dashboard.pull_progress import STATE_DONE, STATE_ERROR, PullProgress
+from brutex.dashboard.pull_stall import PullWatchdog
+from brutex.observability.watchdog import WorkerEvent, WorkerState
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self._t = 0.0
+
+    def __call__(self) -> float:
+        self._t += 1.0
+        return self._t
+
+
+def _sync_spawn(fn: Callable[[], None]) -> None:
+    fn()
+
+
+def _capture_spawn(captured: list[Callable[[], None]]) -> Callable[[Callable[[], None]], None]:
+    return captured.append
+
+
+class _SpyGuard(AbstractContextManager[None]):
+    """A capturing single-flight guard double recording enter/exit + raising on demand."""
+
+    def __init__(self, *, raise_on_enter: bool = False, lock_path: Path | None = None) -> None:
+        self.entered = 0
+        self.exited = 0
+        self._raise_on_enter = raise_on_enter
+        self._lock_path = lock_path if lock_path is not None else Path("/tmp/x.lock")
+
+    def __enter__(self) -> None:
+        self.entered += 1
+        if self._raise_on_enter:
+            raise PullAlreadyRunningError(self._lock_path)
+
+    def __exit__(self, *exc: object) -> None:
+        self.exited += 1
+
+
+def test_default_lake_root_resolver_delegates_to_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The production default resolver delegates to the COMMON config resolver
+    # (BRUTEX_LAKE_ROOT → ~/.brutex/lake), so the guard is ACTIVE by default.
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path / "lake"))
+    assert _default_lake_root_resolver() == tmp_path / "lake"
+
+
+def test_default_guard_is_active_and_held_for_the_run(tmp_path: Path) -> None:
+    # Default resolver injected at a tmp lake root + the REAL flock factory: while the
+    # job holds the lock, a SEPARATE fd (a peer process) cannot acquire it.
+    captured: list[Callable[[], None]] = []
+    held_during_run: dict[str, bool] = {}
+
+    def work(_on_progress: ProgressHook) -> None:
+        try:
+            with pull_singleflight_lock(tmp_path):  # pragma: no cover — must NOT be reached
+                held_during_run["peer_acquired"] = True
+        except PullAlreadyRunningError:
+            held_during_run["peer_acquired"] = False
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=_capture_spawn(captured),
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=pull_singleflight_lock,
+    )
+    started = job.start(work, total=1)
+    assert started is True
+    # The lock file exists (acquired) while the captured worker has not yet run.
+    assert pull_singleflight_lock_path(tmp_path).exists()
+    captured[0]()  # run the worker now — it must find the lock HELD
+    assert held_during_run["peer_acquired"] is False
+    # After a clean finish the lock is released → a fresh acquire succeeds.
+    with pull_singleflight_lock(tmp_path):
+        pass
+
+
+def test_held_lock_refuses_second_pull_and_rolls_back(tmp_path: Path) -> None:
+    spy = _SpyGuard(raise_on_enter=True, lock_path=pull_singleflight_lock_path(tmp_path))
+    spawned: list[Callable[[], None]] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=spawned.append,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: spy,
+    )
+    started = job.start(lambda _h: None, total=1)
+    assert started is False  # refused
+    assert spawned == []  # NO work spawned — never doubles the account rate
+    assert job.running is False  # in-process flag rolled back
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR
+    assert "PullAlreadyRunningError" in snap.detail
+    assert spy.entered == 1
+    assert spy.exited == 0  # never entered the block, so nothing to exit
+
+
+def test_refused_then_idle_can_start_again(tmp_path: Path) -> None:
+    # After a refusal the job is idle and a later start (lock now free) succeeds.
+    spy_refuse = _SpyGuard(raise_on_enter=True, lock_path=pull_singleflight_lock_path(tmp_path))
+    spy_ok = _SpyGuard()
+    factories: list[_SpyGuard] = [spy_refuse, spy_ok]
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: factories.pop(0),
+    )
+    assert job.start(lambda _h: None, total=1) is False
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert job.snapshot().state == STATE_DONE
+    assert spy_ok.entered == 1
+    assert spy_ok.exited == 1  # released on clean finish
+
+
+def test_guard_released_on_worker_exception(tmp_path: Path) -> None:
+    spy = _SpyGuard()
+
+    def boom(_on_progress: ProgressHook) -> None:
+        raise RuntimeError("kaboom")
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: spy,
+    )
+    started = job.start(boom, total=1)
+    assert started is True
+    assert job.snapshot().state == STATE_ERROR
+    assert spy.entered == 1
+    assert spy.exited == 1  # released in _run's finally even on failure
+    assert job.running is False
+
+
+def test_none_resolver_disables_the_guard(tmp_path: Path) -> None:
+    # A None lake root → guard skipped entirely (factory never called), pull runs.
+    calls: list[Path] = []
+
+    def factory(root: Path) -> AbstractContextManager[None]:  # pragma: no cover — never called
+        calls.append(root)
+        return _SpyGuard()
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: None,
+        singleflight_factory=factory,
+    )
+    started = job.start(lambda on_progress: on_progress("X", 1, False, False), total=1)
+    assert started is True
+    assert job.snapshot().state == STATE_DONE
+    assert calls == []  # the factory was never consulted
+
+
+def test_release_is_best_effort_and_swallows_errors(tmp_path: Path) -> None:
+    # A guard whose __exit__ raises must not crash the worker; the run still completes,
+    # _running is cleared, and the error is swallowed (logged).
+    class _BadExitGuard(AbstractContextManager[None]):
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            raise OSError("close failed")
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _BadExitGuard(),
+    )
+    started = job.start(lambda on_progress: on_progress("X", 1, False, False), total=1)
+    assert started is True
+    assert job.snapshot().state == STATE_DONE
+    assert job.running is False
+
+
+def _noop_spawn(_fn: Callable[[], None]) -> None:
+    """A timer-spawner double that never starts the watchdog's daemon timer."""
+
+
+def _hung_event() -> WorkerEvent:
+    return WorkerEvent(
+        worker_name="dashboard-pull",
+        new_state=WorkerState.HUNG,
+        last_beat_seconds_ago=120.0,
+        timeout_seconds=30.0,
+    )
+
+
+def test_on_hung_releases_the_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A wedged run: the watchdog HUNG edge must release the account lock (along with
+    # clearing _running) so a future pull is admitted — the worker never reaches finally.
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _exc: None)
+    spy = _SpyGuard()
+    captured: list[Callable[[WorkerEvent], None]] = []
+
+    def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+        captured.append(on_hung)
+        return PullWatchdog(
+            on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+        )
+
+    def _capture_only(_fn: Callable[[], None]) -> None:
+        """Capture-only spawner: never runs the worker, so the run stays in flight."""
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=_capture_only,
+        watchdog_factory=factory,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: spy,
+    )
+    started = job.start(lambda _h: None, total=1)
+    assert started is True
+    assert spy.entered == 1
+    # Fire the hung edge: it clears _running AND releases the guard.
+    captured[0](_hung_event())
+    assert spy.exited == 1
+    assert job.running is False

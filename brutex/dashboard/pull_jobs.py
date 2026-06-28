@@ -26,10 +26,17 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import Protocol
 
 import structlog
 
+from brutex.adapters.groww.pull_singleflight import (
+    PullAlreadyRunningError,
+    pull_singleflight_lock,
+)
+from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
@@ -68,9 +75,38 @@ Spawner = Callable[[Callable[[], None]], None]
 WatchdogFactory = Callable[[Callable[[WorkerEvent], None]], PullWatchdog]
 
 
+#: The injected lake-root resolver — returns the lake root whose account-wide pull
+#: single-flight lock guards this job, or ``None`` to DISABLE the cross-process guard
+#: (a dry-run / test that never touches a real account). The default delegates to the
+#: COMMON :func:`brutex.config.paths.resolve_lake_root` (``$BRUTEX_LAKE_ROOT`` →
+#: ``$HOME/.brutex/lake``), the same root the production pull writes into — so the guard
+#: is ACTIVE by default and a second concurrent pull against the same lake is refused.
+LakeRootResolver = Callable[[], "Path | None"]
+
+#: The injected single-flight lock factory — given the lake root, returns a context
+#: manager that holds the account-wide cross-process pull lock for its lifetime (and
+#: raises :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError` on
+#: ``__enter__`` if a peer process already holds it). The default is the live
+#: :func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock`; tests inject
+#: a fake to exercise the held / contended paths without a real ``flock``.
+SingleflightFactory = Callable[[Path], AbstractContextManager[None]]
+
+
 def _default_watchdog_factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
     """Build the live :class:`PullWatchdog` (daemon timer + audited timeout)."""
     return PullWatchdog(on_hung=on_hung)
+
+
+def _default_lake_root_resolver() -> Path | None:
+    """Resolve the account-wide lock's lake root via the COMMON config resolver.
+
+    Delegates to :func:`brutex.config.paths.resolve_lake_root`
+    (``$BRUTEX_LAKE_ROOT`` → ``$HOME/.brutex/lake``) — the SAME root the production pull
+    writes into — so the cross-process single-flight guard is ACTIVE by default and a
+    second concurrent pull against the same lake is refused. O(1) (pure path
+    computation; no disk touched).
+    """
+    return resolve_lake_root()
 
 
 def _is_pull_halt(exc: BaseException) -> bool:
@@ -140,6 +176,21 @@ class BackgroundPullJob:
         ``_running`` so future pulls are not silently refused (the single-flight guard's
         forever-stuck failure mode). Injected, never a global (CLAUDE.md §4); tests inject
         a synchronous / capturing factory for determinism.
+    lake_root_resolver
+        Optional resolver for the account-wide single-flight lock's lake root
+        (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001). The default delegates to the COMMON
+        :func:`brutex.config.paths.resolve_lake_root` (``$BRUTEX_LAKE_ROOT`` →
+        ``$HOME/.brutex/lake``), so the cross-process guard is ACTIVE in production: a
+        second pull against the same lake root — e.g. a CLI ``brutex fetch`` while a
+        dashboard pull is running — is REFUSED before it can double the Groww account
+        request rate (Golden Rule #6). Returning ``None`` DISABLES the guard (a dry-run /
+        test that never touches a real account). Injected, never a global (CLAUDE.md §4).
+    singleflight_factory
+        Optional factory building the account-wide cross-process single-flight lock
+        context manager from the resolved lake root (default the live
+        :func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock`, backed by
+        a non-blocking ``fcntl.flock``). Tests inject a fake to exercise the held /
+        contended paths deterministically. Injected, never a global (CLAUDE.md §4).
     """
 
     def __init__(
@@ -150,14 +201,32 @@ class BackgroundPullJob:
         counters: CoverageCounters | None = None,
         summary_cache: _Invalidatable | None = None,
         watchdog_factory: WatchdogFactory = _default_watchdog_factory,
+        lake_root_resolver: LakeRootResolver | None = None,
+        singleflight_factory: SingleflightFactory = pull_singleflight_lock,
     ) -> None:
         self._progress = progress if progress is not None else PullProgress()
         self._spawn = spawn
         self._counters = counters if counters is not None else CoverageCounters()
         self._summary_cache = summary_cache
         self._watchdog_factory = watchdog_factory
+        #: Resolver for the account-wide single-flight lock's lake root (or, when the
+        #: resolver itself returns ``None``, disables the cross-process guard —
+        #: DEC-ACCOUNT-PULL-SINGLEFLIGHT-001). ``lake_root_resolver=None`` (the default)
+        #: falls back to the COMMON config resolver, so the guard is ACTIVE in production;
+        #: tests inject their own resolver (e.g. ``lambda: tmp_path`` or ``lambda: None``).
+        self._lake_root_resolver: LakeRootResolver = (
+            _default_lake_root_resolver if lake_root_resolver is None else lake_root_resolver
+        )
+        #: Factory building the account-wide cross-process single-flight lock context
+        #: manager (default the live ``fcntl.flock``-backed one); injected for tests.
+        self._singleflight_factory = singleflight_factory
         self._lock = threading.Lock()
         self._running = False
+        #: The CURRENT run's account-wide single-flight lock context manager (entered in
+        #: :meth:`start`, exited in :meth:`_run`'s ``finally``). ``None`` between runs and
+        #: when the guard is disabled (no resolvable lake root). Held for the WHOLE pull so
+        #: a peer process cannot start a second concurrent pull (Golden Rule #6).
+        self._singleflight: AbstractContextManager[None] | None = None
         #: When True the per-pair hook does NOT advance the bar — an authoritative
         #: per-WINDOW ledger sync drives the counters instead (DEC-SPOT-WINDOW-PROGRESS-001).
         self._ledger_synced = False
@@ -183,6 +252,23 @@ class BackgroundPullJob:
 
         Single-flight: returns ``True`` and starts the job when idle; returns
         ``False`` (a no-op) when a pull is already running. O(1).
+
+        Two single-flight layers (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001):
+
+        1. **In-process** — the ``threading.Lock`` + ``_running`` flag refuses a second
+           pull within THIS process (a second dashboard click).
+        2. **Cross-process** — an account-wide ``fcntl.flock`` (resolved via
+           *lake_root_resolver*, taken via *singleflight_factory*) refuses a second pull
+           in ANOTHER process (e.g. a CLI ``brutex fetch`` while a dashboard pull runs).
+           Without it each process gets its OWN rate-controller budget, so the Groww
+           account would see the SUM of both rates → a 429 storm / ban risk (Golden
+           Rule #6). On contention the acquire raises
+           :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError`; this
+           method then rolls back the in-process flag, marks the progress failed with a
+           clear "a pull is already running" message, logs it, and returns ``False`` — so
+           the second pull is refused, never silently doubling the account rate. When the
+           resolver returns ``None`` (a dry-run / test) the cross-process guard is skipped.
+           The lock is held for the WHOLE pull and released in :meth:`_run`'s ``finally``.
 
         When *ledger_synced* is True (the bulk spot pull, DEC-SPOT-WINDOW-PROGRESS-001)
         the per-pair :meth:`_on_progress` hook only refreshes the "current" label + the
@@ -219,11 +305,76 @@ class BackgroundPullJob:
             # unlocked ``self._watchdog = watchdog``, still see ``self._watchdog is wd_A`` →
             # clear ``_running`` → admit a third pull concurrently (the residual race).
             self._watchdog = watchdog
+        # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
+        # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
+        # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
+        # already pulling: roll back the in-process flag we just set, refuse this pull, and
+        # report it — never spawn a second pull that would double the account request rate.
+        # A resolver returning None DISABLES the guard (dry-run / test). Done outside
+        # ``self._lock`` — it does (fast, non-blocking) filesystem I/O, and the flag is
+        # already claimed so no other start can race in.
+        if not self._acquire_singleflight():
+            with self._lock:
+                # Roll back the in-process flag we just claimed. No identity gate is needed
+                # here (unlike _run / _on_hung): _acquire_singleflight runs SYNCHRONOUSLY in
+                # this same start() call and never spawns / publishes a worker, so no other
+                # run can have superseded this one's watchdog between claiming the flag and
+                # here — this run unconditionally still owns it.
+                self._running = False
+            return False
         self._ledger_synced = ledger_synced
         self._progress.start(total=total, detail=detail)
         watchdog.start()
         self._spawn(lambda: self._run(work, watchdog, on_success))
         return True
+
+    def _acquire_singleflight(self) -> bool:
+        """Acquire the account-wide cross-process pull lock; return whether it was taken.
+
+        Resolves the lake root via :attr:`_lake_root_resolver`; a ``None`` root DISABLES
+        the guard (a dry-run / test) and returns ``True`` (nothing to hold). Otherwise it
+        ``__enter__``-s the :attr:`_singleflight_factory` context manager and stashes it in
+        :attr:`_singleflight` so :meth:`_run` can release it in its ``finally``. On
+        :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError` (a peer
+        process is mid-pull) it marks the progress failed with the actionable message,
+        logs it, and returns ``False`` so the caller refuses the pull (Golden Rule #6).
+        """
+        lake_root = self._lake_root_resolver()
+        if lake_root is None:
+            self._singleflight = None
+            return True
+        guard = self._singleflight_factory(lake_root)
+        try:
+            guard.__enter__()
+        except PullAlreadyRunningError as exc:
+            self._singleflight = None
+            self._progress.fail(f"{type(exc).__name__}: {exc}")
+            _LOG.warning(
+                "pull_job.singleflight_refused",
+                lake_root=str(lake_root),
+                reason="a pull is already running for this lake",
+            )
+            return False
+        self._singleflight = guard
+        return True
+
+    def _release_singleflight(self) -> None:
+        """Release the account-wide single-flight lock held by the current run, if any.
+
+        Called from :meth:`_run`'s ``finally`` (and only there). ``__exit__``-s the held
+        guard (closing the ``flock`` fd) so a peer process can start the next pull, then
+        clears :attr:`_singleflight`. A ``None`` guard (disabled / never-taken) is a no-op.
+        Best-effort: any error closing the lock is logged + swallowed so it can never
+        crash the worker thread or leave the in-process flag stuck.
+        """
+        guard = self._singleflight
+        self._singleflight = None
+        if guard is None:
+            return
+        try:
+            guard.__exit__(None, None, None)
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
+            _LOG.exception("pull_job.singleflight_release failed; the pull is unaffected")
 
     def _on_hung(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
         """Watchdog HEALTHY→HUNG edge for *watchdog*'s run: alert + release the stuck pull.
@@ -261,6 +412,12 @@ class BackgroundPullJob:
                 # newer pull may already own the flag (this timer fired late) — never touch it.
                 if self._watchdog is watchdog:
                     self._running = False
+                    # Release this hung run's account-wide single-flight lock too
+                    # (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so clearing ``_running`` actually
+                    # admits a future pull — leaving the ``flock`` held would block the next
+                    # pull in this process despite the flag being clear. (The wedged worker
+                    # thread never reaches _run's finally, so this is the only release path.)
+                    self._release_singleflight()
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_hung failed; the pull / timer is unaffected")
 
@@ -325,6 +482,12 @@ class BackgroundPullJob:
                 # worker owns the flag and clears it normally.
                 if self._watchdog is watchdog:
                     self._running = False
+                    # Release the account-wide cross-process single-flight lock under the
+                    # SAME identity gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so a peer
+                    # process can start the next pull — but ONLY when this is still the
+                    # current run (a superseded / hung run's lock was already released by
+                    # _on_hung, and a newer run owns its OWN guard we must not touch).
+                    self._release_singleflight()
 
     def _on_progress(self, label: str, bars: int, failed: bool, gap: bool = False) -> None:
         """Adapt the drivers' positional hook onto the tracker's kw advance.
@@ -405,8 +568,10 @@ class BackgroundPullJob:
 
 __all__ = [
     "BackgroundPullJob",
+    "LakeRootResolver",
     "ProgressHook",
     "PullWork",
+    "SingleflightFactory",
     "Spawner",
     "SuccessHook",
     "WatchdogFactory",

@@ -278,6 +278,21 @@ def _job(factory: WatchdogFactory) -> BackgroundPullJob:
 
 
 class TestBackgroundPullJobWatchdog:
+    @pytest.fixture(autouse=True)
+    def _disable_account_singleflight(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Disable the account-wide cross-process pull lock for these watchdog tests.
+
+        DEC-ACCOUNT-PULL-SINGLEFLIGHT-001 makes :class:`BackgroundPullJob` take a real
+        ``fcntl.flock`` under the production lake root by default. These tests probe the
+        stall watchdog, not the cross-process guard, and several capture-but-never-run the
+        worker — which would leak a process-wide flock into a sibling test. Point the
+        default resolver at ``None`` (guard disabled); the guard's own coverage lives in
+        ``test_pull_jobs_singleflight.py``.
+        """
+        from brutex.dashboard import pull_jobs
+
+        monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
+
     def test_watchdog_started_and_beaten_then_stopped(self) -> None:
         built, factory = _spy_factory()
         job = _job(factory)
