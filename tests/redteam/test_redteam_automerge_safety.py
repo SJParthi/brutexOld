@@ -99,6 +99,45 @@ def test_merge_step_depends_on_the_mergeability_gate() -> None:
     assert "mergeable-check.outputs.safe == 'true'" in guard, msg
 
 
+def test_auto_merge_runs_live_rollup_gate_before_merge() -> None:
+    """DEC-MERGE-LIVE-ROLLUP-001: the final pre-merge step must invoke the
+    canonical pre-merge-check.sh against the LIVE rollup, and the squash-merge
+    must be gated on its green output — so a merge can NEVER fire on a possibly
+    stale required-status match while the live rollup carries any red.
+    """
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    step_ids = [str(s.get("id", "")) for s in steps if isinstance(s, dict)]
+    assert "rollup-gate" in step_ids, (
+        "auto-merge lost its final live-rollup gate (rollup-gate) — the merge "
+        "decision would no longer re-check the complete live rollup at merge time"
+    )
+    rollup_step = next(
+        s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "rollup-gate"
+    )
+    run = str(rollup_step.get("run", ""))
+    assert "pre-merge-check.sh" in run, (
+        "the live-rollup gate must invoke the canonical scripts/ci/pre-merge-check.sh "
+        "(the single source of truth for no-merge-with-red-CI)"
+    )
+    # It must NOT silently bypass via OPERATOR_OVERRIDE from this automated path.
+    assert "OPERATOR_OVERRIDE" not in run, (
+        "the auto-merge live-rollup gate must not set OPERATOR_OVERRIDE — the "
+        "automated path can never bypass the no-red guard"
+    )
+    # And the squash-merge step must depend on the gate's green output.
+    merge_step = next(
+        s
+        for s in steps
+        if isinstance(s, dict) and str(s.get("name", "")).startswith("Squash-merge")
+    )
+    guard = str(merge_step.get("if", ""))
+    assert "rollup-gate.outputs.gated == 'true'" in guard, (
+        "the squash-merge step is not gated on the live-rollup gate "
+        "(DEC-MERGE-LIVE-ROLLUP-001 bypass)"
+    )
+
+
 def test_auto_merge_accepts_push_event_ci_completions() -> None:
     """DEC-AUTOMERGE-RACE-FIX-001: a branch with an open PR often has two
     concurrent CI runs (push + pull_request). The trigger guard must accept

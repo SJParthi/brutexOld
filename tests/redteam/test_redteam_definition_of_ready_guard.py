@@ -22,6 +22,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARD = REPO_ROOT / "scripts" / "ci" / "definition-of-ready-guard.sh"
+CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 ALL_5_SECTIONS = """
 ## Definition of Ready
@@ -181,3 +182,81 @@ class TestBotExemption:
         """Only renovate[bot] / dependabot[bot] are allowed — not custom bots."""
         result = _run("Custom bot body.", pr_author="evil-bot[bot]")
         assert result.returncode == 1
+
+
+def _dor_job_block() -> str:
+    """Return the `definition-of-ready` job's YAML text up to the next job.
+
+    The DoR job is followed by the `dec-id-validator` job (a sibling at the
+    same indent). Slicing on that boundary keeps the assertions scoped to the
+    DoR job and resilient to growth elsewhere in ci.yml.
+    """
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "definition-of-ready:" in text, "ci.yml lost the definition-of-ready job"
+    block = text.split("definition-of-ready:", 1)[1]
+    # Stop at the next top-level (4-space) job key so assertions can't leak into
+    # an adjacent job. dec-id-validator is the documented next sibling.
+    return block.split("\n  dec-id-validator:", 1)[0]
+
+
+class TestDefinitionOfReadyWorkflowLiveBody:
+    """DEC-DOR-LIVE-BODY-001 — the workflow must evaluate the LIVE PR body at
+    run-time and never paint a merged/closed PR red.
+
+    The guard script stays strict (proven by the classes above); these tests
+    pin the *workflow* contract that feeds it a fresh body and skips a settled
+    PR, so the stale-snapshot false-red can never reappear.
+    """
+
+    def test_dor_job_skips_merged_or_closed_pr(self) -> None:
+        """The job `if:` skips an already merged or closed PR.
+
+        A post-merge re-run replays the stale event body; skipping a settled PR
+        means such a re-run can never repaint a green/merged PR red.
+        """
+        block = _dor_job_block()
+        # The job-level if must gate on both closed-state and merged.
+        assert "github.event.pull_request.state != 'closed'" in block, (
+            "DoR job must skip a closed PR (DEC-DOR-LIVE-BODY-001)"
+        )
+        assert "github.event.pull_request.merged != true" in block, (
+            "DoR job must skip a merged PR (DEC-DOR-LIVE-BODY-001)"
+        )
+
+    def test_dor_job_stays_pull_request_scoped(self) -> None:
+        """The skip is ADDED to — not a replacement of — the pull_request gate.
+
+        An OPEN pull_request is still evaluated, so the gate stays strict for
+        in-flight work (it must still block a genuinely incomplete body).
+        """
+        block = _dor_job_block()
+        assert "github.event_name == 'pull_request'" in block, (
+            "DoR job must remain pull_request-scoped (open PRs stay gated)"
+        )
+
+    def test_dor_fetches_live_body_via_gh_cli(self) -> None:
+        """The guard step fetches the LIVE body via `gh pr view`, not only the
+        `github.event.pull_request.body` event snapshot."""
+        block = _dor_job_block()
+        assert "gh pr view" in block and "--json body" in block, (
+            "DoR step must fetch the live PR body (DEC-DOR-LIVE-BODY-001), "
+            "not rely solely on the stale event snapshot"
+        )
+        assert "GH_TOKEN: ${{ github.token }}" in block, (
+            "gh CLI needs the workflow token to read the PR body"
+        )
+
+    def test_dor_falls_back_to_event_snapshot_not_fail_open(self) -> None:
+        """A failed live fetch falls back to the event snapshot — fail-SAFE.
+
+        The guard then still runs against *some* body and can still block; it
+        must never silently pass (fail-open) when the live fetch fails.
+        """
+        block = _dor_job_block()
+        assert "PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}" in block, (
+            "a live-fetch failure must fall back to the event snapshot"
+        )
+        # The guard is still invoked unconditionally after the body is resolved.
+        assert "bash scripts/ci/definition-of-ready-guard.sh" in block, (
+            "the guard must still run (and can still block) after body resolution"
+        )

@@ -27,7 +27,7 @@ false-accept (``import brutex.feed.lookahead_extra`` /
 syntactically broken candidate is caught as a ``SyntaxError`` and rejected.
 
 Also covered: import-verified isolation PASS / FAIL (<100% / not-measured),
-zero-touched PASS, the empty exclude-allowlist, deterministic ordering,
+zero-touched PASS, the curated exclude-allowlist, deterministic ordering,
 Added-vs-Modified handling, renamed (R) path resolution, git-error
 fail-closed exit 2, and multi-file curated-suite discovery. No
 ``# pragma: no cover`` is needed — every branch is reached honestly.
@@ -161,8 +161,8 @@ class TestDiscoverTouchedModules:
     def test_exclude_allowlist_is_dropped(
         self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The shipped allowlist is empty; inject one entry to exercise the
-        # drop branch deterministically.
+        # Inject a single-entry allowlist (independent of the shipped set) to
+        # exercise the drop branch deterministically.
         monkeypatch.setattr(gate, "COVERAGE_DISCOVERY_EXCLUDE", frozenset({"brutex/excluded.py"}))
         assert gate.discover_touched_modules(
             [("M", "brutex/excluded.py"), ("M", "brutex/real.py")]
@@ -177,11 +177,20 @@ class TestDiscoverTouchedModules:
             ("brutex/a.py", "A")
         ]
 
-    def test_shipped_exclude_allowlist_is_app_only(self, gate: ModuleType) -> None:
-        # Pin the documented invariant: the allowlist holds ONLY the route-glue
-        # app.py (gated by the whole-package floor, not a single per-file test —
-        # DEC-DASHBOARD-RESULTS-PAGE-001). Keep it tiny + justified.
-        assert frozenset({"brutex/dashboard/app.py"}) == gate.COVERAGE_DISCOVERY_EXCLUDE
+    def test_shipped_exclude_allowlist_is_curated_multifile_modules(self, gate: ModuleType) -> None:
+        # Pin the documented invariant: the allowlist holds ONLY the modules whose
+        # 100% coverage comes from a CURATED multi-file suite (no single name-matched
+        # per-file test reaches 100% standalone), each gated by the whole-package floor
+        # + a dedicated static per-module gate instead:
+        #   * brutex/dashboard/app.py — the route-glue (DEC-DASHBOARD-RESULTS-PAGE-001);
+        #   * brutex/dashboard/pull_controller.py — the SPOT pull controller, covered by
+        #     the 5-file pull-controller/pool/health/stall/write-batch suite
+        #     (DEC-WRITE-BATCH-COALESCE-001).
+        # Keep it tiny + justified.
+        assert (
+            frozenset({"brutex/dashboard/app.py", "brutex/dashboard/pull_controller.py"})
+            == gate.COVERAGE_DISCOVERY_EXCLUDE
+        )
 
     def test_excluded_app_module_is_dropped_from_discovery(self, gate: ModuleType) -> None:
         # The shipped exclude really removes app.py from the gated set (a touch of it

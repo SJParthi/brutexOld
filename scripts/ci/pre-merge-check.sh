@@ -27,6 +27,17 @@ OVERRIDE_FLAG="${OPERATOR_OVERRIDE:-false}"
 # jobs in `ci-ok needs:` list (currently 20 hard gates).
 EXPECTED_MIN_CHECKS="${EXPECTED_MIN_CHECKS:-20}"
 
+# DEC-MERGE-LIVE-ROLLUP-001: a comma-separated allow-list of check-run NAMES
+# to IGNORE in the rollup (count + failed + pending). Default EMPTY (no
+# exclusion — every existing caller is byte-for-byte unchanged). The
+# auto-merge workflow invokes this script as its final pre-merge gate, and
+# its OWN check run ("Auto-merge on green CI") sits IN_PROGRESS on the head
+# while the gate evaluates — that structurally-pending self-check would
+# otherwise make the gate refuse forever. Excluding it (and only it) lets the
+# gate see the COMPLETE CI rollup it actually cares about, while every real
+# CI check still gates fully. The match is by EXACT name.
+IGNORE_CHECK_NAMES="${IGNORE_CHECK_NAMES:-}"
+
 # OPERATOR_OVERRIDE requires a non-empty reason (Agent 5 MED finding):
 # default of "no reason provided" was useless for audit. Enforce.
 if [[ "$OVERRIDE_FLAG" == "true" ]] && [[ -z "${OPERATOR_OVERRIDE_REASON:-}" ]]; then
@@ -89,11 +100,16 @@ if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
     fi
 fi
 
-# Parse status check rollup
-ROLLUP_COUNT=$(echo "$STATUS_JSON" | python3 -c "
-import json, sys
+# Parse status check rollup. DEC-MERGE-LIVE-ROLLUP-001: drop any check whose
+# name is in IGNORE_CHECK_NAMES (default none) before counting / scanning, so
+# the auto-merge path can exclude its own structurally-pending self-check
+# without weakening the gate for any real CI check.
+ROLLUP_COUNT=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" python3 -c "
+import json, os, sys
 data = json.load(sys.stdin)
-print(len(data.get('statusCheckRollup', [])))
+ignore = {n.strip() for n in os.environ.get('IGNORE_CHECK_NAMES', '').split(',') if n.strip()}
+rollup = [c for c in data.get('statusCheckRollup', []) if c.get('name', '?') not in ignore]
+print(len(rollup))
 ")
 
 # Agent 5 CRIT fix: empty rollup means CI hasn't started yet. Treat as
@@ -113,10 +129,11 @@ if [[ "$ROLLUP_COUNT" -lt "$EXPECTED_MIN_CHECKS" ]]; then
     fi
 fi
 
-FAILED_CHECKS=$(echo "$STATUS_JSON" | python3 -c "
-import json, sys
+FAILED_CHECKS=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" python3 -c "
+import json, os, sys
 data = json.load(sys.stdin)
-rollup = data.get('statusCheckRollup', [])
+ignore = {n.strip() for n in os.environ.get('IGNORE_CHECK_NAMES', '').split(',') if n.strip()}
+rollup = [c for c in data.get('statusCheckRollup', []) if c.get('name', '?') not in ignore]
 failed = [c.get('name', '?') for c in rollup
           if c.get('conclusion') in ('FAILURE', 'CANCELLED', 'TIMED_OUT')]
 print('\n'.join(failed))
@@ -242,10 +259,11 @@ print(n)
 fi
 
 # Check pending checks too — don't merge while CI is still running
-PENDING_CHECKS=$(echo "$STATUS_JSON" | python3 -c "
-import json, sys
+PENDING_CHECKS=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" python3 -c "
+import json, os, sys
 data = json.load(sys.stdin)
-rollup = data.get('statusCheckRollup', [])
+ignore = {n.strip() for n in os.environ.get('IGNORE_CHECK_NAMES', '').split(',') if n.strip()}
+rollup = [c for c in data.get('statusCheckRollup', []) if c.get('name', '?') not in ignore]
 pending = [c.get('name', '?') for c in rollup
            if c.get('status') in ('IN_PROGRESS', 'QUEUED', 'PENDING')]
 print('\n'.join(pending))
