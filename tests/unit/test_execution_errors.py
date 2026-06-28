@@ -11,6 +11,8 @@ from brutex.execution.errors import (
     FreezeQuantityExceededError,
     InsufficientFundsError,
     InvalidLotSizeError,
+    InvalidPriceError,
+    NonMonotonicBarError,
 )
 from brutex.models import BruteXError
 
@@ -30,6 +32,12 @@ class TestExecutionErrorHierarchy:
     def test_insufficient_funds_error_is_execution_error(self) -> None:
         assert issubclass(InsufficientFundsError, ExecutionError)
 
+    def test_invalid_price_error_is_execution_error(self) -> None:
+        assert issubclass(InvalidPriceError, ExecutionError)
+
+    def test_non_monotonic_bar_error_is_execution_error(self) -> None:
+        assert issubclass(NonMonotonicBarError, ExecutionError)
+
     def test_execution_error_raises(self) -> None:
         with pytest.raises(ExecutionError, match="a"):
             raise ExecutionError("a")
@@ -45,3 +53,11 @@ class TestExecutionErrorHierarchy:
     def test_insufficient_funds_raises(self) -> None:
         with pytest.raises(InsufficientFundsError, match="d"):
             raise InsufficientFundsError("d")
+
+    def test_invalid_price_raises(self) -> None:
+        with pytest.raises(InvalidPriceError, match="e"):
+            raise InvalidPriceError("e")
+
+    def test_non_monotonic_bar_raises(self) -> None:
+        with pytest.raises(NonMonotonicBarError, match="f"):
+            raise NonMonotonicBarError("f")
