@@ -86,6 +86,46 @@ def test_psr_radicand_exactly_zero_raises() -> None:
         probabilistic_sharpe_ratio(2.0, 0.0, 10, 1.5, GAUSSIAN_KURTOSIS)
 
 
+# ── Non-finite input guard (DEC-METRICS-NONFINITE-GUARD-001) ─────────
+#
+# A NaN radicand silently bypasses the ``radicand <= 0`` guard (``nan <= 0``
+# is False), and an ``observed_sharpe = +inf`` makes the radicand ``+inf``
+# (also passing the guard) yet yields a NaN ``z`` — both would return NaN,
+# contradicting the docstring "No NaN/inf in result rows". The explicit
+# finite-input check rejects them up front.
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"skew": float("nan")},
+        {"kurtosis": float("nan")},
+        {"observed_sharpe": float("nan")},
+        {"observed_sharpe": float("inf")},
+        {"benchmark_sharpe": float("nan")},
+    ],
+    ids=["skew_nan", "kurtosis_nan", "obs_nan", "obs_inf", "bench_nan"],
+)
+def test_psr_rejects_non_finite_inputs(kwargs: dict[str, float]) -> None:
+    """Any non-finite PSR moment input raises rather than returning NaN."""
+    base = {
+        "observed_sharpe": 1.0,
+        "benchmark_sharpe": 0.0,
+        "sample_length": 100,
+        "skew": 0.0,
+        "kurtosis": GAUSSIAN_KURTOSIS,
+    }
+    base.update(kwargs)
+    with pytest.raises(ValueError, match="must be finite"):
+        probabilistic_sharpe_ratio(
+            float(base["observed_sharpe"]),
+            float(base["benchmark_sharpe"]),
+            int(base["sample_length"]),
+            float(base["skew"]),
+            float(base["kurtosis"]),
+        )
+
+
 # ── Expected maximum Sharpe (SR_0) ──────────────────────────────────
 
 
