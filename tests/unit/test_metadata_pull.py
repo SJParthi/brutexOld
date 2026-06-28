@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import structlog
 from brutex.adapters.groww.client import GrowwClient
 from brutex.dashboard import metadata_pull as mp
 from brutex.dashboard.metadata_pull import (
@@ -1002,3 +1003,173 @@ def test_progress_no_cells_emits_nothing(tmp_path: Path) -> None:
     assert report.expiry_cells == 0
     assert report.cells_skipped == 1
     registry.close()
+
+
+# ── DEC-FNO-UNDERLYING-RESOLVE-001: F&O underlying resolution + zero-expiry audit ──
+
+
+def _equity(symbol: str, *, exch: Exchange = Exchange.NSE) -> Instrument:
+    """An F&O-eligible CASH equity row with a SPOT trading symbol (no leg underlying).
+
+    Mirrors the lean-universe persisted shape: ``underlying_symbol`` is ``None`` (only
+    derivative legs carry it; the legs are discarded), so the F&O underlying for the
+    expiry chain MUST be DERIVED from ``symbol_name`` (DEC-FNO-UNDERLYING-RESOLVE-001).
+    """
+    return Instrument(
+        exch_id=exch,
+        security_id=2,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=375,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+    )
+
+
+def test_hyphenated_stock_resolves_to_fno_underlying(tmp_path: Path) -> None:
+    """REGRESSION: spot ``BAJAJ-AUTO`` queries the F&O underlying ``BAJAJAUTO``.
+
+    Before the fix the pull keyed ``get_expiries`` on the spot ``trading_symbol``
+    (``BAJAJ-AUTO``) → a clean-but-EMPTY reply → 0 expiries → the whole underlying
+    silently missed. After the fix the grid resolves the F&O underlying first, so the
+    fake SDK (which only knows ``BAJAJAUTO``) returns the real chain.
+    """
+    sdk = _FakeSDK(
+        expiries={("NSE", "BAJAJAUTO", 2026): ["2026-06-25"]},
+        contracts={
+            ("NSE", "BAJAJAUTO", "2026-06-25"): ["NSE-BAJAJAUTO-25Jun26-FUT"],
+        },
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    report = pull_expiries_contracts(
+        [_equity("BAJAJ-AUTO")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-bajaj",
+    )
+
+    # The chain was discovered against the F&O underlying spelling — NOT empty.
+    assert registry.count_expiries() == 1
+    assert registry.count_contracts() == 1
+    contracts = registry.list_contracts()
+    assert contracts[0].contract_symbol == "NSE-BAJAJAUTO-25Jun26-FUT"
+    # The coverage rollup + report key on the RESOLVED F&O underlying.
+    assert report.underlyings == ("BAJAJAUTO",)
+    cov = coverage.list_coverage()
+    assert cov[0].underlying_symbol == "BAJAJAUTO"
+    assert cov[0].status == STATUS_COMPLETE
+    registry.close()
+
+
+def test_zero_expiry_audit_fires_when_underlying_empty(tmp_path: Path) -> None:
+    """The observe-only WARNING fires for a clean-but-empty whole underlying.
+
+    A pulled underlying that errors on NO cell yet discovers ZERO expiries is the
+    silent-vanish signal — surfaced as ONE ``metadata.underlying_no_expiries``
+    WARNING naming the resolved F&O underlying (DEC-FNO-UNDERLYING-RESOLVE-001 /
+    DEC-SUSPICIOUS-EMPTY-FLAG-001 #919).
+    """
+    sdk = _FakeSDK(expiries={})  # every get_expiries returns empty
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    with structlog.testing.capture_logs() as logs:
+        report = pull_expiries_contracts(
+            [_equity("BAJAJ-AUTO")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-empty",
+        )
+
+    assert report.expiries_persisted == 0
+    warnings = [e for e in logs if e["event"] == mp.METADATA_UNDERLYING_NO_EXPIRIES_EVENT]
+    assert len(warnings) == 1
+    assert warnings[0]["count"] == 1
+    assert warnings[0]["sample"] == ["NSE-BAJAJAUTO"]
+    assert warnings[0]["run_id"] == "r-empty"
+    registry.close()
+
+
+def test_zero_expiry_audit_silent_on_success(tmp_path: Path) -> None:
+    """No WARNING when the underlying discovers ≥1 expiry (the healthy pull)."""
+    sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
+    registry = _registry(tmp_path)
+    with structlog.testing.capture_logs() as logs:
+        pull_expiries_contracts(
+            [_instrument("NIFTY")],
+            registry=registry,
+            coverage_store=_CoverageSink(),
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+        )
+    assert [e for e in logs if e["event"] == mp.METADATA_UNDERLYING_NO_EXPIRIES_EVENT] == []
+    registry.close()
+
+
+def test_zero_expiry_audit_excludes_errored_underlying(tmp_path: Path) -> None:
+    """An underlying whose cell ERRORED is NOT flagged (already a recorded failure).
+
+    The audit predicate excludes an errored underlying so a transient/auth failure is
+    never double-counted as a silent miss — proven directly against the pure helper.
+    """
+    sdk = _FakeSDK(
+        expiries={},
+        raise_expiry_for=frozenset({("NSE", "BAJAJAUTO")}),
+    )
+    registry = _registry(tmp_path)
+    with structlog.testing.capture_logs() as logs:
+        report = pull_expiries_contracts(
+            [_equity("BAJAJ-AUTO")],
+            registry=registry,
+            coverage_store=_CoverageSink(),
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+        )
+    assert report.expiry_failures == 1
+    # The errored underlying is excluded from the zero-expiry audit.
+    assert [e for e in logs if e["event"] == mp.METADATA_UNDERLYING_NO_EXPIRIES_EVENT] == []
+    registry.close()
+
+
+def test_underlyings_with_no_expiries_pure_predicate() -> None:
+    """Direct unit cover of the pure predicate's three branches + _CellOutcome.merge."""
+    outcomes = {
+        ("NSE", "EMPTY"): mp._CellOutcome(any_expiry=False, errored=False),
+        ("NSE", "HASEXP"): mp._CellOutcome(any_expiry=True, errored=False),
+        ("NSE", "ERRORED"): mp._CellOutcome(any_expiry=False, errored=True),
+    }
+    assert mp.underlyings_with_no_expiries(outcomes) == [("NSE", "EMPTY")]
+    # merge OR-folds across cells.
+    base = mp._CellOutcome()
+    assert base.merge(any_expiry=True, errored=False).any_expiry is True
+    assert base.merge(any_expiry=False, errored=True).errored is True
+    merged = base.merge(any_expiry=False, errored=False)
+    assert merged.any_expiry is False and merged.errored is False
