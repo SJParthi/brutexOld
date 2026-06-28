@@ -68,6 +68,7 @@ import structlog
 
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
+from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
     GROWW_COVERAGE_MARKET,
@@ -223,6 +224,26 @@ class _WindowOutcome:
     error_type: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _RawWindow:
+    """The SUCCESS-path payload handed from ``_fetch_window_raw`` to ``_process_window_tail``.
+
+    A clean fetch (the bars may be empty — an EMPTY window is still a tail to record) carries
+    its RAW bars (post-fetch, pre-session-filter) + the per-window metadata the tail needs to
+    session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record``. Producer-side
+    resolutions (skip / transient / terminal) never build one of these — they short-circuit
+    on the producer thread. Immutable so it crosses the producer→consumer queue safely.
+    """
+
+    instrument: Instrument
+    interval: str
+    window: tuple[date, date]
+    key: WindowKey
+    raw_bars: list[CandleBar]
+    fetch_count: int
+    settle_empty: bool
+
+
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
     """Tile ``[start, end)`` into fetch windows for *interval*'s Groww tier.
 
@@ -257,6 +278,7 @@ def ingest_spot(
     empty_retry_backoff: Callable[[int], None] | None = None,
     now_ist: Callable[[], datetime] | None = None,
     on_window: WindowTick | None = None,
+    fetch_pipeline: FetchPipeline | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -303,6 +325,20 @@ def ingest_spot(
         instead of only when the whole series finishes. Fired on the window worker thread
         AFTER the window's ledger outcome is recorded; the caller owns throttle +
         thread-safety. ``None`` (CLI / tests) is a no-op.
+    fetch_pipeline
+        Optional :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline`
+        (DEC-GROWW-FETCH-ASYNC-SEPARATION-001). When supplied, each window's SUCCESS-path
+        tail (session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record`` +
+        ``on_success``) is handed OFF to a background consumer instead of running on the
+        fetch worker thread — so internal processing can never block or slow the fetch lane.
+        The fetch + the rate-controller feedback STAY on the fetch worker (the producer); the
+        producer submits the raw bars and immediately re-paces + fetches the next window.
+        ``None`` (the default) runs the fetch + tail as ONE synchronous call, byte-identical
+        to today. The caller OWNS the pipeline's lifetime and MUST :meth:`drain` it BEFORE the
+        final ledger flush. NOTE: in pipeline mode a window's bars/conflicts land on the
+        pipeline's pull-level totals (logged at drain), not this per-series report — the
+        producer cannot know them synchronously; the Parquet output + ledger settlement are
+        byte-identical to the synchronous path.
 
     Returns
     -------
@@ -370,6 +406,7 @@ def ingest_spot(
                 empty_retry_attempts=empty_retry_attempts,
                 empty_retry_backoff=empty_backoff,
                 old_cutoff=old_cutoff,
+                fetch_pipeline=fetch_pipeline,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -499,29 +536,153 @@ def _ingest_one_window(
     empty_retry_attempts: int = _DEFAULT_EMPTY_RETRY_ATTEMPTS,
     empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
     old_cutoff: date | None = None,
+    fetch_pipeline: FetchPipeline | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
-    All side effects it touches (the *pace* bucket, the controller hooks, the
-    sink) are thread-safe, so N windows of one series run it concurrently without
-    a data race. A retryable Groww error is counted; a terminal :class:`GrowwError`
-    (auth included) propagates to the outer quarantine.
+    The window is processed in TWO halves (DEC-GROWW-FETCH-ASYNC-SEPARATION-001):
+    :func:`_fetch_window_raw` (pace + fetch + in-pull EMPTY-retry + the rate-controller
+    feedback) STAYS on the fetch (producer) thread; :func:`_process_window_tail`
+    (session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record`` +
+    ``on_success``) is the consumer work. When *fetch_pipeline* is ``None`` (the default)
+    the two run as ONE synchronous call — BYTE-IDENTICAL to the prior single-function body.
+    When a pipeline is wired the producer runs only the fetch half, hands the raw bars off
+    via :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.submit` (a bounded ``put``
+    that blocks ONLY on back-pressure, never on durability), and returns a DEFERRED outcome
+    (the tail's bars/conflicts land on the pipeline's pull-level totals); a consumer thread
+    runs the SAME ``_process_window_tail`` (CLAUDE.md §11 COMMON — one tail).
 
-    A clean **0-bar (EMPTY) response is re-fetched** up to *empty_retry_attempts*
-    times (DEC-EMPTY-INPULL-RETRY-001): a Jan-2020+ historical range can return an
-    empty ``200`` EITHER because the window is genuinely empty OR because of a
-    transient vendor glitch on a range that DOES have data — the first attempt that
-    returns bars wins, and only an all-empty run records genuine no-data WITH
-    confidence. Bounded, so a truly-empty window can never loop forever.
+    All side effects (the *pace* bucket, the controller hooks, the sink) are thread-safe,
+    so N windows of one series run concurrently without a data race. A retryable Groww
+    error is counted on the producer; a terminal :class:`GrowwError` (auth included)
+    propagates to the outer quarantine.
 
-    *old_cutoff* (DEC-OLD-GAP-FAST-SETTLE-001) drives the OLD-gap fast-settle: when the
-    window stayed empty across an in-pull retry (``fetch_count >= 2`` — a single
-    glitch-prone fetch is NOT enough) AND its ``window_end`` is strictly before
-    *old_cutoff* (older than :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`,
-    so vendor data can never appear), the success/empty ``record`` is told to settle the
-    window ``SKIPPED`` in ONE pull instead of needing the 3-pull EMPTY streak. ``None``
-    (no clock threaded) disables the fast-settle — RECENT windows always keep the
-    conservative across-pull streak.
+    A clean **0-bar (EMPTY) response is re-fetched** up to *empty_retry_attempts* times
+    (DEC-EMPTY-INPULL-RETRY-001) — see :func:`_fetch_window_raw`. *old_cutoff*
+    (DEC-OLD-GAP-FAST-SETTLE-001) drives the OLD-gap fast-settle — see
+    :func:`_process_window_tail`.
+    """
+    outcome, raw = _fetch_window_raw(
+        adapter,
+        instrument=instrument,
+        interval=interval,
+        window=window,
+        pace=pace,
+        ledger=ledger,
+        on_rate_limit=on_rate_limit,
+        on_timeout=on_timeout,
+        pull_id=pull_id,
+        series_fields=series_fields,
+        empty_retry_attempts=empty_retry_attempts,
+        empty_retry_backoff=empty_retry_backoff,
+        old_cutoff=old_cutoff,
+    )
+    if raw is None:
+        # Producer-resolved (skip / transient / terminal-raised): never touches the tail.
+        return outcome
+    if fetch_pipeline is None:
+        # Synchronous, byte-identical path: run the tail inline on THIS thread.
+        return _process_window_tail(
+            sink,
+            raw,
+            ledger=ledger,
+            on_success=on_success,
+            pull_id=pull_id,
+            series_fields=series_fields,
+        )
+    # Async separation: hand the tail off to a background consumer. The producer does NOT
+    # wait on it — it returns a DEFERRED outcome immediately and re-paces + fetches the next
+    # window. The consumer runs the SAME ``_process_window_tail`` then folds the window's
+    # bars/conflicts into the pipeline's pull-level totals. A tail failure (disk-full / sink
+    # error) is captured by the pipeline + re-raised on a later submit / drain.
+    pipeline = fetch_pipeline
+
+    # The per-series reconcile key MUST equal the key the spine stores this series'
+    # ``IngestReport`` under (``run_ingest`` keys spot pairs by ``(symbol_name, interval)``), so
+    # the controller's post-drain reconcile lines up the folded consumer totals with the right
+    # deferred report (the completion-count fix).
+    series_key = (instrument.symbol_name, interval)
+
+    def _run_tail(_tail: FetchTail) -> None:
+        result_outcome = _process_window_tail(
+            sink,
+            raw,
+            ledger=ledger,
+            on_success=on_success,
+            pull_id=pull_id,
+            series_fields=series_fields,
+        )
+        if result_outcome.transient:
+            # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
+            # cross-process lock past the deadline). Surface it via the pipeline's tail-transient
+            # tally so it is counted + reported at drain and the across-pull retry round still
+            # fires — otherwise an async-mode tail-transient was silently dropped (MAJOR-2 fix).
+            # The window's ledger row is already recorded FAILED, so a re-pull re-fetches it.
+            pipeline.fold_tail_transient(series_key)
+            return
+        pipeline.fold_totals(
+            bars_appended=result_outcome.bars_appended,
+            conflicts=result_outcome.conflicts,
+            series_key=series_key,
+        )
+
+    tail = FetchTail(
+        shard_key=_series_shard_key(instrument, interval),
+        process=_run_tail,
+        raw_bars=raw.raw_bars,
+    )
+    fetch_pipeline.submit(RawFetchResult(tail=tail))
+    # DEFERRED: the consumer owns the bars/conflicts (pull-level totals); the producer
+    # reports zero for this window — the window is neither skipped nor transient here.
+    return _WindowOutcome()
+
+
+def _series_shard_key(instrument: Instrument, interval: str) -> str:
+    """The consumer routing key for a spot series — the resolved partition coordinates.
+
+    Mirrors :meth:`~brutex.data.write_consumer.WriteRequest.shard_key` so all windows of one
+    ``(exchange, segment, symbol, interval)`` series route to ONE consumer (the per-partition
+    lock invariant). Uses the SAME field values the spot ``sink.append`` passes.
+    """
+    return (
+        f"{instrument.exch_id.value}\x00{instrument.segment.value}"
+        f"\x00{instrument.symbol_name}\x00{interval}"
+    )
+
+
+def _fetch_window_raw(
+    adapter: MarketAdapter,
+    *,
+    instrument: Instrument,
+    interval: str,
+    window: tuple[date, date],
+    pace: Pacer | None,
+    ledger: WindowLedger | None,
+    on_rate_limit: Callable[[], None] | None,
+    on_timeout: Callable[[], None] | None,
+    pull_id: str,
+    series_fields: dict[str, str],
+    empty_retry_attempts: int,
+    empty_retry_backoff: Callable[[int], None],
+    old_cutoff: date | None,
+) -> tuple[_WindowOutcome, _RawWindow | None]:
+    """The PRODUCER half — pace + fetch + EMPTY-retry + controller feedback. STAYS on the fetch thread.
+
+    Returns ``(outcome, None)`` when the window is PRODUCER-resolved (a ledger skip or a
+    transient error — the tail is never reached) and ``(_WindowOutcome(), raw)`` when the
+    fetch succeeded (a :class:`_RawWindow` carrying the raw bars + metadata for the tail; the
+    bars may be empty — an EMPTY window is still a tail to record). A terminal
+    :class:`GrowwError` (auth included) is RAISED on the producer thread to the outer
+    quarantine, never swallowed.
+
+    A clean 0-bar (EMPTY) response is re-fetched up to *empty_retry_attempts* times
+    (DEC-EMPTY-INPULL-RETRY-001): a Jan-2020+ historical range can return an empty ``200``
+    EITHER because the window is genuinely empty OR because of a transient vendor glitch on a
+    range that DOES have data — the first attempt that returns bars wins, and only an
+    all-empty run records genuine no-data WITH confidence. Bounded, so a truly-empty window
+    can never loop forever. The rate-controller feedback (``on_rate_limit`` / ``on_timeout``)
+    + the rate ``pace`` bucket are the producer's job and STAY here (CLAUDE.md §2 Rule 6 — the
+    8/500 + AIMD limiter is producer-side, untouched).
     """
     window_start, window_end = window
     key = WindowKey(
@@ -544,7 +705,7 @@ def _ingest_one_window(
             action="skipped",
             **series_fields,
         )
-        return _WindowOutcome(skipped=1)
+        return _WindowOutcome(skipped=1), None
     # In-pull EMPTY retry (DEC-EMPTY-INPULL-RETRY-001): a clean 0-bar response is
     # AMBIGUOUS on a single call — genuine no-data vs a transient vendor glitch on a range
     # that DOES have data — so re-fetch the SAME window up to empty_retry_attempts times.
@@ -608,8 +769,9 @@ def _ingest_one_window(
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
                     )
-                return _WindowOutcome(
-                    transient=1, window=retry_window, error_type=type(exc).__name__
+                return (
+                    _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__),
+                    None,
                 )
             # A TERMINAL (non-retryable) Groww error — including auth, which has no
             # fail-fast latch here (the documented divergence): it simply propagates to
@@ -629,6 +791,59 @@ def _ingest_one_window(
                 **series_fields,
             )
             empty_retry_backoff(empty_attempt)
+    # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an EMPTY window confirmed empty
+    # ACROSS an in-pull retry (``fetch_count >= 2`` — one glitch-prone fetch is not enough;
+    # this also excludes the degenerate ``empty_retry_attempts <= 1`` single-fetch case) AND
+    # OLD enough that vendor data can never appear (``window_end`` strictly before
+    # ``old_cutoff``) is a PERMANENT gap → settle SKIPPED in ONE pull. A RECENT empty window
+    # (or one not re-hit) keeps the conservative across-pull EMPTY streak. ``old_cutoff is
+    # None`` (no clock threaded) disables the fast-settle. Computed on the PRODUCER from the
+    # pure fetch facts (raw bars + fetch count + clock), so the consumer's tail records the
+    # same byte-identical ``settle_empty`` it would have synchronously.
+    confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
+    is_old = old_cutoff is not None and window_end < old_cutoff
+    settle_empty = confirmed_empty_after_retry and is_old
+    return (
+        _WindowOutcome(),
+        _RawWindow(
+            instrument=instrument,
+            interval=interval,
+            window=window,
+            key=key,
+            raw_bars=raw_bars,
+            fetch_count=fetch_count,
+            settle_empty=settle_empty,
+        ),
+    )
+
+
+def _process_window_tail(
+    sink: BarSink,
+    raw: _RawWindow,
+    *,
+    ledger: WindowLedger | None,
+    on_success: Callable[[], None] | None,
+    pull_id: str,
+    series_fields: dict[str, str],
+) -> _WindowOutcome:
+    """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
+
+    Runs on the consumer thread (async mode) or inline on the fetch thread (sync mode) — the
+    SAME code either way (CLAUDE.md §11 COMMON). All side effects (the sink, the ledger) are
+    thread-safe. A :class:`PartitionLockTimeout` DEFERS the window (records FAILED + returns a
+    transient outcome) exactly as before; any other sink error (a
+    :class:`~brutex.data.errors.LakeWriteHalt` disk-full) propagates — in async mode the
+    pipeline captures it into its pool-wide stop, re-raised on the next submit / drain so the
+    pull halts through ``_GLOBAL_STOP_ERRORS``.
+    """
+    instrument = raw.instrument
+    interval = raw.interval
+    window = raw.window
+    window_start, window_end = window
+    key = raw.key
+    raw_bars = raw.raw_bars
+    fetch_count = raw.fetch_count
+    settle_empty = raw.settle_empty
     # Drop pre-open / post-close bars before they enter the lake — intraday only
     # (a daily bar has no intraday time). An exempt symbol (e.g. a ~21h instrument)
     # keeps its full-day series verbatim.
@@ -718,16 +933,6 @@ def _ingest_one_window(
     # ``result.bars_appended``) is the signal — a re-pull whose bars are all
     # already in the lake dedups to ``bars_appended == 0`` yet the window IS
     # complete, so it must stay marked.
-    # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an EMPTY window confirmed empty
-    # ACROSS an in-pull retry (``fetch_count >= 2`` — one glitch-prone fetch is not enough;
-    # this also excludes the degenerate ``empty_retry_attempts <= 1`` single-fetch case) AND
-    # OLD enough that vendor data can never appear (``window_end`` strictly before
-    # ``old_cutoff``) is a PERMANENT gap → settle SKIPPED in ONE pull. A RECENT empty window
-    # (or one not re-hit) keeps the conservative across-pull EMPTY streak. ``old_cutoff is
-    # None`` (no clock threaded) disables the fast-settle.
-    confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
-    is_old = old_cutoff is not None and window_end < old_cutoff
-    settle_empty = confirmed_empty_after_retry and is_old
     # Surface the in-pull retry at INFO when it fired AND stayed empty
     # (DEC-WINDOW-INPULL-FETCHES-001): the per-attempt log above is DEBUG, so a pull
     # at the operator's INFO level showed NO sign the 3× retry ran — this one line

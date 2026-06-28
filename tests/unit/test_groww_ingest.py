@@ -1057,6 +1057,108 @@ class TestIngestSpotConflicts:
         assert series["conflicts"] == 1
 
 
+class TestIngestSpotAsyncPipeline:
+    """DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — the async-separation branch of ``_ingest_one_window``.
+
+    When a :class:`FetchPipeline` is wired, the SUCCESS-path tail (session-filter +
+    ``sink.append`` + conflict-aggregate + ``ledger.record``) runs on a BACKGROUND consumer,
+    NOT the fetch worker. The producer submits the raw bars and returns a DEFERRED zero-bar
+    window; the consumer folds the real bars/conflicts onto the pipeline's pull-level +
+    per-series totals. Covers lines 598-637 (submit + ``_run_tail`` fold) + 647 (the spot
+    series shard-key the tail routes by).
+    """
+
+    def test_deferred_window_folds_bars_onto_pipeline_totals(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        sink = _Sink()
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            # 1day tiles at 180 days; ~212-day range → 2 windows, each a single in-session bar.
+            report = ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                run_parallel=_sync_run_parallel,
+                fetch_pipeline=pipeline,
+            )
+        finally:
+            pipeline.drain()
+        # Producer DEFERRED: 2 windows fetched, but the per-series report reads zero bars
+        # (the durable work + count land on the pipeline, not this synchronous report).
+        assert report.windows == 2
+        assert report.bars_appended == 0
+        assert report.transient_failures == 0 and report.still_failed_windows == 0
+        # The BACKGROUND consumer durably appended both windows (one bar each) and folded
+        # them onto the pipeline's pull-level + per-series totals (lines 623-627 + 647 route).
+        assert sink.appends == [1, 1]
+        processed, bars, conflicts = pipeline.totals
+        assert (processed, bars, conflicts) == (2, 2, 0)
+        series = pipeline.per_series_totals()
+        assert series[("NIFTY", "1day")].bars_appended == 2
+        assert series[("NIFTY", "1day")].conflicts == 0
+
+    def test_deferred_window_folds_conflicts_onto_pipeline_totals(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        sink = _ConflictSink(conflicts=(_make_conflict(),), bars_appended=0)
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            report = ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 3, 1),
+                run_parallel=_sync_run_parallel,
+                fetch_pipeline=pipeline,
+            )
+        finally:
+            pipeline.drain()
+        assert report.windows == 1
+        # The consumer folded the keep-first conflict onto the pipeline (the conflicts arm of
+        # fold_totals, line 623-627), not the producer's deferred report.
+        assert report.conflicts == 0
+        series = pipeline.per_series_totals()
+        assert series[("NIFTY", "1day")].conflicts == 1
+        _, _, pool_conflicts = pipeline.totals
+        assert pool_conflicts == 1
+
+    def test_tail_lock_timeout_folds_transient_onto_pipeline(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        sink = _LockTimeoutSink()
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            # A clean fetch, but the BACKGROUND tail's sink.append hits a wedged-peer lock
+            # timeout → result_outcome.transient → pipeline.fold_tail_transient (lines 615-622).
+            report = ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 3, 1),
+                run_parallel=_sync_run_parallel,
+                fetch_pipeline=pipeline,
+            )
+        finally:
+            pipeline.drain()
+        # Producer DEFERRED a clean fetch; the transient is owned by the consumer.
+        assert report.windows == 1
+        assert report.transient_failures == 0 and report.still_failed_windows == 0
+        assert sink.calls == 1  # the fetch ran; the async tail hit the wedged lock once
+        # The consumer folded ONE tail-transient (the async still_failed_windows for the
+        # across-pull retry round), attributed to the right series key.
+        assert pipeline.tail_transients == 1
+        series = pipeline.per_series_totals()
+        assert series[("NIFTY", "1day")].transient == 1
+
+
 class TestPaceRps:
     def test_returns_controller_rps_when_valid(self) -> None:
         class _FakeController:

@@ -1578,8 +1578,13 @@ jobs:
           # non-None drain) are covered by tests/unit/test_dashboard_write_batch_wiring.py,
           # which MUST likewise join the per-module gate so its coverage of those
           # lines (pull_controller.py 1066-1071 / 1083-1086) registers.
+          # DEC-GROWW-FETCH-ASYNC-SEPARATION-001: the fetch-pipeline build/drain/
+          # reconcile helpers (_build_fetch_pipeline + _drain_fetch_pipeline +
+          # _reconcile_pairs_with_pipeline) are covered by
+          # tests/unit/test_dashboard_fetch_pipeline_wiring.py, which MUST likewise
+          # join the per-module gate so its coverage of those lines registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py tests/unit/test_dashboard_fetch_pipeline_wiring.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi

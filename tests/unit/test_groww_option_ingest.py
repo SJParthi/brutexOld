@@ -539,6 +539,57 @@ def test_ingest_partition_lock_timeout_no_ledger_logs_deferred() -> None:
     assert "option.ingest.window.lock_deferred" in events
 
 
+def test_ingest_async_pipeline_tail_lock_timeout_folds_transient() -> None:
+    """Async-mode tail-side ``PartitionLockTimeout`` folds a tail-transient (lines 519-520).
+
+    With a ``fetch_pipeline`` wired the SUCCESS-path tail runs on a BACKGROUND consumer.
+    When that consumer's ``_process_option_window_tail`` hits a wedged-peer lock timeout it
+    returns a report with ``still_failed_windows == 1``; the ``_run_tail`` closure must fold
+    it via ``pipeline.fold_tail_transient`` (NOT silently drop it) so the across-pull retry
+    round still re-fetches the contract (MAJOR-2 fix). The producer's report is the DEFERRED
+    zero-bar window; the real transient lands on the pipeline's tally after drain.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _LockTimeoutSink()
+    ledger = WindowLedger()
+    pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+    try:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=0,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+    finally:
+        pipeline.drain()
+    # Producer DEFERRED: a clean fetch, zero bars reported synchronously (the tail is async).
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    assert report.transient_failures == 0 and report.still_failed_windows == 0
+    # The BACKGROUND consumer hit the wedged lock and folded ONE tail-transient (519-520).
+    assert sink.calls == 1
+    assert pipeline.tail_transients == 1
+    series = pipeline.per_series_totals()
+    assert series[(_ce().symbol, "1day")].transient == 1
+    # The window's ledger row is FAILED → a re-pull re-fetches it (deferred, not settled).
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)
+
+
 def test_ingest_transient_no_hooks_no_ledger() -> None:
     # timeout with on_timeout=None + ledger=None — exercises the no-hook branches.
     sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall")])
@@ -1959,6 +2010,49 @@ class TestSuspiciousEmptyFlag:
         assert report.bars_appended == 0
         warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
         assert len(warns) == 1 and warns[0]["underlying"] == repr("NIFTY")
+
+    def test_run_ingest_skips_scan_in_async_pipeline_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MAJOR-3 regression: in async-pipeline mode the all-empty scan is SKIPPED.
+
+        With a ``fetch_pipeline`` wired, each pair's ``IngestReport`` is producer-resolved with
+        ``bars_appended == 0`` (the real counts are folded onto the pipeline totals by the
+        BACKGROUND consumer, not known synchronously). Scanning now would see EVERY pair as
+        0-bars → a false ``pull.underlying_all_empty`` flood for the whole universe. The fix
+        skips the scan entirely when a pipeline is active. The scan helper must NOT even be
+        called (proven by a spy that raises if it runs).
+        """
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        cs = [
+            _ce("NSE-NIFTY-02Jan25-28500-CE"),
+            _ce("NSE-NIFTY-02Jan25-28200-CE"),
+            _ce("NSE-NIFTY-02Jan25-28150-CE"),
+        ]
+
+        def _must_not_scan(*_a: object, **_k: object) -> AllEmptyScan:
+            raise AssertionError("scan_underlying_all_empty must NOT run in pipeline mode")
+
+        monkeypatch.setattr(_oi, "scan_underlying_all_empty", _must_not_scan)
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            with capture_logs() as logs:
+                run_groww_option_ingest(
+                    _client(_FakeSDK(payload=_candles())),
+                    _Sink(),
+                    contracts=cs,
+                    intervals=["1day"],
+                    start=date(2024, 1, 1),
+                    end=date(2024, 1, 2),
+                    now_ist=_now,
+                    fetch_pipeline=pipeline,
+                )
+        finally:
+            pipeline.drain()
+        # NO false all-empty WARNING (the scan never ran) and NO scan-error event either.
+        assert not any(r["event"] == UNDERLYING_ALL_EMPTY_EVENT for r in logs)
+        assert not any(r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT for r in logs)
 
     def test_run_ingest_scan_error_is_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The observe-only scan raising must NEVER break the pull — it logs an error event

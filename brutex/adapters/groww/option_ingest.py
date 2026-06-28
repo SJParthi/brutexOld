@@ -78,6 +78,7 @@ from brutex.adapters.groww.contracts import (
     option_contracts,
 )
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure, is_rate_limit, is_retryable
+from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
@@ -231,6 +232,27 @@ def fetch_option_candles(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _OptionRawWindow:
+    """The SUCCESS-path payload handed from the option PRODUCER half to the CONSUMER tail.
+
+    The F&O twin of :class:`~brutex.adapters.groww.ingest._RawWindow`: a clean fetch (bars
+    may be empty) carries its RAW bars + the per-window metadata the tail needs to
+    session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record``. Producer-side
+    resolutions (skip / transient / terminal) never build one. Immutable so it crosses the
+    producer→consumer queue safely.
+    """
+
+    contract: DerivativeContract
+    interval: str
+    exchange: str
+    key: WindowKey
+    raw_bars: list[CandleBar]
+    fetch_count: int
+    settle_empty: bool
+    attempt: int
+
+
 def _clamped_window_key(
     contract_symbol: str,
     *,
@@ -289,6 +311,7 @@ def ingest_option_contract(
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     on_raw_payload: RawPayloadHook | None = None,
+    fetch_pipeline: FetchPipeline | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -435,6 +458,125 @@ def ingest_option_contract(
             )
             empty_backoff(empty_attempt)
 
+    # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 — the spot-spine twin): an EMPTY
+    # window confirmed empty ACROSS an in-pull retry (``fetch_count >= 2``) AND OLD enough
+    # that vendor data can never appear (``clamped_end`` strictly before ``old_cutoff``) is a
+    # PERMANENT gap (an expired contract's dead period) → settle SKIPPED in ONE pull. A RECENT
+    # empty window (or one not re-hit) keeps the conservative across-pull EMPTY streak.
+    # Computed on the PRODUCER from the pure fetch facts so the consumer tail records the same
+    # byte-identical ``settle_empty`` it would have synchronously.
+    confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
+    is_old = clamped_end < old_cutoff
+    settle_empty = confirmed_empty_after_retry and is_old
+    raw = _OptionRawWindow(
+        contract=contract,
+        interval=interval,
+        exchange=exchange,
+        key=key,
+        raw_bars=raw_bars,
+        fetch_count=fetch_count,
+        settle_empty=settle_empty,
+        attempt=attempt,
+    )
+    if fetch_pipeline is None:
+        # Synchronous, byte-identical path: run the tail inline on THIS thread.
+        return _process_option_window_tail(
+            sink,
+            raw,
+            ledger=ledger,
+            on_success=on_success,
+            pull_id=pull_id,
+            fields=fields,
+        )
+    # Async separation: hand the tail off to a background consumer. The producer does NOT
+    # wait on it — it returns a DEFERRED IngestReport immediately and re-paces + fetches the
+    # next contract. The consumer runs the SAME ``_process_option_window_tail`` then folds the
+    # window's bars/conflicts into the pipeline's pull-level totals. A tail failure (disk-full
+    # / sink error) is captured by the pipeline + re-raised on a later submit / drain.
+    pipeline = fetch_pipeline
+
+    # The per-series reconcile key MUST equal the key the spine stores this contract's
+    # ``IngestReport`` under (``run_groww_option_ingest`` keys pairs by ``(contract.symbol,
+    # interval)``), so the controller's post-drain reconcile lines up the folded consumer totals
+    # with the right deferred report (the completion-count fix).
+    series_key = (contract.symbol, interval)
+
+    def _run_tail(_tail: FetchTail) -> None:
+        result_report = _process_option_window_tail(
+            sink,
+            raw,
+            ledger=ledger,
+            on_success=on_success,
+            pull_id=pull_id,
+            fields=fields,
+        )
+        if result_report.still_failed_windows:
+            # A tail-side PartitionLockTimeout DEFERRED this contract window (a wedged peer held
+            # the cross-process lock past the deadline). Surface it via the pipeline's
+            # tail-transient tally so it is counted + reported at drain and the across-pull retry
+            # round still fires — otherwise an async-mode tail-transient was silently dropped
+            # (MAJOR-2 fix). The window's ledger row is already recorded FAILED → re-pull refetches.
+            pipeline.fold_tail_transient(series_key)
+            return
+        pipeline.fold_totals(
+            bars_appended=result_report.bars_appended,
+            conflicts=result_report.conflicts,
+            series_key=series_key,
+        )
+
+    tail = FetchTail(
+        shard_key=_option_series_shard_key(exchange, contract.symbol, interval),
+        process=_run_tail,
+        raw_bars=raw_bars,
+    )
+    fetch_pipeline.submit(RawFetchResult(tail=tail))
+    # DEFERRED: the consumer owns the bars/conflicts (pull-level totals); the producer
+    # reports a clean window with zero bars here (it is neither skipped nor transient).
+    return IngestReport(
+        windows=1,
+        bars_appended=0,
+        transient_failures=0,
+        retried_windows=1 if attempt > 0 else 0,
+    )
+
+
+def _option_series_shard_key(exchange: str, contract_symbol: str, interval: str) -> str:
+    """The consumer routing key for an F&O contract series — its partition coordinates.
+
+    Mirrors the spot :func:`~brutex.adapters.groww.ingest._series_shard_key` (and
+    :meth:`~brutex.data.write_consumer.WriteRequest.shard_key`) so all windows of one
+    contract series route to ONE consumer (the per-partition lock invariant). The segment is
+    always ``OPTION_SEGMENT`` (``"FNO"``) for the F&O lake.
+    """
+    return f"{exchange}\x00{OPTION_SEGMENT}\x00{contract_symbol}\x00{interval}"
+
+
+def _process_option_window_tail(
+    sink: BarSink,
+    raw: _OptionRawWindow,
+    *,
+    ledger: WindowLedger | None,
+    on_success: Callable[[], None] | None,
+    pull_id: str,
+    fields: dict[str, str],
+) -> IngestReport:
+    """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
+
+    Runs on the consumer thread (async mode) or inline on the fetch thread (sync mode) — the
+    SAME code either way (CLAUDE.md §11 COMMON). A :class:`PartitionLockTimeout` DEFERS the
+    window (records FAILED + returns a transient :class:`IngestReport`) exactly as before; any
+    other sink error (a :class:`~brutex.data.errors.LakeWriteHalt` disk-full) propagates — in
+    async mode the pipeline captures it into its pool-wide stop, re-raised on the next submit /
+    drain so the pull halts through ``_GLOBAL_STOP_ERRORS``.
+    """
+    contract = raw.contract
+    interval = raw.interval
+    exchange = raw.exchange
+    key = raw.key
+    raw_bars = raw.raw_bars
+    fetch_count = raw.fetch_count
+    settle_empty = raw.settle_empty
+    attempt = raw.attempt
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
     try:
         result = sink.append(
@@ -482,14 +624,6 @@ def ingest_option_contract(
             **summarize_conflicts(conflicts),
             **fields,
         )
-    # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 — the spot-spine twin): an EMPTY
-    # window confirmed empty ACROSS an in-pull retry (``fetch_count >= 2``) AND OLD enough
-    # that vendor data can never appear (``clamped_end`` strictly before ``old_cutoff``) is a
-    # PERMANENT gap (an expired contract's dead period) → settle SKIPPED in ONE pull. A RECENT
-    # empty window (or one not re-hit) keeps the conservative across-pull EMPTY streak.
-    confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
-    is_old = clamped_end < old_cutoff
-    settle_empty = confirmed_empty_after_retry and is_old
     # Mirror the spot spine's INFO surface (DEC-WINDOW-INPULL-FETCHES-001): when the
     # in-pull retry fired AND the window stayed empty, one INFO line makes the retry
     # visible in the log (the per-attempt event above is DEBUG). ``settled`` flags an
@@ -881,6 +1015,7 @@ def run_groww_option_ingest(
     on_raw_payload: RawPayloadHook | None = None,
     capture_hook_factory: CaptureHookFactory | None = None,
     write_pool: WriteConsumer | None = None,
+    fetch_pipeline: FetchPipeline | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -963,6 +1098,15 @@ def run_groww_option_ingest(
     synchronous path. The caller owns the pool's lifetime and MUST :meth:`drain` it
     before saving the window ledger.
 
+    *fetch_pipeline* (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) is the F&O twin of the spot
+    spine's full async separation: when supplied, each contract's SUCCESS-path tail
+    (session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record``) is handed
+    OFF to a background consumer so the fetch lane does ONLY fetch + enqueue — internal
+    processing can never block or slow the fetch. Forwarded verbatim into every
+    :func:`ingest_option_contract` call. ``None`` (default) keeps the fully-synchronous,
+    byte-identical path. The caller OWNS the pipeline's lifetime and MUST :meth:`drain` it
+    BEFORE saving the window ledger.
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -1044,6 +1188,7 @@ def run_groww_option_ingest(
                 now_ist=now_ist,
                 market=market,
                 on_raw_payload=contract_hook,
+                fetch_pipeline=fetch_pipeline,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -1104,10 +1249,22 @@ def run_groww_option_ingest(
     # every cleanly-fetched contract came back empty (the BAJAJ-AUTO/M&M silent-vanish
     # case) — a WARNING for human triage, NEVER an engine input or auto-action. Wrapped
     # so the diagnostic can never break the pull (mirrors completeness.py #907).
-    try:
-        _log_underlying_all_empty(scan_underlying_all_empty(pairs, contract_list), pull_id=pull_id)
-    except Exception as exc:  # observe-only diagnostic must never break the pull
-        _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=pull_id, error=str(exc))
+    #
+    # SKIP in async-pipeline mode (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-3 fix): when a
+    # ``fetch_pipeline`` is wired the per-pair ``IngestReport`` is producer-resolved with
+    # ``bars_appended == 0`` (the real bar counts are folded onto the pipeline's pull-level
+    # totals by the BACKGROUND consumer, NOT known synchronously here — the drain has not run
+    # yet). Scanning now would see EVERY pair as 0-bars and flood a false
+    # ``pull.underlying_all_empty`` for the whole universe. The honest "all empty" signal needs
+    # the per-pair durable counts, which only exist after the drain — a post-drain scan is a
+    # flagged FUTURE follow-up (the option path is not wired to the pipeline in production yet).
+    if fetch_pipeline is None:
+        try:
+            _log_underlying_all_empty(
+                scan_underlying_all_empty(pairs, contract_list), pull_id=pull_id
+            )
+        except Exception as exc:  # observe-only diagnostic must never break the pull
+            _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=pull_id, error=str(exc))
     return GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
 
 
