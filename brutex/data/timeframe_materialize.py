@@ -45,7 +45,8 @@ absent from a derivation — or absent from the derived dict — is reported as
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Final
 
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
@@ -59,6 +60,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import polars as pl
+
+    from brutex.models import Instrument
 
 #: Canonical TF-label → lake partition interval map for ALL 19 derived
 #: intraday timeframes (DEC-TF-VOCAB-21-001 — derived from the canonical
@@ -78,6 +81,84 @@ INTRADAY_TF_INTERVALS: Final[dict[str, str]] = {
 #: The materialisable timeframe labels, in canonical (ascending-minutes) order —
 #: the route's default selection when the caller omits ``tfs``.
 MATERIALIZABLE_TFS: Final[tuple[str, ...]] = tuple(INTRADAY_TF_INTERVALS)
+
+
+class PrebuildKind(Enum):
+    """How an instrument's 19 derived intraday timeframes are pre-built (DEC-PREBUILD-SELECT-001).
+
+    The intraday pre-build is SEGMENT-AWARE — the lake stores OI for F&O but
+    never for spot, so the two surfaces use a DIFFERENT resampler, and OPTIONS
+    intraday is deliberately NOT materialised at all (it is TB-scale and the
+    brute-force engine — NIFTY/BANKNIFTY/SENSEX — never reads option intraday;
+    it stays on-demand via :func:`brutex.data.fno_resample.resample_session_to_tf`
+    on the ``/movers`` read path).
+
+    Members
+    -------
+    SPOT
+        An ``INDEX`` / ``CASH`` spot row (the 3 brute-force indices, India VIX,
+        and the F&O-eligible / NTM single-stock SPOT rows). Resampled by the
+        OI-dropping :func:`brutex.data.spot_resample.derive_intraday_tfs`.
+    FUTURES
+        An ``FNO`` ``FUT`` contract. Resampled by the OI-aware
+        :func:`brutex.data.fno_resample.derive_fno_intraday_tfs` so the
+        ``open_interest`` snapshot is preserved per bar.
+    OPTIONS
+        An ``FNO`` ``CE`` / ``PE`` contract. Intraday is NEVER materialised —
+        an explicit, honest no-op (on-demand only).
+    """
+
+    SPOT = "spot"
+    FUTURES = "futures"
+    OPTIONS = "options"
+
+
+def prebuild_kind_for(instrument: Instrument) -> PrebuildKind:
+    """Classify an instrument's intraday pre-build kind (DEC-PREBUILD-SELECT-001).
+
+    Pure (no I/O) — derives the kind from the instrument's
+    :class:`~brutex.models.Segment` + :class:`~brutex.models.InstrumentType`:
+
+    * ``FNO`` ``CE`` / ``PE`` → :attr:`PrebuildKind.OPTIONS` (no intraday).
+    * ``FNO`` ``FUT`` (or any other F&O type) → :attr:`PrebuildKind.FUTURES`
+      (OI-aware). The non-CE/PE F&O fallback is FUTURES so a forward-compat F&O
+      type can never silently route through the OI-dropping SPOT resampler.
+    * everything else (``INDEX`` / ``CASH`` spot) → :attr:`PrebuildKind.SPOT`.
+    """
+    from brutex.models import InstrumentType, Segment
+
+    if instrument.segment is Segment.FNO:
+        if instrument.instrument in (InstrumentType.CE, InstrumentType.PE):
+            return PrebuildKind.OPTIONS
+        return PrebuildKind.FUTURES
+    return PrebuildKind.SPOT
+
+
+def intraday_resampler_for(
+    kind: PrebuildKind,
+) -> Callable[[pl.DataFrame], dict[str, pl.DataFrame]] | None:
+    """Return the intraday resampler for a pre-build *kind*, or ``None`` for OPTIONS.
+
+    The single COMMON routing point (CLAUDE.md §11) from a
+    :class:`PrebuildKind` to the canonical resampler:
+
+    * :attr:`PrebuildKind.SPOT` → :func:`brutex.data.spot_resample.derive_intraday_tfs`
+      (byte-identical to the pre-DEC-PREBUILD-SELECT-001 default — spot output
+      is unchanged).
+    * :attr:`PrebuildKind.FUTURES` → :func:`brutex.data.fno_resample.derive_fno_intraday_tfs`
+      (OI-aware — preserves ``open_interest``).
+    * :attr:`PrebuildKind.OPTIONS` → ``None`` (intraday is on-demand, never
+      materialised).
+    """
+    if kind is PrebuildKind.SPOT:
+        from brutex.data.spot_resample import derive_intraday_tfs
+
+        return derive_intraday_tfs
+    if kind is PrebuildKind.FUTURES:
+        from brutex.data.fno_resample import derive_fno_intraday_tfs
+
+        return derive_fno_intraday_tfs
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,13 +191,15 @@ def materialize_timeframes(
     tfs: Iterable[str],
     read_1m: Callable[[], pl.DataFrame],
     write_tf: Callable[[str, pl.DataFrame], int],
+    resampler: Callable[[pl.DataFrame], dict[str, pl.DataFrame]] | None = None,
 ) -> MaterializeResult:
     """Resample stored 1-minute bars → write each selected derived timeframe.
 
     Reads the symbol's 1-minute bars **once** (via *read_1m*), resamples them
-    to the 19 derived intraday timeframes via the REUSED
-    :func:`~brutex.data.spot_resample.derive_intraday_tfs`, then writes each
-    **requested** timeframe present in that derivation via *write_tf*. A
+    to the 19 derived intraday timeframes via the injected *resampler* (default
+    :func:`~brutex.data.spot_resample.derive_intraday_tfs`, the SPOT path —
+    byte-identical to the pre-DEC-PREBUILD-SELECT-001 behaviour), then writes
+    each **requested** timeframe present in that derivation via *write_tf*. A
     requested label with no derived frame (unknown / non-storable) is recorded
     in :attr:`MaterializeResult.skipped`, never written. Pure orchestration —
     all lake / disk I/O is injected, so this is 100% unit-testable.
@@ -136,22 +219,33 @@ def materialize_timeframes(
         ``(tf_label, frame) -> bar_count`` callable that persists one
         resampled frame to its own stored interval partition and returns the
         number of bars written. Injected so the core never touches the sink.
+    resampler
+        The ``df_1m -> {tf_label: frame}`` intraday derivation (SEGMENT-AWARE,
+        DEC-PREBUILD-SELECT-001). ``None`` (the default) selects the SPOT
+        resampler so an un-parametrised call is byte-for-byte unchanged; an
+        F&O futures caller passes the OI-aware
+        :func:`brutex.data.fno_resample.derive_fno_intraday_tfs` (typically via
+        :func:`intraday_resampler_for`). OPTIONS never reach this function —
+        their intraday is on-demand.
 
     Returns
     -------
     MaterializeResult
         The per-timeframe written bar counts + the skipped labels.
     """
-    # Local import keeps the module's import graph free of polars for callers
-    # that only need the dataclass / the interval map (CLAUDE.md §11 lazy dep,
-    # mirroring spot_resample's own polars-only-when-used discipline).
-    from brutex.data.spot_resample import derive_intraday_tfs
+    if resampler is None:
+        # Local import keeps the module's import graph free of polars for callers
+        # that only need the dataclass / the interval map (CLAUDE.md §11 lazy dep,
+        # mirroring spot_resample's own polars-only-when-used discipline).
+        from brutex.data.spot_resample import derive_intraday_tfs
+
+        resampler = derive_intraday_tfs
 
     # De-dup preserving first-seen order — O(1) uniqueness, deterministic order
     # (CLAUDE.md §5 / §7). A duplicate label derives + writes exactly once.
     requested = tuple(dict.fromkeys(tfs))
 
-    derived = derive_intraday_tfs(read_1m())
+    derived = resampler(read_1m())
 
     written: dict[str, int] = {}
     skipped: list[str] = []
@@ -165,13 +259,69 @@ def materialize_timeframes(
     return MaterializeResult(written=written, skipped=tuple(skipped))
 
 
+def materialize_lake_timeframes(
+    *,
+    lake_root: Path,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    kind: PrebuildKind,
+    tfs: Iterable[str] = MATERIALIZABLE_TFS,
+) -> MaterializeResult:
+    """SEGMENT-AWARE materialise of ONE lake partition's intraday TFs (DEC-PREBUILD-SELECT-001).
+
+    The ONE shared primitive (CLAUDE.md §11 COMMON) behind every pre-build call
+    site — the manual ``/universe/derive-timeframes`` route, the pipeline's gated
+    final pre-build, and the pull-settle auto-derive — replacing the byte-near
+    copies that each rebuilt the read/write builders + chose the resampler inline.
+    Given a lake partition's coordinates + its :class:`PrebuildKind`, it:
+
+    * picks the resampler via :func:`intraday_resampler_for`
+      (SPOT → OI-dropping spot resampler; FUTURES → OI-aware F&O resampler);
+    * reads the 1-minute base with the OI column ONLY for FUTURES
+      (``with_open_interest=kind is PrebuildKind.FUTURES``), so a spot partition's
+      output is byte-identical to before;
+    * writes each derived TF (the writer carries OI when the frame has it).
+
+    Raises :class:`ValueError` for :attr:`PrebuildKind.OPTIONS` — option intraday
+    is on-demand and must never be materialised; the gated orchestrator skips
+    OPTIONS before reaching here, so this is a defensive guard for a misuse.
+
+    Returns the per-TF written counts. Raw lake I/O is composed from the
+    ``# pragma: no cover`` builders; integration-tested by the round-trip test.
+    """
+    resampler = intraday_resampler_for(kind)
+    if resampler is None:
+        raise ValueError(
+            f"{symbol}: options intraday is on-demand (TB-scale) and is never materialised"
+        )
+    return materialize_timeframes(
+        tfs=tfs,
+        read_1m=make_lake_read_1m(
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            with_open_interest=kind is PrebuildKind.FUTURES,
+        ),
+        write_tf=make_lake_write_tf(
+            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+        ),
+        resampler=resampler,
+    )
+
+
 __all__ = [
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
     "MaterializeResult",
+    "PrebuildKind",
+    "intraday_resampler_for",
     "make_lake_read_1m",
     "make_lake_write_tf",
+    "materialize_lake_timeframes",
     "materialize_timeframes",
+    "prebuild_kind_for",
 ]
 
 
@@ -181,19 +331,25 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     exchange: str,
     segment: str,
     symbol: str,
+    with_open_interest: bool = False,
 ) -> Callable[[], pl.DataFrame]:
     """Build the injected 1-minute reader for :func:`materialize_timeframes`.
 
     Returns a zero-arg callable that reads the symbol's stored ``1minute``
-    Parquet partitions into a sorted :class:`polars.DataFrame` with exactly
-    the columns the resampler requires (``ts_utc, open, high, low, close,
-    volume``). Raw lake I/O — ``# pragma: no cover``; exercised by
-    ``tests/integration/test_timeframe_materialize_roundtrip.py``. Moved
-    here from the dashboard route glue (DEC-TF-MATERIALIZE-002) so the
+    Parquet partitions into a sorted :class:`polars.DataFrame` with the columns
+    the resampler requires (``ts_utc, open, high, low, close, volume``; plus
+    ``open_interest`` when *with_open_interest* is set, for the OI-aware F&O
+    futures path — DEC-PREBUILD-SELECT-001). Raw lake I/O — ``# pragma: no
+    cover``; exercised by ``tests/integration/test_timeframe_materialize_roundtrip.py``.
+    Moved here from the dashboard route glue (DEC-TF-MATERIALIZE-002) so the
     manual route AND the pull-settle auto-derive share ONE builder
     (CLAUDE.md §11 COMMON).
     """
     import polars as pl
+
+    columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
+    if with_open_interest:
+        columns = (*columns, "open_interest")
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -203,11 +359,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
                 "pull the 1-minute spot first, then derive timeframes"
             )
         df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
-        return (
-            df.rename({"timestamp": "ts_utc"})
-            .select("ts_utc", "open", "high", "low", "close", "volume")
-            .sort("ts_utc")
-        )
+        return df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
 
     return _read
 
@@ -223,11 +375,14 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
 
     Returns a ``(tf_label, frame) -> bars_written`` callable that converts the
     resampled polars frame's rows to :class:`~brutex.data.models.CandleBar`
-    objects (``open_interest=0`` for spot) and appends them to the lake via a
+    objects and appends them to the lake via a
     :class:`~brutex.data.sink.ParquetBarSink` under the TF's own stored interval
-    partition (:data:`INTRADAY_TF_INTERVALS`). The sink snaps prices to the
-    2-decimal tick grid + merges idempotently by ``(year, month)`` (CLAUDE.md §7
-    / DEC-SPOT-PRICE-2DP-001). Raw lake I/O — ``# pragma: no cover``; exercised
+    partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
+    the resampled frame when the OI-aware F&O futures resampler emitted it
+    (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
+    have no OI column). The sink snaps prices to the 2-decimal tick grid +
+    merges idempotently by ``(year, month)`` (CLAUDE.md §7 /
+    DEC-SPOT-PRICE-2DP-001). Raw lake I/O — ``# pragma: no cover``; exercised
     by the round-trip integration test. Moved here from the dashboard route
     glue (DEC-TF-MATERIALIZE-002) — one builder for every caller.
     """
@@ -241,6 +396,19 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
 
     def _write(tf_label: str, frame: pl.DataFrame) -> int:
         interval = INTRADAY_TF_INTERVALS[tf_label]
+        has_oi = "open_interest" in frame.columns
+
+        def _oi(row: dict[str, Any]) -> int:
+            # OI-aware F&O futures path: carry the bucket's snapshot OI (Int64 →
+            # int). A spot frame has no OI column (→ 0, the spot convention); a
+            # present-but-null OI bucket also maps to 0 (CandleBar.open_interest is
+            # int|None but the lake stored 0 for spot, so 0 is the consistent
+            # absent value).
+            if not has_oi:
+                return 0
+            value = row["open_interest"]
+            return 0 if value is None else int(value)
+
         bars = [
             CandleBar(
                 timestamp=row["ts_utc"],
@@ -249,7 +417,7 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
                 low=Decimal(str(row["low"])),
                 close=Decimal(str(row["close"])),
                 volume=int(row["volume"]),
-                open_interest=0,
+                open_interest=_oi(row),
             )
             for row in frame.iter_rows(named=True)
         ]
