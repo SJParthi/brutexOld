@@ -580,7 +580,7 @@ def test_derive_timeframes_success_reports_written_and_skipped(
     received: list[tuple[str, ...]] = []
 
     def _fake_materialize(
-        *, tfs: tuple[str, ...], read_1m: Any, write_tf: Any
+        *, tfs: tuple[str, ...], read_1m: Any, write_tf: Any, resampler: Any = None
     ) -> MaterializeResult:
         received.append(tuple(tfs))
         return MaterializeResult(written={"5m": 3, "15m": 1}, skipped=("bogus",))

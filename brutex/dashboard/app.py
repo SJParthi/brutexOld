@@ -95,6 +95,7 @@ from brutex.dashboard.fno_cascade import (
     build_fno_cascade,
     contract_to_json,
 )
+from brutex.dashboard.gated_prebuild import run_gated_prebuild
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -180,9 +181,12 @@ from brutex.data.master_integrity import report_from_dict as master_report_from_
 from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
+    PrebuildKind,
+    intraday_resampler_for,
     make_lake_read_1m,
     make_lake_write_tf,
     materialize_timeframes,
+    prebuild_kind_for,
 )
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
@@ -2611,24 +2615,37 @@ def build_app(
 
     @app.post("/api/v1/universe/derive-timeframes")
     async def api_universe_derive_timeframes(
-        symbol: str = Query(...),
+        symbol: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
         tfs: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/derive-timeframes — MANUAL derived-TF materialise.
 
-        Resamples the symbol's STORED 1-minute bars to each selected derived
+        Resamples each selected symbol's STORED 1-minute bars to each derived
         intraday timeframe and writes each as its OWN stored interval partition,
         so the brute-force sweep then reads a 5m / 15m / 60m bar in O(1) (a
         direct Parquet read) instead of re-resampling 1m ~33 billion times
         (DEC-TF-MATERIALIZE-001). **Manual trigger only** — never automatic.
 
+        SEGMENT-AWARE + GATED (DEC-PREBUILD-SELECT-001). A ``?symbols=`` comma
+        list runs a GATED multi-symbol pre-build in the order **SPOT → FUTURES →
+        OPTIONS** (advance only when the current phase FULLY succeeds; the first
+        failing phase HALTS the run). SPOT uses the OI-dropping spot resampler;
+        FUTURES uses the OI-aware F&O resampler; OPTIONS intraday is NEVER
+        materialised (TB-scale, on-demand only) — an explicit, reported no-op.
+        A single ``?symbol=`` keeps the original ``{written, skipped,
+        total_bars}`` shape (back-compat), now also segment-aware.
+
         Query parameters
         ----------------
         symbol
-            The engine ``symbol_name`` / vendor ``SECURITY_ID`` the universe grid
-            sends; resolved to an instrument (and its lake exchange/segment/
-            symbol partition coordinates) via the store. An unknown symbol is a
-            400 (DEC-PULL-ERROR-VISIBILITY-001).
+            A single engine ``symbol_name`` / vendor ``SECURITY_ID``. Resolved to
+            its instrument + lake coordinates via the store. An unknown symbol is
+            a 400 (DEC-PULL-ERROR-VISIBILITY-001).
+        symbols
+            A comma list of ids (the ticked many). Takes precedence over
+            ``symbol``; runs the gated multi-symbol pre-build. An empty / unknown
+            selection fails closed (400).
         tfs
             A comma-separated list of TF labels (e.g. ``5m,15m,60m``). Omitted ⇒
             every materialisable timeframe (:data:`MATERIALIZABLE_TFS`). A
@@ -2637,15 +2654,12 @@ def build_app(
 
         Returns
         -------
-        JSON ``{"written": {tf: bars}, "skipped": [...], "total_bars": <int>}``.
+        Single-symbol: JSON ``{"written": {tf: bars}, "skipped": [...],
+        "total_bars": <int>}``. Multi-symbol (``?symbols=``): the gated report
+        ``{"gated": true, "ok", "halted_after", "source", "total_bars",
+        "phases": [...]}``.
         """
         store = _require_store()
-        instrument = store.get(symbol)
-        if instrument is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown security_id {symbol!r} — not in the instrument store",
-            )
         # Parse the comma list (blank entries dropped); omitted ⇒ all storable.
         requested: tuple[str, ...] = (
             tuple(t for t in (s.strip() for s in tfs.split(",")) if t)
@@ -2653,26 +2667,101 @@ def build_app(
             else MATERIALIZABLE_TFS
         )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=False)
-        exchange = instrument.exch_id.value
-        segment = instrument.segment.value
-        sym = instrument.symbol_name
-        _LOG.info(
-            "universe.derive_timeframes.requested",
-            symbol=sym,
-            exchange=exchange,
-            segment=segment,
-            tfs=list(requested),
-        )
-        try:
-            result = materialize_timeframes(
+
+        def _materialize_one(instrument: Instrument) -> Any:
+            """Segment-aware materialise of ONE instrument (DEC-PREBUILD-SELECT-001)."""
+            kind = prebuild_kind_for(instrument)
+            resampler = intraday_resampler_for(kind)
+            if resampler is None:  # OPTIONS — never reached (gated phase no-ops)
+                raise ValueError(  # pragma: no cover — defensive; OPTIONS never materialises
+                    f"{instrument.symbol_name}: options intraday is on-demand, not materialised"
+                )
+            exchange = instrument.exch_id.value
+            segment = instrument.segment.value
+            sym = instrument.symbol_name
+            # FUTURES needs the OI column read so the OI-aware resampler can carry it.
+            with_oi = kind is PrebuildKind.FUTURES
+            return materialize_timeframes(
                 tfs=requested,
                 read_1m=_make_read_1m(
-                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=sym
+                    lake_root=lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=sym,
+                    with_open_interest=with_oi,
                 ),
                 write_tf=_make_write_tf(
                     lake_root=lake_root, exchange=exchange, segment=segment, symbol=sym
                 ),
+                resampler=resampler,
             )
+
+        # ── Multi-symbol GATED path (DEC-PREBUILD-SELECT-001) ──────────────────
+        if symbols is not None:
+            try:
+                targets, source = resolve_pull_targets(
+                    symbols=symbols,
+                    symbol=None,
+                    lookup=store.get,
+                    whole_universe=lambda: (
+                        _select_bulk_targets("index") + _select_bulk_targets("stock")
+                    ),
+                )
+            except ValueError as exc:  # empty / unknown selection — fail closed
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            _LOG.info(
+                "universe.derive_timeframes.gated_requested",
+                source=source,
+                count=len(targets),
+                tfs=list(requested),
+            )
+            report = run_gated_prebuild(
+                targets=targets,
+                materialize_one=_materialize_one,
+                source=source,
+            )
+            # New partitions on disk; let the next coverage poll rediscover them.
+            _summary_cache.mark_dirty()
+            return JSONResponse({"gated": True, **report.to_dict()})
+
+        # ── Single-symbol back-compat path ────────────────────────────────────
+        if symbol is None:
+            raise HTTPException(
+                status_code=400,
+                detail="provide ?symbol=<id> or ?symbols=<csv>",
+            )
+        instrument = store.get(symbol)
+        if instrument is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown security_id {symbol!r} — not in the instrument store",
+            )
+        sym = instrument.symbol_name
+        kind = prebuild_kind_for(instrument)
+        _LOG.info(
+            "universe.derive_timeframes.requested",
+            symbol=sym,
+            exchange=instrument.exch_id.value,
+            segment=instrument.segment.value,
+            kind=kind.value,
+            tfs=list(requested),
+        )
+        if intraday_resampler_for(kind) is None:
+            # OPTIONS: intraday is on-demand — an explicit, honest no-op.
+            _LOG.info("universe.derive_timeframes.options_noop", symbol=sym)
+            return JSONResponse(
+                {
+                    "written": {},
+                    "skipped": [],
+                    "total_bars": 0,
+                    "note": (
+                        "options intraday: on-demand (not materialised) — TB-scale, "
+                        "the brute-force engine never reads option intraday"
+                    ),
+                }
+            )
+        try:
+            result = _materialize_one(instrument)
         except Exception as exc:  # surface the REAL reason, never swallow it
             _LOG.exception(
                 "universe.derive_timeframes.failed",
