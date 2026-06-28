@@ -1960,6 +1960,49 @@ class TestSuspiciousEmptyFlag:
         warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
         assert len(warns) == 1 and warns[0]["underlying"] == repr("NIFTY")
 
+    def test_run_ingest_skips_scan_in_async_pipeline_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MAJOR-3 regression: in async-pipeline mode the all-empty scan is SKIPPED.
+
+        With a ``fetch_pipeline`` wired, each pair's ``IngestReport`` is producer-resolved with
+        ``bars_appended == 0`` (the real counts are folded onto the pipeline totals by the
+        BACKGROUND consumer, not known synchronously). Scanning now would see EVERY pair as
+        0-bars → a false ``pull.underlying_all_empty`` flood for the whole universe. The fix
+        skips the scan entirely when a pipeline is active. The scan helper must NOT even be
+        called (proven by a spy that raises if it runs).
+        """
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        cs = [
+            _ce("NSE-NIFTY-02Jan25-28500-CE"),
+            _ce("NSE-NIFTY-02Jan25-28200-CE"),
+            _ce("NSE-NIFTY-02Jan25-28150-CE"),
+        ]
+
+        def _must_not_scan(*_a: object, **_k: object) -> AllEmptyScan:
+            raise AssertionError("scan_underlying_all_empty must NOT run in pipeline mode")
+
+        monkeypatch.setattr(_oi, "scan_underlying_all_empty", _must_not_scan)
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            with capture_logs() as logs:
+                run_groww_option_ingest(
+                    _client(_FakeSDK(payload=_candles())),
+                    _Sink(),
+                    contracts=cs,
+                    intervals=["1day"],
+                    start=date(2024, 1, 1),
+                    end=date(2024, 1, 2),
+                    now_ist=_now,
+                    fetch_pipeline=pipeline,
+                )
+        finally:
+            pipeline.drain()
+        # NO false all-empty WARNING (the scan never ran) and NO scan-error event either.
+        assert not any(r["event"] == UNDERLYING_ALL_EMPTY_EVENT for r in logs)
+        assert not any(r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT for r in logs)
+
     def test_run_ingest_scan_error_is_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The observe-only scan raising must NEVER break the pull — it logs an error event
         # and the report still returns.

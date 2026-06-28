@@ -251,6 +251,18 @@ class TestPullCandlesDryRun:
         assert report.dry_run is True
         assert report.symbol == "13"
 
+    def test_pull_candles_drains_fetch_pipeline_before_write_consumer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MAJOR-4 regression (pull_candles twin): pipeline drained BEFORE the write consumer."""
+        import brutex.dashboard.pull_controller as pc
+
+        order: list[str] = []
+        monkeypatch.setattr(pc, "_drain_fetch_pipeline", lambda _p: order.append("fetch_pipeline"))
+        monkeypatch.setattr(pc, "_drain_write_consumer", lambda _c: order.append("write_consumer"))
+        pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
+        assert order == ["fetch_pipeline", "write_consumer"]
+
     def test_covers_fetched_intervals(self, tmp_path: Path) -> None:
         report = pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
         # The PRODUCTION default fetches 1-minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001);
@@ -576,6 +588,24 @@ class TestPullAllSpot:
         assert report.total_symbols == 0
         assert report.total_completed == 0
         assert report.to_dict()["symbols"] == []
+
+    def test_drains_fetch_pipeline_before_write_consumer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MAJOR-4 regression: the fetch pipeline is drained BEFORE the write consumer.
+
+        A pipeline consumer's tail FEEDS the write consumer, so draining the write consumer
+        first could lose a late write a still-running pipeline consumer emits. The pull's
+        ``finally`` must drain the pipeline (every queued tail run) FIRST, then the write
+        consumer. Spy on the two module-private drain helpers + assert the call order.
+        """
+        import brutex.dashboard.pull_controller as pc
+
+        order: list[str] = []
+        monkeypatch.setattr(pc, "_drain_fetch_pipeline", lambda _p: order.append("fetch_pipeline"))
+        monkeypatch.setattr(pc, "_drain_write_consumer", lambda _c: order.append("write_consumer"))
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert order == ["fetch_pipeline", "write_consumer"]
 
     def test_auto_retry_on_clean_dry_run_is_noop(self, tmp_path: Path) -> None:
         # The "Retry failed windows" button path (auto_retry=True): a clean

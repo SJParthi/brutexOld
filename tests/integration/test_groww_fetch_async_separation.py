@@ -281,6 +281,53 @@ class TestSettleAfterDurable:
         assert _spot_part(lake2, year=2021, month=1).exists()
 
 
+# ───────────────────── tail-side transient (PartitionLockTimeout) ───────────────────
+
+
+class TestTailTransientAsync:
+    def test_partition_lock_timeout_in_async_tail_is_counted_not_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """MAJOR-2 regression: a tail-side ``PartitionLockTimeout`` in async mode is COUNTED.
+
+        A wedged peer holding the cross-process partition lock past the deadline makes
+        ``sink.append`` raise ``PartitionLockTimeout`` INSIDE the consumer tail. The tail DEFERS
+        the window (records FAILED) and returns a transient outcome; the producer's ``_run_tail``
+        must fold it into the pipeline's tail-transient tally so it is SURFACED at drain and the
+        across-pull retry round re-pulls it. Before the fix the transient was silently dropped
+        (folded as 0 bars, never counted) so the window vanished for the round.
+        """
+        from brutex.data.errors import PartitionLockTimeout
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+
+        class _LockTimeoutSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                raise PartitionLockTimeout(timeout_seconds=0.5)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        ingest_spot(
+            _DayAdapter(),  # type: ignore[arg-type]
+            _LockTimeoutSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+            instrument=_inst(),
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 2, 1),
+            ledger=ledger,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+        # A transient must NOT trip the pool-wide stop (it is OUR contention, not a fatal halt) —
+        # drain is clean (no re-raise).
+        pipeline.drain()
+        # The deferred window is COUNTED (surfaced at drain), not silently dropped.
+        assert pipeline.tail_transients >= 1
+        # The window's ledger row is FAILED (deferred) — never SUCCESS — so it re-pulls next round.
+        statuses = {r.status for r in ledger.records()}
+        assert "SUCCESS" not in statuses
+
+
 # ───────────────────────── ISOLATION PROOF (centerpiece) ─────────────────────────
 
 
@@ -463,6 +510,33 @@ class TestOptionTwin:
         assert pipeline.totals[1] == 2  # the consumer folded 2 bars
         assert {r.status for r in ledger.records()} == {"SUCCESS"}
         assert _read_all_spot(sync_lake) == _read_all_spot(pipe_lake)
+
+    def test_option_tail_partition_lock_timeout_counted_not_dropped(self, tmp_path: Path) -> None:
+        """MAJOR-2 option twin: a tail-side ``PartitionLockTimeout`` is COUNTED, not dropped."""
+        from brutex.data.errors import PartitionLockTimeout
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+
+        class _LockTimeoutSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                raise PartitionLockTimeout(timeout_seconds=0.5)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4)
+        ingest_option_contract(
+            GrowwClient(sdk=_OptionSDK(), sleep=lambda _s: None, max_attempts=1),
+            _LockTimeoutSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+            contract=_contract(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 3),
+            ledger=ledger,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+        pipeline.drain()  # a transient does not trip the pool-wide stop → clean drain
+        assert pipeline.tail_transients >= 1
+        assert "SUCCESS" not in {r.status for r in ledger.records()}
 
 
 # ─────────────────────── isolation under a REAL pool runner ──────────────────────

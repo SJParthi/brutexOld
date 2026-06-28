@@ -597,6 +597,12 @@ def _ingest_one_window(
     # error) is captured by the pipeline + re-raised on a later submit / drain.
     pipeline = fetch_pipeline
 
+    # The per-series reconcile key MUST equal the key the spine stores this series'
+    # ``IngestReport`` under (``run_ingest`` keys spot pairs by ``(symbol_name, interval)``), so
+    # the controller's post-drain reconcile lines up the folded consumer totals with the right
+    # deferred report (the completion-count fix).
+    series_key = (instrument.symbol_name, interval)
+
     def _run_tail(_tail: FetchTail) -> None:
         result_outcome = _process_window_tail(
             sink,
@@ -606,9 +612,18 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
         )
+        if result_outcome.transient:
+            # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
+            # cross-process lock past the deadline). Surface it via the pipeline's tail-transient
+            # tally so it is counted + reported at drain and the across-pull retry round still
+            # fires — otherwise an async-mode tail-transient was silently dropped (MAJOR-2 fix).
+            # The window's ledger row is already recorded FAILED, so a re-pull re-fetches it.
+            pipeline.fold_tail_transient(series_key)
+            return
         pipeline.fold_totals(
             bars_appended=result_outcome.bars_appended,
             conflicts=result_outcome.conflicts,
+            series_key=series_key,
         )
 
     tail = FetchTail(

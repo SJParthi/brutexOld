@@ -112,6 +112,7 @@ __all__ = [
     "FetchPipeline",
     "FetchTail",
     "RawFetchResult",
+    "SeriesTotals",
     "resolve_fetch_pipeline_size",
 ]
 
@@ -152,6 +153,12 @@ _WATCHDOG_POLL_SECONDS: float = 1.0
 #: rather than hanging the pull's ``finally`` forever. The daemon thread does not keep the
 #: process alive, so a reported-but-unjoined thread can never wedge shutdown.
 _DEFAULT_DRAIN_JOIN_TIMEOUT_SECONDS: float = 60.0
+
+#: How long a consumer blocks on each ``queue.get`` before re-checking the ``_draining`` flag
+#: (seconds). Small so a consumer whose poison-pill could NOT be enqueued (a FULL queue while a
+#: PEER consumer is wedged) still notices the drain promptly and exits once its queue empties —
+#: the producer-side poison is best-effort, the timed re-check is the guaranteed exit path.
+_CONSUMER_GET_POLL_SECONDS: float = 0.5
 
 #: Environment KILL-SWITCH for the FULL async fetch/process separation.
 #: DEFAULT ON: the async pipeline is the production default (operator-authorized 2026-06-28,
@@ -231,6 +238,35 @@ class FetchTail:
     shard_key: str
     process: Callable[[FetchTail], None] = field(compare=False)
     raw_bars: Sequence[CandleBar] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesTotals:
+    """The post-drain consumer totals for ONE ``(symbol, interval)`` series (async-mode fold).
+
+    In async-pipeline mode the producer returns a DEFERRED per-series ``IngestReport`` with
+    ``bars_appended == 0`` (the real durable work runs on a BACKGROUND consumer, not known
+    synchronously). The consumer folds its outcome here keyed by ``(symbol, interval)``; after
+    :meth:`FetchPipeline.drain` the controller RECONCILES each per-series report with these
+    totals so the async-mode reported ``completed`` / ``bars`` / verdict equal the synchronous
+    path's (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix). Without this the
+    controller read ``bars_appended == 0`` for EVERY series and falsely reported
+    ``completed == 0`` even though every bar was durably written.
+
+    Attributes
+    ----------
+    bars_appended
+        Total bars the consumer durably appended for this series.
+    conflicts
+        Total keep-first vendor re-statements detected for this series.
+    transient
+        Tail-side transient defers (``PartitionLockTimeout``) for this series — the async
+        ``still_failed_windows`` so the across-pull retry round still re-pulls them.
+    """
+
+    bars_appended: int = 0
+    conflicts: int = 0
+    transient: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +375,19 @@ class FetchPipeline:
         self._processed = 0
         self._bars_appended = 0
         self._conflicts = 0
+        # Tail-side transient defers (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-2 fix): a
+        # ``PartitionLockTimeout`` raised INSIDE a consumer's tail (a wedged peer held the
+        # cross-process partition lock past the deadline) is folded here so the deferred window
+        # is COUNTED + surfaced at drain — otherwise an async-mode tail-transient was silently
+        # dropped (neither in-run retried nor counted in ``still_failed_windows``), so the
+        # across-pull retry never re-pulled it. A transient does NOT trip the pool-wide stop
+        # (it is OUR contention, not a fatal halt) — the window re-pulls next round.
+        self._tail_transients = 0
+        # Per-series consumer totals keyed by ``(symbol, interval)`` (the producer passes the
+        # series key when it folds). After :meth:`drain` the controller reconciles each deferred
+        # per-series ``IngestReport`` with these so the async-mode reported completed/bars/verdict
+        # equal the synchronous path's (the completion-count fix). A defaultdict-free accumulate.
+        self._series: dict[tuple[str, str], SeriesTotals] = {}
         self._totals_lock = threading.Lock()
         # STALL WATCHDOG state (all under ``_progress_lock``): ``_submitted`` / ``_completed``
         # count windows enqueued vs tail-finished (in flight = submitted − completed); the
@@ -350,8 +399,18 @@ class FetchPipeline:
         self._last_progress = monotonic()
         self._stall_fired = False
         self._progress_lock = threading.Lock()
-        # Watchdog shutdown signal — set at drain so the watchdog thread exits its poll loop.
+        # Watchdog shutdown signal — set AFTER the bounded join at drain so the stall watchdog
+        # stays ALIVE across the (possibly-wedged) drain join and can still surface a stuck
+        # consumer (the BLOCKER fix: stopping it FIRST blinded the watchdog exactly when a wedge
+        # mattered most).
         self._watchdog_stop = threading.Event()
+        # DRAIN signal — set at the START of :meth:`drain` so a consumer that could NOT receive
+        # its poison-pill (its queue was FULL because a PEER consumer is wedged on ``sink.append``
+        # and the producer's bounded poison ``put`` was skipped) still notices the drain on its
+        # next timed ``queue.get`` and exits once its own queue empties. The guaranteed-exit
+        # companion to the best-effort producer-side poison (the BLOCKER fix: an UNBOUNDED
+        # ``q.put(poison)`` blocked drain forever when the queue was full).
+        self._draining = threading.Event()
         self._threads = [
             threading.Thread(
                 target=self._run_consumer,
@@ -373,23 +432,81 @@ class FetchPipeline:
         """Number of consumer threads (``M``)."""
         return self._workers
 
-    def fold_totals(self, *, bars_appended: int, conflicts: int) -> None:
+    def fold_totals(
+        self, *, bars_appended: int, conflicts: int, series_key: tuple[str, str] | None = None
+    ) -> None:
         """Thread-safe fold of ONE processed window's bars/conflicts into the pull totals.
 
         Called by ``_process_window_tail`` (on a consumer thread) after a durable append, so
-        the pull-level observability totals reflect every deferred window. O(1) under the
-        totals lock.
+        the pull-level observability totals reflect every deferred window AND — when
+        *series_key* (``(symbol, interval)``) is given — the per-series totals the controller
+        reconciles after drain (the completion-count fix). O(1) under the totals lock.
         """
         with self._totals_lock:
             self._processed += 1
             self._bars_appended += bars_appended
             self._conflicts += conflicts
+            if series_key is not None:
+                self._accumulate_series(
+                    series_key, bars_appended=bars_appended, conflicts=conflicts
+                )
+
+    def fold_tail_transient(self, series_key: tuple[str, str] | None = None) -> None:
+        """Thread-safe fold of ONE tail-side transient defer (a ``PartitionLockTimeout``).
+
+        Called by ``_process_window_tail`` (on a consumer thread) when the durable append was
+        DEFERRED by a wedged-peer cross-process lock past the deadline. Counts the deferred
+        window so it is surfaced at :meth:`drain`, attributed to its *series_key*
+        (``(symbol, interval)``) for the controller's post-drain reconcile, and the across-pull
+        retry round still fires — without it, an async-mode tail-transient was silently dropped
+        (MAJOR-2 fix). A transient is a normal still-processed window (it advanced +
+        ledger-recorded FAILED), so it is also counted as processed for the watchdog/observability
+        totals; it is NOT a pool-wide stop. O(1) under the totals lock.
+        """
+        with self._totals_lock:
+            self._processed += 1
+            self._tail_transients += 1
+            if series_key is not None:
+                self._accumulate_series(series_key, transient=1)
+
+    def _accumulate_series(
+        self,
+        series_key: tuple[str, str],
+        *,
+        bars_appended: int = 0,
+        conflicts: int = 0,
+        transient: int = 0,
+    ) -> None:
+        """Fold one window's outcome into the per-series totals (caller holds ``_totals_lock``)."""
+        prior = self._series.get(series_key, SeriesTotals())
+        self._series[series_key] = SeriesTotals(
+            bars_appended=prior.bars_appended + bars_appended,
+            conflicts=prior.conflicts + conflicts,
+            transient=prior.transient + transient,
+        )
 
     @property
     def totals(self) -> tuple[int, int, int]:
         """The pull-level ``(processed_windows, bars_appended, conflicts)`` so far (thread-safe)."""
         with self._totals_lock:
             return (self._processed, self._bars_appended, self._conflicts)
+
+    @property
+    def tail_transients(self) -> int:
+        """Tail-side transient defers folded so far — the async ``still_failed_windows`` (safe)."""
+        with self._totals_lock:
+            return self._tail_transients
+
+    def per_series_totals(self) -> dict[tuple[str, str], SeriesTotals]:
+        """A snapshot copy of the per-``(symbol, interval)`` consumer totals (thread-safe).
+
+        The controller calls this AFTER :meth:`drain` to RECONCILE each deferred per-series
+        ``IngestReport`` (which read ``bars_appended == 0`` in async mode) with the real durable
+        counts the background consumers folded — so the async-mode reported completed/bars/verdict
+        equal the synchronous path's (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix).
+        """
+        with self._totals_lock:
+            return dict(self._series)
 
     def submit(self, result: RawFetchResult) -> None:
         """Route *result* to its series shard; block ONLY on back-pressure, never on durability.
@@ -429,10 +546,24 @@ class FetchPipeline:
         captured into the pool-wide stop (so the producer + drain re-raise it) — never
         swallowed. The consumer thread stays alive to drain the rest of its queue (so no
         producer blocks forever on a full queue), settling subsequent windows fail-fast.
+
+        The ``queue.get`` is TIMED (``_CONSUMER_GET_POLL_SECONDS``) so a consumer whose
+        poison-pill could NOT be enqueued — its queue was FULL because a PEER consumer is
+        wedged on ``sink.append`` and the producer's bounded poison ``put`` was skipped — still
+        notices :attr:`_draining` and exits once its OWN queue drains (the guaranteed-exit
+        companion to the best-effort producer poison; the BLOCKER fix).
         """
         q = self._queues[shard]
         while True:
-            item = q.get()
+            try:
+                item = q.get(timeout=_CONSUMER_GET_POLL_SECONDS)
+            except queue.Empty:
+                # No work right now: if the pull is draining, an empty queue means this
+                # consumer is done (every still-queued window has been processed). Exit even
+                # without a poison-pill (it may never have been enqueued on a full queue).
+                if self._draining.is_set():
+                    return
+                continue
             if item is self._poison:
                 return
             # `item` is a RawFetchResult here: the queue only ever carries a RawFetchResult
@@ -527,26 +658,49 @@ class FetchPipeline:
 
         Called ONCE at pull end (producers already stopped submitting) BEFORE the final
         ledger flush, so every still-queued window is processed + ledger-recorded before the
-        ledger persists (settle-after-durable at pull granularity). Sends one poison-pill per
-        shard AFTER the queued work so every still-queued :class:`RawFetchResult` is processed
-        (unless the pool already hard-stopped, in which case the remaining windows are dropped
-        fail-fast — they re-fetch next pull), then joins each thread. After :meth:`drain`
-        returns, if a consumer captured a failure (e.g. a
+        ledger persists (settle-after-durable at pull granularity). Sets :attr:`_draining`
+        then delivers one poison-pill per shard via a BOUNDED, NON-BLOCKING ``put`` so every
+        still-queued :class:`RawFetchResult` is processed (unless the pool already hard-stopped,
+        in which case the remaining windows are dropped fail-fast — they re-fetch next pull),
+        then joins each thread.
+
+        The poison delivery is BEST-EFFORT (the BLOCKER fix): when a consumer is wedged inside
+        ``sink.append`` (a stalled external SSD / NFS hiccup) AND its bounded queue is FULL,
+        an UNBOUNDED ``q.put(poison)`` would block FOREVER and the join below would never run —
+        hanging the pull's ``finally``, never persisting the ledger, with no signal. So the
+        poison is enqueued with a bounded ``put`` and on :class:`queue.Full` we FALL THROUGH to
+        the bounded join: a non-wedged consumer exits via its timed ``queue.get`` seeing
+        :attr:`_draining`; the WEDGED consumer is REPORTED (``fetch_pipeline.drain_join_timeout``).
+        The stall watchdog is kept ALIVE across the join (stopped only AFTER it) so a wedge is
+        still surfaced as ``fetch_pipeline.stalled``.
+
+        After :meth:`drain` returns, if a consumer captured a failure (e.g. a
         :class:`~brutex.data.errors.LakeWriteHalt`) it is RE-RAISED here so the pull halts
         through the spine's ``_GLOBAL_STOP_ERRORS`` path. Idempotent: a second call (no live
         threads) is a no-op.
         """
-        # Stop the watchdog first so it does not flag a stall during the (bounded) join.
-        self._watchdog_stop.set()
+        # Signal the drain FIRST so a consumer whose poison could not be enqueued (full queue,
+        # wedged peer) exits via its timed get once its own queue empties.
+        self._draining.set()
         if not any(t.is_alive() for t in self._threads):
+            self._watchdog_stop.set()
             self._watchdog.join(timeout=self._drain_join_timeout_seconds)
             return
+        # Best-effort BOUNDED poison delivery: a non-blocking put so a FULL queue (a wedged peer
+        # consumer) can NEVER block the drain. On queue.Full the consumer still exits via the
+        # _draining check on its timed get — fall through to the bounded join either way.
         for q in self._queues:
-            q.put(self._poison)
-        # Bounded join — a live consumer exits on the poison-pill within one write cycle, so
-        # this is a SAFETY net: a wedged consumer is REPORTED (never hangs the pull's finally
-        # forever). The daemon thread does not keep the process alive, so an unjoined-but-
-        # reported thread can never wedge shutdown.
+            try:
+                q.put(self._poison, timeout=_CONSUMER_GET_POLL_SECONDS)
+            except queue.Full:
+                # A wedged consumer's queue is full — the timed-get _draining check is its exit
+                # path; the bounded join below reports it if it stays wedged.
+                _LOG.warning("fetch_pipeline.poison_queue_full")
+        # Bounded join — a live consumer exits on the poison-pill (or the _draining timed-get)
+        # within one write cycle, so this is a SAFETY net: a wedged consumer is REPORTED (never
+        # hangs the pull's finally forever). The daemon thread does not keep the process alive,
+        # so an unjoined-but-reported thread can never wedge shutdown. The watchdog stays ALIVE
+        # across this join so a wedge is still surfaced as a stall.
         for t in self._threads:
             t.join(timeout=self._drain_join_timeout_seconds)
             if t.is_alive():
@@ -555,6 +709,9 @@ class FetchPipeline:
                     thread=t.name,
                     timeout_seconds=self._drain_join_timeout_seconds,
                 )
+        # Only NOW stop the watchdog — it was alive across the join, so a stall during the
+        # (possibly-wedged) drain was still surfaced.
+        self._watchdog_stop.set()
         self._watchdog.join(timeout=self._drain_join_timeout_seconds)
         processed, bars_appended, conflicts = self.totals
         _LOG.info(
@@ -562,6 +719,7 @@ class FetchPipeline:
             processed_windows=processed,
             bars_appended=bars_appended,
             conflicts=conflicts,
+            tail_transients=self.tail_transients,
         )
         exc = self._exc
         if exc is not None:

@@ -495,6 +495,12 @@ def ingest_option_contract(
     # / sink error) is captured by the pipeline + re-raised on a later submit / drain.
     pipeline = fetch_pipeline
 
+    # The per-series reconcile key MUST equal the key the spine stores this contract's
+    # ``IngestReport`` under (``run_groww_option_ingest`` keys pairs by ``(contract.symbol,
+    # interval)``), so the controller's post-drain reconcile lines up the folded consumer totals
+    # with the right deferred report (the completion-count fix).
+    series_key = (contract.symbol, interval)
+
     def _run_tail(_tail: FetchTail) -> None:
         result_report = _process_option_window_tail(
             sink,
@@ -504,9 +510,18 @@ def ingest_option_contract(
             pull_id=pull_id,
             fields=fields,
         )
+        if result_report.still_failed_windows:
+            # A tail-side PartitionLockTimeout DEFERRED this contract window (a wedged peer held
+            # the cross-process lock past the deadline). Surface it via the pipeline's
+            # tail-transient tally so it is counted + reported at drain and the across-pull retry
+            # round still fires — otherwise an async-mode tail-transient was silently dropped
+            # (MAJOR-2 fix). The window's ledger row is already recorded FAILED → re-pull refetches.
+            pipeline.fold_tail_transient(series_key)
+            return
         pipeline.fold_totals(
             bars_appended=result_report.bars_appended,
             conflicts=result_report.conflicts,
+            series_key=series_key,
         )
 
     tail = FetchTail(
@@ -1234,10 +1249,22 @@ def run_groww_option_ingest(
     # every cleanly-fetched contract came back empty (the BAJAJ-AUTO/M&M silent-vanish
     # case) — a WARNING for human triage, NEVER an engine input or auto-action. Wrapped
     # so the diagnostic can never break the pull (mirrors completeness.py #907).
-    try:
-        _log_underlying_all_empty(scan_underlying_all_empty(pairs, contract_list), pull_id=pull_id)
-    except Exception as exc:  # observe-only diagnostic must never break the pull
-        _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=pull_id, error=str(exc))
+    #
+    # SKIP in async-pipeline mode (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-3 fix): when a
+    # ``fetch_pipeline`` is wired the per-pair ``IngestReport`` is producer-resolved with
+    # ``bars_appended == 0`` (the real bar counts are folded onto the pipeline's pull-level
+    # totals by the BACKGROUND consumer, NOT known synchronously here — the drain has not run
+    # yet). Scanning now would see EVERY pair as 0-bars and flood a false
+    # ``pull.underlying_all_empty`` for the whole universe. The honest "all empty" signal needs
+    # the per-pair durable counts, which only exist after the drain — a post-drain scan is a
+    # flagged FUTURE follow-up (the option path is not wired to the pipeline in production yet).
+    if fetch_pipeline is None:
+        try:
+            _log_underlying_all_empty(
+                scan_underlying_all_empty(pairs, contract_list), pull_id=pull_id
+            )
+        except Exception as exc:  # observe-only diagnostic must never break the pull
+            _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=pull_id, error=str(exc))
     return GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
 
 

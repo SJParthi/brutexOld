@@ -163,6 +163,39 @@ class TestProcessingAndSharding:
         processed, bars, conflicts = pipeline.totals
         assert (processed, bars, conflicts) == (2, 125, 2)
 
+    def test_tail_transient_folded_and_surfaced(self) -> None:
+        """A tail-side transient defer is counted as processed + surfaced (MAJOR-2 fix)."""
+        pipeline = FetchPipeline(workers=2)
+        pipeline.fold_totals(bars_appended=10, conflicts=0)
+        pipeline.fold_tail_transient()
+        pipeline.fold_tail_transient()
+        assert pipeline.tail_transients == 2
+        # A transient is still a processed window (it advanced + ledger-recorded FAILED).
+        processed, bars, conflicts = pipeline.totals
+        assert (processed, bars, conflicts) == (3, 10, 0)
+        # A transient does NOT trip the pool-wide stop — drain is clean (no re-raise).
+        pipeline.drain()
+
+    def test_per_series_totals_accumulate_by_key(self) -> None:
+        """The completion-count fix: bars/conflicts/transients accumulate per (symbol, interval)."""
+        pipeline = FetchPipeline(workers=2)
+        # No series_key → pull-level only, NOT attributed to any series.
+        pipeline.fold_totals(bars_appended=7, conflicts=0)
+        # Per-series folds for two distinct series + a repeat on the first.
+        pipeline.fold_totals(bars_appended=10, conflicts=1, series_key=("13", "1day"))
+        pipeline.fold_totals(bars_appended=5, conflicts=0, series_key=("13", "1day"))
+        pipeline.fold_totals(bars_appended=3, conflicts=0, series_key=("25", "1minute"))
+        pipeline.fold_tail_transient(("25", "1minute"))
+        per_series = pipeline.per_series_totals()
+        assert per_series[("13", "1day")].bars_appended == 15
+        assert per_series[("13", "1day")].conflicts == 1
+        assert per_series[("13", "1day")].transient == 0
+        assert per_series[("25", "1minute")].bars_appended == 3
+        assert per_series[("25", "1minute")].transient == 1
+        # The keyless fold is in the pull-level totals but NOT attributed to any series.
+        assert sum(t.bars_appended for t in per_series.values()) == 18  # 15 + 3, not the keyless 7
+        pipeline.drain()
+
 
 # ─────────────────────── anti-pileup / bounded backpressure ─────────────────────
 
@@ -479,6 +512,85 @@ class TestDrainLifecycle:
         assert elapsed < 5.0  # bounded — did not hang on the wedged consumer
         # Release so the daemon thread can exit cleanly afterwards.
         wedge.set()
+
+    def test_drain_does_not_hang_when_queue_full_and_consumer_wedged(self) -> None:
+        """BLOCKER regression: a FULL queue + a wedged consumer must NOT hang ``drain()``.
+
+        1 consumer, queue_maxsize=2, a wedged sink, 3 same-shard submits → the queue fills
+        while the consumer is stuck inside ``sink.append``. The OLD code's UNBOUNDED
+        ``q.put(poison)`` blocked FOREVER on the full queue, so the bounded join was never
+        reached and the pull's ``finally`` hung (ledger never persisted, no signal). The fix
+        delivers the poison via a BOUNDED put (falling through to the join on ``queue.Full``)
+        + a ``_draining`` flag the consumer's timed get also checks, so ``drain()`` returns
+        BOUNDED and REPORTS the wedged consumer.
+        """
+        release = threading.Event()
+        first_in = threading.Event()
+
+        def _wedged(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=30.0)  # wedged inside sink.append, queue fills behind it
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=2, drain_join_timeout_seconds=0.3)
+        pipeline.submit(_result("s", _wedged))  # consumer pulls + wedges
+        assert first_in.wait(timeout=2.0)
+        pipeline.submit(_result("s", _wedged))  # queue slot 1
+        pipeline.submit(_result("s", _wedged))  # queue slot 2 → queue now FULL
+        assert pipeline._queues[0].full()
+        # Drain from a side thread and prove it RETURNS within a bound (would hang pre-fix).
+        returned = threading.Event()
+
+        def _do_drain() -> None:
+            pipeline.drain()
+            returned.set()
+
+        t = threading.Thread(target=_do_drain, daemon=True)
+        t.start()
+        assert returned.wait(timeout=5.0), "drain() hung on a full queue with a wedged consumer"
+        t.join(timeout=5.0)
+        # The wedged consumer is still alive (reported, not joined) — the poison could not be
+        # enqueued on the full queue; the bounded join reported it.
+        assert pipeline._threads[0].is_alive()
+        # Release so the daemon thread exits cleanly afterwards.
+        release.set()
+
+    def test_watchdog_alive_across_wedged_drain_surfaces_stall(self) -> None:
+        """The stall watchdog stays ALIVE across a wedged drain join (BLOCKER companion).
+
+        The old code set ``_watchdog_stop`` BEFORE the drain join, so a wedge during the
+        (bounded-but-real) join was never surfaced. The fix stops the watchdog only AFTER the
+        join, so an in-flight wedge during drain still fires ``on_stall``.
+        """
+        fake_now = [0.0]
+        stalls: list[float] = []
+        release = threading.Event()
+        first_in = threading.Event()
+
+        def _wedged(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=30.0)
+
+        pipeline = FetchPipeline(
+            workers=1,
+            queue_maxsize=2,
+            stall_watchdog_seconds=10.0,
+            on_stall=stalls.append,
+            drain_join_timeout_seconds=2.0,
+            monotonic=lambda: fake_now[0],
+        )
+        pipeline.submit(_result("s", _wedged))
+        assert first_in.wait(timeout=2.0)
+        # Advance the fake clock past the stall threshold so the watchdog SHOULD fire while the
+        # consumer is wedged. Drain in a side thread: the watchdog must still be polling.
+        fake_now[0] = 100.0
+        drained = threading.Event()
+        threading.Thread(target=lambda: (pipeline.drain(), drained.set()), daemon=True).start()
+        deadline = time.monotonic() + 5.0
+        while not stalls and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert stalls, "watchdog did not surface the stall during the wedged drain"
+        release.set()
+        assert drained.wait(timeout=5.0)
 
 
 # ──────────────────────────────── no deadlock ───────────────────────────────────
