@@ -6,9 +6,12 @@ golden test cross-checking against Zerodha / Groww calculators
 is planned separately under ``tests/golden/``.
 """
 
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
-from decimal import Decimal
+import decimal
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal
 from typing import Any
 
 import pytest
@@ -22,6 +25,7 @@ from brutex.execution.costs import (
     STT_INTRADAY_EQUITY,
     STT_OPTIONS,
     IndianCostModel,
+    _quantise,
 )
 from brutex.execution.types import FillCosts
 from brutex.models import InstrumentType, Segment
@@ -397,3 +401,61 @@ class TestIndianCostModelIndexIntradayIsZero:
         costs = model.compute(**idx_cost_kwargs)  # type: ignore[arg-type]
         assert costs.stt == Decimal("0")
         assert costs.exchange_fee == Decimal("0")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FIX 5 — _quantise pins ROUND_HALF_EVEN independent of ambient context
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestQuantiseContextIndependence:
+    """The cost rounding is pinned to ROUND_HALF_EVEN and ignores the
+    process-global ``decimal.getcontext().rounding`` (a cross-module
+    non-determinism vector closed by DEC-EXECUTION-REPRO-RESILIENCE-001)."""
+
+    def test_quantise_uses_half_even_on_a_tie(self) -> None:
+        """A half-paise tie rounds to even (0.005 → 0.00), not half-up."""
+        # 0.005 is exactly between 0.00 and 0.01; HALF_EVEN picks the even
+        # neighbour (0.00) while HALF_UP would pick 0.01 — proving the pin.
+        assert _quantise(Decimal("0.005")) == Decimal("0.00")
+        assert _quantise(Decimal("0.015")) == Decimal("0.02")  # even neighbour
+
+    @pytest.mark.parametrize(
+        "rounding_mode",
+        [ROUND_HALF_EVEN, ROUND_HALF_UP, ROUND_DOWN],
+    )
+    def test_quantise_invariant_to_ambient_context(self, rounding_mode: str) -> None:
+        """_quantise(0.005) is 0.00 regardless of the ambient context mode."""
+        original = decimal.getcontext().rounding
+        try:
+            decimal.getcontext().rounding = rounding_mode
+            assert _quantise(Decimal("0.005")) == Decimal("0.00")
+        finally:
+            decimal.getcontext().rounding = original
+
+    @pytest.mark.parametrize(
+        "rounding_mode",
+        [ROUND_HALF_EVEN, ROUND_HALF_UP, ROUND_DOWN],
+    )
+    def test_compute_byte_identical_across_ambient_modes(self, rounding_mode: str) -> None:
+        """A full FillCosts is byte-identical across ambient rounding modes."""
+        model = IndianCostModel()
+        kwargs: dict[str, object] = {
+            "side": Side.SELL,
+            "qty": 7,
+            "fill_price": Decimal("123.45"),
+            "segment": Segment.CASH,
+            "instrument_type": InstrumentType.EQ,
+        }
+        baseline = model.compute(**kwargs)  # type: ignore[arg-type]
+
+        original = decimal.getcontext().rounding
+        try:
+            decimal.getcontext().rounding = rounding_mode
+            under_mode = model.compute(**kwargs)  # type: ignore[arg-type]
+        finally:
+            decimal.getcontext().rounding = original
+
+        assert under_mode == baseline
+        # And every itemised field matches bit-for-bit.
+        assert under_mode.total == baseline.total
