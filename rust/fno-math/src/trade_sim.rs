@@ -241,7 +241,7 @@ impl Walker {
             pos.entry_price_paisa - exit_price_paisa
         };
         self.position = None;
-        let holding = (exit_idx - pos.entry_idx + 1) as u64;
+        let holding = holding_bars(pos.entry_idx, exit_idx);
         (
             pnl,
             pos.mfe_paisa,
@@ -370,6 +370,24 @@ impl Walker {
         let exit_price = close_at(pos.last_idx);
         Some(self.close(pos, exit_price, pos.last_idx))
     }
+}
+
+/// Inclusive holding length in bars — `exit_idx − entry_idx`, plus one.
+///
+/// The forward-only walker always closes at or after the entry bar, so
+/// `exit_idx >= entry_idx` is an invariant and for every real call this equals
+/// the old `exit_idx − entry_idx + 1` byte-for-byte. The subtract uses
+/// `saturating_sub` purely as a **defensive guard**: were a future refactor to
+/// call `close` with `exit_idx < entry_idx`, the old unsigned subtract would
+/// underflow and — under this crate's `overflow-checks = true` plus
+/// `panic = "abort"` profile — `abort()` the process. `saturating_sub` instead
+/// clamps the difference to zero, yielding a defined minimum holding of one bar
+/// and never a panic. Valid inputs are unaffected, so the existing trade-sim
+/// tests stay bit-identical.
+#[inline]
+#[must_use]
+fn holding_bars(entry_idx: usize, exit_idx: usize) -> u64 {
+    (exit_idx.saturating_sub(entry_idx) as u64) + 1
 }
 
 /// Build the policy from the three boolean flags shared by the batch methods.
@@ -607,6 +625,131 @@ mod tests {
             .expect("equal-length test data")
     }
 
+    // ── holding-length guard (defensive checked-subtract) ──────────────────
+
+    #[test]
+    fn holding_bars_normal_is_inclusive() {
+        // The invariant case: exit at or after entry → inclusive bar count,
+        // byte-identical to the old `exit_idx - entry_idx + 1`.
+        assert_eq!(holding_bars(0, 0), 1); // same-bar entry+exit
+        assert_eq!(holding_bars(3, 3), 1);
+        assert_eq!(holding_bars(2, 5), 4); // 2..=5 inclusive
+        assert_eq!(holding_bars(0, 99), 100);
+    }
+
+    #[test]
+    fn holding_bars_inverted_does_not_underflow() {
+        // Defensive: exit_idx < entry_idx (impossible from the public walker, but
+        // a future mis-call) must NOT underflow→abort under overflow-checks; it
+        // saturates to a defined minimum holding of 1 instead of panicking.
+        assert_eq!(holding_bars(5, 2), 1);
+        assert_eq!(holding_bars(usize::MAX, 0), 1);
+    }
+
+    // ── excursion (MFE/MAE) folding — exact values both directions ─────────
+
+    fn pos_at(entry: i64) -> OpenPosition {
+        OpenPosition {
+            entry_idx: 0,
+            entry_price_paisa: entry,
+            sl_level_paisa: None,
+            tp_level_paisa: None,
+            mfe_paisa: 0,
+            mae_paisa: 0,
+            last_idx: 0,
+        }
+    }
+
+    #[test]
+    fn update_excursion_buy_exact_mfe_mae() {
+        // BUY entered at 100; bar high=130, low=90.
+        // favourable = high - entry = 30 ; adverse = entry - low = 10.
+        let mut pos = pos_at(100);
+        Walker::update_excursion(&mut pos, true, 130, 90);
+        assert_eq!(pos.mfe_paisa, 30);
+        assert_eq!(pos.mae_paisa, 10);
+        // A strictly-smaller bar leaves MFE/MAE unchanged (the running max holds).
+        Walker::update_excursion(&mut pos, true, 120, 95);
+        assert_eq!(pos.mfe_paisa, 30);
+        assert_eq!(pos.mae_paisa, 10);
+        // A strictly larger excursion DOES update (kills the `>`->`<`/`==` family).
+        Walker::update_excursion(&mut pos, true, 131, 89);
+        assert_eq!(pos.mfe_paisa, 31);
+        assert_eq!(pos.mae_paisa, 11);
+    }
+
+    #[test]
+    fn update_excursion_sell_exact_mfe_mae() {
+        // SELL entered at 100; bar high=130, low=90.
+        // favourable = entry - low = 10 ; adverse = high - entry = 30.
+        // (distinguishes the SHORT-branch `-` from `+`/`/` mutants.)
+        let mut pos = pos_at(100);
+        Walker::update_excursion(&mut pos, false, 130, 90);
+        assert_eq!(pos.mfe_paisa, 10);
+        assert_eq!(pos.mae_paisa, 30);
+    }
+
+    // ── resolve_level_hit — both SL and TP touch (buy + sell) ──────────────
+
+    fn walker_with_pos(is_buy: bool, sl: Option<i64>, tp: Option<i64>) -> (Walker, OpenPosition) {
+        let w = Walker::new(is_buy, None, None, policy_default());
+        let mut pos = pos_at(100);
+        pos.sl_level_paisa = sl;
+        pos.tp_level_paisa = tp;
+        (w, pos)
+    }
+
+    #[test]
+    fn resolve_level_hit_buy_sl_and_tp() {
+        // BUY: SL hit when low <= sl; TP hit when high >= tp.
+        let (w, pos) = walker_with_pos(true, Some(95), Some(110));
+        // low touches SL exactly (inclusive >=/<=), high below TP → stop.
+        assert_eq!(w.resolve_level_hit(&pos, 105, 95), Some((true, 95)));
+        // high touches TP, low above SL → target.
+        assert_eq!(w.resolve_level_hit(&pos, 110, 96), Some((false, 110)));
+        // neither touched → None.
+        assert_eq!(w.resolve_level_hit(&pos, 109, 96), None);
+    }
+
+    #[test]
+    fn resolve_level_hit_sell_sl_and_tp() {
+        // SELL: SL hit when high >= sl; TP hit when low <= tp.
+        let (w, pos) = walker_with_pos(false, Some(110), Some(95));
+        assert_eq!(w.resolve_level_hit(&pos, 110, 99), Some((true, 110))); // SL
+        assert_eq!(w.resolve_level_hit(&pos, 105, 95), Some((false, 95))); // TP
+        assert_eq!(w.resolve_level_hit(&pos, 109, 96), None);
+    }
+
+    // ── stress: a large window must not panic and is deterministic ─────────
+
+    #[test]
+    fn stress_large_window_no_panic_and_stable() {
+        // A 20k-bar window with a saw-tooth price + per-bar forced-exit flags +
+        // varied entry bits. The whole sweep must complete without tripping the
+        // holding/overflow guards, and re-running it is bit-identical (Golden
+        // Rule #7 idempotence — the sweep ranking must be reproducible).
+        let n = 20_000usize;
+        let open: Vec<i64> = (0..n as i64).map(|i| 10_000 + (i % 137) * 5).collect();
+        let high: Vec<i64> = open.iter().map(|&o| o + 50).collect();
+        let low: Vec<i64> = open.iter().map(|&o| o - 50).collect();
+        let close: Vec<i64> = open.iter().map(|&o| o + 10).collect();
+        let is_forced: Vec<bool> = (0..n).map(|i| i % 375 == 374).collect();
+        let bar_bits: Vec<u64> = (0..n as u64).map(|i| (i & 0x3) | 0x1).collect();
+        let s = ResidentSweepSim::build(open, high, low, close, is_forced, bar_bits)
+            .expect("equal-length stress window");
+
+        let policy = policy_default();
+        let run = || s.simulate_one(0x1, true, Some(200), Some(400), policy);
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "trade sweep must be deterministic");
+        // Every record's holding is >= 1 (the inclusive guard) and exit >= entry.
+        for &(_, _, _, holding, entry, exit) in &first {
+            assert!(holding >= 1);
+            assert!(exit >= entry);
+        }
+    }
+
     // ── construction validation (via the pure `build`, no PyErr in tests) ──
 
     #[test]
@@ -622,6 +765,22 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn build_rejects_each_single_column_mismatch() {
+        // ONE column short at a time, all others length 2. Each case must error
+        // — this kills the `||`->`&&` mutants on every clause of the length guard
+        // (under `&&` a single-column mismatch would wrongly pass).
+        let ok2 = || vec![0i64; 2];
+        let okf = || vec![false; 2];
+        let okb = || vec![0u64; 2];
+        // open is the reference `n`; mismatching a later column individually.
+        assert!(ResidentSweepSim::build(ok2(), vec![0], ok2(), ok2(), okf(), okb()).is_err());
+        assert!(ResidentSweepSim::build(ok2(), ok2(), vec![0], ok2(), okf(), okb()).is_err());
+        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), vec![0], okf(), okb()).is_err());
+        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), vec![false], okb()).is_err());
+        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), vec![0u64]).is_err());
     }
 
     #[test]

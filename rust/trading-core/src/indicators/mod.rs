@@ -39,4 +39,23 @@ mod tests {
         // The live fixture half-tie (retrace_50): 3346656.5 -> even -> 3346656.
         assert_eq!(round_half_even(3_346_656.5), 3_346_656);
     }
+
+    /// Document the `f64 as i64` cast's saturating boundary behaviour. This path
+    /// is UNREACHABLE for real prices (the inner integer arithmetic overflows and
+    /// panics far before a non-finite `f64` could reach here), but Rust's
+    /// float→int cast has been *saturating* (never UB, never a panic) since 1.45,
+    /// so the worst case is a defined clamp — proven here, not relied on by faith.
+    #[test]
+    fn non_finite_and_extreme_inputs_saturate_not_panic() {
+        // NaN maps to 0.
+        assert_eq!(round_half_even(f64::NAN), 0);
+        // ±Infinity saturates to the i64 extremes.
+        assert_eq!(round_half_even(f64::INFINITY), i64::MAX);
+        assert_eq!(round_half_even(f64::NEG_INFINITY), i64::MIN);
+        // A finite magnitude far above i64::MAX also saturates (no wrap, no panic).
+        assert_eq!(round_half_even(1e30), i64::MAX);
+        assert_eq!(round_half_even(-1e30), i64::MIN);
+        // Finite mid-range still rounds normally (the saturation is edge-only).
+        assert_eq!(round_half_even(123.5), 124);
+    }
 }
