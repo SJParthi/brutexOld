@@ -416,15 +416,52 @@ jobs:
           echo "PR #${PR_NUMBER} is mergeable (mergeable=true, state=${state})"
           echo "safe=true" >> "$GITHUB_OUTPUT"
 
+      - name: Final live-rollup gate (pre-merge-check.sh, fail-closed)
+        id: rollup-gate
+        if: steps.mergeable-check.outputs.safe == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
+          # Exclude this workflow's OWN check run, which is structurally
+          # IN_PROGRESS on the head while this gate evaluates — every REAL
+          # CI check still gates fully (DEC-MERGE-LIVE-ROLLUP-001).
+          IGNORE_CHECK_NAMES: "Auto-merge on green CI"
+        # DEC-MERGE-LIVE-ROLLUP-001: the LAST step before the merge re-checks
+        # the PR's LIVE, COMPLETE status-check rollup via the canonical
+        # `scripts/ci/pre-merge-check.sh`. The #941 class of false-merge was a
+        # decision made against a possibly-stale view (a green push-event run
+        # masking an in-flight / later-red pull_request run); the bespoke
+        # ci-check step above closed most of that, but the operator decree is
+        # "NO PR may EVER merge with ANY red — at any time". This gate makes
+        # the merge decision against the live `gh pr view --json
+        # statusCheckRollup` AT MERGE TIME: it fails closed (exit != 0) on ANY
+        # FAILURE / CANCELLED / TIMED_OUT check, on a rollup smaller than the
+        # expected gate count (CI not finished registering), and on ANY pending
+        # check — the same single source of truth a human/automation runs by
+        # hand. NO OPERATOR_OVERRIDE is set here, so the script cannot be
+        # bypassed from this path. A non-zero exit sets gated=false (never
+        # merges); the script's own completion is not needed to re-fire — the
+        # surrounding gates already self-heal on the next CI completion.
+        run: |
+          set -euo pipefail
+          if bash scripts/ci/pre-merge-check.sh "${PR_NUMBER}" "${REPO}"; then
+            echo "::notice::live-rollup gate PASSED for PR #${PR_NUMBER} — full rollup is green at merge time"
+            echo "gated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::live-rollup gate REFUSED merge for PR #${PR_NUMBER} — the live rollup is not fully green/complete (fail-closed)"
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Squash-merge + delete branch
-        if: steps.ci-check.outputs.green == 'true' && steps.mergeable-check.outputs.safe == 'true'
+        if: steps.ci-check.outputs.green == 'true' && steps.mergeable-check.outputs.safe == 'true' && steps.rollup-gate.outputs.gated == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
         run: |
           set -euo pipefail
-          echo "Merging PR #${PR_NUMBER} (ci-ok is green)"
+          echo "Merging PR #${PR_NUMBER} (ci-ok green + live rollup gate passed)"
           HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" \
             --json headRefOid --jq .headRefOid)
           # A CONCURRENT merge can win the race: a second auto-merge run from a
