@@ -228,6 +228,17 @@ def expected_max_sharpe_ratio(n_trials: int, trial_sharpe_variance: float) -> fl
     ------
     ValueError
         If ``n_trials < 1`` or ``trial_sharpe_variance < 0``.
+
+    Notes
+    -----
+    For an *astronomically* large ``n_trials`` (``>= ~6.6e15``, far above
+    any realistic brute-force trial count) the quantile argument
+    ``1 - 1/N`` rounds to exactly ``1.0`` in float64, and
+    :meth:`statistics.NormalDist.inv_cdf` then raises
+    :class:`statistics.StatisticsError` (a :class:`ValueError` subclass).
+    This is documented, not guarded against: such a count is unreachable
+    in practice, and callers already catch :class:`ValueError` (this is
+    the same exception type the explicit domain guards above raise).
     """
     if n_trials < 1:
         raise ValueError(f"n_trials must be >= 1, got {n_trials}")
