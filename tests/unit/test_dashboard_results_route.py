@@ -236,6 +236,9 @@ def test_completed_sweep_refreshes_leaderboard_cache(
     job = BackgroundPullJob(
         spawn=lambda fn: fn(),  # synchronous: the success path runs inline
         summary_cache=summary_cache,
+        # Keep the account-wide single-flight lock inside the tmp lake (not the real
+        # ~/.brutex/lake) — DEC-ACCOUNT-PULL-SINGLEFLIGHT-001.
+        lake_root_resolver=lambda: lake_root,
     )
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
 
@@ -262,7 +265,11 @@ def test_failed_sweep_does_not_refresh_leaderboard_cache(
         _write_sweeps(lake_root, [_row(1)])
         raise RuntimeError("sweep boom")
 
-    job = BackgroundPullJob(spawn=lambda fn: fn(), summary_cache=summary_cache)
+    job = BackgroundPullJob(
+        spawn=lambda fn: fn(),
+        summary_cache=summary_cache,
+        lake_root_resolver=lambda: lake_root,  # DEC-ACCOUNT-PULL-SINGLEFLIGHT-001
+    )
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
 
     # The cache is NOT invalidated by the failed sweep → the next poll is still stale.
