@@ -539,6 +539,57 @@ def test_ingest_partition_lock_timeout_no_ledger_logs_deferred() -> None:
     assert "option.ingest.window.lock_deferred" in events
 
 
+def test_ingest_async_pipeline_tail_lock_timeout_folds_transient() -> None:
+    """Async-mode tail-side ``PartitionLockTimeout`` folds a tail-transient (lines 519-520).
+
+    With a ``fetch_pipeline`` wired the SUCCESS-path tail runs on a BACKGROUND consumer.
+    When that consumer's ``_process_option_window_tail`` hits a wedged-peer lock timeout it
+    returns a report with ``still_failed_windows == 1``; the ``_run_tail`` closure must fold
+    it via ``pipeline.fold_tail_transient`` (NOT silently drop it) so the across-pull retry
+    round still re-fetches the contract (MAJOR-2 fix). The producer's report is the DEFERRED
+    zero-bar window; the real transient lands on the pipeline's tally after drain.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _LockTimeoutSink()
+    ledger = WindowLedger()
+    pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+    try:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=0,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+    finally:
+        pipeline.drain()
+    # Producer DEFERRED: a clean fetch, zero bars reported synchronously (the tail is async).
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    assert report.transient_failures == 0 and report.still_failed_windows == 0
+    # The BACKGROUND consumer hit the wedged lock and folded ONE tail-transient (519-520).
+    assert sink.calls == 1
+    assert pipeline.tail_transients == 1
+    series = pipeline.per_series_totals()
+    assert series[(_ce().symbol, "1day")].transient == 1
+    # The window's ledger row is FAILED → a re-pull re-fetches it (deferred, not settled).
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)
+
+
 def test_ingest_transient_no_hooks_no_ledger() -> None:
     # timeout with on_timeout=None + ledger=None — exercises the no-hook branches.
     sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall")])
