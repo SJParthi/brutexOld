@@ -2934,7 +2934,10 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return build_completeness_scoreboard([], {}, [], {})
-        return await run_in_threadpool(_build_completeness_board, store, lake_root.parent)
+        board: dict[str, Any] = await run_in_threadpool(
+            _build_completeness_board, store, lake_root.parent
+        )
+        return board
 
     async def _completeness_csv() -> str:
         """Resolve the store + lake and build the downloadable CSV (empty + well-shaped if no lake)."""
@@ -2942,7 +2945,8 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return scoreboard_to_csv(build_completeness_scoreboard([], {}, [], {}))
-        return await run_in_threadpool(_build_completeness_csv, store, lake_root.parent)
+        csv_text: str = await run_in_threadpool(_build_completeness_csv, store, lake_root.parent)
+        return csv_text
 
     @app.get("/api/v1/completeness/scoreboard.csv")
     async def api_completeness_scoreboard_csv() -> Response:
@@ -4406,12 +4410,13 @@ def build_app(
             return None
         lake = lake_root.parent
         gen = _summary_cache.generation
-        return await run_in_threadpool(
+        index: FnoCascadeIndex = await run_in_threadpool(
             lambda: _fno_cascade_cache.get(
                 generation=gen,
                 build=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
             )
         )
+        return index
 
     @app.get("/api/v1/db/fno/underlyings")
     async def api_db_fno_underlyings() -> JSONResponse:
@@ -4489,11 +4494,12 @@ def build_app(
             ]
             return build_spot_cascade(spot)
 
-        return await run_in_threadpool(
+        index: SpotCascadeIndex = await run_in_threadpool(
             lambda: _spot_cascade_cache.get_or_compute(
                 "db_spot_cascade", generation=gen, compute=_build
             )
         )
+        return index
 
     @app.get("/api/v1/db/spot/symbols")
     async def api_db_spot_symbols() -> JSONResponse:

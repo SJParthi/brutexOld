@@ -157,7 +157,11 @@ jobs:
         run: |
           . .venv/bin/activate
           # -p no:cacheprovider keeps the runner's $HOME clean between runs.
-          pytest tests/bench/test_throughput_absolute.py -q --tb=short -p no:cacheprovider
+          # -s disables pytest's stdout capture so the measured ops/s print()s
+          # reach the CI log; -rA prints a summary line for every test outcome
+          # (DEC-M4PRO-BENCH-SURFACE-001) — without these the gate passed but the
+          # absolute number never surfaced for the operator.
+          pytest tests/bench/test_throughput_absolute.py -q -s -rA --tb=short -p no:cacheprovider
 
       - name: Run 33B-trial SLA gate (resident-parallel mask-AND)
         run: |
@@ -167,7 +171,15 @@ jobs:
           # — it projects from the resident + rayon-parallel batched mask-AND
           # kernel and fails if it exceeds the 4-day M4 Pro SLA. On shared GHA the
           # same test SKIPS (no env var); CI keeps the O(1) RATIO gate instead.
-          pytest tests/bench/test_full_sweep_extrapolation.py -q --tb=short -p no:cacheprovider
+          # -s -rA surface the projected trials/sec, per-trial µs and projected
+          # days print()s in the CI log (DEC-M4PRO-BENCH-SURFACE-001); without
+          # them the projection was computed but swallowed by pytest's capture.
+          # HONEST: this projection measures the resident-parallel mask-AND +
+          # blake3 kernel ONLY — it EXCLUDES the per-combo Python trade-walk
+          # (count_trades), the dominant real-sweep cost the module docstring
+          # itself flags — so the ≤4-day figure is the kernel envelope, not the
+          # full real-sweep wall time.
+          pytest tests/bench/test_full_sweep_extrapolation.py -q -s -rA --tb=short -p no:cacheprovider
 
       - name: Run strict 1.1x O(1) ratio tier
         run: |
