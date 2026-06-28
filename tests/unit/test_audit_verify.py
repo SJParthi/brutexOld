@@ -330,11 +330,22 @@ def test_golden_hashes_differ_across_algorithms() -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
+# The orchestrator format forbids the ``"|"`` hash-preimage delimiter inside the
+# free-form fields (DEC-ORCH-AUDIT-RATE-HARDEN-001 — keeps the preimage injective), so
+# an HONEST chain never contains one; exclude it from the generated ``subject``
+# text so the property models only honest chains (the sweep path is unaffected).
+# ``codec="utf-8"`` also drops lone surrogates the audit writer cannot UTF-8
+# encode (the same constraint ``st.text()``'s default alphabet applies).
+_HONEST_SUBJECT = st.text(
+    alphabet=st.characters(codec="utf-8", exclude_characters="|"), min_size=1, max_size=6
+)
+
+
 @given(
     fmt=st.sampled_from([AuditFormat.ORCHESTRATOR, AuditFormat.SWEEP]),
     actions=st.lists(
         st.tuples(
-            st.text(min_size=1, max_size=6),
+            _HONEST_SUBJECT,
             st.dictionaries(st.text(max_size=4), st.integers(), max_size=3),
         ),
         min_size=1,
