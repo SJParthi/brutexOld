@@ -178,19 +178,35 @@ class TestDiscoverTouchedModules:
         ]
 
     def test_shipped_exclude_allowlist_is_curated_multifile_modules(self, gate: ModuleType) -> None:
-        # Pin the documented invariant: the allowlist holds ONLY the modules whose
-        # 100% coverage comes from a CURATED multi-file suite (no single name-matched
-        # per-file test reaches 100% standalone), each gated by the whole-package floor
-        # + a dedicated static per-module gate instead:
+        # Pin the documented invariant: the allowlist holds ONLY the dashboard
+        # modules whose 100% coverage comes from a CURATED multi-file suite (no
+        # single name-matched per-file test reaches 100% standalone), each gated by
+        # the whole-package floor + a dedicated static per-module gate instead:
         #   * brutex/dashboard/app.py — the route-glue (DEC-DASHBOARD-RESULTS-PAGE-001);
         #   * brutex/dashboard/pull_controller.py — the SPOT pull controller, covered by
         #     the 5-file pull-controller/pool/health/stall/write-batch suite
-        #     (DEC-WRITE-BATCH-COALESCE-001).
+        #     (DEC-WRITE-BATCH-COALESCE-001);
+        #   * brutex/dashboard/db_view.py — the ~720-stmt /db viewer, covered by the
+        #     six-file db_view test family (DEC-DASHBOARD-EMPTY-STATE-001).
         # Keep it tiny + justified.
         assert (
-            frozenset({"brutex/dashboard/app.py", "brutex/dashboard/pull_controller.py"})
+            frozenset(
+                {
+                    "brutex/dashboard/app.py",
+                    "brutex/dashboard/pull_controller.py",
+                    "brutex/dashboard/db_view.py",
+                }
+            )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
         )
+
+    def test_excluded_db_view_module_is_dropped_from_discovery(self, gate: ModuleType) -> None:
+        # The shipped exclude really removes db_view.py from the gated set (a touch
+        # of it rides the whole-package floor + its six-file static gate instead of
+        # failing the discovery gate on an unreachable single-file 100%).
+        assert gate.discover_touched_modules(
+            [("M", "brutex/dashboard/db_view.py"), ("M", "brutex/dashboard/nav.py")]
+        ) == [("brutex/dashboard/nav.py", "M")]
 
     def test_excluded_app_module_is_dropped_from_discovery(self, gate: ModuleType) -> None:
         # The shipped exclude really removes app.py from the gated set (a touch of it
