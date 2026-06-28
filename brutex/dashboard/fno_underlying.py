@@ -5,8 +5,8 @@ underlying-symbol form(s) to hand the Groww SDK's ``get_expiries`` /
 ``get_contracts`` for an F&O-eligible spot row.
 
 **The bug this closes.** The metadata F&O pull
-(:func:`brutex.dashboard.metadata_pull._underlying_grid`) keyed the expiry/contract
-chain on the SPOT ``trading_symbol`` (``Instrument.symbol_name``) — e.g.
+(:func:`brutex.dashboard.metadata_pull._resolve_underlying_forms`) keyed the
+expiry/contract chain on the SPOT ``trading_symbol`` (``Instrument.symbol_name``) — e.g.
 ``BAJAJ-AUTO`` (hyphenated), ``NIFTY NEXT 50`` (spaced), ``NIFTYJR`` (a genuine
 abbreviation). Groww's F&O addressing wants the symbol the vendor stamps on the
 contract legs as ``underlying_symbol`` (``BAJAJAUTO`` / ``NIFTYNEXT50`` /
@@ -37,10 +37,15 @@ bridges, applied in order, with a no-worse-than-before fallback:
    vendor already answers the raw spot symbol we never regress, and a genuinely
    absent chain records the same empty as before (never a fabricated chain).
 
-The forms feed :func:`~brutex.adapters.groww.contracts.resolve_expiries` /
-``resolve_contracts``, which already try each form in turn (the ``&`` → ``%26``
-ampersand fallback rides ON TOP per DEC-GROWW-AMPERSAND-FALLBACK-001), so handing
-them the correct F&O form keeps every existing fallback working.
+The metadata pull (:mod:`brutex.dashboard.metadata_pull`) tries the forms IN ORDER:
+form ``[0]`` first, and ONLY if it yields ZERO data does it try form ``[1]`` then
+``[2]`` — the first non-empty wins (DEC-FNO-UNDERLYING-RESOLVE-001). Each individual
+form is itself passed to
+:func:`~brutex.adapters.groww.contracts.resolve_expiries` /
+``resolve_contracts``, which compose the ``&`` → ``%26`` ampersand fallback ON TOP
+per DEC-GROWW-AMPERSAND-FALLBACK-001. A symbol that needs no bridge collapses to ONE
+form (no extra SDK calls); the registry/coverage key is always the PRIMARY form ``[0]``
+so the persisted key is stable + reproducible regardless of which form answered.
 
 **Scope (CLAUDE.md §3):** lake / REFERENCE_ONLY pull-side only — the brute-force
 ENGINE is UNCHANGED (NIFTY / BANKNIFTY / SENSEX). Pure functions, no I/O, no network.
@@ -107,8 +112,11 @@ def primary_fno_underlying(spot_symbol: str, *, aliases: Mapping[str, str]) -> s
     """Return the FIRST (preferred) F&O underlying form for *spot_symbol*.
 
     The head of :func:`fno_underlying_forms` — the single best-guess F&O underlying
-    spelling, used as the grid key the metadata pull persists. Never empty (the
-    original spelling is always a fallback candidate).
+    spelling, used by the metadata pull as the stable, reproducible grid / coverage /
+    registry KEY (the persisted ``underlying``), independent of which form ends up
+    answering the vendor. The remaining forms are still TRIED in turn at fetch time
+    (see :mod:`brutex.dashboard.metadata_pull`); this returns only the key. Never
+    empty (the original spelling is always a fallback candidate).
     """
     return fno_underlying_forms(spot_symbol, aliases=aliases)[0]
 
@@ -128,5 +136,6 @@ __all__ = [
     "FNO_INDEX_ALIASES_OVERRIDE_ENV",
     "fno_underlying_forms",
     "primary_fno_underlying",
+    "resolve_fno_index_aliases",
     "resolve_fno_underlying_forms",
 ]

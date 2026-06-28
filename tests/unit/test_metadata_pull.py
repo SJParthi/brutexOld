@@ -71,11 +71,18 @@ class _FakeSDK:
         self._raise_expiry_for = raise_expiry_for
         self._raise_contract_for = raise_contract_for
         self.calls: list[str] = []
+        #: The DISTINCT underlying-symbol forms queried, in first-seen order — lets a
+        #: test prove WHICH F&O forms reached the vendor (the fallback-form axis of
+        #: DEC-FNO-UNDERLYING-RESOLVE-001), independent of the inner empty-retry budget.
+        self.expiry_underlying_forms: list[str] = []
+        self.contract_underlying_forms: list[str] = []
 
     def get_expiries(self, **kw: object) -> Mapping[str, object]:
         self.calls.append("get_expiries")
         exchange = str(kw["exchange"])
         underlying = str(kw["underlying_symbol"])
+        if underlying not in self.expiry_underlying_forms:
+            self.expiry_underlying_forms.append(underlying)
         if (exchange, underlying) in self._raise_expiry_for:
             raise RuntimeError(f"boom-expiries {exchange}-{underlying}")
         # The module always passes an int year (GrowwClient omits a None year), so
@@ -87,9 +94,12 @@ class _FakeSDK:
 
     def get_contracts(self, **kw: object) -> Mapping[str, object]:
         self.calls.append("get_contracts")
+        underlying = str(kw["underlying_symbol"])
+        if underlying not in self.contract_underlying_forms:
+            self.contract_underlying_forms.append(underlying)
         key = (
             str(kw["exchange"]),
-            str(kw["underlying_symbol"]),
+            underlying,
             str(kw["expiry_date"]),
         )
         if key in self._raise_contract_for:
@@ -1173,3 +1183,136 @@ def test_underlyings_with_no_expiries_pure_predicate() -> None:
     assert base.merge(any_expiry=False, errored=True).errored is True
     merged = base.merge(any_expiry=False, errored=False)
     assert merged.any_expiry is False and merged.errored is False
+
+
+def test_fallback_form_tried_when_primary_empty(tmp_path: Path) -> None:
+    """When the PRIMARY F&O form is empty, a FALLBACK form's chain is used.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001 wire-through: ``BAJAJ-AUTO`` resolves to the
+    ordered forms ``('BAJAJAUTO', 'BAJAJ-AUTO')``. Here the fake SDK has NO chain for
+    the PRIMARY ``BAJAJAUTO`` but a real chain for the FALLBACK spot spelling
+    ``BAJAJ-AUTO`` — so the metadata pull must try the primary first, see it empty,
+    then try the fallback and discover the chain. Proves the fallback forms genuinely
+    reach the vendor (both expiries AND contracts) instead of only the primary.
+    """
+    sdk = _FakeSDK(
+        # Primary form is empty; fallback spot spelling carries the chain.
+        expiries={("NSE", "BAJAJ-AUTO", 2026): ["2026-06-25"]},
+        contracts={("NSE", "BAJAJ-AUTO", "2026-06-25"): ["NSE-BAJAJ-AUTO-25Jun26-FUT"]},
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    report = pull_expiries_contracts(
+        [_equity("BAJAJ-AUTO")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-fallback",
+    )
+
+    # The fallback form discovered the real chain — NOT a silent empty.
+    assert registry.count_expiries() == 1
+    assert registry.count_contracts() == 1
+    # Both forms were tried for expiries, PRIMARY first then the FALLBACK spot spelling
+    # (proving the wire-through reaches the fallback when the primary is empty).
+    assert sdk.expiry_underlying_forms == ["BAJAJAUTO", "BAJAJ-AUTO"]
+    # The contract fetch likewise falls back to the spelling that has the chain.
+    assert sdk.contract_underlying_forms == ["BAJAJAUTO", "BAJAJ-AUTO"]
+    # The registry/report key stays the stable PRIMARY form regardless of which answered.
+    assert report.underlyings == ("BAJAJAUTO",)
+    cov = coverage.list_coverage()
+    assert cov[0].underlying_symbol == "BAJAJAUTO"
+    assert cov[0].status == STATUS_COMPLETE
+    # No silent-vanish warning — the chain WAS found (via the fallback form).
+    registry.close()
+
+
+def test_ampersand_fallback_composes_inside_each_form(tmp_path: Path) -> None:
+    """The ``&`` → ``%26`` ampersand fallback still rides INSIDE each underlying form.
+
+    DEC-GROWW-AMPERSAND-FALLBACK-001 must stay intact under the new wire-through:
+    ``M&M`` resolves to a SINGLE F&O form (``('M&M',)`` — no alias/normalization
+    bridge), but ``resolve_expiries`` composes the ``&`` → ``%26`` fallback on TOP, so
+    a vendor that only answers the percent-encoded ``M%26M`` is still resolved. Here
+    the fake SDK has the chain ONLY under ``M%26M`` (plain ``M&M`` empty), proving the
+    ampersand axis is preserved.
+    """
+    sdk = _FakeSDK(
+        expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+        contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    report = pull_expiries_contracts(
+        [_equity("M&M")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-mm",
+    )
+    assert registry.count_expiries() == 1
+    assert registry.count_contracts() == 1
+    # The persisted underlying is the canonical primary ``M&M`` (the %26 form is a
+    # FETCH-only encoding, never the stored key).
+    assert report.underlyings == ("M&M",)
+    assert coverage.list_coverage()[0].status == STATUS_COMPLETE
+    registry.close()
+
+
+def test_canonical_symbol_single_form_one_call(tmp_path: Path) -> None:
+    """A canonical symbol (NIFTY) collapses to ONE form → exactly one get_expiries call.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001 byte-unchanged guarantee: NIFTY/BANKNIFTY/SENSEX
+    carry a single F&O form, so the wire-through issues exactly ONE SDK expiry call —
+    no extra fallback calls, identical to the pre-fix behaviour.
+    """
+    sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
+    registry = _registry(tmp_path)
+    pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+    )
+    # Exactly one underlying form was ever queried — the single canonical NIFTY.
+    assert sdk.expiry_underlying_forms == ["NIFTY"]
+    assert sdk.calls.count("get_expiries") == 1
+    registry.close()
+
+
+def test_first_nonempty_over_forms_helper() -> None:
+    """Direct unit cover of the pure ``_first_nonempty_over_forms`` helper.
+
+    First non-empty wins; the LAST (empty) result is returned when ALL forms are empty
+    (so a genuinely-absent chain records the same empty as before — Golden Rule #1).
+    """
+    calls: list[str] = []
+
+    def _fetch(form: str) -> list[str]:
+        calls.append(form)
+        return ["hit"] if form == "B" else []
+
+    # A → empty, B → non-empty: stops at B (C never called).
+    assert mp._first_nonempty_over_forms(("A", "B", "C"), _fetch, is_empty=lambda r: not r) == [
+        "hit"
+    ]
+    assert calls == ["A", "B"]
+    # All empty: every form tried, the last empty result returned.
+    calls.clear()
+    assert mp._first_nonempty_over_forms(("X", "Y"), _fetch, is_empty=lambda r: not r) == []
+    assert calls == ["X", "Y"]

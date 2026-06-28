@@ -75,7 +75,11 @@ import structlog
 
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contracts import resolve_contracts, resolve_expiries
-from brutex.dashboard.fno_underlying import resolve_fno_underlying_forms
+from brutex.dashboard.fno_underlying import (
+    primary_fno_underlying,
+    resolve_fno_index_aliases,
+    resolve_fno_underlying_forms,
+)
 from brutex.data.coverage_ledger import (
     STATUS_COMPLETE,
     STATUS_EXPIRIES_ONLY,
@@ -313,8 +317,10 @@ def _resolve_client_factory(
     return _live
 
 
-def _underlying_grid(instruments: Sequence[Instrument]) -> list[tuple[str, str]]:
-    """Project instruments to the de-duplicated ``(exchange, F&O underlying_symbol)`` grid.
+def _resolve_underlying_forms(
+    instruments: Sequence[Instrument],
+) -> tuple[list[tuple[str, str]], dict[tuple[str, str], tuple[str, ...]]]:
+    """Project instruments to the ``(exchange, F&O underlying)`` grid + a forms map.
 
     DEC-FNO-UNDERLYING-RESOLVE-001. The Phase-1 ``phase1_cells`` keys on
     ``(exchange, underlying)`` and that ``underlying`` is the symbol Groww's
@@ -323,27 +329,69 @@ def _underlying_grid(instruments: Sequence[Instrument]) -> list[tuple[str, str]]
     ``NIFTYNXT50``), NOT the SPOT ``trading_symbol`` (``symbol_name`` = ``BAJAJ-AUTO``
     / ``NIFTYJR``). Passing the spot form made ``get_expiries`` return a
     clean-but-EMPTY ``200`` → 0 expiries → the whole F&O-eligible underlying silently
-    missed. The F&O form is DERIVED by the COMMON
-    :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` resolver (the
-    sourced index alias, else the case/space/hyphen normalization, else the spot
-    spelling) — a no-op for an already-canonical symbol (NIFTY / BANKNIFTY / SENSEX),
-    so those are byte-unchanged. The forms' downstream fallbacks (the resolver's
-    extra forms + the ``&`` → ``%26`` ampersand fallback) ride inside
-    ``resolve_expiries`` / ``resolve_contracts``; the grid carries the PRIMARY form
-    as the stable, reproducible coverage/registry key.
+    missed.
+
+    Returns a 2-tuple ``(grid, forms_by_key)``:
+
+    * **grid** — the de-duplicated ``(exchange, PRIMARY F&O underlying)`` pairs, the
+      stable, reproducible coverage/registry KEY (the head of
+      :func:`~brutex.dashboard.fno_underlying.fno_underlying_forms`, via the COMMON
+      :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` resolver — the
+      sourced index alias, else the case/space/hyphen normalization, else the spot
+      spelling). A no-op for an already-canonical symbol (NIFTY / BANKNIFTY / SENSEX),
+      so those are byte-unchanged.
+    * **forms_by_key** — ``(exchange, primary) -> the FULL ordered forms tuple`` so
+      the fetchers can try each fallback form when the primary yields ZERO data (the
+      first non-empty wins; each form composes the ``&`` → ``%26`` ampersand fallback
+      INSIDE ``resolve_expiries`` / ``resolve_contracts``). A canonical symbol maps to
+      a single-element tuple → exactly one SDK call, byte-unchanged.
 
     Order-preserving, first-wins dedup on the RESOLVED key so the pull order is
     reproducible (CLAUDE.md §4) and two spot spellings that map to the same F&O
-    underlying are enumerated once.
+    primary underlying are enumerated once (the FIRST spot symbol's forms win the
+    map — deterministic by grid order).
     """
+    aliases = resolve_fno_index_aliases()
     grid: list[tuple[str, str]] = []
+    forms_by_key: dict[tuple[str, str], tuple[str, ...]] = {}
     seen: set[tuple[str, str]] = set()
     for instrument in instruments:
-        pair = (str(instrument.exch_id), resolve_fno_underlying_forms(instrument.symbol_name)[0])
+        exchange = str(instrument.exch_id)
+        forms = resolve_fno_underlying_forms(instrument.symbol_name)
+        pair = (exchange, primary_fno_underlying(instrument.symbol_name, aliases=aliases))
         if pair not in seen:
             seen.add(pair)
             grid.append(pair)
-    return grid
+            forms_by_key[pair] = forms
+    return grid, forms_by_key
+
+
+def _first_nonempty_over_forms[T](
+    forms: tuple[str, ...],
+    fetch: Callable[[str], T],
+    *,
+    is_empty: Callable[[T], bool],
+) -> T:
+    """Try each underlying *form* in order; return the FIRST non-empty *fetch* result.
+
+    DEC-FNO-UNDERLYING-RESOLVE-001 — the F&O-underlying spelling axis of the
+    empty-retry, the metadata-pull twin of
+    :func:`~brutex.adapters.groww.contracts._fetch_first_nonempty_form` (the ``&`` →
+    ``%26`` ampersand axis, which composes INSIDE each per-form ``resolve_expiries`` /
+    ``resolve_contracts`` call). The PRIMARY form (``forms[0]``) is ALWAYS called; a
+    later form is tried ONLY when every prior form was empty, and the LAST form's
+    (empty) result is returned when all are empty — so a genuinely-absent chain records
+    the SAME empty as before (never a fabricated chain, Golden Rule #1). O(forms):
+    exactly ONE call for a canonical single-form symbol (NIFTY / BANKNIFTY / SENSEX —
+    byte-unchanged), at most three for a stock needing the alias + normalized + spot
+    bridge.
+    """
+    result = fetch(forms[0])
+    for form in forms[1:]:
+        if not is_empty(result):
+            return result
+        result = fetch(form)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,7 +626,7 @@ def pull_expiries_contracts(
         run_parallel = PoolRunParallel()
     client = _resolve_client_factory(client_factory, dry_run=dry_run, session_rate=session_rate)()
 
-    grid = _underlying_grid(instruments)
+    grid, forms_by_key = _resolve_underlying_forms(instruments)
     all_cells = phase1_cells(grid, years)
     expiry_skip = settled_expiry_cells(
         (rec.exch_id, rec.underlying_symbol, rec.year, rec.status)
@@ -641,9 +689,23 @@ def pull_expiries_contracts(
         progress_total = len(cells) + len(jobs)
 
     def _fetch_expiries(cell: ExpiryCell) -> Sequence[date]:
-        """Phase-1 fetcher: resolve one cell's expiry dates (metadata only)."""
+        """Phase-1 fetcher: resolve one cell's expiry dates (metadata only).
+
+        Tries the cell's PRIMARY F&O underlying form first and, only if it returns
+        ZERO expiries, the resolver's fallback forms in order — first non-empty wins
+        (DEC-FNO-UNDERLYING-RESOLVE-001). Each form composes the ``&`` → ``%26``
+        ampersand fallback inside :func:`resolve_expiries`. A canonical symbol carries
+        one form → exactly one call, byte-unchanged.
+        """
         exchange, underlying, year = cell
-        return resolve_expiries(client, exchange=exchange, underlying_symbol=underlying, year=year)
+        forms = forms_by_key.get((exchange, underlying), (underlying,))
+        return _first_nonempty_over_forms(
+            forms,
+            lambda form: resolve_expiries(
+                client, exchange=exchange, underlying_symbol=form, year=year
+            ),
+            is_empty=lambda r: not r,
+        )
 
     def _on_expiry_cell(
         cell: ExpiryCell, expiries: Sequence[date], exc: BaseException | None
@@ -694,11 +756,23 @@ def pull_expiries_contracts(
         )
 
     def _fetch_contracts(job: ContractJob) -> int:
-        """Phase-2 fetcher: resolve + persist one expiry's contracts (metadata only)."""
+        """Phase-2 fetcher: resolve + persist one expiry's contracts (metadata only).
+
+        Like :func:`_fetch_expiries`, tries the PRIMARY F&O underlying form first and
+        the resolver's fallback forms only on a ZERO-contract reply — first non-empty
+        wins (DEC-FNO-UNDERLYING-RESOLVE-001). The persisted registry ``underlying`` is
+        always the PRIMARY (Phase-1) key, so the registry stays keyed consistently
+        regardless of which form answered the vendor.
+        """
         nonlocal contracts_persisted
         exchange, underlying, expiry = job
-        contracts = resolve_contracts(
-            client, exchange=exchange, underlying_symbol=underlying, expiry=expiry
+        forms = forms_by_key.get((exchange, underlying), (underlying,))
+        contracts = _first_nonempty_over_forms(
+            forms,
+            lambda form: resolve_contracts(
+                client, exchange=exchange, underlying_symbol=form, expiry=expiry
+            ),
+            is_empty=lambda r: not r,
         )
         for contract in contracts:
             registry.upsert_contract(
