@@ -38,14 +38,7 @@ from brutex.dashboard.app import (
     _render_universe_html,
     build_app,
 )
-from brutex.dashboard.db_view import (
-    REGISTRY_CONTRACT_COLUMNS,
-    REGISTRY_DB_NAME,
-    REGISTRY_EXPIRY_COLUMNS,
-    list_registry_contracts,
-    list_registry_expiries,
-    registry_counts,
-)
+from brutex.dashboard.db_view import REGISTRY_DB_NAME
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.registry_store import RegistryStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -236,71 +229,27 @@ def test_arbitrary_registry_bytes_never_500(
     assert body["rows"] == []
 
 
-# ── db_view unit: the new except branch directly ─────────────────────────────
-
-
-def test_db_view_corrupt_registry_expiries_returns_unreadable(tmp_path: Path) -> None:
-    path = _corrupt_registry(tmp_path)
-    payload = list_registry_expiries(path)
-    assert payload["columns"] == list(REGISTRY_EXPIRY_COLUMNS)
-    assert payload["rows"] == []
-    assert payload["total"] == 0
-    assert payload["note"] == _UNREADABLE_NOTE
-
-
-def test_db_view_corrupt_registry_contracts_returns_unreadable(tmp_path: Path) -> None:
-    path = _corrupt_registry(tmp_path)
-    payload = list_registry_contracts(path, underlying="NIFTY")
-    assert payload["columns"] == list(REGISTRY_CONTRACT_COLUMNS)
-    assert payload["rows"] == []
-    assert payload["total"] == 0
-    assert payload["note"] == _UNREADABLE_NOTE
-
-
-def test_db_view_corrupt_registry_counts_returns_unreadable(tmp_path: Path) -> None:
-    path = _corrupt_registry(tmp_path)
-    counts = registry_counts(path)
-    assert counts == {
-        "expiries": 0,
-        "contracts": 0,
-        "exists": True,
-        "note": _UNREADABLE_NOTE,
-    }
-
-
-def test_db_view_corrupt_registry_contracts_malformed_date_still_raises(
-    tmp_path: Path,
-) -> None:
-    """A malformed ``expiry_date`` is rejected BEFORE the open guard (the date is
-    parsed first), so a corrupt registry never masks the 400 contract."""
-    path = _corrupt_registry(tmp_path)
-    with pytest.raises(ValueError, match="expiry_date"):
-        list_registry_contracts(path, expiry_date="2020/01/30")
-
-
 # ── bench / O(1) honesty: the guard returns immediately, no row scan ──────────
 
 
-def test_corrupt_registry_guard_is_o1_independent_of_size(tmp_path: Path) -> None:
-    """The corrupt-registry guard fails at ``open`` (before any row scan), so the
-    response cost does NOT grow with the file size — a 64-byte garbage file and a
-    256 KiB garbage file both return in constant work. Honest envelope: this asserts
+def test_corrupt_registry_guard_is_o1_independent_of_size(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The route-level corrupt-registry guard fails at ``open`` (before any row scan),
+    so the response cost does NOT grow with the file size — a 64-byte garbage file and
+    a 256 KiB garbage file both return in constant work. Honest envelope: this asserts
     the guard does not SCALE, not a hard wall-clock budget."""
-    small = tmp_path / "small"
-    big = tmp_path / "big"
-    small.mkdir()
-    big.mkdir()
-    (small / REGISTRY_DB_NAME).write_bytes(_CORRUPT_BYTES)
-    (big / REGISTRY_DB_NAME).write_bytes(b"\x00\x01\x02\x03" * 65536)  # 256 KiB
+    path = _registry_path(tmp_path)
 
-    def _elapsed(path: Path) -> float:
+    def _elapsed(blob: bytes) -> float:
+        path.write_bytes(blob)
         start = time.perf_counter()
-        out = list_registry_expiries(path / REGISTRY_DB_NAME)
-        assert out["note"] == _UNREADABLE_NOTE
+        r = client.get("/api/v1/db/registry/expiries?underlying=NIFTY")
+        assert r.json()["note"] == _UNREADABLE_NOTE
         return time.perf_counter() - start
 
-    t_small = max(_elapsed(small), 1e-6)
-    t_big = _elapsed(big)
+    t_small = max(_elapsed(_CORRUPT_BYTES), 1e-6)
+    t_big = _elapsed(b"\x00\x01\x02\x03" * 65536)  # 256 KiB
     # 4096× more bytes must NOT make the guard 4096× slower — it never reads the body.
     assert t_big < t_small * 50
 

@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -67,9 +67,6 @@ from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
 from brutex.money import round_money
-
-if TYPE_CHECKING:
-    from brutex.data.registry_store import RegistryStore
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
 #: (a single corrupt / version-incompatible Parquet file is SKIPPED, logged as
@@ -2958,13 +2955,6 @@ def build_window_payload(
 #: first metadata pull there is simply no cache to browse.
 _REGISTRY_MISSING_NOTE: Final = "no registry yet — pull expiries + contracts first"
 
-#: The honest note returned when the ``registry.duckdb`` file EXISTS but cannot be
-#: opened (corrupt / truncated / version-incompatible — ``RegistryStore.open`` raises
-#: ``RegistryError``). Distinct from :data:`_REGISTRY_MISSING_NOTE` so the operator
-#: can tell "never pulled" apart from "pulled but the cache is damaged"; the cure is
-#: to re-pull, which rewrites the cache atomically.
-_REGISTRY_UNREADABLE_NOTE: Final = "registry unreadable — re-pull expiries + contracts"
-
 
 def registry_path_for(store_path: Path) -> Path:
     """Resolve the ``registry.duckdb`` path as a SIBLING of the instrument master.
@@ -3026,36 +3016,6 @@ def _contract_grid_row(row: Any) -> list[Any]:
     ]
 
 
-def _open_registry_or_none(registry_path: Path) -> RegistryStore | None:
-    """Open the registry read-only, returning ``None`` on a corrupt/unreadable file.
-
-    The ONE place that absorbs a damaged ``registry.duckdb`` (truncated, garbage
-    bytes, version-incompatible) so the ``/db`` registry readers degrade to an honest
-    empty grid + :data:`_REGISTRY_UNREADABLE_NOTE` instead of propagating
-    :class:`~brutex.data.registry_store.RegistryError` (a ``BruteXError``, NOT a
-    ``ValueError``) uncaught to an HTTP 500. O(1): it fails at ``open`` (before any
-    scan) so the guarded path never reads a row. The caller must ``close()`` a
-    non-``None`` store.
-
-    Parameters
-    ----------
-    registry_path
-        An EXISTING ``registry.duckdb`` path (callers check ``is_file()`` first).
-
-    Returns
-    -------
-    RegistryStore | None
-        The opened store, or ``None`` when ``RegistryStore.open`` raised
-        ``RegistryError``.
-    """
-    from brutex.data.registry_store import RegistryError, RegistryStore
-
-    try:
-        return RegistryStore.open(registry_path)
-    except RegistryError:
-        return None
-
-
 def registry_counts(registry_path: Path) -> dict[str, Any]:
     """Return ``{"expiries", "contracts", "exists", "note"}`` for the registry cache.
 
@@ -3079,16 +3039,18 @@ def registry_counts(registry_path: Path) -> dict[str, Any]:
     """
     if not registry_path.is_file():
         return {"expiries": 0, "contracts": 0, "exists": False, "note": _REGISTRY_MISSING_NOTE}
-    store = _open_registry_or_none(registry_path)
-    if store is None:
-        return {"expiries": 0, "contracts": 0, "exists": True, "note": _REGISTRY_UNREADABLE_NOTE}
-    with store:
+    from brutex.data.registry_store import RegistryStore
+
+    store = RegistryStore.open(registry_path)
+    try:
         return {
             "expiries": store.count_expiries(),
             "contracts": store.count_contracts(),
             "exists": True,
             "note": None,
         }
+    finally:
+        store.close()
 
 
 def list_registry_expiries(
@@ -3142,17 +3104,10 @@ def list_registry_expiries(
             "offset": safe_offset,
             "note": _REGISTRY_MISSING_NOTE,
         }
-    store = _open_registry_or_none(registry_path)
-    if store is None:
-        return {
-            "columns": columns,
-            "rows": [],
-            "total": 0,
-            "limit": safe_limit,
-            "offset": safe_offset,
-            "note": _REGISTRY_UNREADABLE_NOTE,
-        }
-    with store:
+    from brutex.data.registry_store import RegistryStore
+
+    store = RegistryStore.open(registry_path)
+    try:
         total = store.count_expiries(exch=exch, underlying=underlying)
         rows = [
             _expiry_grid_row(r)
@@ -3160,6 +3115,8 @@ def list_registry_expiries(
                 exch=exch, underlying=underlying, limit=safe_limit, offset=safe_offset
             )
         ]
+    finally:
+        store.close()
     return {
         "columns": columns,
         "rows": rows,
@@ -3232,17 +3189,10 @@ def list_registry_contracts(
             "offset": safe_offset,
             "note": _REGISTRY_MISSING_NOTE,
         }
-    store = _open_registry_or_none(registry_path)
-    if store is None:
-        return {
-            "columns": columns,
-            "rows": [],
-            "total": 0,
-            "limit": safe_limit,
-            "offset": safe_offset,
-            "note": _REGISTRY_UNREADABLE_NOTE,
-        }
-    with store:
+    from brutex.data.registry_store import RegistryStore
+
+    store = RegistryStore.open(registry_path)
+    try:
         total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
         rows = [
             _contract_grid_row(r)
@@ -3254,6 +3204,8 @@ def list_registry_contracts(
                 offset=safe_offset,
             )
         ]
+    finally:
+        store.close()
     return {
         "columns": columns,
         "rows": rows,
