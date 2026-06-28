@@ -5,8 +5,9 @@ DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — every branch of the best-effort
 :func:`~brutex.dashboard.pull_controller._drain_fetch_pipeline`:
 
 * a dry-run never builds a pipeline (no real writes);
-* the ``BRUTEX_GROWW_FETCH_PIPELINE`` flag OFF (the default) keeps the synchronous path;
-* the flag ON builds a live :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline`;
+* the pipeline is ON BY DEFAULT — an UNSET flag builds a live
+  :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline`;
+* the ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch falls back to the synchronous path;
 * a construction failure is swallowed → ``None`` (binding it can never crash the pull);
 * drain is a guarded no-op on ``None``, swallows a generic drain error, but PROPAGATES a
   captured :class:`~brutex.data.errors.LakeWriteHalt` (the graceful pull-halt path).
@@ -33,11 +34,23 @@ class TestBuildFetchPipeline:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "1")
         assert _build_fetch_pipeline(dry_run=True) is None
 
-    def test_flag_off_keeps_synchronous_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_unset_builds_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DEFAULT ON: with NO env flag set, the production build site constructs the pipeline."""
         monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE_SIZE", raising=False)
+        pipeline = _build_fetch_pipeline(dry_run=False)
+        try:
+            assert isinstance(pipeline, FetchPipeline)
+            assert pipeline.workers == 4  # the audited default size
+        finally:
+            _drain_fetch_pipeline(pipeline)
+
+    def test_kill_switch_off_keeps_synchronous_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """KILL-SWITCH: ``=off`` disables the pipeline → the byte-identical synchronous path."""
+        monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
         assert _build_fetch_pipeline(dry_run=False) is None
 
-    def test_flag_off_explicit_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_kill_switch_explicit_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "0")
         assert _build_fetch_pipeline(dry_run=False) is None
 

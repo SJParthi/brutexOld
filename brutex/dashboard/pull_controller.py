@@ -1096,23 +1096,25 @@ def _drain_write_consumer(consumer: BatchingWriteConsumer | None) -> None:
 
 
 def _build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
-    """Build the FULL async fetch/process separation pool when the flag is on.
+    """Build the FULL async fetch/process separation pool (DEFAULT ON, kill-switchable).
 
     DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — the operator's core requirement: the fetch
     thread does ONLY fetch + enqueue; a SEPARATE consumer pool does ALL internal work
     (session-filter, dedup/lake-write, ledger.record), so internal processing can NEVER
-    block or slow the fetch. When the operator opts in via ``BRUTEX_GROWW_FETCH_PIPELINE``
-    (DEFAULT OFF), each window's tail is handed off to a
+    block or slow the fetch. The pipeline is ON BY DEFAULT (operator-authorized 2026-06-28):
+    each window's tail is handed off to a
     :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline` consumer; the upstream
     :class:`~brutex.adapters.rate_common.RateController` (the per-second AIMD ceiling + the
     atomic 500/min governor) is UNTOUCHED — it stays entirely on the producer side
-    (CLAUDE.md §2 Rule 6).
+    (CLAUDE.md §2 Rule 6). The synchronous byte-identical path is still reachable via the
+    ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch.
 
     Returns ``None`` (the byte-identical synchronous path — no thread, no queue) when: the
-    flag is OFF (the default), this is a ``dry_run`` (no real writes), or construction fails
-    (guarded — binding the pipeline can NEVER crash the pull). The caller OWNS the pipeline's
-    lifetime and MUST :func:`_drain_fetch_pipeline` it in its ``finally`` BEFORE saving the
-    window ledger (so every queued window is processed + ledger-recorded before the flush).
+    kill-switch is set (``BRUTEX_GROWW_FETCH_PIPELINE`` is an explicit falsy token), this is a
+    ``dry_run`` (no real writes), or construction fails (guarded — binding the pipeline can
+    NEVER crash the pull). The caller OWNS the pipeline's lifetime and MUST
+    :func:`_drain_fetch_pipeline` it in its ``finally`` BEFORE saving the window ledger (so
+    every queued window is processed + ledger-recorded before the flush).
     """
     if dry_run:
         return None
@@ -1500,14 +1502,14 @@ def pull_all_spot(
         # synchronous write path byte-identical; drained in the ``finally`` before the
         # ledger is saved (so every settled window is durable).
         _write_consumer = _build_write_consumer(sink, dry_run=dry_run)
-        # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001): when
-        # ``BRUTEX_GROWW_FETCH_PIPELINE`` is opted in (DEFAULT OFF), the fetch lane does ONLY
-        # fetch + enqueue and a SEPARATE consumer pool does ALL internal work (filter / write
-        # / ledger.record), so internal processing can never block or slow the fetch. The
-        # RateController (8/500 + AIMD) stays entirely producer-side, UNTOUCHED (Golden Rule
-        # #6). ``None`` (the default / a dry-run) keeps the synchronous path byte-identical;
-        # drained in the ``finally`` before the ledger is saved (so every queued window is
-        # processed + ledger-recorded first).
+        # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001): ON BY
+        # DEFAULT (operator-authorized 2026-06-28) — the fetch lane does ONLY fetch + enqueue
+        # and a SEPARATE consumer pool does ALL internal work (filter / write / ledger.record),
+        # so internal processing can never block or slow the fetch. The RateController
+        # (8/500 + AIMD) stays entirely producer-side, UNTOUCHED (Golden Rule #6). ``None``
+        # (the ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch / a dry-run) keeps the
+        # synchronous path byte-identical; drained in the ``finally`` before the ledger is
+        # saved (so every queued window is processed + ledger-recorded first).
         _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.

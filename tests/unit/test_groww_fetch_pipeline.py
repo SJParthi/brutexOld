@@ -48,14 +48,18 @@ def _result(shard_key: str, process) -> RawFetchResult:  # type: ignore[no-untyp
 
 
 class TestResolveFetchPipelineSize:
-    """The env-driven on/off + size normalisation (fail-safe to the audited default)."""
+    """The env-driven default-ON + kill-switch + size normalisation (fail-safe to default)."""
 
-    @pytest.mark.parametrize("flag", ["1", "true", "TRUE", "Yes", "on", " on "])
-    def test_truthy_flag_enables_default_size(self, flag: str) -> None:
+    @pytest.mark.parametrize(
+        "flag", [None, "", "garbage", "1", "true", "TRUE", "Yes", "on", " on "]
+    )
+    def test_unset_or_non_falsy_flag_enables_default_size(self, flag: str | None) -> None:
+        """DEFAULT ON: unset / blank / unrecognised / truthy → the pipeline is enabled."""
         assert resolve_fetch_pipeline_size(raw=None, flag=flag) == 4
 
-    @pytest.mark.parametrize("flag", [None, "", "0", "false", "no", "off", "garbage"])
-    def test_falsey_flag_disables(self, flag: str | None) -> None:
+    @pytest.mark.parametrize("flag", ["0", "false", "FALSE", "no", "No", "off", "OFF", " off "])
+    def test_falsy_flag_kill_switches(self, flag: str) -> None:
+        """KILL-SWITCH: only an explicit falsy token disables the pipeline (sync path)."""
         assert resolve_fetch_pipeline_size(raw="4", flag=flag) is None
 
     def test_explicit_in_range_size(self) -> None:
@@ -73,8 +77,15 @@ class TestResolveFetchPipelineSize:
         monkeypatch.setenv(FETCH_PIPELINE_SIZE_ENV, "3")
         assert resolve_fetch_pipeline_size() == 3
 
-    def test_environment_off_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_environment_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An UNSET env flag now resolves ON (the default-flip)."""
         monkeypatch.delenv(FETCH_PIPELINE_ENV, raising=False)
+        monkeypatch.delenv(FETCH_PIPELINE_SIZE_ENV, raising=False)
+        assert resolve_fetch_pipeline_size() == 4
+
+    def test_environment_kill_switch_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ``=off`` kill-switch disables the pipeline via the environment."""
+        monkeypatch.setenv(FETCH_PIPELINE_ENV, "off")
         assert resolve_fetch_pipeline_size() is None
 
 

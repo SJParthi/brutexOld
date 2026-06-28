@@ -31,8 +31,8 @@ that did fetch + filter + append + ledger.record. That function is SPLIT in two:
   ``PartitionLockTimeout`` defer) + conflict-aggregate + ``ledger.record`` (SUCCESS
   / EMPTY) + ``on_success``. This is the CONSUMER work.
 
-When :class:`FetchPipeline` is ``None`` (the default) the spine calls
-``_fetch_window_raw`` then ``_process_window_tail`` as ONE synchronous call —
+When :class:`FetchPipeline` is ``None`` (the kill-switched synchronous path) the spine
+calls ``_fetch_window_raw`` then ``_process_window_tail`` as ONE synchronous call —
 **byte-identical to today**. When a pipeline is wired the producer calls
 ``_fetch_window_raw`` then :meth:`FetchPipeline.submit` (a bounded ``put`` that
 blocks ONLY on back-pressure, NEVER on the write completing) and immediately moves
@@ -81,9 +81,11 @@ This delivers **ISOLATION** — the fetch lane's throughput is decoupled from th
 internal processing (proven by a stalled-consumer test where the producer keeps
 issuing at full rate). It is **NOT** a throughput increase: the achieved rate is
 still vendor-bound (Groww 429s above ~5 r/s), and the controller still caps the
-issue rate. The benefit is fault + latency isolation of the fetch. ``None`` (the
-default) reproduces TODAY's fully-synchronous path BYTE-IDENTICALLY. stdlib-only at
-import (``queue`` / ``threading`` / ``dataclasses`` / ``hashlib`` / ``os``).
+issue rate. The benefit is fault + latency isolation of the fetch. The pipeline is ON
+BY DEFAULT (operator-authorized 2026-06-28); ``None`` (the kill-switch, set
+``BRUTEX_GROWW_FETCH_PIPELINE=off``) reproduces TODAY's fully-synchronous path
+BYTE-IDENTICALLY. stdlib-only at import (``queue`` / ``threading`` / ``dataclasses`` /
+``hashlib`` / ``os``).
 """
 
 from __future__ import annotations
@@ -151,29 +153,33 @@ _WATCHDOG_POLL_SECONDS: float = 1.0
 #: process alive, so a reported-but-unjoined thread can never wedge shutdown.
 _DEFAULT_DRAIN_JOIN_TIMEOUT_SECONDS: float = 60.0
 
-#: Environment flag that opts the live pull into the FULL async fetch/process separation.
-#: DEFAULT OFF: the synchronous, byte-identical path stays the production default until the
-#: operator flips it (Golden Rule #10 — an isolation feature ships dormant). Truthy values:
-#: ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive). Anything else (incl. unset,
-#: blank, ``0``, ``false``) keeps the pipeline OFF.
+#: Environment KILL-SWITCH for the FULL async fetch/process separation.
+#: DEFAULT ON: the async pipeline is the production default (operator-authorized 2026-06-28,
+#: DEC-GROWW-FETCH-ASYNC-SEPARATION-001 default-flip). The synchronous, byte-identical path is
+#: still reachable as a kill-switch: setting this to an explicit FALSY token —
+#: ``off`` / ``0`` / ``false`` / ``no`` (case-insensitive) — DISABLES the pipeline. Anything
+#: else (incl. UNSET, blank, ``1`` / ``true`` / ``yes`` / ``on``) keeps the pipeline ON.
 FETCH_PIPELINE_ENV: str = "BRUTEX_GROWW_FETCH_PIPELINE"
 
 #: Environment override for the consumer-pool width (operator escape hatch, no code change).
 FETCH_PIPELINE_SIZE_ENV: str = "BRUTEX_GROWW_FETCH_PIPELINE_SIZE"
 
-_FETCH_PIPELINE_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+#: Explicit FALSY tokens that flip the kill-switch (disable the pipeline → synchronous path).
+_FETCH_PIPELINE_FALSY: frozenset[str] = frozenset({"off", "0", "false", "no"})
 
 
 def resolve_fetch_pipeline_size(raw: str | None = None, *, flag: str | None = None) -> int | None:
-    """Resolve the consumer-pool width: ``None`` (sync, OFF) or a clamped ``M >= 1``.
+    """Resolve the consumer-pool width: ``None`` (sync, kill-switched) or a clamped ``M >= 1``.
 
-    Returns ``None`` (the synchronous, byte-identical path — the pipeline is OFF) unless the
-    :data:`FETCH_PIPELINE_ENV` flag is an explicit truthy token. When ON, the width is read
-    from :data:`FETCH_PIPELINE_SIZE_ENV` (or *raw* in tests) and clamped to
-    ``[1, _FETCH_PIPELINE_SIZE_MAX]``; an unset / blank / non-integer / out-of-range value
-    falls back to :data:`_DEFAULT_FETCH_PIPELINE_SIZE` (fail-safe to the audited default,
-    Golden Rule #1). A thin helper so the live build site + tests share ONE normalisation
-    (CLAUDE.md §11 COMMON). O(1).
+    The async pipeline is ON BY DEFAULT (operator-authorized 2026-06-28). Returns a clamped
+    ``M >= 1`` (the pipeline is ON) for an UNSET flag OR any non-falsy token; returns ``None``
+    (the synchronous, byte-identical path — the KILL-SWITCH) ONLY when the
+    :data:`FETCH_PIPELINE_ENV` flag is an explicit falsy token (``off`` / ``0`` / ``false`` /
+    ``no``, case-insensitive). When ON, the width is read from :data:`FETCH_PIPELINE_SIZE_ENV`
+    (or *raw* in tests) and clamped to ``[1, _FETCH_PIPELINE_SIZE_MAX]``; an unset / blank /
+    non-integer / out-of-range value falls back to :data:`_DEFAULT_FETCH_PIPELINE_SIZE`
+    (fail-safe to the audited default, Golden Rule #1). A thin helper so the live build site +
+    tests share ONE normalisation (CLAUDE.md §11 COMMON). O(1).
 
     Parameters
     ----------
@@ -183,7 +189,7 @@ def resolve_fetch_pipeline_size(raw: str | None = None, *, flag: str | None = No
         The on/off token (``None`` reads :data:`FETCH_PIPELINE_ENV`); a test may pass one.
     """
     flag_value = os.environ.get(FETCH_PIPELINE_ENV) if flag is None else flag
-    if flag_value is None or flag_value.strip().lower() not in _FETCH_PIPELINE_TRUTHY:
+    if flag_value is not None and flag_value.strip().lower() in _FETCH_PIPELINE_FALSY:
         return None
     size_value = os.environ.get(FETCH_PIPELINE_SIZE_ENV) if raw is None else raw
     if size_value is None or not size_value.strip():
