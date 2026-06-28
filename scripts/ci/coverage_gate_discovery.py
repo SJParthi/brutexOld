@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""coverage_gate_discovery.py — auto-discover touched modules + their tests.
+
+DEC-CICD-GATE-HONESTY-001. The "Strict per-module 100% coverage gate" in
+``.github/workflows/ci.yml`` historically carried a *hardcoded* list of
+``pytest --cov=brutex.MODULE`` invocations (one ``compgen -G`` guard per
+module). A hardcoded allowlist has a structural blind spot: a NEW module
+that is not added to the list silently escapes the per-module independence
+check (it still rides the whole-package ``--cov-fail-under=100`` floor,
+but never proves it is 100% with its OWN tests).
+
+This helper COMPLEMENTS the static list (it does not replace it, nor the
+whole-package floor) with a deterministic "what was TOUCHED" discovery, so
+a newly added module can never escape the per-file gate merely for being
+absent from a list — while a legacy modification with no dedicated test is
+NEVER newly blocked:
+
+1. **Discover touched modules** from ``git diff --name-status
+   --diff-filter=ACMR <base>...HEAD`` (base defaults to ``origin/main``),
+   filtered to ``brutex/**/*.py``, EXCLUDING ``__init__.py``, anything
+   under ``tests/``, and the small documented ``COVERAGE_DISCOVERY_EXCLUDE``
+   allowlist. Each module keeps its git STATUS (Added vs Modified/Renamed/
+   Copied) — the failure policy below differs by status.
+2. **Map each module to its test file(s)** via the repo's real path
+   conventions (``brutex/a/b/foo.py`` → ``test_foo.py`` / ``test_b_foo.py``
+   / ``test_a_b_foo.py``, each optionally with a trailing ``*`` so a
+   curated multi-file suite like ``test_lookahead_barrier.py`` matches),
+   discovered by globbing ``tests/**/test_*.py`` — no second hardcoded
+   mapping table. A candidate is then ACCEPTED only if it actually
+   IMPORTS the module (so a foreign same-stem test — e.g. a
+   ``tests/unit/test_models.py`` that imports a *different* ``models`` —
+   is rejected, never mistaken for the module's own coverage).
+3. **Fail honestly** only when a NEWLY ADDED module has no import-verified
+   test; a MODIFIED module with no such test is warned about and skipped
+   (it still rides the static gate + the whole-package floor).
+4. **Run coverage** per touched module that HAS a verified test against
+   those tests and assert 100% line AND 100% branch, with a precise
+   per-file report.
+
+Determinism: every discovered collection is sorted; nothing depends on
+``dict``/``set``/filesystem iteration order.
+
+Usage::
+
+    python scripts/ci/coverage_gate_discovery.py [--base <ref>] [--list]
+
+Exit codes: 0 = all touched modules at 100% (or none touched, or only
+warn-skipped modifications); 1 = a newly added module has no test OR a
+verified module is below 100%; 2 = script/setup error (e.g. git
+unavailable / no merge base). Fail-closed, mirroring the sibling CI gates.
+``--list`` prints the discovered plan and exits 0 without running coverage
+(a fast dry-run for the workflow log + local debugging).
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import subprocess  # nosec B404 — git/pytest invocation is the gate's purpose
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+#: Default merge base the PR diff is computed against.
+DEFAULT_BASE = "origin/main"
+
+#: The single in-scope source root (POSIX-relative, package-rooted). This
+#: matches the historical per-module gate's ``brutex``-only scope — a
+#: ``scripts/ci`` script is NOT a coverage-gated brutex module here (its
+#: own dedicated tests still run in the suite).
+SOURCE_ROOT = "brutex/"
+
+#: Where the test files live (globbed for ``test_*.py``).
+TESTS_DIR = "tests"
+
+#: TINY, documented allowlist of in-scope files that genuinely have NO
+#: per-file unit test, so a touch must NOT fail the discovery gate. Keep
+#: this list short and justified — every entry needs a one-line reason
+#: (CLAUDE.md Golden Rule #11 COMMON + Golden Rule #10 honesty). It is
+#: deliberately EMPTY: every brutex module is expected to ship a
+#: per-file test, and the warn-skip policy already protects legacy
+#: modifications, so no genuinely test-less brutex module needs an entry
+#: today.
+COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset()
+
+
+class DiscoveryError(Exception):
+    """A setup/usage error (maps to exit code 2)."""
+
+
+def _git_diff_name_status(base: str) -> list[tuple[str, str]]:
+    """Return ``(status, path)`` pairs added/copied/modified/renamed vs *base*.
+
+    ``--diff-filter=ACMR`` excludes deletions (D) so a removed module is
+    never gated, and ``--name-status`` keeps each file's status letter so
+    the caller can distinguish a NEWLY added module (``A``) from a
+    modification (``M``/``R``/``C``). A rename/copy row carries the NEW
+    path in its final tab-separated column (and a similarity score in the
+    status letter, e.g. ``R100``); only the leading letter and the final
+    path are used.
+
+    Parameters
+    ----------
+    base:
+        The git ref (merge base) to diff ``HEAD`` against.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        ``(single-letter status, POSIX path)`` for every non-deletion
+        change, in git's emitted order.
+    """
+    # Fixed argv (no shell), git resolved on PATH, no untrusted input — the
+    # only variable is the caller's --base ref.
+    git_argv = ["git", "diff", "--name-status", "--diff-filter=ACMR", f"{base}...HEAD"]
+    try:
+        proc = subprocess.run(  # noqa: S603  # nosec B603 B607
+            git_argv,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:  # git binary missing / not executable
+        raise DiscoveryError(f"cannot run git: {exc}") from exc
+    if proc.returncode != 0:
+        raise DiscoveryError(f"git diff failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    rows: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        if not line:
+            continue
+        fields = line.split("\t")
+        status = fields[0][:1]
+        # For R/C the new path is the LAST field; for A/M it is fields[1].
+        path = fields[-1]
+        if path:
+            rows.append((status, path))
+    return rows
+
+
+def discover_touched_modules(diff_rows: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Return the sorted in-scope ``(module, status)`` pairs among *diff_rows*.
+
+    Filters to ``SOURCE_ROOT`` ``*.py`` files, dropping ``__init__.py``,
+    any ``tests/`` path, and the ``COVERAGE_DISCOVERY_EXCLUDE`` allowlist.
+    The status letter is normalised to its leading character (``A`` =
+    Added; ``M``/``R``/``C`` = a modification for the failure policy). If a
+    path appears more than once the first kept status wins (sorted input
+    makes this deterministic).
+
+    Parameters
+    ----------
+    diff_rows:
+        ``(status, path)`` pairs from :func:`_git_diff_name_status`.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Sorted ``(module_path, status_letter)`` for every in-scope module.
+    """
+    touched: dict[str, str] = {}
+    for status, name in diff_rows:
+        if not name.endswith(".py"):
+            continue
+        if name.startswith(f"{TESTS_DIR}/"):
+            continue
+        if Path(name).name == "__init__.py":
+            continue
+        if not name.startswith(SOURCE_ROOT):
+            continue
+        if name in COVERAGE_DISCOVERY_EXCLUDE:
+            continue
+        touched.setdefault(name, status[:1])
+    return sorted(touched.items())
+
+
+def candidate_test_globs(module: str) -> list[str]:
+    """Return the candidate ``test_*.py`` glob patterns for *module*.
+
+    The repo maps a source module to its test by the file stem optionally
+    prefixed with one or more parent directory segments — e.g.
+    ``brutex/data/partition.py`` is tested by ``test_data_partition.py``
+    while ``brutex/doctor.py`` is tested by ``test_doctor.py``. A trailing
+    ``*`` is appended to every pattern so a curated multi-file suite (e.g.
+    ``test_lookahead_barrier.py`` alongside ``test_lookahead.py``, or
+    ``test_cli_run.py`` alongside ``test_cli.py``) is discovered too. The
+    patterns are returned longest/most-specific suffix first.
+
+    Parameters
+    ----------
+    module:
+        The POSIX module path (e.g. ``brutex/feed/lookahead.py``).
+
+    Returns
+    -------
+    list[str]
+        Glob patterns (filename only), most specific first, each distinct.
+    """
+    path = Path(module)
+    stem = path.stem
+    # Directory segments between the package root and the file, e.g.
+    # brutex/data/partition.py -> ["data"]; brutex/doctor.py -> [].
+    parts = list(path.parts[:-1])
+    if parts and parts[0] == "brutex":
+        parts = parts[1:]
+    # Progressively drop the leftmost parent segments (most specific
+    # first), so test_data_partition*.py is listed before a bare
+    # test_partition*.py; cut=0 keeps every segment, cut=len(parts) is
+    # bare. Each cut yields a strictly shorter suffix, so the patterns are
+    # distinct by construction — no dedup needed.
+    return [
+        f"test_{'_'.join([*parts[cut:], stem]) if parts[cut:] else stem}*.py"
+        for cut in range(len(parts) + 1)
+    ]
+
+
+def module_import_tokens(module: str) -> tuple[str, str, str]:
+    """Return the dotted identifiers that prove a test covers *module*.
+
+    A test genuinely covering ``brutex/feed/lookahead.py`` must import the
+    module by its dotted path in one of three precise forms, checked by
+    :func:`_file_imports_module` against a parsed AST (NOT a substring
+    scan):
+
+    * ``import brutex.feed.lookahead`` — an :class:`ast.Import` whose alias
+      name equals ``module_dotted``;
+    * ``from brutex.feed.lookahead import X`` — an :class:`ast.ImportFrom`
+      whose ``module`` equals ``module_dotted``;
+    * ``from brutex.feed import lookahead`` — an :class:`ast.ImportFrom`
+      whose ``module`` equals ``parent_pkg`` and one of whose alias names
+      equals ``stem``.
+
+    A foreign same-stem test (e.g. one importing a *different* package's
+    ``lookahead``) matches none of these, so it is rejected.
+
+    Parameters
+    ----------
+    module:
+        The POSIX module path (e.g. ``brutex/feed/lookahead.py``).
+
+    Returns
+    -------
+    tuple[str, str, str]
+        ``(module_dotted, parent_pkg, stem)`` — e.g.
+        ``("brutex.feed.lookahead", "brutex.feed", "lookahead")``.
+    """
+    dotted = module.removesuffix(".py").replace("/", ".")
+    path = Path(module)
+    stem = path.stem
+    parent_pkg = ".".join(path.parts[:-1])  # e.g. "brutex.feed"
+    return (dotted, parent_pkg, stem)
+
+
+def _file_imports_module(test_path: Path, module: str) -> bool:
+    """Return True if *test_path* imports *module* (not a foreign same-stem).
+
+    The candidate test file is parsed with :func:`ast.parse` and its nodes
+    walked, so the decision is precise — independent of comments, string
+    contents, line wrapping, or a coincidental substring. The file is
+    accepted iff ANY top-or-nested import node satisfies one of:
+
+    * an :class:`ast.Import` with an alias whose ``name`` *exactly* equals
+      the module's dotted path (``import brutex.feed.lookahead`` — so
+      ``import brutex.feed.lookahead_extra`` or ``import
+      other.brutex.feed.lookahead`` is rejected);
+    * an :class:`ast.ImportFrom` whose ``module`` equals the dotted path
+      (``from brutex.feed.lookahead import X``);
+    * an :class:`ast.ImportFrom` whose ``module`` equals the parent
+      package *and* one of whose alias ``name`` values equals the stem
+      (``from brutex.feed import lookahead`` / ``... import lookahead as
+      lh`` — the imported NAME is matched, never the asname).
+
+    A relative import (``from . import x``) has ``node.module is None`` and
+    never matches. An :class:`ast.ImportFrom` always carries a
+    non-``None`` ``names`` list, so the alias scan needs no guard. An
+    unreadable file (:class:`OSError`) and a file that fails to parse
+    (:class:`SyntaxError`) are both treated as a non-match — a test that
+    cannot be read or is syntactically broken cannot be relied on to cover
+    the module — and the parse failure is reported on stdout (the script's
+    CLI contract).
+
+    Parameters
+    ----------
+    test_path:
+        Absolute path to a candidate ``test_*.py`` file.
+    module:
+        The POSIX module path being covered.
+
+    Returns
+    -------
+    bool
+        Whether the file genuinely imports *module*.
+    """
+    try:
+        text = test_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        tree = ast.parse(text, filename=str(test_path))
+    except SyntaxError as exc:
+        print(f"  WARN: cannot parse {test_path} ({exc}) — treating as no import")
+        return False
+    module_dotted, parent_pkg, stem = module_import_tokens(module)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == module_dotted for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is None:
+                continue
+            if node.module == module_dotted:
+                return True
+            if node.module == parent_pkg and any(alias.name == stem for alias in node.names):
+                return True
+    return False
+
+
+def discover_tests_for_module(module: str, test_files: Sequence[Path]) -> list[str]:
+    """Return the sorted POSIX test paths that IMPORT *module*, or ``[]``.
+
+    *test_files* is the pre-globbed list of every ``tests/**/test_*.py``.
+    A candidate is one whose basename matches one of the module's glob
+    patterns AND which genuinely imports the module (a foreign same-stem
+    test is rejected). Sorting keeps the pytest invocation deterministic.
+
+    Parameters
+    ----------
+    module:
+        The POSIX module path being covered.
+    test_files:
+        Every discovered ``tests/**/test_*.py`` path.
+
+    Returns
+    -------
+    list[str]
+        Sorted POSIX-relative paths of the import-verified tests.
+    """
+    patterns = candidate_test_globs(module)
+    matched: set[str] = set()
+    for tf in test_files:
+        if not any(tf.match(pattern) for pattern in patterns):
+            continue
+        if _file_imports_module(tf, module):
+            matched.add(tf.relative_to(ROOT).as_posix())
+    return sorted(matched)
+
+
+def all_test_files() -> list[Path]:
+    """Return every ``tests/**/test_*.py`` path, sorted (deterministic)."""
+    return sorted((ROOT / TESTS_DIR).rglob("test_*.py"))
+
+
+class Plan:
+    """The discovered coverage plan for a diff.
+
+    Attributes
+    ----------
+    entries:
+        Sorted ``(module, [test_paths])`` for every touched, non-excluded
+        module that HAS at least one import-verified test.
+    missing_added:
+        Sorted ADDED modules with NO verified test — a hard FAIL.
+    skipped_modified:
+        Sorted MODIFIED modules with NO verified test — WARN + skip (they
+        still ride the static gate + the whole-package floor).
+    """
+
+    def __init__(
+        self,
+        entries: list[tuple[str, list[str]]],
+        missing_added: list[str],
+        skipped_modified: list[str],
+    ) -> None:
+        """Store the partitioned discovery result.
+
+        Parameters
+        ----------
+        entries:
+            ``(module, [test_paths])`` for modules with a verified test.
+        missing_added:
+            ADDED modules with no verified test (a hard FAIL).
+        skipped_modified:
+            MODIFIED modules with no verified test (WARN + skip).
+        """
+        self.entries = entries
+        self.missing_added = missing_added
+        self.skipped_modified = skipped_modified
+
+    def is_empty(self) -> bool:
+        """Return True if the plan has nothing to report (no touched modules)."""
+        return not (self.entries or self.missing_added or self.skipped_modified)
+
+
+def build_plan(base: str) -> Plan:
+    """Discover the coverage plan for the diff against *base*.
+
+    Parameters
+    ----------
+    base:
+        The git ref (merge base) to diff ``HEAD`` against.
+
+    Returns
+    -------
+    Plan
+        The partitioned discovery result (entries / missing-added /
+        skipped-modified), every list sorted for determinism.
+    """
+    diff_rows = _git_diff_name_status(base)
+    modules = discover_touched_modules(diff_rows)
+    test_files = all_test_files()
+    entries: list[tuple[str, list[str]]] = []
+    missing_added: list[str] = []
+    skipped_modified: list[str] = []
+    for module, status in modules:
+        tests = discover_tests_for_module(module, test_files)
+        if tests:
+            entries.append((module, tests))
+        elif status == "A":
+            missing_added.append(module)
+        else:
+            skipped_modified.append(module)
+    return Plan(
+        entries=sorted(entries),
+        missing_added=sorted(missing_added),
+        skipped_modified=sorted(skipped_modified),
+    )
+
+
+def _run_coverage(module: str, tests: Sequence[str]) -> bool:
+    """Run pytest --cov for *module* over *tests*; return True if 100%.
+
+    Uses the numpy-safe ``--cov=brutex`` (whole-package trace) + a
+    ``coverage report --include=<file>`` filter the existing metrics gates
+    use, so a dotted ``--cov=brutex.metrics.X`` never double-loads numpy
+    2.x. The per-file 100% assertion is ``--fail-under=100`` on the
+    filtered report; a file the tests never imported is reported as
+    not-measured and also fails (the exact 0%-masking this gate exists to
+    prevent).
+
+    Parameters
+    ----------
+    module:
+        The POSIX module path being covered.
+    tests:
+        The import-verified test paths to run.
+
+    Returns
+    -------
+    bool
+        Whether the module is at 100% line + branch coverage.
+    """
+    pytest_cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "--cov=brutex",
+        "--cov-branch",
+        "--cov-fail-under=0",
+        *tests,
+    ]
+    proc = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
+        pytest_cmd, cwd=ROOT, text=True, check=False
+    )
+    if proc.returncode != 0:
+        print(f"  FAIL: pytest errored for {module} (exit {proc.returncode})")
+        return False
+    include = f"*/{module}"
+    measured = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
+        [sys.executable, "-m", "coverage", "report", f"--include={include}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if module not in measured.stdout:
+        print(f"  FAIL: {module} was not measured by its tests — gate failed")
+        return False
+    report = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "report",
+            f"--include={include}",
+            "--show-missing",
+            "--fail-under=100",
+        ],
+        cwd=ROOT,
+        text=True,
+        check=False,
+    )
+    return report.returncode == 0
+
+
+def _print_plan(plan: Plan) -> None:
+    """Print the discovered plan (entries, missing-added, skipped-modified).
+
+    Parameters
+    ----------
+    plan:
+        The discovery result to render to stdout.
+    """
+    print("coverage-gate discovery plan (auto-discovered touched brutex modules):")
+    for module, tests in plan.entries:
+        print(f"  - {module} -> {', '.join(tests)}")
+    if plan.missing_added:
+        print("  NEW modules with NO import-verified test (gate will FAIL):")
+        for module in plan.missing_added:
+            print(f"    - {module}")
+    if plan.skipped_modified:
+        print("  modified modules with NO dedicated test (WARN + skip — ride the static gate):")
+        for module in plan.skipped_modified:
+            print(f"    - {module}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point — see the module docstring for the contract.
+
+    Parameters
+    ----------
+    argv:
+        Optional argument vector (defaults to ``sys.argv[1:]``).
+
+    Returns
+    -------
+    int
+        The process exit code (0 pass / 1 gate failure / 2 setup error).
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--base",
+        default=DEFAULT_BASE,
+        help=f"merge base for the diff (default: {DEFAULT_BASE})",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print the discovered plan and exit (no coverage run)",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        plan = build_plan(args.base)
+    except DiscoveryError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+
+    if plan.is_empty():
+        print("coverage-gate discovery: no touched brutex modules — nothing to check (PASS)")
+        return 0
+
+    _print_plan(plan)
+
+    if args.list:
+        return 0
+
+    if plan.missing_added:
+        print(
+            "\nFAIL: a NEW module must ship a dedicated test that imports it "
+            "(or be added — with a justification — to "
+            "COVERAGE_DISCOVERY_EXCLUDE). Missing tests for: " + ", ".join(plan.missing_added)
+        )
+        return 1
+
+    failed: list[str] = []
+    for module, tests in plan.entries:
+        print(f"\n=== 100% gate: {module} ===")
+        if not _run_coverage(module, tests):
+            failed.append(module)
+
+    if failed:
+        print("\ncoverage-gate FAILURES (below 100% line/branch):")
+        for module in failed:
+            print(f"  - {module}")
+        return 1
+
+    print(f"\ncoverage-gate discovery OK: {len(plan.entries)} touched module(s) at 100%")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
