@@ -97,6 +97,33 @@ def test_render_topnav_with_unknown_active_marks_none() -> None:
     assert links == _CANONICAL
 
 
+@pytest.mark.parametrize("page", ["/movers", "/reports"])
+def test_operator_link_present_in_nav(page: str) -> None:
+    """The leading ``Operator`` link (href ``/``) is in each page's top-nav.
+
+    The Operator link points at the live ``/`` route (the rich operator
+    dashboard rendering ``v29.html``) — distinct from ``/results`` — and was
+    added to every top-nav block (DEC-MOVERS-FULL-CONTRACT-NAME-001 bundle).
+    """
+    nav = _nav_block(_TOPNAV_PAGES[page]())
+    links = [(href, text.strip()) for href, _attrs, text in _LINK_RE.findall(nav)]
+    assert ("/", "Operator") in links, f"{page} nav is missing the Operator (/) link"
+    # It is the FIRST nav entry.
+    assert links[0] == ("/", "Operator"), f"{page} Operator link is not first in nav"
+
+
+def test_index_page_still_renders() -> None:
+    """The ``/`` operator dashboard (``v29.html``) still renders non-empty.
+
+    The Operator nav link targets this page; it intentionally carries NO
+    ``topnav`` (it uses in-page tabs), so it stays exempt from the canonical
+    nav guard while remaining a valid, reachable destination.
+    """
+    html = dashboard_app._render_index_html()
+    assert html.strip(), "the operator dashboard index page rendered empty"
+    assert '<nav class="topnav"' not in html, "the / page should not carry the topnav"
+
+
 def test_every_render_helper_is_classified() -> None:
     """Meta-guard: every dashboard page render helper is either guarded or exempt.
 

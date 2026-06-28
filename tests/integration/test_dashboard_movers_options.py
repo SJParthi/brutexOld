@@ -39,6 +39,7 @@ pytest.importorskip("pyarrow")
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_options import (
     _discover_options,
+    compute_options_candidates,
     run_options_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -240,8 +241,8 @@ class TestRunOptionsSnapshot:
         # highest_oi: CE (1100) before PE (900).
         highest = payload["highest_oi"]
         assert [r["name"] for r in highest] == [
-            "Nifty 50 27Jun24 24000 CE",
-            "Nifty 50 27Jun24 24000 PE",
+            "Nifty 50 27-Jun-2024 24000 CE",
+            "Nifty 50 27-Jun-2024 24000 PE",
         ]
         ce_row = highest[0]
         assert ce_row["spot"] == "₹23,622.90"
@@ -260,17 +261,17 @@ class TestRunOptionsSnapshot:
         assert pe_row["atm_offset"] is None
 
         # CE oi% +10 → in oi_gainers; PE oi% -25 → in oi_losers.
-        assert [r["name"] for r in payload["oi_gainers"]] == ["Nifty 50 27Jun24 24000 CE"]
-        assert [r["name"] for r in payload["oi_losers"]] == ["Nifty 50 27Jun24 24000 PE"]
+        assert [r["name"] for r in payload["oi_gainers"]] == ["Nifty 50 27-Jun-2024 24000 CE"]
+        assert [r["name"] for r in payload["oi_losers"]] == ["Nifty 50 27-Jun-2024 24000 PE"]
 
         # CE pct +64 → price_gainers; PE pct -11.11 → price_losers.
-        assert [r["name"] for r in payload["price_gainers"]] == ["Nifty 50 27Jun24 24000 CE"]
-        assert [r["name"] for r in payload["price_losers"]] == ["Nifty 50 27Jun24 24000 PE"]
+        assert [r["name"] for r in payload["price_gainers"]] == ["Nifty 50 27-Jun-2024 24000 CE"]
+        assert [r["name"] for r in payload["price_losers"]] == ["Nifty 50 27-Jun-2024 24000 PE"]
 
         # value: CE 80600 > PE (85*50 + 80*150 = 4250 + 12000 = 16250).
         assert [r["name"] for r in payload["value"]] == [
-            "Nifty 50 27Jun24 24000 CE",
-            "Nifty 50 27Jun24 24000 PE",
+            "Nifty 50 27-Jun-2024 24000 CE",
+            "Nifty 50 27-Jun-2024 24000 PE",
         ]
         pe_signed = next(r for r in payload["oi_losers"])
         assert pe_signed["oi_chg"] == -300  # 900 - 1200
@@ -307,13 +308,13 @@ class TestRunOptionsSnapshot:
         )
         by_name = {r["name"]: r for r in payload["highest_oi"]}
         # 23600 CE: |23622.90 - 23600| = 22.90 <= step/2 (25) → ATM, offset 0.
-        assert by_name["NIFTY 27Jun24 23600 CE"]["moneyness"] == "ATM"
-        assert by_name["NIFTY 27Jun24 23600 CE"]["atm_offset"] == 0
+        assert by_name["NIFTY 27-Jun-2024 23600 CE"]["moneyness"] == "ATM"
+        assert by_name["NIFTY 27-Jun-2024 23600 CE"]["atm_offset"] == 0
         # 24000 CE: spot below strike → OTM by 8 strikes; the shown cell is the combined
         # label "OTM +8" (round((24000-23622.90)/50) = 8), the raw offset stays in payload.
-        assert by_name["NIFTY 27Jun24 24000 CE"]["moneyness"] == "OTM +8"
-        assert by_name["NIFTY 27Jun24 24000 CE"]["moneyness_bucket"] == "OTM"
-        assert by_name["NIFTY 27Jun24 24000 CE"]["atm_offset"] == 8
+        assert by_name["NIFTY 27-Jun-2024 24000 CE"]["moneyness"] == "OTM +8"
+        assert by_name["NIFTY 27-Jun-2024 24000 CE"]["moneyness_bucket"] == "OTM"
+        assert by_name["NIFTY 27-Jun-2024 24000 CE"]["atm_offset"] == 8
 
     def test_no_underlying_spot_nulls_spot(self, tmp_path: Path) -> None:
         # CE present but NO underlying spot → spot null, still ranked.
@@ -424,7 +425,7 @@ class TestRunOptionsSnapshotTrack:
         # Only the June-27 monthly CE + PE → the June-20 weekly drops out.
         assert payload["instrument_count"] == 2
         names = {row["name"] for row in payload["highest_oi"]}
-        assert names == {"NIFTY 27Jun24 24000 CE", "NIFTY 27Jun24 24000 PE"}
+        assert names == {"NIFTY 27-Jun-2024 24000 CE", "NIFTY 27-Jun-2024 24000 PE"}
         assert "Monthly" in payload["note"]
 
     def test_weekly_keeps_only_the_non_terminal_expiry(self, tmp_path: Path) -> None:
@@ -439,7 +440,7 @@ class TestRunOptionsSnapshotTrack:
         )
         # Only the June-20 weekly CE → the June-27 monthly contracts drop out.
         assert payload["instrument_count"] == 1
-        assert payload["highest_oi"][0]["name"] == "NIFTY 20Jun24 24000 CE"
+        assert payload["highest_oi"][0]["name"] == "NIFTY 20-Jun-2024 24000 CE"
         assert "Weekly" in payload["note"]
 
     def test_unknown_track_normalises_to_all(self, tmp_path: Path) -> None:
@@ -456,7 +457,7 @@ class TestRunOptionsSnapshotTrack:
         # overall (the June-20 weekly), and the tier label carries NO cadence suffix
         # (that is what proves it normalised to ``all`` and not to ``weekly``).
         assert payload["instrument_count"] == 1
-        assert payload["highest_oi"][0]["name"] == "NIFTY 20Jun24 24000 CE"
+        assert payload["highest_oi"][0]["name"] == "NIFTY 20-Jun-2024 24000 CE"
         assert "Near expiry" in payload["note"]
         assert "Near Weekly" not in payload["note"]
         assert "Near Monthly" not in payload["note"]
@@ -512,7 +513,7 @@ class TestOptionsApi:
         assert body["instrument_count"] == 2
         assert body["skipped_count"] == 0
         ce_row = body["highest_oi"][0]
-        assert ce_row["name"] == "NIFTY 27Jun24 24000 CE"
+        assert ce_row["name"] == "NIFTY 27-Jun-2024 24000 CE"
         assert ce_row["ltp"] == "₹164.00"
         assert ce_row["oi"] == 1100
         assert Decimal(ce_row["oi_chg_pct"]) == Decimal("10")
@@ -545,7 +546,7 @@ class TestOptionsApi:
         ).json()
         assert near["instrument_count"] == 2
         assert "Near expiry" in near["note"]
-        assert all("25Jul24" not in row["name"] for row in near["highest_oi"])
+        assert all("25-Jul-2024" not in row["name"] for row in near["highest_oi"])
 
         # expiry=Next (mixed case → lower-cased) → only the July 25 CE.
         nxt = client.get(
@@ -553,7 +554,7 @@ class TestOptionsApi:
             params={"asset": "options", "interval": "1day", "date": "2024-06-13", "expiry": "Next"},
         ).json()
         assert nxt["instrument_count"] == 1
-        assert nxt["highest_oi"][0]["name"] == "NIFTY 25Jul24 24000 CE"
+        assert nxt["highest_oi"][0]["name"] == "NIFTY 25-Jul-2024 24000 CE"
         assert "Next expiry" in nxt["note"]
 
     def test_track_monthly_filters_out_the_weekly(
@@ -572,7 +573,7 @@ class TestOptionsApi:
             },
         ).json()
         assert body["instrument_count"] == 2  # the weekly June-20 CE is excluded
-        assert all("20Jun24" not in row["name"] for row in body["highest_oi"])
+        assert all("20-Jun-2024" not in row["name"] for row in body["highest_oi"])
         assert "Near Monthly expiry" in body["note"]
 
     def test_empty_options_lake_degrades(self, store: InstrumentStore) -> None:
@@ -604,3 +605,115 @@ class TestOptionsApi:
         body = client.get("/api/v1/movers", params={"asset": "options"}).json()
         assert body["instrument_count"] == 0
         assert "pull the F&O options first" in body["note"]
+
+
+# ── compute_options_candidates discovery + resilience branches ────────────
+# These exercise the per-file gate branches the broad dashboard suite covered
+# but the narrowly-mapped tests did not: the _discover_options segment/interval
+# skip and the compute_options_candidates corrupt-Parquet skip
+# (DEC-MOVERS-CORRUPT-SKIP-001).
+
+
+class TestComputeOptionsCandidatesBranches:
+    def test_non_one_minute_fno_dataset_is_skipped_in_discovery(self, tmp_path: Path) -> None:
+        # A real 1minute option is discovered; a sibling FNO dataset at a NON-1minute
+        # interval (here 1day) is skipped at the segment/interval guard in
+        # _discover_options, so only the 1minute option registers.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1day",
+            bars=[_day_bar(day=_DAY, close="60", oi=700)],
+        )
+        result = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            expiry_tier="near",
+            expiry_track="all",
+        )
+        # Only the 1minute CE registers; the 1day PE is skipped in discovery.
+        assert len(result.movers) == 1
+        assert result.skipped == 0
+
+    def test_corrupt_option_partition_is_skipped_not_raised(self, tmp_path: Path) -> None:
+        # A single corrupt option Parquet is SKIPPED (logged + counted), never
+        # 500-ing the options screen (DEC-MOVERS-CORRUPT-SKIP-001).
+        from structlog.testing import capture_logs
+
+        good = "NSE-NIFTY-27Jun24-24000-CE"
+        bad = "NSE-NIFTY-27Jun24-25000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=good,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=bad,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="60", volume=80, oi=700)],
+        )
+        corrupt = list((tmp_path / "bars" / _EXCHANGE / "FNO" / bad / "1minute").rglob("*.parquet"))
+        assert corrupt, "expected the 25000-CE 1minute partition to exist"
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+
+        with capture_logs() as logs:
+            result = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+            )
+        assert len(result.movers) == 1
+        assert result.skipped == 1
+        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
+        assert len(skips) == 1
+        assert skips[0]["source"] == "options"
+        assert skips[0]["symbol"] == bad
+
+    def test_exchange_filter_skips_other_exchange(self, tmp_path: Path) -> None:
+        # An option whose exchange != the requested one hits the per-exchange
+        # discovery ``continue`` in ``_discover_options`` (the branch the broad
+        # exchange-cache suite covered but this stem file did not).
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-24000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        writer.write(
+            exchange="BSE",
+            segment="FNO",
+            symbol="BSE-SENSEX-27Jun24-80000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="200", volume=50, oi=500)],
+        )
+        nse = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            expiry_tier="near",
+            expiry_track="all",
+            exchange="NSE",
+        )
+        # The BSE option is filtered out by the per-exchange discovery ``continue``.
+        assert {m.underlying for m in nse.movers} == {"NIFTY"}

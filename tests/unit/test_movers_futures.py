@@ -27,7 +27,9 @@ from brutex.dashboard.movers_futures import (
     FuturesMover,
     _prev_day_oi,
     build_futures_payload,
+    compute_futures_candidates,
     compute_futures_mover,
+    format_contract_date,
     normalize_futures_tier,
     parse_future_symbol,
     rank_discount,
@@ -187,8 +189,10 @@ def _mover(
     value_paisa: int = 0,
 ) -> FuturesMover:
     """A FuturesMover with sensible defaults for the ranking / rendering tests."""
+    parsed = parse_future_symbol(symbol)
     return FuturesMover(
         underlying=underlying,
+        expiry=parsed[1] if parsed is not None else None,
         symbol=symbol,
         exchange="NSE",
         segment="FNO",
@@ -219,6 +223,149 @@ class TestFuturesMoverRendering:
         m = _mover(spot=None, premium=None)
         assert m.spot_inr is None
         assert m.premium_inr is None
+
+
+class TestFormatContractDate:
+    """The shared deterministic ``DD-Mon-YYYY`` contract-date formatter."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (date(2025, 9, 30), "30-Sep-2025"),
+            (date(2025, 1, 1), "01-Jan-2025"),
+            (date(2026, 12, 5), "05-Dec-2026"),
+            (date(2025, 6, 30), "30-Jun-2025"),
+        ],
+    )
+    def test_deterministic_label(self, value: date, expected: str) -> None:
+        # Locale-stable (uses the fixed English month map, never strftime("%b")).
+        assert format_contract_date(value) == expected
+
+
+class TestFuturesMoverName:
+    """The FULL dated contract NAME label + its graceful fallbacks (DEC-MOVERS-FULL-CONTRACT-NAME-001)."""
+
+    def test_dated_name_for_parseable_contract(self) -> None:
+        m = _mover(underlying="NIFTY", symbol="NSE-NIFTY-30Sep25-FUT")
+        assert m.name == "NIFTY 30-Sep-2025 FUT"
+
+    def test_near_next_far_render_different_names(self) -> None:
+        # The whole point: three serial-month contracts of ONE underlying must read
+        # as DISTINCT names (regression for the Near==Next==Far ambiguity bug).
+        near = _mover(underlying="NIFTY", symbol="NSE-NIFTY-25Sep25-FUT")
+        nxt = _mover(underlying="NIFTY", symbol="NSE-NIFTY-30Oct25-FUT")
+        far = _mover(underlying="NIFTY", symbol="NSE-NIFTY-27Nov25-FUT")
+        names = {near.name, nxt.name, far.name}
+        assert names == {
+            "NIFTY 25-Sep-2025 FUT",
+            "NIFTY 30-Oct-2025 FUT",
+            "NIFTY 27-Nov-2025 FUT",
+        }
+        assert len(names) == 3
+
+    def test_unparseable_symbol_falls_back_to_symbol(self) -> None:
+        # expiry None (unparseable) but a symbol present → fall back to the raw symbol,
+        # never blank, never a crash (Golden Rule #1).
+        m = FuturesMover(
+            underlying="NIFTY",
+            expiry=None,
+            symbol="NSE-NIFTY-GARBAGE",
+            exchange="NSE",
+            segment="FNO",
+            ltp=Decimal("100"),
+            spot=None,
+            premium=None,
+            pct_change=None,
+            oi=None,
+            oi_chg_pct=None,
+            volume=0,
+            value_paisa=0,
+        )
+        assert m.name == "NSE-NIFTY-GARBAGE"
+
+    def test_unparseable_and_empty_symbol_falls_back_to_underlying(self) -> None:
+        # expiry None AND an empty symbol → fall back to the bare underlying.
+        m = FuturesMover(
+            underlying="NIFTY",
+            expiry=None,
+            symbol="",
+            exchange="NSE",
+            segment="FNO",
+            ltp=Decimal("100"),
+            spot=None,
+            premium=None,
+            pct_change=None,
+            oi=None,
+            oi_chg_pct=None,
+            volume=0,
+            value_paisa=0,
+        )
+        assert m.name == "NIFTY"
+
+    def test_compute_futures_mover_populates_expiry(self) -> None:
+        m = compute_futures_mover(
+            underlying="NIFTY",
+            symbol="NSE-NIFTY-30Sep25-FUT",
+            exchange="NSE",
+            ltp=Decimal("100"),
+            volume=0,
+            value_paisa=0,
+            oi=None,
+            prev_close=None,
+            spot_ltp=None,
+            prev_oi=None,
+        )
+        assert m.expiry == date(2025, 9, 30)
+        assert m.name == "NIFTY 30-Sep-2025 FUT"
+
+    def test_compute_futures_mover_unparseable_symbol_expiry_none(self) -> None:
+        m = compute_futures_mover(
+            underlying="NIFTY",
+            symbol="NSE-NIFTY-junk",
+            exchange="NSE",
+            ltp=Decimal("100"),
+            volume=0,
+            value_paisa=0,
+            oi=None,
+            prev_close=None,
+            spot_ltp=None,
+            prev_oi=None,
+        )
+        assert m.expiry is None
+        assert m.name == "NSE-NIFTY-junk"
+
+
+class TestFuturesMoverNameProperty:
+    """Property: the NAME label is ALWAYS a non-empty string for any row."""
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            "NSE-NIFTY-30Sep25-FUT",  # parseable → dated label
+            "NSE-NIFTY-30Xxx25-FUT",  # bad month → fallback to symbol
+            "NSE-NIFTY-junk",  # unparseable → fallback to symbol
+            "",  # empty symbol → fallback to underlying
+        ],
+    )
+    def test_name_is_never_empty(self, symbol: str) -> None:
+        parsed = parse_future_symbol(symbol)
+        m = FuturesMover(
+            underlying="NIFTY",
+            expiry=parsed[1] if parsed is not None else None,
+            symbol=symbol,
+            exchange="NSE",
+            segment="FNO",
+            ltp=Decimal("100"),
+            spot=None,
+            premium=None,
+            pct_change=None,
+            oi=None,
+            oi_chg_pct=None,
+            volume=0,
+            value_paisa=0,
+        )
+        assert isinstance(m.name, str)
+        assert m.name != ""
 
 
 class TestComputeFuturesMover:
@@ -392,7 +539,10 @@ class TestBuildFuturesPayload:
             [m], interval="1day", date="2025-09-01", time=None, top_n=5, skipped=0
         )
         row = payload["price_gainers"][0]
-        assert row["name"] == "NIFTY"
+        # The NAME is now the FULL dated contract label (DEC-MOVERS-FULL-CONTRACT-NAME-001),
+        # and the raw symbol is STILL carried in the payload.
+        assert row["name"] == "NIFTY 30-Sep-2025 FUT"
+        assert row["symbol"] == "NSE-NIFTY-30Sep25-FUT"
         assert row["ltp"] == "₹100.00"
         assert row["spot"] == "₹98.00"
         assert row["premium"] == "₹2.00"
@@ -531,3 +681,53 @@ class TestPrevDayOi:
             )
             is None
         )
+
+
+# ── compute_futures_candidates: per-exchange discovery filter ──────────────
+#
+# Standalone unit coverage of the per-exchange discovery ``continue`` branch
+# of ``compute_futures_candidates`` so the touched-module 100% coverage gate
+# (which runs this stem file in isolation) sees it. The corrupt-Parquet skip
+# block is covered by the stem integration file's
+# ``TestComputeFuturesCandidatesBranches`` (Golden Rule #11 — not duplicated).
+
+
+def _fut_min_bar(*, close: str, volume: int, oi: int) -> CandleBar:
+    """A flat 1-minute futures bar at 09:15 IST (03:45 UTC) on 2024-06-13."""
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=volume,
+        open_interest=oi,
+    )
+
+
+class TestComputeFuturesCandidatesExchangeFilter:
+    def test_exchange_filter_skips_other_exchange(self, tmp_path: Path) -> None:
+        """A future whose exchange != the requested one hits the discovery ``continue``."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="22010", volume=100, oi=1000)],
+        )
+        writer.write(
+            exchange="BSE",
+            segment="FNO",
+            symbol="BSE-SENSEX-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="77010", volume=50, oi=500)],
+        )
+        nse = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        # The BSE future is filtered out by the per-exchange discovery ``continue``.
+        assert {m.underlying for m in nse.movers} == {"NIFTY"}

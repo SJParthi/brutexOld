@@ -111,6 +111,7 @@ from brutex.dashboard.movers_futures import (
     _prev_day_oi,
     _read_future_session,
     _underlying_spot_ltp,
+    format_contract_date,
 )
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
@@ -121,7 +122,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     resolve_candle_datasets,
 )
-from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, parse_fno_symbol
+from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -287,20 +288,24 @@ class OptionMover:
 
     @property
     def name(self) -> str:
-        """The contract's human display name, e.g. ``"NIFTY 30Jun25 24000 CE"``.
+        """The contract's human display name, e.g. ``"NIFTY 30-Jun-2025 24000 CE"``.
 
-        Joins the underlying, the ``DDMmmYY`` expiry token, the strike (rendered
-        without a trailing ``.0`` for a whole number), and the option type — the
-        markets-screen Options row label.
+        Joins the underlying, the deterministic ``DD-Mon-YYYY`` expiry
+        (:func:`~brutex.dashboard.movers_futures.format_contract_date` — the ONE
+        contract-date formatter, shared with the Futures tab so both read alike;
+        DEC-MOVERS-FULL-CONTRACT-NAME-001), the strike (rendered without a trailing
+        ``.0`` for a whole number), and the option type — the markets-screen Options
+        row label. The full dated/strike label disambiguates a near-dated vs a
+        far-dated ``24000 CE`` of the same underlying. The parts are all parsed,
+        non-optional fields, so the label is always well-formed (never blank).
         """
-        expiry_token = self.expiry.strftime(EXPIRY_DATE_FORMAT)
         strike = self.strike.normalize()
         # `normalize()` can yield exponent form (``2.4E+4``) for a whole strike —
         # `quantize` back to an integer when there is no fractional part so the
         # label reads ``24000`` not ``2.4E+4``.
         if strike == strike.to_integral_value():
             strike = strike.quantize(Decimal(1))
-        return f"{self.underlying} {expiry_token} {strike} {self.opt_type}"
+        return f"{self.underlying} {format_contract_date(self.expiry)} {strike} {self.opt_type}"
 
     @property
     def ltp_inr(self) -> str:

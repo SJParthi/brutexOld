@@ -1,8 +1,11 @@
 """Single source of truth for the dashboard top navigation.
 
 DEC-DASHBOARD-NAV-UNIFY-001 — every served dashboard page exposes the SAME
-top navigation: Universe · Credentials · Database · Coverage · Movers ·
-Reports. Historically each template hand-coded its own ``<nav>``, which let the
+top navigation: Operator · Universe · Credentials · Database · Coverage ·
+Movers · Results · Reports. The leading ``Operator`` link points at the live
+``/`` route (the rich operator dashboard rendering ``v29.html``), making it
+reachable from every page (DEC-MOVERS-FULL-CONTRACT-NAME-001 bundle, #986).
+Historically each template hand-coded its own ``<nav>``, which let the
 ``/groww-credentials`` page silently drift (a dead ``/credentials`` link, a
 missing ``Reports`` link, a renamed "Groww" tab — DEC-DASHBOARD-NAV-CREDS-
 RECONCILE-001). This module makes the link set CANONICAL in exactly one place;
@@ -28,6 +31,7 @@ class NavLink(NamedTuple):
 #: THIS tuple (and only this tuple); the consistency guard test enforces that
 #: every page matches it exactly.
 NAV_LINKS: tuple[NavLink, ...] = (
+    NavLink("/", "Operator"),
     NavLink("/universe", "Universe"),
     NavLink("/groww-credentials", "Credentials"),
     NavLink("/db", "Database"),
