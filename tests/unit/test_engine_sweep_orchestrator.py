@@ -200,6 +200,24 @@ class TestSweepGridConfig:
         grid = _grid(k_values=[0])
         assert grid.k_values == (0,)
 
+    def test_condition_bit_out_of_range_rejected_at_config_time(self) -> None:
+        # GAP #16 (DEC-SWEEP-DEDUP-LMDB-001): a bit >= MAX_VOCAB_BITS in the
+        # shared axis must fail AT CONFIG TIME (the CLI catches ValueError and
+        # exits cleanly), NOT abort the whole grid mid-enumeration with a bare
+        # ValueError from one tuple's lazy mask enumeration.
+        with pytest.raises(ValueError, match=r"condition_bits \[99\] out of range \[0, 64\)"):
+            _grid(condition_bits=[0, 1, 99])
+
+    def test_negative_condition_bit_rejected_at_config_time(self) -> None:
+        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 64\)"):
+            _grid(condition_bits=[-1, 0, 1])
+
+    def test_top_condition_bit_in_range_is_valid(self) -> None:
+        from brutex.engine.combo_mask import MAX_VOCAB_BITS
+
+        grid = _grid(condition_bits=[0, MAX_VOCAB_BITS - 1])
+        assert MAX_VOCAB_BITS - 1 in grid.condition_bits
+
     @pytest.mark.parametrize("axis", ["stop_losses", "take_profits"])
     def test_nonpositive_paisa_rejected(self, axis: str) -> None:
         with pytest.raises(ValueError, match=f"{axis} entries must be > 0 or None"):
@@ -637,6 +655,46 @@ class TestRunSweepGridResilientSkip:
                 dedup=_dedup(),
                 audit=audit,
             )
+
+    def test_keyboard_interrupt_aborts_grid_not_a_tuple_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A KeyboardInterrupt in run_one_tuple ABORTS the grid (NOT a tuple skip).
+
+        The grid catch is ``except SweepComboError`` — a ``BaseException`` such as
+        an operator Ctrl-C is neither caught nor downgraded, so it propagates and
+        aborts the WHOLE grid (DEC-ENGINE-DEDUP-NAN-CANON-001 / audit H1). The
+        first tuple's failure must NOT bump ``tuples_failed`` nor write a
+        ``TUPLE_FAILED`` audit line, and the second tuple must never run.
+        """
+        # 2 tuples: index 0 raises KeyboardInterrupt, index 1 would run if reached.
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        ran: list[str] = []
+
+        def _interrupt(grid_: object, tuple_: object, **_kwargs: object) -> object:
+            ran.append(tuple_.instrument)  # type: ignore[attr-defined]
+            raise KeyboardInterrupt("operator ctrl-c")
+
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _interrupt)
+        audit_path = tmp_path / "grid.jsonl"
+        with (
+            AuditWriter.open(audit_path) as audit,
+            pytest.raises(KeyboardInterrupt, match="operator ctrl-c"),
+        ):
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: _trending_bars(),
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        # The grid aborted on the FIRST tuple — the second never ran.
+        assert ran == ["NIFTY"]
+        # No TUPLE_FAILED was recorded (the catch is narrow; Ctrl-C is not a skip),
+        # and no terminal GRID_SWEEP_COMPLETE was written (the loop aborted).
+        actions = [e.action for e in read_entries(audit_path)]
+        assert "TUPLE_FAILED" not in actions
+        assert "GRID_SWEEP_COMPLETE" not in actions
 
 
 class TestRunSweepGridResilientHardening:

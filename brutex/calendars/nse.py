@@ -9,6 +9,22 @@ Per `docs/TRACK1_BACKTEST_SPEC.md` Phase 1 Validation Gate 1:
 
 Source-of-truth: NSE/BSE published calendars + India PIB notifications.
 Holidays verified against the published NSE FAOP circulars for each year.
+
+Coverage honesty (DEC-CALENDAR-HARDEN-001): the hardcoded holiday list spans
+:data:`HOLIDAY_COVERAGE_FIRST_YEAR`-:data:`HOLIDAY_COVERAGE_LAST_YEAR`
+(inclusive). For a date outside that span :func:`is_holiday` returns ``False``
+because the date is simply not in the (incomplete) set — that is an ABSENCE of
+information, not a verified "trading day". Callers that need the distinction
+(e.g. the 2020-anchored data pull whose floor predates the 2021 list start)
+must gate on :func:`is_holiday_data_available` or use the strict
+:func:`is_holiday_checked` / :func:`is_trading_day_checked`, which raise
+:class:`HolidayDataUnavailableError` rather than guess. The unguarded
+:func:`is_holiday` / :func:`is_trading_day` keep their byte-identical
+back-compat behaviour (an out-of-coverage date reads as not-a-holiday), so this
+is a DETECT-and-opt-in surface, not a behaviour change; wiring the strict
+variants into the spot-anchor consumers is a deferred cross-package follow-up.
+Per Golden Rule #1 we do NOT hallucinate the missing-year holiday dates; we
+surface the gap honestly.
 """
 
 from __future__ import annotations
@@ -19,6 +35,17 @@ from enum import Enum
 from typing import Final
 from zoneinfo import ZoneInfo
 
+import structlog
+
+_LOG = structlog.get_logger(__name__)
+
+#: IST is a FIXED +05:30 offset with NO daylight-saving transition (India has
+#: observed no DST since 1945). ``ZoneInfo("Asia/Kolkata")`` is therefore a
+#: constant-offset zone — every instant maps to UTC+05:30 — which is the
+#: deliberate, correct choice over a hand-rolled ``timezone(timedelta(...))``
+#: because the IANA database is the authoritative source and a future
+#: (hypothetical) policy change would be picked up without a code edit. A
+#: ``pytz`` / naive / machine-local construction would be a bug; this is not.
 IST = ZoneInfo("Asia/Kolkata")
 SESSION_OPEN_IST = time(9, 15)
 SESSION_CLOSE_IST = time(15, 30)
@@ -206,8 +233,95 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 }
 
 
+#: The INCLUSIVE calendar-year span the hardcoded NSE/BSE holiday list above
+#: actually covers. Derived from the per-year frozensets so the two can never
+#: silently drift: the first/last keys ARE the smallest/largest holiday year.
+#:
+#: Why this matters (DEC-CALENDAR-HARDEN-001): the Track-1 data pull floor is
+#: 2020-01-01 (``GROWW_HISTORY_FLOOR``; CLAUDE.md §3, MIGRATION.md #722) but the
+#: holiday list starts in 2021, and it ends in 2026. For ANY date outside this
+#: span :func:`is_holiday` returns ``False`` — which is the HONEST answer for
+#: "is this date IN the published list" but, if a caller treats it as "is this a
+#: trading day", an out-of-coverage 2020 weekday holiday (e.g. Holi 2020-03-10)
+#: reads as a trading day via the UNGUARDED :func:`is_trading_day`. That
+#: unguarded behaviour is UNCHANGED by this module (back-compat); what is NEW is
+#: an OPT-IN detection surface — the coverage range +
+#: :func:`is_holiday_data_available` / :func:`is_holiday_checked` /
+#: :func:`is_trading_day_checked` let a caller DETECT the out-of-coverage case
+#: and refuse to guess, instead of trusting a silent ``False``. Actually WIRING
+#: those strict variants into the spot-anchor consumers
+#: (``indicators/prev_day_ohlc.py``, ``dashboard/preopen_report.py``) is a
+#: deliberately-DEFERRED cross-package follow-up, NOT done here. The 2020 holiday
+#: list itself is likewise a deliberately-deferred, never-invented follow-up
+#: (MIGRATION.md #722): per Golden Rule #1 we do NOT hallucinate holiday dates —
+#: we surface the gap honestly rather than guess at it.
+HOLIDAY_COVERAGE_FIRST_YEAR: Final[int] = min(h.year for h in ALL_HOLIDAYS)
+HOLIDAY_COVERAGE_LAST_YEAR: Final[int] = max(h.year for h in ALL_HOLIDAYS)
+
+
+class HolidayDataUnavailableError(LookupError):
+    """Raised when a holiday lookup is requested for an out-of-coverage date.
+
+    The hardcoded NSE/BSE holiday list covers
+    ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` inclusive
+    (currently 2021-2026). A date outside that span has NO published-holiday
+    information, so :func:`is_holiday` would silently return ``False`` — which
+    a strict caller can refuse via :func:`is_holiday_checked` to avoid treating
+    an unknown date as a guaranteed non-holiday (Golden Rule #1).
+    """
+
+
+def is_holiday_data_available(d: date) -> bool:
+    """Return True iff ``d`` falls within the covered holiday-list year span.
+
+    O(1) — a single integer-range test against
+    ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``. When this is
+    ``False`` the result of :func:`is_holiday` is an absence of information, not
+    a verified "not a holiday".
+    """
+    return HOLIDAY_COVERAGE_FIRST_YEAR <= d.year <= HOLIDAY_COVERAGE_LAST_YEAR
+
+
 def is_holiday(d: date) -> bool:
-    """Return True if ``d`` is in the NSE/BSE published holiday list (2021-2026)."""
+    """Return True if ``d`` is in the NSE/BSE published holiday list.
+
+    The list covers ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``
+    inclusive (currently 2021-2026). For a date OUTSIDE that span this returns
+    ``False`` because the date is not in the (incomplete) set — that ``False``
+    means "not a known holiday", NOT "verified trading day". A caller that
+    needs the distinction must gate on :func:`is_holiday_data_available` or use
+    the strict :func:`is_holiday_checked`. O(1) ``frozenset`` membership.
+    """
+    return d in ALL_HOLIDAYS
+
+
+def is_holiday_checked(d: date) -> bool:
+    """Strict :func:`is_holiday` — raise on an out-of-coverage date.
+
+    Identical to :func:`is_holiday` for dates within the covered span, but
+    raises :class:`HolidayDataUnavailableError` (after emitting a structlog
+    warning) when ``d`` lies outside ``[HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR]``. A caller that uses THIS variant never
+    silently mistakes an unknown date for a confirmed non-holiday; callers that
+    keep using the unguarded :func:`is_holiday` retain its back-compat ``False``.
+    O(1).
+
+    Raises
+    ------
+    HolidayDataUnavailableError
+        If ``d.year`` is outside the covered holiday-list span.
+    """
+    if not is_holiday_data_available(d):
+        _LOG.warning(
+            "calendar.holiday_data_unavailable",
+            requested_date=d.isoformat(),
+            covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
+            covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
+        )
+        raise HolidayDataUnavailableError(
+            f"no published NSE/BSE holiday data for {d.isoformat()}: covered span is "
+            f"{HOLIDAY_COVERAGE_FIRST_YEAR}-{HOLIDAY_COVERAGE_LAST_YEAR} (inclusive)"
+        )
     return d in ALL_HOLIDAYS
 
 
@@ -230,6 +344,40 @@ def is_trading_day(d: date) -> bool:
     if is_special_weekend_session(d):
         return True
     return not is_weekend(d) and not is_holiday(d)
+
+
+def is_trading_day_checked(d: date) -> bool:
+    """Strict :func:`is_trading_day` — raise on an out-of-coverage date.
+
+    Identical to :func:`is_trading_day` within the covered holiday span. For a
+    date whose year is OUTSIDE ``[HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR]`` it raises :class:`HolidayDataUnavailableError`
+    **only when the verdict would actually depend on the missing holiday
+    list** — i.e. a weekday. Two cases resolve WITHOUT raising because their
+    answer is data-complete regardless of the holiday list:
+
+    * a special-weekend session (data the package explicitly holds) → ``True``;
+    * a plain weekend with no special session → ``False`` (a weekend is never a
+      trading day; the holiday list cannot change that).
+
+    A weekday outside the span is the genuinely-ambiguous case: it would be a
+    trading day UNLESS it is an (unknown) holiday, so the strict variant
+    refuses rather than silently assume a trading day. O(1).
+
+    Raises
+    ------
+    HolidayDataUnavailableError
+        If ``d`` is an out-of-coverage WEEKDAY that is not a special session.
+    """
+    if is_special_weekend_session(d):
+        return True
+    if is_weekend(d):
+        # A weekend is non-trading independent of the holiday list — no
+        # missing data is consulted, so this answer is honest even out of span.
+        return False
+    # A weekday: the verdict turns on the holiday list. ``is_holiday_checked``
+    # raises for an out-of-coverage date rather than guess "not a holiday".
+    return not is_holiday_checked(d)
 
 
 def has_muhurat_session(d: date) -> bool:

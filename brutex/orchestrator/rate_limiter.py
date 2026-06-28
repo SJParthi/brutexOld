@@ -220,6 +220,7 @@ class AdaptiveTokenBucket:
     _tokens: float = field(init=False)
     _last_refill: float = field(init=False)
     _recent_429s: deque[float] = field(init=False)
+    _last_429_at: float = field(init=False)
     _last_success_at: float = field(init=False)
     _lock: threading.Lock = field(init=False)
     _pending_events: list[RateLimiterEvent] = field(init=False, default_factory=list)
@@ -250,6 +251,13 @@ class AdaptiveTokenBucket:
         self._tokens = 0.0 if self.start_empty else float(self.burst)
         self._last_refill = self.clock()
         self._recent_429s = deque()
+        # Sentinel "no 429 yet" — only ever read by ``_maybe_upshift_locked``,
+        # which is itself unreachable until a downshift has stamped a real
+        # timestamp here (the early-return at ``_current_rps == initial_rps``
+        # guards the never-downshifted path). ``-inf`` keeps the recovery gate
+        # ``now - _last_429_at >= upshift_recovery`` trivially open if it were
+        # ever reached without a downshift.
+        self._last_429_at = float("-inf")
         self._last_success_at = self.clock()
         self._lock = threading.Lock()
 
@@ -338,6 +346,11 @@ class AdaptiveTokenBucket:
         with self._lock:
             now = self.clock()
             self._recent_429s.append(now)
+            # Stamp the most-recent 429 so the upshift recovery gate
+            # (``_maybe_upshift_locked``) can require a full
+            # :attr:`upshift_recovery` window of quiet AFTER it, independently
+            # of the shorter ``downshift_window`` the rolling 429 count uses.
+            self._last_429_at = now
             # Evict 429s older than the window
             cutoff = now - self.downshift_window
             while self._recent_429s and self._recent_429s[0] < cutoff:
@@ -472,34 +485,33 @@ class AdaptiveTokenBucket:
         """Check whether enough clean time has passed to upshift.
 
         Called on every :meth:`acquire` (cheap — just a timestamp
-        comparison). If we currently run at downshift_rps and
-        :attr:`upshift_recovery` seconds have passed since the last
-        429 AND we've had at least one successful call in that window,
-        upshift back to initial_rps.
+        comparison). If we currently run at downshift_rps and a full
+        :attr:`upshift_recovery` window has elapsed since the most recent
+        429 (``self._last_429_at``) AND we've had at least one successful
+        call, upshift back to initial_rps.
+
+        The recovery gate is keyed on :attr:`upshift_recovery` (the
+        documented "stay clean before upshifting back" window — typically
+        twice the rolling :attr:`downshift_window` used to COUNT 429s for the
+        downshift trigger), so the bucket never recovers faster than the spec
+        promises (Golden Rule #6: never recover faster than specified).
         """
         if math.isclose(self._current_rps, self.initial_rps, rel_tol=1e-6):
             return None
         now = self.clock()
-        cutoff = now - self.downshift_window
-        while self._recent_429s and self._recent_429s[0] < cutoff:
-            self._recent_429s.popleft()
-        if self._recent_429s:
+        # Recovery gate: the most-recent 429 must be at least
+        # ``upshift_recovery`` seconds in the past. ``_last_429_at`` is always
+        # a real timestamp here because reaching this point requires a prior
+        # downshift, and every downshift stamps it (the construction sentinel
+        # ``-inf`` is never observed).
+        if now - self._last_429_at < self.upshift_recovery:
             return None
-        # No 429s in the recent window — how long since the last one?
-        # ``# pragma: no mutate`` ×2 (DEC-MUTATION-RUNTIME-001): both lines below
-        # are dead by construction — ``since_last_429`` feeds ONLY the throwaway
-        # ``_`` and ``_`` is never read again (pure float arithmetic, no side
-        # effects, no exception paths), so every mutant on them is provably
-        # equivalent.
-        since_last_429 = now - (self._last_success_at - self.upshift_recovery)  # pragma: no mutate
-        _ = since_last_429  # readable but the check below is the gate  # pragma: no mutate
-        # Simpler check: enough recovery time since the last 429
-        # (or since startup, if we never got one).
+        # Defensive clock-anomaly guard: a backwards-stepping injected clock
+        # could put ``now`` before the last success — never upshift early.
         if now - self._last_success_at < 0:
             return None
-        # We want: enough time has passed since any 429 activity.
-        # Use last_success_at as the reference — if we're making
-        # successful calls AND the 429 window is empty, we're good.
+        # A monotonic clock CAN legitimately start at 0.0; require at least one
+        # recorded success before trusting the recovery window.
         if self._last_success_at <= 0:
             return None
         # Upshift!

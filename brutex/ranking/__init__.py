@@ -56,6 +56,8 @@ correctness. Recorded in ``docs/MIGRATION.md`` (DEC-RANKING-001 / DEC-RANKING-OV
 
 from __future__ import annotations
 
+import math
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -141,13 +143,39 @@ class RankedCombo:
         return _risk_efficiency(self.metrics)
 
 
+def _non_finite_gate_input(value: float | None) -> bool:
+    """Whether a float-valued gate input is present but non-finite (``NaN``/±``inf``).
+
+    A ``None`` input is *not* non-finite here — it is mathematically undefined for
+    the sample and keeps its existing per-gate ``None`` handling. Only a present
+    ``NaN``/``inf`` value is flagged, so :func:`passes_gates` can FAIL CLOSED on it
+    (a ``NaN`` silently passes a ``<`` / ``>`` comparison — ``NaN < x`` is always
+    ``False`` — so an unguarded gate would wrongly ACCEPT malformed data).
+    """
+    return value is not None and not math.isfinite(value)
+
+
 def passes_gates(m: ResultMetrics) -> bool:
     """Apply the hard rejection gates to one result (lockbox gate deferred).
 
     Returns ``True`` iff the result survives every applicable gate. A ``None``
     metric (mathematically undefined for the sample) is treated as failing —
     a combo with no real edge cannot be ranked above one with a measured edge.
+
+    **Fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001).** A ``NaN`` or
+    ±``inf`` in any float-valued gate input (``profit_factor``, ``max_drawdown_pct``,
+    ``win_rate``, ``win_loss_ratio``) would silently slip through a ``<`` / ``>``
+    comparison as a PASS (``NaN < x`` and ``NaN > x`` are both ``False``), a silent
+    wrong-ACCEPT on malformed data. Such a result is REJECTED up front. The
+    integer-valued gates (``total_trades``, ``max_consecutive_losses``) cannot be
+    non-finite. Behaviour for every FINITE value and for ``None`` is byte-identical
+    to before this guard.
     """
+    if any(
+        _non_finite_gate_input(value)
+        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
+    ):
+        return False
     if m.total_trades < MIN_TRADES:
         return False
     if m.profit_factor is None or m.profit_factor < _MIN_PROFIT_FACTOR:
@@ -271,7 +299,9 @@ def rank_combos(
     candidates
         ``(mask, metrics)`` pairs for one (instrument, TF) leaderboard. ``len`` is
         the authoritative multiple-testing trial count ``N`` for the opt-in overfit
-        gate (``TRACK1_BACKTEST_SPEC.md:383-385``).
+        gate (``TRACK1_BACKTEST_SPEC.md:383-385``). Each ``mask`` is the combo's
+        identity and MUST be unique among the gate-passing survivors — the
+        deterministic tie-break keys on it (see Raises).
     overfit
         Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig` activating the
         **6th (overfit) gate + the 8th (Deflated-Sharpe) ranking term**
@@ -281,10 +311,23 @@ def rank_combos(
     Returns
     -------
     list[RankedCombo]
-        The gate-passing combos sorted by composite score (descending). Empty if
-        no candidate survives the gates. When ``overfit`` is supplied and the pool
-        was deflatable, each :class:`RankedCombo` carries its ``deflated_sharpe``
-        and the composite includes the weighted Deflated-Sharpe z-term.
+        The gate-passing combos sorted by composite score (descending), with the
+        combo's unique ``mask`` (ascending) as the deterministic final tie-break, so
+        the ranking is a TOTAL order: a leaderboard ranks bit-identically regardless
+        of the order ``candidates`` was enumerated in (Golden Rules #4/#7;
+        DEC-RANKING-TIEBREAK-001). Empty if no candidate survives the gates. When
+        ``overfit`` is supplied and the pool was deflatable, each :class:`RankedCombo`
+        carries its ``deflated_sharpe`` and the composite includes the weighted
+        Deflated-Sharpe z-term.
+
+    Raises
+    ------
+    ValueError
+        If two gate-passing survivors share the same ``mask``. The total-order
+        tie-break depends on a unique mask per combo; a duplicate would silently
+        reintroduce input-order-dependent ordering, so it is rejected LOUDLY with the
+        offending mask(s) named (DEC-RANKING-TIEBREAK-001) — a deterministic,
+        auditable error instead of latent nondeterminism.
     """
     survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
 
@@ -344,7 +387,38 @@ def rank_combos(
         )
         for i, (mask, m) in enumerate(survivors)
     ]
-    ranked.sort(key=lambda rc: rc.composite_score, reverse=True)
+    # ENFORCE the unique-mask precondition the total order depends on
+    # (DEC-RANKING-TIEBREAK-001): the deterministic tie-break keys on ``mask``, so a
+    # DUPLICATE mask would silently reintroduce the input-order-dependent ordering the
+    # tie-break exists to remove (a caller — ``engine.sweep_run`` / ``sweep_driver`` —
+    # passes the sweep's ``(mask, metrics)`` pairs VERBATIM with no dedup). A mask is
+    # the per-(instrument, TF) combo identity and MUST be unique within one
+    # leaderboard; detect a violation here and FAIL LOUD, converting latent silent
+    # nondeterminism into a deterministic, auditable error rather than an
+    # order-dependent ranking. (Checked over the gate SURVIVORS — the only rows that
+    # reach the sort; a duplicate among gate-rejected combos is irrelevant to the
+    # ordering and never raised.)
+    masks = [rc.mask for rc in ranked]
+    if len(set(masks)) != len(masks):
+        counts = Counter(masks)
+        dupes = sorted(mask for mask, count in counts.items() if count > 1)
+        raise ValueError(
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            f"tie-break keys on it); duplicate survivor mask(s): {dupes}"
+        )
+    # Deterministic TOTAL order: primary key is the composite score DESCENDING, with
+    # the unique ``mask`` ASCENDING as the final tie-break, so the key
+    # ``(-composite_score, mask)`` is a strict total order — two distinct survivors can
+    # never compare equal. A bare ``key=composite_score, reverse=True`` left tied
+    # scores in INPUT order (``list.sort`` is stable), so permuting the candidate
+    # enumeration permuted the leaderboard for any score tie — a violation of
+    # idempotence/reproducibility (Golden Rules #4/#7). The negation orders the score
+    # descending while keeping ``mask`` ascending in ONE ``reverse=False`` sort. The
+    # sort key is always finite: a non-finite metric field reaches ``_zscores``, but
+    # the ``[-_Z_CLAMP, +_Z_CLAMP]`` min/max clamp maps any non-finite z to a finite
+    # bound, so every composite — and thus ``-composite_score`` — is finite, never
+    # ``NaN`` (a ``NaN`` key would make ``list.sort`` itself nondeterministic).
+    ranked.sort(key=lambda rc: (-rc.composite_score, rc.mask))
     return ranked
 
 

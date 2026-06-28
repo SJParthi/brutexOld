@@ -19,6 +19,7 @@ from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
 from brutex.feed.replay import FeedEvent, ReplayFeed
 from brutex.strategies.combo import combo_hash
+from brutex.strategies.errors import StrategyError
 from brutex.strategies.protocol import StrategyMeta
 from brutex.strategies.sweep import (
     ComboCache,
@@ -359,3 +360,31 @@ class TestSweepComboHashes:
                 code_commit_sha="deadbeef",
             )
             assert result.combo_hash == expected
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Hardening — the REJECT-ONLY guards abort the sweep cleanly end-to-end
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepHardening:
+    def test_sweep_injection_field_aborts(self, tmp_path: Path) -> None:
+        """A ``data_snapshot_hash`` carrying the ``\\x1f`` join byte aborts the
+        sweep with a :class:`StrategyError` (no forged combo identity)."""
+        lake_root, catalog_path = _seed_lake(tmp_path, n_bars=3)
+        with Catalog.open(catalog_path) as cat:
+            factories = _Factories(cat, lake_root)
+            sweep = ComboSweep(
+                strategy_factory=factories.strategy,
+                feed_factory=factories.feed,
+                grid=ParamGrid.from_dict({"min_bars": [0]}),
+                data_snapshot_hash="snap\x1finjected",
+                code_commit_sha="deadbeef",
+            )
+            with pytest.raises(StrategyError, match="data_snapshot_hash"):
+                sweep.run()
+
+    def test_sweep_empty_axis_grid_rejected_at_construction(self) -> None:
+        """An empty axis raises at grid construction — before any combo runs."""
+        with pytest.raises(StrategyError, match="at least one"):
+            ParamGrid.from_dict({"min_bars": []})
