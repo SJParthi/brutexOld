@@ -16,11 +16,27 @@ import threading
 from collections.abc import Callable
 
 import pytest
+from brutex.dashboard import pull_jobs
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.pull_progress import STATE_DONE, STATE_ERROR, STATE_RUNNING, PullProgress
 from brutex.dashboard.pull_stall import PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
 from brutex.observability.watchdog import WorkerEvent, WorkerState
+
+
+@pytest.fixture(autouse=True)
+def _disable_account_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the account-wide cross-process pull lock for these unit tests.
+
+    DEC-ACCOUNT-PULL-SINGLEFLIGHT-001 makes :class:`BackgroundPullJob` take a real
+    ``fcntl.flock`` under the production lake root by default. These tests are about the
+    job's progress / single-flight-flag / watchdog behaviour, NOT the cross-process
+    guard, so we point the default lake-root resolver at ``None`` (guard disabled) — this
+    avoids touching the real ``~/.brutex/lake`` and avoids a captured-but-never-run worker
+    leaking a process-wide flock into a sibling test. The dedicated guard tests live in
+    ``test_pull_jobs_singleflight.py`` and inject their own resolver / factory.
+    """
+    monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
 
 
 class _FakeClock:
