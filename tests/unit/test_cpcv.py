@@ -175,6 +175,38 @@ class TestSharpeOfReturns:
         with pytest.raises(ValueError, match=match):
             sharpe_of_returns(bad)  # type: ignore[arg-type]
 
+    def test_overflow_variance_returns_none_not_zero(self) -> None:
+        """A finite but huge series whose squared deviations overflow → ``None``.
+
+        The inputs are individually finite (so ``_validate_returns`` admits
+        them), but ``(arr - mean) ** 2`` overflows to ``inf``; the bare
+        ``variance <= 0.0`` guard is ``False`` for ``inf`` and would return a
+        wrong ``mean / sqrt(inf) == 0.0``. The non-finite-variance guard
+        (DEC-METRICS-NONFINITE-GUARD-001) degrades honestly to ``None``.
+        """
+        with np.errstate(all="ignore"):
+            result = sharpe_of_returns(np.array([1e300, 2e300, 3e300, 4e300]))
+        assert result is None
+
+
+class TestNonFiniteVariance:
+    """Overflow-magnitude folds never leak a NaN into ``cpcv_pass_rate``.
+
+    Regression for DEC-METRICS-NONFINITE-GUARD-001: for ``|returns| ~ 1e160``
+    the per-group ``M2`` accumulates to ``inf`` and the combined fold variance
+    becomes ``NaN`` — which the bare ``variance <= 0.0`` guard misses
+    (``nan <= 0`` is ``False``), leaking ``mean / sqrt(nan) == nan`` into the
+    pass-rate. The ``not math.isfinite(variance)`` guard makes every such fold
+    a non-pass, so the rate stays a finite value in ``[0, 1]``.
+    """
+
+    def test_pass_rate_finite_for_overflow_magnitude_series(self) -> None:
+        with np.errstate(all="ignore"):
+            big = np.array([1e160 * (i + 1) for i in range(96)], dtype=np.float64)
+            rate = cpcv_pass_rate(big, n_groups=4, n_test_groups=2)
+        assert math.isfinite(rate)
+        assert 0.0 <= rate <= 1.0
+
 
 class TestPassRate:
     def test_in_unit_interval(self) -> None:

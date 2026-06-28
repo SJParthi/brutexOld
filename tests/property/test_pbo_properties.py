@@ -112,6 +112,29 @@ def test_pbo_matches_naive_reference(case: tuple[list[list[float]], int]) -> Non
     assert production == reference
 
 
+@given(_matrices())
+def test_pbo_all_logits_finite(case: tuple[list[list[float]], int]) -> None:
+    """Every per-split logit is finite (no NaN/inf leaks into the diagnostics).
+
+    DEC-METRICS-NONFINITE-GUARD-001: with a finite-cell matrix the average-rank
+    convention keeps each ``omega`` strictly inside ``(0, 1)``, so every logit
+    ``ln(omega / (1 - omega))`` is finite.
+    """
+    matrix, n_splits = case
+    result = pbo_probability(matrix, n_splits=n_splits)
+    assert all(math.isfinite(lam) for lam in result.logits)
+
+
+@given(_matrices())
+def test_pbo_deterministic(case: tuple[list[list[float]], int]) -> None:
+    """Same matrix ⇒ identical PBO and logits (Golden Rule #4 — reproducibility)."""
+    matrix, n_splits = case
+    first = pbo_probability(matrix, n_splits=n_splits)
+    second = pbo_probability(matrix, n_splits=n_splits)
+    assert first.pbo == second.pbo
+    assert first.logits == second.logits
+
+
 @given(_matrices(), st.sampled_from([0.25, 0.5, 2.0, 4.0, 8.0]))
 def test_pbo_scale_invariant(case: tuple[list[list[float]], int], scale: float) -> None:
     """Scaling every performance value by a positive constant preserves the PBO.

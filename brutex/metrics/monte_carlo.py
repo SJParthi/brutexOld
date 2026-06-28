@@ -123,9 +123,12 @@ def monte_carlo_permutation_test(
         ``1 <= n_entries <= n_bars``.
     evaluate
         The injected exit logic: given a sorted array of ``n_entries`` distinct
-        entry-bar positions, returns the resulting statistic (Sharpe). A
-        non-finite return is treated as "did not beat" (it cannot exceed a
-        finite observed statistic).
+        entry-bar positions, returns the resulting statistic (Sharpe). A NaN or
+        ``-inf`` permuted statistic cannot beat a finite observed one (``nan >=
+        x`` and ``-inf >= x`` are both False), so it is treated as "did not
+        beat"; a ``+inf`` permuted statistic IS counted as beating the observed
+        one (``+inf >= x`` is True), which only raises the p-value — the
+        conservative direction.
     seed
         Non-negative integer seed for :func:`numpy.random.default_rng`
         (Golden Rule #4 — reproducibility).
@@ -171,8 +174,11 @@ def monte_carlo_permutation_test(
             np.intp, copy=False
         )
         permuted = evaluate(positions)
-        # A non-finite permuted statistic cannot beat a finite observed one;
-        # ``nan >= observed`` is already False, so this is conservative.
+        # A NaN or -inf permuted statistic cannot beat a finite observed one
+        # (``nan >= observed`` and ``-inf >= observed`` are both False), so it
+        # is a non-beat; a +inf permuted statistic IS counted as beating it
+        # (``+inf >= observed`` is True), which only raises the p-value — the
+        # conservative direction.
         if permuted >= observed_statistic:
             n_beaten += 1
 
