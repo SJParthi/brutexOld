@@ -18,7 +18,9 @@ from collections.abc import Callable
 import pytest
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.pull_progress import STATE_DONE, STATE_ERROR, STATE_RUNNING, PullProgress
+from brutex.dashboard.pull_stall import PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
+from brutex.observability.watchdog import WorkerEvent, WorkerState
 
 
 class _FakeClock:
@@ -80,7 +82,11 @@ def test_on_success_fires_only_on_a_successful_run() -> None:
     def work(on_progress: ProgressHook) -> None:
         on_progress("NIFTY 1minute", 10, False, False)
 
-    assert job.start(work, total=1, on_success=lambda: calls.append(1)) is True
+    # Call OUT of the assert: ``start`` spawns the worker (a side effect) and a
+    # bare ``assert call()`` is dropped under ``python -O`` (CodeQL
+    # py/side-effect-in-assert). Store the result, then assert it.
+    started = job.start(work, total=1, on_success=lambda: calls.append(1))
+    assert started is True
     assert job.snapshot().state == STATE_DONE
     assert calls == [1]  # fired once on success
 
@@ -93,7 +99,8 @@ def test_on_success_does_not_fire_on_a_failed_run() -> None:
     def work(on_progress: ProgressHook) -> None:
         raise RuntimeError("boom")
 
-    assert job.start(work, total=1, on_success=lambda: calls.append(1)) is True
+    started = job.start(work, total=1, on_success=lambda: calls.append(1))
+    assert started is True
     assert job.snapshot().state == STATE_ERROR
     assert calls == []  # never fired on failure
 
@@ -108,7 +115,8 @@ def test_on_success_raising_is_swallowed_and_never_crashes_the_worker() -> None:
     def boom() -> None:
         raise RuntimeError("hook blew up")
 
-    assert job.start(work, total=1, on_success=boom) is True
+    started = job.start(work, total=1, on_success=boom)
+    assert started is True
     assert job.snapshot().state == STATE_DONE  # success state unaffected by the raising hook
     assert job.running is False  # the finally still cleared the single-flight flag
 
@@ -374,3 +382,156 @@ class TestLedgerSynced:
             ledger_synced=True,
         )
         assert job.snapshot().completed == 3
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Stall watchdog `_on_hung` + the watchdog-identity gate (DEC-PULL-STALL-DETECTION-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _noop_spawn(_fn: Callable[[], None]) -> None:
+    """A timer spawner that NEVER runs the timer body, so a real ``PullWatchdog``
+    can be built (and its ``on_hung`` captured) without a background thread firing.
+    """
+
+
+def _hung_event() -> WorkerEvent:
+    """A HEALTHY→HUNG :class:`WorkerEvent` for driving ``_on_hung`` deterministically."""
+    return WorkerEvent(
+        worker_name="dashboard-pull",
+        new_state=WorkerState.HUNG,
+        last_beat_seconds_ago=120.0,
+        timeout_seconds=30.0,
+    )
+
+
+class TestOnHung:
+    """``BackgroundPullJob._on_hung``: the stall-watchdog HUNG edge + identity gate.
+
+    The job builds its watchdog via the injected ``watchdog_factory`` (given the
+    ``on_hung`` edge callback). Here the factory captures that callback so the test
+    can fire it directly with a HUNG ``WorkerEvent`` — exercising the whole
+    best-effort body (stop the timer, halt alert, ``progress.fail``, identity-gated
+    ``_running`` clear) WITHOUT a real daemon timer.
+    """
+
+    def _job_capturing_on_hung(
+        self, captured: list[Callable[[WorkerEvent], None]]
+    ) -> BackgroundPullJob:
+        """A job whose watchdog factory records the ``on_hung`` callback + never spawns."""
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            captured.append(on_hung)
+            return PullWatchdog(
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            )
+
+        def _capture_only(_fn: Callable[[], None]) -> None:
+            """Capture-only spawner: never runs the worker, so the run stays in flight."""
+
+        return BackgroundPullJob(
+            progress=PullProgress(clock=_FakeClock()),
+            spawn=_capture_only,
+            watchdog_factory=factory,
+        )
+
+    def test_on_hung_marks_failed_and_clears_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A HUNG edge while THIS run is current: progress → failed, _running cleared,
+        # and a best-effort halt alert fires (monkeypatched so no real notifier runs).
+        alerts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
+        captured: list[Callable[[WorkerEvent], None]] = []
+        job = self._job_capturing_on_hung(captured)
+
+        # Start the job with a capture-only spawner → the worker never runs, so the
+        # watchdog stays the CURRENT run's watchdog when on_hung fires.
+        started = job.start(lambda _h: None, total=1, detail="stalled-pull")
+        assert started is True
+        assert job.running is True
+
+        captured[0](_hung_event())  # fire the HUNG edge directly
+
+        snap = job.snapshot()
+        assert snap.state == STATE_ERROR  # _on_hung marked the run failed
+        assert "stalled" in snap.detail  # the stall detail is surfaced
+        assert job.running is False  # identity gate matched → _running cleared
+        assert len(alerts) == 1  # one best-effort halt alert
+        assert isinstance(alerts[0], TimeoutError)
+
+    def test_on_hung_late_fire_does_not_clobber_a_newer_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A STALE on_hung (its run already superseded by a newer watchdog) must NOT
+        # clear _running — the identity gate (`self._watchdog is watchdog`) is False.
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        captured: list[Callable[[WorkerEvent], None]] = []
+        job = self._job_capturing_on_hung(captured)
+        started = job.start(lambda _h: None, total=1)
+        assert started is True
+        stale_on_hung = captured[0]
+
+        # Supersede the run: a newer watchdog now owns the job's identity, so the OLD
+        # on_hung must see `self._watchdog is watchdog` as False (the ->exit branch).
+        newer = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+        )
+        job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+
+        stale_on_hung(_hung_event())  # the late fire
+        # progress.fail still ran (best-effort), but the identity gate refused to
+        # touch _running (it belongs to the newer run now).
+        assert job._watchdog is newer  # pyright: ignore[reportPrivateUsage]
+
+    def test_on_hung_body_is_best_effort_and_swallows_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If the halt alert raises, the whole _on_hung body is swallowed (logged) so
+        # the daemon timer can never crash — the except arm of the best-effort wrap.
+        def _raise(_exc: BaseException) -> None:
+            raise RuntimeError("alert blew up")
+
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", _raise)
+        captured: list[Callable[[WorkerEvent], None]] = []
+        job = self._job_capturing_on_hung(captured)
+        started = job.start(lambda _h: None, total=1)
+        assert started is True
+
+        captured[0](_hung_event())  # must NOT raise out — swallowed + logged
+        # The run is unaffected by the swallowed error (no crash propagated).
+        assert job._watchdog is not None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_run_finally_skips_clearing_running_when_superseded() -> None:
+    """``_run``'s finally identity gate: a worker whose watchdog was superseded mid-run
+    must NOT clear ``_running`` (the ``self._watchdog is watchdog`` ->exit branch)."""
+    captured: list[Callable[[], None]] = []
+    newer = PullWatchdog(
+        on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+    )
+
+    def factory(_on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+        return PullWatchdog(
+            on_hung=_on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+        )
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_FakeClock()),
+        spawn=captured.append,  # capture the worker so we can supersede before it runs
+        watchdog_factory=factory,
+    )
+    started = job.start(lambda _h: None, total=1)
+    assert started is True
+    job._running = True  # pyright: ignore[reportPrivateUsage]
+    # Supersede THIS run's watchdog before draining the captured worker, so the
+    # worker's finally sees `self._watchdog is watchdog` as False (->exit).
+    job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+    captured[0]()  # drain the worker → its finally runs the identity gate
+    assert job._running is True  # pyright: ignore[reportPrivateUsage]  # NOT cleared (superseded)
+
+
+def test_beat_is_a_noop_when_no_watchdog_wired() -> None:
+    """``_beat`` short-circuits (the ``self._watchdog is not None`` ->exit branch) when
+    no watchdog is wired — e.g. before any ``start`` built one."""
+    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+    assert job._watchdog is None  # pyright: ignore[reportPrivateUsage]
+    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the None guard

@@ -75,15 +75,27 @@ SOURCE_ROOT = "brutex/"
 #: Where the test files live (globbed for ``test_*.py``).
 TESTS_DIR = "tests"
 
-#: TINY, documented allowlist of in-scope files that genuinely have NO
-#: per-file unit test, so a touch must NOT fail the discovery gate. Keep
-#: this list short and justified — every entry needs a one-line reason
-#: (CLAUDE.md Golden Rule #11 COMMON + Golden Rule #10 honesty). It is
-#: deliberately EMPTY: every brutex module is expected to ship a
-#: per-file test, and the warn-skip policy already protects legacy
-#: modifications, so no genuinely test-less brutex module needs an entry
-#: today.
-COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset()
+#: TINY, documented allowlist of in-scope files that genuinely CANNOT be
+#: 100%-gated by a SINGLE per-file unit test, so a touch must NOT fail the
+#: discovery gate. Keep this list short and justified — every entry needs a
+#: one-line reason (CLAUDE.md Golden Rule #11 COMMON + Golden Rule #10
+#: honesty). These files still ride the whole-package ``--cov-fail-under=100``
+#: floor (the authoritative 100% gate) + the static per-module list — the
+#: discovery gate is a COMPLEMENT, never the only guard.
+COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
+    {
+        # The ~1300-statement FastAPI route-glue module. Its 100% line+branch is
+        # reached by the WHOLE dashboard route-family suite collectively (~57 test
+        # files exercise ``build_app`` end-to-end) + the residual-gap backfill
+        # ``test_dashboard_app_backfill.py`` — by design that backfill closes only
+        # the leftovers the route suites miss, so it covers ~43% STANDALONE and was
+        # never meant to be app.py's sole per-file gate. The whole-package
+        # ``--cov-fail-under=100`` floor (DEC-COV-APP-BACKFILL-001) is app.py's real
+        # 100% gate; the discovery gate running its backfill in isolation is a
+        # structural mismatch that would block EVERY app.py-touching PR.
+        "brutex/dashboard/app.py",
+    }
+)
 
 
 class DiscoveryError(Exception):

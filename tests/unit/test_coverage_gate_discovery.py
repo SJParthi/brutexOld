@@ -177,9 +177,18 @@ class TestDiscoverTouchedModules:
             ("brutex/a.py", "A")
         ]
 
-    def test_shipped_exclude_allowlist_is_empty(self, gate: ModuleType) -> None:
-        # Pin the documented invariant: the allowlist ships empty.
-        assert len(gate.COVERAGE_DISCOVERY_EXCLUDE) == 0
+    def test_shipped_exclude_allowlist_is_app_only(self, gate: ModuleType) -> None:
+        # Pin the documented invariant: the allowlist holds ONLY the route-glue
+        # app.py (gated by the whole-package floor, not a single per-file test —
+        # DEC-DASHBOARD-RESULTS-PAGE-001). Keep it tiny + justified.
+        assert frozenset({"brutex/dashboard/app.py"}) == gate.COVERAGE_DISCOVERY_EXCLUDE
+
+    def test_excluded_app_module_is_dropped_from_discovery(self, gate: ModuleType) -> None:
+        # The shipped exclude really removes app.py from the gated set (a touch of it
+        # rides the whole-package floor instead of failing the discovery gate).
+        assert gate.discover_touched_modules(
+            [("M", "brutex/dashboard/app.py"), ("M", "brutex/dashboard/nav.py")]
+        ) == [("brutex/dashboard/nav.py", "M")]
 
 
 class TestCandidateTestGlobs:
