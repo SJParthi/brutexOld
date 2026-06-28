@@ -5,10 +5,10 @@
 > decision ledger (`docs/MIGRATION.md`). A self-contained, shareable HTML one-pager lives next to
 > this file at [`docs/product_scoreboard.html`](./product_scoreboard.html) (open in any browser).
 >
-> _Last refreshed: 2026-06-27 — now covering the ledger through entry **#935**
-> (DEC-PULL-HEALTH-WIRING-001; this refresh builds on the prior one DEC-SCOREBOARD-REFRESH-002 /
-> #918). The number in the last column is the **ledger entry** (`docs/MIGRATION.md #NNN`), the
-> authoritative record of each change._
+> _Last refreshed: 2026-06-28 — now covering the ledger through entry **#979**
+> (DEC-M4PRO-BENCH-SURFACE-001; this refresh builds on the prior one DEC-SCOREBOARD-REFRESH-002 /
+> #918 and the in-between #935 sweep). The number in the last column is the **ledger entry**
+> (`docs/MIGRATION.md #NNN`), the authoritative record of each change._
 
 ---
 
@@ -53,6 +53,8 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 | Dashboard never freezes during a download — Coverage / Completeness scans now self-throttle, so a running download keeps its full speed instead of dropping by half | The dashboard stays usable even mid-download | #920 |
 | Faster, byte-identical file writes — a smarter way of merging each downloaded month makes writes quicker without changing a single number in your data | Downloads start getting faster, results stay identical | #927 |
 | Instant nav on the last three pages — Coverage / Completeness / Mapping pages answer a repeat refresh instantly instead of re-projecting the whole lake each time | Section-to-section navigation is snappy | #933 |
+| Bounded daily-derive reads — building the daily/intraday timeframes after a pull now reads only the months you actually pulled, not years of minute history each time | Pulls stay fast as your history grows to years | #939 |
+| Write-cost telemetry + at-scale bench — the disk-write step now reports exactly how long each save takes, with a deep-partition benchmark to prove where the real bottleneck is | Performance work is evidence-led, never guesswork | #937 / #946 |
 
 ### 📊 Theme 2 — "See what's actually moving"
 
@@ -65,6 +67,9 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 | Find any contract fast — symbol → expiry → strike cascading pickers for F&O, symbol → timeframe for spot | Pinpoint the exact contract instead of a giant dropdown | #880 / #897 |
 | Each tab stays its own market — spot shows only spot; futures/options gainers-losers populate even without a daily partition | Clean, accurate tabs — no cross-asset pollution, no empty movers | #915 |
 | Pick your futures expiry — Near / Next / Far filters to that serial-month future per underlying (front / 2nd / 3rd), each cached independently | Focus on the liquid expiry — no stale rows, no spreadsheet juggling | #917 |
+| **See the sweep winners** — a new read-only **`/results`** page lists the ranked brute-force combos: matched conditions by name, net P&L in rupees, full-precision Sharpe / profit-factor / win-rate, with filter + click-to-sort; a completed sweep refreshes it automatically | One screen for *which strategies won* — no CLI needed | #976 / #977 / #978 |
+| F&O movers actually populate — the futures / options CHANGE / CHANGE% / OI columns are no longer blank: the metadata pull now resolves the real vendor underlying first, so eligible stocks return their expiries/contracts instead of zero | F&O gainers/losers screens show real numbers, not blanks | #974 |
+| F&O timeframes carry open interest — the derived daily + intraday F&O candles now carry the bucket's last open-interest snapshot (never summed), exactly like the 1-minute data | Resampled F&O history keeps OI correct on every timeframe | #954 |
 
 ### 🛡️ Theme 3 — "Nothing is ever lost"
 
@@ -80,13 +85,20 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 | Junk bars never stored — a vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero | Your backtest runs on real prices, never corrupted ones | #912 |
 | Rate cap can't be overshot — the 500/min limiter reserves its slot atomically | Your vendor limits are truly enforced, even at full parallelism | #913 |
 | One bad combo ≠ dead sweep — a single failing strategy combo is skipped + flagged, the rest finish | A days-long sweep isn't lost to one bad tuple | #904 |
+| Network blips retry — a momentary DNS / connection failure ("can't resolve api.groww.in") is retried, not treated as a stock that's "gone forever" | A flaky 30-second network hiccup never costs you a whole symbol | #936 |
+| One corrupt stored file ≠ broken pull — a corrupt existing data file now quarantines that one symbol instead of crashing the whole pull, sweep load, or movers screen | A single bad file on disk can never take down a multi-day download | #886 / #941 / #950 |
+| A pull can't stall on its own locks — internal file-locks now defer-and-retry (like a rate limit) instead of pinning a worker, so the *only* thing that can slow a download is the broker's rate limit | Downloads make steady progress — they never silently wedge | #953 |
+| Off-heap sweep dedup — the brute-force engine de-duplicates combos in an on-disk store instead of unbounded RAM, so a giant sweep can't run the 48 GB machine out of memory | Massive sweeps finish instead of crashing on memory | #957 |
+| Deterministic, reproducible results — tied leaderboard scores break on a stable key, `-0.0`/`NaN` can't slip into a run's identity hash, and a re-run is bit-identical | The same inputs always give the exact same ranked winners | #960 / #962 / #964 / #967 |
+| Engine-wide robustness sweep — the indicators, costs, metrics, orchestrator audit-log, rate-limiter and the shared Rust core all now fail loudly on corrupt input instead of silently propagating bad numbers | Bad data is caught at the door, never quietly poisons a result | #961 / #963 / #968 / #969 / #965 |
 
 ### 📡 Theme 4 — "You always know what's happening"
 
 | What it does | Why you care | Proof |
 |---|---|---|
 | Instant phone alerts — a CRITICAL Telegram alert fires when a download halts (disk-full / out-of-memory / quota), from both CLI and dashboard | You hear about a stopped pull in real time, not hours later | #888 / #889 |
-| Pull-health self-watch — a live monitor decides whether a slow download is **our** software holding it back or the broker simply rejecting requests, and it's now wired into every real pull (firing a phone alert the moment it degrades) | When a pull is slow, you know exactly whose fault it is — automatically, not by squinting at a chart | #932 / #935 |
+| Pull-health self-watch — a live monitor decides whether a slow download is **our** software holding it back or the broker simply rejecting requests, and it's now wired into every real pull (firing a phone alert the moment it degrades) — and it's now safe across all parallel download workers | When a pull is slow, you know exactly whose fault it is — automatically, not by squinting at a chart | #932 / #935 / #956 |
+| Hung-pull watchdog — a heartbeat watchdog declares a wedged background download HUNG, fires a CRITICAL phone alert, and releases the stuck flag so the next pull isn't silently refused | A frozen download tells you in real time — it never just sits there silently | #948 |
 
 ### 🎯 Theme 5 — "The data is right (and honest)"
 
@@ -100,6 +112,7 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 | Mapping integrity audits — proves every option maps to the right stock + lot size; flagged, never faked | Trust that the data lines up | #870 / #873 / #874 / #875 |
 | Honest completeness — late-listed names + missing years marked "partial" instead of faking a full span | The completeness screen never lies to you | #859 / #868 |
 | Empty-symbol recovery — a stock whose stored data key drifted has its real on-disk data recovered under the clean name, never silently dropped | No stock with real data ever reads falsely "empty" | #907 / #911 |
+| Dashboard hardened against XSS — vendor-derived cells and reflected query params are escaped before they touch the page, closing two cross-site-scripting holes on the Movers screen | The dashboard is safe to open, even on untrusted data | #949 |
 
 ### 🚀 Theme 6 — "Getting the data is one click (and as fast as the vendor allows)"
 
@@ -111,6 +124,8 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 | Self-tuning rate limit — an adaptive limiter backs off on rejections and recovers automatically; the per-second ceiling is operator-tuned to 8/sec | Fast downloads that adjust themselves and don't get you blocked | #906 / #922 |
 | Actually uses its allowed speed — more download connections so the pull generates real demand toward the rate ceiling instead of leaving most of it idle | Faster downloads from the slack that used to go to waste | #921 |
 | Proven not to leave speed on the table — an at-scale test harness fails the build if the pull ever falls short of the rate it's allowed | The download speed is guarded by an automatic safety net, not hope | #929 |
+| One button does the whole pull — the cluttered per-stage buttons are replaced by one selection-aware "▶ Pull · full pipeline" that always runs the fixed gated order (spot → futures/options metadata → history), auto-loading instruments when needed | Get all your data with a single click — no stage-by-stage button juggling | #955 |
+| Per-segment movers warm-up — the moment a segment (spot, then futures + options) fully succeeds, its movers screen is pre-computed; a segment that didn't fully succeed is never warmed | Movers open instantly after a pull — and never show a half-finished illusion | #951 |
 
 ### 🌙 Theme 7 — "Runs itself overnight — even the login renews itself"
 
@@ -124,17 +139,32 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 > *"start a download and walk away for days."* The login that used to need a human at dawn now
 > renews itself.
 
+### 🔬 Theme 8 — "Proven, measured, and ready for the big sweep"
+
+| What it does | Why you care | Proof |
+|---|---|---|
+| Engine proven O(1) at scale — new benchmarks prove the sweep's hot paths (audit append, per-mask driver, trial-stats write) stay constant-time no matter how big the grid gets | The brute-force engine is built to scale to billions of trials | #971 / #972 / #973 |
+| 7-test-type rigor on the rule engine — the 52-condition evaluator gains benchmark, stress, golden-bit-identity, property and boundary tests | The logic that decides every signal is exhaustively pinned | #970 |
+| Extra metric robustness — a second-round hardening pass on the statistical-validity stage kills mutation survivors and consolidates cross-engine invariant tests | The Sharpe / DSR / significance maths is double-checked | #975 |
+| Calendar hardened — the NSE/BSE trading calendar's timezone, session-boundary, leap-year and half-day rules are pinned with golden + property tests | Trading-hour and holiday logic is trustworthy to the minute | #958 / #959 |
+| Honest CI gates — the build's quality gates are de-conflated into honestly-named jobs, and a new module shipping with no test now fails the build | The "every change is fully tested" promise is enforced, not assumed | #966 |
+| M4 bench numbers in the logs — the reference-hardware performance numbers are surfaced in CI logs, and the type-check is green on the verify machine | Performance claims are visible and checked on the real reference machine | #979 |
+
 ---
 
 ## 🟡 Current — in flight right now (open PRs, not yet merged)
 
-These are real open pull requests. They are **docs / process** work — no `brutex/` engine change.
+These are **real open pull requests** — not yet merged, so not counted as Finished above.
 
 | Item | What it is | Why it matters | Status |
 |---|---|---|---|
-| **EAP feedback — round 2** | An evidence-gated feedback dossier for the Claude Code Early-Access Program — every finding backed by a reproducible proof | Improves how the product itself is built (meta, not a product feature) | 🟡 open PR (#905) |
-| **Consolidated EAP dossier** | One shared feedback file so the BruteX + TickVault repos can be submitted together | Same meta-feedback track as above | 🟡 draft PR (#889) |
-| **Fetch/write overlap (Lever 1)** | An experiment to overlap downloading and disk-writing for higher throughput | Kept **default-off** — a real benchmark showed it doesn't help under Python's lock, so it's honestly **NO-GO** and shelved, not shipped | 🟡 draft PR (#886) — NO-GO, not merged |
+| **Batched-coalesce write consumer** | Group all pending disk-writes for one month into a single save so the download stops idling on its own writes (the "write-fix") | Default-OFF until the M4 A/B proof lands; the CI bench showed ~2× but it ships dormant until proven on reference hardware (Golden Rule #10) | 🟡 draft PR (#943) — not merged, claims ledger #980 |
+| **CI merge-safety hardening** | Kills a cosmetic post-merge "red" and gates auto-merge on the live, complete check rollup so a PR can never merge while anything is red | Process safety — no `brutex/` engine change | 🟡 draft PR (#944) |
+
+> Note: the prior cycle's "Current" items have since landed — the EAP feedback rounds merged (#925 / #931),
+> and the Lever-1 fetch/write overlap merged **shipped-dormant as an honest NO-GO** (the benchmark refuted a
+> throughput gain under Python's lock — #940). The batched-coalesce writer (#943) above is the follow-up
+> that *did* show a win on the CI bench.
 
 ---
 
@@ -152,8 +182,9 @@ These are real open pull requests. They are **docs / process** work — no `brut
 
 | Priority | Plan | What it'll give you | Stage |
 |---|---|---|---|
-| 🔴 Major | Brute-force sweep (build) | Run the ~33-billion-combo sweep across CPU cores — ~2–4 days on reference hardware, bit-identical to serial | design-locked (ADR-0011), build deferred |
+| 🔴 Major | Brute-force sweep (run it for real) | Run the ~33-billion-combo sweep across CPU cores — ~2–4 days on reference hardware, bit-identical to serial. The engine is now O(1)-proven + hardened (#971–#973) and its winners already have a `/results` page (#976) | design-locked (ADR-0011), engine hardened, full production run deferred |
 | 🔴 Major | Options execution track | Translate winning index signals into real options trades for execution realism | Track 2 |
+| 🟡 Mid | Faster disk-writes (proven) | Land the batched-coalesce writer once the M4 A/B proof confirms the CI bench's ~2× | open draft, proof-gated (#943) |
 | 🟡 Mid | In-place dashboard nav | Pages swap content in place instead of fully reloading — the last big source of page lag | documented follow-up (#933) |
 | 🟡 Mid | True O(page) paging | Candle/discovery reads only the visible page via a write-time lake manifest | documented follow-up (#896 / #916) |
 | 🟡 Mid | Engine → F&O stocks | Expand the brute-force engine beyond the 3 indices (the ~212-stock lake is reference-only today) | needs a scope decision (#200) |
