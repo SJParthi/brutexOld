@@ -3082,15 +3082,13 @@ def registry_counts(registry_path: Path) -> dict[str, Any]:
     store = _open_registry_or_none(registry_path)
     if store is None:
         return {"expiries": 0, "contracts": 0, "exists": True, "note": _REGISTRY_UNREADABLE_NOTE}
-    try:
+    with store:
         return {
             "expiries": store.count_expiries(),
             "contracts": store.count_contracts(),
             "exists": True,
             "note": None,
         }
-    finally:
-        store.close()
 
 
 def list_registry_expiries(
@@ -3154,7 +3152,7 @@ def list_registry_expiries(
             "offset": safe_offset,
             "note": _REGISTRY_UNREADABLE_NOTE,
         }
-    try:
+    with store:
         total = store.count_expiries(exch=exch, underlying=underlying)
         rows = [
             _expiry_grid_row(r)
@@ -3162,8 +3160,6 @@ def list_registry_expiries(
                 exch=exch, underlying=underlying, limit=safe_limit, offset=safe_offset
             )
         ]
-    finally:
-        store.close()
     return {
         "columns": columns,
         "rows": rows,
@@ -3246,7 +3242,7 @@ def list_registry_contracts(
             "offset": safe_offset,
             "note": _REGISTRY_UNREADABLE_NOTE,
         }
-    try:
+    with store:
         total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
         rows = [
             _contract_grid_row(r)
@@ -3258,8 +3254,6 @@ def list_registry_contracts(
                 offset=safe_offset,
             )
         ]
-    finally:
-        store.close()
     return {
         "columns": columns,
         "rows": rows,

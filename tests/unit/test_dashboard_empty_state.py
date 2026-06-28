@@ -118,8 +118,7 @@ def _corrupt_registry(tmp_path: Path) -> Path:
 
 def _seed_registry(tmp_path: Path) -> None:
     """Seed a VALID sibling registry with one NIFTY expiry + a CE+PE pair."""
-    reg = RegistryStore.open(_registry_path(tmp_path))
-    try:
+    with RegistryStore.open(_registry_path(tmp_path)) as reg:
         reg.upsert_expiry("NSE", "NIFTY", _EXP, run_id="r1", fetched_at=_NOW)
         reg.upsert_contract(
             "NSE",
@@ -141,8 +140,6 @@ def _seed_registry(tmp_path: Path) -> None:
             run_id="r1",
             fetched_at=_NOW,
         )
-    finally:
-        reg.close()
 
 
 # ── CHANGE 1: route — corrupt registry → 200 honest note, NOT 500 ────────────
