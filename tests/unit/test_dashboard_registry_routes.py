@@ -195,3 +195,62 @@ def test_registry_routes_pathless_store_return_no_store_note(
             assert body["note"] == "no store wired"
             assert body["rows"] == []
             assert body["total"] == 0
+
+
+# ── DEC-DASHBOARD-EMPTY-STATE-001: corrupt registry → honest 200 empty-state ──
+# A corrupt / truncated / version-incompatible ``registry.duckdb`` makes
+# ``RegistryStore.open`` raise ``RegistryError`` (a ``BruteXError``, NOT a
+# ``ValueError``). The ROUTE handlers (``app.py``) catch it and return an honest 200
+# empty grid + the "registry unreadable" note instead of a misleading HTTP 500. These
+# tests exercise the NEW ``except RegistryError`` branches in both registry routes, so
+# they register in ``app.py``'s whole-package 100% coverage floor.
+
+_UNREADABLE_NOTE = "registry unreadable — re-pull expiries + contracts"
+_CORRUPT_BYTES = b"not a duckdb file\x00\x01"
+
+
+def _corrupt_registry(tmp_path: Path) -> None:
+    """Write GARBAGE bytes at the sibling registry path so ``RegistryStore.open`` raises."""
+    (tmp_path / "registry.duckdb").write_bytes(_CORRUPT_BYTES)
+
+
+def test_corrupt_registry_expiries_route_is_200_unreadable_note(
+    client: TestClient, tmp_path: Path
+) -> None:
+    _corrupt_registry(tmp_path)
+    r = client.get("/api/v1/db/registry/expiries?underlying=NIFTY")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["columns"] == list(REGISTRY_EXPIRY_COLUMNS)
+    assert body["rows"] == []
+    assert body["total"] == 0
+    assert body["note"] == _UNREADABLE_NOTE
+    # counts also degrade honestly; the file IS present, just damaged.
+    assert body["counts"]["note"] == _UNREADABLE_NOTE
+    assert body["counts"]["exists"] is True
+
+
+def test_corrupt_registry_contracts_route_is_200_unreadable_note(
+    client: TestClient, tmp_path: Path
+) -> None:
+    _corrupt_registry(tmp_path)
+    r = client.get("/api/v1/db/registry/contracts?underlying=NIFTY")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["columns"] == list(REGISTRY_CONTRACT_COLUMNS)
+    assert body["rows"] == []
+    assert body["total"] == 0
+    assert body["note"] == _UNREADABLE_NOTE
+    assert body["counts"]["note"] == _UNREADABLE_NOTE
+
+
+def test_corrupt_registry_contracts_malformed_date_still_400_not_unreadable(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A malformed ``expiry_date`` is parsed BEFORE the registry is opened, so even with
+    a corrupt registry on disk the contracts route still returns the HTTP-400 contract —
+    the unreadable guard never masks the date-validation error."""
+    _corrupt_registry(tmp_path)
+    r = client.get("/api/v1/db/registry/contracts?expiry_date=2020/01/30")
+    assert r.status_code == 400
+    assert "expiry_date" in r.json()["detail"]

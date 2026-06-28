@@ -44,7 +44,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -68,6 +68,8 @@ from brutex.dashboard.coverage_view import (
     build_spot_coverage_payload,
 )
 from brutex.dashboard.db_view import (
+    REGISTRY_CONTRACT_COLUMNS,
+    REGISTRY_EXPIRY_COLUMNS,
     fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
@@ -178,7 +180,7 @@ from brutex.data.mapping_integrity import (
 )
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
-from brutex.data.registry_store import ContractRow, RegistryStore
+from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
     PrebuildKind,
@@ -735,6 +737,53 @@ def make_rate_observer(
         )
 
     return _observe
+
+
+#: The honest note the ``/api/v1/db/registry/{expiries,contracts}`` routes return when
+#: the ``registry.duckdb`` file EXISTS but cannot be opened (corrupt / truncated /
+#: version-incompatible — ``RegistryStore.open`` raises ``RegistryError``, a
+#: ``BruteXError`` NOT a ``ValueError``). Distinct from the db_view missing-file note so
+#: the operator can tell "never pulled" apart from "pulled but the cache is damaged";
+#: the cure is to re-pull, which rewrites the cache atomically. The corrupt-registry
+#: guard lives HERE in the route handlers (not in ``db_view.py``) so ``db_view.py`` is
+#: covered by its own curated multi-file gate while the new route branches register in
+#: ``app.py``'s whole-package 100% coverage floor (DEC-DASHBOARD-EMPTY-STATE-001).
+_REGISTRY_UNREADABLE_NOTE: Final = "registry unreadable — re-pull expiries + contracts"
+
+
+def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
+    """Build the honest empty-grid payload for an unreadable ``registry.duckdb``.
+
+    Mirrors the grid shape the db_view registry readers return for a MISSING file
+    (``{columns, rows, total, limit, offset, note, counts}``) but with empty ``rows``,
+    a zero ``total``, the DISTINCT :data:`_REGISTRY_UNREADABLE_NOTE`, and a ``counts``
+    block that likewise degrades honestly (``exists=True`` — the file IS present, just
+    damaged). Shared by both registry routes so the two corrupt responses stay
+    byte-consistent (Golden Rule #11 COMMON).
+
+    Parameters
+    ----------
+    columns
+        The browsable column set for the grid — ``REGISTRY_EXPIRY_COLUMNS`` for the
+        expiries route, ``REGISTRY_CONTRACT_COLUMNS`` for the contracts route.
+
+    Returns
+    -------
+    dict[str, Any]
+        The HTTP 200 empty-state payload.
+    """
+    return {
+        "columns": list(columns),
+        "rows": [],
+        "total": 0,
+        "note": _REGISTRY_UNREADABLE_NOTE,
+        "counts": {
+            "expiries": 0,
+            "contracts": 0,
+            "exists": True,
+            "note": _REGISTRY_UNREADABLE_NOTE,
+        },
+    }
 
 
 def build_app(
@@ -4832,7 +4881,15 @@ def build_app(
             payload["counts"] = registry_counts(registry_path)
             return payload
 
-        return JSONResponse(await run_in_threadpool(_load))
+        try:
+            return JSONResponse(await run_in_threadpool(_load))
+        except RegistryError:
+            # A corrupt / truncated / version-incompatible registry.duckdb makes
+            # RegistryStore.open raise RegistryError (a BruteXError, NOT a ValueError):
+            # degrade to an honest 200 empty-state instead of a misleading HTTP 500
+            # (DEC-DASHBOARD-EMPTY-STATE-001). Missing/empty/valid paths are unaffected
+            # — only the EXISTING-but-unreadable file reaches here.
+            return JSONResponse(_registry_unreadable_payload(REGISTRY_EXPIRY_COLUMNS))
 
     @app.get("/api/v1/db/registry/contracts")
     async def api_db_registry_contracts(
@@ -4877,6 +4934,12 @@ def build_app(
 
         try:
             return JSONResponse(await run_in_threadpool(_load))
+        except RegistryError:
+            # Corrupt / unreadable registry.duckdb → honest 200 empty-state, mirroring
+            # the expiries route (DEC-DASHBOARD-EMPTY-STATE-001). A malformed expiry_date
+            # is parsed BEFORE the registry is opened, so it still raises ValueError →
+            # the 400 below; the two error contracts never collide.
+            return JSONResponse(_registry_unreadable_payload(REGISTRY_CONTRACT_COLUMNS))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
