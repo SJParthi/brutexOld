@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
+from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
@@ -267,6 +268,7 @@ def run_groww_spot_ingest(
     on_window: WindowTick | None = None,
     symbol_windows: SpotWindows | None = None,
     write_pool: WriteConsumer | None = None,
+    fetch_pipeline: FetchPipeline | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -335,6 +337,16 @@ def run_groww_spot_ingest(
         default) reproduces TODAY's fully-synchronous path exactly — no thread, no queue.
         The caller OWNS the pool's lifetime and MUST :meth:`drain` it BEFORE saving the
         window ledger (so every settled window is durable).
+    fetch_pipeline
+        Optional :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline`
+        (DEC-GROWW-FETCH-ASYNC-SEPARATION-001). When supplied, each window's SUCCESS-path
+        tail (session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record``) is
+        handed OFF to a background consumer so the fetch lane does ONLY fetch + enqueue —
+        internal processing can never block or slow the fetch. Forwarded verbatim into every
+        :func:`ingest_spot` call. ``None`` (the default) keeps the fully-synchronous,
+        byte-identical path. Mutually independent of *write_pool* (a caller would wire ONE or
+        the other; the pipeline subsumes the write-only decouple). The caller OWNS the
+        pipeline's lifetime and MUST :meth:`drain` it BEFORE saving the window ledger.
 
     Returns
     -------
@@ -407,6 +419,7 @@ def run_groww_spot_ingest(
                 on_success=on_success,
                 run_parallel=inner_runner,
                 on_window=on_window,
+                fetch_pipeline=fetch_pipeline,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -592,6 +605,7 @@ def run_groww_spot_ingest_with_retry(
     on_window: WindowTick | None = None,
     symbol_windows: SpotWindows | None = None,
     write_pool: WriteConsumer | None = None,
+    fetch_pipeline: FetchPipeline | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -619,6 +633,12 @@ def run_groww_spot_ingest_with_retry(
     pass, so each retry round ALSO routes its writes through the same background
     consumer — preserving the settle-after-durable ledger ordering. ``None`` (default)
     keeps the synchronous write path.
+
+    *fetch_pipeline* (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) is likewise forwarded
+    verbatim to every pass, so each retry round ALSO hands its tails off to the same
+    background consumer pool. ``None`` (default) keeps the fully-synchronous path. The
+    caller drains it ONCE at pull end (after the LAST pass), so every queued window is
+    processed + ledger-recorded before the final ledger flush.
 
     Returns
     -------
@@ -652,6 +672,7 @@ def run_groww_spot_ingest_with_retry(
             on_window=on_window,
             symbol_windows=symbol_windows,
             write_pool=write_pool,
+            fetch_pipeline=fetch_pipeline,
         )
 
     report = _one_pass()

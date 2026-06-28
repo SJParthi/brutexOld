@@ -100,6 +100,7 @@ from brutex.orchestrator.universe_phases import RunParallel
 if TYPE_CHECKING:
     import polars as pl
 
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
     from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
     from brutex.adapters.rate_common import RateController
     from brutex.data.models import CandleBar
@@ -1086,6 +1087,67 @@ def _drain_write_consumer(consumer: BatchingWriteConsumer | None) -> None:
         _LOG.exception("pull.write_batch.drain_failed")
 
 
+def _build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
+    """Build the FULL async fetch/process separation pool when the flag is on.
+
+    DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — the operator's core requirement: the fetch
+    thread does ONLY fetch + enqueue; a SEPARATE consumer pool does ALL internal work
+    (session-filter, dedup/lake-write, ledger.record), so internal processing can NEVER
+    block or slow the fetch. When the operator opts in via ``BRUTEX_GROWW_FETCH_PIPELINE``
+    (DEFAULT OFF), each window's tail is handed off to a
+    :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline` consumer; the upstream
+    :class:`~brutex.adapters.rate_common.RateController` (the per-second AIMD ceiling + the
+    atomic 500/min governor) is UNTOUCHED — it stays entirely on the producer side
+    (CLAUDE.md §2 Rule 6).
+
+    Returns ``None`` (the byte-identical synchronous path — no thread, no queue) when: the
+    flag is OFF (the default), this is a ``dry_run`` (no real writes), or construction fails
+    (guarded — binding the pipeline can NEVER crash the pull). The caller OWNS the pipeline's
+    lifetime and MUST :func:`_drain_fetch_pipeline` it in its ``finally`` BEFORE saving the
+    window ledger (so every queued window is processed + ledger-recorded before the flush).
+    """
+    if dry_run:
+        return None
+    try:
+        from brutex.adapters.groww.fetch_pipeline import (
+            FetchPipeline,
+            resolve_fetch_pipeline_size,
+        )
+
+        size = resolve_fetch_pipeline_size()
+        if size is None:
+            return None
+        pipeline = FetchPipeline(workers=size)
+        _LOG.info("pull.fetch_pipeline.enabled", workers=size)
+        return pipeline
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull.fetch_pipeline.build_failed")
+        return None
+
+
+def _drain_fetch_pipeline(pipeline: FetchPipeline | None) -> None:
+    """Drain *pipeline* at pull end (flush+join), re-raising a captured consumer halt.
+
+    Idempotent. A ``None`` pipeline (the synchronous default) is a no-op. A
+    :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.drain` that re-raises a
+    captured :class:`~brutex.data.errors.LakeWriteHalt` (disk-full in a consumer) is allowed
+    to PROPAGATE — that is the graceful pull-halt path (the spine's ``_GLOBAL_STOP_ERRORS``);
+    any OTHER drain error is logged + swallowed so the ledger persist still runs.
+    """
+    if pipeline is None:
+        return
+    from brutex.data.errors import LakeWriteHalt
+
+    try:
+        pipeline.drain()
+    except LakeWriteHalt:
+        # A consumer hit disk-full / OOM — propagate so the pull halts gracefully (the
+        # caller's halt handling + the CRITICAL Telegram alert fire on this).
+        raise
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull.fetch_pipeline.drain_failed")
+
+
 def _emit_pull_pool_size(pull_id: str) -> None:
     """Emit the resolved client connection-pool width once at pull start.
 
@@ -1430,6 +1492,15 @@ def pull_all_spot(
         # synchronous write path byte-identical; drained in the ``finally`` before the
         # ledger is saved (so every settled window is durable).
         _write_consumer = _build_write_consumer(sink, dry_run=dry_run)
+        # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001): when
+        # ``BRUTEX_GROWW_FETCH_PIPELINE`` is opted in (DEFAULT OFF), the fetch lane does ONLY
+        # fetch + enqueue and a SEPARATE consumer pool does ALL internal work (filter / write
+        # / ledger.record), so internal processing can never block or slow the fetch. The
+        # RateController (8/500 + AIMD) stays entirely producer-side, UNTOUCHED (Golden Rule
+        # #6). ``None`` (the default / a dry-run) keeps the synchronous path byte-identical;
+        # drained in the ``finally`` before the ledger is saved (so every queued window is
+        # processed + ledger-recorded first).
+        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -1538,6 +1609,7 @@ def pull_all_spot(
                     on_window=window_observer,
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
+                    fetch_pipeline=_fetch_pipeline,
                 )
                 passes.append(res)
                 return res
@@ -1722,6 +1794,12 @@ def pull_all_spot(
             # the batched path is OFF (the synchronous default). Best-effort: a drain error is
             # logged, never re-raised, so the ledger persist below always runs.
             _drain_write_consumer(_write_consumer)
+            # Drain the FULL async fetch/process pipeline (DEC-GROWW-FETCH-ASYNC-SEPARATION-001):
+            # process every still-queued window's tail + record its ledger row BEFORE the
+            # ledger persist, so settle-after-durable holds at pull granularity. A no-op when
+            # the pipeline is OFF (the synchronous default); a captured disk-full halt
+            # PROPAGATES (the graceful pull-halt path), any other drain error is swallowed.
+            _drain_fetch_pipeline(_fetch_pipeline)
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
@@ -2160,6 +2238,13 @@ def pull_candles(
         # synchronous write path byte-identical; drained in the ``finally`` before the
         # ledger is saved (so every settled window is durable).
         _write_consumer = _build_write_consumer(sink, dry_run=dry_run)
+        # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001): when
+        # ``BRUTEX_GROWW_FETCH_PIPELINE`` is opted in (DEFAULT OFF), the fetch lane does ONLY
+        # fetch + enqueue and a SEPARATE consumer pool does ALL internal work, so internal
+        # processing can never block or slow the fetch. The RateController (8/500 + AIMD)
+        # stays entirely producer-side, UNTOUCHED. ``None`` (default / dry-run) keeps the
+        # synchronous path byte-identical; drained in the ``finally`` before the ledger save.
+        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2216,6 +2301,7 @@ def pull_candles(
                 on_window=window_observer,
                 symbol_windows=phase_windows,
                 write_pool=_write_consumer,
+                fetch_pipeline=_fetch_pipeline,
             )
             merged_pairs.update(phase_report.pairs)
             failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
@@ -2286,6 +2372,11 @@ def pull_candles(
             # the batched path is OFF (the synchronous default). Best-effort: a drain error is
             # logged, never re-raised, so the ledger persist below always runs.
             _drain_write_consumer(_write_consumer)
+            # Drain the FULL async fetch/process pipeline (DEC-GROWW-FETCH-ASYNC-SEPARATION-001):
+            # process every still-queued window's tail + record its ledger row BEFORE the
+            # ledger persist (settle-after-durable at pull granularity). A no-op when OFF; a
+            # captured disk-full halt PROPAGATES (graceful pull-halt), else swallowed.
+            _drain_fetch_pipeline(_fetch_pipeline)
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
 
