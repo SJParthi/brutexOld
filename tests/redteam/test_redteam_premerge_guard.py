@@ -274,6 +274,109 @@ class TestGuardFailsClosed:
         assert "Usage" in result.stderr or "PR_NUMBER" in result.stderr
 
 
+class TestIgnoreCheckNames:
+    """DEC-MERGE-LIVE-ROLLUP-001: IGNORE_CHECK_NAMES drops named check runs
+    from the count + failed + pending scan, so the auto-merge path can exclude
+    its OWN structurally-pending self-check — while every REAL CI check still
+    gates fully. Default empty = no behaviour change (proven by every other
+    test in this file running with no IGNORE_CHECK_NAMES set)."""
+
+    def test_ignored_pending_self_check_does_not_block(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """An IN_PROGRESS check whose name is ignored must NOT block the merge."""
+        rollup: dict[str, Any] = {
+            "statusCheckRollup": [
+                {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
+                for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        # The auto-merge workflow's own check run, structurally pending.
+        rollup["statusCheckRollup"].append(
+            {"name": "Auto-merge on green CI", "conclusion": None, "status": "IN_PROGRESS"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"IGNORE_CHECK_NAMES": "Auto-merge on green CI"},
+            extra_path=fake_bin,
+        )
+        assert result.returncode == 0, (
+            "an ignored pending self-check must not block a green rollup; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_ignored_self_check_does_not_mask_a_real_failure(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """Ignoring the self-check must NOT let a REAL failing check through."""
+        rollup: dict[str, Any] = {
+            "statusCheckRollup": [
+                {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
+                for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        rollup["statusCheckRollup"][7]["conclusion"] = "FAILURE"
+        rollup["statusCheckRollup"].append(
+            {"name": "Auto-merge on green CI", "conclusion": None, "status": "IN_PROGRESS"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"IGNORE_CHECK_NAMES": "Auto-merge on green CI"},
+            extra_path=fake_bin,
+        )
+        assert result.returncode == 1, (
+            "a REAL failing check must still block even when the self-check is "
+            f"ignored; got exit {result.returncode}"
+        )
+        assert "MERGE BLOCKED" in result.stdout or "MERGE BLOCKED" in result.stderr
+
+    def test_ignored_check_does_not_inflate_rollup_below_min(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """The ignored check must NOT count toward the EXPECTED_MIN_CHECKS floor.
+
+        20 real green checks + the ignored self-check = 21 entries, but after
+        excluding the ignored one only 20 real checks remain — exactly the
+        floor, so the merge is allowed. (Without the exclusion-from-count this
+        would still pass; this pins that the ignored entry is not double-counted
+        as a real check that could mask an under-registered rollup.)
+        """
+        rollup: dict[str, Any] = {
+            "statusCheckRollup": [
+                {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
+                for i in range(19)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        # Only 19 real checks + the ignored one → 19 real < 20 floor → blocks.
+        rollup["statusCheckRollup"].append(
+            {"name": "Auto-merge on green CI", "conclusion": None, "status": "IN_PROGRESS"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"IGNORE_CHECK_NAMES": "Auto-merge on green CI"},
+            extra_path=fake_bin,
+        )
+        assert result.returncode == 7, (
+            "with the ignored check excluded, only 19 real checks remain (< 20 "
+            f"floor) so the rollup is incomplete and must block; got {result.returncode}"
+        )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # DEC-P0-008 (PR #30): OPERATOR_OVERRIDE rate-limit (Z+ L7 COOLDOWN)
 # ────────────────────────────────────────────────────────────────────────
