@@ -386,7 +386,7 @@ def _ntm_admission(
     return reference_security_ids, note
 
 
-def _resolve_fno_index_aliases() -> dict[str, str]:
+def resolve_fno_index_aliases() -> dict[str, str]:
     """Return the spot→F&O index alias map: sourced defaults MERGED with the env override.
 
     DEC-FNO-INDEX-ALIAS-001 — the :data:`_SOURCED_FNO_INDEX_ALIASES` defaults
@@ -412,6 +412,14 @@ def _resolve_fno_index_aliases() -> dict[str, str]:
         if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
             aliases[key.strip().upper()] = value.strip()
     return aliases
+
+
+#: Backward-compatible private alias for :func:`resolve_fno_index_aliases`, kept so
+#: existing ``from ...instrument_loader import _resolve_fno_index_aliases`` callers
+#: (the F&O-index diagnostic tests) keep resolving after the public rename
+#: (DEC-FNO-UNDERLYING-RESOLVE-001 promoted it to the public API so the COMMON
+#: F&O-underlying resolver can read the SAME map — no second source of truth).
+_resolve_fno_index_aliases = resolve_fno_index_aliases
 
 
 def _groww_symbol_index_bridge(
