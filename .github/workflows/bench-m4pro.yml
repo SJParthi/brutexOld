@@ -37,6 +37,7 @@ on:
       - "tests/bench/test_throughput_absolute.py"
       - "tests/bench/test_throughput_canary.py"
       - "tests/bench/test_summary_cache_o1.py"
+      - "tests/bench/test_m4pro_sweep_walltime.py"
       - ".github/workflows/bench-m4pro.yml"
       - "brutex/vocabulary/**"
       - "rust/fno-math/**"
@@ -181,6 +182,20 @@ jobs:
           # itself flags — so the ≤4-day figure is the kernel envelope, not the
           # full real-sweep wall time.
           pytest tests/bench/test_full_sweep_extrapolation.py -q -s -rA --tb=short -p no:cacheprovider
+
+      - name: Run real-trade-walk sweep wall-time bench
+        run: |
+          . .venv/bin/activate
+          # DEC-M4PRO-WALLTIME-BENCH-001: times the REAL trade-walk
+          # (ResidentSweepSim.count_trades — entry, SL/TP, 15:20 forced exit) over
+          # a representative TF-mix window and projects wall time for BOTH the full
+          # 33B grid AND the ~50%-conflict-pruned path. This is the DOMINANT cost
+          # the 33B-SLA gate above EXCLUDES (it measures mask-AND + blake3 only).
+          # -s -rA surface the measured trials/sec, per-trial µs and BOTH projected
+          # wall-times in the CI log; the heavy timing is gated on BRUTEX_M4PRO_ABS=1
+          # (set in the job env) and skips elsewhere. HONEST measurement, not a hard
+          # perf gate (the gated body asserts only positive/finite sanity).
+          pytest tests/bench/test_m4pro_sweep_walltime.py -q -s -rA --tb=short -p no:cacheprovider
 
       - name: Run strict 1.1x O(1) ratio tier
         run: |
