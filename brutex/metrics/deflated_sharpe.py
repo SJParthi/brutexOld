@@ -231,7 +231,7 @@ def expected_max_sharpe_ratio(n_trials: int, trial_sharpe_variance: float) -> fl
 
     Notes
     -----
-    For an *astronomically* large ``n_trials`` (``>= ~6.6e15``, far above
+    For an *astronomically* large ``n_trials`` (``>= ~2e16``, far above
     any realistic brute-force trial count) the quantile argument
     ``1 - 1/N`` rounds to exactly ``1.0`` in float64, and
     :meth:`statistics.NormalDist.inv_cdf` then raises
