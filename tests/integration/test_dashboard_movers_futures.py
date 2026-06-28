@@ -41,6 +41,7 @@ from brutex.dashboard.movers_futures import (
     _prev_day_oi,
     _read_future_session,
     _underlying_spot_ltp,
+    compute_futures_candidates,
     run_futures_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -628,3 +629,73 @@ class TestPrevDayOiIntegration:
         )
         got = _prev_day_oi(tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_NEAR_FUT, day=_DAY)
         assert got == 1000
+
+
+# ── compute_futures_candidates discovery + resilience branches ────────────
+# These exercise the per-file gate branches the broad dashboard suite covered
+# but the narrowly-mapped tests did not: the _discover_futures segment/interval
+# skip and the compute_futures_candidates corrupt-Parquet skip
+# (DEC-MOVERS-CORRUPT-SKIP-001).
+
+
+class TestComputeFuturesCandidatesBranches:
+    def test_non_one_minute_fno_dataset_is_skipped_in_discovery(self, tmp_path: Path) -> None:
+        # A real FUT future is discovered; a sibling FNO dataset at a NON-1minute
+        # interval (here 1day) is skipped at the segment/interval guard in
+        # _discover_futures, so only the 1minute future registers.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_NEAR_FUT,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="20010", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FAR_FUT,
+            interval="1day",
+            bars=[_day_bar(day=_DAY, close="20100", oi=900)],
+        )
+        result = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
+        )
+        assert {m.underlying for m in result.movers} == {"NIFTY"}
+        assert result.skipped == 0
+
+    def test_corrupt_future_partition_is_skipped_not_raised(self, tmp_path: Path) -> None:
+        # A single corrupt future Parquet is SKIPPED (logged + counted), never
+        # 500-ing the futures screen (DEC-MOVERS-CORRUPT-SKIP-001).
+        from structlog.testing import capture_logs
+
+        good = "NSE-NIFTY-27Jun24-FUT"
+        bad = "NSE-BANKNIFTY-27Jun24-FUT"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=good,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="20010", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=bad,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="48010", volume=80, oi=900)],
+        )
+        corrupt = list((tmp_path / "bars" / _EXCHANGE / "FNO" / bad / "1minute").rglob("*.parquet"))
+        assert corrupt, "expected the BANKNIFTY future 1minute partition to exist"
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+
+        with capture_logs() as logs:
+            result = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
+            )
+        assert {m.underlying for m in result.movers} == {"NIFTY"}
+        assert result.skipped == 1
+        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
+        assert len(skips) == 1
+        assert skips[0]["source"] == "futures"
+        assert skips[0]["symbol"] == bad

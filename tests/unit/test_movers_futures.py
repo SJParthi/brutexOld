@@ -27,6 +27,7 @@ from brutex.dashboard.movers_futures import (
     FuturesMover,
     _prev_day_oi,
     build_futures_payload,
+    compute_futures_candidates,
     compute_futures_mover,
     format_contract_date,
     normalize_futures_tier,
@@ -680,3 +681,53 @@ class TestPrevDayOi:
             )
             is None
         )
+
+
+# ── compute_futures_candidates: per-exchange discovery filter ──────────────
+#
+# Standalone unit coverage of the per-exchange discovery ``continue`` branch
+# of ``compute_futures_candidates`` so the touched-module 100% coverage gate
+# (which runs this stem file in isolation) sees it. The corrupt-Parquet skip
+# block is covered by the stem integration file's
+# ``TestComputeFuturesCandidatesBranches`` (Golden Rule #11 — not duplicated).
+
+
+def _fut_min_bar(*, close: str, volume: int, oi: int) -> CandleBar:
+    """A flat 1-minute futures bar at 09:15 IST (03:45 UTC) on 2024-06-13."""
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=volume,
+        open_interest=oi,
+    )
+
+
+class TestComputeFuturesCandidatesExchangeFilter:
+    def test_exchange_filter_skips_other_exchange(self, tmp_path: Path) -> None:
+        """A future whose exchange != the requested one hits the discovery ``continue``."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="22010", volume=100, oi=1000)],
+        )
+        writer.write(
+            exchange="BSE",
+            segment="FNO",
+            symbol="BSE-SENSEX-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="77010", volume=50, oi=500)],
+        )
+        nse = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        # The BSE future is filtered out by the per-exchange discovery ``continue``.
+        assert {m.underlying for m in nse.movers} == {"NIFTY"}

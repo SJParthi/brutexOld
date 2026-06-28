@@ -39,6 +39,7 @@ pytest.importorskip("pyarrow")
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_options import (
     _discover_options,
+    compute_options_candidates,
     run_options_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -604,3 +605,115 @@ class TestOptionsApi:
         body = client.get("/api/v1/movers", params={"asset": "options"}).json()
         assert body["instrument_count"] == 0
         assert "pull the F&O options first" in body["note"]
+
+
+# ── compute_options_candidates discovery + resilience branches ────────────
+# These exercise the per-file gate branches the broad dashboard suite covered
+# but the narrowly-mapped tests did not: the _discover_options segment/interval
+# skip and the compute_options_candidates corrupt-Parquet skip
+# (DEC-MOVERS-CORRUPT-SKIP-001).
+
+
+class TestComputeOptionsCandidatesBranches:
+    def test_non_one_minute_fno_dataset_is_skipped_in_discovery(self, tmp_path: Path) -> None:
+        # A real 1minute option is discovered; a sibling FNO dataset at a NON-1minute
+        # interval (here 1day) is skipped at the segment/interval guard in
+        # _discover_options, so only the 1minute option registers.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1day",
+            bars=[_day_bar(day=_DAY, close="60", oi=700)],
+        )
+        result = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            expiry_tier="near",
+            expiry_track="all",
+        )
+        # Only the 1minute CE registers; the 1day PE is skipped in discovery.
+        assert len(result.movers) == 1
+        assert result.skipped == 0
+
+    def test_corrupt_option_partition_is_skipped_not_raised(self, tmp_path: Path) -> None:
+        # A single corrupt option Parquet is SKIPPED (logged + counted), never
+        # 500-ing the options screen (DEC-MOVERS-CORRUPT-SKIP-001).
+        from structlog.testing import capture_logs
+
+        good = "NSE-NIFTY-27Jun24-24000-CE"
+        bad = "NSE-NIFTY-27Jun24-25000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=good,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=bad,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="60", volume=80, oi=700)],
+        )
+        corrupt = list((tmp_path / "bars" / _EXCHANGE / "FNO" / bad / "1minute").rglob("*.parquet"))
+        assert corrupt, "expected the 25000-CE 1minute partition to exist"
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+
+        with capture_logs() as logs:
+            result = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+            )
+        assert len(result.movers) == 1
+        assert result.skipped == 1
+        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
+        assert len(skips) == 1
+        assert skips[0]["source"] == "options"
+        assert skips[0]["symbol"] == bad
+
+    def test_exchange_filter_skips_other_exchange(self, tmp_path: Path) -> None:
+        # An option whose exchange != the requested one hits the per-exchange
+        # discovery ``continue`` in ``_discover_options`` (the branch the broad
+        # exchange-cache suite covered but this stem file did not).
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-24000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="120", volume=100, oi=1000)],
+        )
+        writer.write(
+            exchange="BSE",
+            segment="FNO",
+            symbol="BSE-SENSEX-27Jun24-80000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="200", volume=50, oi=500)],
+        )
+        nse = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            expiry_tier="near",
+            expiry_track="all",
+            exchange="NSE",
+        )
+        # The BSE option is filtered out by the per-exchange discovery ``continue``.
+        assert {m.underlying for m in nse.movers} == {"NIFTY"}
