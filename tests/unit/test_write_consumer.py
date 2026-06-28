@@ -28,6 +28,7 @@ threads against a fake durable sink (no polars / no filesystem), so the concurre
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections.abc import Sequence
@@ -39,10 +40,13 @@ from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
 from brutex.data.write_consumer import (
+    BatchingWriteConsumer,
     ResultBox,
     ShardedWriteConsumer,
+    WriteConsumer,
     WriteConsumerSink,
     WriteRequest,
+    resolve_write_batch_enabled,
     resolve_write_pool_size,
 )
 from hypothesis import given, settings
@@ -248,7 +252,7 @@ class TestConsumerHappyPath:
             consumer.drain()
 
 
-def consumer_submit_async(consumer: ShardedWriteConsumer, request: WriteRequest) -> ResultBox:
+def consumer_submit_async(consumer: WriteConsumer, request: WriteRequest) -> ResultBox:
     """Submit on a background thread (so the test thread does not block on the result)."""
     threading.Thread(target=consumer.submit, args=(request,), daemon=True).start()
     return request.box
@@ -627,3 +631,672 @@ class TestOrderIndependenceProperty:
             consumer.drain()
         written = sorted(c[2] for c in sink.calls)
         assert written == sorted(symbols)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# BatchingWriteConsumer — the coalescing background writer
+# (DEC-WRITE-BATCH-COALESCE-001). Proves: many same-series windows collapse to
+# ONE merge-write per drain cycle, the full crash-safety failure matrix, and the
+# per-window bars_appended attribution — WITHOUT touching the rate gate.
+# ════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class _CoalesceSink:
+    """A durable-sink fake recording each ``append``'s coordinates + combined bar count.
+
+    Returns ``bars_appended = len(bars)`` (every incoming bar treated as new — the fake
+    has no stored state), so a coalesced append over N windows reports the union count.
+    """
+
+    calls: list[tuple[str, int]] = field(default_factory=list)  # (symbol, combined-bar-count)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    delay: float = 0.0
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, interval, merge_mode
+        if self.delay:
+            time.sleep(self.delay)
+        with self._lock:
+            self.calls.append((symbol, len(bars)))
+        return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+
+
+def _batch_request(*, symbol: str = "NSE-NIFTY", minutes: Sequence[int] = (15,)) -> WriteRequest:
+    return WriteRequest(
+        exchange="NSE",
+        segment="INDEX",
+        symbol=symbol,
+        interval="1minute",
+        bars=[_bar(minute=m) for m in minutes],
+        merge_mode="keep-first",
+        box=ResultBox(),
+    )
+
+
+def _submit_swallow_async(consumer: BatchingWriteConsumer, request: WriteRequest) -> ResultBox:
+    """Submit on a daemon thread, SWALLOWING the producer-thread re-raise.
+
+    ``submit`` re-raises a captured write failure on the SUBMITTING thread. When a test
+    submits on a background daemon thread (so the main test thread can poll several boxes),
+    that re-raise would be an UNHANDLED daemon-thread exception (a pytest error). The test
+    asserts the failure via the returned box's :meth:`get` instead, so the daemon swallows
+    the re-raise — the box still carries the captured exception either way.
+    """
+
+    def _run() -> None:
+        # The submitting thread re-raises a captured write failure; this test asserts the
+        # failure via the returned box instead, so the daemon SWALLOWS the re-raise (an
+        # unhandled daemon-thread exception would be a pytest error). The box still carries
+        # the captured exception either way (settle-after-durable).
+        with contextlib.suppress(BaseException):
+            consumer.submit(request)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return request.box
+
+
+class TestBatchingConstruction:
+    def test_rejects_zero_queue_maxsize(self) -> None:
+        sink = _CoalesceSink()
+        with pytest.raises(ValueError, match="queue_maxsize must be >= 1"):
+            BatchingWriteConsumer(sink=sink, queue_maxsize=0)
+
+    def test_rejects_zero_max_coalesce(self) -> None:
+        sink = _CoalesceSink()
+        with pytest.raises(ValueError, match="max_coalesce must be >= 1"):
+            BatchingWriteConsumer(sink=sink, max_coalesce=0)
+
+    def test_workers_is_one(self) -> None:
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        try:
+            assert consumer.workers == 1
+        finally:
+            consumer.drain()
+
+
+class TestBatchingCoalesce:
+    def test_many_same_series_windows_collapse_to_fewer_writes(self) -> None:
+        # The CORE win: while one slow write drains, many windows queue behind it; the
+        # next drain cycle coalesces them all into ONE append. With a deliberate write
+        # delay the producers pile up, so the total append count is << the window count.
+        sink = _CoalesceSink(delay=0.05)
+        consumer = BatchingWriteConsumer(sink=sink)
+        n = 20
+        boxes = [consumer_submit_async(consumer, _batch_request(minutes=[m])) for m in range(n)]
+        results = [b.get() for b in boxes]
+        consumer.drain()
+        # Every window settled; the total newly-added equals the window count.
+        assert sum(r.bars_appended for r in results) == n
+        # Coalescing happened: strictly fewer durable writes than windows.
+        assert len(sink.calls) < n, f"no coalescing: {len(sink.calls)} writes for {n} windows"
+
+    def test_combined_bars_equal_union_of_grouped_windows(self) -> None:
+        # A coalesced append carries the UNION of its grouped windows' bars (per series).
+        sink = _CoalesceSink(delay=0.05)
+        consumer = BatchingWriteConsumer(sink=sink)
+        boxes = [
+            consumer_submit_async(consumer, _batch_request(symbol="NSE-NIFTY", minutes=[m]))
+            for m in range(10)
+        ]
+        for b in boxes:
+            b.get()
+        consumer.drain()
+        # Total combined bars across all NIFTY appends == the 10 distinct windows.
+        nifty_total = sum(count for sym, count in sink.calls if sym == "NSE-NIFTY")
+        assert nifty_total == 10
+
+    def test_distinct_series_never_coalesced_together(self) -> None:
+        # Two different series must NEVER share a coalesced write (each its own partition).
+        sink = _CoalesceSink(delay=0.05)
+        consumer = BatchingWriteConsumer(sink=sink)
+        boxes = [
+            consumer_submit_async(consumer, _batch_request(symbol=s, minutes=[m]))
+            for m in range(6)
+            for s in ("NSE-NIFTY", "NSE-BANKNIFTY")
+        ]
+        for b in boxes:
+            b.get()
+        consumer.drain()
+        # Every call is single-series (the symbol is the group key); no mixed write exists.
+        symbols_written = {sym for sym, _ in sink.calls}
+        assert symbols_written == {"NSE-NIFTY", "NSE-BANKNIFTY"}
+
+    def test_max_coalesce_caps_group_size(self) -> None:
+        # The max_coalesce safety cap bounds how many requests one cycle pulls.
+        sink = _CoalesceSink(delay=0.05)
+        consumer = BatchingWriteConsumer(sink=sink, max_coalesce=3)
+        boxes = [consumer_submit_async(consumer, _batch_request(minutes=[m])) for m in range(12)]
+        for b in boxes:
+            b.get()
+        consumer.drain()
+        # No single coalesced write merged more than the cap's worth of windows.
+        assert max(count for _, count in sink.calls) <= 3
+
+
+class TestAttributeBarsAppended:
+    """Deterministic whitebox unit tests of the per-window attribution helper."""
+
+    def test_distinct_windows_each_get_their_own_count(self) -> None:
+        from brutex.data.write_consumer import _attribute_bars_appended
+
+        per_request = [[_bar(15), _bar(16)], [_bar(17), _bar(18), _bar(19)]]
+        counts = _attribute_bars_appended(per_request, total_appended=5)
+        assert counts == [2, 3]
+        assert sum(counts) == 5
+
+    def test_duplicate_timestamp_credited_to_first_window(self) -> None:
+        from brutex.data.write_consumer import _attribute_bars_appended
+
+        # window B repeats minute 16 (already in A) → B credited only 17.
+        per_request = [[_bar(15), _bar(16)], [_bar(16), _bar(17)]]
+        counts = _attribute_bars_appended(per_request, total_appended=3)
+        assert counts == [2, 1]
+
+    def test_pre_existing_bars_credit_zero_caps_at_total(self) -> None:
+        from brutex.data.write_consumer import _attribute_bars_appended
+
+        # Sink reports only 1 newly-added (the rest were already stored) → the FIRST
+        # distinct timestamp is credited, the remainder credit zero (cap at total).
+        per_request = [[_bar(15)], [_bar(16)], [_bar(17)]]
+        counts = _attribute_bars_appended(per_request, total_appended=1)
+        assert counts == [1, 0, 0]
+        assert sum(counts) == 1
+
+    def test_zero_total_credits_nothing(self) -> None:
+        from brutex.data.write_consumer import _attribute_bars_appended
+
+        per_request = [[_bar(15)], [_bar(16)]]
+        counts = _attribute_bars_appended(per_request, total_appended=0)
+        assert counts == [0, 0]
+
+
+class TestBatchingStraddle:
+    def test_request_straddling_two_months_settles_after_both_partitions(self) -> None:
+        # A request whose bars span Jan + Feb writes TWO partitions; its box must settle
+        # ONLY after BOTH are durable (the multi-partition settle path), with combined
+        # bars_appended + partitions_written = 2.
+        from datetime import datetime as _dt
+        from decimal import Decimal
+
+        def _dated_bar(month: int, day: int) -> CandleBar:
+            return CandleBar(
+                timestamp=_dt(2020, month, day, 9, 15, tzinfo=UTC),
+                open=Decimal("100.00"),
+                high=Decimal("101.00"),
+                low=Decimal("99.00"),
+                close=Decimal("100.50"),
+                volume=10,
+                open_interest=None,
+            )
+
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        req = WriteRequest(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_dated_bar(1, 31), _dated_bar(2, 1)],  # Jan + Feb
+            merge_mode="keep-first",
+            box=ResultBox(),
+        )
+        result = consumer.submit(req)
+        consumer.drain()
+        assert result.partitions_written == 2
+        assert result.bars_appended == 2  # one new bar per partition
+        # Two distinct partition writes happened (one per month).
+        assert len(sink.calls) == 2
+
+
+class TestBatchingPerWindowAttribution:
+    def test_bars_appended_attributed_per_window_not_per_batch(self) -> None:
+        # Each window's result carries ITS OWN bars_appended, not the batch total.
+        sink = _CoalesceSink(delay=0.04)
+        consumer = BatchingWriteConsumer(sink=sink)
+        # Window A: 2 bars, window B: 3 bars — same series, coalesced.
+        a = _batch_request(minutes=[15, 16])
+        b = _batch_request(minutes=[17, 18, 19])
+        ba = consumer_submit_async(consumer, a)
+        bb = consumer_submit_async(consumer, b)
+        ra, rb = ba.get(), bb.get()
+        consumer.drain()
+        # Per-window attribution: A gets its 2, B gets its 3 (distinct timestamps),
+        # summing to the coalesced total — NOT both reading the batch total of 5.
+        assert ra.bars_appended == 2
+        assert rb.bars_appended == 3
+
+    def test_duplicate_timestamp_credited_to_first_window_only_when_coalesced(self) -> None:
+        # When two windows carry the SAME timestamp AND coalesce into one write, keep-first
+        # credits the FIRST window only. A gated sink forces both into ONE batch: the writer
+        # blocks on the first append's gate until BOTH windows are queued, so the next drain
+        # cycle coalesces them deterministically.
+        gate = threading.Event()
+        released = threading.Event()
+
+        @dataclass
+        class _GatedSink:
+            calls: list[int] = field(default_factory=list)
+            _lock: threading.Lock = field(default_factory=threading.Lock)
+
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                with self._lock:
+                    first = not self.calls
+                    self.calls.append(len(bars))
+                if first:
+                    # Hold the very first write until both windows are queued, so the
+                    # SECOND drain cycle sees A+B together and coalesces them.
+                    gate.wait(timeout=2.0)
+                released.set()
+                # Combined keep-first union over {15,16,17} = 3 distinct new bars.
+                distinct = {b.timestamp for b in bars}
+                return SinkAppendResult(
+                    bars_appended=len(distinct), partitions_written=1, write_results=()
+                )
+
+        sink = _GatedSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        # A priming window to occupy the writer in its gated first append.
+        prime = consumer_submit_async(consumer, _batch_request(minutes=[1]))
+        time.sleep(0.05)  # let the writer enter the gated append
+        a = _batch_request(minutes=[15, 16])
+        b = _batch_request(minutes=[16, 17])  # 16 duplicates A's
+        ba = consumer_submit_async(consumer, a)
+        bb = consumer_submit_async(consumer, b)
+        time.sleep(0.05)  # ensure both A and B are queued behind the gate
+        gate.set()
+        ra, rb = ba.get(), bb.get()
+        prime.get()
+        consumer.drain()
+        # A+B coalesced: 3 distinct timestamps {15,16,17}; A credited 15+16 = 2,
+        # B credited 17 only (16 is A's) = 1 — first-occurrence keep-first.
+        assert ra.bars_appended + rb.bars_appended == 3
+        assert ra.bars_appended == 2
+        assert rb.bars_appended == 1
+
+
+class TestBatchingEmptyShortCircuit:
+    def test_empty_bars_request_settles_empty_no_op(self) -> None:
+        # An empty-bars request mirrors the sink's empty no-op: never enqueued for a write.
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        req = WriteRequest(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[],
+            merge_mode="keep-first",
+            box=ResultBox(),
+        )
+        box = consumer_submit_async(consumer, req)
+        result = box.get()
+        consumer.drain()
+        assert result.bars_appended == 0
+        assert result.partitions_written == 0
+        # No durable write for an empty request.
+        assert sink.calls == []
+
+
+class TestBatchingSettleAfterDurable:
+    def test_box_settles_only_after_durable_write_returns(self) -> None:
+        # The producer's result is settled strictly AFTER the durable append returns.
+        order: list[str] = []
+        order_lock = threading.Lock()
+
+        @dataclass
+        class _OrderingSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                with order_lock:
+                    order.append("durable")
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        consumer = BatchingWriteConsumer(sink=_OrderingSink())
+        box = consumer_submit_async(consumer, _batch_request())
+        box.get()
+        with order_lock:
+            order.append("settled")
+        consumer.drain()
+        # "durable" (the append) is recorded before "settled" (after box.get()).
+        assert order == ["durable", "settled"]
+
+
+class TestBatchingLakeWriteHalt:
+    def test_halt_settles_every_box_in_batch_and_trips_stop(self) -> None:
+        # disk-full/OOM: the writer's LakeWriteHalt settles EVERY box in the failing batch
+        # with the halt, and trips the pull-wide stop so queued/future submits fail fast.
+        @dataclass
+        class _HaltingSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, bars, merge_mode
+                raise LakeWriteHalt("disk_full")
+
+        sink = _HaltingSink()
+        consumer = BatchingWriteConsumer(sink=sink, max_coalesce=64)
+        # Submit several windows; EVERY window's box must settle with the halt — whether it
+        # was in the failing batch, queued-but-uncollected (drained-with-halt), or fast
+        # rejected after the stop tripped. None blocks forever (the unsettled-box gap).
+        boxes = [_submit_swallow_async(consumer, _batch_request(minutes=[m])) for m in range(5)]
+        for box in boxes:
+            with pytest.raises(LakeWriteHalt, match="disk_full"):
+                box.get()
+        # A subsequent submit fails fast with the recorded halt (no disk hammering).
+        with pytest.raises(LakeWriteHalt, match="disk_full"):
+            consumer.submit(_batch_request())
+        consumer.drain()
+
+    def test_drain_after_halt_logs_warning(self) -> None:
+        @dataclass
+        class _HaltingSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, bars, merge_mode
+                raise LakeWriteHalt("out_of_memory")
+
+        consumer = BatchingWriteConsumer(sink=_HaltingSink())
+        box = _submit_swallow_async(consumer, _batch_request())
+        with pytest.raises(LakeWriteHalt):
+            box.get()
+        # drain() is safe after a halt (logs + joins, never raises).
+        consumer.drain()
+
+    def test_drain_queue_with_halt_settles_queued_then_stops_at_poison(self) -> None:
+        # Whitebox: after a halt, a request already QUEUED but not yet collected must be
+        # fail-fast settled with the halt (not left blocking its producer), and the
+        # poison-pill stops the drain (re-enqueued for drain() to join cleanly).
+        @dataclass
+        class _NoopSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        consumer = BatchingWriteConsumer(sink=_NoopSink())
+        consumer.drain()  # stop the live writer thread so we can drive the helper directly
+        halt = LakeWriteHalt("disk_full")
+        queued = _batch_request(minutes=[15])
+        consumer._queue.put(queued)  # a request still in the queue at the halt
+        consumer._queue.put(consumer._poison)  # then the poison-pill
+        consumer._drain_queue_with_halt(halt)
+        # The queued request's box is settled WITH the halt (never blocks forever).
+        with pytest.raises(LakeWriteHalt, match="disk_full"):
+            queued.box.get()
+        # The poison-pill was re-enqueued (so a subsequent drain/join sees it).
+        assert consumer._queue.get_nowait() is consumer._poison
+
+    def test_trip_halt_keeps_first_reason(self) -> None:
+        # Whitebox: a SECOND _trip_halt must NOT overwrite the first recorded halt (the
+        # `if self._halt_exc is None` guard's False edge). Exercised directly so the race
+        # is deterministic.
+        @dataclass
+        class _NoopSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        consumer = BatchingWriteConsumer(sink=_NoopSink())
+        consumer.drain()
+        consumer._trip_halt(LakeWriteHalt("disk_full"))
+        consumer._trip_halt(LakeWriteHalt("out_of_memory"))  # second trip is a no-op
+        assert consumer._halt_exc is not None
+        assert consumer._halt_exc.reason == "disk_full"
+
+    def test_drain_queue_with_halt_returns_on_empty(self) -> None:
+        # The empty-queue branch: drain returns immediately when nothing is queued.
+        @dataclass
+        class _NoopSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        consumer = BatchingWriteConsumer(sink=_NoopSink())
+        consumer.drain()
+        consumer._drain_queue_with_halt(LakeWriteHalt("disk_full"))  # empty → no raise
+
+
+class TestBatchingFailureNeverFakesSuccess:
+    def test_write_failure_captured_never_settled_as_success(self) -> None:
+        # A generic write error is captured into every box of the batch and re-raised on
+        # the producer — NEVER a fabricated success (Golden Rule #7). The writer thread
+        # stays alive to drain the rest.
+        @dataclass
+        class _FlakySink:
+            fail_first: bool = True
+            _lock: threading.Lock = field(default_factory=threading.Lock)
+
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                with self._lock:
+                    if self.fail_first:
+                        self.fail_first = False
+                        raise RuntimeError("write boom")
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        consumer = BatchingWriteConsumer(sink=_FlakySink())
+        try:
+            # First window fails — submit() re-raises the captured failure on THIS thread
+            # (NEVER a fabricated success). A generic error does NOT trip the pull-wide stop.
+            with pytest.raises(RuntimeError, match="write boom"):
+                consumer.submit(_batch_request(symbol="NSE-NIFTY"))
+            # The writer is still alive: a later window succeeds.
+            assert consumer.submit(_batch_request(symbol="NSE-BANKNIFTY")).bars_appended == 1
+        finally:
+            consumer.drain()
+
+
+class TestBatchingBackPressure:
+    def test_full_queue_blocks_producer(self) -> None:
+        # A bounded queue back-pressures the producer when full (never an unbounded OOM).
+        started = threading.Event()
+        release = threading.Event()
+
+        @dataclass
+        class _BlockingSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+                merge_mode: str = "keep-first",
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, merge_mode
+                started.set()
+                release.wait(timeout=2.0)
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        consumer = BatchingWriteConsumer(sink=_BlockingSink(), queue_maxsize=1, max_coalesce=1)
+        # First submit occupies the writer (blocks in append). Submit async so we don't block here.
+        first = consumer_submit_async(consumer, _batch_request(minutes=[15]))
+        started.wait(timeout=2.0)
+        # Fill the queue (maxsize 1) with a second; a THIRD submit must block on put.
+        consumer_submit_async(consumer, _batch_request(minutes=[16]))
+        blocked = threading.Event()
+        third_done = threading.Event()
+
+        def _third() -> None:
+            blocked.set()
+            consumer.submit(_batch_request(minutes=[17]))
+            third_done.set()
+
+        t = threading.Thread(target=_third, daemon=True)
+        t.start()
+        blocked.wait(timeout=2.0)
+        time.sleep(0.1)
+        # The third producer is blocked on the full queue (back-pressure), not done.
+        assert not third_done.is_set()
+        release.set()
+        first.get()
+        t.join(timeout=2.0)
+        consumer.drain()
+        assert third_done.is_set()
+
+
+class TestBatchingDrainFlushesAll:
+    def test_drain_flushes_every_queued_request_durably(self) -> None:
+        # drain() flushes EVERY pending request (one final coalesced cycle) before joining.
+        sink = _CoalesceSink(delay=0.02)
+        consumer = BatchingWriteConsumer(sink=sink)
+        boxes = [consumer_submit_async(consumer, _batch_request(minutes=[m])) for m in range(15)]
+        # Drain WITHOUT first joining the boxes — drain must still settle them all.
+        consumer.drain()
+        results = [b.get() for b in boxes]  # already settled by drain
+        assert sum(r.bars_appended for r in results) == 15
+
+    def test_drain_is_idempotent(self) -> None:
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        consumer.submit(_batch_request())
+        consumer.drain()
+        consumer.drain()  # second call: thread already dead → no-op, no raise
+
+    def test_no_leaked_threads_after_drain(self) -> None:
+        before = {t.name for t in threading.enumerate()}
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        consumer.submit(_batch_request())
+        consumer.drain()
+        time.sleep(0.05)
+        after = {t.name for t in threading.enumerate()}
+        leaked = {n for n in after - before if n.startswith("write-batch-consumer")}
+        assert leaked == set()
+
+
+class TestBatchingViaSink:
+    def test_write_consumer_sink_accepts_batching_consumer(self) -> None:
+        # The WriteConsumerSink Protocol drop-in accepts the batching consumer too.
+        sink = _CoalesceSink(delay=0.02)
+        consumer = BatchingWriteConsumer(sink=sink)
+        wsink = WriteConsumerSink(consumer=consumer)
+        result = wsink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(15)],
+        )
+        consumer.drain()
+        assert result.bars_appended == 1
+
+    def test_write_consumer_sink_empty_no_op_with_batching(self) -> None:
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink)
+        wsink = WriteConsumerSink(consumer=consumer)
+        result = wsink.append(
+            exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", bars=[]
+        )
+        consumer.drain()
+        assert result.bars_appended == 0
+        assert sink.calls == []  # never enqueued
+
+
+class TestResolveWriteBatchEnabled:
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "On", " on "])
+    def test_truthy_values_enable(self, value: str) -> None:
+        assert resolve_write_batch_enabled(value) is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  ", "maybe", "2"])
+    def test_other_values_disable(self, value: str) -> None:
+        assert resolve_write_batch_enabled(value) is False
+
+    def test_none_reads_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_WRITE_BATCH", raising=False)
+        assert resolve_write_batch_enabled() is False
+        monkeypatch.setenv("BRUTEX_WRITE_BATCH", "1")
+        assert resolve_write_batch_enabled() is True

@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from brutex.adapters.rate_common import RateController
     from brutex.data.models import CandleBar
     from brutex.data.spot_daily_resample import DailyDeriveTarget
+    from brutex.data.write_consumer import BatchingWriteConsumer
     from brutex.observability.pull_health import PullHealthMonitor
 
 _LOG = structlog.get_logger(__name__)
@@ -1032,6 +1033,59 @@ def _build_pull_health_monitor(
         return None
 
 
+def _build_write_consumer(sink: BarSink, *, dry_run: bool) -> BatchingWriteConsumer | None:
+    """Build the coalescing batched write consumer when ``BRUTEX_WRITE_BATCH`` is on.
+
+    DEC-WRITE-BATCH-COALESCE-001 — the PROVEN write-bottleneck fix. When the operator opts
+    in via ``BRUTEX_WRITE_BATCH`` (DEFAULT OFF), every ``sink.append`` is routed through a
+    background :class:`~brutex.data.write_consumer.BatchingWriteConsumer` that COALESCES all
+    pending same-series windows into ONE O(month-depth) merge per drain cycle — so the fetch
+    lane stops idling on its own write and the achieved rate climbs toward the vendor rate
+    (benchmarked ~2-3× on the deep month). It changes ONLY how fetched data is WRITTEN — the
+    upstream :class:`~brutex.adapters.rate_common.RateController` (the per-second AIMD ceiling
+    + the atomic 500/min governor) is UNTOUCHED, so the pull still issues requests at most at
+    the controller's allowed rate (Golden Rule #6 — faster writes unblock workers to fetch UP
+    TO the ceiling, never beyond it).
+
+    Returns ``None`` (the byte-identical synchronous write path — no thread, no queue) when:
+    the flag is OFF (the default), this is a ``dry_run`` (no real writes), or construction
+    fails (guarded — binding the consumer can NEVER crash the pull). The caller OWNS the
+    consumer's lifetime and MUST :meth:`~brutex.data.write_consumer.BatchingWriteConsumer.drain`
+    it in its ``finally`` BEFORE saving the window ledger (so every settled window is durable).
+    """
+    if dry_run:
+        return None
+    try:
+        from brutex.data.write_consumer import (
+            BatchingWriteConsumer,
+            resolve_write_batch_enabled,
+        )
+
+        if not resolve_write_batch_enabled():
+            return None
+        consumer = BatchingWriteConsumer(sink=sink)
+        _LOG.info("pull.write_batch.enabled")
+        return consumer
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull.write_batch.build_failed")
+        return None
+
+
+def _drain_write_consumer(consumer: BatchingWriteConsumer | None) -> None:
+    """Drain *consumer* at pull end (flush+join), best-effort.
+
+    Idempotent + guarded — a drain error is logged, never re-raised, so the pull's
+    ``finally`` (ledger persist + progress push) always completes. A ``None`` consumer
+    (the synchronous default) is a no-op.
+    """
+    if consumer is None:
+        return
+    try:
+        consumer.drain()
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull.write_batch.drain_failed")
+
+
 def _emit_pull_pool_size(pull_id: str) -> None:
     """Emit the resolved client connection-pool width once at pull start.
 
@@ -1366,6 +1420,16 @@ def pull_all_spot(
         # pull.stalled rule actually accumulates) AND at the post-loop boundary; best-effort
         # (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
+        # Coalescing batched write consumer (DEC-WRITE-BATCH-COALESCE-001): when
+        # ``BRUTEX_WRITE_BATCH`` is opted in (DEFAULT OFF), route every sink.append through
+        # a background writer that COALESCES pending same-series windows into ONE merge per
+        # drain cycle, so the fetch lane stops idling on its own O(month-depth) write. It
+        # changes ONLY how fetched data is WRITTEN — the RateController (per-second ceiling +
+        # 500/min governor) is UNTOUCHED, so the issue rate still binds at the controller's
+        # allowed cap (Golden Rule #6). ``None`` (the default / a dry-run) keeps the
+        # synchronous write path byte-identical; drained in the ``finally`` before the
+        # ledger is saved (so every settled window is durable).
+        _write_consumer = _build_write_consumer(sink, dry_run=dry_run)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -1473,6 +1537,7 @@ def pull_all_spot(
                     auto_retry=do_retry,
                     on_window=window_observer,
                     symbol_windows=phase_windows,
+                    write_pool=_write_consumer,
                 )
                 passes.append(res)
                 return res
@@ -1651,6 +1716,12 @@ def pull_all_spot(
                     pull_id=pid,
                 )
         finally:
+            # Drain the coalescing batched write consumer FIRST (DEC-WRITE-BATCH-COALESCE-001):
+            # flush every still-queued window durably + join the writer BEFORE saving the
+            # ledger, so every settled window is on disk (settle-after-durable). A no-op when
+            # the batched path is OFF (the synchronous default). Best-effort: a drain error is
+            # logged, never re-raised, so the ledger persist below always runs.
+            _drain_write_consumer(_write_consumer)
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
@@ -2079,6 +2150,16 @@ def pull_candles(
         # pull.stalled rule actually accumulates) AND at the post-loop boundary; best-effort
         # (None for a dry-run, never crashes the pull).
         _pull_health_monitor = _build_pull_health_monitor(_rate_controller)
+        # Coalescing batched write consumer (DEC-WRITE-BATCH-COALESCE-001): when
+        # ``BRUTEX_WRITE_BATCH`` is opted in (DEFAULT OFF), route every sink.append through
+        # a background writer that COALESCES pending same-series windows into ONE merge per
+        # drain cycle, so the fetch lane stops idling on its own O(month-depth) write. It
+        # changes ONLY how fetched data is WRITTEN — the RateController (per-second ceiling +
+        # 500/min governor) is UNTOUCHED, so the issue rate still binds at the controller's
+        # allowed cap (Golden Rule #6). ``None`` (the default / a dry-run) keeps the
+        # synchronous write path byte-identical; drained in the ``finally`` before the
+        # ledger is saved (so every settled window is durable).
+        _write_consumer = _build_write_consumer(sink, dry_run=dry_run)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2134,6 +2215,7 @@ def pull_candles(
                 run_parallel=run_parallel,
                 on_window=window_observer,
                 symbol_windows=phase_windows,
+                write_pool=_write_consumer,
             )
             merged_pairs.update(phase_report.pairs)
             failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
@@ -2198,6 +2280,12 @@ def pull_candles(
                     pull_id=pid,
                 )
         finally:
+            # Drain the coalescing batched write consumer FIRST (DEC-WRITE-BATCH-COALESCE-001):
+            # flush every still-queued window durably + join the writer BEFORE saving the
+            # ledger, so every settled window is on disk (settle-after-durable). A no-op when
+            # the batched path is OFF (the synchronous default). Best-effort: a drain error is
+            # logged, never re-raised, so the ledger persist below always runs.
+            _drain_write_consumer(_write_consumer)
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
 

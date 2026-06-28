@@ -56,7 +56,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
-from brutex.data.write_consumer import ShardedWriteConsumer, WriteConsumerSink
+from brutex.data.write_consumer import WriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError, Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
@@ -266,7 +266,7 @@ def run_groww_spot_ingest(
     audit: AuditWriter | None = None,
     on_window: WindowTick | None = None,
     symbol_windows: SpotWindows | None = None,
-    write_pool: ShardedWriteConsumer | None = None,
+    write_pool: WriteConsumer | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -591,7 +591,7 @@ def run_groww_spot_ingest_with_retry(
     audit: AuditWriter | None = None,
     on_window: WindowTick | None = None,
     symbol_windows: SpotWindows | None = None,
-    write_pool: ShardedWriteConsumer | None = None,
+    write_pool: WriteConsumer | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 

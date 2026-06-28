@@ -86,25 +86,31 @@ still halts the pull gracefully. This is stdlib-only at import (``queue`` / ``th
 from __future__ import annotations
 
 import hashlib
+import os
 import queue
 import threading
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 import structlog
 
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.partition import partition_for_timestamp
 from brutex.data.sink import BarSink, SinkAppendResult
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
 
 __all__ = [
+    "BatchingWriteConsumer",
     "ResultBox",
     "ShardedWriteConsumer",
+    "WriteConsumer",
     "WriteConsumerSink",
     "WriteRequest",
+    "resolve_write_batch_enabled",
     "resolve_write_pool_size",
 ]
 
@@ -375,19 +381,42 @@ class ShardedWriteConsumer:
             _LOG.warning("write_consumer.drained_after_halt", reason=self._halt_exc.reason)
 
 
+@runtime_checkable
+class WriteConsumer(Protocol):
+    """The common contract a :class:`WriteConsumerSink` routes every append through.
+
+    Both background consumers satisfy it: the per-window
+    :class:`ShardedWriteConsumer` (one durable write per submitted window) and the
+    coalescing :class:`BatchingWriteConsumer` (many same-series windows merged into one
+    durable write per drain cycle). The sink only needs ``submit`` (block-until-durable)
+    and ``drain`` (flush + join at pull end), so a single Protocol lets the live build
+    site swap the two behind the ``BRUTEX_WRITE_BATCH`` flag with no other change
+    (CLAUDE.md §11 COMMON — one wiring surface).
+    """
+
+    def submit(self, request: WriteRequest) -> SinkAppendResult:
+        """Enqueue *request*; block on back-pressure then on the durable result."""
+        ...
+
+    def drain(self) -> None:
+        """Flush every pending request durably, then stop + join all workers."""
+        ...
+
+
 class WriteConsumerSink:
     """A :class:`~brutex.data.sink.BarSink` that routes every ``append`` through a pool.
 
     Drop-in for the synchronous :class:`~brutex.data.sink.ParquetBarSink` the spines use:
     the spine calls :meth:`append`, which builds a :class:`WriteRequest` + :class:`ResultBox`,
-    submits to the :class:`ShardedWriteConsumer`, and BLOCKS until the durable write returns
-    the real :class:`~brutex.data.sink.SinkAppendResult`. So the spine's existing
+    submits to a :class:`WriteConsumer` (either :class:`ShardedWriteConsumer` or
+    :class:`BatchingWriteConsumer`), and BLOCKS until the durable write returns the real
+    :class:`~brutex.data.sink.SinkAppendResult`. So the spine's existing
     settle-after-durable ledger ordering is preserved BYTE-FOR-BYTE — the only change is
     that OTHER fetch connections fetch during this one's wait. An empty ``bars`` append is
     short-circuited (no enqueue) so it matches the underlying sink's empty no-op exactly.
     """
 
-    def __init__(self, *, consumer: ShardedWriteConsumer) -> None:
+    def __init__(self, *, consumer: WriteConsumer) -> None:
         self._consumer = consumer
 
     def append(
@@ -426,3 +455,397 @@ def resolve_write_pool_size(workers: int | None) -> int | None:
     if workers is None or workers < 1:
         return None
     return workers
+
+
+#: Environment flag that opts the live pull into the coalescing batched write path
+#: (DEC-WRITE-BATCH-COALESCE-001). DEFAULT OFF: the synchronous, byte-identical path
+#: stays the production default until the M4 A/B proof lands (Golden Rule #10 — a perf
+#: feature ships dormant until it is measured on the real envelope). Truthy values:
+#: ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive). Anything else (incl. unset,
+#: blank, ``0``, ``false``) keeps the batched path OFF.
+WRITE_BATCH_ENV: str = "BRUTEX_WRITE_BATCH"
+
+_WRITE_BATCH_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
+def resolve_write_batch_enabled(raw: str | None = None) -> bool:
+    """True iff the coalescing batched write path is opted in via ``BRUTEX_WRITE_BATCH``.
+
+    Reads :data:`WRITE_BATCH_ENV` when *raw* is ``None`` (the live-site call); a test may
+    pass an explicit value. Fail-SAFE: ONLY an explicit truthy token enables it, so a
+    typo / unset / blank / ``0`` keeps the synchronous default (DEC-WRITE-BATCH-COALESCE-001;
+    CLAUDE.md §11 COMMON — one flag-read for the live site + tests). O(1).
+    """
+    value = os.environ.get(WRITE_BATCH_ENV) if raw is None else raw
+    if value is None:
+        return False
+    return value.strip().lower() in _WRITE_BATCH_TRUTHY
+
+
+class BatchingWriteConsumer:
+    """A coalescing background writer: many same-series windows → ONE merge-write/cycle.
+
+    ## Why this beats the per-window :class:`ShardedWriteConsumer`
+
+    The lake merge-write is **O(month-depth) per save and ~constant in the batch size**
+    (the cost is dominated by re-reading the whole stored month — ~163 ms regardless of
+    whether 1 or 50 new bars are merged, #910 evidence). The per-window consumer still
+    runs ONE merge per window, so it cannot beat the serial path (the GIL-held merge binds
+    both — the documented NO-GO of DEC-FETCH-WRITE-OVERLAP-LEVER1-001). This consumer
+    instead COALESCES: a single background writer drains ALL immediately-pending requests,
+    GROUPS them by ``(series, year, month)`` partition, and issues ONE ``sink.append`` per
+    group — so N windows queued for one deep month cost ONE ~163 ms merge, not N. The
+    achieved rate climbs toward the vendor rate because the per-window write amortises to
+    ~163/N ms (the A/B bench proves the real margin —
+    ``tests/bench/test_write_consumer_overlap_bench.py``).
+
+    ## Failure matrix (every permutation handled — Golden Rule #7)
+
+    * **settle-after-durable** — a request's :class:`ResultBox` is settled ONLY after its
+      group's ``sink.append`` (→ ``atomic_write_via`` → ``os.replace``) returns. A success
+      is NEVER settled before the bytes are durable; the spine's ``ledger.record`` runs
+      strictly after.
+    * **crash mid-batch** — one ``atomic_write_via`` (tmp→fsync→``os.replace``) per
+      coalesced group: a crash BEFORE the rename leaves EVERY request in that group
+      un-settled → re-fetched next pull (idempotent keep-first union, no half-state).
+    * **disk-full / OOM** — the writer's :class:`LakeWriteHalt` settles EVERY box in the
+      failing batch WITH the halt and trips a pull-wide stop, so producers re-raise into
+      the spines' ``_GLOBAL_STOP_ERRORS`` (graceful halt) and queued/future submits fail
+      fast (no disk-hammering).
+    * **partition lock** — coalescing is PER SERIES, so one merge targets one partition
+      under the existing per-partition :class:`threading.Lock` + ``flock``; fewer + larger
+      writes mean LESS lock contention, and a ``PartitionLockTimeout`` from the sink
+      propagates per-window (defer still works) exactly like the synchronous path.
+    * **bounded queue** — a single ``maxsize``-bounded queue: ``submit`` BLOCKS when full,
+      back-pressuring the fetch lane to the write rate (never OOM).
+    * **drain** — a poison-pill flushes EVERY pending request durably (one final coalesced
+      cycle) before :meth:`drain` returns, so the caller may save the window ledger knowing
+      every settled window is on disk. Idempotent.
+    * **per-window ``bars_appended`` (#919)** — attributed PER WINDOW (not per batch) via
+      :func:`_coalesce_partition_attribution`, so the back-channel stays REAL.
+
+    ## Honest envelope (Golden Rule #10)
+
+    The coalescing window is "whatever is already queued when the writer wakes" — a single
+    ``get`` (block) + drain-to-empty. So under light load (one window in flight) it
+    degenerates to a per-window write (no worse than sync); the win materialises exactly
+    when the fetch lane out-paces the disk (the write-bound regime the pull actually hits).
+    A single writer thread is deliberate: the merge is GIL-bound, so MORE writer threads do
+    not parallelise it — the win is FEWER merges, not concurrent ones. stdlib-only at import.
+    """
+
+    def __init__(
+        self,
+        *,
+        sink: BarSink,
+        queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
+        max_coalesce: int = 256,
+    ) -> None:
+        """Start ONE background writer draining a ``queue_maxsize``-bounded queue.
+
+        Parameters
+        ----------
+        sink
+            The REAL durable sink (a :class:`~brutex.data.sink.ParquetBarSink`). Its
+            per-partition lock + ``flock`` keep a coalesced merge safe against any peer.
+        queue_maxsize
+            Bounded queue depth (back-pressure; ``>= 1``).
+        max_coalesce
+            Safety cap on how many pending requests one drain cycle pulls before writing
+            (``>= 1``) — bounds the per-cycle memory + a single group's combined bar count
+            so a pathological backlog cannot build one unbounded merge.
+        """
+        if queue_maxsize < 1:
+            raise ValueError(f"queue_maxsize must be >= 1, got {queue_maxsize}")
+        if max_coalesce < 1:
+            raise ValueError(f"max_coalesce must be >= 1, got {max_coalesce}")
+        self._sink = sink
+        self._max_coalesce = max_coalesce
+        self._poison: object = object()
+        self._queue: queue.Queue[WriteRequest | object] = queue.Queue(maxsize=queue_maxsize)
+        self._stopped = threading.Event()
+        self._halt_exc: LakeWriteHalt | None = None
+        self._halt_lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, name="write-batch-consumer", daemon=True)
+        self._thread.start()
+
+    @property
+    def workers(self) -> int:
+        """The writer thread count — always ``1`` (one coalescing writer, by design)."""
+        return 1
+
+    def submit(self, request: WriteRequest) -> SinkAppendResult:
+        """Enqueue *request*, block on back-pressure, then block on the durable result.
+
+        ``put``s the request (blocking when the queue is full — the back-pressure that
+        throttles the fetch lane to the write rate, never an OOM), then blocks on the
+        request's :class:`ResultBox` until the writer's durable coalesced write returns
+        THIS window's attributed :class:`~brutex.data.sink.SinkAppendResult` — or re-raises
+        the writer's captured exception (e.g. a :class:`LakeWriteHalt`) on THIS thread.
+
+        If the consumer already hard-stopped (a prior ``LakeWriteHalt``), the request is
+        rejected immediately with that halt — a full disk fails every remaining window. The
+        rejected request's box is ALSO settled with the halt (not only raised), so anyone
+        holding the box — not just the submitting thread — observes the halt and never
+        blocks forever on an unsettled box.
+        """
+        halt = self._halt_exc
+        if self._stopped.is_set() and halt is not None:
+            request.box.set_exception(halt)
+            raise halt
+        self._queue.put(request)
+        return request.box.get()
+
+    def _drain_queue_with_halt(self, halt: LakeWriteHalt) -> None:
+        """After a halt, settle EVERY still-queued request with *halt* (never block).
+
+        Once :meth:`_trip_halt` fires, the disk is full / OOM — every remaining window
+        fails identically. The writer must NOT loop back to a blocking ``get`` (a window
+        ``put`` before the trip but not yet collected would sit unsettled forever, blocking
+        its producer); instead it drains the queue NON-blocking, settling each request's box
+        with the halt, until empty or the poison-pill (which it pushes back so :meth:`drain`
+        still joins cleanly). O(queued).
+        """
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if item is self._poison:
+                self._queue.put(self._poison)
+                return
+            cast(WriteRequest, item).box.set_exception(halt)
+
+    def _run(self) -> None:
+        """Drain the queue until the poison-pill, coalescing each cycle's pending writes."""
+        while True:
+            batch = self._collect_batch()
+            if batch is None:
+                return
+            self._write_batch(batch)
+            # After a tripped halt every remaining window fails identically — fail-fast
+            # settle the rest of the queue (never loop back to a blocking get, which would
+            # leave a queued-but-uncollected window's box unsettled forever).
+            halt = self._halt_exc
+            if halt is not None:
+                self._drain_queue_with_halt(halt)
+
+    def _collect_batch(self) -> list[WriteRequest] | None:
+        """Block for one request, then drain up to ``max_coalesce`` more without blocking.
+
+        Returns the collected requests, or ``None`` when the poison-pill is reached (so the
+        writer exits). A poison-pill encountered AFTER some requests are already collected
+        is pushed back so the next cycle sees it — the collected requests are flushed first
+        (drain-flushes-all). O(batch size).
+        """
+        first = self._queue.get()
+        if first is self._poison:
+            return None
+        batch: list[WriteRequest] = [cast(WriteRequest, first)]
+        while len(batch) < self._max_coalesce:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is self._poison:
+                # Re-enqueue the pill so the NEXT cycle stops after this batch flushes.
+                self._queue.put(self._poison)
+                break
+            batch.append(cast(WriteRequest, item))
+        return batch
+
+    def _write_batch(self, batch: Sequence[WriteRequest]) -> None:
+        """Coalesce *batch* by ``(series, year, month)`` partition; ONE write per group.
+
+        Every request's box is settled — a success ONLY after its group's durable write
+        returns (settle-after-durable), an exception captured verbatim. A
+        :class:`LakeWriteHalt` settles the whole failing group with the halt + trips the
+        pull-wide stop. A request's box is NEVER left unsettled on a handled write outcome
+        (so no producer blocks forever); only a hard interpreter kill leaves boxes unset
+        (→ re-fetched next pull, idempotent).
+        """
+        # Group by (series coordinates, year, month) so each group maps to EXACTLY one
+        # partition file → one `_merge_write`. Two requests of the SAME series in different
+        # months land in different groups (each its own single write); the empty no-op of
+        # an empty-bars request is settled directly (mirrors the sink's empty short-circuit).
+        groups: dict[tuple[str, int, int], list[WriteRequest]] = defaultdict(list)
+        for request in batch:
+            if not request.bars:
+                request.box.set_result(
+                    SinkAppendResult(bars_appended=0, partitions_written=0, write_results=())
+                )
+                continue
+            series = request.shard_key()
+            # A request's bars may straddle a month boundary; route each (year, month)
+            # slice to its own partition group so one group is exactly one partition write.
+            for (year, month), _slice in _group_request_by_partition(request).items():
+                groups[(series, year, month)].append(request)
+
+        # A request can appear in MULTIPLE groups (it straddled a month). Track each
+        # request's remaining-group count + accumulate its per-partition attribution so its
+        # box is settled exactly ONCE, after ALL its partitions are durable.
+        remaining: dict[int, int] = {}
+        accumulated: dict[int, list[WriteResultParts]] = defaultdict(list)
+        for reqs in groups.values():
+            for request in reqs:
+                remaining[id(request)] = remaining.get(id(request), 0) + 1
+
+        for (series, year, month), reqs in groups.items():
+            del series
+            self._write_one_group((year, month), reqs, remaining, accumulated)
+
+    def _write_one_group(
+        self,
+        partition: tuple[int, int],
+        reqs: Sequence[WriteRequest],
+        remaining: dict[int, int],
+        accumulated: dict[int, list[WriteResultParts]],
+    ) -> None:
+        """Do ONE coalesced merge for *reqs* (all targeting *partition*); settle boxes.
+
+        The combined bars are the UNION (submission order) of every request's bars that fall
+        in *partition* (a request straddling a month contributes only its slice for THIS
+        partition; its other slices are written by their own groups). After the durable
+        write returns, each request's ``bars_appended`` is attributed per-window and its
+        conflicts carried, then — once every partition the request spanned has completed —
+        its box is settled with the merged result.
+        """
+        per_request_bars: list[list[CandleBar]] = [_bars_in_partition(r, partition) for r in reqs]
+        combined: list[CandleBar] = [bar for bars in per_request_bars for bar in bars]
+        try:
+            result = self._sink.append(
+                exchange=reqs[0].exchange,
+                segment=reqs[0].segment,
+                symbol=reqs[0].symbol,
+                interval=reqs[0].interval,
+                bars=combined,
+                merge_mode=reqs[0].merge_mode,
+            )
+        except LakeWriteHalt as exc:
+            self._trip_halt(exc)
+            for request in reqs:
+                request.box.set_exception(exc)
+            return
+        except Exception as exc:  # surface ANY write FAILURE; never settle a success
+            for request in reqs:
+                request.box.set_exception(exc)
+            return
+        # Durable: the merge returned. Attribute the combined `bars_appended` PER WINDOW
+        # (#919 back-channel) by first-occurrence of each distinct timestamp, then settle
+        # each request once ALL its partitions are durable.
+        counts = _attribute_bars_appended(per_request_bars, result.bars_appended)
+        for request, added in zip(reqs, counts, strict=True):
+            accumulated[id(request)].append(
+                WriteResultParts(bars_appended=added, write_results=result.write_results)
+            )
+            remaining[id(request)] -= 1
+            if remaining[id(request)] == 0:
+                request.box.set_result(_merge_parts(accumulated[id(request)]))
+
+    def _trip_halt(self, exc: LakeWriteHalt) -> None:
+        """Record the first :class:`LakeWriteHalt` and set the pull-wide stop flag."""
+        with self._halt_lock:
+            if self._halt_exc is None:
+                self._halt_exc = exc
+        self._stopped.set()
+
+    def drain(self) -> None:
+        """Flush every pending request durably (one final coalesced cycle), then join.
+
+        Called ONCE at pull end (producers stopped submitting). Sends the poison-pill;
+        the writer flushes every still-queued request — coalesced — durably (settling each
+        box) before exiting, then this joins the thread. After :meth:`drain` returns every
+        settled window is on disk, so the caller may save the window ledger. Idempotent.
+        """
+        if not self._thread.is_alive():
+            return
+        self._queue.put(self._poison)
+        self._thread.join()
+        if self._halt_exc is not None:
+            _LOG.warning("write_consumer.batched_drained_after_halt", reason=self._halt_exc.reason)
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResultParts:
+    """One partition's contribution to a request that straddled multiple partitions."""
+
+    bars_appended: int
+    write_results: tuple[WriteResult, ...]
+
+
+def _merge_parts(parts: Sequence[WriteResultParts]) -> SinkAppendResult:
+    """Combine a request's per-partition parts into ONE :class:`SinkAppendResult`.
+
+    Sums the per-partition ``bars_appended`` (each already attributed to THIS request) and
+    concatenates the per-partition ``write_results`` (so the spine sees every partition's
+    conflicts), with ``partitions_written`` = the number of distinct partitions written.
+    """
+    bars_appended = sum(p.bars_appended for p in parts)
+    write_results = tuple(wr for p in parts for wr in p.write_results)
+    return SinkAppendResult(
+        bars_appended=bars_appended,
+        partitions_written=len(parts),
+        write_results=write_results,
+    )
+
+
+def _group_request_by_partition(
+    request: WriteRequest,
+) -> dict[tuple[int, int], list[CandleBar]]:
+    """Split *request*'s bars by ``(year, month)`` partition (mirrors the sink's grouping)."""
+    out: dict[tuple[int, int], list[CandleBar]] = defaultdict(list)
+    for bar in request.bars:
+        out[partition_for_timestamp(bar.timestamp)].append(bar)
+    return out
+
+
+def _bars_in_partition(request: WriteRequest, partition: tuple[int, int]) -> list[CandleBar]:
+    """The subset of *request*'s bars belonging to *partition* (submission order)."""
+    return [b for b in request.bars if partition_for_timestamp(b.timestamp) == partition]
+
+
+def _attribute_bars_appended(
+    per_request_bars: Sequence[Sequence[CandleBar]],
+    total_appended: int,
+) -> list[int]:
+    """Split a coalesced merge's combined ``bars_appended`` PER WINDOW (#919 back-channel).
+
+    A coalesced merge unions every request's bars into ONE partition write, so the sink
+    reports ONE ``total_appended`` = the count of genuinely-NEW bars (not already stored,
+    not a kept-first conflict). This re-attributes that total to the individual windows so
+    the back-channel stays PER-WINDOW (not per-batch), honouring keep-first union order:
+
+    * each distinct timestamp is credited to the FIRST request (submission order) that
+      carries it — exactly which window a serial keep-first append would have credited it
+      to (a later request carrying the same timestamp gets no credit: it was a within-batch
+      duplicate / conflict);
+    * a timestamp ALREADY stored before this pull raised the count for NO window — handled
+      by capping the running credited total at ``total_appended`` (the merge already
+      excluded pre-existing bars), so the FIRST ``total_appended`` distinct new timestamps
+      (submission order) are credited and any remainder (pre-existing duplicates) credit
+      zero.
+
+    The returned counts SUM to exactly ``total_appended`` and never exceed it — so the
+    per-window ledger figures reconcile to the true combined total (Golden Rule #7). O(bars).
+    """
+    seen: set[datetime] = set()
+    credited = 0
+    counts: list[int] = []
+    for bars in per_request_bars:
+        added = 0
+        for bar in bars:
+            if credited >= total_appended:
+                break
+            ts = bar.timestamp
+            if ts not in seen:
+                seen.add(ts)
+                added += 1
+                credited += 1
+        counts.append(added)
+    return counts
+
+
+if TYPE_CHECKING:  # pragma: no cover
+    from datetime import datetime
+
+    from brutex.data.parquet_writer import WriteResult
