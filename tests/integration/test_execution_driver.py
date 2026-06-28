@@ -217,6 +217,41 @@ class TestBacktestDeterminism:
 
         assert run_once() == run_once()
 
+    def test_same_driver_two_runs_are_equal(self, tmp_path: Path) -> None:
+        """Re-running the SAME :class:`BacktestDriver` is reproducible.
+
+        Regression for DEC-EXEC-REPRO-RESILIENCE-001 (the
+        ``reset()``-in-``run()`` same-driver reproducibility BLOCKER fix).
+        Unlike :meth:`test_two_runs_produce_identical_results`, which builds a
+        FRESH :class:`ExecutionSimulator` per run, this directly drives ONE
+        driver (hence ONE simulator instance) twice and asserts the second
+        run neither diverges nor ACCUMULATES the first run's fills/cash. On the
+        pre-fix code the simulator carried prior state into the second
+        ``run()``, so ``result2`` doubled the fills and shifted cash.
+        """
+        closes = [100, 105, 95, 110, 90]
+        lake_root, catalog_path = _seed_lake(tmp_path, closes)
+        with Catalog.open(catalog_path) as cat:
+            feed = _make_feed(cat, lake_root)
+            sim = ExecutionSimulator(
+                initial_cash=Decimal("10000"),
+                instruments={"NSE-NIFTY": _nifty_meta()},
+                default_qty=1,
+                slippage_bps=Decimal("0"),
+            )
+            driver = BacktestDriver(
+                strategy=ClosePreviousMomentum({"k": 1}),
+                feed=feed,
+                simulator=sim,
+            )
+            result1 = driver.run()
+            result2 = driver.run()
+
+        assert result2 == result1
+        # The second run must NOT accumulate the first run's state.
+        assert result2.total_fills == result1.total_fills
+        assert result2.final_cash == result1.final_cash
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Accounting identity: cash delta matches fills + cost sum

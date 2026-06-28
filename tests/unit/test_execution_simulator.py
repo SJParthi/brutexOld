@@ -25,6 +25,7 @@ from brutex.execution.errors import (
     FreezeQuantityExceededError,
     InsufficientFundsError,
     InvalidLotSizeError,
+    InvalidPriceError,
 )
 from brutex.execution.simulator import ExecutionSimulator
 from brutex.execution.types import InstrumentMeta
@@ -460,3 +461,92 @@ class TestCoverageBackfill:
     # (strict inequality), so after `pos.qty += signed_delta` the new
     # qty cannot be zero. Source-level `# pragma: no branch` documents
     # this; defensive code kept in place for future-proofing.
+
+
+# ────────────────────────────────────────────────────────────────────────
+# reset() — reproducible re-run (FIX 1, DEC-EXECUTION-REPRO-RESILIENCE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestReset:
+    def test_reset_restores_initial_state(self, idx_meta: InstrumentMeta) -> None:
+        """After fills + marks, reset() restores cash and clears the book."""
+        sim = _make_sim(idx_meta, cash=Decimal("10000"), slippage_bps=Decimal("0"))
+        sim.execute(_signal(Side.BUY), _bar(100))
+        sim.mark_to_market(
+            symbol="NSE-NIFTY",
+            price=Decimal("110"),
+            timestamp=datetime(2024, 1, 2, 9, 16, tzinfo=UTC),
+        )
+        # Sanity — state is now non-trivial.
+        assert sim.cash != Decimal("10000")
+        assert sim.fills != ()
+        assert sim.equity_curve != ()
+        assert sim.positions != {}
+
+        sim.reset()
+
+        assert sim.cash == Decimal("10000")
+        assert sim.fills == ()
+        assert sim.equity_curve == ()
+        assert sim.positions == {}
+
+    def test_reset_on_fresh_sim_is_noop_equivalent(self, idx_meta: InstrumentMeta) -> None:
+        """reset() on a never-used simulator leaves it at construction state."""
+        sim = _make_sim(idx_meta, cash=Decimal("777"))
+        sim.reset()
+        assert sim.cash == Decimal("777")
+        assert sim.fills == ()
+        assert sim.equity_curve == ()
+        assert sim.positions == {}
+
+
+# ────────────────────────────────────────────────────────────────────────
+# _require_tradeable_price — non-tradeable price guard (FIX 3)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRequireTradeablePrice:
+    _TS = datetime(2024, 1, 2, 9, 15, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "price",
+        [
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+            Decimal("0"),
+            Decimal("-5"),
+        ],
+    )
+    def test_non_tradeable_price_rejected(self, price: Decimal) -> None:
+        """NaN / inf / zero / negative all raise InvalidPriceError."""
+        with pytest.raises(InvalidPriceError, match="non-tradeable price"):
+            ExecutionSimulator._require_tradeable_price(
+                price, symbol="NSE-NIFTY", timestamp=self._TS
+            )
+
+    def test_positive_finite_price_passes(self) -> None:
+        """A normal positive price does not raise (no return value)."""
+        assert (
+            ExecutionSimulator._require_tradeable_price(
+                Decimal("123.45"), symbol="NSE-NIFTY", timestamp=self._TS
+            )
+            is None
+        )
+
+    def test_execute_rejects_zero_close(self, idx_meta: InstrumentMeta) -> None:
+        """A zero bar.close trips the guard inside execute() (typed, not ValueError)."""
+        sim = _make_sim(idx_meta)
+        with pytest.raises(InvalidPriceError, match="non-tradeable price"):
+            sim.execute(_signal(Side.BUY), _bar(0))
+
+    def test_mark_to_market_rejects_negative_price(self, idx_meta: InstrumentMeta) -> None:
+        """A negative mark price trips the guard inside mark_to_market()."""
+        sim = _make_sim(idx_meta)
+        with pytest.raises(InvalidPriceError, match="non-tradeable price"):
+            sim.mark_to_market(
+                symbol="NSE-NIFTY",
+                price=Decimal("-1"),
+                timestamp=self._TS,
+            )
