@@ -377,7 +377,7 @@ class RateController:
         DEC-RATE-CLOCK-SLEEPWAKE-001. The caller MUST hold ``self._lock`` and pass the
         ``now`` it just read from the injected clock. Compares ``now`` against the last
         instant seen in any critical section (:attr:`_last_seen`); when the MAGNITUDE of
-        the delta exceeds :data:`CLOCK_GAP_THRESHOLD_S` (~60 s) — a MacBook sleeping
+        the delta exceeds :data:`CLOCK_GAP_THRESHOLD_S` (300 s = 5 min) — a MacBook sleeping
         overnight and waking, or a rare backward monotonic/NTP glitch — it treats it as
         a sleep/wake event and:
 
