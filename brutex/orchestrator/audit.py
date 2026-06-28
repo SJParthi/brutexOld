@@ -25,6 +25,17 @@ The chain is ``prev_hash(entry[n]) == entry_hash(entry[n-1])``. The
 genesis entry uses 64 zero hex chars for ``prev_hash``. Any tamper
 breaks the chain at the tampered entry's index.
 
+The free-form fields ``actor`` / ``action`` / ``subject`` are joined
+into the preimage with a literal ``|`` delimiter byte, so they MUST NOT
+themselves contain ``|`` — otherwise the preimage is ambiguous and two
+distinct field triples could share one hash (e.g.
+``action="A|B", subject="C"`` vs ``action="A", subject="B|C"`` both
+flatten to ``…|A|B|C|…``). :meth:`AuditEntry.__post_init__` rejects a
+``|`` in any of those fields with :exc:`AuditFieldError`, on BOTH the
+write path (entry construction) and the read path
+(:meth:`AuditEntry.from_json_line`), keeping the preimage injective and
+the chain genuinely tamper-evident.
+
 ## Verification
 
 :func:`verify_chain` reads a log file and replays it, recomputing
@@ -64,7 +75,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from types import TracebackType
-from typing import Any, Final, Self
+from typing import Any, ClassVar, Final, Self
 
 from brutex.models import BruteXError
 
@@ -120,6 +131,26 @@ class AuditChainCorruption(AuditError):
 
 class AuditWriteError(AuditError):
     """Raised on any file I/O failure in the writer."""
+
+
+class AuditFieldError(AuditError):
+    """Raised when a free-form field contains the hash-preimage delimiter.
+
+    The :meth:`AuditEntry.compute_hash` preimage joins the variable-length
+    free-form fields ``actor`` / ``action`` / ``subject`` with a literal
+    ``b"|"`` byte. If any of those fields itself contained a ``"|"`` the
+    encoding would be non-injective: ``action="A|B", subject="C"`` and
+    ``action="A", subject="B|C"`` would both flatten to the SAME preimage
+    ``…|A|B|C|…`` → an identical hash. A tampered on-disk line could then be
+    re-split into a different (action, subject) pair WITHOUT breaking the
+    chain. :meth:`AuditEntry.__post_init__` rejects a ``"|"`` in any of those
+    three fields with this error so the preimage stays unambiguous and the
+    collision is impossible by construction. Because :meth:`from_json_line`
+    rebuilds the entry through the SAME ``__post_init__``, a tampered line
+    that injected a ``"|"`` is likewise rejected on the read path
+    (surfaced through :func:`_read_entries` / :func:`verify_chain` as an
+    :class:`AuditError`).
+    """
 
 
 class AuditPayloadError(AuditError):
@@ -198,6 +229,36 @@ class AuditEntry:
     subject: str
     payload: dict[str, Any]
     entry_hash: str = field(default="")  # populated by compute_hash
+
+    #: The hash-preimage delimiter byte (see :meth:`compute_hash`). It must
+    #: never appear inside a free-form field or the preimage becomes
+    #: ambiguous — enforced by :meth:`__post_init__`.
+    _DELIMITER: ClassVar[str] = "|"
+
+    def __post_init__(self) -> None:
+        """Reject the hash-preimage delimiter in the free-form fields.
+
+        ``actor`` / ``action`` / ``subject`` are joined into the
+        :meth:`compute_hash` preimage with a literal ``"|"`` byte. Allowing a
+        ``"|"`` inside any of them would make the encoding non-injective (two
+        distinct field triples could share one preimage → one hash), so a
+        crafted or tampered ``"|"``-bearing field could be re-split into a
+        different triple WITHOUT breaking the chain. Forbidding the single
+        delimiter character keeps the preimage unambiguous and the chain
+        tamper-evident, while changing NO hash bytes for any conforming entry.
+
+        Raises
+        ------
+        AuditFieldError
+            If ``actor``, ``action`` or ``subject`` contains ``"|"``.
+        """
+        for name in ("actor", "action", "subject"):
+            value: str = getattr(self, name)
+            if self._DELIMITER in value:
+                raise AuditFieldError(
+                    f"Audit field {name!r} must not contain the {self._DELIMITER!r} "
+                    f"hash-preimage delimiter: {value!r}"
+                )
 
     def compute_hash(self) -> str:
         """Compute what the ``entry_hash`` should be based on all other fields.
@@ -564,8 +625,23 @@ def verify_chain(path: Path) -> int:
                 actual=entry.prev_hash,
                 reason="prev_hash does not match previous entry's entry_hash",
             )
-        # 3. entry_hash is correct for the entry's contents
-        recomputed = entry.compute_hash()
+        # 3. entry_hash is correct for the entry's contents.
+        #    A tampered on-disk line can carry a non-finite float
+        #    (``json.loads`` accepts the bare ``NaN`` / ``Infinity`` tokens by
+        #    default), which ``compute_hash`` → ``_canonical_json`` rejects with
+        #    an :class:`AuditPayloadError`. That is a chain-integrity failure of
+        #    THIS entry, so it is re-raised as :class:`AuditChainCorruption`
+        #    naming the offending seq — the documented contract (the writer can
+        #    never emit such a line; only a tamper produces it).
+        try:
+            recomputed = entry.compute_hash()
+        except AuditPayloadError as exc:
+            raise AuditChainCorruption(
+                seq=entry.seq,
+                expected="a finite, RFC 8259-serialisable payload",
+                actual="non-finite payload (NaN / Infinity / -Infinity)",
+                reason="payload contains a non-finite float (tampered line)",
+            ) from exc
         if entry.entry_hash != recomputed:
             raise AuditChainCorruption(
                 seq=entry.seq,
@@ -593,6 +669,7 @@ __all__ = [
     "AuditChainCorruption",
     "AuditEntry",
     "AuditError",
+    "AuditFieldError",
     "AuditPayloadError",
     "AuditWriteError",
     "AuditWriter",
