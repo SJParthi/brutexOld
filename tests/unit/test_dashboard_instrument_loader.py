@@ -27,19 +27,25 @@ from __future__ import annotations
 # module-private names by design (DEC-P0-017 convention).
 # pyright: reportPrivateUsage=false
 from collections.abc import Mapping, Sequence
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
+from brutex.adapters.groww.instruments import build_index
 from brutex.dashboard import instrument_loader as il
 from brutex.dashboard.instrument_loader import (
     FNO_INDEX_ALIASES_OVERRIDE_ENV,
+    _classify_option_pullable,
+    _groww_symbol_index_bridge,
     load_instrument_master,
+    resolve_fno_index_aliases,
 )
 from brutex.dashboard.ntm_cache import load_cached_constituent_csv, save_constituent_csv
 from brutex.data.instrument_store import InstrumentStore
-from brutex.models import InstrumentFormatError
-from brutex.universe import is_option_pullable
+from brutex.models import Exchange, Instrument, InstrumentFormatError, InstrumentType, Segment
+from brutex.universe import build_options_eligible_underlyings, is_option_pullable
 from structlog.testing import capture_logs
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
@@ -1014,3 +1020,190 @@ class TestNtmCacheTtlSeconds:
         assert il._ntm_cache_ttl_seconds() == 0.0
         monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "-1")
         assert il._ntm_cache_ttl_seconds() == -1.0
+
+
+# ── OPT-vs-REF bridge primitives (DEC-FNO-INDEX-ALIAS-001) ────────────────────
+# These direct-call unit tests pin the per-branch behaviour of the three bridge
+# helpers IN THE MAPPED test file for this module, so the auto-discovery coverage
+# gate (DEC-CICD-GATE-HONESTY-001) — which runs only the import-verified
+# test_*instrument_loader*.py suite — measures instrument_loader.py at 100% line +
+# branch. The same branches are also covered end-to-end by
+# tests/unit/test_fno_index_diagnostic.py (a sibling, COMMON behaviour — no logic
+# duplicated, only the per-file gate's view restored).
+_SOURCED_FNO_INDEX_ALIASES = {"NIFTYJR": "NIFTYNXT50", "NIFTYMIDSELECT": "MIDCPNIFTY"}
+
+
+def _idx_inst(
+    symbol: str,
+    *,
+    security_id: int = 0,
+    feed_token: str | None = None,
+    exchange: Exchange = Exchange.NSE,
+) -> Instrument:
+    """Build an IDX Instrument (spot index row)."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal("0"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+        feed_token=feed_token,
+    )
+
+
+def _eq_inst(
+    symbol: str,
+    *,
+    security_id: int,
+    feed_token: str | None,
+    exchange: Exchange = Exchange.NSE,
+) -> Instrument:
+    """Build a cash-equity Instrument carrying an explicit security_id + feed_token."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+        feed_token=feed_token,
+    )
+
+
+def _opt_inst(
+    underlying: str,
+    *,
+    underlying_security_id: int | None,
+    exchange: Exchange = Exchange.NSE,
+    option_type: InstrumentType = InstrumentType.CE,
+) -> Instrument:
+    """Build a CE/PE leg naming *underlying* with an explicit underlying_security_id."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=abs(hash(("opt", underlying, option_type))) % 100_000,
+        symbol_name=f"{underlying}-OPT",
+        display_name=underlying,
+        instrument=option_type,
+        segment=Segment.FNO,
+        series=None,
+        isin=None,
+        underlying_symbol=underlying,
+        underlying_security_id=underlying_security_id,
+        lot_size=50,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=date(2026, 6, 16),
+        strike_price=Decimal("100"),
+        asm_gsm_flag=False,
+        feed_token=None,
+    )
+
+
+class TestResolveFnoIndexAliasesEnvParse:
+    """``resolve_fno_index_aliases`` parses the env override defensively (never crashes)."""
+
+    def test_invalid_json_falls_back_to_sourced_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Malformed JSON → the ``except ValueError`` arm returns the sourced defaults.
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, "{not json")
+        assert resolve_fno_index_aliases() == dict(_SOURCED_FNO_INDEX_ALIASES)
+
+    def test_non_object_json_falls_back_to_sourced_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Valid JSON that is not a dict (a list) → the ``not isinstance(parsed, dict)``
+        # arm returns the sourced defaults.
+        monkeypatch.setenv(FNO_INDEX_ALIASES_OVERRIDE_ENV, '["x", "y"]')
+        assert resolve_fno_index_aliases() == dict(_SOURCED_FNO_INDEX_ALIASES)
+
+    def test_non_str_and_blank_pairs_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A non-str value, a blank value, and a blank key each fail the pair guard
+        # (the loop branch that does NOT add); only the good pair is kept.
+        monkeypatch.setenv(
+            FNO_INDEX_ALIASES_OVERRIDE_ENV,
+            '{"GOODIDX": "GOODFNO", "BADINT": 5, "BLANKVAL": "  ", "  ": "X"}',
+        )
+        aliases = resolve_fno_index_aliases()
+        assert aliases["GOODIDX"] == "GOODFNO"
+        assert "BADINT" not in aliases
+        assert "BLANKVAL" not in aliases
+        assert "" not in aliases
+        # The sourced defaults are still present (merged, not replaced).
+        assert aliases["NIFTYJR"] == "NIFTYNXT50"
+
+
+class TestGrowwSymbolIndexBridgeDashless:
+    """``_groww_symbol_index_bridge`` skips a malformed dashless groww_symbol."""
+
+    def test_dashless_groww_symbol_is_skipped(self) -> None:
+        # A groww_symbol with no "-" → index_symbol_of() returns empty → the row is
+        # skipped (no alias, no bridge), never raises.
+        index = build_index([("WEIRD", _idx_inst("WEIRD"))])
+        bridged, aliases = _groww_symbol_index_bridge(index, frozenset())
+        assert bridged == frozenset()
+        assert aliases == frozenset()
+
+
+class TestClassifyOptionPullableBranches:
+    """Per-mechanism arms of ``_classify_option_pullable`` (token_join / symbol_bridge)."""
+
+    def test_idx_token_join_is_a_real_rescue(self) -> None:
+        # An IDX whose GENUINE numeric vendor token equals an NSE option leg's
+        # underlying_security_id IS a real rescue → mechanism "token_join", added to
+        # the (index-only) bridged set.
+        idx = _idx_inst("VERBOSEIDX", security_id=51, feed_token="51")
+        leg = _opt_inst("COMPACTIDX", underlying_security_id=51)
+        index = build_index([("NSE-VERBOSEIDX", idx), ("NSE-COMPACTIDX-16Jun26-1-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
+        assert (Exchange.NSE, "VERBOSEIDX") in bridged
+        assert rescued["token_join"] == ["NSE:VERBOSEIDX"]
+        assert rescued["token_join_diagnostic"] == []
+
+    def test_bse_equity_token_collision_is_excluded(self) -> None:
+        # A BSE EQ whose numeric token coincidentally equals an NSE option leg's
+        # underlying_security_id is NOT an F&O stock (no BSE derivatives) → the else
+        # arm continues: not persisted, not surfaced.
+        bse = _eq_inst("FOO", security_id=16669, feed_token="16669", exchange=Exchange.BSE)
+        leg = _opt_inst("FOO", underlying_security_id=16669)  # an NSE leg
+        index = build_index([("BSE-FOO", bse), ("NSE-FOO-16Jun26-9000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued, eq_ids = _classify_option_pullable(index, options_eligible)
+        assert eq_ids == frozenset()
+        assert rescued["token_join_diagnostic"] == []
+        assert (Exchange.BSE, "FOO") not in bridged
+
+    def test_symbol_bridge_rescues_verbose_idx(self) -> None:
+        # A verbose-named IDX whose groww_symbol F&O symbol IS options-eligible, with NO
+        # genuine numeric token (so it is reached via the groww_symbol bridge, mechanism
+        # "symbol_bridge", not token_join).
+        midcap = _idx_inst("NIFTY MID SELECT")  # surrogate id 0, no numeric feed_token
+        leg = _opt_inst("MIDCPNIFTY", underlying_security_id=None)
+        index = build_index([("NSE-MIDCPNIFTY", midcap), ("NSE-MIDCPNIFTY-16Jun26-12000-CE", leg)])
+        options_eligible = build_options_eligible_underlyings(index.universe)
+        bridged, _aliases, rescued, _eq_ids = _classify_option_pullable(index, options_eligible)
+        assert (Exchange.NSE, "NIFTY MID SELECT") in bridged
+        assert rescued["symbol_bridge"] == ["NSE:NIFTY MID SELECT"]
+        assert rescued["token_join"] == []
