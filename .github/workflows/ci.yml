@@ -1568,8 +1568,13 @@ jobs:
           # (make_window_observer + the _on_window closure) is covered by
           # tests/unit/test_dashboard_pull_stall.py, which MUST likewise join the
           # per-module gate so its coverage of those lines registers.
+          # DEC-WRITE-BATCH-COALESCE-001: the coalescing-batched-write build/drain
+          # helpers (_build_write_consumer success path + _drain_write_consumer
+          # non-None drain) are covered by tests/unit/test_dashboard_write_batch_wiring.py,
+          # which MUST likewise join the per-module gate so its coverage of those
+          # lines (pull_controller.py 1066-1071 / 1083-1086) registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi

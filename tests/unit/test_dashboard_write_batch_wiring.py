@@ -53,12 +53,12 @@ class TestBuildWriteConsumer:
         # A failure constructing the consumer yields None (never crashes the pull).
         monkeypatch.setenv("BRUTEX_WRITE_BATCH", "1")
 
-        import brutex.data.write_consumer as wc
-
         def _boom(*_a: Any, **_k: Any) -> BatchingWriteConsumer:
             raise RuntimeError("construction boom")
 
-        monkeypatch.setattr(wc, "BatchingWriteConsumer", _boom)
+        # Patch by dotted path (single import style for the module — CodeQL
+        # py/import-and-import-from); the helper resolves the symbol at call time.
+        monkeypatch.setattr("brutex.data.write_consumer.BatchingWriteConsumer", _boom)
         assert _build_write_consumer(NullBarSink(), dry_run=False) is None
 
 

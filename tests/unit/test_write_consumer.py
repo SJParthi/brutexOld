@@ -804,10 +804,14 @@ class TestAttributeBarsAppended:
         assert counts == [2, 1]
 
     def test_pre_existing_bars_credit_zero_caps_at_total(self) -> None:
+        # DEFENSIVE test: drives the cap branch (total_appended < distinct timestamps).
+        # The REAL ``ParquetBarSink.append`` returns ``bars_appended = len(bars)`` (the
+        # INPUT count, sink.py:106/:209 — NOT a net-new count), so it never feeds a
+        # total smaller than the union size; this case is impossible from the production
+        # sink. We assert it anyway to prove the cap keeps per-window credits from being
+        # INFLATED for ANY conforming BarSink (the attribution is at-most-serial).
         from brutex.data.write_consumer import _attribute_bars_appended
 
-        # Sink reports only 1 newly-added (the rest were already stored) → the FIRST
-        # distinct timestamp is credited, the remainder credit zero (cap at total).
         per_request = [[_bar(15)], [_bar(16)], [_bar(17)]]
         counts = _attribute_bars_appended(per_request, total_appended=1)
         assert counts == [1, 0, 0]
@@ -1256,6 +1260,70 @@ class TestBatchingDrainFlushesAll:
         after = {t.name for t in threading.enumerate()}
         leaked = {n for n in after - before if n.startswith("write-batch-consumer")}
         assert leaked == set()
+
+
+class TestBatchingDrainPoisonDelivery:
+    """MINOR-3: drain() never deadlocks delivering the poison-pill on a full queue.
+
+    The pill is sent ``put_nowait`` first; only on a momentarily-full queue does it fall
+    back to a bounded blocking ``put``, and only while the worker is still alive (a dead
+    daemon worker → skip, the process is tearing down). These drive both Full sub-branches
+    deterministically without relying on a real race.
+    """
+
+    @dataclass
+    class _FakeThread:
+        """A stand-in for the worker thread with scripted ``is_alive`` + no-op ``join``."""
+
+        alive: list[bool]
+        joined: bool = False
+
+        def is_alive(self) -> bool:
+            # Pop the next scripted liveness answer (last value sticks).
+            return self.alive[0] if len(self.alive) == 1 else self.alive.pop(0)
+
+        def join(self) -> None:
+            self.joined = True
+
+    def test_drain_full_queue_dead_worker_skips_blocking_put(self) -> None:
+        # put_nowait raises Full; the re-checked worker is DEAD → skip the blocking put
+        # (no deadlock), then join (a no-op on the dead worker).
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink, queue_maxsize=1, max_coalesce=1)
+        consumer.drain()  # cleanly stop + join the REAL worker before swapping internals
+        # Re-create a full queue so put_nowait raises Full.
+        consumer._queue = type(consumer._queue)(maxsize=1)
+        consumer._queue.put_nowait(object())  # fill to capacity
+        # Replace the (already-dead) worker with a fake: alive at the entry guard, DEAD at
+        # the re-check (so drain proceeds past the early return, then skips the blocking put).
+        consumer._thread = self._FakeThread(alive=[True, False])  # type: ignore[assignment]
+        consumer.drain()  # must NOT block — the dead-worker branch skips the blocking put
+        assert consumer._thread.joined is True  # type: ignore[attr-defined]
+
+    def test_drain_full_queue_live_worker_blocks_then_puts(self) -> None:
+        # put_nowait raises Full; the worker is ALIVE → the blocking put is taken. A
+        # background consumer frees a slot so the blocking put returns (no deadlock).
+        sink = _CoalesceSink()
+        consumer = BatchingWriteConsumer(sink=sink, queue_maxsize=1, max_coalesce=1)
+        consumer.drain()  # cleanly stop + join the REAL worker before swapping internals
+        consumer._queue = type(consumer._queue)(maxsize=1)
+        filler = object()
+        consumer._queue.put_nowait(filler)  # fill to capacity → put_nowait will raise Full
+
+        # A live fake thread; a helper drains the filler shortly so the blocking put returns.
+        consumer._thread = self._FakeThread(alive=[True])  # type: ignore[assignment]
+
+        def _free_slot() -> None:
+            time.sleep(0.05)
+            assert consumer._queue.get() is filler  # free the one slot
+
+        helper = threading.Thread(target=_free_slot, daemon=True)
+        helper.start()
+        consumer.drain()  # takes the Full → blocking-put branch; returns once the slot frees
+        helper.join(timeout=2.0)
+        # The poison-pill is now the queued item (the blocking put succeeded).
+        assert consumer._queue.get() is consumer._poison
+        assert consumer._thread.joined is True  # type: ignore[attr-defined]
 
 
 class TestBatchingViaSink:

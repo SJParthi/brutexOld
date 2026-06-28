@@ -350,7 +350,10 @@ def _bytes_for_arm(
 
     # A deterministic multi-window stream over ONE month partition. Submit concurrently
     # for the consumer arms so the oracle also exercises the cross-window merge ordering
-    # (and, for the batched arm, the COALESCED multi-window merge).
+    # (and, for the batched arm, the COALESCED multi-window merge). All timestamps are
+    # DISTINCT here — this oracle proves the no-conflict UNION parity; the same-timestamp
+    # keep-first CONFLICT parity is proven deterministically by
+    # `test_byte_parity_batched_conflict_keep_first` (MINOR-4).
     batches = [[_bar(base + timedelta(minutes=w), price=300.0 + w)] for w in range(30)]
 
     def _one(bars: Sequence[CandleBar]) -> SinkAppendResult:
@@ -389,13 +392,14 @@ def test_byte_parity_across_w_none_2_4(tmp_path: Path) -> None:
 
 
 def test_byte_parity_batched_matches_serial(tmp_path: Path) -> None:
-    """The COALESCING batched writer produces BIT-IDENTICAL lake output to the serial path.
+    """The COALESCING batched writer matches the serial path on a NO-CONFLICT union.
 
-    The byte-parity oracle for DEC-WRITE-BATCH-COALESCE-001: coalescing N windows into ONE
-    merge changes only HOW MANY merge-writes run, never WHICH bytes land — the merge unions
-    by timestamp (keep-first), so the final partition is byte-for-byte the same as N serial
-    appends. This is the gate that proves the speedup is FREE of any data divergence
-    (Golden Rule #7).
+    The byte-parity oracle for DEC-WRITE-BATCH-COALESCE-001: coalescing N DISTINCT-timestamp
+    windows into ONE merge changes only HOW MANY merge-writes run, never WHICH bytes land —
+    the merge unions by timestamp, so the final partition is byte-for-byte the same as N
+    serial appends. This arm streams only distinct minutes (no same-timestamp conflict); the
+    same-timestamp keep-first CONFLICT parity is proven by
+    :func:`test_byte_parity_batched_conflict_keep_first` (MINOR-4). Golden Rule #7.
     """
     sync_bytes = _bytes_for_arm(tmp_path, workers=None, tag="parity_b_none")
     batched_bytes = _bytes_for_arm(tmp_path, batched=True, tag="parity_batched")
@@ -403,6 +407,64 @@ def test_byte_parity_batched_matches_serial(tmp_path: Path) -> None:
         "the batched coalesced partition bytes diverged from the synchronous path — the "
         "coalescing changed WHICH bytes land, NOT just how many writes ran (a byte-parity "
         "violation; do NOT ship)"
+    )
+
+
+def _conflict_bytes(tmp_path: Path, *, batched: bool, tag: str) -> bytes:
+    """Write a stream with SAME-TIMESTAMP conflicts in a DETERMINISTIC order; return bytes.
+
+    Submits SERIALLY (one connection) so keep-first order is well-defined across both the
+    synchronous and the batched arm: each conflicting minute is first written with its
+    ORIGINAL price, then re-submitted with a different price — keep-first must discard the
+    later one identically in both arms. The batched arm still COALESCES the queued windows
+    into one merge (the writer drains in enqueue order), so this proves the coalesced merge
+    honours keep-first on a real conflict, not just the union of distinct minutes.
+    """
+    lake = tmp_path / tag
+    writer = ParquetWriter(lake_root=lake)
+    sink = ParquetBarSink(writer=writer)
+    symbol = "NSE-NIFTY"
+    base = datetime(2020, 1, 1, 9, 15, tzinfo=UTC)
+
+    write_sink: ParquetBarSink | WriteConsumerSink = sink
+    consumer: BatchingWriteConsumer | None = None
+    if batched:
+        consumer = BatchingWriteConsumer(sink=sink, queue_maxsize=64, max_coalesce=64)
+        write_sink = WriteConsumerSink(consumer=consumer)
+
+    # Original distinct minutes, then two CONFLICT re-submissions (minutes 5 + 10 with a
+    # different price). keep-first ⇒ the originals (305 / 310) win in BOTH arms.
+    batches: list[list[CandleBar]] = [
+        [_bar(base + timedelta(minutes=w), price=300.0 + w)] for w in range(15)
+    ]
+    batches.append([_bar(base + timedelta(minutes=5), price=999.0)])
+    batches.append([_bar(base + timedelta(minutes=10), price=888.0)])
+
+    for bars in batches:
+        write_sink.append(
+            exchange="NSE", segment="CASH", symbol=symbol, interval="1minute", bars=bars
+        )
+    if consumer is not None:
+        consumer.drain()
+
+    partition = lake / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute" / "2020" / "01.parquet"
+    return partition.read_bytes()
+
+
+def test_byte_parity_batched_conflict_keep_first(tmp_path: Path) -> None:
+    """The batched writer matches the serial path EVEN with same-timestamp keep-first conflicts.
+
+    MINOR-4: the no-conflict oracle proves the union of distinct minutes is byte-identical,
+    but not the keep-first CONFLICT path. This streams two SAME-TIMESTAMP re-submissions and
+    asserts the coalesced batched partition is byte-for-byte the serial partition — so the
+    later conflicting bar is discarded identically (keep-first) whether the writes ran
+    serially or were coalesced into one merge (Golden Rule #7).
+    """
+    sync_bytes = _conflict_bytes(tmp_path, batched=False, tag="conflict_sync")
+    batched_bytes = _conflict_bytes(tmp_path, batched=True, tag="conflict_batched")
+    assert batched_bytes == sync_bytes, (
+        "batched keep-first CONFLICT parity violated — a coalesced merge kept a DIFFERENT "
+        "bar for a duplicated timestamp than the serial path (do NOT ship)"
     )
 
 
