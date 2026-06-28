@@ -8,6 +8,7 @@ and the error message carrying the lock path.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -19,6 +20,7 @@ from brutex.adapters.groww.pull_singleflight import (
     pull_singleflight_lock,
     pull_singleflight_lock_path,
 )
+from brutex.data.errors import LakeWriteHalt
 
 
 def test_lock_path_is_stable_sidecar_under_lake_root(tmp_path: Path) -> None:
@@ -109,3 +111,18 @@ def test_lock_survives_when_lockfile_preexists(tmp_path: Path) -> None:
     (locks / PULL_SINGLEFLIGHT_LOCK_NAME).write_text("")
     with pull_singleflight_lock(tmp_path):
         assert os.path.exists(locks / PULL_SINGLEFLIGHT_LOCK_NAME)
+
+
+def test_lockfile_open_enospc_maps_to_lake_write_halt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # M3 (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996): a full disk at the lock-file
+    # open maps to a LakeWriteHalt (consistent with partition_write_lock), NOT a raw OSError
+    # that would escape the dashboard start() path uncaught.
+    def _enospc(*_args: object, **_kwargs: object) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("brutex.adapters.groww.pull_singleflight.os.open", _enospc)
+    with pytest.raises(LakeWriteHalt) as excinfo, pull_singleflight_lock(tmp_path):
+        pass  # pragma: no cover — open raises before the body runs
+    assert excinfo.value.reason == "disk_full"
