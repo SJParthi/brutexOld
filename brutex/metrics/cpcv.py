@@ -194,6 +194,18 @@ def sharpe_of_returns(returns: Sequence[float] | npt.NDArray[np.float64]) -> flo
     Returns ``None`` when the series has fewer than two samples or zero
     variance (a flat series), mirroring the spec's "no inf/NaN in result
     rows" rule (``TRACK1_BACKTEST_SPEC.md`` line 746).
+
+    Notes
+    -----
+    Inputs are assumed to satisfy ``|x| << ~1e150``: beyond that the
+    float64 squared-deviation ``(x - mean) ** 2`` overflows to ``inf``
+    (and ``inf - inf`` to ``NaN``), in which case the non-finite-variance
+    guard simply returns ``None`` rather than propagating a non-finite
+    Sharpe — a deliberate fail-safe, not a defect. A near-constant series
+    of a value that is not exactly representable in float64 (e.g.
+    ``[3.3] * n``) can have a tiny but **real** population variance
+    (~1e-31) and therefore a large *finite* Sharpe; this matches the
+    population-variance formula above and is likewise not a bug.
     """
     import numpy as np
 
@@ -242,6 +254,13 @@ def _combine_moments(
     Folds the selected per-group ``(n, mean, M2)`` triples pairwise with
     the Chan/Pébay parallel-variance update (Pébay 2008). ``O(k)`` in the
     number of test groups, independent of the series length.
+
+    As in :func:`sharpe_of_returns`, inputs are assumed ``|x| << ~1e150``:
+    the cross-group merge term ``delta * delta * n_total * n_b / combined``
+    overflows to ``inf`` (and ``inf - inf`` to ``NaN``) when group means
+    differ by more than ~1e150, in which case the non-finite-variance
+    guard returns ``None`` (the fold is a non-pass) — a fail-safe, not a
+    defect.
     """
     n_total = 0
     mean_total = 0.0
