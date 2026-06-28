@@ -31,9 +31,13 @@ from brutex.costs import (
     TradeInput,
     TradeOutcome,
     TradeSide,
+    UnsupportedTradeOutcomeError,
     compute_trade_cost,
     constants,
 )
+from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ─────────────────────────────────────────────────────────────────
 # Helpers
@@ -425,6 +429,86 @@ def test_trade_input_rejects_zero_strike() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+# CHANGE 7 — runtime Literal-membership validation (fail loud on typo)
+# ─────────────────────────────────────────────────────────────────
+
+
+def _make_trade_kwargs() -> dict[str, object]:
+    """A valid kwargs baseline for direct ``TradeInput(**kwargs)`` builds.
+
+    Used by the Literal-membership tests so a single bad field can be
+    overridden while every other field stays valid.
+    """
+    return {
+        "entry_dt_ist": datetime(2026, 5, 15, 10, 0),
+        "exit_dt_ist": datetime(2026, 5, 15, 11, 0),
+        "instrument": "NIFTY",
+        "option_type": "CE",
+        "strike": 2_500_000,
+        "expiry_date": date(2026, 5, 21),
+        "entry_bar_open_paisa": 10_000,
+        "exit_bar_open_paisa": 10_000,
+        "side": "long_call",
+        "n_lots": 1,
+        "broker": "groww",
+        "gst_split": "intra_state",
+        "trade_outcome": "NORMAL_CLOSE",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    [
+        ("instrument", "banana"),
+        ("option_type", "XX"),
+        ("side", "banana"),
+        ("broker", "robinhood"),
+        ("gst_split", "off_world"),
+        ("trade_outcome", "EXPIRED_MAYBE"),
+    ],
+)
+def test_trade_input_rejects_invalid_literal(field_name: str, bad_value: str) -> None:
+    """CHANGE 7: a value outside a Literal field's allowed set fails loud.
+
+    A typo'd enum string is SILENTLY ACCEPTED by the ``Literal`` type alone
+    (it is a static-only annotation). ``__post_init__`` now runtime-validates
+    membership and raises ``ValueError`` naming the field, the bad value, and
+    the allowed set — never a silently-wrong cost.
+    """
+    kwargs = _make_trade_kwargs()
+    kwargs[field_name] = bad_value
+    with pytest.raises(ValueError, match=rf"{field_name} '{bad_value}' is not a valid value"):
+        TradeInput(**kwargs)  # type: ignore[arg-type]
+
+
+def test_trade_input_accepts_every_valid_literal_member() -> None:
+    """CHANGE 7: every VALID member of every Literal field is accepted.
+
+    Exercises the not-raised branch of the membership guard for each field,
+    so the new validation loop is fully covered (line + branch).
+    """
+    valid_by_field: dict[str, tuple[str, ...]] = {
+        "instrument": ("NIFTY", "BANKNIFTY", "SENSEX"),
+        "option_type": ("CE", "PE"),
+        "side": ("long_call", "long_put", "short_call", "short_put"),
+        "broker": ("groww", "zerodha"),
+        "gst_split": ("intra_state", "inter_state"),
+        "trade_outcome": (
+            "NORMAL_CLOSE",
+            "EXPIRY_EXERCISE",
+            "EXPIRY_ASSIGN",
+            "EXPIRY_WORTHLESS",
+        ),
+    }
+    for field_name, members in valid_by_field.items():
+        for member in members:
+            kwargs = _make_trade_kwargs()
+            kwargs[field_name] = member
+            trade = TradeInput(**kwargs)  # type: ignore[arg-type]
+            assert getattr(trade, field_name) == member
+
+
+# ─────────────────────────────────────────────────────────────────
 # Short-side branches (forward-compat stubs per DEC-EXEC-008)
 # ─────────────────────────────────────────────────────────────────
 
@@ -443,13 +527,35 @@ def test_short_call_inverts_pnl_sign() -> None:
     assert r.net_pnl_paisa == r.gross_pnl_paisa - r.total_charges_paisa
 
 
-def test_expiry_outcome_flag() -> None:
-    """trade_outcome=EXPIRY_EXERCISE flips used_exercise_branch to True."""
-    r = compute_trade_cost(_make_trade(trade_outcome="EXPIRY_EXERCISE"))
-    assert r.used_exercise_branch is True
+def test_compute_rejects_non_normal_outcome() -> None:
+    """MAJOR-1: a non-NORMAL_CLOSE outcome fails loud (no silent NORMAL_CLOSE).
 
-    r2 = compute_trade_cost(_make_trade(trade_outcome="NORMAL_CLOSE"))
-    assert r2.used_exercise_branch is False
+    The §4.2 expiry state machine is not implemented; pricing an expiry
+    outcome with the premium-based NORMAL_CLOSE math would be silently
+    wrong, so ``compute_trade_cost`` raises ``UnsupportedTradeOutcomeError``.
+    Verified safe: the only production caller (``options/executor.py``)
+    passes ``NORMAL_CLOSE``.
+    """
+    for outcome in ("EXPIRY_EXERCISE", "EXPIRY_ASSIGN", "EXPIRY_WORTHLESS"):
+        with pytest.raises(UnsupportedTradeOutcomeError, match="not supported"):
+            compute_trade_cost(_make_trade(trade_outcome=outcome))  # type: ignore[arg-type]
+
+
+def test_unsupported_outcome_is_value_error() -> None:
+    """MAJOR-1: ``UnsupportedTradeOutcomeError`` is a ``ValueError`` subclass.
+
+    Callers that catch ``ValueError`` for input validation still catch it,
+    while a caller can pin the exact type. The message names the outcome.
+    """
+    assert issubclass(UnsupportedTradeOutcomeError, ValueError)
+    with pytest.raises(ValueError, match="EXPIRY_EXERCISE"):
+        compute_trade_cost(_make_trade(trade_outcome="EXPIRY_EXERCISE"))  # type: ignore[arg-type]
+
+
+def test_normal_close_outcome_flag_false() -> None:
+    """MAJOR-1: NORMAL_CLOSE never engages the §4.2 exercise branch."""
+    r = compute_trade_cost(_make_trade(trade_outcome="NORMAL_CLOSE"))
+    assert r.used_exercise_branch is False
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -602,7 +708,11 @@ def test_trade_outcome_state_machine() -> None:
     """Anchor for CALCULATOR_SPEC §4.2 'Trade outcome state machine'.
 
     §4.2 prescribes TradeOutcome Literal: NORMAL_CLOSE / EXPIRY_EXERCISE /
-    EXPIRY_ASSIGN / EXPIRY_WORTHLESS. Verify the type accepts each.
+    EXPIRY_ASSIGN / EXPIRY_WORTHLESS. ``TradeInput`` ACCEPTS each value, but
+    per MAJOR-1 the calculator only IMPLEMENTS NORMAL_CLOSE: pricing an
+    expiry outcome fails loud with ``UnsupportedTradeOutcomeError`` rather
+    than silently returning NORMAL_CLOSE numbers (the §4.2 charge state
+    machine is not yet implemented).
     """
     valid_outcomes: list[TradeOutcome] = [
         "NORMAL_CLOSE",
@@ -613,24 +723,394 @@ def test_trade_outcome_state_machine() -> None:
     assert len(valid_outcomes) == 4, "spec §4.2 prescribes exactly 4 outcomes"
     for outcome in valid_outcomes:
         trade = _make_trade(trade_outcome=outcome)
-        # TradeInput accepts the outcome and compute returns a valid breakdown.
-        breakdown = compute_trade_cost(trade)
-        assert breakdown is not None
-        assert trade.trade_outcome == outcome
+        assert trade.trade_outcome == outcome  # TradeInput accepts every outcome
+        if outcome == "NORMAL_CLOSE":
+            breakdown = compute_trade_cost(trade)
+            assert breakdown is not None
+        else:
+            with pytest.raises(UnsupportedTradeOutcomeError):
+                compute_trade_cost(trade)
 
 
 def test_groww_worthless_brokerage() -> None:
     """Anchor for CALCULATOR_SPEC §4.3 'broker-flat-brokerage gotcha'.
 
-    §4.3 prescribes that the broker's flat brokerage applies even when an
-    option expires worthless. Uses trade_outcome=EXPIRY_WORTHLESS with
-    valid exit price (≥ 1 tick = 5 paise per TradeInput validation).
+    §4.3 prescribes the broker's flat brokerage applies even when an option
+    expires worthless. Per MAJOR-1 the EXPIRY_WORTHLESS charge path (§4.2) is
+    not yet implemented, so the calculator fails loud rather than silently
+    pricing it as NORMAL_CLOSE. This anchor pins that fail-loud contract
+    (the implemented brokerage-only worthless path is future work).
     """
     worthless = _make_trade(
         broker="groww",
         trade_outcome="EXPIRY_WORTHLESS",
     )
-    breakdown = compute_trade_cost(worthless)
-    assert breakdown.brokerage_paisa >= 0
-    # Verify input round-trips through compute as expected.
-    assert worthless.trade_outcome == "EXPIRY_WORTHLESS"
+    assert worthless.trade_outcome == "EXPIRY_WORTHLESS"  # input round-trips
+    with pytest.raises(UnsupportedTradeOutcomeError, match="not supported"):
+        compute_trade_cost(worthless)
+
+
+# ─────────────────────────────────────────────────────────────────
+# CHANGE 2 (MINOR-3) — post-slippage fill floored at 1 tick
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_long_exit_fill_floored_at_one_tick() -> None:
+    """MINOR-3: a long exit on a 1-tick bar floors the sell fill at 1 tick.
+
+    ``exit_bar_open_paisa = 5`` (exactly 1 tick) passes the ``>= 5``
+    validation, but 1-tick adverse long slippage gives ``5 - 5 = 0`` — an
+    impossible ₹0.00 sale. The post-slippage fill is clamped to
+    ``TICK_PAISA`` so the sell fill is 5 paise, never 0.
+    """
+    r = compute_trade_cost(
+        _make_trade(
+            entry_open_paisa=10_000,
+            exit_open_paisa=5,  # exactly 1 tick
+            side="long_call",
+        )
+    )
+    # Without the floor this would be 0 (a free sale); clamped to 1 tick.
+    assert r.sell_fill_paisa == constants.TICK_PAISA  # 5 paise, NOT 0
+    assert r.sell_fill_paisa > 0
+    assert r.sell_notional_paisa == 5 * r.n_shares
+
+
+def test_realized_slippage_normal_path_two_ticks() -> None:
+    """NIT-1: on the normal path (fills ≥ 2 ticks) slippage_paisa == 2*tick*shares.
+
+    Both fills move a full tick adverse, so the realized slippage equals the
+    nominal ``2 × TICK_PAISA × n_shares`` — byte-identical to the pre-NIT-1
+    nominal value (the canonical §12.1 NIFTY fixture's 650 paisa is unchanged).
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=9_995, exit_open_paisa=12_005, side="long_call")
+    )
+    assert r.slippage_paisa == 2 * constants.TICK_PAISA * r.n_shares
+
+
+def test_realized_slippage_floored_exit_one_tick() -> None:
+    """NIT-1: a 5-paise (1-tick) long exit floors the sell fill, so the
+    realized slippage is 1*tick*shares — NOT the nominal 2*tick*shares.
+
+    ``exit_bar_open_paisa = 5`` slips to ``5 - 5 = 0``, floored UP to one
+    tick (5 paise). The sell leg therefore moved 0 paise — only the buy leg
+    actually slipped — so the realized slippage is exactly ``1 × TICK_PAISA ×
+    n_shares``, never over-stating the slippage carried by the notionals/PnL.
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=10_000, exit_open_paisa=5, side="long_call")
+    )
+    assert r.sell_fill_paisa == constants.TICK_PAISA  # floored to 5, not 0
+    # Realized: only the buy leg moved (1 tick); the floored sell leg moved 0.
+    assert r.slippage_paisa == 1 * constants.TICK_PAISA * r.n_shares
+    assert r.slippage_paisa != 2 * constants.TICK_PAISA * r.n_shares
+
+
+def test_long_exit_fill_above_floor_unchanged() -> None:
+    """MINOR-3: the normal path (exit ≥ 2 ticks) is byte-unchanged by the floor.
+
+    A ₹0.10 (2-tick) exit slips to ₹0.05 (1 tick), already at the floor —
+    so the clamp is a no-op and the fill equals the un-clamped value.
+    """
+    r = compute_trade_cost(
+        _make_trade(
+            entry_open_paisa=10_000,
+            exit_open_paisa=10,  # 2 ticks → slips to 5 (1 tick), no clamp change
+            side="long_call",
+        )
+    )
+    assert r.sell_fill_paisa == 5  # 10 - 5, equals the floor, un-clamped value
+
+
+# ─────────────────────────────────────────────────────────────────
+# CHANGE 4 (MINOR-4) — byte-exact slippage fills for all 4 leg combos
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_slippage_long_fills_byte_exact() -> None:
+    """CALCULATOR_SPEC §8: long entry = open+1tick, exit = open-1tick.
+
+    Byte-exact concrete paisa values (replacing tautological assertions).
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=10_000, exit_open_paisa=12_000, side="long_call")
+    )
+    assert r.buy_fill_paisa == 10_005  # entry 10000 + 5 tick (adverse, higher)
+    assert r.sell_fill_paisa == 11_995  # exit 12000 - 5 tick (adverse, lower)
+
+
+def test_slippage_short_fills_pinned_current_behavior() -> None:
+    """MINOR-4: the short-side fills are PINNED to current behaviour.
+
+    The short SELL (entry) leg sign is a documented spec ambiguity:
+    CALCULATOR_SPEC §8 table says short entry fill = ``entry_bar_open − 1
+    tick``, but the §4 pseudocode says "SELL at entry+1tick" and is flagged
+    "CHECK SIGN". Track 2 is BUY-only (DEC-EXEC-008), so this path is never
+    used in production; we PIN the current implementation (cover at
+    exit+tick, sell at entry+tick) rather than guess-change an unused path.
+    Resolve the spec contradiction before any short-side track relies on it.
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=10_000, exit_open_paisa=12_000, side="short_call")
+    )
+    assert r.buy_fill_paisa == 12_005  # cover: exit 12000 + 5 tick (adverse, higher)
+    # Current behaviour (matches §4 pseudocode, NOT the §8 table — see docstring):
+    assert r.sell_fill_paisa == 10_005  # entry 10000 + 5 tick
+
+
+# ─────────────────────────────────────────────────────────────────
+# CHANGE 3 (NIT-1) — direct ROUND_HALF_UP rounding-helper tests
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_round_to_paisa_positive_path_byte_identical() -> None:
+    """NIT-1: positive inputs are byte-identical to the historical formula."""
+    for x in (0, 1, 4_999_999, 5_000_000, 5_000_001, 14_999_999, 15_000_000, 99_999_999):
+        assert _round_to_paisa(x) == (x + 5_000_000) // 10_000_000
+
+
+def test_round_to_paisa_half_up_away_from_zero() -> None:
+    """NIT-1: ties round AWAY from zero (ROUND_HALF_UP), both signs."""
+    assert _round_to_paisa(5_000_000) == 1  # +0.5 → +1 (just-on tie)
+    assert _round_to_paisa(4_999_999) == 0  # just below half → 0
+    assert _round_to_paisa(5_000_001) == 1  # just above half → 1
+    assert _round_to_paisa(15_000_000) == 2  # +1.5 → +2
+    assert _round_to_paisa(0) == 0  # exact zero
+    assert _round_to_paisa(-5_000_000) == -1  # -0.5 → -1 (away from zero)
+    assert _round_to_paisa(-15_000_000) == -2  # -1.5 → -2
+    assert _round_to_paisa(-4_999_999) == 0  # just-above -half → 0
+    assert _round_to_paisa(-5_000_001) == -1  # just-below -half → -1
+
+
+def test_round_to_rupee_positive_path_byte_identical() -> None:
+    """NIT-1: positive inputs are byte-identical to the historical formula."""
+    for x in (0, 1, 49, 50, 51, 149, 150, 1_170, 99_999):
+        assert _round_to_rupee(x) == ((x + 50) // 100) * 100
+
+
+def test_round_to_rupee_half_up_away_from_zero() -> None:
+    """NIT-1: ties round AWAY from zero (ROUND_HALF_UP), both signs."""
+    assert _round_to_rupee(50) == 100  # +0.5 rupee → +1
+    assert _round_to_rupee(49) == 0  # just below half → 0
+    assert _round_to_rupee(51) == 100  # just above half → 1
+    assert _round_to_rupee(150) == 200  # +1.5 → +2
+    assert _round_to_rupee(0) == 0  # exact zero
+    assert _round_to_rupee(-50) == -100  # -0.5 → -1 (away from zero)
+    assert _round_to_rupee(-150) == -200  # -1.5 → -2
+    assert _round_to_rupee(-49) == 0  # just-above -half → 0
+    assert _round_to_rupee(-51) == -100  # just-below -half → -1
+
+
+# ─────────────────────────────────────────────────────────────────
+# Boundary LOTS / PRICES
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_boundary_one_lot_minimum() -> None:
+    """Minimum n_lots = 1 produces n_shares == one lot."""
+    r = compute_trade_cost(_make_trade(n_lots=1))
+    assert r.n_shares == r.n_shares_per_lot
+
+
+def test_boundary_large_lot_count() -> None:
+    """A large lot count scales notional linearly; brokerage stays flat."""
+    r = compute_trade_cost(_make_trade(n_lots=10_000))
+    assert r.n_shares == 10_000 * r.n_shares_per_lot
+    assert r.brokerage_paisa == 4_000  # per-order flat, lot-count independent
+
+
+def test_boundary_minimum_valid_price_one_tick() -> None:
+    """Both bars at exactly 1 tick (5 paise) — the minimum valid price.
+
+    Entry fill floors at 1 tick (5 + 5 = 10, above floor); exit fill
+    5 - 5 = 0 floors UP to 1 tick. No exception, all charges ≥ 0.
+    """
+    r = compute_trade_cost(_make_trade(entry_open_paisa=5, exit_open_paisa=5, side="long_call"))
+    assert r.buy_fill_paisa == 10  # 5 + 5 tick
+    assert r.sell_fill_paisa == 5  # floored from 0
+    assert r.total_charges_paisa >= 0
+    assert r.stt_paisa >= 0
+
+
+def test_boundary_price_exactly_on_tick() -> None:
+    """A price exactly on the tick grid slips by exactly ±1 tick."""
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=10_000, exit_open_paisa=20_000, side="long_call")
+    )
+    assert r.buy_fill_paisa == 10_005
+    assert r.sell_fill_paisa == 19_995
+
+
+# ─────────────────────────────────────────────────────────────────
+# STT regime-boundary timestamps (Oct-2024 + Apr-2026)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_stt_regime_boundary_oct_2024() -> None:
+    """STT regime flips at 2024-10-01: 2024-09-30 → 0.0625%, 2024-10-01 → 0.10%."""
+    assert (
+        constants.stt_options_rate_bps_x100(date(2024, 9, 30))
+        == constants.STT_OPTIONS_PRE_OCT_2024_BPS_X100
+    )
+    assert (
+        constants.stt_options_rate_bps_x100(date(2024, 10, 1))
+        == constants.STT_OPTIONS_OCT_2024_TO_MAR_2026_BPS_X100
+    )
+
+
+def test_stt_regime_boundary_apr_2026_flip() -> None:
+    """STT regime flips at 2026-04-01: 2026-03-31 → 0.10%, 2026-04-01 → 0.15%."""
+    assert (
+        constants.stt_options_rate_bps_x100(date(2026, 3, 31))
+        == constants.STT_OPTIONS_OCT_2024_TO_MAR_2026_BPS_X100
+    )
+    assert (
+        constants.stt_options_rate_bps_x100(date(2026, 4, 1))
+        == constants.STT_OPTIONS_POST_APR_2026_BPS_X100
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Property test (CHANGE 5) — invariants over random valid TradeInputs
+# ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.property
+@settings(max_examples=300, deadline=None)
+@given(
+    entry_open=st.integers(min_value=5, max_value=5_000_000),
+    exit_open=st.integers(min_value=5, max_value=5_000_000),
+    n_lots=st.integers(min_value=1, max_value=5_000),
+    instrument=st.sampled_from(["NIFTY", "BANKNIFTY", "SENSEX"]),
+    side=st.sampled_from(["long_call", "long_put"]),
+    broker=st.sampled_from(["groww", "zerodha"]),
+    entry_dt=st.datetimes(
+        min_value=datetime(2021, 1, 1, 9, 15),
+        max_value=datetime(2026, 12, 31, 15, 20),
+    ),
+)
+def test_property_cost_invariants(
+    entry_open: int,
+    exit_open: int,
+    n_lots: int,
+    instrument: Instrument,
+    side: TradeSide,
+    broker: Broker,
+    entry_dt: datetime,
+) -> None:
+    """CHANGE 5: invariants over random valid NORMAL_CLOSE long trades.
+
+    - total_charges == sum of the 7 components
+    - net == gross - total
+    - every component ≥ 0, total ≥ 0
+    - fills ≥ 1 tick (the MINOR-3 floor)
+    - rounding idempotence on the rupee-rounded statutory levies
+    """
+    r = compute_trade_cost(
+        _make_trade(
+            entry_dt=entry_dt,
+            exit_dt=entry_dt,  # same instant is valid (exit >= entry)
+            instrument=instrument,
+            entry_open_paisa=entry_open,
+            exit_open_paisa=exit_open,
+            side=side,
+            n_lots=n_lots,
+            broker=broker,
+        )
+    )
+
+    components = (
+        r.brokerage_paisa,
+        r.stt_paisa,
+        r.exch_paisa,
+        r.sebi_paisa,
+        r.ipft_paisa,
+        r.stamp_paisa,
+        r.gst_paisa,
+    )
+    assert r.total_charges_paisa == sum(components)
+    assert r.net_pnl_paisa == r.gross_pnl_paisa - r.total_charges_paisa
+    assert all(c >= 0 for c in components)
+    assert r.total_charges_paisa >= 0
+    # MINOR-3 floor: no fill below one tick.
+    assert r.buy_fill_paisa >= constants.TICK_PAISA
+    assert r.sell_fill_paisa >= constants.TICK_PAISA
+    # Rounding idempotence: re-rounding a rupee-rounded value is a no-op.
+    assert _round_to_rupee(r.stt_paisa) == r.stt_paisa
+    assert _round_to_rupee(r.gst_paisa) == r.gst_paisa
+    assert _round_to_rupee(r.stamp_paisa) == r.stamp_paisa
+
+
+# ─────────────────────────────────────────────────────────────────
+# Guard completeness — every __post_init__ validation (CHANGE 5)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_trade_input_accepts_equal_entry_exit() -> None:
+    """exit_dt_ist == entry_dt_ist is valid (the boundary of the >= rule)."""
+    dt = datetime(2026, 5, 15, 10, 0)
+    trade = TradeInput(
+        entry_dt_ist=dt,
+        exit_dt_ist=dt,
+        instrument="NIFTY",
+        option_type="CE",
+        strike=2_500_000,
+        expiry_date=date(2026, 5, 21),
+        entry_bar_open_paisa=10_000,
+        exit_bar_open_paisa=10_000,
+        side="long_call",
+    )
+    assert trade.exit_dt_ist == trade.entry_dt_ist
+
+
+def test_trade_input_accepts_min_valid_boundaries() -> None:
+    """The minimum valid values (price 5, n_lots 1, strike 1) are accepted."""
+    trade = TradeInput(
+        entry_dt_ist=datetime(2026, 5, 15, 10, 0),
+        exit_dt_ist=datetime(2026, 5, 15, 11, 0),
+        instrument="NIFTY",
+        option_type="CE",
+        strike=1,
+        expiry_date=date(2026, 5, 21),
+        entry_bar_open_paisa=5,
+        exit_bar_open_paisa=5,
+        side="long_call",
+        n_lots=1,
+    )
+    assert trade.entry_bar_open_paisa == 5
+    assert trade.n_lots == 1
+    assert trade.strike == 1
+
+
+def test_trade_input_rejects_negative_lots() -> None:
+    """n_lots < 0 (negative, not just zero) must raise."""
+    with pytest.raises(ValueError, match="n_lots .* must be >= 1"):
+        TradeInput(
+            entry_dt_ist=datetime(2026, 5, 15, 10, 0),
+            exit_dt_ist=datetime(2026, 5, 15, 11, 0),
+            instrument="NIFTY",
+            option_type="CE",
+            strike=2_500_000,
+            expiry_date=date(2026, 5, 21),
+            entry_bar_open_paisa=10_000,
+            exit_bar_open_paisa=10_000,
+            side="long_call",
+            n_lots=-3,
+        )
+
+
+def test_trade_input_rejects_negative_strike() -> None:
+    """strike < 0 (negative) must raise (the < 1 guard)."""
+    with pytest.raises(ValueError, match="strike .* must be >= 1"):
+        TradeInput(
+            entry_dt_ist=datetime(2026, 5, 15, 10, 0),
+            exit_dt_ist=datetime(2026, 5, 15, 11, 0),
+            instrument="NIFTY",
+            option_type="CE",
+            strike=-1,
+            expiry_date=date(2026, 5, 21),
+            entry_bar_open_paisa=10_000,
+            exit_bar_open_paisa=10_000,
+            side="long_call",
+        )

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal
+from typing import Final, Literal, get_args
 
 __all__ = [
     "Broker",
@@ -37,7 +37,33 @@ __all__ = [
     "TradeInput",
     "TradeOutcome",
     "TradeSide",
+    "UnsupportedTradeOutcomeError",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Domain errors
+# ─────────────────────────────────────────────────────────────────
+
+
+class UnsupportedTradeOutcomeError(ValueError):
+    """Raised when ``compute_trade_cost`` is asked to price a non-NORMAL
+    trade outcome.
+
+    Track 2 (per DEC-RISK-011) is intraday-only with a forced 15:20 exit,
+    so every trade resolves as ``NORMAL_CLOSE``. The expiry outcomes
+    (``EXPIRY_EXERCISE`` / ``EXPIRY_ASSIGN`` / ``EXPIRY_WORTHLESS``) require
+    the ``CALCULATOR_SPEC §4.2`` charge state machine (STT on intrinsic,
+    zero-STT assignment, brokerage-only worthless), which is NOT yet
+    implemented. Rather than silently return premium-based NORMAL_CLOSE
+    numbers for an expiry outcome (a silently-wrong cost), the calculator
+    fails loud with this specific exception.
+
+    A ``ValueError`` subclass so existing callers that catch ``ValueError``
+    for input validation still catch it, while a caller can pin this exact
+    type. NOT ``NotImplementedError`` — that is coverage-excluded and we
+    require a real, tested branch.
+    """
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -76,6 +102,21 @@ TradeOutcome = Literal[
 Track 2 hard-codes ``NORMAL_CLOSE`` per DEC-RISK-011 (intraday-only,
 forced 15:20 exit, no held-to-expiry). The other three values are
 forward-compat stubs for future tracks that may hold to expiry."""
+
+
+# ─────────────────────────────────────────────────────────────────
+# Allowed-member sets — derived ONCE from the Literal aliases above
+# via ``typing.get_args`` so there is a SINGLE source of truth (no
+# hand-maintained duplicate list that could silently drift). Used by
+# ``TradeInput.__post_init__`` to fail loud on a typo'd enum string.
+# ─────────────────────────────────────────────────────────────────
+
+_INSTRUMENT_VALUES: Final[frozenset[str]] = frozenset(get_args(Instrument))
+_OPTION_TYPE_VALUES: Final[frozenset[str]] = frozenset(get_args(OptionType))
+_TRADE_SIDE_VALUES: Final[frozenset[str]] = frozenset(get_args(TradeSide))
+_BROKER_VALUES: Final[frozenset[str]] = frozenset(get_args(Broker))
+_GST_SPLIT_VALUES: Final[frozenset[str]] = frozenset(get_args(GstSplit))
+_TRADE_OUTCOME_VALUES: Final[frozenset[str]] = frozenset(get_args(TradeOutcome))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -170,6 +211,23 @@ class TradeInput:
         if self.strike < 1:
             msg = f"strike {self.strike} must be >= 1"
             raise ValueError(msg)
+        # Fail loud on a typo'd enum string. The fields are typed
+        # ``Literal[...]`` but a static type is NOT a runtime guard: a bad
+        # value like ``side="banana"`` would otherwise be SILENTLY ACCEPTED
+        # and route into the short-leg / inverted-PnL branch, producing a
+        # silently-WRONG cost. Each allowed set is derived from its own
+        # Literal alias (single source of truth — see above).
+        for field_name, value, allowed in (
+            ("instrument", self.instrument, _INSTRUMENT_VALUES),
+            ("option_type", self.option_type, _OPTION_TYPE_VALUES),
+            ("side", self.side, _TRADE_SIDE_VALUES),
+            ("broker", self.broker, _BROKER_VALUES),
+            ("gst_split", self.gst_split, _GST_SPLIT_VALUES),
+            ("trade_outcome", self.trade_outcome, _TRADE_OUTCOME_VALUES),
+        ):
+            if value not in allowed:
+                msg = f"{field_name} {value!r} is not a valid value; allowed: {sorted(allowed)}"
+                raise ValueError(msg)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -220,8 +278,12 @@ class TradeCostBreakdown:
         GST 18% on (brokerage + exch + sebi + ipft). Total rounded
         ONCE per DEC-COST-001 (NOT CGST/SGST separately).
     slippage_paisa : int
-        Informational: ``2 * TICK_PAISA * n_shares`` (already baked
-        into buy_fill_paisa / sell_fill_paisa).
+        Informational: the slippage TRULY baked into the fills (NIT-1) —
+        the realized per-share fill deltas × n_shares. Normally
+        ``2 * TICK_PAISA * n_shares`` (±1 tick per leg), but ``1 *
+        TICK_PAISA * n_shares`` when the 1-tick floor caps a degenerate
+        sub-2-tick sell fill (the sell leg then moved 0). Always
+        internally consistent with buy_fill_paisa / sell_fill_paisa.
     total_charges_paisa : int
         Sum of brokerage + stt + exch + sebi + ipft + stamp + gst.
     gross_pnl_paisa : int

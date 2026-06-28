@@ -21,7 +21,11 @@ at sweep time.
 from __future__ import annotations
 
 from brutex.costs import constants as C  # noqa: N812 — C = costs constants namespace
-from brutex.costs.types import TradeCostBreakdown, TradeInput
+from brutex.costs.types import (
+    TradeCostBreakdown,
+    TradeInput,
+    UnsupportedTradeOutcomeError,
+)
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
 __all__ = ["compute_trade_cost"]
@@ -33,7 +37,7 @@ __all__ = ["compute_trade_cost"]
 
 
 def _round_to_paisa(amount_x_bps_x100: int) -> int:
-    """Round a (paisa × rate-scaled) product down to whole paise, half-up.
+    """Round a (paisa × rate-scaled) product to whole paise, ROUND_HALF_UP.
 
     Rate constants in `brutex.costs.constants` use the encoding
     ``rate_decimal × 10_000_000``. So a 0.03503% rate is stored as
@@ -41,28 +45,45 @@ def _round_to_paisa(amount_x_bps_x100: int) -> int:
 
         rate_decimal = 3503 / 10_000_000 = 0.0003503
 
-    The integer math (half-up rounding to whole paise) is:
-
-        paisa = (paisa_amount * bps_x100 + 5_000_000) // 10_000_000
-
-    The ``+ 5_000_000`` is half-up rounding in integer space.
+    ROUND_HALF_UP here means **round half AWAY from zero**, matching
+    ``brutex.money.round_money`` (Decimal ``ROUND_HALF_UP``): a tie at
+    ``+0.5`` rounds to ``+1`` and a tie at ``-0.5`` rounds to ``-1``. For
+    NON-NEGATIVE inputs the result is byte-identical to the historical
+    ``(x + 5_000_000) // 10_000_000`` formula; the explicit sign branch
+    only changes negative inputs (NIT-1 hardening — the live calculator
+    never feeds a negative product, but a future signed caller no longer
+    rounds toward +∞).
 
     Used for non-statutory items (exchange / SEBI / IPFT) where
     commercial half-up rounding applies.
     """
-    return (amount_x_bps_x100 + 5_000_000) // 10_000_000
+    if amount_x_bps_x100 >= 0:
+        return (amount_x_bps_x100 + 5_000_000) // 10_000_000
+    # Round half AWAY from zero for negatives (mirror the positive branch).
+    return -((-amount_x_bps_x100 + 5_000_000) // 10_000_000)
 
 
 def _round_to_rupee(amount_paisa: int) -> int:
-    """Round to nearest whole rupee (100 paise), half-up.
+    """Round to nearest whole rupee (100 paise), ROUND_HALF_UP.
 
     Used for STATUTORY levies: STT, stamp duty, GST. Returns paise
     rounded to the nearest multiple of 100.
 
+    ROUND_HALF_UP = round half AWAY from zero, matching
+    ``brutex.money.round_money`` (Decimal ``ROUND_HALF_UP``): ``+50`` →
+    ``+100`` and ``-50`` → ``-100``. For NON-NEGATIVE inputs the result is
+    byte-identical to the historical ``((x + 50) // 100) * 100`` formula;
+    the explicit sign branch only changes negatives (NIT-1 hardening —
+    unreachable in the live calculator, but a future signed caller no
+    longer rounds toward +∞).
+
     Example: 1170 paisa (₹11.70) → 1200 paisa (₹12).
              50 paisa (₹0.50) → 100 paisa (₹1) [half-up rule].
     """
-    return ((amount_paisa + 50) // 100) * 100
+    if amount_paisa >= 0:
+        return ((amount_paisa + 50) // 100) * 100
+    # Round half AWAY from zero for negatives (mirror the positive branch).
+    return -(((-amount_paisa + 50) // 100) * 100)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -89,22 +110,61 @@ def _apply_slippage(
     entry_open_paisa: int,
     exit_open_paisa: int,
     side: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Apply 1-tick adverse slippage per side.
 
     Long side: buy 1 tick higher, sell 1 tick lower.
     Short side: sell 1 tick lower, buy 1 tick higher (cover).
 
-    Returns ``(buy_fill_paisa, sell_fill_paisa)``.
+    Returns ``(buy_fill_paisa, sell_fill_paisa, realized_slippage_per_share)``.
 
     For Track 2 (BUY-only, per DEC-EXEC-008), only the long branches
     fire. Short branches kept for forward-compat.
+
+    Every returned fill is floored at one tick (MINOR-3): a long exit on a
+    bar that opens at exactly one tick (₹0.05) would otherwise slip to a
+    ₹0.00 sell fill (a "free" sale), which is economically impossible —
+    nothing trades below one tick. The floor only affects that degenerate
+    tick-boundary case; the normal path (prices ≥ 2 ticks) is unchanged.
+
+    ``realized_slippage_per_share`` is the slippage TRULY baked into the
+    post-floor fills (NIT-1): the buy leg's adverse rise from its raw open
+    plus the sell leg's adverse drop to its raw open, both measured against
+    the floored fills. On the normal path (fills ≥ 2 ticks) it equals the
+    nominal ``2 × tick``; when the 1-tick floor fires on the sell leg the
+    realized sell-leg movement is 0, so the per-share value is exactly
+    ``1 × tick`` — never over-stating the slippage that the notionals/PnL
+    actually carry.
     """
     tick = C.TICK_PAISA
     if side.startswith("long"):
-        return entry_open_paisa + tick, exit_open_paisa - tick
-    # short side: BUY at exit_open + tick (cover), SELL at entry_open + tick
-    return exit_open_paisa + tick, entry_open_paisa + tick
+        # buy leg ← entry bar, sell leg ← exit bar.
+        buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
+        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+    else:
+        # short side: BUY at exit_open + tick (cover), SELL at entry_open + tick.
+        #
+        # MINOR-4 — the short SELL leg sign is a documented spec AMBIGUITY: the
+        # CALCULATOR_SPEC §8 table says short entry fill = ``entry_bar_open − 1
+        # tick`` (adverse, LOWER), but the §4 pseudocode comment says "SELL at
+        # entry+1tick" (HIGHER) and is itself flagged "# CHECK SIGN". The two
+        # spec readings disagree. Track 2 is BUY-only (DEC-EXEC-008), so this
+        # branch is never exercised in production; we PIN the current behaviour
+        # (entry_open + tick) and pin it with a byte-exact test rather than
+        # guess-changing an unused path. Resolve the spec contradiction before
+        # any short-side track relies on this fill.
+        # buy leg (cover) ← exit bar, sell leg ← entry bar.
+        buy_raw, sell_raw = exit_open_paisa, entry_open_paisa
+        buy_fill, sell_fill = buy_raw + tick, sell_raw + tick
+    # Floor every fill at one tick — no instrument trades below ₹0.05.
+    buy_fill, sell_fill = max(buy_fill, tick), max(sell_fill, tick)
+    # Realized per-share slippage = the adverse movement TRULY baked into the
+    # floored fills: |buy_fill − buy_raw| (buy moved against us, up) +
+    # |sell_raw − sell_fill| (sell moved against us, down, but the floor caps
+    # the drop). On the normal path this is 2×tick; a floored sell leg yields
+    # 1×tick (NIT-1: never over-states the slippage carried by the notionals).
+    realized_per_share = abs(buy_fill - buy_raw) + abs(sell_raw - sell_fill)
+    return buy_fill, sell_fill, realized_per_share
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -134,12 +194,31 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
 
     Track 2 (per DEC-RISK-011) always calls with
     ``trade.trade_outcome == "NORMAL_CLOSE"``. The expiry branches
-    (EXPIRY_EXERCISE / EXPIRY_ASSIGN / EXPIRY_WORTHLESS) are
-    forward-compat stubs from `CALCULATOR_SPEC.md §4.2` and are
-    NOT exercised in Track 2 backtests.
+    (EXPIRY_EXERCISE / EXPIRY_ASSIGN / EXPIRY_WORTHLESS) require the
+    `CALCULATOR_SPEC.md §4.2` charge state machine, which is NOT yet
+    implemented — passing one raises ``UnsupportedTradeOutcomeError``
+    (fail-loud) instead of silently pricing it as ``NORMAL_CLOSE``.
+
+    Raises
+    ------
+    UnsupportedTradeOutcomeError
+        If ``trade.trade_outcome`` is not ``"NORMAL_CLOSE"`` (MAJOR-1).
     """
+    # ── Step 0: fail loud on an unimplemented outcome (MAJOR-1) ─────────
+    # Only NORMAL_CLOSE is implemented. Pricing an expiry outcome with the
+    # premium-based NORMAL_CLOSE math would be silently wrong; CALCULATOR_SPEC
+    # §4.2 (STT on intrinsic / zero-STT assign / brokerage-only worthless) is
+    # not yet implemented, so we refuse rather than fabricate a cost.
+    if trade.trade_outcome != "NORMAL_CLOSE":
+        msg = (
+            f"trade_outcome {trade.trade_outcome!r} is not supported: only "
+            "'NORMAL_CLOSE' is implemented (CALCULATOR_SPEC §4.2 expiry state "
+            "machine not yet implemented)"
+        )
+        raise UnsupportedTradeOutcomeError(msg)
+
     # ── Step 1: apply slippage (1-tick flat adverse) ────────────────────
-    buy_fill_paisa, sell_fill_paisa = _apply_slippage(
+    buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
         trade.entry_bar_open_paisa,
         trade.exit_bar_open_paisa,
         trade.side,
@@ -208,8 +287,12 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # ── Step 13: net PnL ────────────────────────────────────────────────
     net_pnl_paisa = gross_pnl_paisa - total_charges_paisa
 
-    # Slippage as informational line (2 ticks × n_shares: ±1 tick per leg)
-    slippage_paisa = 2 * C.TICK_PAISA * n_shares
+    # Slippage as informational line — derived from the REALIZED fill deltas
+    # (NIT-1) so it is always internally consistent with the notionals/PnL: on
+    # the normal path this is the nominal 2 ticks × n_shares (±1 tick per leg),
+    # but when the 1-tick floor caps a degenerate sub-2-tick sell fill the
+    # sell leg actually moved 0, so the realized slippage is 1 tick × n_shares.
+    slippage_paisa = realized_slip_per_share * n_shares
 
     return TradeCostBreakdown(
         n_shares_per_lot=n_shares_per_lot,
@@ -229,6 +312,8 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         total_charges_paisa=total_charges_paisa,
         gross_pnl_paisa=gross_pnl_paisa,
         net_pnl_paisa=net_pnl_paisa,
-        used_exercise_branch=trade.trade_outcome in ("EXPIRY_EXERCISE", "EXPIRY_ASSIGN"),
+        # Always False: the Step-0 guard rejects every non-NORMAL_CLOSE
+        # outcome, so the exercise branch (§4.2) is never reached here.
+        used_exercise_branch=False,
         n_orders_per_leg=1,  # iceberg slicing not yet implemented (§6b deferred)
     )

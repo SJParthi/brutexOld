@@ -40,6 +40,7 @@ from brutex.costs.types import (
     TradeInput,
     TradeOutcome,
     TradeSide,
+    UnsupportedTradeOutcomeError,
 )
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "TradeInput",
     "TradeOutcome",
     "TradeSide",
+    "UnsupportedTradeOutcomeError",
     "compute_trade_cost",
     "constants",
 ]
