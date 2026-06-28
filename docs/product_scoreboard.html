@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · Jun 2026 · ledger #935</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #979</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that records <b>every single minute</b> of India's index &amp; F&amp;O
       market history (2020 → today), shows you <b>what's actually moving</b> right now, and brute-force
@@ -88,6 +88,8 @@
     <tr><td class="feat">Dashboard never freezes during a download — Coverage / Completeness scans now self-throttle, so a running download keeps its full speed instead of dropping by half</td><td class="why">The dashboard stays usable even mid-download</td><td class="ref">#920</td></tr>
     <tr><td class="feat">Faster, byte-identical file writes — a smarter way of merging each downloaded month makes writes quicker without changing a single number in your data</td><td class="why">Downloads start getting faster, results stay identical</td><td class="ref">#927</td></tr>
     <tr><td class="feat">Instant nav on the last three pages — Coverage / Completeness / Mapping pages answer a repeat refresh instantly instead of re-projecting the whole lake each time</td><td class="why">Section-to-section navigation is snappy</td><td class="ref">#933</td></tr>
+    <tr><td class="feat">Bounded daily-derive reads — building the daily/intraday timeframes after a pull now reads only the months you actually pulled, not years of minute history each time</td><td class="why">Pulls stay fast as your history grows to years</td><td class="ref">#939</td></tr>
+    <tr><td class="feat">Write-cost telemetry + at-scale bench — the disk-write step now reports exactly how long each save takes, with a deep-partition benchmark to prove where the real bottleneck is</td><td class="why">Performance work is evidence-led, never guesswork</td><td class="ref">#937 / #946</td></tr>
   </table>
 
   <p class="theme">📊 Theme 2 — "See what's actually moving"</p>
@@ -100,6 +102,9 @@
     <tr><td class="feat">Find any contract fast — symbol → expiry → strike cascading pickers for F&amp;O, symbol → timeframe for spot</td><td class="why">Pinpoint the exact contract instead of a giant dropdown</td><td class="ref">#880 / #897</td></tr>
     <tr><td class="feat">Each tab stays its own market — spot shows only spot; futures/options gainers-losers populate even without a daily partition</td><td class="why">Clean, accurate tabs — no cross-asset pollution, no empty movers</td><td class="ref">#915</td></tr>
     <tr><td class="feat">Pick your futures expiry — Near / Next / Far filters to that serial-month future per underlying (front / 2nd / 3rd), each cached independently</td><td class="why">Focus on the liquid expiry — no stale rows, no spreadsheet juggling</td><td class="ref">#917</td></tr>
+    <tr><td class="feat"><b>See the sweep winners</b> — a new read-only <b>/results</b> page lists the ranked brute-force combos: matched conditions by name, net P&amp;L in rupees, full-precision Sharpe / profit-factor / win-rate, with filter + click-to-sort; a completed sweep refreshes it automatically</td><td class="why">One screen for <i>which strategies won</i> — no CLI needed</td><td class="ref">#976 / #977 / #978</td></tr>
+    <tr><td class="feat">F&amp;O movers actually populate — the futures / options CHANGE / CHANGE% / OI columns are no longer blank: the metadata pull now resolves the real vendor underlying first, so eligible stocks return their expiries/contracts instead of zero</td><td class="why">F&amp;O gainers/losers screens show real numbers, not blanks</td><td class="ref">#974</td></tr>
+    <tr><td class="feat">F&amp;O timeframes carry open interest — the derived daily + intraday F&amp;O candles now carry the bucket's last open-interest snapshot (never summed), exactly like the 1-minute data</td><td class="why">Resampled F&amp;O history keeps OI correct on every timeframe</td><td class="ref">#954</td></tr>
   </table>
 
   <p class="theme">🛡️ Theme 3 — "Nothing is ever lost"</p>
@@ -115,13 +120,20 @@
     <tr><td class="feat">Junk bars never stored — a vendor candle mixing a zero price with real prices is skipped, not stored as a fabricated zero</td><td class="why">Your backtest runs on real prices, never corrupted ones</td><td class="ref">#912</td></tr>
     <tr><td class="feat">Rate cap can't be overshot — the 500/min limiter reserves its slot atomically</td><td class="why">Your vendor limits are truly enforced, even at full parallelism</td><td class="ref">#913</td></tr>
     <tr><td class="feat">One bad combo ≠ dead sweep — a single failing strategy combo is skipped + flagged, the rest finish</td><td class="why">A days-long sweep isn't lost to one bad tuple</td><td class="ref">#904</td></tr>
+    <tr><td class="feat">Network blips retry — a momentary DNS / connection failure ("can't resolve api.groww.in") is retried, not treated as a stock that's "gone forever"</td><td class="why">A flaky 30-second network hiccup never costs you a whole symbol</td><td class="ref">#936</td></tr>
+    <tr><td class="feat">One corrupt stored file ≠ broken pull — a corrupt existing data file now quarantines that one symbol instead of crashing the whole pull, sweep load, or movers screen</td><td class="why">A single bad file on disk can never take down a multi-day download</td><td class="ref">#886 / #941 / #950</td></tr>
+    <tr><td class="feat">A pull can't stall on its own locks — internal file-locks now defer-and-retry (like a rate limit) instead of pinning a worker, so the <i>only</i> thing that can slow a download is the broker's rate limit</td><td class="why">Downloads make steady progress — they never silently wedge</td><td class="ref">#953</td></tr>
+    <tr><td class="feat">Off-heap sweep dedup — the brute-force engine de-duplicates combos in an on-disk store instead of unbounded RAM, so a giant sweep can't run the 48 GB machine out of memory</td><td class="why">Massive sweeps finish instead of crashing on memory</td><td class="ref">#957</td></tr>
+    <tr><td class="feat">Deterministic, reproducible results — tied leaderboard scores break on a stable key, <code>-0.0</code>/<code>NaN</code> can't slip into a run's identity hash, and a re-run is bit-identical</td><td class="why">The same inputs always give the exact same ranked winners</td><td class="ref">#960 / #962 / #964 / #967</td></tr>
+    <tr><td class="feat">Engine-wide robustness sweep — the indicators, costs, metrics, orchestrator audit-log, rate-limiter and the shared Rust core all now fail loudly on corrupt input instead of silently propagating bad numbers</td><td class="why">Bad data is caught at the door, never quietly poisons a result</td><td class="ref">#961 / #963 / #968 / #969 / #965</td></tr>
   </table>
 
   <p class="theme">📡 Theme 4 — "You always know what's happening"</p>
   <table>
     <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
     <tr><td class="feat">Instant phone alerts — a CRITICAL Telegram alert fires when a download halts (disk-full / out-of-memory / quota), from both CLI and dashboard</td><td class="why">You hear about a stopped pull in real time, not hours later</td><td class="ref">#888 / #889</td></tr>
-    <tr><td class="feat">Pull-health self-watch — a live monitor decides whether a slow download is <b>our</b> software holding it back or the broker simply rejecting requests, and it's now wired into every real pull (firing a phone alert the moment it degrades)</td><td class="why">When a pull is slow, you know exactly whose fault it is — automatically, not by squinting at a chart</td><td class="ref">#932 / #935</td></tr>
+    <tr><td class="feat">Pull-health self-watch — a live monitor decides whether a slow download is <b>our</b> software holding it back or the broker simply rejecting requests, and it's now wired into every real pull (firing a phone alert the moment it degrades) — and it's now safe across all parallel download workers</td><td class="why">When a pull is slow, you know exactly whose fault it is — automatically, not by squinting at a chart</td><td class="ref">#932 / #935 / #956</td></tr>
+    <tr><td class="feat">Hung-pull watchdog — a heartbeat watchdog declares a wedged background download HUNG, fires a CRITICAL phone alert, and releases the stuck flag so the next pull isn't silently refused</td><td class="why">A frozen download tells you in real time — it never just sits there silently</td><td class="ref">#948</td></tr>
   </table>
 
   <p class="theme">🎯 Theme 5 — "The data is right (and honest)"</p>
@@ -135,6 +147,7 @@
     <tr><td class="feat">Mapping integrity audits — proves every option maps to the right stock + lot size; flagged, never faked</td><td class="why">Trust that the data lines up</td><td class="ref">#870 / #873 / #874 / #875</td></tr>
     <tr><td class="feat">Honest completeness — late-listed names + missing years marked "partial" instead of faking a full span</td><td class="why">The completeness screen never lies to you</td><td class="ref">#859 / #868</td></tr>
     <tr><td class="feat">Empty-symbol recovery — a stock whose stored data key drifted has its real on-disk data recovered under the clean name, never silently dropped</td><td class="why">No stock with real data ever reads falsely "empty"</td><td class="ref">#907 / #911</td></tr>
+    <tr><td class="feat">Dashboard hardened against XSS — vendor-derived cells and reflected query params are escaped before they touch the page, closing two cross-site-scripting holes on the Movers screen</td><td class="why">The dashboard is safe to open, even on untrusted data</td><td class="ref">#949</td></tr>
   </table>
 
   <p class="theme">🚀 Theme 6 — "Getting the data is one click (and as fast as the vendor allows)"</p>
@@ -146,6 +159,8 @@
     <tr><td class="feat">Self-tuning rate limit — an adaptive limiter backs off on rejections and recovers automatically; the per-second ceiling is operator-tuned to 8/sec</td><td class="why">Fast downloads that adjust themselves and don't get you blocked</td><td class="ref">#906 / #922</td></tr>
     <tr><td class="feat">Actually uses its allowed speed — more download connections so the pull generates real demand toward the rate ceiling instead of leaving most of it idle</td><td class="why">Faster downloads from the slack that used to go to waste</td><td class="ref">#921</td></tr>
     <tr><td class="feat">Proven not to leave speed on the table — an at-scale test harness fails the build if the pull ever falls short of the rate it's allowed</td><td class="why">The download speed is guarded by an automatic safety net, not hope</td><td class="ref">#929</td></tr>
+    <tr><td class="feat">One button does the whole pull — the cluttered per-stage buttons are replaced by one selection-aware "▶ Pull · full pipeline" that always runs the fixed gated order (spot → futures/options metadata → history), auto-loading instruments when needed</td><td class="why">Get all your data with a single click — no stage-by-stage button juggling</td><td class="ref">#955</td></tr>
+    <tr><td class="feat">Per-segment movers warm-up — the moment a segment (spot, then futures + options) fully succeeds, its movers screen is pre-computed; a segment that didn't fully succeed is never warmed</td><td class="why">Movers open instantly after a pull — and never show a half-finished illusion</td><td class="ref">#951</td></tr>
   </table>
 
   <p class="theme">🌙 Theme 7 — "Runs itself overnight — even the login renews itself"</p>
@@ -156,14 +171,28 @@
     <tr><td class="feat">Can't freeze on a bad renewal — even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry</td><td class="why">A flaky network at 6 AM can never lock up your pull</td><td class="ref">#910</td></tr>
   </table>
 
+  <p class="theme">🔬 Theme 8 — "Proven, measured, and ready for the big sweep"</p>
+  <table>
+    <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
+    <tr><td class="feat">Engine proven O(1) at scale — new benchmarks prove the sweep's hot paths (audit append, per-mask driver, trial-stats write) stay constant-time no matter how big the grid gets</td><td class="why">The brute-force engine is built to scale to billions of trials</td><td class="ref">#971 / #972 / #973</td></tr>
+    <tr><td class="feat">7-test-type rigor on the rule engine — the 52-condition evaluator gains benchmark, stress, golden-bit-identity, property and boundary tests</td><td class="why">The logic that decides every signal is exhaustively pinned</td><td class="ref">#970</td></tr>
+    <tr><td class="feat">Extra metric robustness — a second-round hardening pass on the statistical-validity stage kills mutation survivors and consolidates cross-engine invariant tests</td><td class="why">The Sharpe / DSR / significance maths is double-checked</td><td class="ref">#975</td></tr>
+    <tr><td class="feat">Calendar hardened — the NSE/BSE trading calendar's timezone, session-boundary, leap-year and half-day rules are pinned with golden + property tests</td><td class="why">Trading-hour and holiday logic is trustworthy to the minute</td><td class="ref">#958 / #959</td></tr>
+    <tr><td class="feat">Honest CI gates — the build's quality gates are de-conflated into honestly-named jobs, and a new module shipping with no test now fails the build</td><td class="why">The "every change is fully tested" promise is enforced, not assumed</td><td class="ref">#966</td></tr>
+    <tr><td class="feat">M4 bench numbers in the logs — the reference-hardware performance numbers are surfaced in CI logs, and the type-check is green on the verify machine</td><td class="why">Performance claims are visible and checked on the real reference machine</td><td class="ref">#979</td></tr>
+  </table>
+
   <h2>🟡 Current <small>— in flight right now (open PRs, not yet merged)</small></h2>
-  <p class="tag" style="font-size:15px">These are real open pull requests. They are <b>docs / process</b> work — no <code>brutex/</code> engine change.</p>
+  <p class="tag" style="font-size:15px">These are <b>real open pull requests</b> — not yet merged, so not counted as Finished above.</p>
   <table>
     <tr><th>What it is</th><th>Why it matters</th><th>Status</th></tr>
-    <tr><td class="feat">EAP feedback — round 2: an evidence-gated feedback dossier for the Claude Code Early-Access Program, every finding backed by a reproducible proof</td><td class="why">Improves how the product itself is built (meta, not a product feature)</td><td><span class="pill mid">OPEN PR #905</span></td></tr>
-    <tr><td class="feat">Consolidated EAP dossier — one shared feedback file so the BruteX + TickVault repos can be submitted together</td><td class="why">Same meta-feedback track as above</td><td><span class="pill mid">DRAFT PR #889</span></td></tr>
-    <tr><td class="feat">Fetch/write overlap (Lever 1) — an experiment to overlap downloading and disk-writing for higher throughput</td><td class="why">Kept <b>default-off</b> — a real benchmark showed it doesn't help under Python's lock, so it's honestly <b>NO-GO</b> and shelved, not shipped</td><td><span class="pill big">DRAFT PR #886 · NO-GO</span></td></tr>
+    <tr><td class="feat">Batched-coalesce write consumer — group all pending disk-writes for one month into a single save so the download stops idling on its own writes (the "write-fix")</td><td class="why">Default-OFF until the M4 A/B proof lands; the CI bench showed ~2× but it ships dormant until proven on reference hardware (Golden Rule #10)</td><td><span class="pill mid">DRAFT PR #943 · ledger #980 claimed</span></td></tr>
+    <tr><td class="feat">CI merge-safety hardening — kills a cosmetic post-merge "red" and gates auto-merge on the live, complete check rollup so a PR can never merge while anything is red</td><td class="why">Process safety — no <code>brutex/</code> engine change</td><td><span class="pill mid">DRAFT PR #944</span></td></tr>
   </table>
+  <p class="tag" style="font-size:14px">The prior cycle's "Current" items have since landed — the EAP feedback rounds merged (#925 / #931), and the
+    Lever-1 fetch/write overlap merged <b>shipped-dormant as an honest NO-GO</b> (the benchmark refuted a throughput gain
+    under Python's lock — #940). The batched-coalesce writer (#943) above is the follow-up that <i>did</i> show a win on
+    the CI bench.</p>
 
   <h2>🔜 Up next <small>— being built or designed now (not yet shipped)</small></h2>
   <table>
@@ -176,8 +205,9 @@
   <h2>🔮 Future <small>— planned next (honest roadmap, not yet built)</small></h2>
   <table>
     <tr><th>Plan</th><th>What it'll give you</th><th>Stage</th></tr>
-    <tr><td class="feat">Brute-force sweep (build) — run the ~33-billion-combo sweep across CPU cores, ~2–4 days on reference hardware, bit-identical to serial</td><td class="why">Massive-scale testing on the reference machine</td><td><span class="pill big">🔴 design-locked (ADR-0011), build deferred</span></td></tr>
+    <tr><td class="feat">Brute-force sweep (run it for real) — run the ~33-billion-combo sweep across CPU cores, ~2–4 days on reference hardware, bit-identical to serial. The engine is now O(1)-proven + hardened (#971–#973) and its winners already have a <b>/results</b> page (#976)</td><td class="why">Massive-scale testing on the reference machine</td><td><span class="pill big">🔴 design-locked (ADR-0011), engine hardened, full production run deferred</span></td></tr>
     <tr><td class="feat">Options execution track — translate winning index signals into real options trades for execution realism</td><td class="why">From signal research to execution-realistic results</td><td><span class="pill big">🔴 Track 2</span></td></tr>
+    <tr><td class="feat">Faster disk-writes (proven) — land the batched-coalesce writer once the M4 A/B proof confirms the CI bench's ~2×</td><td class="why">Downloads stop idling on their own writes</td><td><span class="pill mid">🟡 open draft, proof-gated (#943)</span></td></tr>
     <tr><td class="feat">In-place dashboard nav — pages swap content in place instead of fully reloading</td><td class="why">The last big source of page lag, gone</td><td><span class="pill mid">🟡 documented follow-up (#933)</span></td></tr>
     <tr><td class="feat">True O(page) paging — candle/discovery reads only the visible page via a write-time lake manifest</td><td class="why">Paging stays instant at any history depth</td><td><span class="pill mid">🟡 documented follow-up (#896 / #916)</span></td></tr>
     <tr><td class="feat">Engine → F&amp;O stocks — expand the brute-force engine beyond the 3 indices (the ~212-stock lake is reference-only today)</td><td class="why">Brute-force more of the market — once a scope decision is taken</td><td><span class="pill mid">🟡 needs a scope decision (#200)</span></td></tr>
@@ -197,10 +227,10 @@
   </div>
 
   <p class="foot">Honesty footer: every Finished row above traces to a real, merged <code>docs/MIGRATION.md</code>
-    ledger entry (refreshed through #935). The Current rows are <b>open PRs, not merged</b> (the Lever-1 write
-    overlap is honestly <b>NO-GO</b> and shelved). The Up-next and Future rows are <b>planned, not built</b>. The
-    brute-force engine trades 3 indices (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data, never
-    changed silently. Generated from the decision ledger — if a row and the ledger disagree, the ledger wins.</p>
+    ledger entry (refreshed through #979). The Current rows are <b>open PRs, not merged</b> (#943 / #944, their ledger
+    #980 not yet on main). The Up-next and Future rows are <b>planned, not built</b>. The brute-force engine trades 3
+    indices (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data, never changed silently. Generated from
+    the decision ledger — if a row and the ledger disagree, the ledger wins.</p>
 
 </div>
 </body>
