@@ -89,6 +89,7 @@ __all__ = [
     "build_futures_payload",
     "compute_futures_candidates",
     "compute_futures_mover",
+    "format_contract_date",
     "normalize_futures_tier",
     "parse_future_symbol",
     "run_futures_snapshot",
@@ -140,6 +141,37 @@ _MONTHS: Final[dict[str, int]] = {
 
 #: The two-digit year in the expiry token is in the 2000s (``25`` → 2025).
 _CENTURY: Final[int] = 2000
+
+#: Month number → three-letter abbreviation, the inverse of :data:`_MONTHS`. Used
+#: by :func:`format_contract_date` so the human ``dd-Mon-YYYY`` contract label is
+#: DETERMINISTIC across machines — ``datetime.strftime("%b")`` is LOCALE-dependent
+#: (a non-English locale would render ``"déc."`` etc.), so the displayed contract
+#: name must never go through it (CLAUDE.md §4 deterministic display).
+_MONTH_ABBR: Final[dict[int, str]] = {number: abbr for abbr, number in _MONTHS.items()}
+
+
+def format_contract_date(value: date_cls) -> str:
+    """Format an expiry date as a deterministic, locale-stable ``DD-Mon-YYYY`` string.
+
+    Renders e.g. ``date(2025, 9, 30)`` → ``"30-Sep-2025"`` using the fixed English
+    :data:`_MONTH_ABBR` table rather than ``strftime("%b")`` (which is
+    locale-dependent), so the displayed Futures / Options contract name reads
+    identically on every machine (CLAUDE.md §4 / §11 COMMON — the ONE contract-date
+    formatter, shared by both derivative movers tabs). The day is zero-padded to two
+    digits and the year is the full four digits.
+
+    Parameters
+    ----------
+    value
+        The expiry (or any) date to render.
+
+    Returns
+    -------
+    str
+        The ``DD-Mon-YYYY`` label (``30-Sep-2025``).
+    """
+    return f"{value.day:02d}-{_MONTH_ABBR[value.month]}-{value.year:04d}"
+
 
 #: The expiry token's fixed character length (``DDMmmYY`` = 2 + 3 + 2).
 _EXPIRY_TOKEN_LEN: Final[int] = 7
@@ -312,10 +344,14 @@ class FuturesMover:
     Attributes
     ----------
     underlying
-        The underlying symbol (``NIFTY`` / ``RELIANCE``) — the row's display name.
+        The underlying symbol (``NIFTY`` / ``RELIANCE``).
+    expiry
+        The contract's expiry date (parsed from :attr:`symbol`), or ``None`` when
+        the symbol could not be parsed — the :attr:`name` label then falls back to
+        the raw symbol / underlying (never blank, Golden Rule #1).
     symbol
         The near-month contract groww_symbol (``NSE-NIFTY-30Sep25-FUT``) — the
-        deterministic tiebreak key, never shown.
+        deterministic tiebreak key + the raw-identity fallback for :attr:`name`.
     exchange, segment
         The future's lake partition coordinates (segment is always ``FNO``);
         used only for the stable ``(symbol, exchange, segment)`` tiebreak.
@@ -347,6 +383,7 @@ class FuturesMover:
     """
 
     underlying: str
+    expiry: date_cls | None
     symbol: str
     exchange: str
     segment: str
@@ -358,6 +395,21 @@ class FuturesMover:
     oi_chg_pct: Decimal | None
     volume: int
     value_paisa: int
+
+    @property
+    def name(self) -> str:
+        """The contract's human display name, e.g. ``"NIFTY 30-Sep-2025 FUT"``.
+
+        Joins the underlying, the deterministic ``DD-Mon-YYYY`` expiry
+        (:func:`format_contract_date`), and the ``FUT`` suffix — the markets-screen
+        Futures row label (the mockup intent). When :attr:`expiry` is ``None`` (the
+        contract symbol could not be parsed), it falls back to the raw
+        :attr:`symbol` if present, else the bare :attr:`underlying` — so the cell is
+        NEVER blank and never crashes on an unparseable contract (Golden Rule #1).
+        """
+        if self.expiry is None:
+            return self.symbol or self.underlying
+        return f"{self.underlying} {format_contract_date(self.expiry)} FUT"
 
     @property
     def ltp_inr(self) -> str:
@@ -512,8 +564,14 @@ def compute_futures_mover(
         if (oi is not None and prev_oi is not None and prev_oi != 0)
         else None
     )
+    # Derive the expiry from the contract symbol for the dated display name; an
+    # unparseable symbol yields ``None`` → the name falls back to the raw symbol /
+    # underlying (never crashes, never blank — Golden Rule #1).
+    parsed = parse_future_symbol(symbol)
+    expiry = parsed[1] if parsed is not None else None
     return FuturesMover(
         underlying=underlying,
+        expiry=expiry,
         symbol=symbol,
         exchange=exchange,
         segment=_FNO_SEGMENT,
@@ -531,7 +589,10 @@ def compute_futures_mover(
 def _futures_row(mover: FuturesMover) -> dict[str, Any]:
     """Project one mover to a markets-screen Futures row (money 2dp, metrics full-precision)."""
     return {
-        "name": mover.underlying,
+        # The FULL dated contract label ("NIFTY 30-Sep-2025 FUT") so the Futures tab
+        # disambiguates Near/Next/Far contracts of the same underlying; falls back to
+        # the raw symbol / underlying on an unparseable symbol (DEC-MOVERS-FULL-CONTRACT-NAME-001).
+        "name": mover.name,
         "symbol": mover.symbol,
         "exchange": mover.exchange,
         "segment": mover.segment,

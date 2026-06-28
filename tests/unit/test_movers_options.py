@@ -291,16 +291,29 @@ def _mover(
 
 class TestOptionMoverRendering:
     def test_name_whole_strike(self) -> None:
-        assert _mover().name == "NIFTY 30Jun25 24000 CE"
+        # FULL dated/strike label, deterministic DD-Mon-YYYY (DEC-MOVERS-FULL-CONTRACT-NAME-001).
+        assert _mover().name == "NIFTY 30-Jun-2025 24000 CE"
+
+    def test_name_put_contract(self) -> None:
+        m = _mover(opt_type="PE")
+        assert m.name == "NIFTY 30-Jun-2025 24000 PE"
 
     def test_name_fractional_strike(self) -> None:
         m = _mover(strike=Decimal("24000.5"))
-        assert m.name == "NIFTY 30Jun25 24000.5 CE"
+        assert m.name == "NIFTY 30-Jun-2025 24000.5 CE"
 
     def test_name_with_trailing_zero_strike_normalizes(self) -> None:
         # A strike carrying ``.00`` must still read as the integer 24000.
         m = _mover(strike=Decimal("24000.00"))
-        assert m.name == "NIFTY 30Jun25 24000 CE"
+        assert m.name == "NIFTY 30-Jun-2025 24000 CE"
+
+    def test_name_different_expiries_render_different_names(self) -> None:
+        # Near vs Far ``24000 CE`` of the same underlying must read DISTINCT.
+        near = _mover(expiry=date(2025, 6, 26))
+        far = _mover(expiry=date(2025, 7, 31))
+        assert near.name == "NIFTY 26-Jun-2025 24000 CE"
+        assert far.name == "NIFTY 31-Jul-2025 24000 CE"
+        assert near.name != far.name
 
     def test_ltp_inr(self) -> None:
         assert _mover().ltp_inr == "₹164.00"
@@ -553,7 +566,7 @@ class TestBuildOptionsPayload:
             [_mover()], interval="1day", date="2025-06-13", time=None, top_n=10, skipped=0
         )
         row = payload["highest_oi"][0]
-        assert row["name"] == "NIFTY 30Jun25 24000 CE"
+        assert row["name"] == "NIFTY 30-Jun-2025 24000 CE"
         assert row["spot"] == "₹23,622.90"
         assert row["ltp"] == "₹164.00"
         assert row["pct_change"] == "179.62"

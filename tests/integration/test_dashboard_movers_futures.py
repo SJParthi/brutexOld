@@ -366,7 +366,9 @@ class TestRunFuturesSnapshot:
         gain = payload["price_gainers"]
         assert len(gain) == 1
         row = gain[0]
-        assert row["name"] == "Nifty 50"
+        # The NAME is the FULL dated contract label using the renamed underlying
+        # (DEC-MOVERS-FULL-CONTRACT-NAME-001); the raw symbol is still carried.
+        assert row["name"] == "Nifty 50 27-Jun-2024 FUT"
         assert row["symbol"] == _NEAR_FUT  # near month, NOT the far one
         assert row["ltp"] == "₹20,100.00"
         assert row["spot"] == "₹20,040.00"
