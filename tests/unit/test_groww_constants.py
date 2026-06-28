@@ -165,3 +165,26 @@ def test_resolve_pool_size_rejects_one_above_max(monkeypatch) -> None:
     """MAX+1 is rejected → fall back to the audited default (the boundary, not MAX+5)."""
     monkeypatch.setenv(c.GROWW_POOL_SIZE_ENV, str(c.GROWW_CLIENT_POOL_MAX + 1))
     assert c.resolve_pool_size() == c.GROWW_CLIENT_POOL_SIZE
+
+
+# ── resolve_smooth_pacing — env toggle, default-OFF, both ways (DEC-GROWW-SMOOTH-PACING-001) ──
+
+
+def test_resolve_smooth_pacing_default_off_when_unset(monkeypatch) -> None:
+    """Unset env → OFF (the safe default; smooth pacing never enabled by accident)."""
+    monkeypatch.delenv(c.GROWW_SMOOTH_PACING_ENV, raising=False)
+    assert c.resolve_smooth_pacing() is False
+
+
+def test_resolve_smooth_pacing_truthy_values_enable(monkeypatch) -> None:
+    """Each accepted truthy spelling (case-insensitive, whitespace-trimmed) → ON."""
+    for raw in ("1", "true", "TRUE", "Yes", " on ", "On"):
+        monkeypatch.setenv(c.GROWW_SMOOTH_PACING_ENV, raw)
+        assert c.resolve_smooth_pacing() is True
+
+
+def test_resolve_smooth_pacing_falsy_and_unknown_stay_off(monkeypatch) -> None:
+    """Blank / "0" / "false" / any unrecognised value → OFF (fail-safe to default)."""
+    for raw in ("", "  ", "0", "false", "no", "off", "maybe", "2"):
+        monkeypatch.setenv(c.GROWW_SMOOTH_PACING_ENV, raw)
+        assert c.resolve_smooth_pacing() is False

@@ -852,6 +852,7 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     from brutex.adapters.groww.constants import (
         GROWW_RATE_LIMIT_PER_MIN,
         GROWW_RATE_LIMIT_RPS_CEILING,
+        resolve_smooth_pacing,
     )
     from brutex.adapters.rate_common import RateController
 
@@ -867,9 +868,16 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     # gate without ever fighting the per-minute cap; the AIMD ladder still steps DOWN on
     # 429s. Lowered from the prior 8 r/s because a live-log audit showed the vendor 429s
     # even at 3–5 r/s, so probing up to 8 only wasted ~870 429-retries.
+    # OPTIONAL anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001): default OFF
+    # (byte-identical), enabled only when BRUTEX_GROWW_SMOOTH_PACING is truthy. When
+    # ON, issuance is spread evenly at a ``1/current_rps`` minimum interval so the
+    # per-second issue count never exceeds the current AIMD rate (no sub-second 9-burst
+    # that trips a vendor 429). It only ADDS spacing — the 8 r/s ceiling, the 500/min
+    # governor, and the AIMD ladder are UNCHANGED.
     return RateController(
         ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
         ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+        smooth_pacing=resolve_smooth_pacing(),
     )
 
 

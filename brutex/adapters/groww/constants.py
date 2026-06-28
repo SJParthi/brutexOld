@@ -220,6 +220,33 @@ GROWW_CLIENT_POOL_MAX: Final[int] = 4
 #: Environment override for the pool size (operator escape hatch, no code change).
 GROWW_POOL_SIZE_ENV: Final[str] = "BRUTEX_GROWW_POOL_SIZE"
 
+#: Environment toggle for the OPTIONAL anti-burst smooth pacing
+#: (DEC-GROWW-SMOOTH-PACING-001). The token bucket already caps the AVERAGE rate at
+#: ``current_rps``, but its ``1/rate`` cadence still lets sub-second micro-bursts
+#: through (the operator's ``rps_1s_max`` spiking to 8–9 below the AIMD ceiling), which
+#: can trip a vendor 429. When this toggle is truthy, the live pull build site injects
+#: ``RateController(smooth_pacing=True)`` so issuance is spread evenly with a minimum
+#: ``1/current_rps`` interval between consecutive issues — the per-second issue count
+#: can then never exceed the current AIMD rate. DEFAULT OFF (byte-identical to today):
+#: the smoothing is provably SAFE (caps + AIMD ladder UNCHANGED) but its live
+#: 429-reduction is UNVERIFIED pending a live probe, so it ships behind a flag.
+GROWW_SMOOTH_PACING_ENV: Final[str] = "BRUTEX_GROWW_SMOOTH_PACING"
+
+
+def resolve_smooth_pacing() -> bool:
+    """Resolve the smooth-pacing toggle from ``BRUTEX_GROWW_SMOOTH_PACING`` — default OFF.
+
+    Reads :data:`GROWW_SMOOTH_PACING_ENV`. Returns ``True`` only for an explicit truthy
+    value (``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``, case-insensitive); ANY other
+    value — unset, blank, ``"0"``, ``"false"``, or unrecognised — returns ``False``, so
+    the safe default-OFF, byte-identical behaviour can never be enabled by accident
+    (CLAUDE.md §2 Rule 6 — never silently change a rate gate). O(1).
+    """
+    raw = os.environ.get(GROWW_SMOOTH_PACING_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 def resolve_pool_size() -> int:
     """Resolve the live-pull connection-pool size: env override clamped to ``[1, MAX]``.
@@ -264,6 +291,7 @@ __all__ = [
     "GROWW_RATE_LIMIT_RPS_CEILING",
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
+    "GROWW_SMOOTH_PACING_ENV",
     "INDIA_VIX_SYMBOL",
     "INSTRUMENT_CSV_COLUMNS",
     "INTERVAL_TO_GROWW",
@@ -275,4 +303,5 @@ __all__ = [
     "WINDOW_DAYS_90",
     "WINDOW_DAYS_180",
     "resolve_pool_size",
+    "resolve_smooth_pacing",
 ]
