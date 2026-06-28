@@ -185,6 +185,37 @@ def test_intrusive_tf_dropdown_stays_removed_but_clean_button_replaces_it() -> N
     )
 
 
+def test_prebuild_tooltip_is_segment_accurate() -> None:
+    """The ⚙ Pre-build tooltip + hero blurb tell the TRUTH (DEC-PREBUILD-SELECT-001).
+
+    The pre-DEC-PREBUILD-SELECT-001 tooltip wrongly claimed pre-build covered
+    "both spot AND F&O via the shared resampler". The corrected copy must:
+
+    * NO longer claim "both spot AND F&O" / "shared resampler";
+    * state intraday pre-build is SPOT and FUTURES only;
+    * state OPTIONS intraday stays on-demand.
+    """
+    html = _render_universe_html()
+    # The inaccurate claim is gone.
+    assert "both spot AND F&amp;O via the shared resampler" not in html
+    assert "shared resampler" not in html
+    # The accurate scope is stated (in the matbtn tooltip + the hero blurb).
+    assert "SPOT and FUTURES" in html, "the honest spot+futures intraday scope is missing"
+    assert "on-demand" in html, "the options-on-demand honesty is missing"
+    assert "OPTIONS intraday stays on-demand" in html
+
+
+def test_prebuild_button_wires_gated_multi_symbol() -> None:
+    """A multi-symbol selection POSTs ONCE to ?symbols= (gated backend order)."""
+    html = _render_universe_html()
+    assert "derive-timeframes?symbols=" in html, (
+        "multi-symbol pre-build must POST the gated ?symbols= form (DEC-PREBUILD-SELECT-001)"
+    )
+    assert "runGatedMaterialize" in html, "the gated multi-symbol handler is missing"
+    # The single-symbol path is still wired (back-compat).
+    assert "derive-timeframes?symbol=" in html
+
+
 def test_universe_visual_upgrade_present() -> None:
     """The /universe visual upgrade (DEC-DASHBOARD-UNIVERSE-UX-001): the REF chip +
     its CSS, the inline chip legend, the skeleton-load shimmer, and the
