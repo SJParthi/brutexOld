@@ -162,6 +162,14 @@ BURST: int = 1
 #: acquire cap forces a token, keeping behaviour consistent (CLAUDE.md §11 COMMON).
 _GOVERNOR_LOOP_CAP: int = 64
 
+#: Safety cap on the optional smooth-pacing re-check loop (DEC-GROWW-SMOOTH-PACING-001).
+#: Mirrors :data:`_GOVERNOR_LOOP_CAP`: under contention a worker may wake from its
+#: spacing sleep to find a peer already issued in the slot it was waiting for, so it
+#: must re-test the spacing. This bounds that re-contend loop so a pathological
+#: INJECTED clock (one that never advances) can't spin forever — after the cap the
+#: pacer fails OPEN (stamps + admits) exactly as the governor's loop cap does.
+_SMOOTH_LOOP_CAP: int = 64
+
 #: Minimum seconds between periodic ``rate.snapshot`` telemetry logs during active
 #: pacing (DEC-GROWW-RATE-SNAPSHOT-LOG-001). The existing rate.* events fire ONLY on a
 #: rung CHANGE (rate.429 / rate.stepdown / rate.stepup), so a pull HOLDING at a
@@ -212,6 +220,7 @@ class RateController:
         sleep: Callable[[float], None] = time.sleep,
         ceiling_rps: float = CEILING_RPS,
         ceiling_per_min: int | None = None,
+        smooth_pacing: bool = False,
     ) -> None:
         """Build a controller starting at the ceiling rate (default 5 r/s).
 
@@ -243,6 +252,22 @@ class RateController:
             the governor is mathematically never the binding gate (5×60 = 300 < a
             300/500 cap), so existing 5 r/s behaviour is unchanged even when a cap
             is injected.
+        smooth_pacing
+            Optional ANTI-BURST gate (DEC-GROWW-SMOOTH-PACING-001). ``False`` (the
+            default) = byte-for-byte backward-compatible: the existing token bucket
+            already absorbs short bursts within its ``1/rate`` cadence, so sub-second
+            micro-bursts (the operator's ``rps_1s_max`` spiking to 8–9 below the AIMD
+            ceiling) can still slip through and trip a vendor 429. When ``True`` a
+            THIRD gate runs FIRST in :meth:`pace`: it enforces a global MINIMUM
+            inter-issue interval of ``1.0 / current_rps`` seconds across ALL workers
+            (a shared ``_last_issue_ts`` under the SAME lock the token math uses), so
+            issuance is spread evenly and the per-second issue count can never exceed
+            the current AIMD rate — no 9-burst. It only ever ADDS spacing: it never
+            raises the per-second ceiling, the 500/min governor, or any AIMD rung —
+            it composes WITH (never bypasses) both existing gates. SAFE-but-UNVERIFIED
+            (Golden Rule #10): the smoothing is provably correct + cannot exceed any
+            cap, but the live 429-reduction benefit is UNVERIFIED pending a live
+            vendor probe — no throughput gain is claimed.
         """
         self._clock = clock
         self._sleep = sleep
@@ -254,6 +279,16 @@ class RateController:
         #: deque stays empty + ``pace`` skips both governor phases entirely.
         self._ceiling_per_min: int | None = ceiling_per_min
         self._issues: deque[float] = deque()
+        #: Optional anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001). ``False``
+        #: ⇒ the smooth gate is skipped ENTIRELY in :meth:`pace` (byte-identical to the
+        #: prior behaviour) and ``_last_issue_ts`` is never read/written. ``True`` ⇒ the
+        #: gate enforces a ``1/current_rps`` minimum interval between consecutive issues
+        #: across all workers, sharing the SAME lock as the token math.
+        self._smooth_pacing: bool = smooth_pacing
+        #: Last issue instant under smooth pacing — the shared spacing baseline. ``-inf``
+        #: so the FIRST issue under smooth mode never waits (any real gap exceeds the
+        #: minimum interval). Only ever touched when ``_smooth_pacing`` is True.
+        self._last_issue_ts: float = float("-inf")
         self._hits: deque[float] = deque()
         #: Server-stress stalls (timeout / transport / 5xx) inside the rolling
         #: STEP_DOWN_WINDOW — the gentle adaptive timeout ladder's evidence
@@ -334,11 +369,33 @@ class RateController:
         # evicted — so no clamp is needed.
         return (self._issues[0] + PER_MIN_WINDOW) - now
 
+    def _smooth_wait_locked(self, now: float) -> float:
+        """Seconds to wait so consecutive issues are ≥ ``1/current_rps`` apart (caller holds lock).
+
+        DEC-GROWW-SMOOTH-PACING-001 — the anti-burst spacing arithmetic, O(1). Returns
+        ``0.0`` when the previous issue is already at least ``1/current_rps`` seconds in
+        the past (or there has been no prior issue — ``_last_issue_ts`` starts ``-inf``),
+        otherwise the remaining seconds until the minimum interval elapses,
+        ``(_last_issue_ts + 1/rps) - now``. The interval is derived from the LIVE
+        ``_rps`` so an AIMD step-down widens the spacing immediately + a step-up narrows
+        it, always tracking the current sustainable rate (never exceeding it).
+        """
+        interval = 1.0 / self._rps
+        wait = (self._last_issue_ts + interval) - now
+        return wait if wait > 0.0 else 0.0
+
     def pace(self) -> None:
-        """Block until both rate gates allow an issue — **O(1)** amortized fast path.
+        """Block until every rate gate allows an issue — **O(1)** amortized fast path.
 
-        TWO sequenced gates (DEC-GROWW-RATE-PERMIN-001):
+        SEQUENCED gates (the smooth gate is OPTIONAL + OFF by default):
 
+        0. **Anti-burst smooth pacing** (only when ``smooth_pacing`` is set,
+           DEC-GROWW-SMOOTH-PACING-001) — enforces a global MINIMUM inter-issue
+           interval of ``1/current_rps`` across all workers via a shared
+           ``_last_issue_ts`` under the same lock, so the per-second issue count can
+           never exceed the current AIMD rate (no sub-second burst). It only ADDS
+           spacing; it never raises any cap. Skipped ENTIRELY when disabled —
+           byte-for-byte identical to the prior two-gate ``pace``.
         1. **Per-minute governor** (only when ``ceiling_per_min`` is set) — a HARD
            ceiling on the issue count inside any rolling :data:`PER_MIN_WINDOW`. It
            runs its own compute-under-lock / sleep-outside-lock / re-check loop,
@@ -365,6 +422,35 @@ class RateController:
         per-second step mutates the one bucket IN PLACE
         (:meth:`AdaptiveTokenBucket.set_rate`) and never touches the governor state.
         """
+        # ── Gate 0: anti-burst smooth pacing (skipped entirely when disabled). ──
+        # DEC-GROWW-SMOOTH-PACING-001. Enforce a global minimum ``1/current_rps``
+        # interval between consecutive issues. Compute the wait under the lock
+        # (O(1)), SLEEP outside it (so it never serialises workers through the mutex,
+        # mirroring the governor + bucket), then re-test on wake: a peer may have
+        # issued into the slot we waited for, so the spacing must be re-checked. We
+        # stamp ``_last_issue_ts`` in the SAME lock acquisition that observes a
+        # zero wait — so the (check, stamp) is atomic and N concurrent workers can
+        # never collapse onto one issue instant (the governor's atomic-reserve idiom,
+        # DEC-GROWW-GOVERNOR-ATOMIC-001). The bucket (gate 2) still binds the physical
+        # token rate; this gate only ADDS spacing, never raises a cap.
+        if self._smooth_pacing:
+            iterations = 0
+            while True:
+                with self._lock:
+                    now = self._clock()
+                    wait = self._smooth_wait_locked(now)
+                    if wait <= 0.0:
+                        self._last_issue_ts = now  # stamp the issue atomically
+                        break  # spaced — fall through to the governor + bucket
+                iterations += 1
+                if iterations > _SMOOTH_LOOP_CAP:
+                    # fail-OPEN after the cap (mirrors the governor's loop cap): still
+                    # stamp so the spacing baseline stays honest under a frozen clock.
+                    with self._lock:
+                        self._last_issue_ts = self._clock()
+                    break
+                # lock RELEASED before sleeping; re-test the spacing on the next pass.
+                self._sleep(wait)
         # ── Gate 1: per-minute governor (skipped entirely when disabled). ──
         # The issue instant is RESERVED atomically under the SAME lock acquisition that
         # observes a free slot (DEC-GROWW-GOVERNOR-ATOMIC-001) — NOT after the bucket. The

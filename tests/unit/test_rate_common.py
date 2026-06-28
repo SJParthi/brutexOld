@@ -12,11 +12,13 @@ fix), never exceeds 5, and `pace()` delegates to the bucket.
 from __future__ import annotations
 
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from brutex.adapters.rate_common import (
     _GOVERNOR_LOOP_CAP,
+    _SMOOTH_LOOP_CAP,
     CEILING_RPS,
     FLOOR_RPS,
     PER_MIN_WINDOW,
@@ -774,6 +776,168 @@ def test_pace_emits_throttled_rate_snapshot() -> None:
     assert snaps[0]["recent_timeouts"] == 0
     assert snaps[0]["recent_minute"] == 0
     assert snaps[0]["ceiling_per_min"] is None
+
+
+# ── DEC-GROWW-SMOOTH-PACING-001 — optional anti-burst smooth pacing ──────────────
+def _smooth(
+    *, ceiling_rps: float = CEILING_RPS, ceiling_per_min: int | None = None
+) -> tuple[RateController, _Clock, list[float]]:
+    """Build a smooth-paced controller + its clock + a clock-advancing sleep-log."""
+    clock = _Clock()
+    slept: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    ctl = RateController(
+        clock=clock,
+        sleep=_sleep,
+        ceiling_rps=ceiling_rps,
+        ceiling_per_min=ceiling_per_min,
+        smooth_pacing=True,
+    )
+    return ctl, clock, slept
+
+
+class TestSmoothPacing:
+    """The OPTIONAL anti-burst smooth-pacing gate (DEC-GROWW-SMOOTH-PACING-001)."""
+
+    def test_default_off_is_byte_identical(self) -> None:
+        # Default controller: smooth OFF → the smooth gate is skipped entirely, the
+        # spacing baseline is never stamped, and pace() pays ONLY the bucket's 1/rps —
+        # byte-for-byte identical to the prior two-gate behaviour.
+        clock = _Clock()
+        slept: list[float] = []
+
+        def _sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock.advance(seconds)
+
+        ctl = RateController(clock=clock, sleep=_sleep)  # smooth OFF (default)
+        ctl.pace()
+        ctl.pace()
+        assert slept == [1.0 / CEILING_RPS, 1.0 / CEILING_RPS]  # only the bucket paced
+        assert ctl._last_issue_ts == float("-inf")  # smooth baseline never touched
+        assert ctl._smooth_pacing is False
+
+    def test_smooth_wait_disabled_branch_via_first_issue(self) -> None:
+        # The FIRST smooth-paced issue never waits: _last_issue_ts starts -inf so the
+        # spacing gate computes a non-positive wait → 0.0 (the <= 0 branch) and stamps.
+        ctl, _clock, _slept = _smooth(ceiling_rps=8.0)
+        assert ctl._smooth_wait_locked(ctl._clock()) == 0.0  # -inf baseline → no wait
+        ctl.pace()
+        assert ctl._last_issue_ts == 1000.0  # stamped at admission
+
+    def test_issues_evenly_spaced_at_min_interval(self) -> None:
+        # Smooth ON at 8 r/s: consecutive issues are stamped exactly 1/8 = 0.125 s apart,
+        # so the per-second issue count can never exceed the rate (no sub-second burst).
+        ctl, _clock, _slept = _smooth(ceiling_rps=8.0)
+        stamps: list[float] = []
+        for _ in range(20):
+            ctl.pace()
+            stamps.append(ctl._last_issue_ts)
+        gaps = [round(b - a, 6) for a, b in pairwise(stamps)]
+        assert gaps == [0.125] * 19  # uniform spacing at the min interval
+        # max issues in ANY rolling 1-second window <= the AIMD rate (8).
+        worst = max(sum(1 for s in stamps if t - 1.0 < s <= t) for t in stamps)
+        assert worst <= 8
+
+    def test_per_second_count_never_exceeds_rate_16_threads(self) -> None:
+        # Anti-burst guarantee under REAL contention: 16 workers smooth-paced at 8 r/s
+        # must spread issuance so NO 1-second window ever holds more than 8 issues —
+        # the rps_1s_max <= current_rps property (no 9-burst), proven concurrently.
+        import threading
+
+        cl = threading.Lock()
+        t = [1000.0]
+
+        def clock() -> float:
+            with cl:
+                return t[0]
+
+        def sleep(s: float) -> None:
+            with cl:
+                t[0] += s
+
+        ctl = RateController(
+            clock=clock,
+            sleep=sleep,
+            ceiling_rps=8.0,
+            ceiling_per_min=500,
+            smooth_pacing=True,
+        )
+        stamps: list[float] = []
+        stamp_lock = threading.Lock()
+
+        def worker() -> None:
+            for _ in range(4):
+                ctl.pace()
+                with stamp_lock:
+                    stamps.append(ctl._last_issue_ts)
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10.0)
+        assert all(not th.is_alive() for th in threads)  # none hung
+        # Every issue is at least 1/8 s after the previous → at most 8 per 1 s window.
+        worst = max(sum(1 for s in stamps if t0 - 1.0 < s <= t0) for t0 in stamps)
+        assert worst <= 8  # rps_1s never exceeds the current AIMD rate
+
+    def test_caps_still_hold_under_smooth_governor(self) -> None:
+        # Smooth ADDS spacing but never bypasses the per-minute governor: cap=4 at 8 r/s
+        # → recent_minute never exceeds 4 across many paces (the HARD 500-style cap holds).
+        ctl, _clock, _slept = _smooth(ceiling_rps=8.0, ceiling_per_min=4)
+        for _ in range(12):
+            ctl.pace()
+            recent = ctl.snapshot()["recent_minute"]
+            assert isinstance(recent, int) and recent <= 4
+
+    def test_aimd_step_down_widens_spacing(self) -> None:
+        # AIMD ladder intact under smooth mode: a sustained 429 storm steps 5→4 r/s, and
+        # the smooth interval immediately tracks the LIVE rate (1/4 s after the step).
+        ctl, clock, _slept = _smooth(ceiling_rps=CEILING_RPS)
+        ctl.pace()  # stamp @1000.0 at 5 r/s
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 5→4 (same ladder, unchanged)
+        assert ctl.current_rps == 4.0
+        # With the rate now 4, the min interval is 1/4 = 0.25 (was 1/5 = 0.20).
+        assert ctl._smooth_wait_locked(ctl._last_issue_ts) == 0.25
+
+    def test_aimd_step_up_narrows_spacing(self) -> None:
+        # AIMD recovery intact under smooth mode: after a clean STEP_UP_WINDOW the rate
+        # recovers 3→4, and the smooth interval narrows to track the higher live rate.
+        ctl, clock, _slept = _smooth(ceiling_rps=CEILING_RPS)
+        ctl.pace()  # stamp _last_issue_ts at the live clock (5 r/s)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 5→4
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 4→3
+        assert ctl.current_rps == 3.0
+        clock.advance(STEP_UP_WINDOW)
+        ctl.on_success()  # 3→4 recovery (same ladder)
+        assert ctl.current_rps == 4.0
+        # Evaluate the spacing AT the last issue instant: the wait to the next issue is
+        # the full 1/4 = 0.25 s interval (narrowed from 1/3 at the recovered rate).
+        assert ctl._smooth_wait_locked(ctl._last_issue_ts) == 0.25  # 1/4, narrowed from 1/3
+
+    def test_loop_cap_fails_open_on_frozen_clock(self) -> None:
+        # A pathological clock that NEVER advances (sleep is a no-op): the smooth gate's
+        # re-test loop must not spin forever — it breaks after _SMOOTH_LOOP_CAP and
+        # fails OPEN (stamps + admits), mirroring the governor's loop cap. The smooth
+        # gate's wait is the EXACT float ``(baseline + interval) − now`` it computes; the
+        # bucket's later acquire-loop wait is a different float, so we count the smooth
+        # gate's leading run by exact-value equality.
+        clock = _Clock()
+        slept: list[float] = []
+        ctl = RateController(
+            clock=clock, sleep=slept.append, ceiling_rps=CEILING_RPS, smooth_pacing=True
+        )
+        ctl.pace()  # first issue stamps @1000.0 (no wait — -inf baseline)
+        smooth_wait = (1000.0 + 1.0 / CEILING_RPS) - 1000.0  # the smooth gate's exact wait
+        slept.clear()
+        ctl.pace()  # baseline 1000.0, frozen clock → every pass waits 1/5, spins to the cap
+        assert slept.count(smooth_wait) == _SMOOTH_LOOP_CAP  # smooth gate spun to its cap
+        assert ctl._last_issue_ts == 1000.0  # fail-open stamped at the frozen now
 
 
 def test_rate_snapshot_throttles_after_a_log() -> None:
