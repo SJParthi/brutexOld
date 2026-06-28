@@ -1601,3 +1601,67 @@ class TestSweepComboError:
             cause = cause.__context__
         # The sentinel — the redo authority — is ABSENT, so a resume redoes the tuple.
         assert not completion_sentinel_path(store.path).exists()
+
+    def test_trial_stats_write_error_propagates_un_sentineled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError from the trial-stats sidecar write propagates (redo-not-skip).
+
+        ``write_tuple_trial_stats`` is written AFTER the store flush but BEFORE
+        the strictly-last ``write_completion_sentinel`` (DEC-TRIAL-STATS-WRITE-001
+        / DEC-MARK-MANY-SENTINEL-001). It sits OUTSIDE the narrow
+        ``except SweepComboError`` that wraps only the per-combo
+        ``metrics_for_mask`` loop, so a disk fault at this sidecar write must
+        PROPAGATE OUT unchanged — never downgraded into a ``SweepComboError``
+        tuple-skip (only a ``SweepComboError`` triggers the grid drivers'
+        single-tuple skip + ``tuples_failed`` bump, so propagating a raw
+        ``OSError`` keeps the failure a sweep-wide ABORT, not a combo-skip) — AND
+        leave the completion sentinel ABSENT. A resume consults ONLY the
+        sentinel, so an absent sentinel forces a deterministic FULL redo of the
+        tuple (Golden Rule #7). This pins the trial-stats sidecar-write
+        boundary — the twin of the flush-error, store-append-error, and
+        completion-sentinel-write fault tests — completing the per-tuple
+        finalize write-fault-injection matrix.
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+
+        def _trial_stats_write_fails(*_args: object, **_kwargs: object) -> object:
+            raise OSError("simulated disk failure writing trial-stats sidecar")
+
+        # Patch the name as resolved inside run_persisted_sweep (the sweep_run
+        # module namespace) — the string target avoids the re-export attr check.
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.write_tuple_trial_stats", _trial_stats_write_fails
+        )
+
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(
+                OSError, match="simulated disk failure writing trial-stats sidecar"
+            ) as exc,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        # The raw OSError is NOT downgraded into a SweepComboError tuple-skip
+        # (so the grid drivers ABORT instead of bumping tuples_failed + skipping).
+        assert not isinstance(exc.value, SweepComboError)
+        assert exc.value.__cause__ is None or not isinstance(exc.value.__cause__, SweepComboError)
+        cause = exc.value.__context__
+        while cause is not None:
+            assert not isinstance(cause, SweepComboError)
+            cause = cause.__context__
+        # The sidecar write FAILED → no sidecar, and the strictly-last sentinel
+        # was never reached → ABSENT, so a resume redoes the whole tuple.
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
