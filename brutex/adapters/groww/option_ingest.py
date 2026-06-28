@@ -97,7 +97,7 @@ from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
-from brutex.data.write_consumer import ShardedWriteConsumer, WriteConsumerSink
+from brutex.data.write_consumer import WriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import SerialRunParallel
@@ -880,7 +880,7 @@ def run_groww_option_ingest(
     run_parallel: RunParallel | None = None,
     on_raw_payload: RawPayloadHook | None = None,
     capture_hook_factory: CaptureHookFactory | None = None,
-    write_pool: ShardedWriteConsumer | None = None,
+    write_pool: WriteConsumer | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 

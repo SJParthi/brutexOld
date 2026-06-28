@@ -374,6 +374,87 @@ def test_dry_run_pull_has_no_capture_hook_factory(
     assert all(f is None for f in factories)
 
 
+def test_fno_pull_threads_write_pool_when_flag_on(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The F&O (futures+options) pull threads the batched write_pool when BRUTEX_WRITE_BATCH=1.
+
+    DEC-WRITE-BATCH-COALESCE-001 (MAJOR-2 wiring): the operator requires the batched-write
+    speedup for spot AND futures AND options. A LIVE (dry_run=False) F&O pull with the flag
+    ON MUST hand every ``run_groww_option_ingest`` call a live
+    :class:`~brutex.data.write_consumer.BatchingWriteConsumer` as ``write_pool`` (the SAME
+    background writer the spot spine uses) — so the F&O lake write is also coalesced off the
+    fetch lane. A spy captures the ``write_pool`` kwarg each ingest call receives.
+    """
+    from brutex.data.write_consumer import BatchingWriteConsumer
+
+    monkeypatch.setenv("BRUTEX_WRITE_BATCH", "1")
+    pools_seen: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, write_pool: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        pools_seen.append(write_pool)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert pools_seen  # at least one ingest call (futures + options buckets)
+    # EVERY F&O ingest call received the SAME live batched consumer (one per pull, drained
+    # in the finally so no thread leaks).
+    assert all(isinstance(p, BatchingWriteConsumer) for p in pools_seen)
+    assert len({id(p) for p in pools_seen}) == 1
+
+
+def test_fno_pull_write_pool_none_when_flag_off(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """With the flag OFF (default) the F&O pull keeps the byte-identical synchronous path.
+
+    Every ``run_groww_option_ingest`` call receives ``write_pool=None`` (no background
+    writer), so the F&O write path is unchanged unless the operator opts in.
+    """
+    monkeypatch.delenv("BRUTEX_WRITE_BATCH", raising=False)
+    pools_seen: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, write_pool: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        pools_seen.append(write_pool)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert pools_seen
+    assert all(p is None for p in pools_seen)
+
+
 def test_market_pull_order_sorts_unknown_market_last() -> None:
     """The order key sorts the two known markets futures-first, an unknown market LAST.
 

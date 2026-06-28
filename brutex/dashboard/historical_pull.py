@@ -109,6 +109,7 @@ from brutex.data.window_ledger_store import (
     end_pull_ledger,
     make_live_ledger_flush,
 )
+from brutex.data.write_consumer import WriteConsumer
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
@@ -566,6 +567,7 @@ def _run_phase(
     until_clean_rounds: int,
     contract_windows: ContractWindows | None,
     run_parallel: RunParallel | None,
+    write_pool: WriteConsumer | None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -630,6 +632,7 @@ def _run_phase(
                 contract_windows=contract_windows,
                 run_parallel=run_parallel,
                 capture_hook_factory=capture_hook_factory,
+                write_pool=write_pool,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows
@@ -963,6 +966,21 @@ def pull_contract_candles(
     if run_parallel is None:
         run_parallel = _option_run_parallel(dry_run=dry_run, session_rate=session_rate)
     client, sink = client_factory(lake_root)
+    # Coalescing batched write consumer (DEC-WRITE-BATCH-COALESCE-001) for the F&O
+    # (futures + options) pull — the SAME background writer the spot spine uses, behind the
+    # SAME ``BRUTEX_WRITE_BATCH`` flag (DEFAULT OFF). It changes ONLY how fetched F&O bars are
+    # WRITTEN (one O(month-depth) coalesced merge per drain cycle instead of one per window),
+    # so the fetch lane stops idling on its own write; the RateController (per-second ceiling
+    # + 500/min governor) is UNTOUCHED, so the issue rate still binds at the controller's
+    # allowed cap (Golden Rule #6). ``None`` (the default / a dry-run) keeps the synchronous
+    # write path byte-identical. Built + drained via the COMMON helpers in pull_controller
+    # (one wiring surface, CLAUDE.md §11 COMMON); the lazy import avoids a module-load cycle.
+    from brutex.dashboard.pull_controller import (
+        _build_write_consumer,  # pyright: ignore[reportPrivateUsage]
+        _drain_write_consumer,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    write_pool = _build_write_consumer(sink, dry_run=dry_run)
     rebuilt = _rebuild_contracts(contracts)
     selected_symbols = frozenset(row.contract_symbol for row, _contract in rebuilt)
     # Option + future legs ride DISTINCT ledger namespaces (DEC-GROWW-FUTURE-INGEST-001),
@@ -981,27 +999,35 @@ def pull_contract_candles(
     )
 
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
-    minute = _run_phase(
-        interval=_MINUTE_INTERVAL,
-        by_market=by_market,
-        selected_symbols=selected_symbols,
-        client=client,
-        sink=sink,
-        lake_root=lake_root,
-        dry_run=dry_run,
-        start=start,
-        end=end,
-        pace=pace,
-        on_rate_limit=on_rate_limit,
-        on_timeout=on_timeout,
-        on_success=on_success,
-        on_progress=on_progress,
-        session_rate=session_rate,
-        until_clean=until_clean,
-        until_clean_rounds=until_clean_rounds,
-        contract_windows=minute_windows,
-        run_parallel=run_parallel,
-    )
+    try:
+        minute = _run_phase(
+            interval=_MINUTE_INTERVAL,
+            by_market=by_market,
+            selected_symbols=selected_symbols,
+            client=client,
+            sink=sink,
+            lake_root=lake_root,
+            dry_run=dry_run,
+            start=start,
+            end=end,
+            pace=pace,
+            on_rate_limit=on_rate_limit,
+            on_timeout=on_timeout,
+            on_success=on_success,
+            on_progress=on_progress,
+            session_rate=session_rate,
+            until_clean=until_clean,
+            until_clean_rounds=until_clean_rounds,
+            contract_windows=minute_windows,
+            run_parallel=run_parallel,
+            write_pool=write_pool,
+        )
+    finally:
+        # Drain the batched writer BEFORE the 1-day derivation reads the just-written
+        # 1-minute lake (every settled window must be durable first) and BEFORE returning
+        # (so the caller's ledger persist sees a fully-flushed lake). Best-effort + a no-op
+        # when ``write_pool`` is ``None`` (the synchronous default).
+        _drain_write_consumer(write_pool)
 
     # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
     # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the
