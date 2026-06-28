@@ -20,6 +20,7 @@ from brutex.adapters.rate_common import (
     _GOVERNOR_LOOP_CAP,
     _SMOOTH_LOOP_CAP,
     CEILING_RPS,
+    CLOCK_GAP_THRESHOLD_S,
     FLOOR_RPS,
     PER_MIN_WINDOW,
     RATE_LIMIT_STORM_FLOOR_RPS,
@@ -27,6 +28,7 @@ from brutex.adapters.rate_common import (
     STEP_DOWN_HITS,
     STEP_DOWN_TIMEOUT_HITS,
     STEP_DOWN_WINDOW,
+    STEP_RPS,
     STEP_UP_WINDOW,
     STORM_HITS,
     TIMEOUT_FLOOR_RPS,
@@ -1005,3 +1007,145 @@ def test_recovers_from_floor_up_to_the_injected_8_ceiling() -> None:
 def test_step_up_window_matches_the_step_down_window() -> None:
     """The incremental window is symmetric with the rolling step-down window (60 s)."""
     assert STEP_UP_WINDOW == STEP_DOWN_WINDOW == 60.0
+
+
+class TestClockGapSleepWake:
+    """DEC-RATE-CLOCK-SLEEPWAKE-001 — laptop sleep/wake monotonic-gap safety.
+
+    When the operator's MacBook sleeps overnight and wakes, ``time.monotonic()``
+    jumps forward by a large delta. Two failure modes the controller must prevent:
+    (a) a stale rolling-60s issue history that lets a post-wake burst overshoot the
+    per-second OR per-minute cap, and (b) mis-timed AIMD recovery/backoff after the
+    gap. A single delta larger than :data:`PER_MIN_WINDOW` (~60 s) is treated as a
+    sleep/wake event: the rolling histories are pruned + every time-anchored marker
+    is re-based to ``now`` so issuance starts fresh — never bursting past the cap,
+    never stalling.
+    """
+
+    def test_governor_no_burst_overshoot_across_sleep(self) -> None:
+        # cap=3 at a HIGH ceiling so the per-second bucket is never the binding gate:
+        # only the per-minute governor governs. Fill the window, then jump the clock
+        # well past PER_MIN_WINDOW (sleep/wake) and confirm the next pace cannot let
+        # the rolling count exceed the cap.
+        clock = _Clock()
+        slept: list[float] = []
+
+        def _sleep(seconds: float) -> None:  # never reached in this happy path
+            slept.append(seconds)
+            clock.advance(seconds)
+
+        ctl = RateController(clock=clock, sleep=_sleep, ceiling_rps=1000.0, ceiling_per_min=3)
+        for _ in range(3):
+            ctl.pace()
+        assert ctl.snapshot()["recent_minute"] == 3  # window full at the cap
+        slept.clear()  # ignore the bucket's negligible 0.001 s opening pacing
+        # Simulate an 8-hour laptop sleep: one giant monotonic delta.
+        clock.advance(8 * 3600.0)
+        # The gap is detected → the stale issue history is reset to ``now``; the next
+        # pace admits exactly ONE fresh issue and the rolling count is the post-reset
+        # count, never the cap+pre-sleep stale entries.
+        ctl.pace()
+        recent = ctl.snapshot()["recent_minute"]
+        assert isinstance(recent, int)
+        assert recent <= 3, f"per-minute cap overshot after sleep/wake: {recent}"
+        # No GOVERNOR block fired: any governor block would be tens of seconds (one
+        # rolling window); the only sleep should be the bucket's tiny 1/1000 s pacing.
+        assert all(s < 1.0 for s in slept), f"governor blocked after sleep/wake: {slept}"
+
+    def test_no_stall_after_backward_clock_glitch(self) -> None:
+        # A small BACKWARD clock glitch on wake must not wedge the governor (mode b):
+        # a tiny backward step inside the window is tolerated normally, but a large
+        # backward jump (> PER_MIN_WINDOW) is treated as a gap → reset, so the
+        # controller resumes immediately instead of waiting on a future-stamped issue.
+        clock = _Clock()
+        ctl = RateController(
+            clock=clock, sleep=lambda _s: None, ceiling_rps=1000.0, ceiling_per_min=2
+        )
+        ctl.pace()
+        ctl.pace()
+        assert ctl.snapshot()["recent_minute"] == 2  # full
+        clock.advance(-(2 * CLOCK_GAP_THRESHOLD_S))  # large backward glitch (> threshold)
+        # Without gap handling the deque holds FUTURE-stamped issues that never age out
+        # → the governor would wait (or fail-open after spinning). With the reset the
+        # next pace starts fresh and admits without a spin.
+        ctl.pace()
+        recent = ctl.snapshot()["recent_minute"]
+        assert isinstance(recent, int)
+        assert recent <= 2
+
+    def test_smooth_pacing_no_burst_across_sleep(self) -> None:
+        # With smooth pacing ON, ``_last_issue_ts`` holds a real instant; a post-wake
+        # gap re-bases it so the first post-wake issue is not throttled against a stale
+        # baseline, yet the per-second spacing still binds afterward (no burst).
+        clock = _Clock()
+        slept: list[float] = []
+        ctl = RateController(
+            clock=clock,
+            sleep=slept.append,
+            ceiling_rps=5.0,
+            smooth_pacing=True,
+        )
+        ctl.pace()  # first issue (no wait — _last_issue_ts started -inf)
+        slept.clear()  # ignore the bucket's 1/5 s opening pacing
+        clock.advance(8 * 3600.0)  # sleep/wake
+        ctl.pace()  # gap re-based; first post-wake issue should not wait on the gate-0 spacing
+        # The smooth gate adds NO wait (a stale baseline 8 h in the past is way past
+        # the 1/rps interval anyway, but the re-base makes the intent explicit); the
+        # only sleep is the bucket's own 1/5 s pacing, never a multi-second block.
+        assert all(s < 1.0 for s in slept), f"smooth gate blocked after sleep/wake: {slept}"
+
+    def test_aimd_anchors_rebased_after_gap(self) -> None:
+        # After a sleep/wake gap, ``_last_step`` is re-based so a single clean
+        # on_success cannot interpret the whole sleep as "many recovery windows":
+        # recovery is still ONE rung per genuine post-wake clean STEP_UP_WINDOW.
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_rps=5.0)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # 5→4→3 (soft floor)
+        assert ctl.current_rps == FLOOR_RPS
+        clock.advance(8 * 3600.0)  # sleep/wake (huge gap)
+        ctl.on_success()  # gap re-bases _last_step → NOT yet a clean window post-wake
+        assert ctl.current_rps == FLOOR_RPS  # no instant multi-rung jump from the gap
+        # A genuine clean window after the wake recovers one rung.
+        clock.advance(STEP_UP_WINDOW)
+        ctl.on_success()
+        assert ctl.current_rps == FLOOR_RPS + STEP_RPS
+
+    def test_sub_threshold_delta_does_not_trip_gap(self) -> None:
+        # A normal small advance (≤ CLOCK_GAP_THRESHOLD_S) must NOT be treated as a
+        # sleep/wake event: the rolling 429 history is preserved across it so the
+        # step-down ladder still works (the gap handler's false branch). Hammer 3 hits
+        # spread by a sub-threshold amount and confirm the step-down still fires.
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_rps=5.0)
+        # Spread under BOTH the rolling step-down window (so the hits co-exist) AND the
+        # gap threshold (so no phantom reset). 1 s satisfies both.
+        small = 1.0
+        assert small < STEP_DOWN_WINDOW and small <= CLOCK_GAP_THRESHOLD_S
+        for _ in range(STEP_DOWN_HITS):
+            ctl.on_rate_limit()
+            clock.advance(small)
+        # The hits were NOT cleared by a phantom gap → the ladder stepped down.
+        assert ctl.current_rps == CEILING_RPS - STEP_RPS
+
+    def test_default_controller_rebases_via_snapshot_on_wake(self) -> None:
+        # A DEFAULT controller (no governor, no smooth pacing) reads the clock under
+        # lock only in _maybe_log_snapshot at the end of pace(). A sleep/wake gap there
+        # must re-base _last_step so a subsequent on_success times recovery from the
+        # wake, not the pre-sleep step. Drive the rate to the floor, then pace across a
+        # huge gap and confirm a single immediate on_success does NOT step up.
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_rps=5.0)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # → FLOOR
+        assert ctl.current_rps == FLOOR_RPS
+        clock.advance(8 * 3600.0)  # sleep/wake
+        ctl.pace()  # the only clock-under-lock read (snapshot) re-bases _last_step
+        ctl.on_success()  # 0 s since the re-based step → no recovery from the gap alone
+        assert ctl.current_rps == FLOOR_RPS
+
+    def test_threshold_is_above_every_operational_window(self) -> None:
+        # The gap threshold sits comfortably ABOVE every normal operational gap (the
+        # longest of which is one AIMD recovery window) so genuine pacing never
+        # false-trips, while a multi-minute laptop sleep always does.
+        assert CLOCK_GAP_THRESHOLD_S == 5.0 * PER_MIN_WINDOW == 300.0
+        assert CLOCK_GAP_THRESHOLD_S > STEP_UP_WINDOW
+        assert CLOCK_GAP_THRESHOLD_S > STEP_DOWN_WINDOW
