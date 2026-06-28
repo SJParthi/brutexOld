@@ -22,6 +22,7 @@
 # the next push triggers this workflow and the absolute gate activates.
 #
 # Decision: DEC-M4PRO-ABSOLUTE-001 (2026-05-25, MIGRATION #236).
+# Bench-surface (-s -rA) wiring: DEC-M4PRO-BENCH-SURFACE-001 (MIGRATION #979).
 
 name: bench-m4pro
 
