@@ -2991,7 +2991,14 @@ jobs:
     name: Definition of Ready (plan-first gate)
     runs-on: ubuntu-24.04
     timeout-minutes: 3
-    if: github.event_name == 'pull_request'
+    # DEC-DOR-LIVE-BODY-001: skip on an already merged/closed PR. A post-merge
+    # re-run replays the stale event snapshot and would paint a green/merged PR
+    # red on an outdated body — a cosmetic false-red. An OPEN PR is never
+    # skipped, so the gate stays strict for in-flight work.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.state != 'closed'
+      && github.event.pull_request.merged != true
     steps:
       - uses: actions/checkout@v7
       - name: Detect PR author
@@ -3002,13 +3009,25 @@ jobs:
           set -euo pipefail
           echo "author=$PR_AUTHOR" >> "$GITHUB_OUTPUT"
       - name: Run Definition-of-Ready guard
+        # DEC-DOR-LIVE-BODY-001: evaluate the LIVE PR body at run-time, not the
+        # `github.event.pull_request.body` event snapshot (which goes STALE on a
+        # body edit or a post-merge re-run). Fetch the current body via the API
+        # so a corrected body is honoured; fall back to the event snapshot only
+        # if the live fetch fails (fail-safe, never fail-open).
         env:
           PR_AUTHOR: ${{ steps.pr-meta.outputs.author }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
-          printf '%s\n' "$PR_BODY" > "$tmp"
+          if live_body=$(gh pr view "$PR_NUMBER" --json body -q .body 2>/dev/null); then
+            printf '%s\n' "$live_body" > "$tmp"
+          else
+            echo "::warning::DoR guard: live PR-body fetch failed; falling back to the event snapshot" >&2
+            printf '%s\n' "$PR_BODY_FALLBACK" > "$tmp"
+          fi
           bash scripts/ci/definition-of-ready-guard.sh "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
