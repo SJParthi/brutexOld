@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-import polars as pl
 import pytest
 from brutex.dashboard.gated_prebuild import PREBUILD_PHASE_ORDER, run_gated_prebuild
 from brutex.data.spot_resample import derive_intraday_tfs
@@ -27,6 +27,11 @@ from brutex.data.timeframe_materialize import (
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import given
 from hypothesis import strategies as st
+
+if TYPE_CHECKING:
+    import polars as pl  # type-only: real module so `pl.X` annotations resolve
+else:
+    pl = pytest.importorskip("polars")  # runtime: frame construction needs the [data] extra
 
 
 def _make(kind: PrebuildKind, idx: int) -> Instrument:
