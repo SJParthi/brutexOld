@@ -1142,6 +1142,10 @@ async function selectInstrument(i) {
        fills — NOT the expired-options OHLC lake. Rows follow
        REGISTRY_EXPIRY_COLUMNS = [exch, underlying, expiry_date, year, fetched_at]. */
     const r = await fetch('/api/v1/db/registry/expiries?underlying=' + encodeURIComponent(i.symbol));
+    if (!r.ok) {
+      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load expiries — registry may be unreadable; try ▶ Pull · full pipeline above") + '</div>';
+      return;
+    }
     const body = await r.json();
     const rows = (body.rows || []);
     if (!rows.length) {
@@ -1178,6 +1182,10 @@ async function renderContracts(symbol, expiryDate) {
        strike, side, candle_status, fetched_at]. */
     const r = await fetch('/api/v1/db/registry/contracts?underlying=' + encodeURIComponent(symbol)
       + '&expiry_date=' + encodeURIComponent(expiryDate));
+    if (!r.ok) {
+      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load contracts — registry may be unreadable; try ▶ Pull · full pipeline above") + '</div>';
+      return;
+    }
     const body = await r.json();
     const rows = body.rows || [];
     if (!rows.length) {
