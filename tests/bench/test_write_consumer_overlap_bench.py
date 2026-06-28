@@ -66,6 +66,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink, SinkAppendResult
 from brutex.data.write_consumer import (
+    BatchingWriteConsumer,
     ResultBox,
     ShardedWriteConsumer,
     WriteConsumerSink,
@@ -136,16 +137,27 @@ class _ArmResult:
 def _run_arm(
     tmp_path: Path,
     *,
-    write_pool_workers: int | None,
+    write_pool_workers: int | None = None,
+    batched: bool = False,
     tag: str,
 ) -> _ArmResult:
     """Drive ``_WINDOWS`` fetch→write cycles over ``_CONNECTIONS`` connections; measure rps.
 
     Each "connection" runs a sequence of windows. A window = sleep(fetch latency) then the
-    durable write. With ``write_pool_workers=None`` the write runs INLINE on the connection
-    thread (today's synchronous path); with a sharded consumer the write is handed off and
-    the connection only blocks on the durable result — so OTHER connections fetch during
-    the wait (the overlap). ``achieved_rps`` = total windows / wall time.
+    durable write.
+
+    Three arms:
+
+    * ``write_pool_workers is None and not batched`` — today's SYNCHRONOUS path (the write
+      runs INLINE on the connection thread).
+    * ``write_pool_workers is not None`` — the per-window :class:`ShardedWriteConsumer`
+      (one durable write per window, handed to a shard thread).
+    * ``batched`` — the coalescing :class:`BatchingWriteConsumer`: the connection blocks on
+      the durable result, but the background writer COALESCES all pending same-series
+      windows into ONE merge per drain cycle, so N windows queued for one deep month cost
+      ONE ~163 ms merge instead of N (DEC-WRITE-BATCH-COALESCE-001).
+
+    ``achieved_rps`` = total windows / wall time.
     """
     lake = tmp_path / tag
     writer = ParquetWriter(lake_root=lake)
@@ -153,9 +165,12 @@ def _run_arm(
     symbol = "NSE-NIFTY"
     next_ts = _seed_deep_partition(writer, symbol=symbol)
 
-    consumer: ShardedWriteConsumer | None = None
+    consumer: ShardedWriteConsumer | BatchingWriteConsumer | None = None
     write_sink: ParquetBarSink | WriteConsumerSink = sink
-    if write_pool_workers is not None:
+    if batched:
+        consumer = BatchingWriteConsumer(sink=sink, queue_maxsize=64, max_coalesce=_WINDOWS)
+        write_sink = WriteConsumerSink(consumer=consumer)
+    elif write_pool_workers is not None:
         consumer = ShardedWriteConsumer(sink=sink, workers=write_pool_workers, queue_maxsize=64)
         write_sink = WriteConsumerSink(consumer=consumer)
 
@@ -261,12 +276,62 @@ def test_write_consumer_ab_records_no_go(tmp_path: Path) -> None:
     )
 
 
-def _bytes_for_arm(tmp_path: Path, *, workers: int | None, tag: str) -> bytes:
+@pytest.mark.slow
+def test_batched_write_consumer_ab_beats_serial(tmp_path: Path) -> None:
+    """A/B: the COALESCING batched writer beats the synchronous path on the deep month.
+
+    The HARD gate (DEC-WRITE-BATCH-COALESCE-001 ships ONLY if this holds):
+
+        achieved_rps(batched) > achieved_rps(sync)   (a real margin, not noise)
+
+    WHY it CAN beat sync where the per-window ``ShardedWriteConsumer`` could NOT (the
+    documented NO-GO above): the deep merge is ~constant per write (it re-reads the whole
+    stored month regardless of how many NEW bars it merges). The per-window consumer still
+    ran ONE merge per window, so the GIL-held merge bound both arms. The BATCHED consumer
+    COALESCES every pending same-series window into ONE merge per drain cycle — so N
+    windows queued for one deep month pay ONE merge, not N. That divides the write time by
+    ~N, which is exactly the lever that lets the fetch lane stop idling on the disk.
+
+    The bench drives ``_CONNECTIONS`` fetch connections over a deep ``_DEEP_ROWS``-row
+    month so each write is a real O(month-depth) merge; the batched arm coalesces the
+    windows that pile up behind one slow merge. The MEDIAN of several repeats is compared
+    so one noisy run cannot flip the verdict. If the margin is NOT met on this envelope the
+    test FAILS — an honest NO-GO is the outcome, never a fabricated win (Golden Rule #10).
+    """
+    repeats = 3
+    none_rps = [_run_arm(tmp_path, tag=f"bsync{i}").achieved_rps for i in range(repeats)]
+    batched_rps = [
+        _run_arm(tmp_path, batched=True, tag=f"batched{i}").achieved_rps for i in range(repeats)
+    ]
+    none_med, batched_med = _median(none_rps), _median(batched_rps)
+    speedup = batched_med / none_med if none_med > 0 else float("inf")
+    curve = (
+        f"\nBATCHED A/B curve (deep {_DEEP_ROWS}-row month, {_CONNECTIONS} connections, "
+        f"{_WINDOWS} windows, {_FETCH_LATENCY_S * 1000:.0f}ms fetch, median of {repeats}):\n"
+        f"  achieved_rps(sync)    = {none_med:6.2f} r/s  raw={[round(x, 2) for x in none_rps]}\n"
+        f"  achieved_rps(batched) = {batched_med:6.2f} r/s  raw={[round(x, 2) for x in batched_rps]}\n"
+        f"  speedup = {speedup:.2f}x\n"
+        f"  VERDICT: {'GO' if batched_med > none_med * 1.10 else 'NO-GO'} "
+        f"(batched {'beats' if batched_med > none_med else 'does NOT beat'} sync)\n"
+    )
+    print(curve)  # captured by -s / on failure; the measured curve for the PR body
+    # The batched coalescing write MUST beat sync by a meaningful margin (>=10%, filters
+    # noise) — the whole point of the feature. A failure is an honest NO-GO, recorded here.
+    assert batched_med > none_med * 1.10, (
+        "the batched coalescing writer did NOT beat the synchronous path by >=10% on this "
+        "envelope — do NOT enable BRUTEX_WRITE_BATCH until the margin is proven" + curve
+    )
+
+
+def _bytes_for_arm(
+    tmp_path: Path, *, workers: int | None = None, batched: bool = False, tag: str
+) -> bytes:
     """Write an IDENTICAL bar stream through the given arm; return the stored partition bytes.
 
-    The byte-parity oracle: the consumer (any W) must produce the EXACT same on-disk
-    Parquet as the synchronous path — sharding/concurrency changes only WHEN a write runs,
-    never WHICH bytes land (the merge unions by timestamp, order-independent).
+    The byte-parity oracle: the consumer (any W, or the coalescing batched writer) must
+    produce the EXACT same on-disk Parquet as the synchronous path — sharding /
+    concurrency / coalescing changes only WHEN + HOW MANY writes run, never WHICH bytes
+    land (the merge unions by timestamp, order-independent — Golden Rule #7).
     """
     lake = tmp_path / tag
     writer = ParquetWriter(lake_root=lake)
@@ -275,13 +340,20 @@ def _bytes_for_arm(tmp_path: Path, *, workers: int | None, tag: str) -> bytes:
     base = datetime(2020, 1, 1, 9, 15, tzinfo=UTC)
 
     write_sink: ParquetBarSink | WriteConsumerSink = sink
-    consumer: ShardedWriteConsumer | None = None
-    if workers is not None:
+    consumer: ShardedWriteConsumer | BatchingWriteConsumer | None = None
+    if batched:
+        consumer = BatchingWriteConsumer(sink=sink, queue_maxsize=64, max_coalesce=64)
+        write_sink = WriteConsumerSink(consumer=consumer)
+    elif workers is not None:
         consumer = ShardedWriteConsumer(sink=sink, workers=workers, queue_maxsize=64)
         write_sink = WriteConsumerSink(consumer=consumer)
 
     # A deterministic multi-window stream over ONE month partition. Submit concurrently
-    # for the consumer arms so the oracle also exercises the cross-window merge ordering.
+    # for the consumer arms so the oracle also exercises the cross-window merge ordering
+    # (and, for the batched arm, the COALESCED multi-window merge). All timestamps are
+    # DISTINCT here — this oracle proves the no-conflict UNION parity; the same-timestamp
+    # keep-first CONFLICT parity is proven deterministically by
+    # `test_byte_parity_batched_conflict_keep_first` (MINOR-4).
     batches = [[_bar(base + timedelta(minutes=w), price=300.0 + w)] for w in range(30)]
 
     def _one(bars: Sequence[CandleBar]) -> SinkAppendResult:
@@ -317,6 +389,83 @@ def test_byte_parity_across_w_none_2_4(tmp_path: Path) -> None:
     w4_bytes = _bytes_for_arm(tmp_path, workers=4, tag="parity_w4")
     assert w2_bytes == sync_bytes, "W=2 partition bytes diverged from the synchronous path"
     assert w4_bytes == sync_bytes, "W=4 partition bytes diverged from the synchronous path"
+
+
+def test_byte_parity_batched_matches_serial(tmp_path: Path) -> None:
+    """The COALESCING batched writer matches the serial path on a NO-CONFLICT union.
+
+    The byte-parity oracle for DEC-WRITE-BATCH-COALESCE-001: coalescing N DISTINCT-timestamp
+    windows into ONE merge changes only HOW MANY merge-writes run, never WHICH bytes land —
+    the merge unions by timestamp, so the final partition is byte-for-byte the same as N
+    serial appends. This arm streams only distinct minutes (no same-timestamp conflict); the
+    same-timestamp keep-first CONFLICT parity is proven by
+    :func:`test_byte_parity_batched_conflict_keep_first` (MINOR-4). Golden Rule #7.
+    """
+    sync_bytes = _bytes_for_arm(tmp_path, workers=None, tag="parity_b_none")
+    batched_bytes = _bytes_for_arm(tmp_path, batched=True, tag="parity_batched")
+    assert batched_bytes == sync_bytes, (
+        "the batched coalesced partition bytes diverged from the synchronous path — the "
+        "coalescing changed WHICH bytes land, NOT just how many writes ran (a byte-parity "
+        "violation; do NOT ship)"
+    )
+
+
+def _conflict_bytes(tmp_path: Path, *, batched: bool, tag: str) -> bytes:
+    """Write a stream with SAME-TIMESTAMP conflicts in a DETERMINISTIC order; return bytes.
+
+    Submits SERIALLY (one connection) so keep-first order is well-defined across both the
+    synchronous and the batched arm: each conflicting minute is first written with its
+    ORIGINAL price, then re-submitted with a different price — keep-first must discard the
+    later one identically in both arms. The batched arm still COALESCES the queued windows
+    into one merge (the writer drains in enqueue order), so this proves the coalesced merge
+    honours keep-first on a real conflict, not just the union of distinct minutes.
+    """
+    lake = tmp_path / tag
+    writer = ParquetWriter(lake_root=lake)
+    sink = ParquetBarSink(writer=writer)
+    symbol = "NSE-NIFTY"
+    base = datetime(2020, 1, 1, 9, 15, tzinfo=UTC)
+
+    write_sink: ParquetBarSink | WriteConsumerSink = sink
+    consumer: BatchingWriteConsumer | None = None
+    if batched:
+        consumer = BatchingWriteConsumer(sink=sink, queue_maxsize=64, max_coalesce=64)
+        write_sink = WriteConsumerSink(consumer=consumer)
+
+    # Original distinct minutes, then two CONFLICT re-submissions (minutes 5 + 10 with a
+    # different price). keep-first ⇒ the originals (305 / 310) win in BOTH arms.
+    batches: list[list[CandleBar]] = [
+        [_bar(base + timedelta(minutes=w), price=300.0 + w)] for w in range(15)
+    ]
+    batches.append([_bar(base + timedelta(minutes=5), price=999.0)])
+    batches.append([_bar(base + timedelta(minutes=10), price=888.0)])
+
+    for bars in batches:
+        write_sink.append(
+            exchange="NSE", segment="CASH", symbol=symbol, interval="1minute", bars=bars
+        )
+    if consumer is not None:
+        consumer.drain()
+
+    partition = lake / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute" / "2020" / "01.parquet"
+    return partition.read_bytes()
+
+
+def test_byte_parity_batched_conflict_keep_first(tmp_path: Path) -> None:
+    """The batched writer matches the serial path EVEN with same-timestamp keep-first conflicts.
+
+    MINOR-4: the no-conflict oracle proves the union of distinct minutes is byte-identical,
+    but not the keep-first CONFLICT path. This streams two SAME-TIMESTAMP re-submissions and
+    asserts the coalesced batched partition is byte-for-byte the serial partition — so the
+    later conflicting bar is discarded identically (keep-first) whether the writes ran
+    serially or were coalesced into one merge (Golden Rule #7).
+    """
+    sync_bytes = _conflict_bytes(tmp_path, batched=False, tag="conflict_sync")
+    batched_bytes = _conflict_bytes(tmp_path, batched=True, tag="conflict_batched")
+    assert batched_bytes == sync_bytes, (
+        "batched keep-first CONFLICT parity violated — a coalesced merge kept a DIFFERENT "
+        "bar for a duplicated timestamp than the serial path (do NOT ship)"
+    )
 
 
 def test_settle_after_durable_in_real_write(tmp_path: Path) -> None:

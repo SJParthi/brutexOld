@@ -1034,6 +1034,48 @@ def test_run_write_pool_none_uses_raw_sink() -> None:
     assert {a[2] for a in sink.appends} == {ok.symbol}
 
 
+def test_run_capture_hook_factory_builds_per_contract_hook() -> None:
+    """DEC-RAW-DATA-INTEGRITY-001: with no explicit ``on_raw_payload``, the production
+
+    ``capture_hook_factory`` is invoked PER CONTRACT with that contract's resolved
+    ``(exchange, OPTION_SEGMENT, symbol)`` coordinates (option_ingest.py:1026). A spy
+    factory records each invocation, proving the per-contract hook is built here (one
+    ingest run pulls many contracts, so the hook must be attributed per leg).
+    """
+    from brutex.adapters.groww.option_ingest import OPTION_SEGMENT, contract_exchange
+
+    ok1, ok2 = _ce(), _ce2()
+    sdk = _FakeSDK(payload=_candles())
+    built: list[tuple[str, str, str]] = []
+
+    def _factory(
+        exchange: str, segment: str, symbol: str
+    ) -> Callable[[Mapping[str, object], str, str, str], None]:
+        built.append((exchange, segment, symbol))
+
+        def _hook(_payload: Mapping[str, object], _e: str, _s: str, _sym: str) -> None:
+            return None
+
+        return _hook
+
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[ok1, ok2],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+        capture_hook_factory=_factory,
+    )
+    assert report.bars_appended == 2
+    # The factory was invoked once per contract with that leg's (exchange, FNO, symbol).
+    assert set(built) == {
+        (contract_exchange(ok1), OPTION_SEGMENT, ok1.symbol),
+        (contract_exchange(ok2), OPTION_SEGMENT, ok2.symbol),
+    }
+
+
 def test_run_auth_failure_sets_auth_aborted() -> None:
     bad = _ce()
     sdk = _FakeSDK(raise_for={bad.symbol: GrowwAPIAuthenticationException("dead token")})
