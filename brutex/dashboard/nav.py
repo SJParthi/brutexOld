@@ -33,6 +33,7 @@ NAV_LINKS: tuple[NavLink, ...] = (
     NavLink("/db", "Database"),
     NavLink("/coverage", "Coverage"),
     NavLink("/movers", "Movers"),
+    NavLink("/results", "Results"),
     NavLink("/reports", "Reports"),
 )
 

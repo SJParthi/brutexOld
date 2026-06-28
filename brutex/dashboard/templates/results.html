@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Sweep leaderboard</title>
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C;
+    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
+    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(ellipse at top, rgba(157,123,255,0.07), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
+      var(--bg);
+  }
+  @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .5; transform: scale(.9);} }
+  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
+  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
+  .topnav a:hover { color:var(--text-bright); }
+  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
+
+  header {
+    display:flex; align-items:center; gap:14px; padding:16px 24px;
+    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
+  }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
+    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { color:var(--muted); font-size:12px; }
+  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
+  .topnav a { color:var(--blue); text-decoration:none; }
+  .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--green);
+    box-shadow:0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+
+  .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
+    animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; align-items:flex-end; }
+  .ctl { display:flex; flex-direction:column; gap:4px; }
+  .ctl label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+  .ctl select, .ctl input {
+    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+    border-radius:var(--r-md); min-height:var(--ctl-h); padding:0 12px; font:inherit; font-size:13px;
+    color-scheme:dark; min-width:130px;
+  }
+  .ctl select:focus, .ctl input:focus { outline:none; border-color:var(--blue);
+    box-shadow:0 0 0 3px rgba(91,141,239,.18); }
+  .refreshbtn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
+    min-height:var(--ctl-h); padding:0 16px; font:inherit; font-size:13px; font-weight:700;
+    color:var(--text-bright); background:var(--surface-2); transition:.15s var(--ease); }
+  .refreshbtn:hover { border-color:var(--blue); box-shadow:0 0 18px rgba(91,141,239,.3); transform:translateY(-1px); }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:16px; padding:18px 24px 6px; animation: fadeInUp .5s ease both; align-content:start; }
+  .card { display:flex; flex-direction:column; gap:6px;
+    background:linear-gradient(160deg,var(--surface),var(--surface-2));
+    border:1px solid var(--border-strong); border-radius:16px; padding:16px 18px; }
+  .card .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
+  .card .v.warn { color:var(--yellow); }
+  .card .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+
+  .sectiontitle { padding:14px 24px 2px; font-size:12px; color:var(--muted);
+    text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
+  .panelwrap { padding:6px 24px 24px; animation: fadeInUp .5s ease both; }
+  .panel { overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
+    font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
+    text-transform:uppercase; letter-spacing:.5px; cursor:pointer; white-space:nowrap; user-select:none; }
+  thead th:hover { color:var(--text-bright); }
+  thead th.sorted::after { content:" \25be"; color:var(--blue); }
+  thead th.sorted.asc::after { content:" \25b4"; color:var(--blue); }
+  tbody td { padding:9px 14px; border-top:1px solid var(--border); }
+  tbody tr:hover { background:var(--surface-2); }
+  .rank { font-weight:800; color:var(--blue); font-variant-numeric:tabular-nums; }
+  .sym { font-weight:700; color:var(--text-bright); }
+  .num { font-variant-numeric:tabular-nums; text-align:right; }
+  .pnl.pos { color:var(--green); } .pnl.neg { color:var(--red); }
+  .cond { color:var(--text); font-size:12px; max-width:420px; }
+  .cond.none { color:var(--muted); font-style:italic; }
+  .empty { color:var(--muted); font-size:14px; padding:40px 20px; text-align:center; line-height:1.7; }
+  .empty .ei { font-size:30px; display:block; margin-bottom:10px; opacity:.65; }
+  #status { padding:4px 24px 12px; font-size:12px; color:var(--muted); }
+  .foot { padding:6px 24px 26px; font-size:11px; color:var(--muted); line-height:1.6; }
+
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important; scroll-behavior: auto !important;
+    }
+  }
+  @media (max-width: 680px) {
+    header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+    .live { margin-left: 0; }
+    .cards { grid-template-columns: 1fr 1fr; padding: 14px; gap: 12px; }
+    .controls { padding: 12px 14px; }
+  }
+</style>
+<link rel="stylesheet" href="/static/bx-theme.css">
+</head>
+<body>
+  <header>
+    <div class="brandmark" aria-hidden="true">B</div>
+    <div class="logo">BruteX</div>
+    <div class="sub">Sweep leaderboard — the ranked brute-force combo winners (read-only · engine: NIFTY / BANKNIFTY / SENSEX)</div>
+    <nav class="topnav" aria-label="Primary">
+      <a href="/universe">Universe</a>
+      <a href="/groww-credentials">Credentials</a>
+      <a href="/db">Database</a>
+      <a href="/coverage">Coverage</a>
+      <a href="/movers">Movers</a>
+      <a href="/results" aria-current="page">Results</a>
+      <a href="/reports">Reports</a>
+    </nav>
+    <div class="live" id="live"><span class="dot"></span><span id="livetxt">loading</span></div>
+  </header>
+
+  <div class="controls">
+    <div class="ctl">
+      <label for="fInstrument">Instrument</label>
+      <select id="fInstrument"><option value="">All</option></select>
+    </div>
+    <div class="ctl">
+      <label for="fTf">Timeframe</label>
+      <select id="fTf"><option value="">All</option></select>
+    </div>
+    <div class="ctl">
+      <label for="fDirection">Direction</label>
+      <select id="fDirection"><option value="">All</option></select>
+    </div>
+    <div class="ctl">
+      <label for="fRankBy">Rank by</label>
+      <select id="fRankBy">
+        <option value="sharpe_ratio">Sharpe ratio</option>
+        <option value="sortino_ratio">Sortino ratio</option>
+        <option value="calmar_ratio">Calmar ratio</option>
+        <option value="profit_factor">Profit factor</option>
+        <option value="win_rate">Win rate</option>
+        <option value="net_pnl_paisa">Net P&amp;L</option>
+        <option value="expectancy_paisa">Expectancy</option>
+        <option value="total_trades">Total trades</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="fTop">Top N</label>
+      <input id="fTop" type="number" min="1" max="500" value="50" />
+    </div>
+    <button class="refreshbtn" id="refreshBtn" title="Re-read the sweep leaderboard">&#x21bb; Refresh</button>
+  </div>
+
+  <div class="cards" id="cards"></div>
+  <div id="status"></div>
+
+  <div class="panelwrap"><div class="panel" id="panel"><div class="empty">loading…</div></div></div>
+
+  <div class="foot">
+    Read-only view of the per-tuple sweep stores under <code>&lt;lake&gt;/sweeps</code>
+    (<code>ResultsStore</code>). Net&nbsp;P&amp;L is rendered in rupees (two decimals);
+    Sharpe&nbsp;/&nbsp;profit&nbsp;factor&nbsp;/&nbsp;win&nbsp;rate are full-precision and
+    <strong>never rounded</strong> (ranking integrity). The brute-force engine scope is
+    <strong>NIFTY&nbsp;/&nbsp;BANKNIFTY&nbsp;/&nbsp;SENSEX</strong> (CLAUDE.md&nbsp;§3) — this
+    page displays the results, it does not run the engine.
+  </div>
+
+<script>
+/* ── BruteX Sweep Leaderboard (DEC-DASHBOARD-RESULTS-PAGE-001) ──
+   Read-only: fetches /api/v1/sweep/leaderboard on open + on every filter change /
+   manual Refresh and renders the ranked sweep winners as a click-to-sort table, with
+   an honest empty-state when no sweep has been run yet. Escape-before-innerHTML (XSS). */
+const cardsEl = document.getElementById("cards");
+const panel = document.getElementById("panel");
+const statusEl = document.getElementById("status");
+const liveTxt = document.getElementById("livetxt");
+const fInstrument = document.getElementById("fInstrument");
+const fTf = document.getElementById("fTf");
+const fDirection = document.getElementById("fDirection");
+const fRankBy = document.getElementById("fRankBy");
+const fTop = document.getElementById("fTop");
+
+let ROWS = [];               // the current leaderboard rows (already ranked server-side)
+let sortKey = "rank";        // active client-side sort column
+let sortAsc = true;          // ascending? (rank ascends by default — best first)
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
+/* Full-precision metric formatting: show up to 4 significant decimals WITHOUT
+   altering the stored value (display only — the value sorted/ranked is the raw one). */
+function metric(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return esc(String(v));
+  return n.toLocaleString("en-US", { maximumFractionDigits: 4 });
+}
+function pct(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  return (n * 100).toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
+}
+
+/* The sortable columns: key → (header label, cell renderer). The server already
+   ranked by the chosen metric; client-side sort re-orders the fetched page only. */
+const COLS = [
+  ["rank", "#", (r) => '<span class="rank">' + num(r.rank) + "</span>"],
+  ["instrument", "Instrument", (r) => '<span class="sym">' + esc(r.instrument) + "</span>"],
+  ["tf", "TF", (r) => esc(r.tf)],
+  ["direction", "Dir", (r) => esc(r.direction)],
+  ["net_pnl_rupees", "Net P&L", (r) =>
+    '<span class="pnl ' + (Number(r.net_pnl_rupees) >= 0 ? "pos" : "neg") + '">' + esc(r.net_pnl) + "</span>"],
+  ["sharpe_ratio", "Sharpe", (r) => metric(r.sharpe_ratio)],
+  ["sortino_ratio", "Sortino", (r) => metric(r.sortino_ratio)],
+  ["profit_factor", "PF", (r) => metric(r.profit_factor)],
+  ["win_rate", "Win %", (r) => pct(r.win_rate)],
+  ["total_trades", "Trades", (r) => num(r.total_trades)],
+  ["conditions", "Matched conditions", (r) =>
+    r.conditions
+      ? '<span class="cond">' + esc(r.conditions) + "</span>"
+      : '<span class="cond none">(no conditions — enters every bar)</span>'],
+];
+const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
+  "profit_factor", "win_rate", "total_trades"]);
+
+function renderCards(board) {
+  const html =
+    '<div class="card"><span class="v">' + num(board.total_rows) + '</span><span class="l">combos ranked</span></div>'
+    + '<div class="card"><span class="v">' + num((board.rows || []).length) + '</span><span class="l">shown</span></div>'
+    + '<div class="card"><span class="v">' + num(board.store_count) + '</span><span class="l">sweep files</span></div>'
+    + '<div class="card"><span class="v' + (board.skipped ? " warn" : "") + '">' + num(board.skipped)
+      + '</span><span class="l">skipped (unreadable)</span></div>';
+  cardsEl.innerHTML = html;
+}
+
+/* Fill a <select> with options, preserving the current value when still valid. */
+function fillSelect(el, values) {
+  const cur = el.value;
+  let html = '<option value="">All</option>';
+  for (const v of values || []) html += '<option value="' + esc(v) + '">' + esc(v) + "</option>";
+  el.innerHTML = html;
+  if (cur && (values || []).includes(cur)) el.value = cur;
+}
+
+function sortRows() {
+  const factor = sortAsc ? 1 : -1;
+  ROWS.sort((a, b) => {
+    let av = a[sortKey], bv = b[sortKey];
+    if (NUMERIC.has(sortKey)) { av = Number(av) || 0; bv = Number(bv) || 0; return (av - bv) * factor; }
+    av = String(av == null ? "" : av); bv = String(bv == null ? "" : bv);
+    return av.localeCompare(bv) * factor;
+  });
+}
+
+function renderTable() {
+  if (!ROWS.length) {
+    panel.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">&#128202;</span>'
+      + "No sweeps yet — run one from the dashboard (the “🚀 Run Sweep” button), "
+      + "then the ranked combo winners appear here.</div>";
+    return;
+  }
+  sortRows();
+  const head = COLS.map(([k, lbl]) => {
+    const cls = k === sortKey ? "sorted" + (sortAsc ? " asc" : "") : "";
+    return '<th data-k="' + esc(k) + '" class="' + cls + '">' + lbl + "</th>";
+  }).join("");
+  const body = ROWS.map((r) =>
+    "<tr>" + COLS.map(([, , render]) => "<td>" + render(r) + "</td>").join("") + "</tr>"
+  ).join("");
+  panel.innerHTML = "<table><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
+  panel.querySelectorAll("thead th").forEach((th) => {
+    th.onclick = () => {
+      const k = th.dataset.k;
+      if (k === sortKey) { sortAsc = !sortAsc; } else { sortKey = k; sortAsc = k === "rank"; }
+      renderTable();
+    };
+  });
+}
+
+async function load() {
+  liveTxt.textContent = "loading";
+  const params = new URLSearchParams();
+  if (fInstrument.value) params.set("instrument", fInstrument.value);
+  if (fTf.value) params.set("tf", fTf.value);
+  if (fDirection.value) params.set("direction", fDirection.value);
+  if (fRankBy.value) params.set("rank_by", fRankBy.value);
+  let top = parseInt(fTop.value, 10);
+  if (!isFinite(top) || top < 1) top = 50;
+  if (top > 500) top = 500;
+  params.set("top", String(top));
+  try {
+    const r = await fetch("/api/v1/sweep/leaderboard?" + params.toString());
+    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
+    const board = await r.json();
+    renderCards(board);
+    fillSelect(fInstrument, board.instruments);
+    fillSelect(fTf, board.timeframes);
+    fillSelect(fDirection, board.directions);
+    ROWS = (board.rows || []).slice();
+    sortKey = "rank"; sortAsc = true;
+    renderTable();
+    statusEl.textContent = board.available
+      ? num((board.rows || []).length) + " of " + num(board.total_rows) + " combos shown · ranked by "
+        + esc(board.rank_by) + " · " + num(board.store_count) + " sweep file(s)"
+        + (board.skipped ? " · " + num(board.skipped) + " skipped (unreadable)" : "")
+      : "no sweep has been run yet — run one from the dashboard";
+    liveTxt.textContent = board.available ? "live · " + num((board.rows || []).length) + " rows" : "no data";
+  } catch (e) {
+    liveTxt.textContent = "offline";
+  }
+}
+
+[fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
+fTop.onchange = load;
+document.getElementById("refreshBtn").onclick = load;
+load();
+</script>
+</body>
+</html>

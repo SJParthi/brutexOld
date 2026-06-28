@@ -52,6 +52,12 @@ ProgressHook = Callable[[str, int, bool, bool], None]
 #: The injected pull work — given the progress hook, run the pull (return ignored).
 PullWork = Callable[[ProgressHook], object]
 
+#: An optional zero-arg success callback fired ONCE on the worker thread when the
+#: work returns WITHOUT raising (never on a failed / hung run). Used by the
+#: dashboard sweep route to bump ``SummaryCache.mark_dirty`` so a completed sweep
+#: invalidates the ``/results`` leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001).
+SuccessHook = Callable[[], None]
+
 #: The injected thread spawner — runs *fn* off the caller's thread. The default
 #: spawns a daemon thread; tests inject a synchronous runner for determinism.
 Spawner = Callable[[Callable[[], None]], None]
@@ -165,7 +171,13 @@ class BackgroundPullJob:
         self._watchdog: PullWatchdog | None = None
 
     def start(
-        self, work: PullWork, *, total: int, detail: str = "", ledger_synced: bool = False
+        self,
+        work: PullWork,
+        *,
+        total: int,
+        detail: str = "",
+        ledger_synced: bool = False,
+        on_success: SuccessHook | None = None,
     ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
@@ -178,6 +190,13 @@ class BackgroundPullJob:
         instead by :meth:`sync_from_ledger` off the live WindowLedger, so the bar advances
         per WINDOW (~1 s cadence) rather than per finished symbol. Default ``False`` keeps
         the per-pair advance (every other caller — options, per-symbol — is unchanged).
+
+        When *on_success* is given it is fired ONCE on the worker thread iff the work
+        returns WITHOUT raising — never on a failed / hung run. The dashboard sweep
+        route passes ``_summary_cache.mark_dirty`` so a SUCCESSFUL sweep bumps the
+        write-generation and the next ``/results`` poll re-reads the new winners
+        (DEC-DASHBOARD-RESULTS-PAGE-001). A success callback that raises is logged +
+        swallowed so it can never crash the worker thread.
         """
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
         # the worker beats it on real progress (per window), and its daemon timer declares
@@ -203,7 +222,7 @@ class BackgroundPullJob:
         self._ledger_synced = ledger_synced
         self._progress.start(total=total, detail=detail)
         watchdog.start()
-        self._spawn(lambda: self._run(work, watchdog))
+        self._spawn(lambda: self._run(work, watchdog, on_success))
         return True
 
     def _on_hung(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
@@ -245,11 +264,18 @@ class BackgroundPullJob:
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_hung failed; the pull / timer is unaffected")
 
-    def _run(self, work: PullWork, watchdog: PullWatchdog) -> None:
+    def _run(
+        self, work: PullWork, watchdog: PullWatchdog, on_success: SuccessHook | None = None
+    ) -> None:
         """Worker body: run *work*, then mark the tracker done / errored.
 
         *watchdog* is THIS run's stall watchdog (passed in by :meth:`start`, so it is never
         ``None`` here), stopped in the ``finally`` once the worker has returned / raised.
+
+        *on_success* (when given) fires ONCE on the success branch — after the work
+        returns without raising and the progress is marked done — and never on the
+        failure branch, so a completed sweep can invalidate the ``/results`` cache
+        while a failed sweep leaves it untouched (DEC-DASHBOARD-RESULTS-PAGE-001).
         """
         # Install the process-global liveness beat for this run (DEC-PULL-CONTENTION-
         # ANTISTALL-001 GAP #15): the bounded partition lock-wait + the rate pacer fire
@@ -273,6 +299,15 @@ class BackgroundPullJob:
                 emit_pull_halt_alert(exc)
         else:
             self._progress.finish(detail="done")
+            if on_success is not None:
+                # Fire the success-only completion hook (e.g. the sweep route's
+                # mark_dirty). Best-effort: a raising callback is logged + swallowed
+                # so it can never crash the worker thread or leave the job stuck with
+                # _running set (the finally below still clears it).
+                try:
+                    on_success()
+                except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
+                    _LOG.exception("pull_job.on_success failed; the completed pull is unaffected")
         finally:
             # Remove this run's liveness beat so a later poll can never fire into a dead
             # watchdog (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15).
@@ -373,5 +408,6 @@ __all__ = [
     "ProgressHook",
     "PullWork",
     "Spawner",
+    "SuccessHook",
     "WatchdogFactory",
 ]
