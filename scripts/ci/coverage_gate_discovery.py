@@ -94,6 +94,19 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # 100% gate; the discovery gate running its backfill in isolation is a
         # structural mismatch that would block EVERY app.py-touching PR.
         "brutex/dashboard/app.py",
+        # The SPOT pull controller's 100% line+branch is reached by a CURATED
+        # multi-file suite — test_dashboard_pull_controller.py +
+        # test_dashboard_pull_pool_sizing.py + test_dashboard_pull_health_wiring.py +
+        # test_dashboard_pull_stall.py + test_dashboard_write_batch_wiring.py
+        # collectively (the AIMD/quota mid-round paths, the pool-sizing math, the
+        # health-monitor + stall-detector + write-batch build/drain wiring each live
+        # in their own differently-stemmed file). No single name-matched file reaches
+        # 100% standalone (test_dashboard_pull_controller.py alone is ~94%), so the
+        # discovery gate's one-file mapping is a structural mismatch that would block
+        # EVERY pull_controller-touching PR. It is fully gated by the dedicated STATIC
+        # per-module gate in ci.yml (which runs exactly that 5-file suite at
+        # --cov-fail-under=100) + the whole-package floor — DEC-WRITE-BATCH-COALESCE-001.
+        "brutex/dashboard/pull_controller.py",
     }
 )
 
