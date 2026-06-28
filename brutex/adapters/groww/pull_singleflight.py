@@ -44,6 +44,20 @@ one lake root; it is the account-rate twin of the partition-write lock, NOT a
 distributed lock across hosts (an ``flock`` is local to one machine / one filesystem)
 and NOT a queue (the second pull is REFUSED, not deferred). ``fcntl.flock`` is POSIX
 (Linux + macOS — the Track-1 hardware envelope); Windows is out of scope.
+
+**RESIDUAL — keyed by lake root, NOT by the Groww account (DEC-PULL-HARDENING-FOLLOWUP-001,
+MIGRATION.md #996).** The lock file lives UNDER ``lake_root`` (see
+:func:`pull_singleflight_lock_path`), so this gate serialises pulls that share ONE lake
+root. The *intent* is the ACCOUNT request rate (Golden Rule #6), but the *key* is the
+lake root — so it does NOT cover the case where the SAME Groww account is pulled into
+TWO distinct ``BRUTEX_LAKE_ROOT`` s at once: those two pulls take DIFFERENT lock files,
+BOTH acquire, and the account still sees the SUM of both rates (~16 r/s at the 8 r/s
+ceiling). Keying the lock on the credentials / feed-token instead of the lake root would
+need the live ``GrowwAPI`` token threaded into BOTH build sites + a system-wide
+cross-user lock dir (``/tmp``-style) with its own permission trade-offs — a larger
+change, flagged as a FOLLOW-UP and deliberately NOT done here. **Operators running ONE
+account into TWO lake roots must not start both pulls at once — this guard will NOT stop
+them.** (See ``docs/runbooks/data-fetch-runday.md`` §6a for the operator note.)
 """
 
 from __future__ import annotations
@@ -55,6 +69,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
+from brutex.data.atomic_io import lake_write_guard
 from brutex.models import BruteXError
 
 __all__ = [
@@ -140,12 +155,22 @@ def pull_singleflight_lock(lake_root: Path) -> Generator[None, None, None]:
     PullAlreadyRunningError
         If the lock is already held by another process (a pull is in flight) — raised
         immediately (non-blocking), so the caller refuses to start a second pull.
+    LakeWriteHalt
+        If creating the ``.locks`` sidecar dir / lock file hits a full disk (ENOSPC) /
+        OOM. Mapped via :func:`~brutex.data.atomic_io.lake_write_guard` so the disk-full
+        contract is consistent with :func:`~brutex.data.partition_lock.partition_write_lock`
+        (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996) — a raw ``OSError`` would
+        otherwise escape the dashboard ``start()`` path uncaught.
     """
     lock_path = pull_singleflight_lock_path(lake_root)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # 0o600 — owner-only: a private coordination sidecar, never world-readable
-    # (CodeQL py/overly-permissive-file-permission).
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    # The lock-file creation runs inside ``lake_write_guard`` so a full disk at that step
+    # becomes a ``LakeWriteHalt`` (the same contract the partition lock honours), never a
+    # raw ``OSError`` that escapes the caller uncaught.
+    with lake_write_guard():
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # 0o600 — owner-only: a private coordination sidecar, never world-readable
+        # (CodeQL py/overly-permissive-file-permission).
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

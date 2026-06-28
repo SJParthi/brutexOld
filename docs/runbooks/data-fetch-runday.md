@@ -181,9 +181,34 @@ every new Claude session, so you see live state with zero clicks.
 
 ---
 
+## 6a. One pull at a time per lake — and the two-lake-root residual
+
+**DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996).** Only ONE pull may run at a
+time per `BRUTEX_LAKE_ROOT`. A cross-process single-flight lock
+(`<lake_root>/.locks/pull_singleflight.lock`, an advisory `flock`) is taken by BOTH
+entrypoints — the dashboard pull **and** the CLI `brutex fetch` — so starting a second
+pull against the SAME lake fails fast with:
+
+> `a pull is already running for this lake … refusing to start a second concurrent pull`
+
+This protects the Groww **account** request rate (CLAUDE.md Golden Rule #6): two
+concurrent pulls would each pace at the 8 r/s ceiling, so the account would see ~16 r/s
+and risk a sustained 429 storm. `--dry-run` / `--inspect` do not take the lock (they
+write no real data and pace no real account requests).
+
+> **⚠️ RESIDUAL — the lock is keyed by LAKE ROOT, not by Groww ACCOUNT.** If you point
+> the SAME Groww account at **two different `BRUTEX_LAKE_ROOT`s** and start a pull in
+> each, the two take DIFFERENT lock files, BOTH acquire, and the account STILL sees the
+> SUM of both rates. The guard will NOT stop you. **Operator rule: never run two pulls
+> on one Groww account at the same time, even into different lake roots.** Keying the
+> lock on the credentials / feed-token is a flagged follow-up, not yet implemented.
+
+---
+
 ## 7. Decision trail
 
 - **Network/creds blocker + unblock path:** this runbook + DEC-SESSION-HOOK-LIVESTATE-001 (MIGRATION #298).
+- **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`).
 - **Index symbols + scope:** Golden Rule #3; `ingest.py:37`.
 - **Rate-limit + chunk windows:** CLAUDE.md §6.
 - **Auth (Groww API key + TOTP shared secret):** CLAUDE.md §6; `brutex/adapters/groww/auth.py`.

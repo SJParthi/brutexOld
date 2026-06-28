@@ -1894,6 +1894,46 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
+def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
+    """Take the cross-process account single-flight lock for the CLI pull; report contention.
+
+    DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
+    (:func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock`) was wired
+    ONLY into the dashboard ``BackgroundPullJob``; the CLI ``brutex fetch`` path took NO
+    lock, so a CLI pull + a dashboard pull on the SAME lake could run at once and DOUBLE
+    the Groww account request rate (CLAUDE.md Golden Rule #6). This wires the CLI half:
+    the lock context manager is ``__enter__``-ed into the caller's :class:`contextlib.ExitStack`
+    so it is held for the WHOLE fetch + released on exit (success OR error), exactly as
+    ``pull_jobs.start()`` does for the dashboard.
+
+    On contention — a peer process is mid-pull against this lake —
+    :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError` is caught,
+    a clear actionable operator message is printed to ``stderr``, and ``False`` is
+    returned so the caller refuses to start a SECOND concurrent pull (fail-fast — never
+    double-run, never block for hours). A clean acquire returns ``True``.
+
+    Only the genuine persisting LIVE pull takes the lock; ``--dry-run`` / ``--inspect``
+    (which write no real lake data and pace no real account requests) deliberately do
+    NOT call this, so an offline test or an inspect run never contends.
+    """
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
+
+    try:
+        stack.enter_context(pull_singleflight_lock(lake_root))
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] {exc} — refusing to start a second concurrent pull on this lake. "
+            "Wait for the running pull to finish (or stop it) before re-running "
+            "`brutex fetch`.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -2069,6 +2109,15 @@ def cmd_fetch(
         audit_ctx as ingest_audit,
         contextlib.ExitStack() as storm_stack,
     ):
+        # Cross-process account single-flight gate (DEC-PULL-HARDENING-FOLLOWUP-001,
+        # MIGRATION.md #996): refuse to start if a peer pull (a dashboard pull or another
+        # CLI fetch) is already running on this lake — otherwise the Groww ACCOUNT sees the
+        # SUM of both pulls' rates (Golden Rule #6). Held for the whole fetch via the
+        # ExitStack, released on exit. ONLY the genuine persisting live pull takes it;
+        # `--dry-run` / `--inspect` write no real lake data + pace no real account requests,
+        # so they deliberately skip the lock (no offline-test / inspect contention).
+        if not (dry_run or inspect) and not _enter_pull_singleflight(storm_stack, resolved):
+            return EXIT_USER_ERROR
         if dry_run:
             fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
             adapter = _DryRunGrowwSpotAdapter(bars_per_window=rows_per_chunk)

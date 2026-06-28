@@ -553,7 +553,14 @@ class FetchPipeline:
             except queue.Full:
                 # A peer-consumer halt RE-RAISES here, releasing the blocked producer so the stop
                 # reaches the spine's ``_GLOBAL_STOP_ERRORS`` path (never an unbounded wedge).
-                self._raise_if_stopped()
+                # This window was counted ``_submitted`` above but never enqueued, so mark it
+                # completed BEFORE re-raising — otherwise it lingers as a phantom ``in_flight``
+                # window and the teardown watchdog fires ONE spurious ``fetch_pipeline.stalled``
+                # WARNING (the symmetric twin of the ``_draining`` drop below, which already
+                # accounts; DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996).
+                if self._stopped.is_set():
+                    self._mark_completed()
+                    self._raise_if_stopped()
                 # A pull-end drain with this window still un-enqueued: the consumer for this shard
                 # is wedged (its queue stays full), so DROP the window fail-fast — it re-fetches
                 # next pull (idempotent keep-first). Account for it so in-flight stays accurate.

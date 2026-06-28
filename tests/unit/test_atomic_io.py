@@ -56,12 +56,34 @@ def test_guard_maps_enospc_to_disk_full() -> None:
     assert exc_info.value.reason == "disk_full"
 
 
+def test_guard_maps_edquot_to_disk_full() -> None:
+    """EDQUOT (filesystem disk-quota exhausted) is the SAME 'out of space' condition as
+    ENOSPC, so it maps to ``LakeWriteHalt('disk_full')`` too — never a raw OSError that
+    crashes the pull (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996)."""
+    edquot = getattr(errno, "EDQUOT", None)
+    if edquot is None:  # pragma: no cover — EDQUOT exists on the Track-1 POSIX envelope
+        pytest.skip("errno.EDQUOT not present on this platform")
+    with pytest.raises(LakeWriteHalt) as exc_info, lake_write_guard():
+        _raise(OSError(edquot, "Disk quota exceeded"))
+    assert exc_info.value.reason == "disk_full"
+
+
 def test_guard_reraises_other_oserror_unchanged() -> None:
-    """A non-ENOSPC OSError (e.g. EACCES) is NOT escalated to a halt — propagates as-is."""
+    """A non-ENOSPC/EDQUOT OSError (e.g. EACCES / EROFS) is NOT escalated to a halt —
+    it propagates as-is so an ordinary write error is never mis-escalated."""
     with pytest.raises(OSError) as exc_info, lake_write_guard():
         _raise(OSError(errno.EACCES, "Permission denied"))
     assert not isinstance(exc_info.value, LakeWriteHalt)
     assert exc_info.value.errno == errno.EACCES
+
+
+def test_guard_reraises_erofs_unchanged() -> None:
+    """EROFS (read-only filesystem) is a DIFFERENT class of fault than out-of-space and
+    is deliberately NOT mapped — it propagates raw (Golden Rule #1, never over-broad)."""
+    with pytest.raises(OSError) as exc_info, lake_write_guard():
+        _raise(OSError(errno.EROFS, "Read-only file system"))
+    assert not isinstance(exc_info.value, LakeWriteHalt)
+    assert exc_info.value.errno == errno.EROFS
 
 
 # ── atomic_write_via ─────────────────────────────────────────────────────────

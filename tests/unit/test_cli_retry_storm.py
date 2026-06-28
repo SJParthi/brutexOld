@@ -942,3 +942,117 @@ def test_emit_pull_halt_alert_swallows_its_own_failure(monkeypatch: pytest.Monke
     monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
     # Must NOT raise — the blanket except swallows + logs it (the no-raise IS the assertion).
     cli._emit_pull_halt_alert(RuntimeError("halt"))
+
+
+# ── cross-process account single-flight (DEC-PULL-HARDENING-FOLLOWUP-001, #996) ──
+
+
+def test_enter_pull_singleflight_acquires_and_holds_in_stack(tmp_path: Path) -> None:
+    """A clean acquire returns True and the lock is HELD for the life of the ExitStack."""
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
+
+    with contextlib.ExitStack() as stack:
+        assert cli._enter_pull_singleflight(stack, tmp_path) is True
+        # Held: a second independent acquire on the SAME lake is refused while the stack
+        # keeps the lock open.
+        with pytest.raises(PullAlreadyRunningError), pull_singleflight_lock(tmp_path):
+            pass  # pragma: no cover — __enter__ raises first
+    # Stack exited → released → a fresh acquire now succeeds.
+    with pull_singleflight_lock(tmp_path):
+        pass
+
+
+def test_enter_pull_singleflight_refuses_on_contention(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When a peer already holds the lock, the helper returns False + prints a clear note."""
+    from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+    with (
+        pull_singleflight_lock(tmp_path),  # a peer pull is mid-flight on this lake
+        contextlib.ExitStack() as stack,
+    ):
+        assert cli._enter_pull_singleflight(stack, tmp_path) is False
+    captured = capsys.readouterr()
+    assert "a pull is already running for this lake" in captured.err
+    assert "refusing to start a second concurrent pull" in captured.err
+
+
+def test_cmd_fetch_live_refused_when_peer_pull_holds_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live persisting ``brutex fetch`` is REFUSED (exit 1) if a peer pull holds the lake
+    single-flight lock — never a second concurrent pull that doubles the account rate
+    (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996)."""
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    def _never_ingest(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("the pull must be refused before the ingest engine runs")
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", _never_ingest)
+
+    with pull_singleflight_lock(tmp_path):  # a peer pull already holds the lake lock
+        rc = cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=False,
+            rows_per_chunk=5,
+        )
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    assert "a pull is already running for this lake" in captured.err
+
+
+def test_cmd_fetch_dry_run_does_not_take_singleflight_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--dry-run`` writes no real data + paces no account requests, so it NEVER takes the
+    single-flight lock — even while a peer holds it (DEC-PULL-HARDENING-FOLLOWUP-001)."""
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+    # A spy so we can assert the dry-run path never even calls the gate.
+    called: list[Path] = []
+    real_enter = cli._enter_pull_singleflight
+
+    def _spy(stack: Any, lake_root: Path) -> bool:
+        called.append(lake_root)
+        return real_enter(stack, lake_root)
+
+    monkeypatch.setattr(cli, "_enter_pull_singleflight", _spy)
+
+    with pull_singleflight_lock(tmp_path):  # peer holds the lock — must NOT block dry-run
+        rc = cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=True,
+            inspect=False,
+            rows_per_chunk=5,
+        )
+    assert rc == cli.EXIT_OK
+    assert called == []  # the gate was never consulted on the dry-run path

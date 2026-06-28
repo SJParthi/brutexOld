@@ -46,17 +46,32 @@ from brutex.data.errors import LakeWriteHalt
 
 __all__ = ["atomic_write_simple", "atomic_write_via", "lake_write_guard"]
 
+#: The errnos that mean "no room to write" and so must HALT the pull gracefully as a
+#: ``LakeWriteHalt("disk_full")``, NOT crash raw. ``ENOSPC`` is a literally-full volume;
+#: ``EDQUOT`` is a filesystem DISK-QUOTA exhaustion (the SAME operator condition — "out
+#: of space" — on a quota'd mount) which previously re-raised raw and, on the write
+#: path, crashed the whole pull mislabelled as an escaped code bug
+#: (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996). ``EDQUOT`` is absent on a few
+#: exotic platforms, so it is admitted defensively via ``getattr`` (never an
+#: ``AttributeError`` at import). ONE source of truth — both lake writers + the merge-read
+#: path route through :func:`lake_write_guard`, so widening here covers every write site.
+_DISK_FULL_ERRNOS: frozenset[int] = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None
+)
+
 
 @contextmanager
 def lake_write_guard() -> Generator[None, None, None]:
     """Map a disk-full / out-of-memory failure inside the block to a :class:`LakeWriteHalt`.
 
-    ``OSError`` with errno ``ENOSPC`` → ``LakeWriteHalt("disk_full")``;
+    ``OSError`` with errno in :data:`_DISK_FULL_ERRNOS` (``ENOSPC`` — a literally-full
+    volume — OR ``EDQUOT`` — a filesystem disk-quota exhaustion, the SAME "out of space"
+    operator condition on a quota'd mount) → ``LakeWriteHalt("disk_full")``;
     ``MemoryError`` → ``LakeWriteHalt("out_of_memory")``. EVERY OTHER error
-    (a different ``OSError`` such as ``EACCES``, a ``polars`` failure, a code bug)
-    propagates UNCHANGED — only the two unrecoverable host conditions are mapped,
-    so an ordinary write error is never mis-escalated to a pull-wide halt
-    (Golden Rule #1, fail-closed but never over-broad).
+    (a different ``OSError`` such as ``EACCES`` / ``EROFS``, a ``polars`` failure, a code
+    bug) propagates UNCHANGED — only the unrecoverable host conditions are mapped, so an
+    ordinary write error is never mis-escalated to a pull-wide halt (Golden Rule #1,
+    fail-closed but never over-broad).
     """
     try:
         yield
@@ -65,7 +80,7 @@ def lake_write_guard() -> Generator[None, None, None]:
         # re-chaining it can itself allocate; the reason token is the signal.
         raise LakeWriteHalt("out_of_memory") from None
     except OSError as exc:
-        if exc.errno == errno.ENOSPC:
+        if exc.errno in _DISK_FULL_ERRNOS:
             raise LakeWriteHalt("disk_full") from exc
         raise
 

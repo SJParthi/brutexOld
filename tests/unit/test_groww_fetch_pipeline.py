@@ -439,6 +439,68 @@ class TestFailureHandling:
         with pytest.raises(ValueError, match="tail bug"):
             pipeline.drain()
 
+    def test_blocked_producer_release_on_stop_accounts_in_flight(self) -> None:
+        """A producer blocked on a FULL queue that a peer halt releases must NOT leave a
+        phantom in-flight window (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996).
+
+        The window is counted ``_submitted`` BEFORE the (blocking) put; the ``_draining``
+        drop branch already calls ``_mark_completed`` but the ``_stopped`` re-raise branch
+        did NOT — leaving ``in_flight > 0`` after a halt and firing one SPURIOUS
+        ``fetch_pipeline.stalled`` WARNING during teardown. This asserts the re-raise path
+        now accounts the window so in-flight returns to 0 and the stall stays honest.
+        """
+        release = threading.Event()
+        first_in = threading.Event()
+
+        def _proc(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=5.0)  # wedge the consumer so the queue fills behind it
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1)
+        # 1st is pulled by the consumer (which wedges); 2nd fills the single queue slot.
+        pipeline.submit(_result("s", _proc))
+        assert first_in.wait(timeout=2.0)
+        pipeline.submit(_result("s", _proc))  # queue now FULL — the next submit BLOCKS
+
+        blocked = threading.Event()
+        raised = threading.Event()
+
+        def _blocking_submit() -> None:
+            blocked.set()
+            try:
+                pipeline.submit(_result("s", _proc))  # blocks on the full queue
+            except LakeWriteHalt:
+                raised.set()  # released by the peer halt re-raise (the fixed path)
+
+        t = threading.Thread(target=_blocking_submit, daemon=True)
+        t.start()
+        assert blocked.wait(timeout=2.0)
+        assert not raised.wait(timeout=0.3)  # still blocked while the queue is full
+        # A peer consumer trips the pool-wide stop → the blocked producer's full-queue
+        # recheck re-raises AND marks its window completed.
+        pipeline._trip(LakeWriteHalt("disk_full"))
+        assert raised.wait(timeout=5.0), "blocked producer was not released on stop"
+        t.join(timeout=5.0)
+        # The blocked window was counted submitted then accounted on the re-raise: every
+        # submitted window is matched by a completion now that the consumer can drain.
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with pipeline._progress_lock:
+                if pipeline._submitted == pipeline._completed:
+                    break
+            time.sleep(0.02)
+        with pipeline._progress_lock:
+            in_flight = pipeline._submitted - pipeline._completed
+        assert in_flight == 0, f"phantom in-flight window after halt: {in_flight}"
+        # No spurious stall: with in-flight == 0, the watchdog never fires.
+        stalls: list[float] = []
+        pipeline._on_stall = stalls.append
+        pipeline._check_stall()
+        assert stalls == []
+        with pytest.raises(LakeWriteHalt):
+            pipeline.drain()
+
     def test_after_halt_subsequent_windows_dropped(self) -> None:
         """Once stopped, later windows are DROPPED (not re-run) — re-fetched next pull."""
         processed: list[int] = []
