@@ -1779,9 +1779,8 @@ def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner c
     from brutex.data.timeframe_materialize import (
         MATERIALIZABLE_TFS,
         MaterializeResult,
-        make_lake_read_1m,
-        make_lake_write_tf,
-        materialize_timeframes,
+        materialize_lake_timeframes,
+        prebuild_kind_for,
     )
 
     try:
@@ -1789,17 +1788,17 @@ def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner c
         planned = plan_autoderive_symbols(bulk.symbols)
 
         def _materialize_one(symbol: str) -> MaterializeResult:
+            # Segment-aware via the SHARED materialize_lake_timeframes (CLAUDE.md §11
+            # COMMON — the SAME helper the manual route + pipeline pre-build use). The
+            # settled instruments are spot underlyings, so this pre-builds spot intraday.
             inst = by_symbol[symbol]
-            exchange = inst.exch_id.value
-            segment = inst.segment.value
-            return materialize_timeframes(
+            return materialize_lake_timeframes(
+                lake_root=lake_root,
+                exchange=inst.exch_id.value,
+                segment=inst.segment.value,
+                symbol=symbol,
+                kind=prebuild_kind_for(inst),
                 tfs=MATERIALIZABLE_TFS,
-                read_1m=make_lake_read_1m(
-                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-                ),
-                write_tf=make_lake_write_tf(
-                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-                ),
             )
 
         report = run_autoderive(symbols=planned, materialize_one=_materialize_one)

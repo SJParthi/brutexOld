@@ -46,7 +46,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
@@ -259,6 +259,58 @@ def materialize_timeframes(
     return MaterializeResult(written=written, skipped=tuple(skipped))
 
 
+def materialize_lake_timeframes(
+    *,
+    lake_root: Path,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    kind: PrebuildKind,
+    tfs: Iterable[str] = MATERIALIZABLE_TFS,
+) -> MaterializeResult:
+    """SEGMENT-AWARE materialise of ONE lake partition's intraday TFs (DEC-PREBUILD-SELECT-001).
+
+    The ONE shared primitive (CLAUDE.md §11 COMMON) behind every pre-build call
+    site — the manual ``/universe/derive-timeframes`` route, the pipeline's gated
+    final pre-build, and the pull-settle auto-derive — replacing the byte-near
+    copies that each rebuilt the read/write builders + chose the resampler inline.
+    Given a lake partition's coordinates + its :class:`PrebuildKind`, it:
+
+    * picks the resampler via :func:`intraday_resampler_for`
+      (SPOT → OI-dropping spot resampler; FUTURES → OI-aware F&O resampler);
+    * reads the 1-minute base with the OI column ONLY for FUTURES
+      (``with_open_interest=kind is PrebuildKind.FUTURES``), so a spot partition's
+      output is byte-identical to before;
+    * writes each derived TF (the writer carries OI when the frame has it).
+
+    Raises :class:`ValueError` for :attr:`PrebuildKind.OPTIONS` — option intraday
+    is on-demand and must never be materialised; the gated orchestrator skips
+    OPTIONS before reaching here, so this is a defensive guard for a misuse.
+
+    Returns the per-TF written counts. Raw lake I/O is composed from the
+    ``# pragma: no cover`` builders; integration-tested by the round-trip test.
+    """
+    resampler = intraday_resampler_for(kind)
+    if resampler is None:
+        raise ValueError(
+            f"{symbol}: options intraday is on-demand (TB-scale) and is never materialised"
+        )
+    return materialize_timeframes(
+        tfs=tfs,
+        read_1m=make_lake_read_1m(
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            with_open_interest=kind is PrebuildKind.FUTURES,
+        ),
+        write_tf=make_lake_write_tf(
+            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+        ),
+        resampler=resampler,
+    )
+
+
 __all__ = [
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
@@ -267,6 +319,7 @@ __all__ = [
     "intraday_resampler_for",
     "make_lake_read_1m",
     "make_lake_write_tf",
+    "materialize_lake_timeframes",
     "materialize_timeframes",
     "prebuild_kind_for",
 ]
@@ -345,15 +398,16 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
         interval = INTRADAY_TF_INTERVALS[tf_label]
         has_oi = "open_interest" in frame.columns
 
-        def _oi(row: dict[str, object]) -> int:
-            # OI-aware F&O futures path: carry the bucket's snapshot OI. A spot
-            # frame has no OI column (→ 0, the spot convention); a present-but-
-            # null OI bucket also maps to 0 (CandleBar.open_interest is int|None
-            # but the lake stored 0 for spot, so 0 is the consistent absent value).
+        def _oi(row: dict[str, Any]) -> int:
+            # OI-aware F&O futures path: carry the bucket's snapshot OI (Int64 →
+            # int). A spot frame has no OI column (→ 0, the spot convention); a
+            # present-but-null OI bucket also maps to 0 (CandleBar.open_interest is
+            # int|None but the lake stored 0 for spot, so 0 is the consistent
+            # absent value).
             if not has_oi:
                 return 0
             value = row["open_interest"]
-            return 0 if value is None else int(str(value))
+            return 0 if value is None else int(value)
 
         bars = [
             CandleBar(

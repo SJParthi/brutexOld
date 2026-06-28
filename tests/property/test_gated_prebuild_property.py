@@ -11,7 +11,7 @@ the SPOT byte-identity of :func:`brutex.data.timeframe_materialize.materialize_t
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -34,84 +34,64 @@ else:
     pl = pytest.importorskip("polars")  # runtime: frame construction needs the [data] extra
 
 
-def _make(kind: PrebuildKind, idx: int) -> Instrument:
-    if kind is PrebuildKind.SPOT:
-        return Instrument(
-            exch_id=Exchange.NSE,
-            security_id=idx,
-            symbol_name=f"SPOT{idx}",
-            display_name=f"SPOT{idx}",
-            instrument=InstrumentType.IDX,
-            segment=Segment.INDEX,
-            series=None,
-            isin=None,
-            underlying_symbol=None,
-            underlying_security_id=None,
-            lot_size=0,
-            tick_size=Decimal("0.05"),
-            sm_freeze_qty=None,
-            sm_expiry_date=None,
-            strike_price=None,
-        )
-    if kind is PrebuildKind.FUTURES:
-        return Instrument(
-            exch_id=Exchange.NSE,
-            security_id=1000 + idx,
-            symbol_name=f"FUT{idx}",
-            display_name=f"FUT{idx}",
-            instrument=InstrumentType.FUT,
-            segment=Segment.FNO,
-            series=None,
-            isin=None,
-            underlying_symbol="NIFTY",
-            underlying_security_id=1,
-            lot_size=75,
-            tick_size=Decimal("0.05"),
-            sm_freeze_qty=1800,
-            sm_expiry_date=date(2025, 1, 30),
-            strike_price=None,
-        )
+def _underlying(idx: int) -> Instrument:
     return Instrument(
         exch_id=Exchange.NSE,
-        security_id=2000 + idx,
-        symbol_name=f"OPT{idx}",
-        display_name=f"OPT{idx}",
-        instrument=InstrumentType.CE,
-        segment=Segment.FNO,
+        security_id=idx,
+        symbol_name=f"U{idx}",
+        display_name=f"U{idx}",
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
         series=None,
         isin=None,
-        underlying_symbol="NIFTY",
-        underlying_security_id=1,
-        lot_size=75,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=0,
         tick_size=Decimal("0.05"),
-        sm_freeze_qty=1800,
-        sm_expiry_date=date(2025, 1, 30),
-        strike_price=Decimal("20000"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
     )
 
 
-_kinds = st.sampled_from([PrebuildKind.SPOT, PrebuildKind.FUTURES, PrebuildKind.OPTIONS])
+# Per underlying: (spot_ok, n_futures, futures_all_ok).
+_spec = st.tuples(st.booleans(), st.integers(min_value=0, max_value=3), st.booleans())
 
 
-@given(
-    spec=st.lists(st.tuples(_kinds, st.booleans()), max_size=12),
-)
+@given(specs=st.lists(_spec, max_size=8))
 def test_any_selection_never_crashes_and_respects_the_gate(
-    spec: list[tuple[PrebuildKind, bool]],
+    specs: list[tuple[bool, int, bool]],
 ) -> None:
-    targets = [_make(kind, i) for i, (kind, _ok) in enumerate(spec)]
-    fail_names = {
-        f"{'SPOT' if k is PrebuildKind.SPOT else 'FUT'}{i}"
-        for i, (k, ok) in enumerate(spec)
-        if not ok and k is not PrebuildKind.OPTIONS
+    underlyings = [_underlying(i) for i in range(len(specs))]
+    spot_fail = {f"U{i}" for i, (ok, _n, _fok) in enumerate(specs) if not ok}
+    futures_by_u: dict[str, list[str]] = {
+        f"U{i}": [f"U{i}-FUT{j}" for j in range(n)] for i, (_ok, n, _fok) in enumerate(specs)
+    }
+    fut_fail = {
+        f"U{i}-FUT0"
+        for i, (_ok, n, fok) in enumerate(specs)
+        if not fok and n > 0  # the first future of a "futures-fail" underlying raises
     }
 
-    def materialize_one(inst: Instrument) -> MaterializeResult:
-        if inst.symbol_name in fail_names:
-            raise ValueError("forced")
+    def materialize_spot(inst: Instrument) -> MaterializeResult:
+        if inst.symbol_name in spot_fail:
+            raise ValueError("forced spot")
         return MaterializeResult(written={"5m": 1}, skipped=())
 
-    report = run_gated_prebuild(targets=targets, materialize_one=materialize_one)
+    def futures_for(inst: Instrument) -> list[str]:
+        return futures_by_u[inst.symbol_name]
+
+    def materialize_future(contract: str) -> MaterializeResult:
+        if contract in fut_fail:
+            raise ValueError("forced future")
+        return MaterializeResult(written={"5m": 1}, skipped=())
+
+    report = run_gated_prebuild(
+        underlyings=underlyings,
+        materialize_spot=materialize_spot,
+        futures_contracts_for=futures_for,
+        materialize_future=materialize_future,
+    )
 
     # GATE invariant: every RAN phase EXCEPT possibly the last (the halting one)
     # had zero failures; a later phase ran ⇒ all earlier ran phases were ok.

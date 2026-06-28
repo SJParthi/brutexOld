@@ -580,12 +580,18 @@ def test_derive_timeframes_success_reports_written_and_skipped(
     received: list[tuple[str, ...]] = []
 
     def _fake_materialize(
-        *, tfs: tuple[str, ...], read_1m: Any, write_tf: Any, resampler: Any = None
+        *,
+        lake_root: Any,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        kind: Any,
+        tfs: tuple[str, ...] = (),
     ) -> MaterializeResult:
         received.append(tuple(tfs))
         return MaterializeResult(written={"5m": 3, "15m": 1}, skipped=("bogus",))
 
-    monkeypatch.setattr(app_module, "materialize_timeframes", _fake_materialize)
+    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _fake_materialize)
     resp = client.post(
         "/api/v1/universe/derive-timeframes",
         params={"symbol": "NIFTY", "tfs": "5m, 15m,,bogus"},

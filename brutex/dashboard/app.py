@@ -95,7 +95,7 @@ from brutex.dashboard.fno_cascade import (
     build_fno_cascade,
     contract_to_json,
 )
-from brutex.dashboard.gated_prebuild import run_gated_prebuild
+from brutex.dashboard.gated_prebuild import discover_futures_contracts, run_gated_prebuild
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -183,9 +183,7 @@ from brutex.data.timeframe_materialize import (
     MATERIALIZABLE_TFS,
     PrebuildKind,
     intraday_resampler_for,
-    make_lake_read_1m,
-    make_lake_write_tf,
-    materialize_timeframes,
+    materialize_lake_timeframes,
     prebuild_kind_for,
 )
 from brutex.models import Exchange, Instrument, InstrumentType
@@ -2396,16 +2394,19 @@ def build_app(
 
                 Runs ONLY after a fully-successful fetch (run_full_pipeline's gate) — the
                 operator's "pre-build runs as the pipeline's final stage automatically". For
-                EVERY pulled target it materialises all 19 derived intraday timeframes to the
-                lake via the SHARED materialize_timeframes + the SHARED lake read/write
-                builders (CLAUDE.md §11 COMMON — the SAME pair the manual derive route uses),
-                run through the quarantining run_autoderive driver so one symbol's corrupt
-                partition never sinks the rest. Returns how many symbols built cleanly.
+                EVERY pulled target it materialises the 19 derived intraday timeframes to the
+                lake via the SHARED segment-aware ``materialize_lake_timeframes``
+                (CLAUDE.md §11 COMMON — the SAME helper the manual derive route + the
+                pull-settle auto-derive use), run through the quarantining run_autoderive
+                driver so one symbol's corrupt partition never sinks the rest. Returns how
+                many symbols built cleanly.
 
-                COMMON-resampler note: materialize_timeframes drives the canonical
-                tf_resampler, so once the in-flight F&O-OI resampler change lands this covers
-                F&O automatically with NO change here. A symbol with no stored 1-minute base
-                derives nothing (an honest 0, never a fabricated bar).
+                The pulled targets here are spot UNDERLYINGS (the lean store discards FUT/CE/PE
+                legs), so :func:`prebuild_kind_for` classifies them SPOT — this stage pre-builds
+                the SPOT intraday. The FUTURES intraday pre-build (discovering each underlying's
+                F&O-lake futures contracts) is the on-demand gated ``?symbols=`` route's job
+                (DEC-PREBUILD-SELECT-001); a symbol with no stored 1-minute base derives nothing
+                (an honest 0, never a fabricated bar).
 
                 Whole-body best-effort: every failure is swallowed so a transient lake-read
                 race NEVER fails the already-successful pull (Correctness of the pull > the
@@ -2417,20 +2418,13 @@ def build_app(
                     inst = _require_store().get(symbol)
                     if inst is None:  # pragma: no cover — targets come from the store
                         raise KeyError(symbol)
-                    return materialize_timeframes(
+                    return materialize_lake_timeframes(
+                        lake_root=lake_root,
+                        exchange=inst.exch_id.value,
+                        segment=inst.segment.value,
+                        symbol=inst.symbol_name,
+                        kind=prebuild_kind_for(inst),
                         tfs=MATERIALIZABLE_TFS,
-                        read_1m=make_lake_read_1m(
-                            lake_root=lake_root,
-                            exchange=inst.exch_id.value,
-                            segment=inst.segment.value,
-                            symbol=inst.symbol_name,
-                        ),
-                        write_tf=make_lake_write_tf(
-                            lake_root=lake_root,
-                            exchange=inst.exch_id.value,
-                            segment=inst.segment.value,
-                            symbol=inst.symbol_name,
-                        ),
                     )
 
                 try:
@@ -2668,32 +2662,15 @@ def build_app(
         )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=False)
 
-        def _materialize_one(instrument: Instrument) -> Any:
-            """Segment-aware materialise of ONE instrument (DEC-PREBUILD-SELECT-001)."""
-            kind = prebuild_kind_for(instrument)
-            resampler = intraday_resampler_for(kind)
-            if resampler is None:  # OPTIONS — never reached (gated phase no-ops)
-                raise ValueError(  # pragma: no cover — defensive; OPTIONS never materialises
-                    f"{instrument.symbol_name}: options intraday is on-demand, not materialised"
-                )
-            exchange = instrument.exch_id.value
-            segment = instrument.segment.value
-            sym = instrument.symbol_name
-            # FUTURES needs the OI column read so the OI-aware resampler can carry it.
-            with_oi = kind is PrebuildKind.FUTURES
-            return materialize_timeframes(
+        def _materialize_spot(instrument: Instrument) -> Any:
+            """Materialise ONE underlying's SPOT intraday (segment-aware, DEC-PREBUILD-SELECT-001)."""
+            return materialize_lake_timeframes(
+                lake_root=lake_root,
+                exchange=instrument.exch_id.value,
+                segment=instrument.segment.value,
+                symbol=instrument.symbol_name,
+                kind=prebuild_kind_for(instrument),
                 tfs=requested,
-                read_1m=_make_read_1m(
-                    lake_root=lake_root,
-                    exchange=exchange,
-                    segment=segment,
-                    symbol=sym,
-                    with_open_interest=with_oi,
-                ),
-                write_tf=_make_write_tf(
-                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=sym
-                ),
-                resampler=resampler,
             )
 
         # ── Multi-symbol GATED path (DEC-PREBUILD-SELECT-001) ──────────────────
@@ -2703,9 +2680,7 @@ def build_app(
                     symbols=symbols,
                     symbol=None,
                     lookup=store.get,
-                    whole_universe=lambda: (
-                        _select_bulk_targets("index") + _select_bulk_targets("stock")
-                    ),
+                    whole_universe=list,  # never reached (symbols is not None); no dead body
                 )
             except ValueError as exc:  # empty / unknown selection — fail closed
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2715,13 +2690,43 @@ def build_app(
                 count=len(targets),
                 tfs=list(requested),
             )
+            # Build the F&O cascade ONCE for the whole selection so the FUTURES
+            # phase discovers contracts via O(1) cascade lookups (no per-underlying
+            # lake walk). A contract leaf carries its own exchange + groww_symbol;
+            # remember the exchange so the per-contract materialise reads the right
+            # partition.
+            cascade = build_fno_cascade(list_fno_candle_datasets(lake_root))
+            contract_exchange: dict[str, str] = {}
+
+            def _futures_for(instrument: Instrument) -> list[str]:
+                discovered = discover_futures_contracts(instrument, cascade)
+                for c in discovered:
+                    contract_exchange[c.symbol] = c.exchange
+                return [c.symbol for c in discovered]
+
+            def _materialize_future_contract(contract_symbol: str) -> Any:
+                """Materialise ONE futures contract's OI-aware intraday from the F&O lake."""
+                return materialize_lake_timeframes(
+                    lake_root=lake_root,
+                    exchange=contract_exchange[contract_symbol],
+                    segment=FNO_CANDLE_LAKE_SEGMENT,
+                    symbol=contract_symbol,
+                    kind=PrebuildKind.FUTURES,
+                    tfs=requested,
+                )
+
             report = run_gated_prebuild(
-                targets=targets,
-                materialize_one=_materialize_one,
+                underlyings=targets,
+                materialize_spot=_materialize_spot,
+                futures_contracts_for=_futures_for,
+                materialize_future=_materialize_future_contract,
                 source=source,
             )
-            # New partitions on disk; let the next coverage poll rediscover them.
-            _summary_cache.mark_dirty()
+            # New partitions on disk; let the next coverage poll rediscover them —
+            # but only when something was actually written (skip the rescan on an
+            # options-only / halted / no-data run).
+            if report.total_bars > 0:
+                _summary_cache.mark_dirty()
             return JSONResponse({"gated": True, **report.to_dict()})
 
         # ── Single-symbol back-compat path ────────────────────────────────────
@@ -2761,7 +2766,7 @@ def build_app(
                 }
             )
         try:
-            result = _materialize_one(instrument)
+            result = _materialize_spot(instrument)
         except Exception as exc:  # surface the REAL reason, never swallow it
             _LOG.exception(
                 "universe.derive_timeframes.failed",
@@ -2779,7 +2784,8 @@ def build_app(
         )
         # The just-materialised partitions are new datasets on disk; let the next
         # coverage poll rediscover them (mirrors the single-pull invalidation).
-        _summary_cache.mark_dirty()
+        if result.total_bars > 0:
+            _summary_cache.mark_dirty()
         return JSONResponse(
             {
                 "written": result.written,
@@ -4903,14 +4909,6 @@ def build_app(
     app.add_api_websocket_route("/ws", _make_ws_handler(state))
 
     return app
-
-
-# The lake read/write builders moved to brutex.data.timeframe_materialize
-# (DEC-TF-MATERIALIZE-002) so the manual derive route AND the pull-settle
-# auto-derive share ONE pair of builders (CLAUDE.md §11 COMMON). Thin
-# aliases keep this module's call sites unchanged.
-_make_read_1m = make_lake_read_1m
-_make_write_tf = make_lake_write_tf
 
 
 def _metadata_progress_sync(

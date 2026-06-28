@@ -3,15 +3,18 @@
 FastAPI ``TestClient`` over ``POST /api/v1/universe/derive-timeframes`` proving:
 
 * ``?symbols=`` runs the GATED SPOT → FUTURES → OPTIONS report;
+* the FUTURES phase discovers the selected underlyings' FUT contracts from the
+  F&O candle lake cascade and materialises each;
 * a forced failure in the SPOT phase HALTS the run — FUTURES + OPTIONS never
   start (the gate);
 * OPTIONS is always reported as an on-demand no-op (no intraday written);
 * the single-symbol path stays back-compat (``{written, skipped, total_bars}``),
   and a single OPTIONS symbol is the explicit no-op.
 
-``materialize_timeframes`` is monkeypatched to a deterministic fake keyed by the
-read coordinates so the gate is exercised without lake I/O (the real
-materialise core is unit-tested separately).
+``materialize_lake_timeframes`` is monkeypatched to a deterministic fake keyed by
+the partition symbol so the gate is exercised without lake I/O; the F&O cascade is
+fed a fake dataset list so futures discovery is deterministic (the real
+materialise core + cascade are unit/integration-tested separately).
 """
 
 from __future__ import annotations
@@ -54,26 +57,6 @@ def _index(name: str, sid: int) -> Instrument:
     )
 
 
-def _future(name: str, sid: int) -> Instrument:
-    return Instrument(
-        exch_id=Exchange.NSE,
-        security_id=sid,
-        symbol_name=name,
-        display_name=name,
-        instrument=InstrumentType.FUT,
-        segment=Segment.FNO,
-        series=None,
-        isin=None,
-        underlying_symbol="NIFTY",
-        underlying_security_id=1,
-        lot_size=75,
-        tick_size=Decimal("0.05"),
-        sm_freeze_qty=1800,
-        sm_expiry_date=date(2025, 1, 30),
-        strike_price=None,
-    )
-
-
 def _option(name: str, sid: int) -> Instrument:
     return Instrument(
         exch_id=Exchange.NSE,
@@ -94,14 +77,35 @@ def _option(name: str, sid: int) -> Instrument:
     )
 
 
+_NIFTY_FUTURES = ["NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-27Feb25-FUT"]
+
+
+def _fno_datasets() -> list[dict[str, object]]:
+    """NIFTY futures (two expiries) the cascade discovery resolves for NSE-NIFTY."""
+    rows: list[dict[str, object]] = []
+    for sym, exp in zip(_NIFTY_FUTURES, ("2025-01-30", "2025-02-27"), strict=True):
+        rows.append(
+            {
+                "symbol": sym,
+                "exchange": "NSE",
+                "underlying": "NIFTY",
+                "expiry": exp,
+                "strike": None,
+                "option_type": None,
+                "instrument_type": "FUT",
+                "interval": "1minute",
+            }
+        )
+    return rows
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[InstrumentStore]:
     instrument_store = InstrumentStore.open(tmp_path / "instruments.duckdb")
     instrument_store.upsert_many(
         [
-            _index("NIFTY", 1),
-            _future("NIFTY-25JAN-FUT", 2),
-            _option("NIFTY-25JAN-20000-CE", 3),
+            _index("NSE-NIFTY", 1),
+            _option("NSE-NIFTY-25JAN-20000-CE", 3),
         ],
         snapshot_date=date(2024, 1, 2),
         run_id="r1",
@@ -120,48 +124,50 @@ def client(
         yield c
 
 
-def _patch_materialize(
-    monkeypatch: pytest.MonkeyPatch, *, fail_symbol: str | None = None
+def _patch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_symbol: str | None = None,
+    with_futures: bool = True,
 ) -> list[str]:
-    """Patch the lake read builder + ``materialize_timeframes`` to a recording fake.
+    """Patch materialize + F&O dataset listing; record each materialised symbol.
 
-    ``_make_read_1m`` is patched to return a tagged sentinel carrying its
-    ``symbol`` (robust — no closure-cell sniffing), and ``_make_write_tf`` to a
-    no-op; ``materialize_timeframes`` then reads the tag, records the symbol, and
-    raises for *fail_symbol* — exercising the gate without any lake I/O.
+    ``materialize_lake_timeframes`` is patched to record its ``symbol`` and raise
+    for *fail_symbol*; ``list_fno_candle_datasets`` is patched to feed the cascade
+    deterministic NIFTY futures (or none, when *with_futures* is False) so the
+    FUTURES phase's discovery is exercised without a real lake.
     """
     materialized: list[str] = []
 
-    def _fake_read(*, symbol: str, **_kw: Any) -> Any:
-        sentinel = lambda: None  # noqa: E731 — a tiny tagged callable
-        sentinel.symbol = symbol  # type: ignore[attr-defined]
-        return sentinel
-
-    def _fake_write(**_kw: Any) -> Any:
-        return lambda _tf, _frame: 0
-
-    def _fake(
-        *, tfs: tuple[str, ...], read_1m: Any, write_tf: Any, resampler: Any = None
+    def _fake_materialize(
+        *,
+        lake_root: Any,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        kind: Any,
+        tfs: Any = (),
     ) -> MaterializeResult:
-        symbol = read_1m.symbol
         materialized.append(symbol)
         if fail_symbol is not None and symbol == fail_symbol:
             raise ValueError(f"no stored 1minute bars for {symbol}")
         return MaterializeResult(written={"5m": 9}, skipped=())
 
-    monkeypatch.setattr(app_module, "_make_read_1m", _fake_read)
-    monkeypatch.setattr(app_module, "_make_write_tf", _fake_write)
-    monkeypatch.setattr(app_module, "materialize_timeframes", _fake)
+    def _fake_datasets(_lake_root: Any) -> list[dict[str, object]]:
+        return _fno_datasets() if with_futures else []
+
+    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _fake_materialize)
+    monkeypatch.setattr(app_module, "list_fno_candle_datasets", _fake_datasets)
     return materialized
 
 
 def test_gated_multi_symbol_runs_all_three_phases(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    materialized = _patch_materialize(monkeypatch)
+    materialized = _patch(monkeypatch)
     resp = client.post(
         "/api/v1/universe/derive-timeframes",
-        params={"symbols": "NIFTY,NIFTY-25JAN-FUT,NIFTY-25JAN-20000-CE"},
+        params={"symbols": "NSE-NIFTY"},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -171,52 +177,46 @@ def test_gated_multi_symbol_runs_all_three_phases(
     assert body["source"] == "selection"
     phases = {p["phase"]: p for p in body["phases"]}
     assert list(phases) == ["spot", "futures", "options"]
-    assert phases["spot"]["succeeded"] == ["NIFTY"]
-    assert phases["futures"]["succeeded"] == ["NIFTY-25JAN-FUT"]
+    assert phases["spot"]["succeeded"] == ["NSE-NIFTY"]
+    # FUTURES discovered + materialised the two NIFTY futures from the lake cascade.
+    assert phases["futures"]["attempted"] == _NIFTY_FUTURES
+    assert phases["futures"]["succeeded"] == _NIFTY_FUTURES
     # OPTIONS reported, never materialised (on-demand).
-    assert phases["options"]["attempted"] == ["NIFTY-25JAN-20000-CE"]
+    assert phases["options"]["attempted"] == ["NSE-NIFTY"]
     assert phases["options"]["total_bars"] == 0
     assert "on-demand" in phases["options"]["note"]
-    assert "NIFTY-25JAN-20000-CE" not in materialized
-    assert materialized == ["NIFTY", "NIFTY-25JAN-FUT"]
-    assert body["total_bars"] == 18
+    # spot underlying + the two futures contracts materialised; never an option.
+    assert materialized == ["NSE-NIFTY", *_NIFTY_FUTURES]
+    assert body["total_bars"] == 27  # 3 × 9
+
+
+def test_no_futures_in_lake_is_clean_skip(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materialized = _patch(monkeypatch, with_futures=False)
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbols": "NSE-NIFTY"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    phases = {p["phase"]: p for p in body["phases"]}
+    assert phases["futures"]["attempted"] == []
+    assert "no futures contracts found" in phases["futures"]["note"]
+    assert materialized == ["NSE-NIFTY"]  # only the spot underlying
 
 
 def test_spot_phase_failure_halts_futures_and_options(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    materialized = _patch_materialize(monkeypatch, fail_symbol="NIFTY")
-    resp = client.post(
-        "/api/v1/universe/derive-timeframes",
-        params={"symbols": "NIFTY,NIFTY-25JAN-FUT,NIFTY-25JAN-20000-CE"},
-    )
+    materialized = _patch(monkeypatch, fail_symbol="NSE-NIFTY")
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbols": "NSE-NIFTY"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["gated"] is True
     assert body["ok"] is False
     assert body["halted_after"] == "spot"
-    # Only the SPOT phase ran — futures + options never started.
     assert [p["phase"] for p in body["phases"]] == ["spot"]
-    # The futures contract was NEVER materialised (the gate held).
-    assert materialized == ["NIFTY"]
-    assert body["phases"][0]["failed"][0]["symbol"] == "NIFTY"
-
-
-def test_options_only_selection_is_reported_noop(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    materialized = _patch_materialize(monkeypatch)
-    resp = client.post(
-        "/api/v1/universe/derive-timeframes",
-        params={"symbols": "NIFTY-25JAN-20000-CE"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is True
-    assert body["total_bars"] == 0
-    assert materialized == []  # nothing materialised
-    options = next(p for p in body["phases"] if p["phase"] == "options")
-    assert options["attempted"] == ["NIFTY-25JAN-20000-CE"]
+    # Futures contracts NEVER materialised (the gate held).
+    assert materialized == ["NSE-NIFTY"]
+    assert body["phases"][0]["failed"][0]["symbol"] == "NSE-NIFTY"
 
 
 def test_empty_symbols_selection_fails_closed(client: TestClient) -> None:
@@ -225,23 +225,54 @@ def test_empty_symbols_selection_fails_closed(client: TestClient) -> None:
 
 
 def test_unknown_symbols_member_fails_closed(client: TestClient) -> None:
-    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbols": "NIFTY,NOPE"})
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbols": "NSE-NIFTY,NOPE"})
     assert resp.status_code == 400
 
 
 def test_single_symbol_backcompat_shape(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_materialize(monkeypatch)
-    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NIFTY"})
+    _patch(monkeypatch)
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NSE-NIFTY"})
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"written": {"5m": 9}, "skipped": [], "total_bars": 9}
 
 
+def test_single_symbol_zero_bars_skips_cache_dirty(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single-symbol materialise that writes 0 bars still 200s (no rescan needed)."""
+
+    def _zero(
+        *, lake_root: Any, exchange: str, segment: str, symbol: str, kind: Any, tfs: Any = ()
+    ) -> MaterializeResult:
+        return MaterializeResult(written={}, skipped=())
+
+    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _zero)
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NSE-NIFTY"})
+    assert resp.status_code == 200
+    assert resp.json() == {"written": {}, "skipped": [], "total_bars": 0}
+
+
+def test_single_symbol_failure_maps_to_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, fail_symbol="NSE-NIFTY")
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NSE-NIFTY"})
+    assert resp.status_code == 400
+    assert "no stored 1minute bars" in resp.json()["detail"]
+
+
+def test_single_unknown_symbol_400(client: TestClient) -> None:
+    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NOPE"})
+    assert resp.status_code == 400
+    assert "unknown security_id" in resp.json()["detail"]
+
+
 def test_single_option_symbol_is_noop(client: TestClient) -> None:
     resp = client.post(
-        "/api/v1/universe/derive-timeframes", params={"symbol": "NIFTY-25JAN-20000-CE"}
+        "/api/v1/universe/derive-timeframes", params={"symbol": "NSE-NIFTY-25JAN-20000-CE"}
     )
     assert resp.status_code == 200
     body = resp.json()

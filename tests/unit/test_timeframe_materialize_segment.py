@@ -28,6 +28,7 @@ from brutex.data.spot_resample import derive_intraday_tfs
 from brutex.data.timeframe_materialize import (
     PrebuildKind,
     intraday_resampler_for,
+    materialize_lake_timeframes,
     materialize_timeframes,
     prebuild_kind_for,
 )
@@ -151,6 +152,21 @@ class TestIntradayResamplerFor:
 
     def test_options_returns_none(self) -> None:
         assert intraday_resampler_for(PrebuildKind.OPTIONS) is None
+
+
+# ── materialize_lake_timeframes OPTIONS guard ─────────────────────────────
+
+
+def test_materialize_lake_timeframes_rejects_options(tmp_path: object) -> None:
+    """The shared helper refuses OPTIONS — option intraday is on-demand, never built."""
+    with pytest.raises(ValueError, match="on-demand"):
+        materialize_lake_timeframes(
+            lake_root=tmp_path,  # type: ignore[arg-type]  — never read; raises before any I/O
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-25JAN-20000-CE",
+            kind=PrebuildKind.OPTIONS,
+        )
 
 
 # ── materialize_timeframes resampler routing ──────────────────────────────
