@@ -853,6 +853,13 @@ def build_app(
         Already-wired ASGI app. Caller mounts it on their uvicorn
         server of choice.
     """
+    from brutex.config.dotenv import bootstrap_env
+
+    # GAP C6 — load a persisted ``.env`` ONCE at app construction (no-op when
+    # absent; never overrides an already-set env var, secret values never
+    # logged) so a dashboard-launched pull inherits the operator's config.
+    bootstrap_env()
+
     try:
         from fastapi import FastAPI, HTTPException, Query
         from fastapi.concurrency import run_in_threadpool
