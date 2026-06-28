@@ -31,6 +31,7 @@ _TOPNAV_PAGES = {
     "/db": dashboard_app._render_db_html,
     "/coverage": dashboard_app._render_coverage_html,
     "/movers": dashboard_app._render_movers_html,
+    "/results": dashboard_app._render_results_html,
     "/reports": dashboard_app._render_reports_html,
     "/coverage/spot": dashboard_app._render_spot_coverage_html,
     "/coverage/windows": dashboard_app._render_fetch_windows_html,

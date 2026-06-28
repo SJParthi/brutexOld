@@ -146,6 +146,15 @@ from brutex.dashboard.spot_cascade import (
     symbol_to_json,
 )
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.sweep_results_view import (
+    DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
+)
+from brutex.dashboard.sweep_results_view import (
+    MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
+)
+from brutex.dashboard.sweep_results_view import (
+    build_sweep_leaderboard,
+)
 from brutex.dashboard.sweep_runner import (
     default_results_root,
     resolve_sweep_request,
@@ -950,6 +959,15 @@ def build_app(
     _coverage_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
+    # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001): the
+    # `<lake>/sweeps` discovery + per-tuple Parquet read is O(stores × rows); the
+    # ranked leaderboard for a given (instrument, tf, direction, rank_by, top_n) is a
+    # pure function of the sweep tree, so it is memoised behind the SAME write
+    # generation as the caches above (a sweep run / pull bumps `_summary_cache`'s
+    # generation → re-read; otherwise a repeat poll or a filter the operator already
+    # viewed is an O(1) handoff). REUSES the COMMON generation-stamped LRU
+    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON).
+    _sweep_leaderboard_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
@@ -3805,6 +3823,19 @@ def build_app(
         """
         return _render_movers_html()
 
+    @app.get("/results", response_class=HTMLResponse)
+    async def results_page() -> str:
+        """GET /results — the brute-force sweep leaderboard page (DEC-DASHBOARD-RESULTS-PAGE-001).
+
+        A read-only view of the ranked sweep winners — the combos the brute-force
+        engine found, decoded to their matched conditions, with net P&L (₹) and the
+        full-precision Sharpe / profit-factor / win-rate. Mirrors the ``/universe``
+        page style + nav; fetches ``/api/v1/sweep/leaderboard`` on open + on every
+        filter change / manual Refresh, sorts any column client-side, and shows an
+        honest empty-state when no sweep has been run yet.
+        """
+        return _render_results_html()
+
     @app.post("/api/v1/cascade/run")
     async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
         """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
@@ -3932,6 +3963,97 @@ def build_app(
         payload = request.to_dict()
         payload["started"] = started
         return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/leaderboard")
+    async def api_sweep_leaderboard(
+        instrument: str | None = Query(default=None),
+        tf: str | None = Query(default=None),
+        direction: str | None = Query(default=None),
+        rank_by: str | None = Query(default=None),
+        top: int = Query(
+            default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
+        ),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/leaderboard — the ranked brute-force sweep winners (DEC-DASHBOARD-RESULTS-PAGE-001).
+
+        The data source for the ``/results`` page: discovers every per-tuple
+        Parquet store under ``<lake>/sweeps``
+        (:func:`brutex.dashboard.sweep_runner.default_results_root`), loads them via
+        the SAME :class:`~brutex.engine.results_store.ResultsStore` the sweep wrote,
+        applies the optional filters, ranks to the top-N, and projects each winning
+        combo into a display row (rank, decoded matched conditions, net P&L in ``₹``,
+        and the full-precision Sharpe / profit-factor / win-rate — NEVER rounded).
+
+        READ-ONLY (CLAUDE.md §3): ranks results the operator already produced; it
+        NEVER touches the brute-force engine or the 52-condition vocabulary (the
+        ENGINE stays NIFTY/BANKNIFTY/SENSEX).
+
+        Query parameters
+        ----------------
+        instrument, tf, direction
+            Optional case-insensitive exact-match filters (e.g. ``NIFTY`` / ``5m`` /
+            ``bull``); blank ⇒ no filter on that axis.
+        rank_by
+            The ranking column — one of
+            :data:`brutex.dashboard.sweep_results_view.RANKABLE_COLUMNS`; an unknown
+            value falls back to the default headline metric (``sharpe_ratio``),
+            never a 500.
+        top
+            Leaderboard depth (1..500; default 50).
+
+        **Latency (DEC-DASHBOARD-RESULTS-PAGE-001):** the ``<lake>/sweeps`` read is
+        a pure function of the sweep tree, so the projected leaderboard is memoised
+        behind the dashboard write-generation (``_summary_cache.generation`` — a
+        sweep run / pull bumps it). A repeat poll, or a filter the operator already
+        viewed, is an O(1) cache hit; the first read of a coordinate still pays the
+        real ``O(stores × rows)`` scan (honest envelope, Golden Rule #10).
+
+        **Honest envelope (Golden Rule #10):** an empty / absent ``<lake>/sweeps``
+        (no sweep run yet) returns ``available: false`` with zero rows — never a
+        fabricated winner; a corrupt per-tuple Parquet is SKIPPED + counted, never a
+        500. When no lake root is wired the payload is the same honest empty shape.
+        """
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            # No lake root wired → honest empty leaderboard (never a 500), mirroring
+            # the /api/v1/movers no-lake-root degrade.
+            empty = build_sweep_leaderboard(
+                Path("/nonexistent-lake"),
+                instrument=instrument,
+                tf=tf,
+                direction=direction,
+                rank_by=rank_by,
+                top_n=top,
+            )
+            return JSONResponse(empty.to_dict())
+        lake_root = store_path.parent
+        generation = _summary_cache.generation
+        key = (
+            f"sweep_leaderboard|i={instrument or ''}|tf={tf or ''}"
+            f"|d={direction or ''}|r={rank_by or ''}|n={top}"
+        )
+
+        def _resolve() -> dict[str, Any]:
+            """Cache-or-compute the projected leaderboard on a threadpool worker.
+
+            The ``compute=`` closure performs the real ``<lake>/sweeps`` scan ONLY on
+            a miss / post-write; a hit is an O(1) handoff (DEC-DASHBOARD-RESULTS-PAGE-001).
+            """
+            return _sweep_leaderboard_cache.get_or_compute(
+                key,
+                generation=generation,
+                compute=lambda: build_sweep_leaderboard(
+                    lake_root,
+                    instrument=instrument,
+                    tf=tf,
+                    direction=direction,
+                    rank_by=rank_by,
+                    top_n=top,
+                ).to_dict(),
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     # ── Groww credentials store + live probe (DEC-DHAN-GROWW-REMIGRATE-001) ──
     # GrowwCredentialsIn is module-scope (see top of file) so FastAPI resolves
@@ -5186,6 +5308,29 @@ def _load_movers_template() -> str:
 def _render_movers_html() -> str:
     """Return the reference-only movers page HTML (DEC-MOVERS-SNAPSHOT-VIEW-001)."""
     return _load_movers_template()
+
+
+_RESULTS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "results.html"
+_RESULTS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_results_template() -> str:
+    """Load + cache the sweep-leaderboard page template (DEC-DASHBOARD-RESULTS-PAGE-001).
+
+    Ships as ``brutex/dashboard/templates/results.html``. The page fetches
+    ``/api/v1/sweep/leaderboard`` on open + on every filter change / manual Refresh
+    and renders the ranked sweep winners as a click-to-sort table with an honest
+    empty-state. Loaded once, then served verbatim.
+    """
+    global _RESULTS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _RESULTS_TEMPLATE_CACHE is None:
+        _RESULTS_TEMPLATE_CACHE = _RESULTS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _RESULTS_TEMPLATE_CACHE
+
+
+def _render_results_html() -> str:
+    """Return the brute-force sweep leaderboard page HTML (DEC-DASHBOARD-RESULTS-PAGE-001)."""
+    return _load_results_template()
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:
