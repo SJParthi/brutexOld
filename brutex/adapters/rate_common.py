@@ -170,6 +170,27 @@ _GOVERNOR_LOOP_CAP: int = 64
 #: pacer fails OPEN (stamps + admits) exactly as the governor's loop cap does.
 _SMOOTH_LOOP_CAP: int = 64
 
+#: Sleep/wake clock-gap threshold (DEC-RATE-CLOCK-SLEEPWAKE-001). The controller
+#: paces off ``time.monotonic()`` which, on a laptop, jumps forward by a large delta
+#: when the machine SLEEPS overnight and WAKES (and a rare platform/NTP glitch can even
+#: step it slightly back). A SINGLE inter-event delta whose magnitude EXCEEDS this
+#: threshold is treated as a sleep/wake event: the rolling-60s issue / 429 / timeout
+#: histories are pruned and every time-anchored marker is re-based to ``now`` so a
+#: post-wake pull starts FRESH — it can never burst past the per-second OR per-minute
+#: cap on stale pre-sleep timestamps (failure mode (a)), and never mis-times AIMD
+#: recovery/backoff by interpreting the whole sleep as elapsed pacing time (failure
+#: mode (b)). Set to FIVE :data:`PER_MIN_WINDOW`s (300 s = 5 min), comfortably ABOVE
+#: every normal operational gap so genuine pacing NEVER false-trips: a healthy pull
+#: issues many times per second, and even at the 1 r/s deep floor a call lands every
+#: ~1 s, so the LONGEST normal gap between two controller calls is the AIMD recovery
+#: window (one :data:`STEP_UP_WINDOW` = 60 s) — well under 300 s. A laptop sleeping
+#: overnight is minutes-to-hours, so 5 min cleanly separates "between recovery windows"
+#: (keep the rolling state) from "the machine slept" (reset). Any gap this large already
+#: evicts the ENTIRE 60 s rolling history under normal eviction; the explicit reset ALSO
+#: re-bases the AIMD anchors (``_last_step`` / ``_last_snapshot_log`` / ``_last_issue_ts``)
+#: that ordinary eviction does not touch. O(1): one subtraction + (rarely) a few clears.
+CLOCK_GAP_THRESHOLD_S: float = 5.0 * PER_MIN_WINDOW
+
 #: Minimum seconds between periodic ``rate.snapshot`` telemetry logs during active
 #: pacing (DEC-GROWW-RATE-SNAPSHOT-LOG-001). The existing rate.* events fire ONLY on a
 #: rung CHANGE (rate.429 / rate.stepdown / rate.stepup), so a pull HOLDING at a
@@ -307,6 +328,14 @@ class RateController:
         #: :data:`SNAPSHOT_LOG_INTERVAL_S` of active pacing. Stamped ``now`` at
         #: construction so the FIRST pace does not immediately log (warm-up grace).
         self._last_snapshot_log: float = clock()
+        #: Last clock instant observed inside a lock-held critical section — the
+        #: sleep/wake gap baseline (DEC-RATE-CLOCK-SLEEPWAKE-001). Every critical
+        #: section calls :meth:`_handle_clock_gap_locked` FIRST, which compares ``now``
+        #: against this marker: a magnitude jump > :data:`CLOCK_GAP_THRESHOLD_S` (a
+        #: laptop sleep/wake, or a rare backward NTP/monotonic glitch) prunes the
+        #: rolling histories + re-bases the AIMD anchors so issuance starts fresh.
+        #: Seeded at construction so the first activity never spuriously trips it.
+        self._last_seen: float = clock()
         self._bucket: AdaptiveTokenBucket = self._make_bucket()
         #: Guards the step-ladder state under concurrent worker access
         #: (DEC-DHAN-PARALLEL-INGEST-001). Held only for O(1) state reads/writes,
@@ -341,6 +370,49 @@ class RateController:
         """The current rate (in ``[TIMEOUT_FLOOR_RPS, CEILING_RPS]``) — thread-safe."""
         with self._lock:
             return self._rps
+
+    def _handle_clock_gap_locked(self, now: float) -> None:
+        """Detect a laptop sleep/wake clock jump; reset rolling state if one occurred — O(1).
+
+        DEC-RATE-CLOCK-SLEEPWAKE-001. The caller MUST hold ``self._lock`` and pass the
+        ``now`` it just read from the injected clock. Compares ``now`` against the last
+        instant seen in any critical section (:attr:`_last_seen`); when the MAGNITUDE of
+        the delta exceeds :data:`CLOCK_GAP_THRESHOLD_S` (300 s = 5 min) — a MacBook sleeping
+        overnight and waking, or a rare backward monotonic/NTP glitch — it treats it as
+        a sleep/wake event and:
+
+        * clears the rolling-60s issue / 429 / timeout histories (``_issues`` /
+          ``_hits`` / ``_timeouts``) so no STALE pre-sleep timestamp can let a post-wake
+          burst overshoot the per-second OR per-minute cap (failure mode (a)), and
+        * re-bases every time-anchored marker (``_last_step`` / ``_last_snapshot_log``,
+          and ``_last_issue_ts`` only under smooth pacing) to ``now`` so AIMD
+          recovery/backoff is timed from the wake, not mis-counting the whole sleep as
+          elapsed pacing time (failure mode (b)).
+
+        It NEVER changes ``_rps`` — a wake neither steps the rate up nor down; it only
+        forgets stale timing so the NEXT genuine signal decides. ``_last_seen`` is always
+        advanced to ``now`` (gap or not), so a steady stream of sub-threshold deltas never
+        accumulates into a false trip. O(1): one subtraction + (rarely) a few deque
+        clears.
+        """
+        if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
+            self._issues.clear()
+            self._hits.clear()
+            self._timeouts.clear()
+            self._last_step = now
+            self._last_snapshot_log = now
+            if self._smooth_pacing:
+                # Re-base the spacing baseline to the construction sentinel (``-inf``)
+                # so the FIRST post-wake issue admits immediately (no spurious wait
+                # against a pre-sleep instant); the per-second spacing re-binds from
+                # that issue onward, exactly as on a fresh controller.
+                self._last_issue_ts = float("-inf")
+            _LOG.warning(
+                "rate.clock_gap",
+                gap_s=now - self._last_seen,
+                current_rps=self._rps,
+            )
+        self._last_seen = now
 
     def _governor_wait_locked(self, now: float) -> float:
         """Evict the rolling window; return seconds to wait before an issue may proceed.
@@ -438,6 +510,7 @@ class RateController:
             while True:
                 with self._lock:
                     now = self._clock()
+                    self._handle_clock_gap_locked(now)
                     wait = self._smooth_wait_locked(now)
                     if wait <= 0.0:
                         self._last_issue_ts = now  # stamp the issue atomically
@@ -466,6 +539,7 @@ class RateController:
             while True:
                 with self._lock:
                     now = self._clock()
+                    self._handle_clock_gap_locked(now)
                     wait = self._governor_wait_locked(now)
                     if wait <= 0.0:
                         self._issues.append(now)  # reserve the slot atomically
@@ -512,6 +586,12 @@ class RateController:
         """
         now = self._clock()
         with self._lock:
+            # Re-base on a sleep/wake gap FIRST (DEC-RATE-CLOCK-SLEEPWAKE-001) so even a
+            # default controller — no governor, no smooth pacing, whose ``pace`` reads
+            # the clock under lock only here — forgets stale AIMD anchors on wake. The
+            # gap reset sets ``_last_snapshot_log = now``, so the throttle check below
+            # then correctly suppresses an immediate post-wake snapshot.
+            self._handle_clock_gap_locked(now)
             if now - self._last_snapshot_log < SNAPSHOT_LOG_INTERVAL_S:
                 return
             self._last_snapshot_log = now
@@ -528,6 +608,7 @@ class RateController:
         """
         with self._lock:
             now = self._clock()
+            self._handle_clock_gap_locked(now)
             self._hits.append(now)
             cutoff = now - STEP_DOWN_WINDOW
             while self._hits and self._hits[0] < cutoff:
@@ -584,6 +665,7 @@ class RateController:
         """
         with self._lock:
             now = self._clock()
+            self._handle_clock_gap_locked(now)
             self._timeouts.append(now)
             cutoff = now - STEP_DOWN_WINDOW
             while self._timeouts and self._timeouts[0] < cutoff:
@@ -620,6 +702,7 @@ class RateController:
         """
         with self._lock:
             now = self._clock()
+            self._handle_clock_gap_locked(now)
             cutoff = now - STEP_DOWN_WINDOW
             # Evict aged-out 429 hits AND timeouts (DEC-DHAN-RATE-STORM-FLOOR-001).
             # on_success previously evicted ONLY _timeouts. But on_rate_limit clears
@@ -715,6 +798,7 @@ class RateController:
 __all__ = [
     "BURST",
     "CEILING_RPS",
+    "CLOCK_GAP_THRESHOLD_S",
     "FLOOR_RPS",
     "PER_MIN_WINDOW",
     "RATE_LIMIT_STORM_FLOOR_RPS",
