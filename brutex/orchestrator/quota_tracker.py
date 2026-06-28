@@ -293,27 +293,39 @@ class DailyQuotaTracker:
         self._closed = False
         self._lock = threading.Lock()
         self._fired_today = set()
-        # Compute absolute threshold counts from percentages x daily_limit.
-        # For daily_limit=100_000: (80_000, 95_000, 100_000).
-        # For daily_limit=10 (tests): (8, 9, 10). The "exceeded" label is
-        # always exactly daily_limit so the gate triggers at the right point.
-        self._thresholds = tuple(
-            (int(self.daily_limit * pct), label) for pct, label in _THRESHOLD_PCTS
-        )
+        # Any failure AFTER the env refcount was incremented above (a corrupt
+        # persisted state raising QuotaInvariantError in _read_state, say) must
+        # release that reference before the constructor re-raises — otherwise
+        # the instance never binds, close() is unreachable, and the
+        # (env, refcount) entry leaks in _ENV_REGISTRY, growing on every
+        # corrupt load (DEC-ORCH-AUDIT-RATE-HARDEN-001). Mirror close()'s
+        # teardown exactly: flag closed + release the shared env.
+        try:
+            # Compute absolute threshold counts from percentages x daily_limit.
+            # For daily_limit=100_000: (80_000, 95_000, 100_000).
+            # For daily_limit=10 (tests): (8, 9, 10). The "exceeded" label is
+            # always exactly daily_limit so the gate triggers at the right point.
+            self._thresholds = tuple(
+                (int(self.daily_limit * pct), label) for pct, label in _THRESHOLD_PCTS
+            )
 
-        # Rehydrate the fired-today set from the persisted date if we
-        # are resuming on the same IST day. Without this, a process
-        # restart at count=85_000 would re-emit the 80pct threshold on
-        # the next acquire (Rule-11 false-OK: "fire once per day"
-        # would actually fire twice across the restart boundary).
-        persisted = self._read_state()
-        if persisted is not None:
-            persisted_date, persisted_count = persisted
-            today = self.clock().date()
-            if persisted_date == today:
-                for limit, label in self._thresholds:
-                    if persisted_count >= limit:
-                        self._fired_today.add(label)
+            # Rehydrate the fired-today set from the persisted date if we
+            # are resuming on the same IST day. Without this, a process
+            # restart at count=85_000 would re-emit the 80pct threshold on
+            # the next acquire (Rule-11 false-OK: "fire once per day"
+            # would actually fire twice across the restart boundary).
+            persisted = self._read_state()
+            if persisted is not None:
+                persisted_date, persisted_count = persisted
+                today = self.clock().date()
+                if persisted_date == today:
+                    for limit, label in self._thresholds:
+                        if persisted_count >= limit:
+                            self._fired_today.add(label)
+        except Exception:
+            self._closed = True
+            _release_shared_env(self._env_key)
+            raise
 
     def close(self) -> None:
         """Release this tracker's reference to the shared LMDB env.

@@ -99,7 +99,9 @@ def test_storm_gives_up_at_boundary_alerts_once_and_audits(tmp_path: Path) -> No
         AUDIT_ACTION_SYMBOL_FAILURE,
     ]
     give_up_subjects = {e.subject for e in entries if e.action == AUDIT_ACTION_GIVE_UP}
-    assert give_up_subjects == {"NIFTY|w0", "NIFTY|w1", "NIFTY|w2"}
+    # ``~`` (not ``|``) joins the (symbol, window) pair — ``|`` is the audit
+    # hash-preimage delimiter forbidden inside a field (DEC-ORCH-AUDIT-RATE-HARDEN-001).
+    assert give_up_subjects == {"NIFTY~w0", "NIFTY~w1", "NIFTY~w2"}
     symbol_row = entries[-1]
     assert symbol_row.subject == "NIFTY"
     assert symbol_row.payload == {"failed_windows": 3, "total_windows": 3}
@@ -128,5 +130,5 @@ def test_partial_failure_does_not_alert_and_audits_only_give_ups(tmp_path: Path)
     assert verify_chain(audit_path) == 1
     (entry,) = read_entries(audit_path)
     assert entry.action == AUDIT_ACTION_GIVE_UP
-    assert entry.subject == "BANKNIFTY|w0"
+    assert entry.subject == "BANKNIFTY~w0"
     assert entry.payload["reason"] == "terminal"
