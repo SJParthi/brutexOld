@@ -73,6 +73,45 @@ class PartitionLockTimeout(DataLakeError):
         self.timeout_seconds = timeout_seconds
 
 
+class WriteDeadlineExceeded(DataLakeError):
+    """A single durable lake write (``sink.append``) blew its wall-clock deadline.
+
+    The lake write does a READ-modify-WRITE of a month partition ending in an
+    ``os.fsync`` + atomic ``os.replace`` (:func:`~brutex.data.atomic_io.atomic_write_via`).
+    Those syscalls carry NO inherent wall-clock bound, so a WEDGED durable write — a hung
+    ``fsync`` / ``os.replace`` on a stalled external SSD / NFS mount that NEVER raises — would
+    block its consumer thread forever, fill its bounded queue, and eventually wedge the
+    PRODUCER (the fetch lane) on back-pressure at 0 r/s while the rate controller still
+    "allows" the ceiling (DEC-FETCH-HUNG-WRITE-DEADLINE-001). This is DISTINCT from
+    :class:`PartitionLockTimeout`, which bounds only the cross-process ``flock`` ACQUIRE — a
+    hung write happens AFTER the lock is held, inside the merge / render / fsync / replace, and
+    was previously unbounded.
+
+    :func:`~brutex.adapters.groww.write_deadline.append_with_deadline` runs ``sink.append`` under
+    a generous wall-clock deadline (:data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S`)
+    and raises this on expiry. Like :class:`PartitionLockTimeout` it is a TRANSIENT / RETRYABLE
+    signal — it subclasses :class:`DataLakeError`, NOT :class:`LakeWriteHalt`, so it is NOT a
+    pull-wide stop: the ingest spines catch it at the window boundary, record the window
+    ``FAILED``, and DEFER it to the next pull, exactly like a 429 / lock-timeout transient. The
+    fetch lane is FREED and the window is never silently lost (Golden Rule #1).
+
+    **Honest envelope (Golden Rule #10):** the abandoned write runs in a daemon worker thread,
+    so a C-level wedged ``fsync`` thread CANNOT be killed — it dies with the process. The
+    guarantee is "the fetch lane is never blocked" (the producer is released + the window is
+    deferred), NOT "the zombie write thread is terminated". A persistently-wedged volume defers
+    the same window every pull until the volume recovers (the operator's signal to act).
+
+    ``deadline_seconds`` is the deadline that was exhausted (non-secret) for the log.
+    """
+
+    def __init__(self, deadline_seconds: float) -> None:
+        super().__init__(
+            f"durable lake write not completed within {deadline_seconds:g}s "
+            "(wedged fsync/replace); window deferred to the next pull"
+        )
+        self.deadline_seconds = deadline_seconds
+
+
 class CatalogError(DataLakeError):
     """Raised when a DuckDB catalog operation fails or is malformed.
 

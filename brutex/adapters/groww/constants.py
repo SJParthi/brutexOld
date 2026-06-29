@@ -187,6 +187,28 @@ GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
 #: dead socket to seconds, not forever. NOT a vendor-documented limit.
 GROWW_PULL_CALL_TIMEOUT_S: Final[float] = 45.0
 
+#: Hard per-window wall-clock deadline (seconds) for ONE durable lake write — the
+#: DURABLE-WRITE FREEZE GUARD (DEC-FETCH-HUNG-WRITE-DEADLINE-001). The lake
+#: read-modify-write ends in ``os.fsync`` + atomic ``os.replace``
+#: (:func:`~brutex.data.atomic_io.atomic_write_via`); those syscalls carry NO inherent
+#: wall-clock bound, so a WEDGED durable write (a hung ``fsync`` / ``os.replace`` on a
+#: stalled external SSD / NFS mount that NEVER raises) would block its fetch-pipeline
+#: consumer thread forever, fill its bounded queue, and eventually wedge the PRODUCER (the
+#: fetch lane) on back-pressure at 0 r/s while the rate controller still "allows" the
+#: ceiling. :func:`~brutex.adapters.groww.write_deadline.append_with_deadline` runs
+#: ``sink.append`` under this deadline so a hang raises a TRANSIENT
+#: :class:`~brutex.data.errors.WriteDeadlineExceeded` — the ingest spines DEFER that one
+#: window (record FAILED → re-pull next round) and the fetch lane is FREED. This bounds the
+#: WRITE itself (the merge/render/fsync/replace), DISTINCT from
+#: :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS` (which bounds
+#: only the ``flock`` ACQUIRE before the write). 90 s is GENEROUS — a merely-SLOW
+#: deep-month merge (hundreds of ms typical; pathological deep partitions a few seconds)
+#: always completes well within it, but a true hang trips it in bounded time, far under the
+#: 600 s pull watchdog. NOT a vendor-documented limit; operator-tunable via
+#: :func:`~brutex.adapters.groww.write_deadline.resolve_write_deadline_seconds`
+#: (env ``BRUTEX_GROWW_WRITE_DEADLINE_S``).
+GROWW_WRITE_DEADLINE_S: Final[float] = 90.0
+
 #: Default number of INDEPENDENT Groww SDK connections the live spot pull fans its worker
 #: threads across (DEC-GROWW-CLIENT-POOL-001 — the multi-connection
 #: :class:`~brutex.adapters.groww.pool.ClientPool`). 1 = today's exact single-connection
@@ -292,6 +314,7 @@ __all__ = [
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
     "GROWW_SMOOTH_PACING_ENV",
+    "GROWW_WRITE_DEADLINE_S",
     "INDIA_VIX_SYMBOL",
     "INSTRUMENT_CSV_COLUMNS",
     "INTERVAL_TO_GROWW",

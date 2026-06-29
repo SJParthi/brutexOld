@@ -1,0 +1,181 @@
+"""Bound ONE durable lake write by a wall-clock deadline (DEC-FETCH-HUNG-WRITE-DEADLINE-001).
+
+The Groww fetch lane must NEVER be blocked by an internal write. The async fetch pipeline
+(:mod:`brutex.adapters.groww.fetch_pipeline`) already DECOUPLES the durable write from the
+producer onto a bounded-queue consumer pool — but there was one remaining HUNG-WRITE BLIND
+SPOT. The consumer's durable write (``sink.append`` → :class:`~brutex.data.parquet_writer.ParquetWriter`
+→ :func:`~brutex.data.atomic_io.atomic_write_via` → ``os.fsync`` + ``os.replace``) carries NO
+inherent wall-clock bound. The existing bounds do NOT cover it:
+
+* :func:`~brutex.adapters.groww.deadline.run_with_deadline` bounds only the *fetch* SDK call;
+* :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS` bounds only the
+  cross-process ``flock`` ACQUIRE — a hung write happens AFTER the lock is held, inside the
+  merge / render / fsync / replace.
+
+So a WEDGED durable write that NEVER raises (a hung ``fsync`` / ``os.replace`` on a stalled
+external SSD / NFS mount) would block its consumer thread forever, fill that consumer's bounded
+queue, and eventually wedge the PRODUCER on :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.submit`
+back-pressure FOREVER — the whole fetch lane stalls at 0 r/s while the rate controller still
+"allows" the ceiling. The fetch-pipeline back-pressure loop only breaks on ``_stopped`` /
+``_draining``, which a non-RAISING hang never sets.
+
+This module is the FREEZE GUARD for the durable write. :func:`append_with_deadline` runs
+``sink.append`` under a generous wall-clock deadline (reusing the COMMON
+:func:`~brutex.adapters.groww.deadline.run_with_deadline` — NO copy, CLAUDE.md §11) and, on
+expiry, raises the TRANSIENT :class:`~brutex.data.errors.WriteDeadlineExceeded`. The ingest
+spines catch it at the window boundary EXACTLY like a :class:`~brutex.data.errors.PartitionLockTimeout`
+— record the window ``FAILED``, return a transient outcome, DEFER it to the next pull — so the
+consumer keeps processing subsequent windows and the producer is RELEASED. Per-window graceful
+deferral, NOT a pull-wide trip.
+
+**Honest envelope (Golden Rule #10).** :func:`~brutex.adapters.groww.deadline.run_with_deadline`
+runs ``sink.append`` in a daemon worker thread; a wedged C-level ``fsync`` thread CANNOT be
+killed — it dies with the process. The guarantee here is **"the fetch lane is never blocked"**
+(the producer is released + the window is deferred + re-pulled), NOT "the zombie write thread is
+terminated". The abandoned daemon STILL holds this partition's in-process
+:class:`threading.Lock` + cross-process ``flock`` until its wedged syscall finally returns or the
+process exits; because all windows of ONE series route to ONE consumer (the per-partition-lock
+shard invariant), a LATER window of the SAME partition that lands on that consumer could block on
+the still-held in-process lock — but that later append is ALSO wrapped here, so it too defers in
+bounded time rather than wedging. A persistently-wedged volume therefore defers the same window(s)
+every pull until the volume recovers (the operator's signal to act), never silently losing data
+(idempotent keep-first sink + the durable window ledger). The number of abandoned daemons is
+bounded by the distinct wedged partitions, not by the window count.
+
+This module is import-cheap: it imports only :func:`run_with_deadline`, the constant, and the
+exception type; it does NOT import the heavy lake writers (the ``sink`` is injected). O(1) per
+window — the deadline wrap is one ``threading.Event.wait``, NOT per-bar.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from brutex.adapters.groww.constants import GROWW_WRITE_DEADLINE_S
+from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
+from brutex.data.errors import WriteDeadlineExceeded
+
+if TYPE_CHECKING:  # pragma: no cover
+    from brutex.data.models import CandleBar
+    from brutex.data.sink import BarSink, SinkAppendResult
+
+__all__ = [
+    "WRITE_DEADLINE_ENV",
+    "append_with_deadline",
+    "resolve_write_deadline_seconds",
+]
+
+#: Environment override for the durable-write deadline (operator escape hatch, no code change).
+WRITE_DEADLINE_ENV: str = "BRUTEX_GROWW_WRITE_DEADLINE_S"
+
+
+def resolve_write_deadline_seconds(raw: str | None = None) -> float:
+    """Resolve the durable-write deadline: env override, else the audited default.
+
+    Reads :data:`WRITE_DEADLINE_ENV` (:data:`BRUTEX_GROWW_WRITE_DEADLINE_S`); falls back to
+    :data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S` when unset, blank,
+    non-numeric, non-positive, OR non-finite (``nan`` / ``inf`` parse as floats but would
+    DEFEAT the bound — a ``nan`` deadline makes ``done.wait(nan)`` ill-defined and an ``inf``
+    deadline never expires, re-introducing the infinite block this fix removes). A bad value
+    can therefore NEVER disable the bound (fail-safe to the audited default, Golden Rule #1).
+    Mirrors :func:`~brutex.data.partition_lock.resolve_partition_lock_timeout_seconds` so the
+    two pull deadlines share ONE validation shape (CLAUDE.md §11 COMMON shape). O(1).
+
+    Parameters
+    ----------
+    raw
+        The deadline value (``None`` reads :data:`WRITE_DEADLINE_ENV`); a test may pass one.
+    """
+    value = os.environ.get(WRITE_DEADLINE_ENV) if raw is None else raw
+    if value is None or not value.strip():
+        return GROWW_WRITE_DEADLINE_S
+    try:
+        parsed = float(value)
+    except ValueError:
+        return GROWW_WRITE_DEADLINE_S
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        return GROWW_WRITE_DEADLINE_S
+    return parsed
+
+
+def append_with_deadline(
+    sink: BarSink,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    bars: Sequence[CandleBar],
+    deadline_seconds: float | None = None,
+) -> SinkAppendResult:
+    """Run ``sink.append`` under a wall-clock deadline; a hang → :class:`WriteDeadlineExceeded`.
+
+    The COMMON freeze guard for the durable lake write. Delegates the append to
+    :func:`~brutex.adapters.groww.deadline.run_with_deadline` (NO copy, CLAUDE.md §11) so a
+    WEDGED durable write (a hung ``fsync`` / ``os.replace`` that never raises) raises a
+    :class:`~brutex.adapters.groww.deadline.DeadlineExceeded` after *deadline_seconds*, which this
+    re-raises as the TRANSIENT :class:`~brutex.data.errors.WriteDeadlineExceeded` — the ingest
+    spines catch it at the window boundary EXACTLY like a
+    :class:`~brutex.data.errors.PartitionLockTimeout` and DEFER the window to the next pull,
+    freeing the fetch lane.
+
+    Any error the underlying ``sink.append`` raises ITSELF (a
+    :class:`~brutex.data.errors.PartitionLockTimeout` from the lock acquire, a
+    :class:`~brutex.data.errors.LakeWriteHalt` disk-full, a
+    :class:`~brutex.data.errors.WriterError`, …) propagates UNCHANGED through
+    :func:`run_with_deadline` (it re-raises the worker's exception on the caller thread). Only the
+    GUARD's OWN deadline — a :class:`~brutex.adapters.groww.deadline.DeadlineExceeded` — becomes
+    :class:`WriteDeadlineExceeded`; a real :class:`TimeoutError` / :class:`socket.timeout` raised
+    by ``sink.append`` ITSELF (e.g. a future network-backed writer) is NOT caught here and
+    propagates UNCHANGED (DEC-FETCH-HUNG-WRITE-DEADLINE-001 hardening — it is NOT silently
+    deferred as a hung durable write). So this wraps the existing error contract additively: it
+    adds the hung-write bound, it never reclassifies a real write error.
+
+    Parameters
+    ----------
+    sink
+        The lake write sink (injected — this module never imports the heavy writers).
+    exchange, segment, symbol, interval, bars
+        Forwarded verbatim to :meth:`~brutex.data.sink.BarSink.append`.
+    deadline_seconds
+        The wall-clock bound; defaults to :func:`resolve_write_deadline_seconds`
+        (env-tunable). Tests pass a small value to exercise the timeout fast.
+
+    Returns
+    -------
+    SinkAppendResult
+        The sink's result on a write that completes within the deadline (the normal /
+        merely-slow path — byte-identical to a direct ``sink.append`` call).
+
+    Raises
+    ------
+    WriteDeadlineExceeded
+        If the durable write does not complete within *deadline_seconds* (a wedged
+        fsync / replace). A TRANSIENT defer signal, NOT a pull-wide stop.
+    """
+    deadline = resolve_write_deadline_seconds() if deadline_seconds is None else deadline_seconds
+    try:
+        return run_with_deadline(
+            lambda: sink.append(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                bars=bars,
+            ),
+            deadline,
+        )
+    except DeadlineExceeded as exc:
+        # The GUARD's OWN deadline fired (a wedged fsync/replace that never raised). We match the
+        # DeadlineExceeded subclass — NOT the broad TimeoutError — so a real TimeoutError /
+        # socket.timeout raised by sink.append ITSELF propagates UNCHANGED (it never reaches this
+        # arm), never silently deferred as a hung durable write (DEC-FETCH-HUNG-WRITE-DEADLINE-001
+        # hardening). Re-raise as the TRANSIENT WriteDeadlineExceeded so the spine DEFERS this
+        # window (record FAILED → re-pull) exactly like a PartitionLockTimeout — never a
+        # pull-wide stop, never silent data loss (Golden Rule #1). The abandoned daemon write
+        # thread cannot be killed (honest envelope) but the FETCH LANE is freed: the consumer
+        # returns + processes the next window, releasing the back-pressured producer.
+        raise WriteDeadlineExceeded(deadline) from exc

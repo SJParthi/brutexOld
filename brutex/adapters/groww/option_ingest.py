@@ -80,6 +80,7 @@ from brutex.adapters.groww.contracts import (
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure, is_rate_limit, is_retryable
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
+from brutex.adapters.groww.write_deadline import append_with_deadline
 from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
@@ -91,7 +92,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout
+from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.raw_integrity_store import CaptureHookFactory
@@ -563,11 +564,18 @@ def _process_option_window_tail(
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
     Runs on the consumer thread (async mode) or inline on the fetch thread (sync mode) — the
-    SAME code either way (CLAUDE.md §11 COMMON). A :class:`PartitionLockTimeout` DEFERS the
-    window (records FAILED + returns a transient :class:`IngestReport`) exactly as before; any
-    other sink error (a :class:`~brutex.data.errors.LakeWriteHalt` disk-full) propagates — in
-    async mode the pipeline captures it into its pool-wide stop, re-raised on the next submit /
-    drain so the pull halts through ``_GLOBAL_STOP_ERRORS``.
+    SAME code either way (CLAUDE.md §11 COMMON). The durable write goes through
+    :func:`~brutex.adapters.groww.write_deadline.append_with_deadline`, so a wedged
+    fsync/replace that NEVER raises (a hung durable write) is bounded by
+    :data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S` and surfaces as a
+    :class:`~brutex.data.errors.WriteDeadlineExceeded` instead of blocking the fetch lane
+    forever (DEC-FETCH-HUNG-WRITE-DEADLINE-001). BOTH that and a
+    :class:`PartitionLockTimeout` (the cross-process lock ACQUIRE bound) DEFER the window
+    (record FAILED + return a transient :class:`IngestReport`) — OUR contention / pipeline
+    stall, not a fatal halt, so the contract window re-pulls next round and the fetch lane is
+    freed. Any other sink error (a :class:`~brutex.data.errors.LakeWriteHalt` disk-full)
+    propagates — in async mode the pipeline captures it into its pool-wide stop, re-raised on
+    the next submit / drain so the pull halts through ``_GLOBAL_STOP_ERRORS``.
     """
     contract = raw.contract
     interval = raw.interval
@@ -579,25 +587,33 @@ def _process_option_window_tail(
     attempt = raw.attempt
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
     try:
-        result = sink.append(
+        # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
+        # durable write that never raises) can NEVER block this consumer — and therefore the
+        # back-pressured producer / fetch lane — forever (DEC-FETCH-HUNG-WRITE-DEADLINE-001).
+        result = append_with_deadline(
+            sink,
             exchange=exchange,
             segment=OPTION_SEGMENT,
             symbol=contract.symbol,
             interval=interval,
             bars=bars,
         )
-    except PartitionLockTimeout as exc:
-        # A WEDGED peer held this partition's cross-process lock past the bounded
-        # deadline (DEC-PULL-CONTENTION-ANTISTALL-001): DEFER this window to the next
-        # pull, exactly like a 429 / timeout transient — record FAILED + return the
-        # transient IngestReport (NOT a contract-quarantine, NOT a rate-controller step:
-        # this is OUR contention, not vendor pressure). The peer genuinely progressing
-        # finishes its write and this window succeeds on the re-pull; the worker is freed
-        # instead of pinned until the 600 s watchdog kill.
+    except (PartitionLockTimeout, WriteDeadlineExceeded) as exc:
+        # DEFER this contract window to the next pull, exactly like a 429 / timeout transient —
+        # record FAILED + return the transient IngestReport (NOT a contract-quarantine, NOT a
+        # rate-controller step: a lock-acquire timeout is OUR partition contention and a
+        # write-deadline is OUR wedged-disk hang — both are our-pipeline stalls, not vendor
+        # pressure). The window re-pulls next round; the worker / fetch lane is freed instead of
+        # pinned until the 600 s watchdog kill. ``error_type`` (the class name) distinguishes
+        # ``PartitionLockTimeout`` (lock acquire) from ``WriteDeadlineExceeded`` (hung write).
+        defer_seconds = (
+            exc.timeout_seconds if isinstance(exc, PartitionLockTimeout) else exc.deadline_seconds
+        )
         _LOG.warning(
-            "option.ingest.window.lock_deferred",
+            "option.ingest.window.write_deferred",
             pull_id=pull_id,
-            timeout_seconds=exc.timeout_seconds,
+            error_type=type(exc).__name__,
+            defer_seconds=defer_seconds,
             **fields,
         )
         if ledger is not None:
