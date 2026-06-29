@@ -27,6 +27,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import polars as pl
+import pytest
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import ingest_spot
@@ -396,6 +397,186 @@ class TestIsolationProof:
             pipeline.drain()
         # And the data still landed durably after drain.
         assert _spot_part(lake, year=2021, month=1).exists()
+
+
+# ───────────────── HUNG-WRITE FREEZE GUARD (DEC-FETCH-HUNG-WRITE-DEADLINE-001) ─────────────────
+
+
+class TestHungWriteDoesNotBlockFetchLane:
+    """Adversarial: a durable write that HANGS (never raises) can never wedge the fetch lane.
+
+    The bug class (verified by the prior audit): the fetch-pipeline consumer does the durable
+    ``sink.append`` (fsync + os.replace) with NO timeout. If a write HANGS WITHOUT RAISING (a
+    wedged fsync on a stalled SSD), the consumer never finishes, its bounded queue fills, and
+    the producer eventually BLOCKS on ``submit``'s ``queue.put`` back-pressure FOREVER — the
+    whole fetch lane stalls at 0 r/s while the rate controller still "allows" the ceiling. The
+    back-pressure loop only breaks on ``_stopped`` / ``_draining``, which a non-raising hang
+    NEVER sets.
+
+    The fix (DEC-FETCH-HUNG-WRITE-DEADLINE-001): the consumer's durable write goes through
+    :func:`~brutex.adapters.groww.write_deadline.append_with_deadline`, so a hang raises a
+    TRANSIENT :class:`~brutex.data.errors.WriteDeadlineExceeded` after the deadline — the
+    window is DEFERRED (recorded FAILED → re-pull) and the consumer keeps draining, releasing
+    the producer.
+
+    These tests patch the deadline to 0.2 s (via the real env var) so the timeout path is
+    exercised fast.
+    """
+
+    def test_producer_not_blocked_by_a_hung_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fetch lane keeps issuing windows through a hung durable write (no deadlock).
+
+        ONE consumer, a TINY queue (so a hung consumer back-pressures the producer almost
+        immediately), and MANY windows where the FIRST window's write hangs forever. WITHOUT the
+        fix the producer wedges on ``queue.put`` after the queue fills and ``ingest_spot`` never
+        returns. WITH the fix the consumer's hung write times out at 0.2 s, the window defers,
+        the consumer drains the rest, and the producer finishes — proven by a wall-clock budget
+        + a watchdog that fails LOUDLY (never hangs the suite) if the call deadlocks.
+        """
+        # 0.2 s durable-write deadline (the real env path used by append_with_deadline(None)).
+        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+
+        gate = threading.Event()  # released at teardown so the abandoned daemon exits cleanly
+        first_entered = threading.Event()
+        append_calls: list[int] = []
+        lock = threading.Lock()
+
+        class _HungFirstWriteSink(ParquetBarSink):
+            """The FIRST append hangs forever; every later append writes normally."""
+
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                with lock:
+                    append_calls.append(1)
+                    n = len(append_calls)
+                if n == 1:
+                    first_entered.set()
+                    gate.wait(timeout=30.0)  # the wedged fsync — bounded only by the guard
+                    return super().append(**kw)  # type: ignore[arg-type]
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+        # workers=1 so the SAME consumer that hangs must also process the rest (it cannot offload
+        # to a peer); queue_maxsize=1 so the producer is back-pressured almost immediately when
+        # the consumer wedges — the exact condition that wedged the producer before the fix.
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, drain_join_timeout_seconds=1.0)
+
+        done = threading.Event()
+        error: list[BaseException] = []
+
+        def _run() -> None:
+            try:
+                ingest_spot(
+                    _DayAdapter(),  # type: ignore[arg-type]
+                    _HungFirstWriteSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+                    instrument=_inst(),
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2022, 1, 1),  # ~12 monthly tiles → many windows
+                    ledger=ledger,
+                    now_ist=_now,
+                    fetch_pipeline=pipeline,
+                )
+            except BaseException as exc:  # surface ANY deadlock/raise to the test, never swallow
+                error.append(exc)
+            finally:
+                done.set()
+
+        runner = threading.Thread(target=_run, name="hung-write-producer", daemon=True)
+        runner.start()
+        try:
+            # FORWARD-PROGRESS PROOF: the producer must finish issuing ALL windows within a
+            # bounded wall time DESPITE the hung first write. Each hung window costs ~0.2 s
+            # (the deadline); a dozen windows + the fixed producer work fit comfortably in 20 s.
+            # WITHOUT the fix this would hang here forever (the watchdog fails LOUDLY, never
+            # blocking the suite indefinitely).
+            assert done.wait(timeout=20.0), (
+                "ingest_spot did NOT return — the fetch lane was BLOCKED by the hung write "
+                "(the bug the deadline fixes)"
+            )
+            assert not error, f"producer raised unexpectedly: {error[0]!r}"
+            # The first window's write really DID start hanging (the hang is real, not a no-op).
+            assert first_entered.is_set()
+            # (a) CLEAN shutdown — drain returns within the bounded join (no hang on drain/join).
+            pipeline.drain()
+            # (b) The hung window is recorded FAILED-deferred (re-pull next round) — NEVER a
+            # silent loss and NEVER a fabricated SUCCESS for a write that never completed.
+            statuses = [r.status for r in ledger.records()]
+            assert "FAILED" in statuses, statuses
+            assert "SUCCESS" in statuses, (
+                "the windows AFTER the hung one must have written durably — proving the "
+                "consumer kept processing"
+            )
+            # (c) The deferred window is surfaced on the pipeline's tail-transient tally so the
+            # across-pull retry round re-pulls it (never dropped).
+            assert pipeline.tail_transients >= 1
+            # (d) The later windows' data landed durably on disk.
+            assert any(lake.rglob("*.parquet")), "no Parquet written — the consumer never drained"
+        finally:
+            gate.set()  # release the abandoned daemon write thread (no orphan)
+            runner.join(timeout=5.0)
+
+    def test_hung_write_then_normal_pull_recovers_the_deferred_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The deferred window is RE-PULLED + lands durably on a fresh (non-hung) pull.
+
+        Proves the defer is recoverable, not a permanent loss: after a hung-write pull defers a
+        window, a normal pull of the SAME span writes it (idempotent keep-first sink), so the
+        guard trades a wedged lane for a clean re-pull — zero corruption.
+        """
+        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+        gate = threading.Event()
+        calls: list[int] = []
+        lock = threading.Lock()
+
+        class _HungFirstWriteSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                with lock:
+                    calls.append(1)
+                    n = len(calls)
+                if n == 1:
+                    gate.wait(timeout=30.0)
+                    return super().append(**kw)  # type: ignore[arg-type]
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, drain_join_timeout_seconds=1.0)
+        try:
+            ingest_spot(
+                _DayAdapter(),  # type: ignore[arg-type]
+                _HungFirstWriteSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+                instrument=_inst(),
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 4, 1),  # 3 monthly tiles; the FIRST defers
+                ledger=ledger,
+                now_ist=_now,
+                fetch_pipeline=pipeline,
+            )
+        finally:
+            pipeline.drain()
+            gate.set()
+        assert "FAILED" in {r.status for r in ledger.records()}  # the hung window deferred
+        # A fresh, normal pull (no hang) of the SAME span lands every window durably.
+        lake2 = tmp_path / "lake2"
+        ledger2 = WindowLedger()
+        ingest_spot(
+            _DayAdapter(),  # type: ignore[arg-type]
+            _sink(lake2),
+            instrument=_inst(),
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 4, 1),
+            ledger=ledger2,
+            now_ist=_now,
+        )
+        # Every monthly partition exists on the clean re-pull — the deferred window recovered.
+        assert _spot_part(lake2, year=2021, month=1).exists()
+        assert "FAILED" not in {r.status for r in ledger2.records()}
 
 
 # ─────────────────────────── caps intact under pipeline ──────────────────────────

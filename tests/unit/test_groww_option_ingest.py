@@ -535,8 +535,10 @@ def test_ingest_partition_lock_timeout_no_ledger_logs_deferred() -> None:
             now_ist=_now,
         )
     assert report.transient_failures == 1
-    events = [r["event"] for r in logs]
-    assert "option.ingest.window.lock_deferred" in events
+    deferred = [r for r in logs if r["event"] == "option.ingest.window.write_deferred"]
+    assert deferred  # the unified write-defer WARNING fired
+    # A lock-acquire timeout is distinguished from a write-deadline by ``error_type``.
+    assert deferred[0]["error_type"] == "PartitionLockTimeout"
 
 
 def test_ingest_async_pipeline_tail_lock_timeout_folds_transient() -> None:

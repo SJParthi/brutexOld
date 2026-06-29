@@ -230,7 +230,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-health-wiring-jlzt1n` (**DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
+- **Active branch:** `claude/fetch-hung-write-deadline` (**DEC-FETCH-HUNG-WRITE-DEADLINE-001, MIGRATION.md #999** — the
+  durable lake write (`sink.append` → `os.fsync` + atomic `os.replace`) is now BOUNDED by a wall-clock DEADLINE so a
+  HUNG write (a wedged fsync/replace on a stalled external SSD / NFS mount that NEVER raises) can never permanently
+  stall the fetch lane. The async fetch pipeline (#951/#998) decouples the write onto a bounded-queue consumer, but the
+  write ITSELF had NO timeout — `run_with_deadline` bounds only the FETCH call, `partition_lock`'s 120 s bound only the
+  `flock` ACQUIRE — so a non-raising hang blocked the consumer forever, filled its queue, and wedged the PRODUCER on
+  `submit` back-pressure at 0 r/s while the controller still "allowed" 8 (the back-pressure loop breaks only on
+  `_stopped`/`_draining`, which a non-raising hang never sets). FIX (REUSE the COMMON `run_with_deadline` freeze guard,
+  NO copy): NEW `brutex/adapters/groww/write_deadline.py::append_with_deadline` runs `sink.append` under
+  `GROWW_WRITE_DEADLINE_S` (90 s, env-tunable `BRUTEX_GROWW_WRITE_DEADLINE_S`) and on a hang raises the TRANSIENT
+  `WriteDeadlineExceeded` (a `DataLakeError`, NOT a `LakeWriteHalt` — NOT a pull-wide stop); BOTH spines'
+  `_process_window_tail` (spot `ingest.py` + F&O `option_ingest.py`) catch it ALONGSIDE `PartitionLockTimeout` in ONE
+  defer block — record the window FAILED, return a transient, DEFER to the next pull — so the consumer keeps processing
+  and the producer is RELEASED (per-window graceful deferral, the pipeline is NOT tripped; the defer folds onto
+  `tail_transients` so the across-pull retry re-pulls it). HONEST (Golden Rule #10): the abandoned write runs in a daemon
+  thread, so a wedged C-level fsync CANNOT be killed — the guarantee is "the FETCH LANE is never blocked + the window is
+  deferred + re-pulled", NOT "the zombie write thread is terminated"; a persistently-wedged volume defers the same
+  window every pull until it recovers, never silently losing data (idempotent keep-first sink + durable ledger). The two
+  `lock_deferred` log events unify to `write_deferred` (carrying `error_type` to distinguish the lock-acquire vs the
+  hung-write case). NEW `test_groww_write_deadline.py` (16) + an ADVERSARIAL `TestHungWriteDoesNotBlockFetchLane` (a
+  hung-first-write pull that PROVES forward progress within a 20 s budget, the FAILED-deferred window, durable later
+  windows, clean drain — and DEADLOCKS without the fix, verified by reverting); `write_deadline.py` + `errors.py` 100%
+  line+branch, both spines + `constants.py` stay 100%; ruff/ruff-format/`mypy --strict`/`pyright` clean. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior on `claude/pull-health-wiring-jlzt1n`:
+  **DEC-PULL-HEALTH-WIRING-001, MIGRATION.md #935** — the
   live pull-health monitor shipped DORMANT in #893 (DEC-PULL-HEALTH-MONITOR-001 — the `PullHealthMonitor` + the
   `_observe_rate(..., monitor=None)` seam, but NO production build site constructed one, so it watched NOTHING on a
   real pull) is now BOUND at the dashboard live-pull build site, so it actually runs on every real pull — the same
