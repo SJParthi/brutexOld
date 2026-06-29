@@ -102,7 +102,9 @@ def test_fixture_exercises_all_implemented_bits_both_ways() -> None:
         set_any |= mask
         clear_any |= (~mask) & IMPLEMENTED_MASK
     assert set_any == IMPLEMENTED_MASK, "an implemented condition never fires across the oracle"
-    assert clear_any == IMPLEMENTED_MASK, "an implemented condition is never false across the oracle"
+    assert clear_any == IMPLEMENTED_MASK, (
+        "an implemented condition is never false across the oracle"
+    )
 
 
 def test_layout_only_bits_are_always_clear() -> None:

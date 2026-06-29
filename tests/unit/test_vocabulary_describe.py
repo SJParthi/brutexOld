@@ -67,7 +67,5 @@ class TestGroupInvariant:
 
     def test_tampered_grouping_raises(self) -> None:
         # Drop the last family → no longer a full partition → AssertionError.
-        with pytest.raises(
-            AssertionError, match=rf"partition bits 0\.\.{TOTAL_CONDITIONS - 1}"
-        ):
+        with pytest.raises(AssertionError, match=rf"partition bits 0\.\.{TOTAL_CONDITIONS - 1}"):
             _check_group_invariants(GROUP_RANGES[:-1], TOTAL_CONDITIONS)
