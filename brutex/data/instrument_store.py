@@ -1381,7 +1381,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         return frozenset(int(r[0]) for r in rows)
 
     def fno_eligible_underlyings(
-        self, *, as_of: date | None = None
+        self, *, as_of: date | None = None, tradable_only: bool = False
     ) -> frozenset[tuple[Exchange, str]]:
         """Return the NSE F&O-eligible ``(exchange, underlying_symbol)`` set in SQL.
 
@@ -1400,14 +1400,10 @@ class InstrumentStore(metaclass=_StoreMeta):
 
         * every NSE underlying NAMED by a persisted NSE derivative leg (the
           full-master / with-legs case), AND
-        * every persisted TRADABLE NSE ``EQ`` row's own ``(exch_id,
-          symbol_name)`` — which, on a lean store, is F&O-eligible *by
-          construction* (a non-eligible equity is never persisted; see
-          :func:`brutex.universe.is_universe_underlying`). The
-          ``reference_only = FALSE`` clause excludes the NIFTY-Total-Market
-          REFERENCE_ONLY constituents (DEC-NIFTY-TOTAL-MARKET-REFTAG-001),
-          which are admitted as cash names with NO option chain and so are
-          NOT F&O-eligible (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+        * every persisted NSE ``EQ`` row's own ``(exch_id, symbol_name)``
+          — which, on a lean store, is F&O-eligible *by construction* (a
+          non-eligible equity is never persisted; see
+          :func:`brutex.universe.is_universe_underlying`).
 
         On a full with-legs snapshot the second source is a subset of the
         first (every persisted EQ is F&O-eligible there too), so the union
@@ -1415,6 +1411,23 @@ class InstrumentStore(metaclass=_StoreMeta):
         property test (`test_universe_query`) pins this on full-master data,
         keeping the classification rule single-source. Latest-snapshot-per-
         symbol semantics match ``load_snapshot(in_scope_only=False)``.
+
+        Parameters
+        ----------
+        as_of
+            Optional snapshot cutoff (latest snapshot ≤ *as_of* per symbol).
+        tradable_only
+            When ``True``, the EQ arm (b) additionally filters
+            ``reference_only = FALSE``, so the ~539 NIFTY-Total-Market
+            REFERENCE_ONLY constituents (cash names with NO option chain;
+            DEC-NIFTY-TOTAL-MARKET-REFTAG-001) are EXCLUDED — the scope the
+            mapping-integrity gate needs so a reference-only name never
+            inflates it ~2.5× nor keeps it perpetually red
+            (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). The DEFAULT ``False``
+            keeps the FULL universe — the ``/universe`` summary classifies a
+            REFERENCE_ONLY constituent as a "stock" so the operator sees the
+            whole ~750-name universe (the leg arm (a) is unaffected either
+            way — a derivative leg is never ``reference_only``).
         """
         self._ensure_open()
         as_of_clause = " AND snapshot_date <= ?" if as_of is not None else ""
@@ -1429,6 +1442,9 @@ class InstrumentStore(metaclass=_StoreMeta):
             "AND i.segment = latest.segment "
             "AND i.snapshot_date = latest.snap "
         )
+        # The optional tradable-only filter on the EQ arm (b) is a STATIC literal
+        # selected by a bool, never an interpolated value — no injection vector.
+        eq_reference_clause = " AND i.reference_only = FALSE" if tradable_only else ""
         sql = (
             # (a) underlyings named by a persisted NSE derivative leg
             "SELECT DISTINCT i.exch_id, i.underlying_symbol "  # noqa: S608  # nosec B608 — only the static as_of_clause literal is concatenated; all values are bound
@@ -1437,17 +1453,13 @@ class InstrumentStore(metaclass=_StoreMeta):
             "AND i.exch_id = 'NSE' "
             "AND i.underlying_symbol IS NOT NULL "
             "UNION "
-            # (b) every persisted TRADABLE NSE EQ row (F&O-eligible by construction).
-            # ``reference_only = FALSE`` excludes the ~539 NIFTY-Total-Market
-            # REFERENCE_ONLY constituents (DEC-NIFTY-TOTAL-MARKET-REFTAG-001): those
-            # cash names have NO option chain, so without this filter they inflate the
-            # eligible set ~2.5× and the mapping-integrity gate could never go green
-            # even after a complete F&O pull (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). The
-            # sibling probe ``has_placeholder_stock_economics`` filters the same way.
+            # (b) every persisted NSE EQ row (F&O-eligible by construction). When
+            # ``tradable_only`` is set, ``reference_only = FALSE`` additionally drops the
+            # ~539 NIFTY-Total-Market REFERENCE_ONLY constituents (no option chain) — the
+            # scope the mapping-integrity gate needs (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
             "SELECT DISTINCT i.exch_id, i.symbol_name "
             f"FROM instruments i {latest}"
-            "WHERE i.instrument = 'EQ' AND i.exch_id = 'NSE' "
-            "AND i.reference_only = FALSE"
+            f"WHERE i.instrument = 'EQ' AND i.exch_id = 'NSE'{eq_reference_clause}"
         )
         params: list[Any] = []
         if as_of is not None:

@@ -3362,12 +3362,15 @@ def build_app(
         ``expiries_pulled > 0``) AND the attempted set (every underlying with ANY row — an
         expiry pull was actually run, even if it returned zero). Passing the attempted set
         lets the reconciler distinguish a real attempted-and-zero failure (M&M) from a benign
-        never-pulled name (a selective pull), so the gate is no longer falsely RED.
+        never-pulled name (a selective pull), so the gate is no longer falsely RED. The
+        eligible set is scoped to TRADABLE F&O underlyings (``tradable_only=True``), so the
+        ~539 NIFTY-Total-Market REFERENCE_ONLY constituents (no option chain) never inflate
+        the gate (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
         """
         store = _require_store()
         eligible = [
             EligibleSpot(exchange=exch.value, symbol=sym)
-            for exch, sym in store.fno_eligible_underlyings()
+            for exch, sym in store.fno_eligible_underlyings(tradable_only=True)
         ]
         coverage = store.list_coverage()
         return reconcile_mapping_integrity(
