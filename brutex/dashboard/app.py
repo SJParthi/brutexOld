@@ -5949,7 +5949,7 @@ def _load_db_template() -> str:
     template fetches ``/api/v1/db/tables`` for the table list + row counts,
     then ``/api/v1/db/columns/{name}`` + ``/api/v1/db/query/{name}`` when a
     table is clicked, escaping every column name + cell via an ``esc()``
-    helper before it touches innerHTML (XSS — values originate from the
+    helper before it is inserted into the DOM (XSS — values originate from the
     instrument-master CSV). **Read fresh** (no module cache) so a redeployed
     template takes effect on the next request without a server restart — the
     load-once cache was why a clicked table showed nothing after a deploy
@@ -6070,18 +6070,22 @@ async function loadInstruments() {
     const body = await r.json();
     const rows = body.instruments || [];
     const tb = document.querySelector('#ins-table tbody');
-    tb.innerHTML = rows.map(i =>
-      `<tr>
-        <td>${i.symbol_name}</td>
-        <td>${i.instrument}</td>
-        <td>${i.segment}</td>
-        <td>${i.underlying_symbol || '-'}</td>
-        <td>${i.sm_expiry_date || '-'}</td>
-        <td>${i.strike_price || '-'}</td>
-        <td>${i.lot_size || '-'}</td>
-        <td>${i.sm_freeze_qty || '-'}</td>
-      </tr>`
-    ).join('');
+    // Build rows via createElement + textContent (NO markup parsing) so server-derived
+    // instrument values can never be interpreted as HTML — XSS-safe by construction.
+    tb.replaceChildren();
+    rows.forEach(i => {
+      const tr = document.createElement('tr');
+      [
+        i.symbol_name, i.instrument, i.segment,
+        i.underlying_symbol || '-', i.sm_expiry_date || '-',
+        i.strike_price || '-', i.lot_size || '-', i.sm_freeze_qty || '-'
+      ].forEach(val => {
+        const td = document.createElement('td');
+        td.textContent = (val == null ? '' : String(val));
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
     status.textContent = rows.length + ' rows';
   } catch (e) { status.textContent = 'error: ' + e.message; }
 }
@@ -6191,19 +6195,40 @@ function renderState(s) {
   runId.textContent = s.run_id || '(no run)';
   runDot.className = 'status-dot ' + (s.run_status || 'idle');
 
-  phasesEl.innerHTML = '';
+  phasesEl.replaceChildren();
   (s.phases || []).forEach(p => {
+    // Build the phase card via createElement + textContent (NO markup parsing) so
+    // server-derived phase/status/message text can never be interpreted as HTML (XSS-safe).
     const div = document.createElement('div');
     div.className = 'card phase-card';
-    div.innerHTML = `
-      <h3>${p.phase} <span class="badge ${p.status}">${p.status}</span></h3>
-      <div class="bar"><div style="width:${p.percent}%"></div></div>
-      <div class="stats">
-        ${p.done}/${p.total} (${p.percent}%) ·
-        ok: ${p.success} · no_data: ${p.no_data} · quarantined: ${p.quarantined}
-        ${p.elapsed_seconds ? '· ' + p.elapsed_seconds.toFixed(1) + 's' : ''}
-        ${p.message ? '<br><span style="color:#ef4444">' + p.message + '</span>' : ''}
-      </div>`;
+    const h3 = document.createElement('h3');
+    h3.textContent = (p.phase == null ? '' : String(p.phase)) + ' ';
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (p.status || '');
+    badge.textContent = (p.status == null ? '' : String(p.status));
+    h3.appendChild(badge);
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const fill = document.createElement('div');
+    fill.style.width = (Number(p.percent) || 0) + '%';
+    bar.appendChild(fill);
+    const stats = document.createElement('div');
+    stats.className = 'stats';
+    let line = p.done + '/' + p.total + ' (' + p.percent + '%) · '
+      + 'ok: ' + p.success + ' · no_data: ' + p.no_data
+      + ' · quarantined: ' + p.quarantined;
+    if (p.elapsed_seconds) { line += ' · ' + p.elapsed_seconds.toFixed(1) + 's'; }
+    stats.textContent = line;
+    if (p.message) {
+      stats.appendChild(document.createElement('br'));
+      const msg = document.createElement('span');
+      msg.style.color = '#ef4444';
+      msg.textContent = String(p.message);
+      stats.appendChild(msg);
+    }
+    div.appendChild(h3);
+    div.appendChild(bar);
+    div.appendChild(stats);
     phasesEl.appendChild(div);
   });
 
@@ -6231,18 +6256,36 @@ function renderState(s) {
   document.getElementById('tg-fail').textContent = tg.dropped_on_failure || 0;
   document.getElementById('tg-dup').textContent = tg.dropped_on_dedupe || 0;
 
+  // Build the workers + events rows via createElement + textContent (NO markup parsing),
+  // so server-derived worker/task/event/message text can never be interpreted as HTML.
+  const mkRow = (cells, lastClass) => {
+    const tr = document.createElement('tr');
+    cells.forEach((val, idx) => {
+      const td = document.createElement('td');
+      if (lastClass && idx === cells.length - 1) { td.className = lastClass; }
+      td.textContent = (val == null ? '' : String(val));
+      tr.appendChild(td);
+    });
+    return tr;
+  };
+
   const wtb = document.querySelector('#workers tbody');
-  wtb.innerHTML = (s.workers || []).map(w =>
-    `<tr><td>${w.worker_id}</td><td>${w.status}</td>
-     <td>${w.current_task || '-'}</td><td>${w.elapsed_seconds.toFixed(1)}s</td></tr>`
-  ).join('');
+  wtb.replaceChildren();
+  (s.workers || []).forEach(w => {
+    wtb.appendChild(mkRow([
+      w.worker_id, w.status, w.current_task || '-',
+      w.elapsed_seconds.toFixed(1) + 's'
+    ]));
+  });
 
   const etb = document.querySelector('#events tbody');
-  etb.innerHTML = (s.recent_events || []).slice(-20).reverse().map(e =>
-    `<tr><td>${e.at.split('T')[1].slice(0,8)}</td>
-     <td>${e.phase || '-'}</td><td>${e.kind}</td>
-     <td class="stats">${e.message || e.item_id || ''}</td></tr>`
-  ).join('');
+  etb.replaceChildren();
+  (s.recent_events || []).slice(-20).reverse().forEach(e => {
+    etb.appendChild(mkRow([
+      e.at.split('T')[1].slice(0,8), e.phase || '-', e.kind,
+      e.message || e.item_id || ''
+    ], 'stats'));
+  });
 }
 
 function connect() {
