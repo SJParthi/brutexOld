@@ -4,7 +4,7 @@
 **Date:** 2026-06-29
 **Status:** ACCEPTED — design lock. Per Golden Rule #9 a 4-agent hostile review is run on THIS ADR before any engine code lands (the build PRs follow).
 **Author:** Claude Code (operator-directed)
-**Supersedes (clarifies):** none — net-new strategy track, scoped to NIFTY only.
+**Amends (operator-authorized):** CLAUDE.md §3 Rule #3 engine-scope — the brute-force ENGINE additionally runs on **NIFTY futures** for this dedicated track (the 3 spot indices NIFTY/BANKNIFTY/SENSEX remain the index engine surface; all other F&O stays REFERENCE_ONLY per DEC-P0-063). This is operator-authorized (verbatim directive below), NOT a silent expansion. The companion CLAUDE.md §3 clause is owned by **PR-1** (named here so the scope change is recorded where the lock lives, not by omission). Also clarifies DEC-INSTRUMENT-UNIVERSE-FAST-001's REFERENCE_ONLY framing.
 **Builds on:** DEC-SHARED-CORE-001 (MIGRATION.md #441 — shared `trading-core` crate), DEC-DHAN-1M-ONLY-001 (1-minute base + deterministic resample), DEC-VENDOR-VOLUME-NORMALIZE-001 (`drop_volume=is_index`, `brutex/adapters/groww/adapter.py:217`), DEC-PLUGIN-001 (mask-width transition is ADR-gated), DEC-DASHBOARD-RESULTS-PAGE-001 (the `/results` page this folds away).
 
 **Operator directive (verbatim intent):**
@@ -51,6 +51,14 @@ Three current-state facts the build PRs must respect (verified, not assumed):
 
 **D10 — The 9-standards funnel is the winner-guarantee.** No combo is ever called a "winner" without surviving the full statistical battery in `brutex/metrics/` + `engine/cascade.py` (Stage 1A→1B→2→3→4): DSR / PSR / SPA (White Reality Check + Hansen + Romano-Wolf) / CPCV (purge+embargo) / PBO-CSCV / walk-forward / lockbox holdout / Monte-Carlo permutation — and a reproducible 9-field blake3 run-id (`docs/TRACK1_BACKTEST_SPEC.md:743`). The funnel is precisely what collapses the trillions of brute-force trials down to the proven few.
 
+**D11 — Futures series construction & roll (the single largest silent-bug guard).** The engine runs on a **per-contract** NIFTY futures series, NOT a back-adjusted continuous contract (back-adjustment shifts every absolute price level and would corrupt pivots / Fibonacci / VWAP versus what a trader actually saw). Each monthly contract is its own series; the active near-month is resolved by `resolve_current_expiry` (`brutex/options/executor.py:740`). All session/level indicators (VWAP, pivots, Fib anchors, EMA) recompute per-contract; **no level-cross condition ever compares prices across a roll boundary** — the front-month→next-month basis gap (typically 20-60 pts) is never treated as a price move. On **expiry day** an intraday trade force-exits at 15:20 IST on the **expiring** contract (per D5 — nothing held overnight, no overnight roll); the next session opens on the new near-month, so the roll-day gap is never inside a trade. Owned by **PR-3** with an explicit expiry-day boundary test.
+
+**D12 — VWAP session-anchoring semantics.** The futures session VWAP **resets at 09:15 IST** each trading day, **excludes the 09:00-09:15 pre-open auction** and its volume (CLAUDE.md §7), and **resets on contract roll** (per D11). VWAP-position conditions are **intraday-only**: on the **1day** timeframe they are **NA / masked-out** (a session-anchored VWAP is degenerate with one bar per session). Per-timeframe condition applicability is declared in PR-1's manifest. Owned by **PR-2**.
+
+**D13 — Data-integrity / gap / halt policy.** Missing 1-minute bars are **NOT forward-filled** (a synthetic bar would fabricate a level cross); a session containing a circuit-breaker halt (10/15/20%, e.g. Mar-2020 — within the 2020→today range) is **flagged** in the per-bar metadata (D8). Forced-exit uses the **last real bar at or before 15:20 IST**, evaluated on the **1-minute base clock** (not the resampled bar close) so a 1h/4h-timeframe trade still force-exits on time. EMPTY vendor windows are surfaced honestly, never silently treated as no-data. Owned by **PR-3 / PR-4**.
+
+**D14 — Statistical eligibility floor (effective-N) BEFORE the funnel.** No combo enters the Stage 1A statistical battery until it clears a **minimum-trade / effective-N gate** (target ≥30 closed trades AND a DSR effective-N threshold), so DSR / CPCV are never computed on 2-5 trades (degenerate, meaningless). This is the UPFRONT gate; the existing `lockbox_min_trades=500` (`brutex/metrics/lockbox.py:89`) remains the END-stage floor. The exact threshold locks in PR-5/PR-7. Owned by **PR-5 (gate) / PR-7 (selector)**.
+
 ## 3. Why these choices (rationale)
 
 **Why futures, not spot, for VWAP.** A spot index has no traded volume by construction; the adapter zeroes it (`drop_volume=is_index`). VWAP needs volume. A NIFTY futures contract trades with real volume, so a session-anchored VWAP is a legitimate, computable level there — and futures are the closest frictionless proxy to the index for signal research.
@@ -78,6 +86,28 @@ trials ≈ masks × 2 directions × 21 timeframes × 2 modes × (2000 Mode-A cel
 
 **Build sequence (each its own PR, 100% strict gates, hostile-reviewed):** PR-0 design lock (this) → PR-1 vocab+codegen (u128, shared) → PR-2 indicators (VWAP/EMA/pivots+R5S5/Fib 3-anchor/BOS-CHoCH/candles) → PR-3 futures roll + metadata stamping → PR-4 the 3 strategies + frictionless sim → PR-5 brute-force sweep + time-of-day map → PR-6 options translation (costs) → PR-7 dynamic selector + snooping guard → PR-8 dashboard consolidation + measured benchmark gate. PR-0/1/2 are data-independent (synthetic fixtures); PR-3+ consume the operator's NIFTY pull.
 
+## 4.5 Edge-case register (scenario → policy → owning PR)
+
+The 4-agent hostile review (citation lens: SHIP, zero hallucinations; design + completeness lenses: FIX-FIRST) surfaced these out-of-box scenarios. Each is locked to a policy and a named owning PR — none is left unowned.
+
+| # | Scenario / edge case | Policy (locked here) | Owner |
+|---|----------------------|----------------------|-------|
+| 1 | Futures roll — series construction | per-contract; no cross-roll level compare (D11) | PR-3 |
+| 2 | Expiry-day intraday trade | force-exit 15:20 on the expiring contract; no overnight roll (D5/D11) | PR-3/PR-4 |
+| 3 | Roll-day basis gap | never inside a trade; not a price move (D11) | PR-3 |
+| 4 | VWAP session reset / auction exclusion | reset 09:15 IST; exclude 09:00-09:15; reset on roll (D12) | PR-2 |
+| 5 | VWAP on the 1day timeframe | NA / masked-out — intraday-only (D12) | PR-1/PR-2 |
+| 6 | Rolling-weekly / weekly-static cold-start | combo INELIGIBLE until the anchor is warm (no prior 5 sessions / no completed prior week) | PR-2 |
+| 7 | Holiday-shortened / Muhurat weeks | calendar-week definition; the Muhurat evening session is excluded from the weekly High/Low | PR-2 |
+| 8 | Missing 1-minute bars | NOT forward-filled (D13) | PR-3 |
+| 9 | Circuit-breaker halt session | flagged in per-bar metadata (D13) | PR-3 |
+| 10 | Forced-exit on coarse (1h/4h) timeframes | evaluated on the 1m base clock; last real bar ≤ 15:20 (D13) | PR-4 |
+| 11 | SL + TP both hit in the same bar | SL-first — ALREADY resolved in code (`brutex/engine/trade_sim.py:119` `SameBarTie.SL_FIRST`) | existing |
+| 12 | SL/TP grid axis units | points-based, symmetric long/short; exact step size locks in PR-4 | PR-4 |
+| 13 | Look-ahead on new indicators (BOS/CHoCH, weekly-static Fib) | strict bars 0..N; "last completed week" uses only data ≤ bar N; guarded by Property P-06 (`brutex/feed/lookahead.py` LookAheadBarrier) | PR-2 |
+| 14 | Minimum trade count before statistics | effective-N gate ≥30 at Stage 1A (D14) | PR-5/PR-7 |
+| 15 | EMPTY vendor window | surfaced honestly; never a silent no-data (D13) | PR-3 |
+
 ## 5. Phased implementation (smallest-first; each its own PR, 100% strict gates)
 
 - **PR-0 — design lock (THIS ADR).** Docs only. DEC-NIFTY-DYNAMIC-STRATEGY-001 / MIGRATION.md #1006.
@@ -98,3 +128,5 @@ trials ≈ masks × 2 directions × 21 timeframes × 2 modes × (2000 Mode-A cel
 - 🟡 **Runtime speed is UNPROVEN here** — this ADR is design only; the M4-Pro SLA is a model, not a measurement. Real measured benchmark is PR-8's gate. No fake throughput claim is made.
 - 🟡 **Exact combo/trial count is a FORMULA, not a frozen number** — it locks when the vocab+grid freeze in PR-1/PR-2.
 - 🚫 **No engine code in this PR** — docs-only; no brutex/ change, no scope expansion beyond NIFTY, no `/results` deletion yet (PR-8 does that wire-first-then-delete).
+- ✅ **Out-of-box edge cases are each named + owned** — §4.5 registers 15 scenarios (roll/series stitching, expiry-day, VWAP reset, data gaps/halts, cold-start, holiday/Muhurat weeks, look-ahead on new indicators, effective-N floor) with a locked policy and an owning PR; surfaced by the 4-agent hostile review and folded in before merge.
+- 🟡 **Edge-case POLICIES are locked, IMPLEMENTATION is deferred to the named build PRs** — §4.5 fixes the decision; the code + its 100%-coverage tests land per the §5 sequence.
