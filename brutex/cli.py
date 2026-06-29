@@ -1934,6 +1934,94 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
     return True
 
 
+def _make_cli_rate_bridge_on_window(
+    inner: Any,
+    lake_root: Path,
+    controller: Any,
+    adapter: Any,
+) -> Any:
+    """Wrap the CLI per-window ``on_window`` to ALSO publish the live rate to the bridge file.
+
+    DEC-CLI-RATE-BRIDGE-001 (MIGRATION.md #997). A ``brutex fetch`` pull runs in a SEPARATE
+    process from the dashboard, so it never touches the dashboard's in-memory rate panel and
+    the live-rate WIDGET (DEC-LIVE-RATE-MONITOR-001) stayed IDLE during a CLI pull — there
+    was no CLI rate-observer seam. This is that seam: on each processed window the wrapped
+    callback runs *inner* FIRST (the existing throttled ledger checkpoint — byte-unchanged),
+    then snapshots the SAME ``RateController.snapshot()`` + transport ``CallMeter.snapshot()``
+    the dashboard mirrors and atomically writes them, with a cross-process wall-clock stamp,
+    to ``<lake_root>/.rate/pull_rate.json`` via
+    :func:`~brutex.data.rate_bridge.publish_from_snapshots`. The dashboard's
+    ``/api/v1/pull/rate`` reader then surfaces whichever pull (dashboard OR CLI) ticked most
+    recently, so the widget reflects the active CLI pull's real measured rate.
+
+    The publish is BEST-EFFORT cross-process VISIBILITY (NOT shared rate accounting — the
+    per-process caps are unchanged; the single-flight lock already prevents two concurrent
+    pulls). The bridge write is atomic + ``lake_write_guard``-wrapped, so a torn read is
+    impossible and a full-disk ENOSPC maps to a :class:`LakeWriteHalt` like every other
+    lake-write site. When no controller is wired (a ``--dry-run`` / ``--inspect`` pull paces
+    no real account requests) there is nothing real to publish, so *inner* is returned
+    unwrapped (zero overhead, no bridge file written).
+
+    Parameters
+    ----------
+    inner
+        The existing 0-arg ``on_window`` callback (the locked ledger checkpoint).
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+    controller
+        The live pull's :class:`~brutex.adapters.rate_common.RateController` (``None`` for
+        a dry-run / inspect pull — then no bridge is published).
+    adapter
+        The market adapter; its ``client.meter`` supplies the achieved-throughput snapshot.
+
+    Returns
+    -------
+    Any
+        A wrapped 0-arg callback, or *inner* unchanged when there is no controller to read.
+    """
+    if controller is None:
+        return inner
+
+    import time
+
+    import structlog
+
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.rate_bridge import publish_from_snapshots
+
+    log = structlog.get_logger("brutex.cli.rate_bridge")
+
+    def _on_window() -> None:
+        inner()
+        # The publish is a pure VISIBILITY side-effect, so it must NEVER crash the operator's
+        # multi-hour pull: wrap it so only a real disk-full halt (``LakeWriteHalt``, consistent
+        # with every other lake-write site) propagates, and every OTHER error — a non-disk
+        # ``OSError`` (``EROFS`` / ``EACCES`` / ``EXDEV`` from the ``.rate`` mkdir or the atomic
+        # ``os.replace``, which ``atomic_io`` deliberately does NOT map) or a transient
+        # controller/meter snapshot error — is swallowed + logged best-effort. The publish does
+        # one per-window ``fsync`` (no throttle — windows land at ~1 s cadence; an fsync of a
+        # tiny JSON file is negligible against the per-window fetch+append already on this path).
+        try:
+            meter = getattr(getattr(adapter, "client", None), "meter", None)
+            meter_snap = meter.snapshot() if meter is not None else {}
+            publish_from_snapshots(
+                lake_root,
+                controller.snapshot(),
+                meter_snap,
+                wall_time=time.time(),
+                monotonic=time.monotonic(),
+            )
+        except LakeWriteHalt:
+            # Disk-full / OOM is a genuine pull-wide stop — let it propagate so the existing
+            # halt handling (the `_pull_halt_errors` catch) runs, exactly like every writer.
+            raise
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Best-effort visibility — never crash the pull for a rate-monitor side-effect.
+            log.warning("cli.rate_bridge.publish_failed", exc_info=True)
+
+    return _on_window
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -2081,6 +2169,10 @@ def cmd_fetch(
     pace: Any = None
     on_rate_limit: Any = None
     on_success: Any = None
+    # The live pull's RateController (DEC-CLI-RATE-BRIDGE-001): held so the per-window
+    # ``on_window`` hook can publish the live rate to the cross-process bridge file. Stays
+    # ``None`` for --dry-run / --inspect (no real account pacing, nothing to publish).
+    rate_controller: Any = None
     # Persisting pulls register every written partition in the DuckDB catalog
     # so `brutex sweep-all` can read the bars back (DEC-CATALOG-RECONCILE-WIRE-001
     # — historically the sink was built with catalog=None, leaving the catalog
@@ -2182,6 +2274,9 @@ def cmd_fetch(
             _alerter = SweepAlerter()
             pace, on_success = _rate.pace, _rate.on_success
             on_rate_limit = _alerter.rate_breach_callback(_rate)
+            # Hold the controller for the cross-process rate-bridge publisher
+            # (DEC-CLI-RATE-BRIDGE-001) — its per-window snapshot feeds the dashboard widget.
+            rate_controller = _rate
             print("[brutex] fetch (live Groww)", file=sys.stderr)
 
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001, Stage b3 — R7): the CLI
@@ -2260,6 +2355,17 @@ def cmd_fetch(
         # the keep-first sink is idempotent, so a re-pull of an un-flushed window is
         # safe; loss is bounded to one throttle interval, not the whole pull.
         ledger_checkpoint = make_locked_flush(make_live_ledger_flush(ledger, resolved))
+        # Cross-process pull-rate VISIBILITY bridge (DEC-CLI-RATE-BRIDGE-001, MIGRATION.md
+        # #997): wrap the per-window checkpoint so each processed window ALSO publishes the
+        # live RateController + CallMeter snapshot to <lake>/.rate/pull_rate.json, which the
+        # dashboard's /api/v1/pull/rate reader surfaces on the live-rate WIDGET — so a CLI
+        # `brutex fetch` pull is VISIBLE on the dashboard even though it runs in a separate
+        # process. Best-effort cross-process visibility (NOT shared rate accounting; the
+        # per-process caps + the single-flight lock are unchanged). A `None` controller
+        # (--dry-run / --inspect) returns the checkpoint unwrapped (no bridge written).
+        ledger_checkpoint = _make_cli_rate_bridge_on_window(
+            ledger_checkpoint, resolved, rate_controller, adapter
+        )
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""

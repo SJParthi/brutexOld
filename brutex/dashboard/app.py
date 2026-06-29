@@ -35,6 +35,7 @@ refresh the Telegram panel.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -1151,19 +1152,64 @@ def build_app(
         number is ZEROED and ``flow_state`` is ``idle`` — never a fabricated "live"
         figure (Golden Rule #1). A pure in-memory read: never touches the lake / store
         lock, never blocks the pull.
-        """
-        from brutex.dashboard.pull_rate_view import build_pull_rate_view
 
+        Cross-process bridge (DEC-CLI-RATE-BRIDGE-001): a CLI ``brutex fetch`` pull runs
+        in a SEPARATE process and never touches this in-memory panel, so it ALSO publishes
+        its rate to ``<lake_root>/.rate/pull_rate.json``. This route best-effort reads that
+        bridge file and surfaces whichever pull (dashboard OR CLI) ticked most recently, so
+        the widget reflects the active CLI pull's real measured rate too. A missing /
+        stale / unreadable bridge file is honestly ignored (the in-memory panel wins, or
+        IDLE). This is cross-process VISIBILITY, NOT shared rate accounting — the
+        per-process caps are unchanged.
+        """
+        from brutex.dashboard.pull_rate_view import build_pull_rate_view_merged
+
+        now_monotonic = time.monotonic()
         with state._lock:  # pyright: ignore[reportPrivateUsage]
             panel = state.rate_limit
-            view = build_pull_rate_view(
-                effective_rps=panel.effective_rps,
-                current_rps=panel.current_rps,
-                recent_minute=panel.recent_minute,
-                recent_429_count=panel.recent_429_count,
-                last_update_monotonic=panel.last_update_monotonic,
-                now_monotonic=time.monotonic(),
-            )
+            panel_effective_rps = panel.effective_rps
+            panel_current_rps = panel.current_rps
+            panel_recent_minute = panel.recent_minute
+            panel_recent_429 = panel.recent_429_count
+            panel_last_update = panel.last_update_monotonic
+        if math.isinf(panel_last_update):
+            panel_age = math.inf
+        else:
+            panel_age = max(0.0, now_monotonic - panel_last_update)
+
+        # Best-effort cross-process bridge read (never raises, never blocks the pull): a
+        # damaged / absent file degrades to None so the in-memory panel alone is projected
+        # (byte-identical to the pre-bridge behaviour). The lake root is read off the wired
+        # instrument store; without one (no resolvable lake) the bridge is simply skipped.
+        bridge_age: float | None = None
+        bridge_effective_rps: float | None = None
+        bridge_current_rps: float | None = None
+        bridge_recent_minute: int | None = None
+        bridge_recent_429: int | None = None
+        bridge_lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if bridge_lake_root is not None:
+            from brutex.data.rate_bridge import read_rate_snapshot
+
+            snapshot = read_rate_snapshot(bridge_lake_root)
+            if snapshot is not None:
+                bridge_age = max(0.0, time.time() - snapshot.wall_time)
+                bridge_effective_rps = snapshot.effective_rps
+                bridge_current_rps = snapshot.current_rps
+                bridge_recent_minute = snapshot.recent_minute
+                bridge_recent_429 = snapshot.recent_429
+
+        view = build_pull_rate_view_merged(
+            panel_effective_rps=panel_effective_rps,
+            panel_current_rps=panel_current_rps,
+            panel_recent_minute=panel_recent_minute,
+            panel_recent_429_count=panel_recent_429,
+            panel_seconds_since_update=panel_age,
+            bridge_effective_rps=bridge_effective_rps,
+            bridge_current_rps=bridge_current_rps,
+            bridge_recent_minute=bridge_recent_minute,
+            bridge_recent_429_count=bridge_recent_429,
+            bridge_seconds_since_update=bridge_age,
+        )
         return JSONResponse(view.to_dict())
 
     @app.get("/api/v1/quota")
@@ -5140,6 +5186,32 @@ def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:
         "Parquet sink, or run without vendor creds for the offline "
         "synthetic preview."
     )
+
+
+def _rate_bridge_lake_root_or_none(instrument_store: Any) -> Path | None:
+    """Resolve the lake root for the cross-process rate bridge, or ``None`` (never raises).
+
+    DEC-CLI-RATE-BRIDGE-001. The ``/api/v1/pull/rate`` route reads the CLI bridge file at
+    ``<lake_root>/.rate/pull_rate.json``. Unlike :func:`_resolve_pull_lake_root` (which
+    RAISES on the live pull path when no store is wired — a pull MUST have a sink), this
+    read-side resolver returns ``None`` when no lake root can be derived, so the rate poll
+    simply falls back to the in-memory panel rather than 500-ing when the dashboard runs
+    without a wired instrument store. O(1) — a single ``getattr``.
+
+    Parameters
+    ----------
+    instrument_store
+        The wired :class:`~brutex.data.instrument_store.InstrumentStore`, or ``None``.
+
+    Returns
+    -------
+    Path | None
+        The lake root (the store path's parent), or ``None`` when unresolvable.
+    """
+    store_path = getattr(instrument_store, "path", None)
+    if isinstance(store_path, Path):
+        return store_path.parent
+    return None
 
 
 def _make_ws_handler(state: DashboardState) -> Any:

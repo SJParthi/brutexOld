@@ -1,0 +1,288 @@
+"""Cross-process pull-rate VISIBILITY bridge — a small shared file under the lake root.
+
+DEC-CLI-RATE-BRIDGE-001 (MIGRATION.md entry #997). The dashboard's live-rate WIDGET
+(DEC-LIVE-RATE-MONITOR-001, ``/api/v1/pull/rate`` → ``bx-rate-monitor.js``) reads an
+IN-MEMORY :class:`~brutex.dashboard.app.RateLimitPanel` populated on each
+``_observe_rate`` tick of a DASHBOARD pull. A CLI ``python -m brutex fetch`` pull runs
+in a SEPARATE process, so it never touches that in-process panel — the widget sits IDLE
+while a CLI pull is actively hammering Groww. There was no CLI rate-observer seam.
+
+This module is the thin cross-process bridge that closes that gap WITHOUT changing any
+pacing decision:
+
+* **Publisher (CLI side).** On each rate-observe tick the CLI pull atomically writes the
+  current rate snapshot (the SAME controller + call-meter fields the dashboard mirrors:
+  allowed ``current_rps``, achieved ``effective_rps``, ``recent_minute`` = req/min,
+  ``recent_429`` 429 hits, ``ceiling_per_min``) plus a WALL-CLOCK timestamp to
+  ``<lake_root>/.rate/pull_rate.json`` via :func:`publish_rate_snapshot`.
+* **Reader (dashboard side).** :func:`read_rate_snapshot` best-effort reads that file.
+  The ``/api/v1/pull/rate`` route considers it ALONGSIDE the in-memory panel and surfaces
+  whichever pull (dashboard OR CLI) ticked most recently, so the widget reflects the
+  active pull's real measured rate regardless of which process is pulling. A missing /
+  stale / unreadable file is honestly ignored (the in-memory panel wins, or IDLE).
+
+## Why wall-clock, not monotonic
+
+The in-memory panel's ``last_update_monotonic`` is a per-process ``time.monotonic``
+reading — meaningless ACROSS processes (each process's monotonic clock has its own
+arbitrary epoch). The bridge therefore stamps a ``wall_time`` (``time.time()``, seconds
+since the Unix epoch — comparable across processes) and the reader derives staleness from
+``now_wall - wall_time``. A second ``monotonic`` field is carried for in-process diagnostic
+parity but is NOT used for the cross-process freshness decision.
+
+## Honest envelope (Golden Rule #10)
+
+This is a cross-process **VISIBILITY** bridge, file-based and BEST-EFFORT — it is NOT
+shared rate ACCOUNTING. The per-process rate caps are unchanged; the single-flight pull
+lock (DEC-PULL-HARDENING-FOLLOWUP-001) already prevents two concurrent pulls on one lake,
+so at most one publisher is ever active. The widget reflects the ACTIVE pull's real
+measured rate and reads IDLE when none is fresh — never a fabricated number (Golden
+Rule #1). Every read failure (missing file, partial write, corrupt JSON, wrong shape)
+degrades to ``None`` so a damaged bridge file can NEVER break the dashboard. The publish
+runs inside :func:`~brutex.data.atomic_io.lake_write_guard`, so a full-disk ENOSPC at the
+bridge write maps to a :class:`~brutex.data.errors.LakeWriteHalt` consistent with every
+other lake-write site (DEC-LAKE-WRITE-HALT-001).
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from brutex.data.atomic_io import atomic_write_simple, lake_write_guard
+
+__all__ = [
+    "RATE_BRIDGE_FILENAME",
+    "RATE_BRIDGE_SUBDIR",
+    "RateBridgeSnapshot",
+    "publish_from_snapshots",
+    "publish_rate_snapshot",
+    "rate_bridge_path",
+    "read_rate_snapshot",
+]
+
+#: Dot-prefixed sidecar dir under the lake root (a sibling of ``.locks`` /
+#: ``bars`` / ``options``) so no dataset glob or lake scanner ever matches it.
+RATE_BRIDGE_SUBDIR = ".rate"
+
+#: The single bridge file name. ONE file (last-writer-wins) — the single-flight pull lock
+#: guarantees at most one publisher, so there is no multi-writer contention to resolve.
+RATE_BRIDGE_FILENAME = "pull_rate.json"
+
+#: The bridge schema version. Bumped if the field set changes incompatibly; the reader
+#: ignores a snapshot whose ``schema`` it does not recognise (forward-safe — never a
+#: KeyError / wrong-shape crash).
+_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RateBridgeSnapshot:
+    """One cross-process rate snapshot written by a pull + read by the dashboard.
+
+    The MEASURED fields mirror the in-memory :class:`~brutex.dashboard.app.RateLimitPanel`
+    one-for-one (so the reader can feed them into the SAME
+    :func:`~brutex.dashboard.pull_rate_view.build_pull_rate_view` projection), plus a
+    cross-process-comparable wall-clock timestamp.
+
+    Attributes
+    ----------
+    schema
+        The bridge schema version (:data:`_SCHEMA_VERSION`). The reader ignores an
+        unrecognised version rather than mis-decoding it.
+    effective_rps
+        The transport call-meter's MEASURED achieved r/s (``effective_rps``).
+    current_rps
+        The controller's current allowed AIMD r/s (``current_rps``).
+    recent_minute
+        The controller's MEASURED rolling-60s issue count (``recent_minute``) — req/min.
+    recent_429
+        Recent vendor 429 hits (``recent_hits``) — context for a depressed achieved rate.
+    ceiling_per_min
+        The HARD per-minute governor cap (``ceiling_per_min``); ``-1`` when none is wired.
+    wall_time
+        Seconds since the Unix epoch (``time.time()``) at the tick — the CROSS-PROCESS
+        freshness clock the reader compares against ``now``.
+    monotonic
+        The publisher's ``time.monotonic()`` reading at the tick — carried for in-process
+        diagnostic parity ONLY; NOT used for the cross-process staleness decision.
+    """
+
+    schema: int
+    effective_rps: float
+    current_rps: float
+    recent_minute: int
+    recent_429: int
+    ceiling_per_min: int
+    wall_time: float
+    monotonic: float
+
+    def to_json_bytes(self) -> bytes:
+        """Serialise to compact UTF-8 JSON bytes (the on-disk bridge payload)."""
+        return json.dumps(asdict(self), separators=(",", ":")).encode("utf-8")
+
+
+def rate_bridge_path(lake_root: Path) -> Path:
+    """Return the bridge file path ``<lake_root>/.rate/pull_rate.json`` (never created here).
+
+    Parameters
+    ----------
+    lake_root
+        The lake root; the ``.rate`` sidecar dir lives directly under it.
+
+    Returns
+    -------
+    Path
+        The single shared bridge file path.
+    """
+    return lake_root / RATE_BRIDGE_SUBDIR / RATE_BRIDGE_FILENAME
+
+
+def publish_rate_snapshot(
+    lake_root: Path,
+    *,
+    effective_rps: float,
+    current_rps: float,
+    recent_minute: int,
+    recent_429: int,
+    ceiling_per_min: int,
+    wall_time: float,
+    monotonic: float,
+) -> None:
+    """Atomically write one rate snapshot to the lake-root bridge file (best-effort, O(1)).
+
+    Creates the ``.rate`` sidecar dir on first use and writes the snapshot via
+    :func:`~brutex.data.atomic_io.atomic_write_simple` (tmp → ``fsync`` → ``os.replace``),
+    so a concurrent reader always sees either the old or the new whole file, never a torn
+    one. The whole write runs inside :func:`~brutex.data.atomic_io.lake_write_guard`, so a
+    full-disk ENOSPC at the dir-create or the file write maps to a
+    :class:`~brutex.data.errors.LakeWriteHalt` (consistent with every other lake-write
+    site, DEC-LAKE-WRITE-HALT-001) rather than crashing the pull with a raw ``OSError``.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+    effective_rps, current_rps, recent_minute, recent_429, ceiling_per_min
+        The MEASURED rate fields straight from the controller + call-meter snapshots
+        (mirroring :class:`~brutex.dashboard.app.RateLimitPanel`).
+    wall_time
+        ``time.time()`` at the tick (the cross-process freshness clock).
+    monotonic
+        ``time.monotonic()`` at the tick (in-process diagnostic parity only).
+    """
+    snapshot = RateBridgeSnapshot(
+        schema=_SCHEMA_VERSION,
+        effective_rps=effective_rps,
+        current_rps=current_rps,
+        recent_minute=recent_minute,
+        recent_429=recent_429,
+        ceiling_per_min=ceiling_per_min,
+        wall_time=wall_time,
+        monotonic=monotonic,
+    )
+    dest = rate_bridge_path(lake_root)
+    with lake_write_guard():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(dest, lambda tmp: tmp.write_bytes(snapshot.to_json_bytes()))
+
+
+def publish_from_snapshots(
+    lake_root: Path,
+    controller_snap: Mapping[str, Any],
+    meter_snap: Mapping[str, Any],
+    *,
+    wall_time: float,
+    monotonic: float,
+) -> None:
+    """Publish a bridge snapshot from raw controller + call-meter snapshot mappings.
+
+    The same ``.get(...)`` field mapping the dashboard's
+    :func:`~brutex.dashboard.app.make_rate_observer` uses, so the bridge file carries
+    EXACTLY the fields the in-memory panel does (CLAUDE.md §11 COMMON — one mapping
+    contract). Missing keys default safely (no ``KeyError``): a snapshot absent
+    ``recent_minute`` / ``ceiling_per_min`` (e.g. a controller with no governor) publishes
+    ``0`` / ``-1`` exactly as the panel observer maps them. Delegates the atomic, disk-full-
+    guarded write to :func:`publish_rate_snapshot`.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+    controller_snap
+        A :meth:`~brutex.adapters.rate_common.RateController.snapshot` mapping
+        (``current_rps`` / ``recent_minute`` / ``recent_hits`` / ``ceiling_per_min``).
+    meter_snap
+        A :meth:`~brutex.adapters.call_meter.CallMeter.snapshot` mapping (``effective_rps``).
+    wall_time
+        ``time.time()`` at the tick (the cross-process freshness clock).
+    monotonic
+        ``time.monotonic()`` at the tick (in-process diagnostic parity only).
+    """
+    # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired
+    # (DEC-GROWW-RATE-PERMIN-001) — map that to the ``-1`` "no cap" sentinel the panel
+    # observer uses, so the bridge file and the in-memory panel agree.
+    per_min_cap = controller_snap.get("ceiling_per_min")
+    publish_rate_snapshot(
+        lake_root,
+        effective_rps=float(meter_snap.get("effective_rps", 0.0)),
+        current_rps=float(controller_snap.get("current_rps", 0.0)),
+        recent_minute=int(controller_snap.get("recent_minute", 0)),
+        recent_429=int(controller_snap.get("recent_hits", 0)),
+        ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
+        wall_time=wall_time,
+        monotonic=monotonic,
+    )
+
+
+def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
+    """Best-effort read the lake-root bridge snapshot, or ``None`` (never raises).
+
+    Returns ``None`` for EVERY non-happy case — the file is absent (no CLI pull has run),
+    unreadable (a permission / IO error), not valid JSON (a partial / corrupt write), not
+    a JSON object, carries an unrecognised :data:`_SCHEMA_VERSION`, or is missing / has the
+    wrong type for any required field. A damaged bridge file can therefore NEVER break the
+    dashboard read (Golden Rule #1 — degrade honestly, never crash, never fabricate).
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+
+    Returns
+    -------
+    RateBridgeSnapshot | None
+        The decoded snapshot, or ``None`` when nothing valid is present.
+    """
+    path = rate_bridge_path(lake_root)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        # Absent (FileNotFoundError) or unreadable (permission/IO) — no live CLI bridge.
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        # A partial / corrupt write (a torn file, or non-UTF-8 bytes). Ignore it.
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("schema") != _SCHEMA_VERSION:
+        # Unrecognised version — forward-safe: never mis-decode a future shape.
+        return None
+    try:
+        return RateBridgeSnapshot(
+            schema=_SCHEMA_VERSION,
+            effective_rps=float(data["effective_rps"]),
+            current_rps=float(data["current_rps"]),
+            recent_minute=int(data["recent_minute"]),
+            recent_429=int(data["recent_429"]),
+            ceiling_per_min=int(data["ceiling_per_min"]),
+            wall_time=float(data["wall_time"]),
+            monotonic=float(data["monotonic"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        # A missing or wrong-typed field (a hand-edited / truncated / alien file).
+        return None
