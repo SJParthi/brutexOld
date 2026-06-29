@@ -1341,8 +1341,8 @@ def test_clean_symbols_excludes_quarantine_and_still_failing() -> None:
 # 1-minute is the ONLY granularity fetched from Groww for F&O; 1-day is DERIVED
 # from it (never vendor-fetched), so the prior two-phase 1-day-first barrier is
 # RETIRED. These tests assert the single 1-minute phase, the per-contract default
-# window (a UNIFORM expiry − 30 days → expiry for ALL F&O), and the explicit-dates
-# override.
+# window (SPLIT by type — FUT expiry − 60 days → expiry, CE/PE expiry − 30 days →
+# expiry; DEC-FUTURES-LOOKBACK-60D-001), and the explicit-dates override.
 
 
 def test_fno_pulls_minute_only_never_day(registry: RegistryStore) -> None:
@@ -1371,12 +1371,12 @@ def test_fno_pulls_minute_only_never_day(registry: RegistryStore) -> None:
     assert report.phase1_clean is True
 
 
-def test_minute_window_defaults_uniform_30_days(registry: RegistryStore) -> None:
-    """No explicit dates → ALL F&O (FUT/CE/PE) start at expiry − 30 days.
+def test_minute_window_defaults_split_futures_60_options_30(registry: RegistryStore) -> None:
+    """No explicit dates → a FUTURE starts at expiry − 60 days, an OPTION at − 30 days.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: the per-contract default lookback is a UNIFORM
-    30 days for every F&O contract (the NIFTY chain is CE + PE + FUT, all expiry
-    2024-01-25).
+    DEC-FUTURES-LOOKBACK-60D-001: the per-contract default lookback is SPLIT by type —
+    the FUT contract (expiry 2024-01-25) starts a wider 60 days back (2023-11-26) while
+    the CE/PE options stay on the tighter 30-day default (2023-12-26).
     """
     sdk = _FakeSDK()
     sink = _RecordingSink()
@@ -1393,14 +1393,15 @@ def test_minute_window_defaults_uniform_30_days(registry: RegistryStore) -> None
         client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # expiry 2024-01-25 − 30 days = 2023-12-26, uniform for FUT/CE/PE.
+    # expiry 2024-01-25 − 60 days = 2023-11-26 (FUT); − 30 days = 2023-12-26 (CE/PE).
     for r in selected:
-        assert report.start_dates[r.contract_symbol] == "2023-12-26"
-    # The EARLIEST recorded fetch start is the uniform 30-day window start (2023-12-26),
+        expected = "2023-11-26" if r.side == "FUT" else "2023-12-26"
+        assert report.start_dates[r.contract_symbol] == expected
+    # The EARLIEST recorded fetch start is the futures 60-day window start (2023-11-26),
     # never blindly 2020; every chunk-start is within a window.
     starts = [start[:10] for _sym, start in sdk.starts]
-    assert min(starts) == "2023-12-26"
-    assert all("2023-12-26" <= s <= "2024-01-25" for s in starts)
+    assert min(starts) == "2023-11-26"
+    assert all("2023-11-26" <= s <= "2024-01-25" for s in starts)
 
 
 def test_explicit_dates_override_default_window(registry: RegistryStore) -> None:
@@ -1456,24 +1457,31 @@ def test_resolve_minute_windows_explicit_uses_full_range(registry: RegistryStore
     assert set(out) == {c.symbol for _r, c in rebuilt}
 
 
-def test_resolve_minute_windows_default_is_per_contract_expiry(registry: RegistryStore) -> None:
-    """``_resolve_minute_windows(explicit_dates=False)`` → a UNIFORM expiry−30d for all F&O.
+def test_resolve_minute_windows_default_splits_futures_60_options_30(
+    registry: RegistryStore,
+) -> None:
+    """``_resolve_minute_windows(explicit_dates=False)`` → FUT expiry−60d, CE/PE expiry−30d.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: the NIFTY chain is CE + PE + FUT (expiry 2024-01-25),
-    so EVERY contract's window starts a uniform 30 days back.
+    DEC-FUTURES-LOOKBACK-60D-001: the NIFTY chain is CE + PE + FUT (expiry 2024-01-25);
+    the FUT window starts 60 days back (2023-11-26) while the CE/PE windows start the
+    tighter 30 days back (2023-12-26). This proves ``is_option`` routes correctly.
     """
     rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
     out = hp._resolve_minute_windows(
         rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 6, 13)
     )
-    # FUT and CE/PE alike → [2023-12-26, 2024-01-26) (a uniform 30-day lookback).
-    assert set(out.values()) == {(date(2023, 12, 26), date(2024, 1, 26))}
     by_symbol = {c.symbol: c for _r, c in rebuilt}
+    # FUT → [2023-11-26, 2024-01-26) (a 60-day lookback).
     assert out[next(s for s, c in by_symbol.items() if c.contract_type == "FUT")] == (
+        date(2023, 11, 26),
+        date(2024, 1, 26),
+    )
+    # CE / PE → [2023-12-26, 2024-01-26) (the 30-day lookback, UNCHANGED).
+    assert out[next(s for s, c in by_symbol.items() if c.contract_type == "CE")] == (
         date(2023, 12, 26),
         date(2024, 1, 26),
     )
-    assert out[next(s for s, c in by_symbol.items() if c.contract_type == "CE")] == (
+    assert out[next(s for s, c in by_symbol.items() if c.contract_type == "PE")] == (
         date(2023, 12, 26),
         date(2024, 1, 26),
     )

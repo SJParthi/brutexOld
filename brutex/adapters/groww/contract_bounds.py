@@ -93,17 +93,34 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only (duckdb stays lazy, mirror
 #: silent, and the per-pull bounded/unbounded split is visible to the operator.
 _LOG = structlog.get_logger("brutex.adapters.groww.contract_bounds")
 
-#: Default F&O minute-window lookback — the per-contract DEFAULT span when the
-#: operator passes no explicit from/to dates (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
-#: ALL F&O (``FUT`` / ``CE`` / ``PE``) default to a fixed 30-day lookback
-#: (``expiry − 30 days → expiry``): an option's liquid life is short and the chain
-#: is huge, and the operator directs futures to the same recent tail, so a uniform
-#: tighter default keeps the pull bounded. The operator's explicit from/to dates
-#: still override it.
-DEFAULT_FNO_LOOKBACK_DAYS: Final[int] = 30
+#: Default OPTION minute-window lookback — the per-OPTION (``CE`` / ``PE``) DEFAULT
+#: span when the operator passes no explicit from/to dates
+#: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001). An option defaults to a fixed 30-day lookback
+#: (``expiry − 30 days → expiry``): an option's liquid life is short and the chain is
+#: huge, so a tight default keeps the pull bounded. The operator's explicit from/to
+#: dates still override it. (Historically named ``DEFAULT_FNO_LOOKBACK_DAYS`` when
+#: ALL F&O shared one 30-day default; DEC-FUTURES-LOOKBACK-60D-001 splits FUTURES out
+#: to its own wider 60-day default below, so this constant is now OPTION-specific.)
+DEFAULT_OPTION_LOOKBACK_DAYS: Final[int] = 30
+
+#: Legacy alias — kept so existing importers of ``DEFAULT_FNO_LOOKBACK_DAYS`` (the
+#: pre-split uniform constant) continue to resolve. It equals the OPTION lookback
+#: (30); FUTURES now use the wider :data:`DEFAULT_FUTURES_LOOKBACK_DAYS` below.
+DEFAULT_FNO_LOOKBACK_DAYS: Final[int] = DEFAULT_OPTION_LOOKBACK_DAYS
+
+#: Default FUTURES minute-window lookback — the per-FUTURE (``FUT``) DEFAULT span
+#: when the operator passes no explicit from/to dates. Operator-directed
+#: (DEC-FUTURES-LOOKBACK-60D-001): a future defaults to a fixed 60-DAY lookback
+#: (``expiry − 60 days → expiry``), wider than an option's 30-day default because a
+#: future carries a continuous liquid life over its whole serial month and the
+#: operator wants the fuller recent tail. A fixed DAY-count (NOT calendar months).
+#: The operator's explicit from/to dates still override it.
+DEFAULT_FUTURES_LOOKBACK_DAYS: Final[int] = 60
 
 __all__ = [
     "DEFAULT_FNO_LOOKBACK_DAYS",
+    "DEFAULT_FUTURES_LOOKBACK_DAYS",
+    "DEFAULT_OPTION_LOOKBACK_DAYS",
     "ContractCoverage",
     "contract_daily_coverage",
     "coverage_to_minute_window",
@@ -254,16 +271,21 @@ def default_fno_minute_window(
     *,
     full_start: date,
     full_end: date,
+    is_option: bool,
 ) -> tuple[date, date]:
     """The DEFAULT half-open ``[start, end)`` 1-minute window for an F&O contract.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. When the operator passes NO explicit from/to
-    dates, an F&O contract's 1-minute pull defaults to the recent tail of its trading
-    life: ``expiry − DEFAULT_FNO_LOOKBACK_DAYS`` days → ``min(full_end, expiry +
-    1 day)`` (the ``+ 1 day`` end is end-EXCLUSIVE so the expiry day's own intraday
-    bars are INCLUDED — the SAME ceiling convention :func:`coverage_to_minute_window`
-    uses). The lookback is UNIFORM across ALL F&O (``FUT`` / ``CE`` / ``PE``) — a
-    fixed 30-day window per the operator's direction.
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / DEC-FUTURES-LOOKBACK-60D-001. When the operator
+    passes NO explicit from/to dates, an F&O contract's 1-minute pull defaults to the
+    recent tail of its trading life: ``expiry − <lookback>`` days → ``min(full_end,
+    expiry + 1 day)`` (the ``+ 1 day`` end is end-EXCLUSIVE so the expiry day's own
+    intraday bars are INCLUDED — the SAME ceiling convention
+    :func:`coverage_to_minute_window` uses). The lookback is SPLIT by contract type
+    (operator-directed): an OPTION (``CE`` / ``PE``) uses
+    :data:`DEFAULT_OPTION_LOOKBACK_DAYS` (30) — its liquid life is short and the chain
+    is huge — while a FUTURE (``FUT``) uses the wider
+    :data:`DEFAULT_FUTURES_LOOKBACK_DAYS` (60), the recent two-month tail of its serial
+    month. Both are fixed DAY-counts (NOT calendar months).
 
     Both bounds are clamped INTO the operator's resolved ``[full_start, full_end)``
     range (the historical floor → previous-day envelope), so the default never widens
@@ -279,6 +301,11 @@ def default_fno_minute_window(
     full_start, full_end
         The half-open ``[full_start, full_end)`` range the operator resolved (the
         explicit-dates-or-default envelope from ``_resolve_range``).
+    is_option
+        ``True`` for a ``CE`` / ``PE`` option (30-day lookback), ``False`` for a
+        ``FUT`` future (60-day lookback). Required — the caller derives it from the
+        contract's type (``contract_type in {"CE", "PE"}``), so the split is never
+        guessed.
 
     Returns
     -------
@@ -288,7 +315,8 @@ def default_fno_minute_window(
     """
     if expiry is None:
         return (full_start, full_end)
-    lookback_start = expiry - timedelta(days=DEFAULT_FNO_LOOKBACK_DAYS)
+    lookback_days = DEFAULT_OPTION_LOOKBACK_DAYS if is_option else DEFAULT_FUTURES_LOOKBACK_DAYS
+    lookback_start = expiry - timedelta(days=lookback_days)
     start = max(full_start, lookback_start)
     end = min(full_end, expiry + timedelta(days=1))
     if start >= end:
