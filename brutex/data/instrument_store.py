@@ -1400,10 +1400,14 @@ class InstrumentStore(metaclass=_StoreMeta):
 
         * every NSE underlying NAMED by a persisted NSE derivative leg (the
           full-master / with-legs case), AND
-        * every persisted NSE ``EQ`` row's own ``(exch_id, symbol_name)``
-          — which, on a lean store, is F&O-eligible *by construction* (a
-          non-eligible equity is never persisted; see
-          :func:`brutex.universe.is_universe_underlying`).
+        * every persisted TRADABLE NSE ``EQ`` row's own ``(exch_id,
+          symbol_name)`` — which, on a lean store, is F&O-eligible *by
+          construction* (a non-eligible equity is never persisted; see
+          :func:`brutex.universe.is_universe_underlying`). The
+          ``reference_only = FALSE`` clause excludes the NIFTY-Total-Market
+          REFERENCE_ONLY constituents (DEC-NIFTY-TOTAL-MARKET-REFTAG-001),
+          which are admitted as cash names with NO option chain and so are
+          NOT F&O-eligible (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
 
         On a full with-legs snapshot the second source is a subset of the
         first (every persisted EQ is F&O-eligible there too), so the union
@@ -1433,10 +1437,17 @@ class InstrumentStore(metaclass=_StoreMeta):
             "AND i.exch_id = 'NSE' "
             "AND i.underlying_symbol IS NOT NULL "
             "UNION "
-            # (b) every persisted NSE EQ row (F&O-eligible by construction)
+            # (b) every persisted TRADABLE NSE EQ row (F&O-eligible by construction).
+            # ``reference_only = FALSE`` excludes the ~539 NIFTY-Total-Market
+            # REFERENCE_ONLY constituents (DEC-NIFTY-TOTAL-MARKET-REFTAG-001): those
+            # cash names have NO option chain, so without this filter they inflate the
+            # eligible set ~2.5× and the mapping-integrity gate could never go green
+            # even after a complete F&O pull (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). The
+            # sibling probe ``has_placeholder_stock_economics`` filters the same way.
             "SELECT DISTINCT i.exch_id, i.symbol_name "
             f"FROM instruments i {latest}"
-            "WHERE i.instrument = 'EQ' AND i.exch_id = 'NSE'"
+            "WHERE i.instrument = 'EQ' AND i.exch_id = 'NSE' "
+            "AND i.reference_only = FALSE"
         )
         params: list[Any] = []
         if as_of is not None:

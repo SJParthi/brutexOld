@@ -176,6 +176,7 @@ from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.mapping_integrity import (
     EligibleSpot,
     MappingIntegrityReport,
+    attempted_pairs_from_records,
     coverage_years_from_records,
     reconcile_mapping_integrity,
     report_to_dict,
@@ -3355,16 +3356,25 @@ def build_app(
         reconciliations. Gathers the two store reads (eligible underlyings + coverage ledger)
         off the event loop and delegates to the 100%-tested
         :func:`~brutex.data.mapping_integrity.reconcile_mapping_integrity`.
+
+        The coverage ledger is read ONCE and projected two ways
+        (DEC-MAPPING-INTEGRITY-ATTEMPTED-001): the covered-years map (cells with
+        ``expiries_pulled > 0``) AND the attempted set (every underlying with ANY row — an
+        expiry pull was actually run, even if it returned zero). Passing the attempted set
+        lets the reconciler distinguish a real attempted-and-zero failure (M&M) from a benign
+        never-pulled name (a selective pull), so the gate is no longer falsely RED.
         """
         store = _require_store()
         eligible = [
             EligibleSpot(exchange=exch.value, symbol=sym)
             for exch, sym in store.fno_eligible_underlyings()
         ]
+        coverage = store.list_coverage()
         return reconcile_mapping_integrity(
             eligible_spots=eligible,
-            covered_years=coverage_years_from_records(store.list_coverage()),
+            covered_years=coverage_years_from_records(coverage),
             expected_years=_coverage_years(),
+            attempted=attempted_pairs_from_records(coverage),
             whitelist=(),
             now=datetime.now(UTC),
         )
