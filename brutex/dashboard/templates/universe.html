@@ -1542,32 +1542,56 @@ function setBulkDisabled(on) {
 const PROGRESS_MS = 600;
 let pollTimer = null;
 
-/* DEC-PROGRESS-WINDOW-UNITS-001 + DEC-EMPTY-RESOLVED-REPORTING-001: window-scale
-   companion to the coarse unit counter — reads the SAME /api/v1/coverage/windows
-   counts the fetch-windows page renders (mtime-cached server-side; cheap at a 5 s
-   cadence). resolved = SUCCESS+SKIPPED+EMPTY (a genuine no-data window IS resolved,
-   never "pending" — a wholly-PAST empty window can never gain data); no-data = EMPTY
-   surfaced on its own; pending = PLANNED only (work a re-pull WILL fetch); failed =
-   FAILED. Bucket-global, not per-pull — the honest scope of the counts API. */
-let windowsBucket = null;
+/* DEC-PROGRESS-WINDOW-UNITS-001 + DEC-EMPTY-RESOLVED-REPORTING-001 +
+   DEC-UNIVERSE-WINDOW-SEGMENTS-001: window-scale companion to the coarse unit
+   counter — reads the SAME /api/v1/coverage/windows counts the fetch-windows page
+   renders (mtime-cached server-side; cheap at a 5 s cadence). resolved =
+   SUCCESS+SKIPPED+EMPTY (a genuine no-data window IS resolved, never "pending" — a
+   wholly-PAST empty window can never gain data); no-data = EMPTY surfaced on its
+   own; pending = PLANNED only (work a re-pull WILL fetch); failed = FAILED.
+
+   DEC-UNIVERSE-WINDOW-SEGMENTS-001: the inline summary was hardcoded to the SPOT
+   bucket, so it froze at the spot total through the FUTURES/OPTIONS pull phases even
+   though the SAME payload already carries counts.spot / counts.futures / counts.options
+   (built server-side via _window_counts_total → _window_market_bucket, no extra read).
+   Now it renders ALL THREE segments — a per-segment breakdown plus an honest combined
+   total — so the futures/options windows grow live during the F&O phase. Bucket-global,
+   not per-pull — the honest scope of the counts API. */
+const WINDOW_SEGMENTS = ['spot', 'futures', 'options'];
+let pullStarted = false;
+/* COMMON per-bucket arithmetic (Golden Rule #11): ONE place that folds a single
+   segment's raw status counts into the display tallies, shared by every segment. */
+function windowBucketTallies(c) {
+  c = c || {};
+  const noData = c.EMPTY || 0;
+  const resolved = (c.SUCCESS || 0) + (c.SKIPPED || 0) + noData;
+  const pending = c.PLANNED || 0;
+  const failed = c.FAILED || 0;
+  return {noData, resolved, pending, failed, total: resolved + pending + failed};
+}
 async function refreshWindowsLine() {
-  if (!windowsBucket) return;
+  if (!pullStarted) return;
   try {
     const r = await fetch('/api/v1/coverage/windows');
     if (!r.ok) return;
-    const c = ((await r.json()).counts || {})[windowsBucket] || {};
-    const noData = c.EMPTY || 0;
-    const resolved = (c.SUCCESS || 0) + (c.SKIPPED || 0) + noData;
-    const pending = c.PLANNED || 0;
-    const failed = c.FAILED || 0;
-    const total = resolved + pending + failed;
+    const counts = (await r.json()).counts || {};
+    const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
+    const segParts = [];
+    for (const seg of WINDOW_SEGMENTS) {
+      const t = windowBucketTallies(counts[seg]);
+      grand.noData += t.noData; grand.resolved += t.resolved; grand.pending += t.pending;
+      grand.failed += t.failed; grand.total += t.total;
+      if (t.total === 0) continue;   // skip empty segments — keep the line readable
+      segParts.push(seg + ' ' + t.total.toLocaleString('en-IN'));
+    }
+    const breakdown = segParts.length ? segParts.join(' · ') : 'none yet';
     document.getElementById('windowsline').textContent =
-      'fetch windows (' + windowsBucket + ', all recorded): '
-      + resolved.toLocaleString('en-IN') + ' resolved · '
-      + noData.toLocaleString('en-IN') + ' no-data · '
-      + pending.toLocaleString('en-IN') + ' pending · '
-      + failed.toLocaleString('en-IN') + ' failed · '
-      + total.toLocaleString('en-IN') + ' total';
+      'fetch windows (all segments): ' + breakdown + ' · '
+      + grand.resolved.toLocaleString('en-IN') + ' resolved · '
+      + grand.noData.toLocaleString('en-IN') + ' no-data · '
+      + grand.pending.toLocaleString('en-IN') + ' pending · '
+      + grand.failed.toLocaleString('en-IN') + ' failed · '
+      + grand.total.toLocaleString('en-IN') + ' total';
   } catch (e) { /* transient poll miss — keep the last line */ }
 }
 setInterval(refreshWindowsLine, 5000);
@@ -1579,7 +1603,7 @@ async function startAndPoll(path, label) {
   document.getElementById('pulltitle').textContent = `Starting ${label}…`;
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
-  windowsBucket = 'spot';
+  pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
   refreshWindowsLine();
   try {
     const r = await fetch(path, {method: 'POST'});

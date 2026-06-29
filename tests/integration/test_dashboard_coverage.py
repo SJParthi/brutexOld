@@ -388,14 +388,23 @@ class TestWindowStatusApi:
         cache wired in ``build_app`` — exercising the SHIPPED route path, not a bare
         ``duckdb.connect()``. Asserts ``source=="ledger"`` (not the sidecar), the always-
         complete counts, the status filter, and offset paging.
+
+        DEC-UNIVERSE-WINDOW-SEGMENTS-001 extends it to also record a future + an option
+        window and assert the payload's ``futures`` / ``options`` buckets are populated —
+        pinning the contract the ``/universe`` all-segments inline summary now relies on
+        (it renders all three buckets, not only ``spot``, so the F&O counts grow live).
         """
+        from brutex.adapters.groww.constants import (
+            GROWW_FUTURE_COVERAGE_MARKET,
+            GROWW_OPTION_COVERAGE_MARKET,
+        )
         from brutex.data.fetch_coverage import WindowKey
         from brutex.data.window_ledger import WindowLedger
         from brutex.data.window_ledger_store import save_window_ledger
 
-        def _key(symbol: str) -> WindowKey:
+        def _key(symbol: str, *, market: str = "groww") -> WindowKey:
             return WindowKey(
-                market="groww",
+                market=market,
                 security_id=symbol,
                 interval="1minute",
                 start=date(2021, 1, 1),
@@ -409,23 +418,49 @@ class TestWindowStatusApi:
             _key("BANKNIFTY"), raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=now
         )
         ledger.plan(_key("SENSEX"), now=now)  # PLANNED — excluded from the default list
+        # DEC-UNIVERSE-WINDOW-SEGMENTS-001: a future + an option window so the payload
+        # carries non-empty `futures` and `options` buckets — the contract the /universe
+        # all-segments inline summary now relies on (it renders all three buckets, not
+        # only `spot`). Pins that `_window_counts_total` keeps splitting the namespaces.
+        ledger.record(
+            _key("25", market=GROWW_FUTURE_COVERAGE_MARKET),
+            raw_bars=7,
+            error_type=None,
+            bars_appended=7,
+            now=now,
+        )
+        ledger.record(
+            _key("42", market=GROWW_OPTION_COVERAGE_MARKET),
+            raw_bars=0,
+            error_type="GrowwTimeoutError",
+            bars_appended=0,
+            now=now,
+        )
         save_window_ledger(ledger, tmp_path)  # store.path parent (tmp_path) is the lake root
 
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         body = client.get("/api/v1/coverage/windows").json()
         assert body["source"] == "ledger"  # the DuckDB fast path, NOT the status_log sidecar
-        assert body["count"] == 3
+        assert body["count"] == 5
         assert body["counts"]["spot"] == {"SUCCESS": 1, "FAILED": 1, "PLANNED": 1}
+        # The /universe all-segments summary reads these two buckets LIVE during the F&O
+        # phase (DEC-UNIVERSE-WINDOW-SEGMENTS-001): they must be present + populated so the
+        # inline line no longer freezes at the spot total.
+        assert body["counts"]["futures"] == {"SUCCESS": 1}
+        assert body["counts"]["options"] == {"FAILED": 1}
         symbols = {w["symbol"] for w in body["windows"]}
-        assert symbols == {"NIFTY", "BANKNIFTY"}  # PLANNED (SENSEX) excluded by default
+        # NIFTY/BANKNIFTY spot + the future (security_id 25) + the option (42); PLANNED
+        # (SENSEX) is excluded from the default list.
+        assert {"NIFTY", "BANKNIFTY"} <= symbols
         assert body["windows"][0]["status"] == "FAILED"  # severity-first
 
         failed = client.get("/api/v1/coverage/windows?status=FAILED").json()
-        assert [w["symbol"] for w in failed["windows"]] == ["BANKNIFTY"]
+        # Both FAILED rows surface across the spot + options namespaces (severity-first).
+        assert {w["symbol"] for w in failed["windows"]} == {"BANKNIFTY", "42"}
 
         page = client.get("/api/v1/coverage/windows?limit=1&offset=1").json()
         assert page["returned"] == 1
-        assert page["capped"] is True  # matched (2) > limit (1)
+        assert page["capped"] is True  # matched (4) > limit (1)
 
     def test_windows_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))
