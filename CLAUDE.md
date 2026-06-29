@@ -890,7 +890,7 @@ hostile-review pass._
 
    **Engine-scope amendment (DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012,
    2026-06-29, MIGRATION.md entry #1006; companion clause owned by PR-1
-   DEC-VOCAB-U128-CODEGEN-001 #1007):** the operator has AUTHORIZED the
+   DEC-VOCAB-U128-CODEGEN-001 #1009):** the operator has AUTHORIZED the
    brute-force ENGINE to ALSO run on **NIFTY futures** for the dedicated
    dynamic-strategy track (a session-anchored intraday VWAP is feasible on
    futures because they carry traded volume, unlike a spot index per
