@@ -143,7 +143,6 @@ from brutex.dashboard.pull_controller import (
     resolve_pull_targets,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
-from brutex.dashboard.rate_sampler import RatePanelSampler
 from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.spot_cascade import (
     SpotCascadeIndex,
@@ -2646,24 +2645,15 @@ def build_app(
                 _summary_cache.mark_dirty()  # the new derived partitions are fresh datasets
                 return report.symbols_ok
 
-            # Keep the live PULL RATE panel fed through EVERY phase, not just spot
-            # (DEC-PULL-RATE-WIDGET-VISIBILITY-001). The spot phase pushes the panel on its
-            # per-window observe seam, but the metadata + F&O/historical phases have no such
-            # seam, so without this the panel goes stale → /api/v1/pull/rate reports `idle`
-            # for the entire ~38-min F&O phase even while the SHARED controller is pacing
-            # real fetches. The sampler ticks the SAME controller through make_rate_observer
-            # (observe-only, best-effort, never builds a controller) so the widget stays
-            # live the whole pull.
-            with RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)):
-                report = run_full_pipeline(
-                    run_spot=_run_spot,
-                    run_metadata=_run_metadata,
-                    run_historical=_run_historical,
-                    warm_spot_movers=_warm_spot_movers,
-                    warm_futures_movers=_warm_futures_movers,
-                    warm_options_movers=_warm_options_movers,
-                    run_prebuild=_prebuild_timeframes,
-                )
+            report = run_full_pipeline(
+                run_spot=_run_spot,
+                run_metadata=_run_metadata,
+                run_historical=_run_historical,
+                warm_spot_movers=_warm_spot_movers,
+                warm_futures_movers=_warm_futures_movers,
+                warm_options_movers=_warm_options_movers,
+                run_prebuild=_prebuild_timeframes,
+            )
             if report.spot is not None:
                 _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
             return report.to_dict()
