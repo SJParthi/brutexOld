@@ -47,22 +47,22 @@ def test_js_flags_running_at_start_and_clears_it_on_finish() -> None:
     )
 
 
-def test_date_pickers_removed_for_static_fixed_window_label() -> None:
-    """DEC-UNIVERSE-PULL-CONSOLIDATE-001 (FIX-FIRST follow-up): the from/to date
-    pickers are REMOVED — the consolidated pipeline button accepts no from/to and
-    always pulls the fixed default window, so an inert picker was dead/misleading UI.
+def test_spot_date_pickers_readded_and_tokens_filled() -> None:
+    """DEC-UNIVERSE-PULL-DATERANGE-001: the from/to spot date pickers are RE-ADDED.
 
-    The pickers (and their ``__BRUTEX_DATE_*__`` tokens) are gone, replaced by a
-    static "window · 2020 → prev-day (fixed)" label; the report page keeps its own
-    pickers via the shared ``_fill_default_dates`` (unaffected — the universe page
-    simply carries no token for it to fill)."""
+    DEC-UNIVERSE-PULL-CONSOLIDATE-001 had removed the picker because the route
+    ignored it; the route now threads ``from_date`` / ``to_date`` into the SPOT
+    history phase, so the picker is restored with real wiring. The inputs carry
+    ``id="pipeFrom"`` / ``id="pipeTo"`` and the shared ``_fill_default_dates`` fills
+    their ``__BRUTEX_DATE_*__`` tokens per render, so no raw token leaks. The old
+    fixed-window label is gone."""
     from brutex.dashboard.app import _render_universe_html
 
     html = _render_universe_html()
-    assert 'id="fromDate"' not in html  # the dead from-date input is removed
-    assert 'id="toDate"' not in html  # the dead to-date input is removed
-    assert "__BRUTEX_DATE_" not in html  # no placeholder token leaks (none remain to fill)
-    assert "window · <b>2020 → prev-day</b> (fixed)" in html  # the honest static label
+    assert 'id="pipeFrom"' in html  # the spot from-date input is present
+    assert 'id="pipeTo"' in html  # the spot to-date input is present
+    assert "__BRUTEX_DATE_" not in html  # every placeholder token is filled (none leak)
+    assert "window · <b>2020 → prev-day</b> (fixed)" not in html  # the static label is gone
 
 
 def test_spot_interval_dropdown_is_retired() -> None:

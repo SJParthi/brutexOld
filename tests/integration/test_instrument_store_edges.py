@@ -672,6 +672,35 @@ class TestFilteredScans:
             # Before the only snapshot → empty set.
             assert s.fno_eligible_underlyings(as_of=date(2025, 4, 1)) == frozenset()
 
+    def test_fno_eligible_underlyings_tradable_only_excludes_reference_eq(
+        self, tmp_path: Path
+    ) -> None:
+        """DEC-MAPPING-INTEGRITY-ATTEMPTED-001: ``tradable_only=True`` drops ``reference_only`` EQ.
+
+        A NIFTY-Total-Market REFERENCE_ONLY cash constituent has NO option chain, so under
+        ``tradable_only=True`` (the mapping-integrity gate's scope) it must NOT count as
+        F&O-eligible (it inflated the gate ~2.5×). The DEFAULT (``tradable_only=False``, the
+        ``/universe`` summary's scope) KEEPS it so the operator sees the full ~750 universe.
+        """
+        with InstrumentStore.open(tmp_path / "db") as s:
+            # TANLA = reference-only NTM constituent; RELIANCE = tradable F&O equity.
+            s.upsert_many(
+                [_eq("RELIANCE"), _eq("TANLA", lot_size=1)],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+                in_scope_of=lambda _instr: True,
+                reference_only_of=lambda instr: instr.symbol_name == "TANLA",
+            )
+            # Default keeps the reference-only constituent (the full universe).
+            default = s.fno_eligible_underlyings()
+            assert (Exchange.NSE, "RELIANCE") in default
+            assert (Exchange.NSE, "TANLA") in default
+            # tradable_only drops it (the mapping-integrity scope).
+            tradable = s.fno_eligible_underlyings(tradable_only=True)
+            assert (Exchange.NSE, "RELIANCE") in tradable
+            assert (Exchange.NSE, "TANLA") not in tradable
+
     def test_count_with_as_of_and_segment(self, tmp_path: Path) -> None:
         """``count`` reaches both the ``as_of`` and ``segment`` clause arms (1778-1783)."""
         with InstrumentStore.open(tmp_path / "db") as s:

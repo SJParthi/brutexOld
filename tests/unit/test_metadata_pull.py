@@ -38,6 +38,10 @@ from brutex.data.coverage_ledger import (
     STATUS_PENDING,
     CoverageRecord,
 )
+from brutex.data.mapping_integrity import (
+    attempted_pairs_from_records,
+    coverage_years_from_records,
+)
 from brutex.data.registry_store import RegistryStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.orchestrator.universe_phases import ItemResult
@@ -505,6 +509,40 @@ def test_zero_expiries_cell_is_pending(tmp_path: Path) -> None:
     assert report.contract_jobs == 0
     assert coverage.list_coverage()[0].status == STATUS_PENDING
     assert registry.count_expiries() == 0
+    registry.close()
+
+
+def test_attempted_empty_cell_records_a_coverage_row(tmp_path: Path) -> None:
+    """DEC-MAPPING-INTEGRITY-ATTEMPTED-001: an attempted-and-EMPTY cell writes a coverage row.
+
+    The defect-2 marker — an underlying whose expiry pull RAN but returned zero (the M&M
+    silent-vanish mode) must persist a ``pending`` ``expiries_pulled=0`` cell, so that
+    ``attempted_pairs_from_records`` includes it (distinguishable from a never-pulled name,
+    which has NO row). This is what lets the mapping-integrity gate flag the real failure.
+    """
+    sdk = _FakeSDK(expiries={})  # NIFTY/2026 attempted but empty
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+
+    pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    rows = coverage.list_coverage()
+    assert len(rows) == 1  # the attempt left a row even though it was empty
+    [row] = rows
+    assert row.expiries_pulled == 0 and row.status == STATUS_PENDING
+    # The attempted set (any row) includes the empty pair; covered_years (years>0) excludes it.
+    assert attempted_pairs_from_records(rows) == {("NSE", "NIFTY")}
+    assert coverage_years_from_records(rows) == {}
     registry.close()
 
 

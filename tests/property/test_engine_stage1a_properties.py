@@ -5,8 +5,10 @@ bar sequence):
 
 * **Determinism** (Golden Rule #4) — the same bars always produce the same
   ``bar_bits`` matrix, bit-for-bit; a fresh builder is stateless across runs.
-* **1:1 shape** — exactly one u64 mask per input bar; every mask fits in 52
-  bits (bits 52-63 are always zero).
+* **1:1 shape** — exactly one mask per input bar; every mask uses only the
+  IMPLEMENTED condition bits (bits 0-55 after PR-2 DEC-NIFTY-INDICATORS-001 —
+  the original 52 plus VWAP 52/53 and pivot R5/S5 54/55; the layout-only
+  BOS/CHoCH bits 56-59 and the u128 headroom stay always-zero).
 * **No look-ahead** (CLAUDE.md §4) — mutating bars STRICTLY AFTER index ``k``
   never changes any mask at index ``≤ k`` (at bar N the builder reads only
   bars ``0..N``).
@@ -21,6 +23,7 @@ from decimal import Decimal
 
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import Stage1AMatrixBuilder, _price_to_paisa, build_bar_bits
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -107,8 +110,12 @@ def test_deterministic_and_one_to_one(bars: list[CandleBar]) -> None:
     second = build_bar_bits(bars)
     assert first == second
     assert len(first) == len(bars)
-    # 52-condition vocabulary → bits 52-63 are always zero.
-    assert all(0 <= m < (1 << 52) for m in first)
+    # Only IMPLEMENTED condition bits may fire — every other bit is always zero.
+    # PR-2 (DEC-NIFTY-INDICATORS-001) flipped bits 52-55 (VWAP + pivot R5/S5) to
+    # implemented, so the bound is now ``IMPLEMENTED_MASK`` (bits 0-55); the still
+    # layout-only BOS/CHoCH bits (56-59) and the unused u128 headroom stay clear.
+    assert all(0 <= m <= IMPLEMENTED_MASK for m in first)
+    assert all(m & ~IMPLEMENTED_MASK == 0 for m in first)
 
 
 @given(bars=_bar_sequences())

@@ -5,26 +5,41 @@ operator's core trust question — *"is every options-eligible spot underlying a
 mapped to and pulling its option expiries, or is a name silently empty?"* — as a single
 green/red verdict you can SEE, never a "trust me".
 
-It cross-checks two already-materialised, store-fed sets (NO lake/network, NO 89k option
+It cross-checks already-materialised, store-fed sets (NO lake/network, NO 89k option
 legs — the lean store discards them, DEC-INSTRUMENT-UNIVERSE-FAST-001):
 
 * the **options-eligible underlyings** the vendor master admits
-  (``InstrumentStore.fno_eligible_underlyings``), and
+  (``InstrumentStore.fno_eligible_underlyings`` — scoped to TRADABLE F&O
+  underlyings, ``reference_only = FALSE``, so the ~539 NIFTY-Total-Market
+  REFERENCE_ONLY constituents never inflate the gate;
+  DEC-MAPPING-INTEGRITY-ATTEMPTED-001),
 * the **coverage ledger** of which underlyings actually pulled expiries
-  (``InstrumentStore.list_coverage`` → years with ``expiries_pulled > 0``),
+  (``InstrumentStore.list_coverage`` → years with ``expiries_pulled > 0``), and
+* the **attempted set** — every underlying that has ANY coverage-ledger row
+  (regardless of ``expiries_pulled``), i.e. an expiry pull was actually RUN for it
+  (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
 
-and flags every eligible spot that pulled NOTHING (``none`` — e.g. M&M, the
-special-character options-fetch bug F2 fixes) or only PART of the expected 2020→today span
-(``partial`` — e.g. BAJAJ-AUTO's 2024-only). The ``none`` failures are the GATING red
-signal (``is_green``); ``partial`` is surfaced amber (an honestly-stated "covered some
-years, not all" — distinguishing a genuine late listing from a bug needs the vendor-bounded
-completeness verdict, NOT a fabricated year total, so it does not gate — Golden Rule #10).
+A spot that was ATTEMPTED yet pulled ZERO expiries is the hard, GATING ``none`` failure
+(e.g. M&M, the special-character options-fetch bug); a spot covering only PART of the
+expected 2020→today span is ``partial``/amber (e.g. BAJAJ-AUTO's 2024-only). A spot that
+was NEVER attempted (NO coverage row at all — the common case on a SELECTIVE pull that
+targeted only a few underlyings) is the neutral ``not_attempted`` state: it is reported
+SEPARATELY and NEVER gates, because "not pulled yet" is not a "pulled and got nothing"
+failure (DEC-MAPPING-INTEGRITY-ATTEMPTED-001 — the false-RED-on-selective-pull fix). Only
+the non-whitelisted ``none`` rows turn ``is_green`` red; ``partial`` and ``not_attempted``
+stay green (distinguishing a genuine late listing from a bug needs the vendor-bounded
+completeness verdict, NOT a fabricated year total — Golden Rule #10).
 
-This module DETECTS; it does not FIX. Until F2 normalises the options-fetch symbol, M&M
-reads red here — that red is the honest, intended pre-fix proof, not a regression.
+This is the never-attempted↔attempted-and-zero distinction the gate was missing: a
+never-attempted spot has NO coverage row; an attempted-and-empty spot DOES (Phase-1
+expiry discovery writes a ``pending`` ``expiries_pulled=0`` cell — ``metadata_pull.
+_on_expiry_cell``), so the two are on-disk distinguishable. The real M&M silent-vanish
+stays catchable (it is in the attempted set, zero years → ``none`` → red) while a clean
+selective pull reads green (the un-pulled names are ``not_attempted``, never red).
 
-The reconciliation is one O(eligible) pass over O(1) dict/set lookups (no nested scan);
-inputs are injected so the whole module is 100% offline-unit-testable.
+This module DETECTS; it does not FIX. The reconciliation is one O(eligible) pass over
+O(1) dict/set lookups (no nested scan); inputs are injected so the whole module is 100%
+offline-unit-testable.
 """
 
 from __future__ import annotations
@@ -47,8 +62,15 @@ REASON_NONE: Final[str] = "none"
 #: a fabricated total here (Golden Rule #10).
 REASON_PARTIAL: Final[str] = "partial"
 
-#: Both reasons, for drift tests / consumers.
-REASONS: Final[tuple[str, str]] = (REASON_NONE, REASON_PARTIAL)
+#: An options-eligible spot that was NEVER attempted — it has NO coverage-ledger row at
+#: all, so an expiry pull was simply never RUN for it (the common case on a SELECTIVE pull
+#: that targeted only a few underlyings). Reported separately and NEVER gating: "not pulled
+#: yet" is not "pulled and got nothing" (DEC-MAPPING-INTEGRITY-ATTEMPTED-001 — the
+#: false-RED-on-selective-pull fix).
+REASON_NOT_ATTEMPTED: Final[str] = "not_attempted"
+
+#: All three reasons, for drift tests / consumers.
+REASONS: Final[tuple[str, str, str]] = (REASON_NONE, REASON_PARTIAL, REASON_NOT_ATTEMPTED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,13 +90,14 @@ class UnderPulledSpot:
     exchange, symbol
         The eligible underlying's exchange token + trading symbol.
     reason
-        :data:`REASON_NONE` (zero expiries pulled — gating) or :data:`REASON_PARTIAL`
-        (some years pulled, not the full expected span — amber).
+        :data:`REASON_NONE` (attempted yet zero expiries pulled — gating),
+        :data:`REASON_PARTIAL` (some years pulled, not the full expected span — amber), or
+        :data:`REASON_NOT_ATTEMPTED` (no coverage row at all — never pulled, neutral).
     covered_years
         The calendar years this underlying actually pulled ≥1 expiry for (sorted).
     missing_years
-        The expected years it did NOT cover (sorted) — empty for a pure ``none`` with no
-        expected span, else the shortfall.
+        The expected years it did NOT cover (sorted) — empty for a pure ``none`` /
+        ``not_attempted`` with no expected span, else the shortfall.
     whitelisted
         ``True`` iff the symbol is in the operator's documented whitelist (a known-genuine
         late listing), which excludes it from the gating verdict.
@@ -100,8 +123,13 @@ class MappingIntegrityReport:
         Count of distinct options-eligible spot underlyings reconciled.
     fully_covered
         Count that pulled the full expected span (the healthy majority).
+    not_attempted
+        Count of eligible spots that were NEVER attempted (no coverage row) — the neutral
+        "not pulled yet" tally, the common case on a SELECTIVE pull. NEVER gates
+        (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
     under_pulled
-        Every eligible spot that fell short, sorted (exchange, symbol).
+        Every eligible spot that fell short — ``none`` / ``partial`` / ``not_attempted`` —
+        sorted (exchange, symbol).
     expected_years
         The expected calendar-year span every eligible spot is checked against (sorted).
     whitelist
@@ -112,18 +140,27 @@ class MappingIntegrityReport:
     generated_at: str
     total_eligible: int
     fully_covered: int
+    not_attempted: int
     under_pulled: tuple[UnderPulledSpot, ...]
     expected_years: tuple[int, ...]
     whitelist: tuple[str, ...]
 
     @property
     def gating_failures(self) -> tuple[UnderPulledSpot, ...]:
-        """The non-whitelisted :data:`REASON_NONE` failures — the rows that turn it red."""
+        """The non-whitelisted :data:`REASON_NONE` failures — the rows that turn it red.
+
+        ONLY attempted-and-zero (``none``) rows gate; a ``not_attempted`` row (never
+        pulled) and a ``partial`` row never do (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+        """
         return tuple(u for u in self.under_pulled if u.reason == REASON_NONE and not u.whitelisted)
 
     @property
     def is_green(self) -> bool:
-        """``True`` iff NO non-whitelisted eligible spot pulled zero expiries (the hard gate)."""
+        """``True`` iff NO non-whitelisted eligible spot was ATTEMPTED and pulled zero expiries.
+
+        A never-attempted spot (``not_attempted``) and a ``partial`` spot never turn it
+        red — so a clean SELECTIVE pull reads green (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+        """
         return not self.gating_failures
 
 
@@ -143,6 +180,26 @@ def coverage_years_from_records(
     return covered
 
 
+def attempted_pairs_from_records(
+    records: Iterable[CoverageRecord],
+) -> set[tuple[str, str]]:
+    """Collect the ``(exch_id, underlying_symbol)`` of every underlying with ANY coverage row.
+
+    DEC-MAPPING-INTEGRITY-ATTEMPTED-001. A coverage-ledger row exists IFF an expiry pull was
+    actually RUN for that underlying — including an attempted-and-EMPTY run, which Phase-1
+    expiry discovery records as a ``pending`` ``expiries_pulled=0`` cell
+    (``brutex.dashboard.metadata_pull._on_expiry_cell``). Unlike
+    :func:`coverage_years_from_records` (which keeps only ``expiries_pulled > 0`` cells), this
+    keeps a pair for ANY row, so an attempted-and-empty underlying (the M&M silent-vanish) is
+    in the attempted set while a never-pulled underlying (no row) is NOT — the distinction the
+    gate needs to separate a real "pulled ZERO expiries" failure from a benign "not pulled yet".
+
+    The thin dashboard route feeds ``InstrumentStore.list_coverage()`` here so its grouping
+    logic stays unit-tested. One O(rows) pass; the returned set has O(1) membership.
+    """
+    return {(rec.exch_id, rec.underlying_symbol) for rec in records}
+
+
 def _as_pair(spot: EligibleSpot | tuple[str, str]) -> tuple[str, str]:
     """Normalise an eligible-spot input (dataclass OR ``(exchange, symbol)`` tuple) to a pair."""
     if isinstance(spot, EligibleSpot):
@@ -156,15 +213,20 @@ def reconcile_mapping_integrity(
     eligible_spots: Iterable[EligibleSpot | tuple[str, str]],
     covered_years: Mapping[tuple[str, str], Iterable[int]],
     expected_years: Iterable[int],
+    attempted: Iterable[tuple[str, str]] | None = None,
     whitelist: Iterable[str] = (),
     now: datetime,
 ) -> MappingIntegrityReport:
     """Reconcile options-eligible spots against pulled coverage → a green/red report.
 
     For each distinct eligible ``(exchange, symbol)``: look up its covered years (O(1) dict
-    get). Zero covered → :data:`REASON_NONE`; covered but missing any *expected_years* →
-    :data:`REASON_PARTIAL`; else fully covered. Whitelisted symbols are still reported but
-    excluded from the gating verdict. One O(eligible) pass, O(1) per spot — no nested scan.
+    get). If it has covered years missing any *expected_years* → :data:`REASON_PARTIAL`; if
+    it covers the full span → fully covered. If it pulled ZERO expiries the verdict depends
+    on whether it was ATTEMPTED (DEC-MAPPING-INTEGRITY-ATTEMPTED-001): a spot WITH a coverage
+    row but zero years → :data:`REASON_NONE` (gating — the real M&M silent-vanish); a spot
+    with NO coverage row → :data:`REASON_NOT_ATTEMPTED` (neutral — never pulled, never gates,
+    so a clean SELECTIVE pull reads green). Whitelisted symbols are still reported but excluded
+    from the gating verdict. One O(eligible) pass, O(1) per spot — no nested scan.
 
     Parameters
     ----------
@@ -175,7 +237,13 @@ def reconcile_mapping_integrity(
         Map ``(exchange, symbol) -> years`` that pulled ≥1 expiry (from the coverage ledger).
     expected_years
         The calendar-year span each eligible spot is expected to span (e.g. 2020→today). An
-        empty span disables the ``partial`` check (only ``none`` can then fail).
+        empty span disables the ``partial`` check (only ``none`` / ``not_attempted`` can fail).
+    attempted
+        The ``(exchange, symbol)`` pairs that HAVE a coverage-ledger row (an expiry pull was
+        actually RUN — see :func:`attempted_pairs_from_records`). A zero-expiry eligible spot
+        IN this set is :data:`REASON_NONE` (gating); one NOT in it is
+        :data:`REASON_NOT_ATTEMPTED` (neutral). ``None`` (the back-compat default) treats every
+        eligible spot AS attempted — the pre-DEC-MAPPING-INTEGRITY-ATTEMPTED-001 behaviour.
     whitelist
         Documented genuine late-listing symbols, excluded from the gating verdict.
     now
@@ -190,17 +258,27 @@ def reconcile_mapping_integrity(
     expected_set = frozenset(expected)
     wl = frozenset(whitelist)
     pairs = sorted({_as_pair(spot) for spot in eligible_spots})
+    # ``None`` ⇒ treat every eligible spot as attempted (back-compat); otherwise only the
+    # pairs WITH a coverage row are attempted. ``covered_years`` keys are always a subset of
+    # the attempted set (a covered year implies a row), so a covered spot is never miscounted
+    # as not-attempted even if a caller passes a narrower ``attempted``.
+    attempted_set = frozenset(covered_years) if attempted is None else frozenset(attempted)
 
     under: list[UnderPulledSpot] = []
     fully_covered = 0
+    not_attempted = 0
     for exchange, symbol in pairs:
         years = frozenset(covered_years.get((exchange, symbol), ()))
         if not years:
+            was_attempted = attempted is None or (exchange, symbol) in attempted_set
+            reason = REASON_NONE if was_attempted else REASON_NOT_ATTEMPTED
+            if not was_attempted:
+                not_attempted += 1
             under.append(
                 UnderPulledSpot(
                     exchange=exchange,
                     symbol=symbol,
-                    reason=REASON_NONE,
+                    reason=reason,
                     covered_years=(),
                     missing_years=expected,
                     whitelisted=symbol in wl,
@@ -224,6 +302,7 @@ def reconcile_mapping_integrity(
         generated_at=now.isoformat(),
         total_eligible=len(pairs),
         fully_covered=fully_covered,
+        not_attempted=not_attempted,
         under_pulled=tuple(under),
         expected_years=expected,
         whitelist=tuple(sorted(wl)),
@@ -237,6 +316,7 @@ def report_to_dict(report: MappingIntegrityReport) -> dict[str, Any]:
         "is_green": report.is_green,
         "total_eligible": report.total_eligible,
         "fully_covered": report.fully_covered,
+        "not_attempted": report.not_attempted,
         "under_pulled_count": len(report.under_pulled),
         "gating_failures": len(report.gating_failures),
         "expected_years": list(report.expected_years),
@@ -258,10 +338,12 @@ def report_to_dict(report: MappingIntegrityReport) -> dict[str, Any]:
 __all__ = [
     "REASONS",
     "REASON_NONE",
+    "REASON_NOT_ATTEMPTED",
     "REASON_PARTIAL",
     "EligibleSpot",
     "MappingIntegrityReport",
     "UnderPulledSpot",
+    "attempted_pairs_from_records",
     "coverage_years_from_records",
     "reconcile_mapping_integrity",
     "report_to_dict",

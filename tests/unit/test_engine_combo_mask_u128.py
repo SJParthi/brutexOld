@@ -11,6 +11,8 @@ and prove the three views (numpy two-limb reference · production kernel-or-fall
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from brutex.engine.combo_mask import (
     U64_MASK,
     ResidentBarBuffer,
@@ -18,6 +20,9 @@ from brutex.engine.combo_mask import (
     count_supermasks_reference,
     evaluate_mask,
 )
+
+if TYPE_CHECKING:
+    import pytest
 
 # A bar + mask that BOTH set a bit >= 64 (the u128 headroom) and a bit < 64.
 _HI_BAR = (1 << 70) | (1 << 80) | (1 << 3) | (1 << 1)
@@ -90,6 +95,58 @@ def test_resident_buffer_numpy_fallback_for_u128_bars() -> None:
     rb = ResidentBarBuffer(bars)
     assert rb.n_bars == 3
     assert rb.count_supermasks([_HI_MASK, 1 << 70, 0]) == [1, 2, 3]
+
+
+def test_resident_buffer_falls_back_when_rust_kernel_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ImportError/AttributeError from the Rust kernel falls back to numpy.
+
+    Covers ``combo_mask.py`` 487-488 — the ``except (ImportError, AttributeError):
+    pass`` arm of ``ResidentBarBuffer.__init__``. When ``fno_math.ResidentBars``
+    cannot be constructed (an older/incompatible wheel missing the resident type),
+    the buffer degrades to the two-limb numpy backing and still serves bit-exact
+    superset counts — no crash, no truncation.
+    """
+
+    def _raise(_bars: object) -> object:
+        msg = "ResidentBars unavailable in this wheel"
+        raise AttributeError(msg)
+
+    monkeypatch.setattr("brutex.engine.combo_mask.fno_math.ResidentBars", _raise)
+    bars = [0b111, 0b101, 0b010]  # all fit u64 -> takes the try/except path
+    rb = ResidentBarBuffer(bars)
+    # The Rust buffer was NOT built; the numpy two-limb backing serves the count.
+    assert rb._rust is None
+    assert rb.n_bars == 3
+    # Identical answers to the kernel path: supersets of 0b101 -> {0b111,0b101}=2,
+    # of 0b010 -> {0b111,0b010}=2, of 0 -> all 3.
+    assert rb.count_supermasks([0b101, 0b010, 0]) == [2, 2, 3]
+
+
+def test_resident_buffer_numpy_path_empty_masks_returns_empty() -> None:
+    """A numpy-backed (u128) buffer with no masks returns ``[]``.
+
+    Covers ``combo_mask.py`` line 512 — the ``len(masks) == 0`` early return on the
+    two-limb path (the Rust fast path is skipped because a bar uses a bit >= 64).
+    """
+    rb = ResidentBarBuffer([1 << 70, 0b101])  # a high bit -> numpy two-limb backing
+    assert rb._rust is None
+    assert rb.count_supermasks([]) == []
+
+
+def test_resident_buffer_numpy_path_empty_window_returns_zeros() -> None:
+    """A numpy-backed buffer with zero bars returns one ``0`` per mask.
+
+    Covers ``combo_mask.py`` line 514 — the ``self._n == 0`` early return on the
+    two-limb path. An empty bar window is forced onto the numpy backing by setting
+    a high-bit-capable backing with no bars (every mask matches zero bars).
+    """
+    rb = ResidentBarBuffer([])
+    # An empty all-u64 build still constructs the Rust kernel, so query a u128 mask
+    # to force the two-limb path; with no bars every count is 0.
+    assert rb.n_bars == 0
+    assert rb.count_supermasks([1 << 70, 0b1, 0]) == [0, 0, 0]
 
 
 def test_three_view_u128_parity() -> None:

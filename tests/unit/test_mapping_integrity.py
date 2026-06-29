@@ -1,8 +1,9 @@
 """Unit tests for the mapping-integrity reconciliation (DEC-MAPPING-INTEGRITY-RECONCILE-001).
 
 Pure, offline — 100% line+branch with tiny injected fixtures (no store/lake/network). Covers
-the full / none(M&M) / partial(BAJAJ-AUTO) / whitelisted / empty-span / empty-universe cases,
-both eligible-spot input shapes, de-dup, the green/red gate, and the JSON projection.
+the full / none(M&M) / partial(BAJAJ-AUTO) / not_attempted(selective-pull) / whitelisted /
+empty-span / empty-universe cases, both eligible-spot input shapes, de-dup, the green/red gate,
+the attempted-set distinction (DEC-MAPPING-INTEGRITY-ATTEMPTED-001), and the JSON projection.
 """
 
 from __future__ import annotations
@@ -12,11 +13,13 @@ from datetime import UTC, datetime
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.mapping_integrity import (
     REASON_NONE,
+    REASON_NOT_ATTEMPTED,
     REASON_PARTIAL,
     REASONS,
     EligibleSpot,
     MappingIntegrityReport,
     UnderPulledSpot,
+    attempted_pairs_from_records,
     coverage_years_from_records,
     reconcile_mapping_integrity,
     report_to_dict,
@@ -26,11 +29,12 @@ _NOW = datetime(2026, 6, 21, tzinfo=UTC)
 _EXPECTED = (2020, 2021, 2022)
 
 
-def _reconcile(eligible, covered, *, expected=_EXPECTED, whitelist=()):
+def _reconcile(eligible, covered, *, expected=_EXPECTED, attempted=None, whitelist=()):
     return reconcile_mapping_integrity(
         eligible_spots=eligible,
         covered_years=covered,
         expected_years=expected,
+        attempted=attempted,
         whitelist=whitelist,
         now=_NOW,
     )
@@ -206,9 +210,100 @@ def test_coverage_years_feeds_reconcile_end_to_end() -> None:
 
 
 def test_reasons_constant_pins_vocabulary() -> None:
-    """Drift guard: the public REASONS tuple stays the two known reasons."""
-    assert REASONS == (REASON_NONE, REASON_PARTIAL)
+    """Drift guard: the public REASONS tuple stays the three known reasons."""
+    assert REASONS == (REASON_NONE, REASON_PARTIAL, REASON_NOT_ATTEMPTED)
     # the dataclasses are importable and frozen (slots) — construct one for coverage.
     spot = UnderPulledSpot("NSE", "X", REASON_NONE, (), (2020,), False)
     assert isinstance(spot, UnderPulledSpot)
-    assert isinstance(MappingIntegrityReport("t", 0, 0, (), (), ()), MappingIntegrityReport)
+    assert isinstance(MappingIntegrityReport("t", 0, 0, 0, (), (), ()), MappingIntegrityReport)
+
+
+# ── DEC-MAPPING-INTEGRITY-ATTEMPTED-001: attempted vs never-attempted ─────────
+
+
+def test_never_attempted_spot_is_neutral_not_gating() -> None:
+    """Defect 1: an eligible spot with NO coverage row (never pulled) is not_attempted, NOT red."""
+    report = _reconcile([("NSE", "M&M")], {}, attempted=set())
+    assert report.is_green is True  # never attempted ⇒ never gates
+    [u] = report.under_pulled
+    assert u.reason == REASON_NOT_ATTEMPTED and u.whitelisted is False
+    assert u.covered_years == () and u.missing_years == _EXPECTED
+    assert report.gating_failures == ()
+    assert report.not_attempted == 1 and report.fully_covered == 0
+
+
+def test_attempted_zero_spot_is_gating_red() -> None:
+    """Defect 2: an attempted-and-EMPTY spot (a coverage row, zero years) gates red — M&M."""
+    report = _reconcile([("NSE", "M&M")], {}, attempted={("NSE", "M&M")})
+    assert report.is_green is False
+    [u] = report.under_pulled
+    assert u.reason == REASON_NONE
+    assert len(report.gating_failures) == 1
+    assert report.not_attempted == 0
+
+
+def test_green_on_clean_selective_pull() -> None:
+    """The headline fix: a selective pull (only NIFTY attempted+covered) reads GREEN.
+
+    The other eligible names were never attempted → not_attempted, never red — so the banner
+    no longer falsely brands a whole 750-name universe "pulled ZERO expiries".
+    """
+    eligible = [("NSE", "NIFTY"), ("NSE", "M&M"), ("NSE", "RELIANCE"), ("NSE", "SBIN")]
+    report = _reconcile(
+        eligible,
+        {("NSE", "NIFTY"): [2020, 2021, 2022]},
+        attempted={("NSE", "NIFTY")},
+    )
+    assert report.is_green is True
+    assert report.fully_covered == 1
+    assert report.not_attempted == 3  # M&M, RELIANCE, SBIN — never pulled, neutral
+    assert report.gating_failures == ()
+    assert {u.reason for u in report.under_pulled} == {REASON_NOT_ATTEMPTED}
+
+
+def test_mixed_attempted_and_not_attempted() -> None:
+    """A real failure (attempted M&M) stays catchable AMONG never-attempted names."""
+    eligible = [("NSE", "M&M"), ("NSE", "RELIANCE"), ("NSE", "SBIN")]
+    report = _reconcile(
+        eligible,
+        {("NSE", "RELIANCE"): [2020, 2021, 2022]},
+        attempted={("NSE", "RELIANCE"), ("NSE", "M&M")},  # SBIN never attempted
+    )
+    assert report.is_green is False  # M&M attempted-and-empty still flags
+    by_sym = {u.symbol: u.reason for u in report.under_pulled}
+    assert by_sym == {"M&M": REASON_NONE, "SBIN": REASON_NOT_ATTEMPTED}
+    assert [u.symbol for u in report.gating_failures] == ["M&M"]
+    assert report.not_attempted == 1 and report.fully_covered == 1
+
+
+def test_attempted_none_defaults_to_all_attempted_back_compat() -> None:
+    """``attempted=None`` (the back-compat default) treats EVERY eligible spot as attempted."""
+    report = _reconcile([("NSE", "M&M")], {}, attempted=None)
+    assert report.is_green is False  # behaves like the pre-attempted reconciler
+    [u] = report.under_pulled
+    assert u.reason == REASON_NONE
+    assert report.not_attempted == 0
+
+
+def test_attempted_pairs_from_records_keeps_any_row() -> None:
+    """attempted_pairs_from_records keeps a pair for ANY row — even a zero-expiry attempt."""
+    records = [
+        _cov("RELIANCE", 2020, expiries=50),
+        _cov("M&M", 2020, expiries=0),  # attempted-and-empty — STILL counts as attempted
+    ]
+    assert attempted_pairs_from_records(records) == {("NSE", "RELIANCE"), ("NSE", "M&M")}
+    # …whereas coverage_years_from_records drops the zero-expiry M&M cell.
+    assert ("NSE", "M&M") not in coverage_years_from_records(records)
+
+
+def test_report_to_dict_carries_not_attempted() -> None:
+    """The JSON projection exposes the not_attempted tally for the dashboard banner."""
+    report = _reconcile(
+        [("NSE", "NIFTY"), ("NSE", "SBIN")],
+        {("NSE", "NIFTY"): [2020, 2021, 2022]},
+        attempted={("NSE", "NIFTY")},
+    )
+    payload = report_to_dict(report)
+    assert payload["not_attempted"] == 1
+    assert payload["is_green"] is True
+    assert payload["gating_failures"] == 0

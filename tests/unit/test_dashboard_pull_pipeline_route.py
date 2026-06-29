@@ -272,3 +272,152 @@ def test_pull_pipeline_runs_prebuild_as_final_stage_on_clean_fetch(
     # The FINAL pre-build stage ran exactly once over the pulled target (NIFTY).
     assert len(seen) == 1, "the pre-build stage must run once on a clean fetch"
     assert "NIFTY" in seen[0], "pre-build must cover the pulled target symbol"
+
+
+# ── spot from/to date range (DEC-UNIVERSE-PULL-DATERANGE-001) ─────────────────
+
+
+def _patch_spines_capturing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Wire the offline fakes but RECORD each phase's kwargs.
+
+    Returns ``(spot_calls, metadata_calls)`` — the kwargs the route threaded into
+    ``pull_all_spot`` / ``pull_expiries_contracts`` so a test can assert the
+    operator-picked dates (or their absence) reached the right phase.
+    """
+    spot_calls: list[dict[str, Any]] = []
+    metadata_calls: list[dict[str, Any]] = []
+
+    def _spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        spot_calls.append(dict(kwargs))
+        return _fake_spot(*args, **kwargs)
+
+    def _metadata(*args: Any, **kwargs: Any) -> MetadataPullReport:
+        metadata_calls.append(dict(kwargs))
+        return _fake_metadata(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    return spot_calls, metadata_calls
+
+
+def test_pull_pipeline_blank_dates_thread_none_to_spot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blank from/to (the default) ⇒ the route passes ``None`` to the spot phase.
+
+    DEFAULT-PRESERVATION (DEC-UNIVERSE-PULL-DATERANGE-001): a no-date pull must be
+    byte-identical to the pre-picker behaviour — ``pull_all_spot`` receives
+    ``from_date=None`` / ``to_date=None`` so its own ``resolve_candle_range``
+    resolves the canonical ``[2020-01-01, previous trading day]`` default, and the
+    metadata-year grid spans the full 2020 → current-year floor.
+    """
+    _force_dry_run(monkeypatch)
+    spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert len(spot_calls) == 1
+    assert spot_calls[0]["from_date"] is None
+    assert spot_calls[0]["to_date"] is None
+    # Full year grid (2020 → current year) when no bound is given.
+    assert metadata_calls[0]["years"][0] == 2020
+
+
+def test_pull_pipeline_explicit_dates_thread_to_spot_and_metadata(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit valid from/to ⇒ threaded to the spot phase AND narrow the year grid.
+
+    The spot phase receives the exact picked strings; the metadata-year grid is
+    narrowed to those bounds' YEARS (the grid is year-granular) — so a 2021→2022
+    range pulls metadata for exactly [2021, 2022].
+    """
+    _force_dry_run(monkeypatch)
+    spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2021-03-01", "to_date": "2022-04-15"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert spot_calls[0]["from_date"] == "2021-03-01"
+    assert spot_calls[0]["to_date"] == "2022-04-15"
+    # The metadata-year grid is narrowed to the picked bounds' years.
+    assert list(metadata_calls[0]["years"]) == [2021, 2022]
+
+
+def test_pull_pipeline_reversed_dates_is_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A from_date AFTER to_date is a clean 400, never a silent empty pull."""
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2023-06-01", "to_date": "2022-01-01"},
+    )
+    assert resp.status_code == 400
+
+
+def test_pull_pipeline_below_2020_from_date_is_clamped_not_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A from_date BELOW the 2020 floor is clamped up (resolves fine), not a 400.
+
+    ``resolve_candle_range`` clamps ``start`` up to ``GROWW_HISTORY_FLOOR``; only an
+    impossible window (start > end) raises. A 2019 start with a valid end clamps to
+    2020 and pulls — so the route accepts it and threads the raw string to the spot
+    phase (the phase's own ``resolve_candle_range`` re-clamps identically).
+    """
+    _force_dry_run(monkeypatch)
+    spot_calls, _ = _patch_spines_capturing(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2019-01-01", "to_date": "2021-01-01"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert spot_calls[0]["from_date"] == "2019-01-01"
+
+
+def test_pull_pipeline_non_iso_date_is_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ISO date string is a clean 400 (validated eagerly, never queued)."""
+    _force_dry_run(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "01-03-2021"},
+    )
+    assert resp.status_code == 400
+
+
+def test_pull_pipeline_whitespace_dates_behave_as_blank(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace-only date params behave byte-identically to blank (200, not 500).
+
+    ONE definition of "blank" (DEC-UNIVERSE-PULL-DATERANGE-001): a whitespace-only
+    value is normalized to ``None`` at the top of the route, so it threads ``None``
+    to the spot phase + the full 2020-origin metadata-year grid — exactly like an
+    omitted param. Without the normalization the two helpers disagreed
+    (``resolve_candle_range`` stripped ``"  "`` to None but ``_resolve_metadata_years``
+    did not → ``date.fromisoformat("  ")`` raised → a 500). Unreachable from the
+    date-input UI, but ``/pull-pipeline`` is a public API.
+    """
+    _force_dry_run(monkeypatch)
+    spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "  ", "to_date": " "},
+    )
+    assert resp.status_code == 200, "whitespace dates must NOT 500 — normalized to blank"
+    assert _wait_for_job(client)["state"] == "done"
+    # Threaded as blank: None to the spot phase + the full 2020-origin year grid.
+    assert spot_calls[0]["from_date"] is None
+    assert spot_calls[0]["to_date"] is None
+    assert metadata_calls[0]["years"][0] == 2020

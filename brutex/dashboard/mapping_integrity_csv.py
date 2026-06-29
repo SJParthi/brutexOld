@@ -16,7 +16,8 @@ header, blank-line separated):
    expected year span every eligible spot is checked against.
 2. ``SUMMARY`` — total eligible, fully covered, under-pulled, gating failures, whitelist.
 3. ``DETAIL — under-pulled spots`` — one row per shortfall: exchange, symbol, reason
-   (``none`` gating / ``partial`` amber), covered years, missing years, whitelisted.
+   (``none`` attempted-and-zero gating / ``partial`` amber / ``not_attempted`` never-pulled
+   neutral — DEC-MAPPING-INTEGRITY-ATTEMPTED-001), covered years, missing years, whitelisted.
 
 Uses :mod:`csv` so any symbol with a comma / quote (e.g. ``M&M``) is escaped correctly, and
 every cell is run through the SHARED :class:`~brutex.dashboard._csv_utils.FormulaSafeWriter`
@@ -79,6 +80,7 @@ def mapping_integrity_to_csv(report: MappingIntegrityReport) -> str:
     writer.writerow(["SUMMARY"])
     writer.writerow(["Total eligible", report.total_eligible])
     writer.writerow(["Fully covered", report.fully_covered])
+    writer.writerow(["Not attempted (no pull run yet)", report.not_attempted])
     writer.writerow(["Under-pulled", len(report.under_pulled)])
     writer.writerow(["Gating failures (none, not whitelisted)", len(report.gating_failures)])
     writer.writerow(["Whitelist", " ".join(report.whitelist)])

@@ -72,9 +72,15 @@ def store(tmp_path: Path):
 
 
 def test_csv_download_headers_and_gating_row(store: InstrumentStore) -> None:
-    """RELIANCE covered, M&M empty → a downloadable CSV with M&M as a gating none row."""
+    """RELIANCE covered, M&M ATTEMPTED-and-empty → a CSV with M&M as a gating none row.
+
+    The attempted-and-empty marker is a zero-expiry coverage cell
+    (DEC-MAPPING-INTEGRITY-ATTEMPTED-001); without it M&M would read the neutral
+    ``not_attempted`` instead of the gating ``none``.
+    """
     for year in _coverage_years():
         store.upsert_coverage(_cov("RELIANCE", year))
+    store.upsert_coverage(_cov("M&M", _coverage_years()[0], expiries=0))
     client = TestClient(build_app(DashboardState(), instrument_store=store))
 
     resp = client.get("/api/v1/universe/mapping-integrity.csv")
