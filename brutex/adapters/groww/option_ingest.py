@@ -95,6 +95,11 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
+from brutex.data.partial_window_detect import (
+    SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT,
+    SUSPECTED_PARTIAL_WINDOW_EVENT,
+    observe_partial_window,
+)
 from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
@@ -670,6 +675,12 @@ def _process_option_window_tail(
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
         )
+    # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): for a FUTURES window only (options are
+    # excluded — sparsity near expiry is indistinguishable from truncation), WARN if its
+    # SESSION-FILTERED bars stop materially before the expected end (a truncation the SUCCESS
+    # classifier + skip rule would otherwise never revisit). Fully guarded inside — never
+    # breaks the pull, changes no status/ledger/return.
+    _observe_partial_window(raw, bars, pull_id=pull_id, fields=fields)
     if on_success is not None:
         on_success()
     return IngestReport(
@@ -888,6 +899,49 @@ def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> Non
             attempted_pairs=rep.attempted_pairs,
             stored_bars=rep.stored_bars,
         )
+
+
+#: F&O contract types the partial-window truncation detector WATCHES. Only FUTURES
+#: (``FUT``) — futures trade densely every session, so a truncated futures window is a
+#: genuine, reliably-detectable fetch gap. OPTIONS (``CE`` / ``PE``) are EXCLUDED by
+#: design: an option routinely stops printing bars several sessions before expiry
+#: (liquidity death in the final week) even though the contract is COMPLETE, so a
+#: truncation there is indistinguishable from sparsity — watching the chain would flag
+#: constantly (a false-positive storm, BLOCKER-1 of the hostile review).
+_PARTIAL_WINDOW_WATCHED_CONTRACT_TYPES: frozenset[str] = frozenset({"FUT"})
+
+
+def _observe_partial_window(
+    raw: _OptionRawWindow,
+    session_bars: list[CandleBar],
+    *,
+    pull_id: str | None,
+    fields: dict[str, str],
+) -> None:
+    """Observe-only: WARN if a FUTURES SUCCESS window's bars stop before its end.
+
+    DEC-PARTIAL-WINDOW-DETECT-001. SCOPE GATE (BLOCKER-1): only FUTURES (``FUT``)
+    contracts are watched — OPTIONS (``CE`` / ``PE``) are EXCLUDED because near expiry
+    an option's bars die from illiquidity, indistinguishable from truncation (see
+    :data:`_PARTIAL_WINDOW_WATCHED_CONTRACT_TYPES` + the module docstring). For a watched
+    contract it delegates to the COMMON
+    :func:`~brutex.data.partial_window_detect.observe_partial_window` over the
+    SESSION-FILTERED bars (MINOR-1 — not the raw bars), which runs the pure classifier +
+    emits ONE guarded ``window.suspected_partial`` WARNING, never breaking the pull.
+    """
+    if raw.contract.contract_type not in _PARTIAL_WINDOW_WATCHED_CONTRACT_TYPES:
+        return
+    last_bar_ts = session_bars[-1].timestamp if session_bars else None
+    observe_partial_window(
+        _LOG,
+        last_bar_ts=last_bar_ts,
+        window_end=raw.key.end,
+        now=datetime.now(UTC),
+        expiry=raw.contract.expiry,
+        symbol=raw.contract.symbol,
+        interval=fields.get("interval", raw.interval),
+        pull_id=pull_id,
+    )
 
 
 #: Live-progress hook fired once per ``(contract, interval)`` pair after it is
@@ -1437,6 +1491,8 @@ def ingest_underlying_futures(
 
 
 __all__ = [
+    "SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT",
+    "SUSPECTED_PARTIAL_WINDOW_EVENT",
     "UNDERLYING_ALL_EMPTY_EVENT",
     "AllEmptyScan",
     "ContractWindows",

@@ -85,6 +85,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
+from brutex.data.partial_window_detect import observe_partial_window
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
@@ -985,6 +986,22 @@ def _process_window_tail(
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
         )
+    # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): WARN if this SUCCESS spot window's
+    # SESSION-FILTERED bars stop materially before the expected end — a truncated fetch the
+    # SUCCESS classifier + skip rule would otherwise never revisit. Spot indices trade
+    # densely EVERY session, so a truncated spot window is a genuine, reliably-detectable
+    # completeness gap (the primary concern). Spot has no expiry (``expiry=None``). The
+    # COMMON helper is fully guarded — it can never block / slow / crash the pull.
+    observe_partial_window(
+        _LOG,
+        last_bar_ts=bars[-1].timestamp if bars else None,
+        window_end=window_end,
+        now=datetime.now(UTC),
+        expiry=None,
+        symbol=instrument.symbol_name,
+        interval=interval,
+        pull_id=pull_id,
+    )
     if on_success is not None:
         on_success()
     return _WindowOutcome(bars_appended=result.bars_appended, conflicts=window_conflicts)
