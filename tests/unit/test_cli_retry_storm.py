@@ -1056,3 +1056,147 @@ def test_cmd_fetch_dry_run_does_not_take_singleflight_lock(
         )
     assert rc == cli.EXIT_OK
     assert called == []  # the gate was never consulted on the dry-run path
+
+
+# ── Cross-process CLI→dashboard rate bridge (DEC-CLI-RATE-BRIDGE-001) ──────
+
+
+def test_make_cli_rate_bridge_on_window_none_controller_returns_inner() -> None:
+    """A dry-run / inspect pull (no controller) → the checkpoint is returned UNWRAPPED.
+
+    Nothing real is paced, so there is nothing to publish; the helper must be a zero-overhead
+    passthrough (the exact ``inner`` object back), and no bridge file is created.
+    """
+    sentinel = object()
+    out = cli._make_cli_rate_bridge_on_window(sentinel, Path("/unused"), None, object())
+    assert out is sentinel
+
+
+def test_make_cli_rate_bridge_on_window_publishes_real_snapshot(tmp_path: Path) -> None:
+    """With a live controller, firing the wrapped hook publishes the bridge file.
+
+    The wrapped callback runs *inner* FIRST (byte-unchanged), then atomically writes the
+    controller + call-meter snapshot to ``<lake_root>/.rate/pull_rate.json`` — which the
+    dashboard ``/api/v1/pull/rate`` reader surfaces. A bare ``object()`` adapter (no
+    ``client.meter``) publishes a zero achieved-rps (the meter-None branch), proving the
+    publish never crashes on a meterless adapter.
+    """
+    from brutex.adapters.groww.constants import (
+        GROWW_RATE_LIMIT_PER_MIN,
+        GROWW_RATE_LIMIT_RPS_CEILING,
+    )
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    controller = RateController(
+        ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
+        ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+    )
+    inner_calls = {"n": 0}
+
+    def _inner() -> None:
+        inner_calls["n"] += 1
+
+    wrapped = cli._make_cli_rate_bridge_on_window(_inner, tmp_path, controller, object())
+    assert wrapped is not _inner  # it WAS wrapped (controller present)
+    wrapped()
+
+    assert inner_calls["n"] == 1  # inner ran first
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    # The controller snapshot's allowed rps + governor cap are published verbatim.
+    assert snap.current_rps == controller.snapshot()["current_rps"]
+    assert snap.ceiling_per_min == GROWW_RATE_LIMIT_PER_MIN
+    # No call-meter on a bare adapter → the achieved rps defaults to 0 (meter-None branch).
+    assert snap.effective_rps == 0.0
+    assert snap.wall_time > 0.0
+
+
+def test_cmd_fetch_live_pull_publishes_rate_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live persisting ``brutex fetch`` writes the cross-process rate bridge per window.
+
+    DEC-CLI-RATE-BRIDGE-001 — the CLI pull runs in a separate process from the dashboard,
+    so it publishes its live rate to ``<lake_root>/.rate/pull_rate.json`` on each processed
+    window, which the dashboard widget surfaces. The fake ingest fires the per-window hook
+    once; we assert the bridge file exists + carries the live controller's allowed rps.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.data.rate_bridge import rate_bridge_path, read_rate_snapshot
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    result = _FakeIngestResult(
+        report=_FakeIngestReport(
+            windows=1,
+            bars_appended=375,
+            failed_pairs=0,
+            transient_failures=0,
+            still_failed_windows=0,
+        ),
+        retry=None,
+    )
+    bridge_existed_during_ingest: list[bool] = []
+
+    def fake_ingest(adapter_arg: Any, sink_arg: Any, **kwargs: Any) -> _FakeIngestResult:
+        on_window = kwargs["on_window"]
+        on_window()  # one processed window → publishes the bridge file
+        bridge_existed_during_ingest.append(rate_bridge_path(tmp_path).is_file())
+        return result
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+    # The bridge was published DURING the pull (from the per-window hook).
+    assert bridge_existed_during_ingest == [True]
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.current_rps > 0.0  # the live controller's allowed pace was published
+
+
+def test_cmd_fetch_dry_run_does_not_publish_rate_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--dry-run`` pull paces no real account requests, so it publishes NO bridge file.
+
+    The controller is ``None`` on the dry-run path, so ``_make_cli_rate_bridge_on_window``
+    returns the checkpoint unwrapped and no ``.rate/pull_rate.json`` is written.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.data.rate_bridge import rate_bridge_path
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=True,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+    assert not rate_bridge_path(tmp_path).exists()
