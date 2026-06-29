@@ -1,28 +1,28 @@
-"""Golden consumer test for the 52-condition truth table.
+"""Golden consumer test for the condition truth table.
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
 "52-condition truth table / per-condition determinism (G9)").
 
 ``tests/golden/condition_truth_table.csv`` is the flat, human-auditable
-projection of the frozen ``input → u64`` oracle
+projection of the frozen ``input → u128`` oracle
 (``fixtures/vocab_golden_vectors.json``) emitted by
 ``scripts/gen_condition_truth_table.py``. This module is its golden gate. It
 asserts, with NO call to the evaluator (so it runs even where the Rust
 ``trading_core`` wheel is absent — the values are decoded from the already-proven
-``expected_u64`` in the corpus):
+``expected_mask`` in the corpus):
 
 * the table is well-formed (canonical header, ≥ ``MIN_ROWS`` rows, no dup
   ``(snippet, condition)`` pair, only ``true``/``false`` booleans);
 * every ``condition_name`` is a real vocabulary condition and its
   ``bit_position`` matches the ONE source of truth, ``brutex/vocabulary/bits.py``;
 * every ``expected_bool`` equals the bit decoded from the referenced golden
-  case's frozen ``expected_u64`` — so the table cannot drift from the oracle;
-* the G9 both-ways guarantee: each of the 52 conditions fires ``true`` at least
-  once AND ``false`` at least once across the table, and all 52 are present;
+  case's frozen ``expected_mask`` — so the table cannot drift from the oracle;
+* the G9 both-ways guarantee: each implemented condition fires ``true`` at least
+  once AND ``false`` at least once across the table, and all are present;
 * no drift: the on-disk CSV is byte-identical to a fresh generation, and its
   SHA-256 matches the pinned manifest (the README's "SHA-256 manifest" rule).
 
-Because the contract ``evaluate_atoms == expected_u64`` is itself locked by
+Because the contract ``evaluate_atoms == expected_mask`` is itself locked by
 ``test_vocab_golden.py`` (which runs the live evaluator in CI), this CSV is
 transitively a golden assertion against the real evaluator while staying
 evaluator-free here.
@@ -110,10 +110,10 @@ class TestTruthTableMatchesRegistry:
 
 
 class TestTruthTableMatchesOracle:
-    """Every ``expected_bool`` is decoded from the frozen oracle u64."""
+    """Every ``expected_bool`` is decoded from the frozen oracle u128 mask."""
 
     def test_every_row_matches_the_frozen_u64(self) -> None:
-        """``expected_bool`` == bit of the referenced case's ``expected_u64``."""
+        """``expected_bool`` == bit of the referenced case's ``expected_mask``."""
         cases = _cases_by_id()
         mismatches: list[str] = []
         for row in _read_rows():

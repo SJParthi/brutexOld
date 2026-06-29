@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Generate the 52-condition truth table CSV from the frozen golden vectors.
+"""Generate the condition truth table CSV from the frozen golden vectors.
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
 "52-condition truth table / per-condition determinism (G9)").
 
 The human-readable companion to ``tests/golden/fixtures/vocab_golden_vectors.json``
-(the language-neutral ``input → u64`` oracle locked by ``test_vocab_golden.py``).
+(the language-neutral ``input → u128`` oracle locked by ``test_vocab_golden.py``).
 This script projects that **already-proven** corpus into a flat, auditable
 ``(snippet, condition, bit, expected_bool)`` table so a human — or the future
 Rust ``trading_core`` crate's own per-condition tests — can read off exactly
-which of the 52 atomic conditions fires for a concrete worked input.
+which of the atomic conditions fires for a concrete worked input.
 
 Grounding (Golden Rule #1 — no hallucination): every ``expected_bool`` is
-DECODED from the frozen, evaluator-produced ``expected_u64`` in the JSON corpus
+DECODED from the frozen, evaluator-produced ``expected_mask`` in the JSON corpus
 (``generated_from = brutex.vocabulary.evaluator.evaluate_atoms``). Nothing is
 hand-authored. The bit↔name mapping is read from the ONE source of truth,
 ``brutex/vocabulary/bits.py`` (CLAUDE.md §11 COMMON).
 
 Case selection: a deterministic greedy set-cover picks the fewest golden cases
-whose union SETS every one of the 52 bits at least once AND CLEARS every bit at
+whose union SETS every implemented bit at least once AND CLEARS every bit at
 least once (the G9 both-ways guarantee), then pads in case-id order until the
 table has at least ``MIN_ROWS`` rows (``docs/TRACK1_PHASE_PLAN.md`` Week 2:
 "expands to ≥ 200 rows"). The output is fully deterministic — re-running yields
@@ -33,7 +33,7 @@ Note: this script imports ``bits.py`` **standalone** (via importlib from the
 file path) rather than ``import brutex.vocabulary`` so it runs WITHOUT the Rust
 ``trading_core`` wheel — the package ``__init__`` pulls in the evaluator (and
 thus ``trading_core``), but the bit registry itself is pure-Python. The frozen
-``expected_u64`` values mean no evaluator call is needed to regenerate the table.
+``expected_mask`` values mean no evaluator call is needed to regenerate the table.
 """
 
 from __future__ import annotations

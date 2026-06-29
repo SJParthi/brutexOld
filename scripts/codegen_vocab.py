@@ -251,6 +251,26 @@ def render_python(manifest: Manifest) -> str:
     lines.append("")
     lines.append("from typing import Final")
     lines.append("")
+    # Public API surface (``__all__``) — every BIT_* plus the metadata constants
+    # and tables, so the codegen-emitted masks (IMPLEMENTED_MASK /
+    # APPLIES_TO_1DAY_MASK) are a declared part of the module's public surface for
+    # downstream (PR-2) consumption, not flagged as unused module-level globals.
+    all_names: list[str] = [f"BIT_{c.name.upper()}" for c in manifest.conditions]
+    all_names += [
+        "ALL_CONDITION_NAMES",
+        "APPLIES_TO_1DAY_MASK",
+        "BIT_TO_NAME",
+        "GROUP_RANGES",
+        "IMPLEMENTED_MASK",
+        "MASK_WIDTH",
+        "NAME_TO_BIT",
+        "TOTAL_CONDITIONS",
+    ]
+    lines.append("__all__ = [")
+    for name in sorted(all_names):
+        lines.append(f'    "{name}",')
+    lines.append("]")
+    lines.append("")
     cur_group: str | None = None
     for c in manifest.conditions:
         if c.group != cur_group:
@@ -312,11 +332,12 @@ def render_python(manifest: Manifest) -> str:
     lines.append("")
     lines.append("# Import-time invariant.")
     lines.append("_check_invariants(NAME_TO_BIT, TOTAL_CONDITIONS)")
-    # Pipe through `ruff format` so the generated file is byte-identical to what
-    # the repo's `ruff format --check brutex` gate expects (ONE formatter
-    # authority — the generated file never trips the format gate, and
-    # `--check` here agrees with ruff). ruff is a dev dependency (CLAUDE.md §4).
-    return _ruff_format("\n".join(lines) + "\n")
+    # First apply ruff's lint autofixes (notably RUF022 — isort-style ``__all__``
+    # sorting, whose natural-sort order differs from a plain ``sorted()``), THEN
+    # ``ruff format``, so the generated file passes BOTH ``ruff check brutex`` and
+    # ``ruff format --check brutex`` (ONE formatter+linter authority — the
+    # generated file never trips either gate). ruff is a dev dep (CLAUDE.md §4).
+    return _ruff_format(_ruff_check_fix("\n".join(lines) + "\n"))
 
 
 def _ruff_format(source: str) -> str:
@@ -328,6 +349,27 @@ def _ruff_format(source: str) -> str:
     """
     result = subprocess.run(
         [sys.executable, "-m", "ruff", "format", "-"],
+        input=source,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def _ruff_check_fix(source: str) -> str:
+    """Apply ``ruff check --fix`` autofixes to *source* (stdin → fixed stdout).
+
+    Run as ``<python> -m ruff check --fix --exit-zero -`` so the generated
+    ``bits.py`` carries ruff's lint autofixes — notably RUF022's isort-style
+    ``__all__`` natural sort, which differs from a plain ``sorted()`` (e.g.
+    ``BIT_NEAR_FIB_0`` < ``BIT_NEAR_FIB_100`` < ``BIT_NEAR_FIB_200``). ``--exit-zero``
+    means "fixed remaining issues are not an error exit"; a genuine ruff/env
+    failure still raises (surfaced, not hidden). The ``-`` filename defaults to
+    ``.py`` so project lint config applies.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "--fix", "--exit-zero", "-"],
         input=source,
         capture_output=True,
         text=True,

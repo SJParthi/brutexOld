@@ -1,6 +1,6 @@
 """Track 1 brute-force engine — combo mask iteration + evaluation.
 
-Implements the u64 bitmask combo iteration foundation per
+Implements the u128 bitmask combo iteration foundation per
 `docs/TRACK1_BACKTEST_SPEC.md §"Stage 1A"`.
 
 ## The bitmask model
@@ -39,16 +39,16 @@ bits 52-59 still fit u64; the >=64-bit headroom is exercised by the tests).
 
 ## Combo iteration
 
-For a 52-condition vocab and AND-mask of size K, the count is C(52,K):
+For a 60-condition vocab and AND-mask of size K, the count is C(60,K):
 
-    K=1   52
-    K=2   1,326
-    K=3   22,100
-    K=4   270,725
-    K=5   2,598,960
+    K=1   60
+    K=2   1,770
+    K=3   34,220
+    K=4   487,635
+    K=5   5,461,512
 
 This module exposes ``iter_masks_k_of_n(k, n)`` that yields every
-u64 mask with exactly K bits set. The implementation is currently
+u128 mask with exactly K bits set. The implementation is currently
 ``itertools.combinations``-based (correct, sufficient for K≤5 +
 synthetic-data tests); a Gosper's-hack or LUT optimization is a
 later Phase-3 throughput task.
@@ -231,9 +231,9 @@ def evaluate_mask(bar_bits: int, required_mask: int) -> bool:
     Parameters
     ----------
     bar_bits : int
-        u64 truth-vector at one bar (all 52 conditions evaluated).
+        u128 truth-vector at one bar (all 60 conditions evaluated).
     required_mask : int
-        u64 strategy mask. A bit set here means the condition is
+        u128 strategy mask. A bit set here means the condition is
         required to fire.
 
     Returns
@@ -266,10 +266,10 @@ def mask_to_entry_signals(bar_bits: Sequence[int], required_mask: int) -> list[b
     Parameters
     ----------
     bar_bits : Sequence[int]
-        Per-bar u64 truth-vectors (e.g. from
+        Per-bar u128 truth-vectors (e.g. from
         :func:`brutex.engine.stage1a.build_bar_bits`).
     required_mask : int
-        The u64 strategy mask. An empty mask (``0``) fires on every bar.
+        The u128 strategy mask. An empty mask (``0``) fires on every bar.
 
     Returns
     -------
@@ -482,8 +482,6 @@ class ResidentBarBuffer:
         self._bar_hi: npt.NDArray[np.uint64] | None = None
         if fits_u64:
             try:
-                import fno_math
-
                 self._rust = fno_math.ResidentBars(list(bar_bits))
                 return
             except (ImportError, AttributeError):
@@ -533,7 +531,7 @@ class ResidentBarBuffer:
 
 
 def count_combos(k: int, n: int = VOCAB_BITS) -> int:
-    """Count the number of u64 masks with exactly ``k`` of ``n`` bits set.
+    """Count the number of u128 masks with exactly ``k`` of ``n`` bits set.
 
     Equivalent to C(n, k). Useful for sizing the sweep upfront.
 
@@ -542,7 +540,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     k : int
         Number of required bits. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 52).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 60).
 
     Returns
     -------
@@ -583,7 +581,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
 
 
 def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
-    """Yield every u64 mask with exactly ``k`` of ``n`` bits set.
+    """Yield every u128 mask with exactly ``k`` of ``n`` bits set.
 
     Iteration order is lexicographic on bit-position tuples
     (matches itertools.combinations). The total count is
@@ -603,12 +601,12 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
     k : int
         Number of bits to set in each yielded mask. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 52).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 60).
 
     Yields
     ------
     int
-        u64 masks with exactly ``k`` bits set, in lexicographic order.
+        u128 masks with exactly ``k`` bits set, in lexicographic order.
 
     Examples
     --------
@@ -641,11 +639,11 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
 
 
 def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
-    """Yield every u64 mask with exactly ``k`` of the GIVEN condition bits set.
+    """Yield every u128 mask with exactly ``k`` of the GIVEN condition bits set.
 
     Generalises :func:`iter_masks_k_of_n` — which enumerates over the first ``n``
     *contiguous* bits ``0..n-1`` — to an **arbitrary subset** of condition bits, so
-    a sweep can brute-force over a chosen handful of the 52 conditions (e.g. only
+    a sweep can brute-force over a chosen handful of the 60 conditions (e.g. only
     the pivot + Fibonacci bits), ``k`` at a time, instead of a contiguous prefix.
     Positions are de-duplicated and sorted ascending, so the iteration order is
     deterministic (lexicographic on the sorted positions) and the total count is
@@ -662,7 +660,7 @@ def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
     Yields
     ------
     int
-        u64 masks with exactly ``k`` of the chosen bits set, lexicographic order.
+        u128 masks with exactly ``k`` of the chosen bits set, lexicographic order.
 
     Raises
     ------

@@ -129,6 +129,25 @@ def test_render_python_has_banner_and_constants() -> None:
     assert '"close_above_vwap": BIT_CLOSE_ABOVE_VWAP,' in py
 
 
+def test_render_python_exports_public_masks_in_all() -> None:
+    """The codegen-emitted masks are part of the module's public ``__all__``.
+
+    ``IMPLEMENTED_MASK`` / ``APPLIES_TO_1DAY_MASK`` are public API for downstream
+    (PR-2) consumers, so they must be declared in ``__all__`` — otherwise a static
+    analyser flags them as unused module-level globals (DEC-VOCAB-U128-CODEGEN-001).
+    """
+    py = cg.render_python(_manifest())
+    assert "__all__ = [" in py
+    for name in ("IMPLEMENTED_MASK", "APPLIES_TO_1DAY_MASK", "BIT_CLOSE_ABOVE_VWAP"):
+        assert f'    "{name}",' in py
+    # The ``__all__`` block carries ruff's RUF022 isort-style natural sort (so
+    # ``ruff check brutex`` stays green): FIB_0 < FIB_50 < FIB_100 < FIB_200.
+    fib0 = py.index('"BIT_NEAR_FIB_0",')
+    fib100 = py.index('"BIT_NEAR_FIB_100",')
+    fib200 = py.index('"BIT_NEAR_FIB_200",')
+    assert fib0 < fib100 < fib200
+
+
 def test_committed_artifacts_match_fresh_render() -> None:
     """The in-repo bits.rs / bits.py have NO drift from the manifest."""
     assert cg.check_artifacts(_manifest()) == []

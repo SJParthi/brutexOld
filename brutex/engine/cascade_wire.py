@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 import structlog
 
 from brutex.models import BruteXError
+from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
@@ -115,8 +116,10 @@ REPORT_VERSION: Final[int] = 1
 
 #: 64-char lowercase-hex BLAKE3 run-identity length (mirrors COMBO_HASH_HEX_LEN).
 _RUN_ID_LEN: Final[int] = 64
-#: Largest valid strategy mask — the 52 atomic condition bits (0..51) all set.
-_MASK_BITS_MAX: Final[int] = (1 << 52) - 1
+#: Largest valid strategy mask — every defined condition bit
+#: (0..TOTAL_CONDITIONS-1) all set. Tracks the manifest (mirrors
+#: ``results_store.MASK_BITS_MAX``); a bit >= TOTAL_CONDITIONS is rejected.
+_MASK_BITS_MAX: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 #: Modulus keeping the sweep-id-derived seed a non-negative 31-bit int.
 _SEED_MODULUS: Final[int] = 2**31
 #: The three proximity tolerances ``(pivot, pdh_pdl, fib)`` carried per tuple.

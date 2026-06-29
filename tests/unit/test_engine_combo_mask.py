@@ -119,7 +119,7 @@ def test_bits_to_mask_rejects_negative_position() -> None:
 
 
 def test_bits_to_mask_rejects_at_max() -> None:
-    """Position MAX_VOCAB_BITS (= 64) is out of range."""
+    """Position MAX_VOCAB_BITS (= 128) is out of range."""
     with pytest.raises(ValueError, match=f"position {MAX_VOCAB_BITS} out of range"):
         bits_to_mask(MAX_VOCAB_BITS)
 

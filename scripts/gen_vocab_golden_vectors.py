@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Generate the cross-language golden answer-key for the 52-condition vocabulary.
+"""Generate the cross-language golden answer-key for the condition vocabulary.
 
 Phase 0 of the shared-core migration (DEC-SHARED-CORE-001, proposed): freeze the
 *current* Python ``evaluate_atoms`` output over a diverse, deterministic set of
 inputs into a language-neutral JSON fixture. This fixture is the **oracle**:
 
 * the Python test (``tests/golden/test_vocab_golden.py``) asserts Python still
-  reproduces every frozen ``u64`` — locking the behaviour against accidental drift;
-* the future Rust ``trading-core`` crate MUST reproduce the same ``u64`` for the
-  same inputs **bit-for-bit** before BruteX/TickVault switch to it.
+  reproduces every frozen ``u128`` mask — locking the behaviour against accidental
+  drift;
+* the future Rust ``trading-core`` crate MUST reproduce the same ``u128`` mask for
+  the same inputs **bit-for-bit** before BruteX/TickVault switch to it.
 
 The cases are built with a fixed seed so the fixture is reproducible. Prices are
 int64 paisa. Run with ``python scripts/gen_vocab_golden_vectors.py`` to (re)write
@@ -35,8 +36,8 @@ from brutex.vocabulary.evaluator import (
 )
 
 #: Hex width to zero-pad a u128 mask string (32 nibbles). The mask is serialised
-#: as a STRING (not a JSON number) because a mask using bits >= 53 exceeds 2**53
-#: and would lose precision as an IEEE-754 double / JS number.
+#: as a STRING (not a JSON number) because a mask using bits >= 53 would exceed the
+#: 2**53 IEEE-754 double safe-integer range and lose precision as a JSON/JS number.
 _MASK_HEX_WIDTH = 32
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -65,7 +66,7 @@ _PRIOR_FLAG_PATTERNS: tuple[tuple[bool, ...], ...] = (
 
 
 def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
-    """Build one diverse, deterministic case + its frozen ``evaluate_atoms`` u64."""
+    """Build one diverse, deterministic case + its frozen ``evaluate_atoms`` u128 mask."""
     # Previous-day anchors (drive pivots + Fib); keep pdh > pdl, pdc inside.
     pdl = rng.randint(1_500_000, 4_500_000)
     pdh = pdl + rng.randint(20_000, 400_000)
