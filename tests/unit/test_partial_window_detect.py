@@ -25,11 +25,15 @@ from brutex.data import partial_window_detect as pwd
 from brutex.data.partial_window_detect import (
     NOT_TRUNCATED,
     SUSPECTED_PARTIAL,
+    SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT,
+    SUSPECTED_PARTIAL_WINDOW_EVENT,
     PartialWindowVerdict,
     classify_partial_window,
     last_completed_session_on_or_before,
+    observe_partial_window,
     sessions_between,
 )
+from structlog.testing import capture_logs
 
 #: A frozen "now" well after every test window so only the live-edge knob (not a
 #: real future) governs the live-edge exclusion. 2024-06-03 is a Monday.
@@ -139,6 +143,35 @@ class TestClassifyPartialWindow:
         assert v.verdict == NOT_TRUNCATED
         assert v.reason == "at_expiry"
         assert v.expected_end_date == date(2024, 3, 28)
+
+    def test_window_end_outside_calendar_coverage_not_flagged(self) -> None:
+        # MAJOR-1: a window ENDING in an uncovered year (2020) abstains — the holiday list
+        # would miscount weekday holidays as sessions → spurious flag. Honest abstention.
+        from brutex.calendars.nse import HOLIDAY_COVERAGE_FIRST_YEAR
+
+        uncovered_year = HOLIDAY_COVERAGE_FIRST_YEAR - 1
+        v = classify_partial_window(
+            last_bar_ts=_ts(date(uncovered_year, 3, 4)),
+            window_end=date(uncovered_year, 4, 2),
+            now=_NOW,
+            expiry=date(2025, 1, 30),
+        )
+        assert v.verdict == NOT_TRUNCATED
+        assert v.reason == "out_of_calendar_coverage"
+        assert v.expected_end_date is None
+
+    def test_last_bar_outside_calendar_coverage_not_flagged(self) -> None:
+        # MAJOR-1: a covered window_end but a last bar in an uncovered year also abstains.
+        from brutex.calendars.nse import HOLIDAY_COVERAGE_LAST_YEAR
+
+        v = classify_partial_window(
+            last_bar_ts=_ts(date(HOLIDAY_COVERAGE_LAST_YEAR + 1, 1, 6)),
+            window_end=date(HOLIDAY_COVERAGE_LAST_YEAR + 1, 3, 1),
+            now=datetime(HOLIDAY_COVERAGE_LAST_YEAR + 1, 6, 3, 10, 0, tzinfo=UTC),
+            expiry=None,
+        )
+        assert v.verdict == NOT_TRUNCATED
+        assert v.reason == "out_of_calendar_coverage"
 
     def test_expiry_clamps_expected_end_but_still_truncated_before_it(self) -> None:
         # Expiry clamps the expected end, yet the last bar stops far BEFORE expiry → flagged.
@@ -268,3 +301,98 @@ def test_verdict_is_frozen_immutable() -> None:
     )
     with pytest.raises((AttributeError, Exception)):
         v.verdict = SUSPECTED_PARTIAL  # type: ignore[misc]
+
+
+class _Logger:
+    """A minimal structlog-shaped recorder for the COMMON observe helper."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def warning(self, event: str, **fields: object) -> None:
+        self.events.append((event, fields))
+
+
+class TestObservePartialWindow:
+    """The COMMON shared wiring helper both pull spines call (DEC-PARTIAL-WINDOW-DETECT-001)."""
+
+    def test_truncation_emits_one_warning(self) -> None:
+        log = _Logger()
+        observe_partial_window(
+            log,
+            last_bar_ts=_ts(date(2024, 1, 8)),
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=date(2025, 1, 30),
+            symbol="NSE-NIFTY-30Mar24-FUT",
+            interval="1day",
+            pull_id="pid-1",
+        )
+        warns = [e for e in log.events if e[0] == SUSPECTED_PARTIAL_WINDOW_EVENT]
+        assert len(warns) == 1
+        fields = warns[0][1]
+        assert fields["symbol"] == repr("NSE-NIFTY-30Mar24-FUT")
+        assert fields["last_bar_date"] == "2024-01-08"
+        assert fields["expiry"] == "2025-01-30"
+        # Also assert it fires through a REAL structlog logger (the production shape).
+        import structlog
+
+        with capture_logs() as logs:
+            observe_partial_window(
+                structlog.get_logger("t"),
+                last_bar_ts=_ts(date(2024, 1, 8)),
+                window_end=date(2024, 3, 1),
+                now=_NOW,
+                expiry=None,
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                pull_id=None,
+            )
+        assert any(r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT for r in logs)
+
+    def test_complete_window_silent(self) -> None:
+        log = _Logger()
+        observe_partial_window(
+            log,
+            last_bar_ts=_ts(date(2024, 2, 29)),
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=None,
+            symbol="NSE-NIFTY",
+            interval="1day",
+            pull_id="pid-1",
+        )
+        assert [e for e in log.events if e[0] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
+
+    def test_empty_window_silent(self) -> None:
+        log = _Logger()
+        observe_partial_window(
+            log,
+            last_bar_ts=None,
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=None,
+            symbol="NSE-NIFTY",
+            interval="1day",
+            pull_id="pid-1",
+        )
+        assert log.events == []
+
+    def test_diagnostic_error_is_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(**_k: object) -> object:
+            raise RuntimeError("classify blew up")
+
+        monkeypatch.setattr(pwd, "classify_partial_window", _boom)
+        log = _Logger()
+        observe_partial_window(
+            log,
+            last_bar_ts=_ts(date(2024, 1, 8)),
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=None,
+            symbol="NSE-NIFTY",
+            interval="1day",
+            pull_id="pid-1",
+        )
+        assert [e for e in log.events if e[0] == SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT]
+        assert [e for e in log.events if e[0] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []

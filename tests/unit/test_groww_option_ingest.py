@@ -49,6 +49,7 @@ from brutex.adapters.groww.option_ingest import (
     scan_underlying_all_empty,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.data import partial_window_detect as _pwd
 from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
@@ -2267,7 +2268,7 @@ class TestSuspiciousEmptyFlag:
 
 
 def _partial_bar(d: date) -> CandleBar:
-    """A valid in-session option bar whose IST trading date is *d* (for truncation tests)."""
+    """A valid in-session F&O bar whose IST trading date is *d* (for truncation tests)."""
     return CandleBar(
         timestamp=datetime(d.year, d.month, d.day, 4, 0, tzinfo=UTC),  # 09:30 IST = 04:00 UTC
         open=Decimal("100.0"),
@@ -2280,18 +2281,29 @@ def _partial_bar(d: date) -> CandleBar:
 
 
 def _raw_window(
-    *, last_bar_date: date | None, window_end: date, expiry: date | None
+    *,
+    last_bar_date: date | None,
+    window_end: date,
+    expiry: date | None,
+    contract_type: str = "FUT",
 ) -> _oi._OptionRawWindow:
-    """An ``_OptionRawWindow`` carrying one bar on *last_bar_date* (or empty), end *window_end*."""
+    """An ``_OptionRawWindow`` carrying one bar on *last_bar_date* (or empty), end *window_end*.
+
+    Defaults to a FUT contract (the watched type). A ``CE``/``PE`` is built when
+    *contract_type* asks (to prove the option-exclusion gate). Covered years (2022-2025)
+    so the real NSE calendar is exercised (MAJOR-1 fix).
+    """
+    is_option = contract_type in {"CE", "PE"}
+    symbol = "NSE-NIFTY-30Mar24-22000-CE" if is_option else "NSE-NIFTY-30Mar24-FUT"
     contract = DerivativeContract(
         underlying_symbol="NIFTY",
         expiry=expiry,
-        symbol="NSE-NIFTY-02Jan25-28500-CE",
-        contract_type="CE",
-        strike=28500.0,
+        symbol=symbol,
+        contract_type=contract_type,
+        strike=22000.0 if is_option else None,
     )
     key = WindowKey(
-        market="groww-option",
+        market="groww-future" if not is_option else "groww-option",
         security_id=contract.symbol,
         interval="1day",
         start=date(2024, 1, 1),
@@ -2310,47 +2322,77 @@ def _raw_window(
     )
 
 
-class TestPartialWindowFlag:
-    """DEC-PARTIAL-WINDOW-DETECT-001 — observe-only truncated-SUCCESS-window WARNING."""
+def _observe(raw: _oi._OptionRawWindow) -> None:
+    """Run the FUT-gated observe wiring over *raw*'s session-filtered bars."""
+    _oi._observe_partial_window(
+        raw,
+        list(raw.raw_bars),
+        pull_id="pid-1",
+        fields={"symbol": raw.contract.symbol, "interval": "1day"},
+    )
 
-    def test_truncated_window_fires_one_warning(self) -> None:
-        # A SUCCESS window whose last bar (2020-03-04) stops far before its end (2020-04-02),
-        # contract still live to 2025 → the suspected-partial WARNING fires once.
+
+class TestPartialWindowFlag:
+    """DEC-PARTIAL-WINDOW-DETECT-001 — observe-only truncated-SUCCESS-window WARNING (FUT only)."""
+
+    def test_truncated_futures_window_fires_one_warning(self) -> None:
+        # A FUTURES SUCCESS window whose last bar (2024-01-08) stops far before its end
+        # (2024-03-01), contract still live to 2025 → the suspected-partial WARNING fires once.
         raw = _raw_window(
-            last_bar_date=date(2020, 3, 4),
-            window_end=date(2020, 4, 2),
-            expiry=date(2025, 1, 2),
+            last_bar_date=date(2024, 1, 8),
+            window_end=date(2024, 3, 1),
+            expiry=date(2025, 1, 30),
+            contract_type="FUT",
         )
         with capture_logs() as logs:
-            _oi._observe_partial_window(
-                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
-            )
+            _observe(raw)
         warns = [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT]
         assert len(warns) == 1
         assert warns[0]["symbol"] == repr(raw.contract.symbol)
-        assert warns[0]["last_bar_date"] == "2020-03-04"
+        assert warns[0]["last_bar_date"] == "2024-01-08"
         assert warns[0]["missing_sessions"] > 5
+
+    def test_option_pre_expiry_is_excluded(self) -> None:
+        # MINOR-2 / BLOCKER-1: an OPTION (CE) whose bars die 7 sessions before expiry — a
+        # COMPLETE-but-illiquid contract — is NOT flagged because options are excluded entirely.
+        raw = _raw_window(
+            last_bar_date=date(2024, 3, 19),
+            window_end=date(2024, 3, 29),  # expiry+1
+            expiry=date(2024, 3, 28),
+            contract_type="CE",
+        )
+        with capture_logs() as logs:
+            _observe(raw)
+        assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
+
+    def test_put_option_also_excluded(self) -> None:
+        # The PE leg is excluded too (both option legs trade sparsely near expiry).
+        raw = _raw_window(
+            last_bar_date=date(2024, 1, 8),
+            window_end=date(2024, 3, 1),
+            expiry=date(2025, 1, 30),
+            contract_type="PE",
+        )
+        with capture_logs() as logs:
+            _observe(raw)
+        assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
 
     def test_sparse_complete_window_silent(self) -> None:
         # Last bar reaches the window end → COMPLETE → no WARNING (illiquid-but-complete guard).
         raw = _raw_window(
-            last_bar_date=date(2020, 4, 1),
-            window_end=date(2020, 4, 2),
-            expiry=date(2025, 1, 2),
+            last_bar_date=date(2024, 2, 29),
+            window_end=date(2024, 3, 1),
+            expiry=date(2025, 1, 30),
         )
         with capture_logs() as logs:
-            _oi._observe_partial_window(
-                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
-            )
+            _observe(raw)
         assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
 
     def test_empty_window_silent(self) -> None:
         # An EMPTY window (no bars) is never a truncation → silent.
-        raw = _raw_window(last_bar_date=None, window_end=date(2020, 4, 2), expiry=date(2025, 1, 2))
+        raw = _raw_window(last_bar_date=None, window_end=date(2024, 3, 1), expiry=date(2025, 1, 30))
         with capture_logs() as logs:
-            _oi._observe_partial_window(
-                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
-            )
+            _observe(raw)
         assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
 
     def test_diagnostic_error_is_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2358,21 +2400,19 @@ class TestPartialWindowFlag:
         def _boom(*_a: object, **_k: object) -> object:
             raise RuntimeError("classify blew up")
 
-        monkeypatch.setattr(_oi, "classify_partial_window", _boom)
+        monkeypatch.setattr(_pwd, "classify_partial_window", _boom)
         raw = _raw_window(
-            last_bar_date=date(2020, 3, 4), window_end=date(2020, 4, 2), expiry=date(2025, 1, 2)
+            last_bar_date=date(2024, 1, 8), window_end=date(2024, 3, 1), expiry=date(2025, 1, 30)
         )
         with capture_logs() as logs:
-            _oi._observe_partial_window(
-                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
-            )
+            _observe(raw)
         assert any(r["event"] == _oi.SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT for r in logs)
         assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
 
     def test_wired_into_success_tail(self) -> None:
-        # End-to-end through the SUCCESS-path consumer tail: a truncated window fires the flag.
+        # End-to-end through the SUCCESS-path consumer tail: a truncated FUT window fires the flag.
         raw = _raw_window(
-            last_bar_date=date(2020, 3, 4), window_end=date(2020, 4, 2), expiry=date(2025, 1, 2)
+            last_bar_date=date(2024, 1, 8), window_end=date(2024, 3, 1), expiry=date(2025, 1, 30)
         )
         with capture_logs() as logs:
             report = _oi._process_option_window_tail(

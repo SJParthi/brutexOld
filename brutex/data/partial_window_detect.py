@@ -1,6 +1,6 @@
 """Observe-only diagnostic — flag a fetch window the pull marks SUCCESS but TRUNCATED.
 
-DEC-PARTIAL-WINDOW-DETECT-001 (MIGRATION.md #1004). The window classifier
+DEC-PARTIAL-WINDOW-DETECT-001 (MIGRATION.md #1008). The window classifier
 (:func:`brutex.data.window_status.classify_window_status`) returns ``SUCCESS`` the
 moment the vendor returns ANY bar (``raw_bars > 0``) — with **no completeness
 check** — and the unified ledger then treats ``SUCCESS`` as terminal/skippable
@@ -20,27 +20,45 @@ value, **NO** ``SUCCESS`` classification, **NO** skip rule, **NO** ledger row,
 (CLAUDE.md §3). It DETECTS and WARNs; it does not auto-remediate (Golden Rule
 #10).
 
+Scope: SPOT + FUTURES windows only (OPTIONS EXCLUDED by design)
+--------------------------------------------------------------
+The detector is wired into the SPOT pull tail (`brutex/adapters/groww/ingest.py`)
+and the FUTURES contract path (`brutex/adapters/groww/option_ingest.py`, gated to
+``contract_type == "FUT"``) — both trade DENSELY every session, so a truncated
+window there is a genuine, reliably-detectable fetch gap. **OPTIONS (CE/PE) are
+deliberately NOT watched**: an option routinely stops printing bars several
+sessions before its expiry (liquidity death in the final week) even though the
+contract is COMPLETE, so truncation is indistinguishable from sparsity for an
+option — watching the chain would flag constantly (a false-positive storm, "worse
+than no detector"). That exclusion is enforced at the wiring (the spine decides
+which windows to observe); the classifier below is contract-agnostic and pure.
+
 False-positive safety (the crux — read this before touching the threshold)
 --------------------------------------------------------------------------
 A naive "expected bar count vs actual bar count" check WOULD false-flag a
-genuinely-sparse illiquid option (a far-OTM strike legitimately trades a handful
-of bars over its whole life) and could imply a giant wasteful re-pull. We DO NOT
-do that. The flag fires ONLY on a strong **TRUNCATION** signal, never on
-sparsity:
+genuinely-sparse window and could imply a giant wasteful re-pull. We DO NOT do
+that. The flag fires ONLY on a strong **TRUNCATION** signal, never on sparsity:
 
 * The signal is *temporal coverage*, not *bar density*. We compare the date of
   the LAST stored bar against where the last bar SHOULD be — the window's end
   boundary, clamped to the contract's expiry/delisting and to the last completed
-  trading session. A contract whose bars run up to its expiry (or to the window
+  trading session. A window whose bars run up to its expiry (or to the window
   end) is COMPLETE **even if it only has a few bars** (sparse-but-complete is NOT
   flagged). A window whose last bar stops materially earlier than that bound —
-  with the contract still live well past it — is the truncation case.
+  with the instrument still live well past it — is the truncation case.
 * The truncation must exceed a conservative, env-tunable tolerance of *trading
   sessions* (:data:`PARTIAL_WINDOW_TOLERANCE_SESSIONS`, env
   ``BRUTEX_PARTIAL_WINDOW_TOLERANCE_SESSIONS``, default 5). One or two missing
   trailing sessions (a holiday cluster, a vendor publish-lag day) never trip it.
 * Explicitly EXCLUDED (each returns :data:`NOT_TRUNCATED`):
   - an EMPTY window (no stored bars — already handled by the EMPTY status);
+  - an OUT-OF-CALENDAR-COVERAGE window — when ``window_end`` or the last bar falls
+    in a year OUTSIDE the NSE holiday list's covered span
+    (:func:`brutex.calendars.nse.is_holiday_data_available`,
+    ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``). Outside that
+    span :func:`~brutex.calendars.nse.is_trading_day` would silently count a
+    weekday holiday (Holi / Good Friday) as a session, inflating the gap and
+    producing a spurious flag — so we honestly abstain (Golden Rule #1, no guess);
   - a window at the LIVE EDGE (its end boundary is within the live-edge horizon
     :data:`PARTIAL_WINDOW_LIVE_EDGE_SESSIONS` of *today* — the vendor may simply
     not have published the most recent sessions yet);
@@ -60,16 +78,19 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from brutex.calendars.nse import IST, is_trading_day
+from brutex.calendars.nse import IST, is_holiday_data_available, is_trading_day
 
 __all__ = [
     "NOT_TRUNCATED",
     "PARTIAL_WINDOW_LIVE_EDGE_SESSIONS",
     "PARTIAL_WINDOW_TOLERANCE_SESSIONS",
     "SUSPECTED_PARTIAL",
+    "SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT",
+    "SUSPECTED_PARTIAL_WINDOW_EVENT",
     "PartialWindowVerdict",
     "classify_partial_window",
     "last_completed_session_on_or_before",
+    "observe_partial_window",
     "sessions_between",
 ]
 
@@ -259,6 +280,22 @@ def classify_partial_window(
     last_bar_date = last_bar_ts.astimezone(IST).date()
     today = now.astimezone(IST).date()
 
+    # OUT-OF-CALENDAR-COVERAGE exclusion (MAJOR-1): the NSE holiday list only covers
+    # ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (currently 2021-2026).
+    # OUTSIDE that span ``is_trading_day`` would silently count a weekday holiday (Holi /
+    # Good Friday) as a session, inflating the missing-session count into a SPURIOUS flag.
+    # When either the window end OR the last bar falls in an uncovered year we honestly
+    # ABSTAIN (Golden Rule #1 — surface the gap, never guess), reusing the COMMON
+    # ``is_holiday_data_available`` rather than a hardcoded year range.
+    if not (is_holiday_data_available(window_end) and is_holiday_data_available(last_bar_date)):
+        return PartialWindowVerdict(
+            verdict=NOT_TRUNCATED,
+            last_bar_date=last_bar_date,
+            expected_end_date=None,
+            missing_sessions=0,
+            reason="out_of_calendar_coverage",
+        )
+
     # The window's end boundary is END-EXCLUSIVE, so the last bar's session is the last
     # completed trading day STRICTLY BEFORE window_end. The expected end is that session,
     # additionally clamped to the contract's expiry (a dead contract has no bars past it)
@@ -330,3 +367,70 @@ def classify_partial_window(
         missing_sessions=missing,
         reason="sparse_complete",
     )
+
+
+#: The structlog event a SUSPECTED-PARTIAL (truncated-but-marked-SUCCESS) window emits
+#: (observe-only; DEC-PARTIAL-WINDOW-DETECT-001). ONE WARNING for human triage — it
+#: changes NO status / ledger / skip / engine input. Shared by BOTH the spot
+#: (`ingest.py`) and the futures (`option_ingest.py`) wiring (CLAUDE.md §11 COMMON).
+SUSPECTED_PARTIAL_WINDOW_EVENT = "window.suspected_partial"
+#: Emitted if the observe-only scan itself raises — it NEVER breaks the pull.
+SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT = "window.suspected_partial_error"
+
+
+def observe_partial_window(
+    log: object,
+    *,
+    last_bar_ts: datetime | None,
+    window_end: date,
+    now: datetime,
+    expiry: date | None,
+    symbol: str,
+    interval: str,
+    pull_id: str | None,
+) -> None:
+    """Observe-only: WARN if a SUCCESS window's bars stop materially before its end.
+
+    The ONE shared wiring both pull spines call (CLAUDE.md §11 COMMON — no copy):
+    runs :func:`classify_partial_window` over the window's last-stored-bar timestamp
+    vs its end bound + the instrument's expiry, and emits ONE
+    :data:`SUSPECTED_PARTIAL_WINDOW_EVENT` WARNING when (and only when) the window is
+    a SUSPECTED truncation. Fully wrapped: ANY failure of the diagnostic is swallowed
+    + logged (:data:`SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT`), so it can NEVER block /
+    slow / crash the pull. It changes NO status, NO ledger row, NO return value
+    (observe-only, Golden Rule #10).
+
+    *log* is the caller's structlog logger (typed ``object`` so this module need not
+    import structlog — it is duck-typed for ``.warning(event, **fields)``). *last_bar_ts*
+    is the SESSION-FILTERED last bar's UTC timestamp (or ``None`` for an empty window).
+    *expiry* is the contract expiry (``None`` for a spot series). The caller is
+    responsible for the SCOPE gate (spot + futures only — options are excluded at the
+    wiring; see the module docstring).
+    """
+    try:
+        verdict = classify_partial_window(
+            last_bar_ts=last_bar_ts,
+            window_end=window_end,
+            now=now,
+            expiry=expiry,
+        )
+        if verdict.is_suspected_partial():
+            log.warning(  # type: ignore[attr-defined]
+                SUSPECTED_PARTIAL_WINDOW_EVENT,
+                pull_id=pull_id,
+                symbol=repr(symbol),
+                interval=interval,
+                window_end=window_end.isoformat(),
+                last_bar_date=(
+                    verdict.last_bar_date.isoformat() if verdict.last_bar_date else None
+                ),
+                expected_end_date=(
+                    verdict.expected_end_date.isoformat() if verdict.expected_end_date else None
+                ),
+                missing_sessions=verdict.missing_sessions,
+                expiry=expiry.isoformat() if expiry else None,
+            )
+    except Exception as exc:  # observe-only diagnostic must never break the pull
+        log.warning(  # type: ignore[attr-defined]
+            SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT, pull_id=pull_id, error=str(exc)
+        )
