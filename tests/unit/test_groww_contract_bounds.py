@@ -23,6 +23,8 @@ import pytest
 from brutex.adapters.groww.constants import OPTION_SEGMENT, TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.contract_bounds import (
     DEFAULT_FNO_LOOKBACK_DAYS,
+    DEFAULT_FUTURES_LOOKBACK_DAYS,
+    DEFAULT_OPTION_LOOKBACK_DAYS,
     ContractCoverage,
     contract_daily_coverage,
     coverage_to_minute_window,
@@ -176,48 +178,110 @@ def test_window_disjoint_after_range_falls_back_to_full() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# default_fno_minute_window (pure — DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+# default_fno_minute_window (pure — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 /
+# DEC-FUTURES-LOOKBACK-60D-001: FUTURES default 60 days, OPTIONS default 30 days)
 # ─────────────────────────────────────────────────────────────────────────
-# Uniform 30-day lookback for ALL F&O (FUT/CE/PE) — the operator's direction.
-def test_default_fno_lookback_is_30_days() -> None:
-    assert DEFAULT_FNO_LOOKBACK_DAYS == 30
+def test_default_option_lookback_is_30_days() -> None:
+    assert DEFAULT_OPTION_LOOKBACK_DAYS == 30
 
 
-def test_default_fno_window_uses_expiry_minus_30_days() -> None:
+def test_default_futures_lookback_is_60_days() -> None:
+    assert DEFAULT_FUTURES_LOOKBACK_DAYS == 60
+
+
+def test_default_fno_lookback_legacy_alias_equals_option() -> None:
+    # The legacy ``DEFAULT_FNO_LOOKBACK_DAYS`` name is kept as the OPTION value (30).
+    assert DEFAULT_FNO_LOOKBACK_DAYS == DEFAULT_OPTION_LOOKBACK_DAYS == 30
+
+
+def test_default_future_window_uses_expiry_minus_60_days() -> None:
+    # A FUTURE (is_option=False) defaults to a 60-day lookback.
     win = default_fno_minute_window(
-        date(2024, 1, 25), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
+        date(2024, 1, 25),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=False,
     )
-    # [expiry−30 days, expiry+1day) — end-exclusive includes the expiry day's intraday
-    # bars. 2024-01-25 − 30 days = 2023-12-26; expiry+1 day = 2024-01-26.
+    # [expiry−60 days, expiry+1day) — end-exclusive includes the expiry day's intraday
+    # bars. 2024-01-25 − 60 days = 2023-11-26; expiry+1 day = 2024-01-26.
+    assert win == (date(2023, 11, 26), date(2024, 1, 26))
+
+
+def test_default_option_window_uses_expiry_minus_30_days() -> None:
+    # An OPTION (is_option=True) stays on the tighter 30-day lookback — unchanged.
+    win = default_fno_minute_window(
+        date(2024, 1, 25),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=True,
+    )
+    # 2024-01-25 − 30 days = 2023-12-26; expiry+1 day = 2024-01-26.
     assert win == (date(2023, 12, 26), date(2024, 1, 26))
 
 
-def test_default_fno_window_clamps_start_to_full_start() -> None:
-    # expiry−30 days (2020-01-16) is BEFORE the floor → start clamps up to full_start.
+def test_default_future_window_clamps_start_to_full_start() -> None:
+    # expiry−60 days (2019-12-17) is BEFORE the floor → start clamps up to full_start.
     win = default_fno_minute_window(
-        date(2020, 2, 15), full_start=date(2020, 1, 20), full_end=date(2026, 6, 13)
+        date(2020, 2, 15),
+        full_start=date(2020, 1, 20),
+        full_end=date(2026, 6, 13),
+        is_option=False,
     )
     assert win == (date(2020, 1, 20), date(2020, 2, 16))
 
 
-def test_default_fno_window_clamps_end_to_full_end() -> None:
+def test_default_option_window_clamps_start_to_full_start() -> None:
+    # expiry−30 days (2020-01-16) is BEFORE the floor → start clamps up to full_start.
+    win = default_fno_minute_window(
+        date(2020, 2, 15),
+        full_start=date(2020, 1, 20),
+        full_end=date(2026, 6, 13),
+        is_option=True,
+    )
+    assert win == (date(2020, 1, 20), date(2020, 2, 16))
+
+
+def test_default_future_window_clamps_end_to_full_end() -> None:
     # expiry+1day is AFTER full_end → end clamps down to full_end.
     win = default_fno_minute_window(
-        date(2026, 6, 30), full_start=date(2020, 1, 1), full_end=date(2026, 6, 13)
+        date(2026, 6, 30),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 6, 13),
+        is_option=False,
     )
-    assert win == (date(2026, 5, 31), date(2026, 6, 13))
+    # expiry−60 days = 2026-05-01; end clamps to full_end 2026-06-13.
+    assert win == (date(2026, 5, 1), date(2026, 6, 13))
 
 
 def test_default_fno_window_none_expiry_is_full_range() -> None:
+    # The None-expiry guard fires regardless of is_option (both branches return full).
     full = (date(2020, 1, 1), date(2026, 6, 13))
-    assert default_fno_minute_window(None, full_start=full[0], full_end=full[1]) == full
+    assert (
+        default_fno_minute_window(None, full_start=full[0], full_end=full[1], is_option=False)
+        == full
+    )
+    assert (
+        default_fno_minute_window(None, full_start=full[0], full_end=full[1], is_option=True)
+        == full
+    )
 
 
-def test_default_fno_window_collapsed_span_falls_back_to_full() -> None:
-    # expiry BEFORE full_start → the lookback window is entirely out of range
+def test_default_future_window_collapsed_span_falls_back_to_full() -> None:
+    # expiry BEFORE full_start → the 60-day lookback window is entirely out of range
     # (start>=end) → conservative full range.
     full = (date(2024, 1, 1), date(2026, 6, 13))
-    win = default_fno_minute_window(date(2023, 6, 1), full_start=full[0], full_end=full[1])
+    win = default_fno_minute_window(
+        date(2023, 6, 1), full_start=full[0], full_end=full[1], is_option=False
+    )
+    assert win == full
+
+
+def test_default_option_window_collapsed_span_falls_back_to_full() -> None:
+    # The same empty-span guard for the 30-day option branch.
+    full = (date(2024, 1, 1), date(2026, 6, 13))
+    win = default_fno_minute_window(
+        date(2023, 6, 1), full_start=full[0], full_end=full[1], is_option=True
+    )
     assert win == full
 
 
