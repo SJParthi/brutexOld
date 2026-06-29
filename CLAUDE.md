@@ -888,6 +888,20 @@ hostile-review pass._
    Groww serves 1-minute data from `2020-01-01T09:15:00`). No futures, no
    options, no F&O contracts. Do not silently expand scope.
 
+   **Engine-scope amendment (DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012,
+   2026-06-29, MIGRATION.md entry #1006; companion clause owned by PR-1
+   DEC-VOCAB-U128-CODEGEN-001 #1007):** the operator has AUTHORIZED the
+   brute-force ENGINE to ALSO run on **NIFTY futures** for the dedicated
+   dynamic-strategy track (a session-anchored intraday VWAP is feasible on
+   futures because they carry traded volume, unlike a spot index per
+   DEC-VENDOR-VOLUME-NORMALIZE-001). This is operator-authorized, NOT a silent
+   expansion. The 3 spot indices (NIFTY 50 / BANKNIFTY / SENSEX) remain the
+   index engine surface; **all OTHER F&O — every non-NIFTY-futures contract,
+   the ~212 F&O stocks, the NTM constituents, India VIX — stays REFERENCE_ONLY**
+   (lake-only, never in the 52→60-condition vocabulary). The vocabulary itself
+   grew 52→60 conditions on a u128 mask in PR-1 (the 8 new VWAP / pivot-R5-S5 /
+   BOS-CHoCH bits are LAYOUT-ONLY until PR-2 supplies their math).
+
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
    cover **200 NSE F&O eligible single stocks (spot + options across the

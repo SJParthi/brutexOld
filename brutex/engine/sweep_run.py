@@ -21,7 +21,7 @@ Three invariants make this a *sweep RUN*, not just a sweep:
 
 * **Reproducibility (Golden Rule #4).** Every mask's identity is the 9-field
   BLAKE3 :func:`~brutex.strategies.combo.combo_hash` with
-  ``strategy_id = "mask:%016x"`` of the u64 mask (DEC-MASK-IDENTITY-001 — the
+  ``strategy_id = "mask:%032x"`` of the u128 mask (DEC-MASK-IDENTITY-001 — the
   mask *is* the strategy). Same inputs → same run-ids → same
   :class:`~brutex.engine.results_store.FlushResult.content_hash`, bit-for-bit.
 * **Idempotence (Golden Rule #7).** On the digest path (the production
@@ -244,8 +244,8 @@ def mask_run_id(
 ) -> str:
     """Return the 9-field BLAKE3 run-identity of one strategy *mask* (Golden Rule #4).
 
-    DEC-MASK-IDENTITY-001: the u64 mask **is** the strategy identity, encoded as
-    the ``strategy_id`` ``"mask:%016x"`` (16 lowercase hex chars, zero-padded);
+    DEC-MASK-IDENTITY-001: the u128 mask **is** the strategy identity, encoded as
+    the ``strategy_id`` ``"mask:%032x"`` (32 lowercase hex chars, zero-padded);
     the remaining eight fields are forwarded unchanged to
     :func:`brutex.strategies.combo.combo_hash`. Two masks share a run-identity
     iff all nine inputs collide, so the same mask under the same context + params
@@ -255,7 +255,7 @@ def mask_run_id(
     Parameters
     ----------
     mask
-        The u64 strategy mask. Encoded as ``"mask:%016x"`` for the ``strategy_id``.
+        The u128 strategy mask. Encoded as ``"mask:%032x"`` for the ``strategy_id``.
     direction
         Direction label (``"bull"`` / ``"bear"``); non-empty.
     instrument, tf, mode
@@ -279,7 +279,7 @@ def mask_run_id(
         :func:`brutex.strategies.combo.combo_hash`).
     """
     return combo_hash(
-        strategy_id=f"mask:{mask:016x}",
+        strategy_id=f"mask:{mask:032x}",
         direction=direction,
         instrument=instrument,
         tf=tf,
@@ -950,7 +950,7 @@ def run_persisted_sweep(
             raise
         except Exception as exc:
             raise SweepComboError(
-                f"combo 0x{mask:016x} (run_id={run_id_by_mask[mask]}) in "
+                f"combo 0x{mask:032x} (run_id={run_id_by_mask[mask]}) in "
                 f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: {exc}"
             ) from exc
         pairs.append((mask, metrics))

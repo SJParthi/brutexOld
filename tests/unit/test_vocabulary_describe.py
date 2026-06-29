@@ -8,6 +8,7 @@ line+branch gate.
 from __future__ import annotations
 
 import pytest
+from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from brutex.vocabulary.describe import (
     GROUP_RANGES,
     MaskGroup,
@@ -62,9 +63,11 @@ class TestMatchedConditionNames:
 class TestGroupInvariant:
     def test_canonical_groups_partition_the_vocabulary(self) -> None:
         covered = [bit for _, rng in GROUP_RANGES for bit in rng]
-        assert sorted(covered) == list(range(52))
+        assert sorted(covered) == list(range(TOTAL_CONDITIONS))
 
     def test_tampered_grouping_raises(self) -> None:
         # Drop the last family → no longer a full partition → AssertionError.
-        with pytest.raises(AssertionError, match="partition bits 0..51"):
-            _check_group_invariants(GROUP_RANGES[:-1], 52)
+        with pytest.raises(
+            AssertionError, match=rf"partition bits 0\.\.{TOTAL_CONDITIONS - 1}"
+        ):
+            _check_group_invariants(GROUP_RANGES[:-1], TOTAL_CONDITIONS)

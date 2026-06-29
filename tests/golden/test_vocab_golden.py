@@ -1,17 +1,20 @@
-"""Golden cross-language oracle for the 52-condition vocabulary.
+"""Golden cross-language oracle for the shared condition vocabulary.
 
-Phase 0 of the shared-core migration (``DEC-SHARED-CORE-001``, proposed): a
-frozen ``input → u64`` answer-key (``fixtures/vocab_golden_vectors.json``,
+A frozen ``input → mask`` answer-key (``fixtures/vocab_golden_vectors.json``,
 produced by ``scripts/gen_vocab_golden_vectors.py``) that:
 
 * **locks** today's Python :func:`brutex.vocabulary.evaluator.evaluate_atoms`
   against accidental drift (this module), and
-* becomes the **contract** the future Rust ``trading-core`` crate must satisfy
-  bit-for-bit before BruteX / TickVault switch to it.
+* is the **contract** the Rust ``trading-core`` crate satisfies bit-for-bit
+  (``rust/trading-core/tests/golden_vectors.rs``), so BruteX (PyO3) and
+  TickVault (native) are provably identical.
 
-The fixture is language-neutral (raw int64-paisa inputs), so the same vectors
-drive the Python check here and the Rust check later — that is what makes the
-two engines provably identical.
+The fixture is language-neutral (raw int64-paisa inputs). Since
+DEC-VOCAB-U128-CODEGEN-001 the mask is a **u128** serialised as a hex STRING
+(``expected_mask``) so a bit >= 53 keeps full precision across JSON doubles, and
+the "both ways" coverage gate is partitioned over the IMPLEMENTED bits only — the
+LAYOUT-ONLY bits (VWAP/R5-S5/BOS/CHoCH, ``implemented=false``) are proven inert
+by :func:`test_layout_only_bits_are_always_clear`.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from typing import Any
 from brutex.indicators.fib_levels import compute_fib_levels
 from brutex.indicators.pivots import compute_pivot_levels
 from brutex.vocabulary import TOTAL_CONDITIONS
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
     PriorBarHistory,
@@ -34,6 +38,11 @@ from brutex.vocabulary.evaluator import (
 _FIXTURE = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 _DATA: dict[str, Any] = json.loads(_FIXTURE.read_text(encoding="utf-8"))
 _CASES: list[dict[str, Any]] = _DATA["cases"]
+
+
+def _expected(case: dict[str, Any]) -> int:
+    """Parse a case's ``expected_mask`` hex string into the u128 mask int."""
+    return int(case["expected_mask"], 16)
 
 
 def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, PriorBarHistory]:
@@ -68,33 +77,57 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
 
 
 def test_python_reproduces_every_golden_vector() -> None:
-    """``evaluate_atoms`` must reproduce every frozen ``u64`` bit-for-bit."""
+    """``evaluate_atoms`` must reproduce every frozen mask bit-for-bit."""
     mismatches: list[str] = []
     for case in _CASES:
         snapshot, proximity, prior = _rebuild(case)
         got = evaluate_atoms(snapshot, proximity, prior)
-        if got != case["expected_u64"]:
-            mismatches.append(
-                f"case {case['id']}: expected {case['expected_u64']:#015x}, got {got:#015x}"
-            )
+        expected = _expected(case)
+        if got != expected:
+            mismatches.append(f"case {case['id']}: expected {expected:#034x}, got {got:#034x}")
     assert not mismatches, "golden-vector drift:\n" + "\n".join(mismatches[:20])
 
 
-def test_fixture_exercises_all_52_bits_both_ways() -> None:
-    """The oracle must set AND clear every one of the 52 bits at least once."""
-    full = (1 << TOTAL_CONDITIONS) - 1
+def test_fixture_exercises_all_implemented_bits_both_ways() -> None:
+    """The oracle must set AND clear every IMPLEMENTED bit at least once.
+
+    The LAYOUT-ONLY bits (``implemented=false``) are excluded — the evaluator
+    emits 0 for them by construction; :func:`test_layout_only_bits_are_always_clear`
+    proves that separately.
+    """
     set_any = 0
     clear_any = 0
     for case in _CASES:
-        set_any |= case["expected_u64"]
-        clear_any |= (~case["expected_u64"]) & full
-    assert set_any == full, "a condition never fires across the oracle"
-    assert clear_any == full, "a condition is never false across the oracle"
+        mask = _expected(case)
+        set_any |= mask
+        clear_any |= (~mask) & IMPLEMENTED_MASK
+    assert set_any == IMPLEMENTED_MASK, "an implemented condition never fires across the oracle"
+    assert clear_any == IMPLEMENTED_MASK, "an implemented condition is never false across the oracle"
+
+
+def test_layout_only_bits_are_always_clear() -> None:
+    """Every non-implemented / reserved bit must be 0 in EVERY golden case.
+
+    The honest PR-1 guarantee: the new VWAP/R5-S5/BOS/CHoCH bits are declared in
+    the layout but the evaluator never sets them (their math lands in PR-2).
+    """
+    for case in _CASES:
+        mask = _expected(case)
+        assert mask & ~IMPLEMENTED_MASK == 0, (
+            f"case {case['id']}: a layout-only/reserved bit fired (mask={mask:#034x})"
+        )
 
 
 def test_fixture_metadata_is_consistent() -> None:
     """Guard the fixture header against silent corruption / regeneration drift."""
+    assert _DATA["version"] == 2
     assert _DATA["total_conditions"] == TOTAL_CONDITIONS
+    assert int(_DATA["implemented_mask"], 16) == IMPLEMENTED_MASK
+    assert int(_DATA["full_mask"], 16) == (1 << TOTAL_CONDITIONS) - 1
     assert _DATA["n_cases"] == len(_CASES)
     assert len({case["id"] for case in _CASES}) == len(_CASES)
     assert _DATA["generated_from"] == "brutex.vocabulary.evaluator.evaluate_atoms"
+    # Every case carries a 32-nibble hex mask string (u128), not a JSON number.
+    for case in _CASES:
+        assert isinstance(case["expected_mask"], str)
+        assert len(case["expected_mask"]) == 32

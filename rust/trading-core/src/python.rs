@@ -47,7 +47,7 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// The number of atomic conditions (52).
+/// The number of atomic conditions (the dense bit count from the manifest).
 #[pyfunction]
 fn total_conditions() -> u32 {
     TOTAL_CONDITIONS
@@ -206,7 +206,7 @@ fn check_evaluate_inputs(
     Ok(())
 }
 
-/// Evaluate one bar's 52-condition `u64` mask, RECOMPUTING pivots+fib from the
+/// Evaluate one bar's condition `u128` mask, RECOMPUTING pivots+fib from the
 /// previous day's `pdh/pdl/pdc`. Used by the standalone parity check; BruteX
 /// itself uses [`evaluate_with_levels`] (it already holds the levels).
 ///
@@ -251,7 +251,7 @@ fn evaluate_from_raw(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> PyResult<u64> {
+) -> PyResult<u128> {
     // Thin PyO3 wrapper: all logic + validation lives in the pure `_impl` (unit
     // tested without a libpython link), the boundary only maps `Err(String)` to a
     // clean `ValueError` — never a panic → SIGABRT under `panic = "abort"`.
@@ -278,7 +278,7 @@ fn evaluate_from_raw(
     .map_err(PyValueError::new_err)
 }
 
-/// Pure logic for [`evaluate_from_raw`] — `Result<u64, String>` so the
+/// Pure logic for [`evaluate_from_raw`] — `Result<u128, String>` so the
 /// no-libpython `cargo test` covers every branch (valid + the validation reject).
 #[expect(
     clippy::too_many_arguments,
@@ -303,7 +303,7 @@ fn evaluate_from_raw_impl(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> Result<u64, String> {
+) -> Result<u128, String> {
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
     check_prev_day_ohlc(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa)?;
@@ -356,7 +356,7 @@ fn evaluate_from_raw_impl(
     Ok(evaluate_atoms(&snapshot, &proximity, &prior))
 }
 
-/// Evaluate one bar's 52-condition `u64` mask from PRE-BUILT levels (no
+/// Evaluate one bar's condition `u128` mask from PRE-BUILT levels (no
 /// recompute) — BruteX's `evaluate_atoms` delegation target.
 ///
 /// `pivot_levels` (len 10) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc]`.
@@ -401,7 +401,7 @@ fn evaluate_with_levels(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> PyResult<u64> {
+) -> PyResult<u128> {
     // Thin PyO3 wrapper — the length-validation + the level-indexing it guards
     // live in the pure `_impl` (unit-tested without a libpython link). The
     // boundary maps `Err(String)` to a clean `ValueError`; a length-mismatch can
@@ -428,7 +428,7 @@ fn evaluate_with_levels(
     .map_err(PyValueError::new_err)
 }
 
-/// Pure logic for [`evaluate_with_levels`] — `Result<u64, String>` so the
+/// Pure logic for [`evaluate_with_levels`] — `Result<u128, String>` so the
 /// length-guard + the indexing it protects are unit-covered without a GIL.
 #[expect(
     clippy::too_many_arguments,
@@ -452,7 +452,7 @@ fn evaluate_with_levels_impl(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> Result<u64, String> {
+) -> Result<u128, String> {
     if pivot_levels.len() != PIVOT_LEVELS_LEN {
         return Err(format!(
             "pivot_levels must have {PIVOT_LEVELS_LEN} entries, got {}",
@@ -789,7 +789,7 @@ mod tests {
     }
 
     // ── evaluate_from_raw_impl ─────────────────────────────────────────────
-    fn raw(pdh: i64, pdl: i64, pdc: i64) -> Result<u64, String> {
+    fn raw(pdh: i64, pdl: i64, pdc: i64) -> Result<u128, String> {
         evaluate_from_raw_impl(
             10 * 3600, // tod_seconds (mid-morning)
             PDC,
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn raw_impl_valid_returns_mask() {
-        // A valid call returns a u64 mask (no panic, no error).
+        // A valid call returns a u128 mask (no panic, no error).
         let m = raw(PDH, PDL, PDC).expect("valid raw");
         // Mid-morning bit must be set (sanity that the evaluator actually ran).
         let _ = m; // exact bits proven by the golden test; here we assert it ran.
@@ -844,7 +844,7 @@ mod tests {
         pivot_bps: i64,
         pdh_pdl_bps: i64,
         fib_bps: i64,
-    ) -> Result<u64, String> {
+    ) -> Result<u128, String> {
         evaluate_from_raw_impl(
             10 * 3600,
             open,
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     // ── evaluate_with_levels_impl ──────────────────────────────────────────
-    fn with_levels(pivots: Vec<i64>, fibs: Vec<i64>) -> Result<u64, String> {
+    fn with_levels(pivots: Vec<i64>, fibs: Vec<i64>) -> Result<u128, String> {
         evaluate_with_levels_impl(
             10 * 3600,
             PDC,
@@ -1182,7 +1182,7 @@ mod tests {
     /// (no per-call drift). Also a cheap perf smoke — the work is O(1) per call.
     #[test]
     fn stress_many_anchors_parity_and_no_panic() {
-        let mut acc = 0u64;
+        let mut acc = 0u128;
         for i in 0..50_000i64 {
             let pdl = 1 + (i % 100_000);
             let pdh = pdl + (i % 20_000);

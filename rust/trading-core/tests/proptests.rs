@@ -44,7 +44,9 @@ const MID_MORNING_END: u32 = 11 * 3600 + 30 * 60;
 const MIDDAY_END: u32 = 13 * 3600;
 const AFTERNOON_END: u32 = 15 * 3600;
 
-const FULL_MASK: u64 = (1u64 << bits::TOTAL_CONDITIONS) - 1;
+/// All IMPLEMENTED condition bits set — the union the evaluator can ever produce
+/// (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH bits have no branch yet, so they are 0).
+const FULL_MASK: u128 = bits::IMPLEMENTED_MASK;
 
 // ───────────────────────────── strategies ──────────────────────────────────
 
@@ -251,8 +253,8 @@ fn oracle_is_near(close: i64, level: i64, bps: i64) -> bool {
 /// only as a test oracle. `cargo-mutants` mutates `src/` but never `tests/`, so
 /// any mutant in `evaluate_atoms` diverges from this reference and is killed
 /// (provided the generators reach the mutated line — they are boundary-aware).
-fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u64 {
-    let mut m = 0u64;
+fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
+    let mut m = 0u128;
     let c = s.close_paisa;
     let pv: &PivotLevels = &s.pivots;
     let fib: &FibLevels = &s.fib;
@@ -260,26 +262,26 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
     // Group 1: EMA position.
     if let Some(e) = s.ema20_paisa {
         if c > e {
-            m |= 1 << bits::BIT_CLOSE_ABOVE_EMA20;
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_EMA20;
         }
         if c < e {
-            m |= 1 << bits::BIT_CLOSE_BELOW_EMA20;
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_EMA20;
         }
     }
     if let Some(e) = s.ema200_paisa {
         if c > e {
-            m |= 1 << bits::BIT_CLOSE_ABOVE_EMA200;
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_EMA200;
         }
         if c < e {
-            m |= 1 << bits::BIT_CLOSE_BELOW_EMA200;
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_EMA200;
         }
     }
     if let (Some(e20), Some(e200)) = (s.ema20_paisa, s.ema200_paisa) {
         if e20 > e200 {
-            m |= 1 << bits::BIT_EMA20_ABOVE_EMA200;
+            m |= 1u128 << bits::BIT_EMA20_ABOVE_EMA200;
         }
         if e20 < e200 {
-            m |= 1 << bits::BIT_EMA20_BELOW_EMA200;
+            m |= 1u128 << bits::BIT_EMA20_BELOW_EMA200;
         }
     }
 
@@ -301,22 +303,22 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
 
     // Group 3: PDH/PDL.
     if c > pv.pdh_paisa {
-        m |= 1 << bits::BIT_CLOSE_ABOVE_PDH;
+        m |= 1u128 << bits::BIT_CLOSE_ABOVE_PDH;
     }
     if c < pv.pdh_paisa {
-        m |= 1 << bits::BIT_CLOSE_BELOW_PDH;
+        m |= 1u128 << bits::BIT_CLOSE_BELOW_PDH;
     }
     if c > pv.pdl_paisa {
-        m |= 1 << bits::BIT_CLOSE_ABOVE_PDL;
+        m |= 1u128 << bits::BIT_CLOSE_ABOVE_PDL;
     }
     if c < pv.pdl_paisa {
-        m |= 1 << bits::BIT_CLOSE_BELOW_PDL;
+        m |= 1u128 << bits::BIT_CLOSE_BELOW_PDL;
     }
     if oracle_is_near(c, pv.pdh_paisa, p.pdh_pdl_proximity_bps) {
-        m |= 1 << bits::BIT_NEAR_PDH;
+        m |= 1u128 << bits::BIT_NEAR_PDH;
     }
     if oracle_is_near(c, pv.pdl_paisa, p.pdh_pdl_proximity_bps) {
-        m |= 1 << bits::BIT_NEAR_PDL;
+        m |= 1u128 << bits::BIT_NEAR_PDL;
     }
 
     // Group 4: fib proximity.
@@ -366,67 +368,67 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
     let body = (c - o).abs();
     let total_range = h - lo;
     if c > o {
-        m |= 1 << bits::BIT_BAR_BULLISH;
+        m |= 1u128 << bits::BIT_BAR_BULLISH;
     }
     if c < o {
-        m |= 1 << bits::BIT_BAR_BEARISH;
+        m |= 1u128 << bits::BIT_BAR_BEARISH;
     }
     if total_range > 0 && body * 10 < total_range {
-        m |= 1 << bits::BIT_BAR_DOJI;
+        m |= 1u128 << bits::BIT_BAR_DOJI;
     }
     if total_range > 0 {
         if body * 10 > total_range * 7 {
-            m |= 1 << bits::BIT_BAR_LARGE_BODY;
+            m |= 1u128 << bits::BIT_BAR_LARGE_BODY;
         }
         if body * 10 < total_range * 3 {
-            m |= 1 << bits::BIT_BAR_SMALL_BODY;
+            m |= 1u128 << bits::BIT_BAR_SMALL_BODY;
         }
         if (h - o.max(c)) * 2 > total_range {
-            m |= 1 << bits::BIT_LONG_UPPER_WICK;
+            m |= 1u128 << bits::BIT_LONG_UPPER_WICK;
         }
         if (o.min(c) - lo) * 2 > total_range {
-            m |= 1 << bits::BIT_LONG_LOWER_WICK;
+            m |= 1u128 << bits::BIT_LONG_LOWER_WICK;
         }
     }
 
     // Group 6: prior bar pattern.
     if prior.all_bullish() {
-        m |= 1 << bits::BIT_PRIOR_N_BULLISH;
+        m |= 1u128 << bits::BIT_PRIOR_N_BULLISH;
     }
     if prior.all_bearish() {
-        m |= 1 << bits::BIT_PRIOR_N_BEARISH;
+        m |= 1u128 << bits::BIT_PRIOR_N_BEARISH;
     }
     if prior.alternating() {
-        m |= 1 << bits::BIT_PRIOR_ALTERNATING;
+        m |= 1u128 << bits::BIT_PRIOR_ALTERNATING;
     }
 
     // Group 7: day structure.
     if c == s.day_high_paisa {
-        m |= 1 << bits::BIT_CLOSE_AT_DAY_HIGH;
+        m |= 1u128 << bits::BIT_CLOSE_AT_DAY_HIGH;
     }
     if c == s.day_low_paisa {
-        m |= 1 << bits::BIT_CLOSE_AT_DAY_LOW;
+        m |= 1u128 << bits::BIT_CLOSE_AT_DAY_LOW;
     }
     let day_range = s.day_high_paisa - s.day_low_paisa;
     if day_range > 0 {
         if (c - s.day_low_paisa) * 3 > day_range * 2 {
-            m |= 1 << bits::BIT_CLOSE_IN_UPPER_THIRD;
+            m |= 1u128 << bits::BIT_CLOSE_IN_UPPER_THIRD;
         }
         if (c - s.day_low_paisa) * 3 < day_range {
-            m |= 1 << bits::BIT_CLOSE_IN_LOWER_THIRD;
+            m |= 1u128 << bits::BIT_CLOSE_IN_LOWER_THIRD;
         }
     }
 
     // Group 8: time of day (mutually-exclusive half-open buckets).
     let t = s.tod_seconds;
     if (EARLY_MORNING_START..EARLY_MORNING_END).contains(&t) {
-        m |= 1 << bits::BIT_EARLY_MORNING;
+        m |= 1u128 << bits::BIT_EARLY_MORNING;
     } else if (EARLY_MORNING_END..MID_MORNING_END).contains(&t) {
-        m |= 1 << bits::BIT_MID_MORNING;
+        m |= 1u128 << bits::BIT_MID_MORNING;
     } else if (MID_MORNING_END..MIDDAY_END).contains(&t) {
-        m |= 1 << bits::BIT_MIDDAY;
+        m |= 1u128 << bits::BIT_MIDDAY;
     } else if (MIDDAY_END..AFTERNOON_END).contains(&t) {
-        m |= 1 << bits::BIT_AFTERNOON;
+        m |= 1u128 << bits::BIT_AFTERNOON;
     }
 
     // Group 9: day type.
@@ -434,17 +436,17 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
     if pdc > 0 {
         let gap = (pdc * 50).div_euclid(10_000);
         if s.open_of_day_paisa > pdc + gap {
-            m |= 1 << bits::BIT_GAP_UP_DAY;
+            m |= 1u128 << bits::BIT_GAP_UP_DAY;
         }
         if s.open_of_day_paisa < pdc - gap {
-            m |= 1 << bits::BIT_GAP_DOWN_DAY;
+            m |= 1u128 << bits::BIT_GAP_DOWN_DAY;
         }
     }
     if s.day_high_paisa < pv.pdh_paisa && s.day_low_paisa > pv.pdl_paisa {
-        m |= 1 << bits::BIT_INSIDE_DAY;
+        m |= 1u128 << bits::BIT_INSIDE_DAY;
     }
     if s.day_high_paisa > pv.pdh_paisa && s.day_low_paisa < pv.pdl_paisa {
-        m |= 1 << bits::BIT_OUTSIDE_DAY;
+        m |= 1u128 << bits::BIT_OUTSIDE_DAY;
     }
 
     m
@@ -477,11 +479,12 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 
-    /// Bits 52-63 are reserved and must always be clear.
+    /// Every bit outside IMPLEMENTED_MASK (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH
+    /// bits + the reserved u128 headroom) must always be clear.
     #[test]
-    fn reserved_bits_are_always_clear((s, p, prior) in arb_scenario()) {
+    fn non_implemented_bits_are_always_clear((s, p, prior) in arb_scenario()) {
         let mask = evaluate_atoms(&s, &p, &prior);
-        prop_assert_eq!(mask & !FULL_MASK, 0u64);
+        prop_assert_eq!(mask & !FULL_MASK, 0u128);
     }
 
     /// The evaluator must equal the independent oracle on every scenario. This
@@ -612,7 +615,7 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         flags: vec![],
     };
 
-    let mut seen: u64 = 0;
+    let mut seen: u128 = 0;
     let mut check = |bit: u32, s: IndicatorSnapshot, pr: &PriorBarHistory| {
         let m = evaluate_atoms(&s, &prox, pr);
         assert!(

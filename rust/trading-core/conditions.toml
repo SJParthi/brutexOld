@@ -1,0 +1,536 @@
+# conditions.toml — the SINGLE source of truth for the shared condition vocabulary.
+#
+# DEC-VOCAB-U128-CODEGEN-001 (ADR-0012 D4 / D7). This manifest is the ONE place
+# the condition bit LAYOUT lives. `scripts/codegen_vocab.py` reads it and emits
+# BOTH the Rust bit constants (`rust/trading-core/src/bits.rs`) AND the Python
+# bit constants (`brutex/vocabulary/bits.py` + the `describe.py` GROUP_RANGES),
+# so BruteX (PyO3) and TickVault (native Rust) are bit-identical BY CONSTRUCTION
+# (CLAUDE.md §11 COMMON / zero-duplication). The evaluator boolean branches stay
+# hand-written (the actual math is not codegen-able from a TOML description); this
+# manifest owns the bit LAYOUT only.
+#
+# Grow-only invariant (DEC-PLUGIN-001): a bit is NEVER renumbered or reused. The
+# existing 52 conditions keep bits 0-51 forever; new conditions append at the
+# next free bit (>= 52). A removed condition becomes `reserved = true` and keeps
+# its position. The mask is a u128 (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4 —
+# this ADR is the DEC-PLUGIN-001-mandated mask-width gate; the u64 -> u128 move
+# is NOT silent).
+#
+# Per-condition fields:
+#   bit              explicit grow-only bit position (dense over the live set)
+#   name             snake_case condition name (the NAME_TO_BIT key)
+#   group            indicator-family name (the GROUP_RANGES label)
+#   description      one-line human description
+#   reserved         true = position retired/held, not a live condition (default false)
+#   applies_to_1day  per-timeframe applicability (ADR-0012 D12 — VWAP masked on 1day)
+#   implemented      true = the evaluator computes a real boolean for this bit;
+#                    false = LAYOUT ONLY, the evaluator emits 0 until a later PR
+#                    supplies the indicator math (PR-2 for the VWAP/R5/S5/BOS/CHoCH
+#                    bits). NEVER set true without real indicator math.
+
+schema_version = 2
+mask_width = 128
+
+# ─────────────────────── Group 1: EMA Position (bits 0-5) ───────────────────────
+[[condition]]
+bit = 0
+name = "close_above_ema20"
+group = "EMA Position"
+description = "bar close strictly above the 20-period EMA"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 1
+name = "close_below_ema20"
+group = "EMA Position"
+description = "bar close strictly below the 20-period EMA"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 2
+name = "close_above_ema200"
+group = "EMA Position"
+description = "bar close strictly above the 200-period EMA"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 3
+name = "close_below_ema200"
+group = "EMA Position"
+description = "bar close strictly below the 200-period EMA"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 4
+name = "ema20_above_ema200"
+group = "EMA Position"
+description = "EMA20 strictly above EMA200 (bullish stack)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 5
+name = "ema20_below_ema200"
+group = "EMA Position"
+description = "EMA20 strictly below EMA200 (bearish stack)"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 2: Pivot Proximity (bits 6-12) ───────────────────
+[[condition]]
+bit = 6
+name = "near_pivot_p"
+group = "Pivot Proximity"
+description = "close within tolerance of the central pivot P"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 7
+name = "near_pivot_r1"
+group = "Pivot Proximity"
+description = "close within tolerance of resistance R1"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 8
+name = "near_pivot_r2"
+group = "Pivot Proximity"
+description = "close within tolerance of resistance R2"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 9
+name = "near_pivot_r3"
+group = "Pivot Proximity"
+description = "close within tolerance of resistance R3"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 10
+name = "near_pivot_s1"
+group = "Pivot Proximity"
+description = "close within tolerance of support S1"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 11
+name = "near_pivot_s2"
+group = "Pivot Proximity"
+description = "close within tolerance of support S2"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 12
+name = "near_pivot_s3"
+group = "Pivot Proximity"
+description = "close within tolerance of support S3"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 3: PDH/PDL (bits 13-18) ──────────────────────────
+[[condition]]
+bit = 13
+name = "close_above_pdh"
+group = "PDH/PDL"
+description = "close strictly above the previous-day high"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 14
+name = "close_below_pdh"
+group = "PDH/PDL"
+description = "close strictly below the previous-day high"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 15
+name = "close_above_pdl"
+group = "PDH/PDL"
+description = "close strictly above the previous-day low"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 16
+name = "close_below_pdl"
+group = "PDH/PDL"
+description = "close strictly below the previous-day low"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 17
+name = "near_pdh"
+group = "PDH/PDL"
+description = "close within tolerance of the previous-day high"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 18
+name = "near_pdl"
+group = "PDH/PDL"
+description = "close within tolerance of the previous-day low"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 4: Fibonacci (bits 19-29) ────────────────────────
+[[condition]]
+bit = 19
+name = "near_fib_0"
+group = "Fibonacci"
+description = "close within tolerance of the 0% retracement (anchor high)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 20
+name = "near_fib_236"
+group = "Fibonacci"
+description = "close within tolerance of the 23.6% retracement"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 21
+name = "near_fib_382"
+group = "Fibonacci"
+description = "close within tolerance of the 38.2% retracement"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 22
+name = "near_fib_50"
+group = "Fibonacci"
+description = "close within tolerance of the 50% retracement"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 23
+name = "near_fib_618"
+group = "Fibonacci"
+description = "close within tolerance of the 61.8% retracement"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 24
+name = "near_fib_786"
+group = "Fibonacci"
+description = "close within tolerance of the 78.6% retracement"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 25
+name = "near_fib_100"
+group = "Fibonacci"
+description = "close within tolerance of the 100% retracement (anchor low)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 26
+name = "near_fib_1272"
+group = "Fibonacci"
+description = "close within tolerance of the 127.2% extension (up or down)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 27
+name = "near_fib_1618"
+group = "Fibonacci"
+description = "close within tolerance of the 161.8% extension (up or down)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 28
+name = "near_fib_200"
+group = "Fibonacci"
+description = "close within tolerance of the 200% extension (up or down)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 29
+name = "near_fib_2618"
+group = "Fibonacci"
+description = "close within tolerance of the 261.8% extension (up or down)"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 5: Candle Shape (bits 30-36) ─────────────────────
+[[condition]]
+bit = 30
+name = "bar_bullish"
+group = "Candle Shape"
+description = "bar close strictly above its open"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 31
+name = "bar_bearish"
+group = "Candle Shape"
+description = "bar close strictly below its open"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 32
+name = "bar_doji"
+group = "Candle Shape"
+description = "body is a small fraction (<10%) of the bar range"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 33
+name = "bar_large_body"
+group = "Candle Shape"
+description = "body exceeds 70% of the bar range"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 34
+name = "bar_small_body"
+group = "Candle Shape"
+description = "body is under 30% of the bar range"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 35
+name = "long_upper_wick"
+group = "Candle Shape"
+description = "upper wick exceeds half the bar range"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 36
+name = "long_lower_wick"
+group = "Candle Shape"
+description = "lower wick exceeds half the bar range"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 6: Prior Bar Pattern (bits 37-39) ────────────────
+[[condition]]
+bit = 37
+name = "prior_n_bullish"
+group = "Prior Bar Pattern"
+description = "the prior N bars are all bullish"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 38
+name = "prior_n_bearish"
+group = "Prior Bar Pattern"
+description = "the prior N bars are all bearish"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 39
+name = "prior_alternating"
+group = "Prior Bar Pattern"
+description = "the prior N bars strictly alternate bull/bear"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 7: Day Structure (bits 40-43) ────────────────────
+[[condition]]
+bit = 40
+name = "close_at_day_high"
+group = "Day Structure"
+description = "close equals the running day high"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 41
+name = "close_at_day_low"
+group = "Day Structure"
+description = "close equals the running day low"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 42
+name = "close_in_upper_third"
+group = "Day Structure"
+description = "close sits in the upper third of the day range"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 43
+name = "close_in_lower_third"
+group = "Day Structure"
+description = "close sits in the lower third of the day range"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 8: Time of Day (bits 44-47) ──────────────────────
+[[condition]]
+bit = 44
+name = "early_morning"
+group = "Time of Day"
+description = "09:16-10:00 IST"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 45
+name = "mid_morning"
+group = "Time of Day"
+description = "10:00-11:30 IST"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 46
+name = "midday"
+group = "Time of Day"
+description = "11:30-13:00 IST"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 47
+name = "afternoon"
+group = "Time of Day"
+description = "13:00-15:00 IST"
+applies_to_1day = false
+implemented = true
+
+# ─────────────────────── Group 9: Day Type (bits 48-51) ─────────────────────────
+[[condition]]
+bit = 48
+name = "gap_up_day"
+group = "Day Type"
+description = "today's open gaps up >0.5% above the previous close"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 49
+name = "gap_down_day"
+group = "Day Type"
+description = "today's open gaps down >0.5% below the previous close"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 50
+name = "inside_day"
+group = "Day Type"
+description = "today's range is inside the previous-day range"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 51
+name = "outside_day"
+group = "Day Type"
+description = "today's range engulfs the previous-day range"
+applies_to_1day = true
+implemented = true
+
+# ════════════════════════════════════════════════════════════════════════════════
+# NEW bits (>= 52) — DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4.
+# LAYOUT ONLY: every bit below is `implemented = false` — the bit position is
+# RESERVED + declared now, the evaluator emits 0 for it. The indicator math
+# (VWAP, pivot R5/S5, BOS/CHoCH) lands in PR-2, which flips `implemented = true`
+# alongside the real boolean branch. NEVER set true without real math.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────── Group 10: VWAP Position (bits 52-53) ───────────────────
+# Session-anchored intraday futures VWAP (ADR-0012 D12). Masked on 1day
+# (a session VWAP is degenerate with one bar per session) — applies_to_1day=false.
+[[condition]]
+bit = 52
+name = "close_above_vwap"
+group = "VWAP Position"
+description = "close strictly above the session-anchored intraday VWAP (futures)"
+applies_to_1day = false
+implemented = false
+
+[[condition]]
+bit = 53
+name = "close_below_vwap"
+group = "VWAP Position"
+description = "close strictly below the session-anchored intraday VWAP (futures)"
+applies_to_1day = false
+implemented = false
+
+# ─────────────────────── Group 11: Pivot Proximity Extended (bits 54-55) ────────
+# R5/S5 proximity (ADR-0012 D3/D4 — the pivot ladder extended past R4/S4).
+[[condition]]
+bit = 54
+name = "near_pivot_r5"
+group = "Pivot Proximity Extended"
+description = "close within tolerance of resistance R5"
+applies_to_1day = true
+implemented = false
+
+[[condition]]
+bit = 55
+name = "near_pivot_s5"
+group = "Pivot Proximity Extended"
+description = "close within tolerance of support S5"
+applies_to_1day = true
+implemented = false
+
+# ─────────────────────── Group 12: Market Structure (bits 56-59) ────────────────
+# Break-of-structure (BOS) + change-of-character (CHoCH) (ADR-0012 D3/D4).
+[[condition]]
+bit = 56
+name = "bos_bullish"
+group = "Market Structure"
+description = "bullish break of structure (price takes out the last swing high)"
+applies_to_1day = true
+implemented = false
+
+[[condition]]
+bit = 57
+name = "bos_bearish"
+group = "Market Structure"
+description = "bearish break of structure (price takes out the last swing low)"
+applies_to_1day = true
+implemented = false
+
+[[condition]]
+bit = 58
+name = "choch_bullish"
+group = "Market Structure"
+description = "bullish change of character (trend flips up after a lower-low sequence)"
+applies_to_1day = true
+implemented = false
+
+[[condition]]
+bit = 59
+name = "choch_bearish"
+group = "Market Structure"
+description = "bearish change of character (trend flips down after a higher-high sequence)"
+applies_to_1day = true
+implemented = false

@@ -26,12 +26,18 @@ from typing import Any
 from brutex.indicators.fib_levels import compute_fib_levels
 from brutex.indicators.pivots import compute_pivot_levels
 from brutex.vocabulary import TOTAL_CONDITIONS
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
     PriorBarHistory,
     ProximityParams,
     evaluate_atoms,
 )
+
+#: Hex width to zero-pad a u128 mask string (32 nibbles). The mask is serialised
+#: as a STRING (not a JSON number) because a mask using bits >= 53 exceeds 2**53
+#: and would lose precision as an IEEE-754 double / JS number.
+_MASK_HEX_WIDTH = 32
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _SEED = 20260603
@@ -172,7 +178,9 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
             "fib_bps": prox.fib_proximity_bps,
         },
         "prior": {"prior_n": prior_n, "flags": list(flags)},
-        "expected_u64": mask,
+        # u128 mask serialised as a 32-nibble hex STRING (not a JSON number) so a
+        # mask using bits >= 53 keeps full precision across JSON/JS doubles.
+        "expected_mask": f"{mask:0{_MASK_HEX_WIDTH}x}",
     }
 
 
@@ -180,23 +188,31 @@ def generate() -> dict[str, Any]:
     """Build the full deterministic fixture payload."""
     rng = random.Random(_SEED)  # noqa: S311 — deterministic fixture generation, not crypto
     cases = [_build_case(rng, i) for i in range(_N_RANDOM)]
-    # Coverage audit: every one of the 52 bits must be set in >=1 case AND clear
-    # in >=1 case, so the oracle exercises all conditions both ways.
+    # Coverage audit: every IMPLEMENTED bit must be set in >=1 case AND clear in
+    # >=1 case, so the oracle exercises every condition the evaluator actually
+    # computes both ways. LAYOUT-ONLY bits (implemented=false — the new
+    # VWAP/R5-S5/BOS/CHoCH bits) are EXCLUDED from this gate because the evaluator
+    # emits 0 for them by construction (PR-1 is layout-only); a separate test
+    # asserts they are ALWAYS clear, so they are provably inert until PR-2.
     set_seen = 0
     clr_seen = 0
     for c in cases:
-        set_seen |= c["expected_u64"]
-        clr_seen |= (~c["expected_u64"]) & ((1 << TOTAL_CONDITIONS) - 1)
+        mask = int(c["expected_mask"], 16)
+        set_seen |= mask
+        clr_seen |= (~mask) & IMPLEMENTED_MASK
     full = (1 << TOTAL_CONDITIONS) - 1
     return {
-        "version": 1,
+        # version 2: u128 mask, `expected_mask` is a STRING, the both-ways gate is
+        # partitioned over the implemented bits (DEC-VOCAB-U128-CODEGEN-001).
+        "version": 2,
         "generated_from": "brutex.vocabulary.evaluator.evaluate_atoms",
         "seed": _SEED,
         "total_conditions": TOTAL_CONDITIONS,
+        "implemented_mask": f"{IMPLEMENTED_MASK:0{_MASK_HEX_WIDTH}x}",
         "n_cases": len(cases),
-        "bits_set_somewhere": f"{set_seen:013x}",
-        "bits_clear_somewhere": f"{clr_seen:013x}",
-        "full_mask": f"{full:013x}",
+        "bits_set_somewhere": f"{set_seen:0{_MASK_HEX_WIDTH}x}",
+        "bits_clear_somewhere": f"{clr_seen:0{_MASK_HEX_WIDTH}x}",
+        "full_mask": f"{full:0{_MASK_HEX_WIDTH}x}",
         "cases": cases,
     }
 
@@ -204,15 +220,14 @@ def generate() -> dict[str, Any]:
 def main() -> int:
     """Write the fixture and report coverage."""
     payload = generate()
-    full = (1 << TOTAL_CONDITIONS) - 1
-    set_ok = int(payload["bits_set_somewhere"], 16) == full
-    clr_ok = int(payload["bits_clear_somewhere"], 16) == full
+    set_ok = int(payload["bits_set_somewhere"], 16) == IMPLEMENTED_MASK
+    clr_ok = int(payload["bits_clear_somewhere"], 16) == IMPLEMENTED_MASK
     out = Path(__file__).resolve().parents[1] / "tests/golden/fixtures/vocab_golden_vectors.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote {payload['n_cases']} cases → {out}")
-    print(f"all 52 bits set-somewhere : {set_ok}")
-    print(f"all 52 bits clear-somewhere: {clr_ok}")
+    print(f"all implemented bits set-somewhere : {set_ok}")
+    print(f"all implemented bits clear-somewhere: {clr_ok}")
     return 0 if (set_ok and clr_ok) else 1
 
 

@@ -1,10 +1,16 @@
-//! `trading-core` — the shared indicator + 52-condition vocabulary kernel.
+//! `trading-core` — the shared indicator + condition vocabulary kernel.
 //!
 //! `DEC-SHARED-CORE-001` (`docs/MIGRATION.md` #441): a bit-for-bit Rust port of
 //! BruteX's Python vocabulary, the single source of truth that **BruteX consumes
 //! today** (via PyO3, live since Phase 2b — `brutex/vocabulary/evaluator.py`
 //! delegates to it) and that **TickVault will share natively (Phase 3, not yet
 //! done)**, so the backtested signal equals the live signal *by construction*.
+//!
+//! The vocabulary mask is a `u128` (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4 —
+//! the DEC-PLUGIN-001-gated u64→u128 widening for headroom). The bit LAYOUT
+//! ([`bits`]) is GENERATED from `conditions.toml` by `scripts/codegen_vocab.py`
+//! (the same manifest emits the Python twin). New bits 52..=59 (VWAP/R5-S5/
+//! BOS/CHoCH) are LAYOUT-ONLY (`implemented=false`) until their math lands in PR-2.
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral

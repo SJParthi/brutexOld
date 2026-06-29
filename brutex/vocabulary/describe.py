@@ -1,41 +1,28 @@
 """Human-readable decode of a strategy mask — which conditions matched, by family.
 
-A strategy combo is a u64 mask; each set bit ``0..51`` is one atomic condition from
-the 52-vocabulary (:mod:`brutex.vocabulary.bits`). This module turns a winning mask
-back into the EXACT list of matched conditions, grouped by the 9 indicator families,
-so a leaderboard combo reads as a rule ("close_above_ema20 AND near_fib_618 AND
-bar_bullish") rather than an opaque number — the explainability the brute-force
-search exists to deliver (CLAUDE.md §1: no black box, every winning combo traces to
-its matched conditions).
+A strategy combo is a u128 mask; each set bit ``0..TOTAL_CONDITIONS-1`` is one atomic
+condition from the shared vocabulary (:mod:`brutex.vocabulary.bits`). This module turns
+a winning mask back into the EXACT list of matched conditions, grouped by indicator
+family, so a leaderboard combo reads as a rule ("close_above_ema20 AND near_fib_618 AND
+bar_bullish") rather than an opaque number — the explainability the brute-force search
+exists to deliver (CLAUDE.md §1: no black box, every winning combo traces to its
+matched conditions).
 
-Decode only — no bar evaluation, no I/O. The reserved bits ``52..63`` (headroom per
-``bits.py``) are ignored, so a forward-compatible mask never raises here.
+Decode only — no bar evaluation, no I/O. Bits ``>= TOTAL_CONDITIONS`` (reserved
+headroom per ``bits.py``) are ignored, so a forward-compatible mask never raises here.
 
-O(1) per mask: a bounded scan of the 52 condition bits (independent of bar count).
+O(1) per mask: a bounded scan of the condition bits (independent of bar count). The
+family→bit-range table (:data:`GROUP_RANGES`) is re-exported from the generated
+:mod:`brutex.vocabulary.bits` — the codegen owns it (sourced from ``conditions.toml``),
+so it is the ONE place the grouping lives (CLAUDE.md §11 COMMON /
+DEC-VOCAB-U128-CODEGEN-001).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
 
-from brutex.vocabulary.bits import BIT_TO_NAME, TOTAL_CONDITIONS
-
-#: The 9 indicator families and their contiguous bit ranges — the canonical grouping
-#: documented in ``bits.py`` (Group 1..9). Kept as the ONE place the family→bit-range
-#: correspondence lives (CLAUDE.md §11 COMMON); validated against the 52-bit vocabulary
-#: at import so a future bit change cannot silently desync the grouping.
-GROUP_RANGES: Final[tuple[tuple[str, range], ...]] = (
-    ("EMA Position", range(0, 6)),
-    ("Pivot Proximity", range(6, 13)),
-    ("PDH/PDL", range(13, 19)),
-    ("Fibonacci", range(19, 30)),
-    ("Candle Shape", range(30, 37)),
-    ("Prior Bar Pattern", range(37, 40)),
-    ("Day Structure", range(40, 44)),
-    ("Time of Day", range(44, 48)),
-    ("Day Type", range(48, 52)),
-)
+from brutex.vocabulary.bits import BIT_TO_NAME, GROUP_RANGES, TOTAL_CONDITIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,19 +61,19 @@ def _check_group_invariants(groups: tuple[tuple[str, range], ...], total: int) -
         )
 
 
-# Compile-time invariant — the grouping must cover the whole 52-bit vocabulary.
+# Compile-time invariant — the grouping must cover the whole vocabulary exactly.
 _check_group_invariants(GROUP_RANGES, TOTAL_CONDITIONS)
 
 
 def matched_condition_names(mask: int) -> list[str]:
     """Return the condition names a mask requires, in ascending bit order.
 
-    Reserved bits ``52..63`` are ignored, so a forward-compatible mask is safe.
+    Bits ``>= TOTAL_CONDITIONS`` are ignored, so a forward-compatible mask is safe.
 
     Parameters
     ----------
     mask
-        The u64 strategy mask.
+        The u128 strategy mask.
 
     Returns
     -------
@@ -101,12 +88,12 @@ def describe_mask(mask: int) -> list[MaskGroup]:
 
     Only families with at least one matched condition are returned, in canonical
     family order — so the result reads as the combo's rule across its strategy
-    families. Reserved bits ``52..63`` are ignored.
+    families. Bits ``>= TOTAL_CONDITIONS`` are ignored.
 
     Parameters
     ----------
     mask
-        The u64 strategy mask (e.g. a leaderboard combo).
+        The u128 strategy mask (e.g. a leaderboard combo).
 
     Returns
     -------

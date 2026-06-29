@@ -9,12 +9,17 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use trading_core::bits::{IMPLEMENTED_MASK, TOTAL_CONDITIONS};
 use trading_core::{
     IndicatorSnapshot, PriorBarHistory, ProximityParams, compute_fib_levels, compute_pivot_levels,
     evaluate_atoms,
 };
 
-const TOTAL_CONDITIONS: u32 = 52;
+/// Parse a 32-nibble hex mask STRING into a `u128`. The fixture serialises the
+/// mask as a string (not a JSON number) so a bit >= 53 keeps full precision.
+fn parse_mask_hex(s: &str) -> u128 {
+    u128::from_str_radix(s, 16).expect("expected_mask must be valid hex")
+}
 
 #[derive(Deserialize)]
 struct Proximity {
@@ -47,7 +52,7 @@ struct Case {
     open_of_day_paisa: i64,
     proximity: Proximity,
     prior: Prior,
-    expected_u64: u64,
+    expected_mask: String,
 }
 
 #[derive(Deserialize)]
@@ -89,7 +94,7 @@ fn load_fixture() -> Fixture {
     serde_json::from_str(&raw).expect("parse golden fixture JSON")
 }
 
-fn eval_case(c: &Case) -> u64 {
+fn eval_case(c: &Case) -> u128 {
     let pivots = compute_pivot_levels(c.prev_pdh_paisa, c.prev_pdl_paisa, c.prev_pdc_paisa);
     let fib = compute_fib_levels(c.prev_pdh_paisa, c.prev_pdl_paisa);
     let snapshot = IndicatorSnapshot {
@@ -125,10 +130,11 @@ fn rust_reproduces_every_golden_vector() {
     let mut mismatches: Vec<String> = Vec::new();
     for c in &fixture.cases {
         let got = eval_case(c);
-        if got != c.expected_u64 {
+        let expected = parse_mask_hex(&c.expected_mask);
+        if got != expected {
             mismatches.push(format!(
-                "case {}: expected {:#015x}, got {:#015x}",
-                c.id, c.expected_u64, got
+                "case {}: expected {expected:#034x}, got {got:#034x}",
+                c.id
             ));
         }
     }
@@ -147,22 +153,45 @@ fn rust_reproduces_every_golden_vector() {
 }
 
 #[test]
-fn rust_evaluator_exercises_all_52_bits_both_ways() {
+fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
+    // The both-ways gate is partitioned over the IMPLEMENTED bits only: the
+    // LAYOUT-ONLY bits (implemented=false — VWAP/R5-S5/BOS/CHoCH) have no branch
+    // in the evaluator yet (PR-1 is layout-only), so they never fire. The
+    // separate `layout_only_bits_are_always_clear` test below proves they are
+    // provably inert until PR-2 supplies their math.
     let fixture = load_fixture();
-    let full: u64 = (1u64 << TOTAL_CONDITIONS) - 1;
-    let mut set_any: u64 = 0;
-    let mut clear_any: u64 = 0;
+    let mut set_any: u128 = 0;
+    let mut clear_any: u128 = 0;
     for c in &fixture.cases {
         let mask = eval_case(c);
         set_any |= mask;
-        clear_any |= (!mask) & full;
+        clear_any |= (!mask) & IMPLEMENTED_MASK;
     }
     assert_eq!(
-        set_any, full,
-        "a condition never fires across the Rust evaluation"
+        set_any, IMPLEMENTED_MASK,
+        "an implemented condition never fires across the Rust evaluation"
     );
     assert_eq!(
-        clear_any, full,
-        "a condition is never false across the Rust evaluation"
+        clear_any, IMPLEMENTED_MASK,
+        "an implemented condition is never false across the Rust evaluation"
     );
+}
+
+#[test]
+fn layout_only_bits_are_always_clear() {
+    // Every bit OUTSIDE IMPLEMENTED_MASK (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH
+    // bits + the reserved headroom) must be 0 in EVERY evaluated case — the
+    // honest PR-1 guarantee that the new bits are declared but inert.
+    let fixture = load_fixture();
+    let full: u128 = (1u128 << TOTAL_CONDITIONS) - 1;
+    let layout_only = full & !IMPLEMENTED_MASK;
+    for c in &fixture.cases {
+        let mask = eval_case(c);
+        assert_eq!(
+            mask & !IMPLEMENTED_MASK,
+            0,
+            "case {}: a layout-only/reserved bit fired (mask={mask:#034x}, layout_only={layout_only:#034x})",
+            c.id
+        );
+    }
 }

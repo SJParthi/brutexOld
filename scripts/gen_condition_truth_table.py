@@ -59,8 +59,8 @@ HEADER = ("snippet_id", "condition_name", "bit_position", "expected_bool", "desc
 MIN_ROWS = 200
 
 
-def load_bit_registry() -> tuple[dict[int, str], int]:
-    """Load ``BIT_TO_NAME`` + ``TOTAL_CONDITIONS`` from ``bits.py`` standalone.
+def load_bit_registry() -> tuple[dict[int, str], int, int]:
+    """Load ``BIT_TO_NAME`` + ``TOTAL_CONDITIONS`` + ``IMPLEMENTED_MASK`` standalone.
 
     Imports the module by file path so the package ``__init__`` (which pulls in
     the evaluator → ``trading_core``) is never executed — the registry is the
@@ -68,30 +68,41 @@ def load_bit_registry() -> tuple[dict[int, str], int]:
 
     Returns
     -------
-    tuple[dict[int, str], int]
-        The bit-position → condition-name map and the total condition count.
+    tuple[dict[int, str], int, int]
+        The bit-position → condition-name map, the total condition count, and the
+        IMPLEMENTED bitmask (the bits the evaluator actually computes; the
+        LAYOUT-ONLY bits are excluded from the both-ways cover + the table rows).
     """
     spec = importlib.util.spec_from_file_location("_brutex_bits_standalone", _BITS_PATH)
     if spec is None or spec.loader is None:  # pragma: no cover — defensive, path is fixed
         raise RuntimeError(f"cannot load bit registry from {_BITS_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.BIT_TO_NAME, module.TOTAL_CONDITIONS
+    return module.BIT_TO_NAME, module.TOTAL_CONDITIONS, module.IMPLEMENTED_MASK
 
 
-def select_cases(cases: list[dict[str, Any]], total: int, *, min_rows: int) -> list[dict[str, Any]]:
+def _case_mask(case: dict[str, Any]) -> int:
+    """Parse a case's ``expected_mask`` hex string into the u128 mask int."""
+    return int(case["expected_mask"], 16)
+
+
+def select_cases(
+    cases: list[dict[str, Any]], impl_bits: list[int], *, min_rows: int
+) -> list[dict[str, Any]]:
     """Greedy both-ways set-cover over *cases*, padded to ``min_rows`` rows.
 
     Picks the fewest cases (in corpus order) whose union sets AND clears every
-    one of *total* bits, then appends further unused cases (in case-id order)
-    until ``len(selected) * total >= min_rows``. Deterministic.
+    IMPLEMENTED bit, then appends further unused cases (in case-id order) until
+    ``len(selected) * len(impl_bits) >= min_rows``. Deterministic. The LAYOUT-ONLY
+    bits are excluded — the evaluator never sets them, so a both-ways cover over
+    them is impossible (they are proven always-clear by the golden tests).
 
     Parameters
     ----------
     cases
-        The golden corpus cases (each with an integer ``id`` and ``expected_u64``).
-    total
-        The condition count (52) — one row per condition per selected case.
+        The golden corpus cases (each with an integer ``id`` and ``expected_mask``).
+    impl_bits
+        The implemented condition bit positions — one row per bit per selected case.
     min_rows
         The floor on the emitted row count.
 
@@ -100,14 +111,14 @@ def select_cases(cases: list[dict[str, Any]], total: int, *, min_rows: int) -> l
     list[dict]
         The selected cases, sorted by ``id`` for a stable, reproducible table.
     """
-    need_set = set(range(total))
-    need_clear = set(range(total))
+    need_set = set(impl_bits)
+    need_clear = set(impl_bits)
     chosen: list[dict[str, Any]] = []
     chosen_ids: set[int] = set()
     for case in cases:
-        u64 = case["expected_u64"]
-        gained_set = {b for b in need_set if (u64 >> b) & 1}
-        gained_clear = {b for b in need_clear if not (u64 >> b) & 1}
+        mask = _case_mask(case)
+        gained_set = {b for b in need_set if (mask >> b) & 1}
+        gained_clear = {b for b in need_clear if not (mask >> b) & 1}
         if gained_set or gained_clear:
             chosen.append(case)
             chosen_ids.add(case["id"])
@@ -117,11 +128,11 @@ def select_cases(cases: list[dict[str, Any]], total: int, *, min_rows: int) -> l
             break
     if need_set or need_clear:  # pragma: no cover — the 400-case corpus covers all bits
         raise RuntimeError(
-            f"corpus does not cover every bit both ways: "
+            f"corpus does not cover every implemented bit both ways: "
             f"unset={sorted(need_set)} uncleared={sorted(need_clear)}"
         )
     for case in cases:
-        if len(chosen) * total >= min_rows:
+        if len(chosen) * len(impl_bits) >= min_rows:
             break
         if case["id"] not in chosen_ids:
             chosen.append(case)
@@ -131,9 +142,9 @@ def select_cases(cases: list[dict[str, Any]], total: int, *, min_rows: int) -> l
 
 
 def build_rows(
-    cases: list[dict[str, Any]], bit_to_name: dict[int, str], total: int
+    cases: list[dict[str, Any]], bit_to_name: dict[int, str], impl_bits: list[int]
 ) -> list[tuple[str, str, int, str, str]]:
-    """Decode each selected case's ``expected_u64`` into one row per condition.
+    """Decode each selected case's ``expected_mask`` into one row per implemented condition.
 
     Parameters
     ----------
@@ -141,8 +152,9 @@ def build_rows(
         The selected golden cases (already ordered by id).
     bit_to_name
         Bit-position → condition-name map (the source-of-truth registry).
-    total
-        The condition count (52).
+    impl_bits
+        The implemented condition bit positions (one row per bit per case). The
+        LAYOUT-ONLY bits are excluded — they are always false (no row needed).
 
     Returns
     -------
@@ -153,11 +165,11 @@ def build_rows(
     rows: list[tuple[str, str, int, str, str]] = []
     for case in cases:
         snippet_id = f"CASE-{case['id']:03d}"
-        u64 = case["expected_u64"]
+        mask = _case_mask(case)
         ts = case["timestamp_ist"]
-        for bit in range(total):
+        for bit in impl_bits:
             name = bit_to_name[bit]
-            value = bool((u64 >> bit) & 1)
+            value = bool((mask >> bit) & 1)
             expected = "true" if value else "false"
             description = f"golden case {case['id']} @ {ts} IST: {name}={expected}"
             rows.append((snippet_id, name, bit, expected, description))
@@ -175,10 +187,11 @@ def render_csv(rows: list[tuple[str, str, int, str, str]]) -> str:
 
 def generate() -> str:
     """Build the full truth-table CSV text from the frozen corpus + bit registry."""
-    bit_to_name, total = load_bit_registry()
+    bit_to_name, total, implemented_mask = load_bit_registry()
+    impl_bits = [b for b in range(total) if (implemented_mask >> b) & 1]
     data = json.loads(_VECTORS_PATH.read_text(encoding="utf-8"))
-    cases = select_cases(data["cases"], total, min_rows=MIN_ROWS)
-    rows = build_rows(cases, bit_to_name, total)
+    cases = select_cases(data["cases"], impl_bits, min_rows=MIN_ROWS)
+    rows = build_rows(cases, bit_to_name, impl_bits)
     return render_csv(rows)
 
 

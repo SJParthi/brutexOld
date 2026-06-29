@@ -41,14 +41,16 @@ from brutex.engine.combo_mask import (
 # ─────────────────────────────────────────────────────────────────
 
 
-def test_vocab_bits_is_52() -> None:
-    """The current 52-condition vocabulary size."""
-    assert VOCAB_BITS == 52
+def test_vocab_bits_matches_total_conditions() -> None:
+    """VOCAB_BITS tracks the codegen'd vocabulary size (grow-only)."""
+    from brutex.vocabulary.bits import TOTAL_CONDITIONS
+
+    assert VOCAB_BITS == TOTAL_CONDITIONS == 60
 
 
-def test_max_vocab_bits_is_64() -> None:
-    """u64 ceiling for the bitmask vocabulary."""
-    assert MAX_VOCAB_BITS == 64
+def test_max_vocab_bits_is_128() -> None:
+    """u128 ceiling for the bitmask vocabulary (ADR-0012 / DEC-VOCAB-U128-CODEGEN-001)."""
+    assert MAX_VOCAB_BITS == 128
 
 
 def test_module_alias_exists() -> None:
@@ -123,8 +125,8 @@ def test_bits_to_mask_rejects_at_max() -> None:
 
 
 def test_bits_to_mask_rejects_above_max() -> None:
-    with pytest.raises(ValueError, match="position 100 out of range"):
-        bits_to_mask(100)
+    with pytest.raises(ValueError, match="position 200 out of range"):
+        bits_to_mask(200)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -198,22 +200,22 @@ def test_count_combos_zero() -> None:
 
 
 def test_count_combos_one() -> None:
-    """C(n, 1) = n."""
-    assert count_combos(1) == 52
+    """C(n, 1) = n (default n = VOCAB_BITS)."""
+    assert count_combos(1) == VOCAB_BITS
     assert count_combos(1, n=5) == 5
 
 
 def test_count_combos_canonical_values() -> None:
-    """Verify against known C(52, k) values."""
-    assert count_combos(2) == 1326
-    assert count_combos(3) == 22100
-    assert count_combos(4) == 270725
-    assert count_combos(5) == 2598960
+    """Verify against known C(52, k) values (explicit n=52)."""
+    assert count_combos(2, n=52) == 1326
+    assert count_combos(3, n=52) == 22100
+    assert count_combos(4, n=52) == 270725
+    assert count_combos(5, n=52) == 2598960
 
 
 def test_count_combos_full_set() -> None:
     """C(n, n) = 1 (the all-bits-set combo)."""
-    assert count_combos(52) == 1
+    assert count_combos(VOCAB_BITS) == 1
     assert count_combos(5, n=5) == 1
 
 
@@ -233,8 +235,13 @@ def test_count_combos_rejects_k_greater_than_n() -> None:
 
 
 def test_count_combos_rejects_n_above_max() -> None:
-    with pytest.raises(ValueError, match=f"n=65 exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS}"):
-        count_combos(1, n=65)
+    with pytest.raises(ValueError, match=f"n=129 exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS}"):
+        count_combos(1, n=129)
+
+
+def test_count_combos_accepts_n_up_to_u128_ceiling() -> None:
+    """A vocab of exactly MAX_VOCAB_BITS (128) is allowed (the u128 ceiling)."""
+    assert count_combos(1, n=MAX_VOCAB_BITS) == MAX_VOCAB_BITS
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -302,8 +309,8 @@ def test_iter_masks_rejects_k_greater_than_n() -> None:
 
 
 def test_iter_masks_rejects_n_above_max() -> None:
-    with pytest.raises(ValueError, match=f"n=65 exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS}"):
-        list(iter_masks_k_of_n(1, n=65))
+    with pytest.raises(ValueError, match=f"n=129 exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS}"):
+        list(iter_masks_k_of_n(1, n=129))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -332,10 +339,10 @@ def test_evaluate_mask_against_iter_masks() -> None:
         assert evaluate_mask(bar_without_lowest, mask) is False
 
 
-def test_total_count_for_52_vocab_canonical() -> None:
-    """Sum of C(52, k) for k=0..52 = 2^52 (total power-set size)."""
-    total = sum(count_combos(k) for k in range(53))
-    assert total == 1 << 52
+def test_total_count_for_full_vocab_canonical() -> None:
+    """Sum of C(n, k) for k=0..n = 2^n (total power-set size), n = VOCAB_BITS."""
+    total = sum(count_combos(k) for k in range(VOCAB_BITS + 1))
+    assert total == 1 << VOCAB_BITS
 
 
 # ─────────────────────────────────────────────────────────────────
