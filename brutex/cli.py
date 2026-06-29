@@ -1984,19 +1984,40 @@ def _make_cli_rate_bridge_on_window(
 
     import time
 
+    import structlog
+
+    from brutex.data.errors import LakeWriteHalt
     from brutex.data.rate_bridge import publish_from_snapshots
+
+    log = structlog.get_logger("brutex.cli.rate_bridge")
 
     def _on_window() -> None:
         inner()
-        meter = getattr(getattr(adapter, "client", None), "meter", None)
-        meter_snap = meter.snapshot() if meter is not None else {}
-        publish_from_snapshots(
-            lake_root,
-            controller.snapshot(),
-            meter_snap,
-            wall_time=time.time(),
-            monotonic=time.monotonic(),
-        )
+        # The publish is a pure VISIBILITY side-effect, so it must NEVER crash the operator's
+        # multi-hour pull: wrap it so only a real disk-full halt (``LakeWriteHalt``, consistent
+        # with every other lake-write site) propagates, and every OTHER error — a non-disk
+        # ``OSError`` (``EROFS`` / ``EACCES`` / ``EXDEV`` from the ``.rate`` mkdir or the atomic
+        # ``os.replace``, which ``atomic_io`` deliberately does NOT map) or a transient
+        # controller/meter snapshot error — is swallowed + logged best-effort. The publish does
+        # one per-window ``fsync`` (no throttle — windows land at ~1 s cadence; an fsync of a
+        # tiny JSON file is negligible against the per-window fetch+append already on this path).
+        try:
+            meter = getattr(getattr(adapter, "client", None), "meter", None)
+            meter_snap = meter.snapshot() if meter is not None else {}
+            publish_from_snapshots(
+                lake_root,
+                controller.snapshot(),
+                meter_snap,
+                wall_time=time.time(),
+                monotonic=time.monotonic(),
+            )
+        except LakeWriteHalt:
+            # Disk-full / OOM is a genuine pull-wide stop — let it propagate so the existing
+            # halt handling (the `_pull_halt_errors` catch) runs, exactly like every writer.
+            raise
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Best-effort visibility — never crash the pull for a rate-monitor side-effect.
+            log.warning("cli.rate_bridge.publish_failed", exc_info=True)
 
     return _on_window
 

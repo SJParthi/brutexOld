@@ -1112,6 +1112,57 @@ def test_make_cli_rate_bridge_on_window_publishes_real_snapshot(tmp_path: Path) 
     assert snap.wall_time > 0.0
 
 
+def test_make_cli_rate_bridge_on_window_swallows_non_halt_publish_error(
+    tmp_path: Path,
+) -> None:
+    """A non-LakeWriteHalt publish error must NOT propagate out of the per-window hook.
+
+    The bridge publish is a pure VISIBILITY side-effect — an EROFS/EACCES/EXDEV from the
+    atomic write, or a transient controller-snapshot error, must NEVER crash the operator's
+    multi-hour pull. The wrapped hook swallows everything except LakeWriteHalt, and ``inner``
+    must STILL have run (the ledger checkpoint is not skipped just because the publish failed).
+    """
+
+    class _BoomController:
+        def snapshot(self) -> dict[str, object]:
+            raise RuntimeError("transient snapshot failure")
+
+    inner_calls = {"n": 0}
+
+    def _inner() -> None:
+        inner_calls["n"] += 1
+
+    wrapped = cli._make_cli_rate_bridge_on_window(_inner, tmp_path, _BoomController(), object())
+    # Must NOT raise even though controller.snapshot() blows up inside the publish.
+    wrapped()
+    assert inner_calls["n"] == 1  # inner STILL ran (publish error did not skip the checkpoint)
+    # Nothing was published (the snapshot failed before the write).
+    assert not (tmp_path / ".rate" / "pull_rate.json").exists()
+
+
+def test_make_cli_rate_bridge_on_window_reraises_lake_write_halt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A LakeWriteHalt (disk-full) from the publish STILL propagates — disk-full halts the pull.
+
+    Disk-full is a genuine pull-wide stop (it fails every remaining window), so unlike a
+    best-effort visibility error it must reach the existing ``_pull_halt_errors`` handling.
+    """
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.errors import LakeWriteHalt
+
+    def _halt(*_a: Any, **_k: Any) -> None:
+        raise LakeWriteHalt("disk_full")
+
+    # Patch the symbol the helper imported (string-target form — one consistent import style).
+    monkeypatch.setattr("brutex.data.rate_bridge.publish_from_snapshots", _halt)
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    wrapped = cli._make_cli_rate_bridge_on_window(lambda: None, tmp_path, controller, object())
+    with pytest.raises(LakeWriteHalt) as excinfo:
+        wrapped()
+    assert excinfo.value.reason == "disk_full"
+
+
 def test_cmd_fetch_live_pull_publishes_rate_bridge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
