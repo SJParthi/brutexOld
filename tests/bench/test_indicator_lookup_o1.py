@@ -56,6 +56,7 @@ def _make_pivot_days(n: int) -> dict[date, PivotLevels]:
             pdh_paisa=2_050_000 + i,
             pdl_paisa=2_000_000 + i,
             pdc_paisa=2_030_000 + i,
+            r5_paisa=2_150_000 + i,
             r4_paisa=2_130_000 + i,
             r3_paisa=2_110_000 + i,
             r2_paisa=2_090_000 + i,
@@ -65,6 +66,7 @@ def _make_pivot_days(n: int) -> dict[date, PivotLevels]:
             s2_paisa=1_990_000 + i,
             s3_paisa=1_970_000 + i,
             s4_paisa=1_950_000 + i,
+            s5_paisa=1_930_000 + i,
         )
     return levels
 
@@ -158,4 +160,61 @@ def test_fib_value_lookup_is_o1_in_days_loaded() -> None:
         f"fib value-lookup latency ratio {ratio:.2f}× ({N_BIG} vs {N_SMALL} "
         f"days) exceeds the CI ceiling — the indicator lookup may have "
         f"regressed away from O(1). t_small={t_small:.1f}ns, t_big={t_big:.1f}ns."
+    )
+
+
+def _time_vwap_update(prefilled_bars: int) -> float:
+    """Mean ns per ``VwapState.update`` AFTER the session already accumulated
+    ``prefilled_bars`` bars — proving the running-sum cost is O(1) in the number
+    of bars already seen (NOT a re-sum of session history, PR-2 risk #2)."""
+    from datetime import date as _date
+
+    from brutex.indicators.vwap import VwapState
+
+    state = VwapState()
+    day = _date(2024, 1, 2)
+    base_tod = 9 * 3600 + 16 * 60
+    # Prefill the session so cum_pv/cum_vol carry `prefilled_bars` of history.
+    for k in range(prefilled_bars):
+        state.update(
+            2_000_000 + (k % 1000),
+            100 + (k % 50),
+            is_pre_open=False,
+            session_key=1,
+            session_day=day,
+            tod_seconds=base_tod + k,
+        )
+    iters = 200_000
+    tod = base_tod + prefilled_bars
+    for k in range(2_000):  # warm up
+        state.update(
+            2_000_000, 100, is_pre_open=False, session_key=1, session_day=day, tod_seconds=tod + k
+        )
+    t0 = time.perf_counter_ns()
+    for k in range(iters):
+        state.update(
+            2_000_000,
+            100,
+            is_pre_open=False,
+            session_key=1,
+            session_day=day,
+            tod_seconds=tod + 2_000 + k,
+        )
+    t1 = time.perf_counter_ns()
+    return (t1 - t0) / iters
+
+
+def test_vwap_update_is_o1_in_session_bars() -> None:
+    """VWAP ``update`` latency with a 100K-bar-deep session must hold the ceiling
+    vs a 1K-bar-deep one — the running cum(pv)/cum(vol) is O(1) per bar (two adds
+    + one divide), never a re-sum of the session (PR-2 — DEC-NIFTY-INDICATORS-001).
+    """
+    t_small = _time_vwap_update(N_SMALL)
+    t_big = _time_vwap_update(N_BIG)
+    ratio = t_big / max(t_small, 1.0)
+
+    assert ratio < ratio_ceiling(5.0), (
+        f"VWAP update latency ratio {ratio:.2f}× ({N_BIG} vs {N_SMALL} session "
+        f"bars) exceeds the CI ceiling — VWAP may have regressed away from O(1) "
+        f"per bar. t_small={t_small:.1f}ns, t_big={t_big:.1f}ns."
     )

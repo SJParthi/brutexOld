@@ -94,6 +94,10 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
         fib.retrace_78_paisa,
         fib.ext_up_127_paisa,
         fib.ext_up_162_paisa,
+        # R5/S5 (PR-2): include so close sometimes snaps onto them and the new
+        # near_pivot_r5 / near_pivot_s5 bits (54/55) fire across the 400 cases.
+        pivots.r5_paisa,
+        pivots.s5_paisa,
     ]
     if rng.random() < 0.6:
         close = max(1, levels[rng.randrange(len(levels))] + rng.randint(-300, 300))
@@ -130,6 +134,11 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
     ema20 = None if rng.random() < 0.12 else max(1, close + rng.randint(-30_000, 30_000))
     ema200 = None if rng.random() < 0.12 else max(1, close + rng.randint(-60_000, 60_000))
 
+    # Session VWAP (PR-2): above/below the close, or warming-up/1day-NA (None).
+    # Mirrors the EMA distribution so the Group-10 close_above/below_vwap bits
+    # (52/53) are exercised BOTH ways across the 400 cases (the coverage audit).
+    vwap = None if rng.random() < 0.12 else max(1, close + rng.randint(-40_000, 40_000))
+
     tod = rng.choice(_TOD_SAMPLES)
     ts = datetime(2024, 1, 2, tod.hour, tod.minute, tzinfo=IST)
 
@@ -150,6 +159,7 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
         close_paisa=close,
         ema20_paisa=ema20,
         ema200_paisa=ema200,
+        vwap_paisa=vwap,
         pivots=pivots,
         fib=fib,
         day_high_paisa=day_high,
@@ -167,6 +177,7 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
         "close_paisa": close,
         "ema20_paisa": ema20,
         "ema200_paisa": ema200,
+        "vwap_paisa": vwap,
         "prev_pdh_paisa": pdh,
         "prev_pdl_paisa": pdl,
         "prev_pdc_paisa": pdc,
@@ -191,10 +202,11 @@ def generate() -> dict[str, Any]:
     cases = [_build_case(rng, i) for i in range(_N_RANDOM)]
     # Coverage audit: every IMPLEMENTED bit must be set in >=1 case AND clear in
     # >=1 case, so the oracle exercises every condition the evaluator actually
-    # computes both ways. LAYOUT-ONLY bits (implemented=false — the new
-    # VWAP/R5-S5/BOS/CHoCH bits) are EXCLUDED from this gate because the evaluator
-    # emits 0 for them by construction (PR-1 is layout-only); a separate test
-    # asserts they are ALWAYS clear, so they are provably inert until PR-2.
+    # computes both ways. PR-2 flipped VWAP (52/53) + pivot R5/S5 (54/55) to
+    # implemented, so they are now part of this both-ways gate (the generator
+    # snaps close onto R5/S5 + varies the VWAP above/below close). The still-
+    # LAYOUT-ONLY BOS/CHoCH bits (56-59, implemented=false) are EXCLUDED — the
+    # evaluator emits 0 for them; a separate test asserts they are ALWAYS clear.
     set_seen = 0
     clr_seen = 0
     for c in cases:

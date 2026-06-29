@@ -124,14 +124,14 @@ pub const BIT_INSIDE_DAY: u32 = 50;
 /// today's range engulfs the previous-day range
 pub const BIT_OUTSIDE_DAY: u32 = 51;
 // VWAP Position
-/// close strictly above the session-anchored intraday VWAP (futures)  (LAYOUT ONLY — implemented=false)
+/// close strictly above the session-anchored intraday VWAP (futures)
 pub const BIT_CLOSE_ABOVE_VWAP: u32 = 52;
-/// close strictly below the session-anchored intraday VWAP (futures)  (LAYOUT ONLY — implemented=false)
+/// close strictly below the session-anchored intraday VWAP (futures)
 pub const BIT_CLOSE_BELOW_VWAP: u32 = 53;
 // Pivot Proximity Extended
-/// close within tolerance of resistance R5  (LAYOUT ONLY — implemented=false)
+/// close within tolerance of resistance R5
 pub const BIT_NEAR_PIVOT_R5: u32 = 54;
-/// close within tolerance of support S5  (LAYOUT ONLY — implemented=false)
+/// close within tolerance of support S5
 pub const BIT_NEAR_PIVOT_S5: u32 = 55;
 // Market Structure
 /// bullish break of structure (price takes out the last swing high)  (LAYOUT ONLY — implemented=false)
@@ -153,7 +153,7 @@ pub const MASK_WIDTH: u32 = 128;
 /// LAYOUT-ONLY bits (`implemented=false`, e.g. the new VWAP/R5S5/BOS/CHoCH
 /// bits) are 0 here and the evaluator emits 0 for them until a later PR
 /// supplies the math.
-pub const IMPLEMENTED_MASK: u128 = 4503599627370495;
+pub const IMPLEMENTED_MASK: u128 = 72057594037927935;
 
 #[cfg(test)]
 mod tests {

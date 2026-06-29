@@ -756,6 +756,7 @@ class TestEvaluatorEdgeCases:
             pdh_paisa=pdh,
             pdl_paisa=pdl,
             pdc_paisa=0,
+            r5_paisa=0,
             r4_paisa=0,
             r3_paisa=0,
             r2_paisa=0,
@@ -765,6 +766,7 @@ class TestEvaluatorEdgeCases:
             s2_paisa=0,
             s3_paisa=0,
             s4_paisa=0,
+            s5_paisa=0,
         )
         base = _make_snapshot()
         s = IndicatorSnapshot(

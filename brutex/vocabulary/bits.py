@@ -170,7 +170,7 @@ MASK_WIDTH: Final[int] = 128
 
 #: Bitmask of conditions whose evaluator computes a real boolean. LAYOUT-ONLY
 #: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.
-IMPLEMENTED_MASK: Final[int] = 4503599627370495
+IMPLEMENTED_MASK: Final[int] = 72057594037927935
 
 #: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12 — VWAP
 #: position is masked out on 1day; intraday-only).

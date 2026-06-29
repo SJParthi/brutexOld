@@ -1,10 +1,13 @@
-//! Evaluate-time indicators the 52-condition vocabulary consumes: Standard
-//! Pivot Points and Static Daily Fibonacci levels. (EMA is NOT here — the
-//! evaluator consumes precomputed `ema20`/`ema200` paisa from the snapshot,
-//! so EMA recurrence is a later phase.)
+//! Evaluate-time indicators the condition vocabulary consumes: Standard Pivot
+//! Points (now incl. R5/S5), Static Daily Fibonacci levels, and the session-
+//! anchored intraday futures VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001). (EMA
+//! is NOT here — the evaluator consumes precomputed `ema20`/`ema200` paisa from
+//! the snapshot, so EMA recurrence is a later phase. VWAP is a STATE object whose
+//! resolved level is fed into the snapshot as `vwap_paisa`, mirroring EMA.)
 
 pub mod fib;
 pub mod pivots;
+pub mod vwap;
 
 /// Round-half-to-even (banker's rounding) to `i64` — the exact match for
 /// Python's built-in `round()` used by `_round_half_even` in

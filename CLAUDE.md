@@ -899,8 +899,14 @@ hostile-review pass._
    index engine surface; **all OTHER F&O — every non-NIFTY-futures contract,
    the ~212 F&O stocks, the NTM constituents, India VIX — stays REFERENCE_ONLY**
    (lake-only, never in the 52→60-condition vocabulary). The vocabulary itself
-   grew 52→60 conditions on a u128 mask in PR-1 (the 8 new VWAP / pivot-R5-S5 /
-   BOS-CHoCH bits are LAYOUT-ONLY until PR-2 supplies their math).
+   grew 52→60 conditions on a u128 mask in PR-1. **PR-2 (DEC-NIFTY-INDICATORS-001,
+   #1010) supplied the indicator math for the VWAP-position (bits 52/53) + pivot
+   R5/S5 (bits 54/55) conditions — now `implemented=true` (56 of 60 implemented)
+   + the two new Fibonacci anchors (rolling-weekly / weekly-static, NO new bits).
+   The BOS/CHoCH bits (56-59) remain LAYOUT-ONLY (`implemented=false`), HONESTLY
+   DEFERRED to a focused follow-up PR because their stateful fractal swing
+   detection is look-ahead-critical (a swing confirmed k bars later must not be
+   peeked) and was not made provably P-06-clean in this pass.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally

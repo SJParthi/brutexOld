@@ -79,6 +79,8 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         pv.pdh_paisa,
         pv.pdl_paisa,
         pv.pdc_paisa,
+        pv.r5_paisa,
+        pv.s5_paisa,
     ]
     fib_levels = [
         fb.retrace_level_at_pdh_paisa,
@@ -107,6 +109,7 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
+        case["vwap_paisa"],
         pivot_levels,
         fib_levels,
         case["day_high_paisa"],
@@ -135,6 +138,7 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
+        case["vwap_paisa"],
         case["prev_pdh_paisa"],
         case["prev_pdl_paisa"],
         case["prev_pdc_paisa"],

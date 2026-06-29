@@ -18,7 +18,10 @@ use crate::indicators::fib::{FibLevels, compute_fib_levels};
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
-const PIVOT_LEVELS_LEN: usize = 10;
+///
+/// `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]` — the original 10 plus the
+/// PR-2 R5/S5 levels appended (never renumbered; DEC-NIFTY-INDICATORS-001).
+const PIVOT_LEVELS_LEN: usize = 12;
 /// Number of `fib_levels` entries [`evaluate_with_levels`] expects.
 const FIB_LEVELS_LEN: usize = 15;
 
@@ -228,7 +231,7 @@ fn check_evaluate_inputs(
 )]
 #[pyo3(signature = (
     tod_seconds, open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
+    ema20_paisa, ema200_paisa, vwap_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
 ))]
@@ -240,6 +243,7 @@ fn evaluate_from_raw(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -263,6 +267,7 @@ fn evaluate_from_raw(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        vwap_paisa,
         prev_pdh_paisa,
         prev_pdl_paisa,
         prev_pdc_paisa,
@@ -292,6 +297,7 @@ fn evaluate_from_raw_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -307,6 +313,16 @@ fn evaluate_from_raw_impl(
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
     check_prev_day_ohlc(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa)?;
+    // `vwap_paisa` is only compared in the evaluator (never multiplied); bound it
+    // for hygiene alongside the EMAs.
+    if let Some(v) = vwap_paisa
+        && !bar_in_range(v)
+    {
+        return Err(format!(
+            "vwap_paisa magnitude {v} out of the overflow-safe range \
+             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+        ));
+    }
     // Also bound every per-bar input the EVALUATOR multiplies/subtracts/`.abs()`es
     // (close × bps, body × 10, (close − day_low) × 3, pdc × 50, …). The
     // recomputed pivot/fib R/S/retrace levels are bounded by the validated anchor
@@ -338,6 +354,10 @@ fn evaluate_from_raw_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        // The recompute path now ALSO threads the session VWAP, so the four-way
+        // golden bit-identity (shim == with_levels == from_raw == oracle) holds
+        // for the Group-10 bits too (DEC-NIFTY-INDICATORS-001).
+        vwap_paisa,
         pivots,
         fib,
         day_high_paisa,
@@ -359,15 +379,16 @@ fn evaluate_from_raw_impl(
 /// Evaluate one bar's condition `u128` mask from PRE-BUILT levels (no
 /// recompute) — BruteX's `evaluate_atoms` delegation target.
 ///
-/// `pivot_levels` (len 10) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc]`.
+/// `pivot_levels` (len 12) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`.
 /// `fib_levels` (len 15) = `[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
-/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`. The struct fields
-/// the 52 conditions never read (pivot r4/s4, fib range/424) are set to 0.
-/// Because the levels are passed verbatim, this is bit-identical to the Python
-/// evaluator for ANY snapshot — including hand-built levels with `pdc == 0`
-/// (the gap conditions' own `pdc > 0` guard handles that, no recompute to reject it).
+/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`. `vwap_paisa` is the
+/// session VWAP (`None` during warm-up / on 1day — the Group-10 bits then do not
+/// fire). The struct fields the conditions never read (pivot r4/s4, fib range/424)
+/// are set to 0. Because the levels are passed verbatim, this is bit-identical to
+/// the Python evaluator for ANY snapshot — including hand-built levels with
+/// `pdc == 0` (the gap conditions' own `pdc > 0` guard handles that).
 ///
-/// The length guards (10 / 15) are validated FIRST (a mismatch would otherwise
+/// The length guards (12 / 15) are validated FIRST (a mismatch would otherwise
 /// index out of bounds → SIGABRT), then every caller-supplied level AND every
 /// per-bar input + bps is bounded ([`check_evaluate_inputs`]) so a garbage value
 /// raises a clean `ValueError` instead of overflowing/`.abs()`-panicking the inner
@@ -379,7 +400,7 @@ fn evaluate_from_raw_impl(
 )]
 #[pyo3(signature = (
     tod_seconds, open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, pivot_levels, fib_levels,
+    ema20_paisa, ema200_paisa, vwap_paisa, pivot_levels, fib_levels,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
 ))]
@@ -391,6 +412,7 @@ fn evaluate_with_levels(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -414,6 +436,7 @@ fn evaluate_with_levels(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        vwap_paisa,
         pivot_levels,
         fib_levels,
         day_high_paisa,
@@ -442,6 +465,7 @@ fn evaluate_with_levels_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -478,6 +502,18 @@ fn evaluate_with_levels_impl(
             ));
         }
     }
+    // `vwap_paisa` is only COMPARED (`close > vwap` / `close < vwap`) in the
+    // evaluator — never multiplied or subtracted — so any i64 is overflow-safe;
+    // we still bound it for hygiene alongside the EMAs (a garbage value is a data
+    // bug, not a valid level).
+    if let Some(v) = vwap_paisa
+        && !bar_in_range(v)
+    {
+        return Err(format!(
+            "vwap_paisa magnitude {v} out of the overflow-safe range \
+             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+        ));
+    }
     // Bound the per-bar inputs + bps the evaluator multiplies/subtracts/`.abs()`es
     // (`pdc` = pivot_levels[9] is already bar-bounded above).
     check_evaluate_inputs(
@@ -506,6 +542,9 @@ fn evaluate_with_levels_impl(
         pdh_paisa: pivot_levels[7],
         pdl_paisa: pivot_levels[8],
         pdc_paisa: pivot_levels[9],
+        // R5/S5 appended at indices 10/11 (PR-2); r4/s4 unused by the conditions.
+        r5_paisa: pivot_levels[10],
+        s5_paisa: pivot_levels[11],
         r4_paisa: 0,
         s4_paisa: 0,
     };
@@ -539,6 +578,7 @@ fn evaluate_with_levels_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        vwap_paisa,
         pivots,
         fib,
         day_high_paisa,
@@ -561,9 +601,10 @@ fn evaluate_with_levels_impl(
 /// single-source indicator math BruteX's `compute_pivot_levels` wrapper packs
 /// into its `PivotLevels` dataclass (so the arithmetic lives ONCE, in Rust).
 ///
-/// Returns a 9-element list in BruteX `PivotLevels` field order:
-/// `[r4, r3, r2, r1, p, s1, s2, s3, s4]` (int64 paisa). The caller supplies
-/// `pdh/pdl/pdc` and already holds them. Invalid prev-day OHLC
+/// Returns an 11-element list in BruteX `PivotLevels` field order:
+/// `[r5, r4, r3, r2, r1, p, s1, s2, s3, s4, s5]` (int64 paisa — R5/S5 added in
+/// PR-2, DEC-NIFTY-INDICATORS-001). The caller supplies `pdh/pdl/pdc` and already
+/// holds them. Invalid prev-day OHLC
 /// (`pdh < pdl`, `pdc` outside `[pdl, pdh]`, or an overflow-prone magnitude) is
 /// REJECTED at the boundary with a clean `ValueError` — matching BruteX's
 /// wrapper AND ensuring a direct/garbage FFI caller can never trip the inner
@@ -586,8 +627,8 @@ fn py_compute_pivot_levels_impl(
     check_prev_day_ohlc(pdh_paisa, pdl_paisa, pdc_paisa)?;
     let p = compute_pivot_levels(pdh_paisa, pdl_paisa, pdc_paisa);
     Ok(vec![
-        p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa, p.s2_paisa,
-        p.s3_paisa, p.s4_paisa,
+        p.r5_paisa, p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa,
+        p.s2_paisa, p.s3_paisa, p.s4_paisa, p.s5_paisa,
     ])
 }
 
@@ -741,11 +782,11 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa, p.s2_paisa,
-                p.s3_paisa, p.s4_paisa,
+                p.r5_paisa, p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa,
+                p.s2_paisa, p.s3_paisa, p.s4_paisa, p.s5_paisa,
             ]
         );
-        assert_eq!(got.len(), 9);
+        assert_eq!(got.len(), 11);
     }
 
     #[test]
@@ -798,6 +839,7 @@ mod tests {
             PDC, // open/high/low/close
             Some(PDC),
             Some(PDC), // ema20/ema200
+            Some(PDC), // vwap
             pdh,
             pdl,
             pdc,
@@ -853,6 +895,7 @@ mod tests {
             close,
             ema20,
             ema200,
+            None, // vwap (the Group-10 bits are not under test here)
             PDH,
             PDL,
             PDC, // VALID anchor
@@ -963,6 +1006,58 @@ mod tests {
     }
 
     #[test]
+    fn raw_impl_rejects_out_of_range_vwap() {
+        // A garbage session VWAP (PR-2) is rejected on BOTH the recompute path …
+        let big = MAX_BAR_PAISA + 1;
+        let err = evaluate_from_raw_impl(
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            Some(big), // vwap out of range
+            PDH,
+            PDL,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
+        // … and the pre-built-levels path.
+        let err = evaluate_with_levels_impl(
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            Some(big), // vwap out of range
+            vec![0i64; PIVOT_LEVELS_LEN],
+            vec![0i64; FIB_LEVELS_LEN],
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
+    }
+
+    #[test]
     fn raw_impl_rejects_close_times_bps_overflow() {
         // A big close (at the bar ceiling) × a big-but-in-cap bps overflows i64 —
         // the `checked_mul` guard rejects it (the close × bps DoS the reviewer
@@ -1061,6 +1156,7 @@ mod tests {
             PDC,
             Some(PDC),
             Some(PDC),
+            Some(PDC), // vwap_paisa
             pivots,
             fibs,
             PDH,
@@ -1076,7 +1172,7 @@ mod tests {
 
     #[test]
     fn with_levels_valid_returns_mask() {
-        // A correctly-sized levels pair (10 + 15) runs the evaluator with no panic.
+        // A correctly-sized levels pair (12 + 15) runs the evaluator with no panic.
         let pivots = vec![0i64; PIVOT_LEVELS_LEN];
         let fibs = vec![0i64; FIB_LEVELS_LEN];
         assert!(with_levels(pivots, fibs).is_ok());
@@ -1124,6 +1220,7 @@ mod tests {
             0,
             None,
             None,
+            None, // vwap_paisa
             ok_p.clone(),
             ok_f.clone(),
             0,
@@ -1146,6 +1243,7 @@ mod tests {
             MAX_BAR_PAISA, // close
             None,
             None,
+            None, // vwap_paisa
             ok_p,
             ok_f,
             0,
@@ -1189,7 +1287,8 @@ mod tests {
             let pdc = pdl + (i % (pdh - pdl + 1));
             let got = py_compute_pivot_levels_impl(pdh, pdl, pdc).unwrap();
             let p = compute_pivot_levels(pdh, pdl, pdc);
-            assert_eq!(got[4], p.p_paisa);
+            // The 11-element list is [r5, r4, r3, r2, r1, p, s1, …]; p is index 5.
+            assert_eq!(got[5], p.p_paisa);
             let m = evaluate_from_raw_impl(
                 10 * 3600,
                 pdc,
@@ -1198,6 +1297,7 @@ mod tests {
                 pdc,
                 Some(pdc),
                 Some(pdc),
+                Some(pdc), // vwap
                 pdh,
                 pdl,
                 pdc,
@@ -1248,8 +1348,8 @@ mod tests {
             prop_assert_eq!(
                 got_p,
                 vec![
-                    p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa,
-                    p.s1_paisa, p.s2_paisa, p.s3_paisa, p.s4_paisa,
+                    p.r5_paisa, p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa,
+                    p.s1_paisa, p.s2_paisa, p.s3_paisa, p.s4_paisa, p.s5_paisa,
                 ]
             );
 
@@ -1305,7 +1405,7 @@ mod tests {
             ).is_ok());
             // … and a full valid-anchor evaluate runs without panic.
             let mask = evaluate_from_raw_impl(
-                10 * 3600, open, high, low, close, Some(close), Some(close),
+                10 * 3600, open, high, low, close, Some(close), Some(close), Some(close),
                 1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
                 bps, bps, bps, 0, vec![],
             );
