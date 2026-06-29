@@ -159,3 +159,103 @@ def test_widget_referenced_on_operator_and_universe_templates() -> None:
     for name in ("v29.html", "universe.html"):
         text = (templates / name).read_text(encoding="utf-8")
         assert "/static/bx-rate-monitor.js" in text, name
+
+
+def test_widget_referenced_on_every_dashboard_template() -> None:
+    """EVERY dashboard page loads the widget — incl. the pull-watching pages (the bug).
+
+    DEC-PULL-RATE-WIDGET-VISIBILITY-001: the widget previously loaded ONLY on v29 +
+    universe, so it was ABSENT from the pages a pull is actually watched on
+    (coverage / spot_coverage / fetch_windows / completeness / db / movers / …). It is
+    now loaded site-wide (the widget is self-contained + idempotent, so this is safe).
+    """
+    templates = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates"
+    html_files = sorted(templates.glob("*.html"))
+    assert html_files, "expected dashboard templates to exist"
+    # The pull-watching pages the bug report names MUST be present + carry the widget.
+    must_have = {
+        "coverage.html",
+        "spot_coverage.html",
+        "fetch_windows.html",
+        "completeness.html",
+        "db.html",
+        "movers.html",
+        "results.html",
+        "reports.html",
+        "expired_options.html",
+    }
+    present = {p.name for p in html_files}
+    assert must_have <= present, f"missing pull-watching templates: {must_have - present}"
+    for path in html_files:
+        text = path.read_text(encoding="utf-8")
+        assert "/static/bx-rate-monitor.js" in text, path.name
+
+
+class TestFnoPhaseLiveness:
+    """The live panel stays fed through the metadata + F&O phases, not just spot.
+
+    DEC-PULL-RATE-WIDGET-VISIBILITY-001 — the BACKEND half of the fix. The bug: only the
+    spot phase fed the panel, so ~12 s after the spot phase ended the route reported
+    ``idle`` for the entire ~38-minute F&O phase. The fix: a
+    :class:`~brutex.dashboard.rate_sampler.RatePanelSampler` ticks the SHARED controller
+    into the panel through the WHOLE pipeline, so the widget stays live across F&O.
+    """
+
+    def test_route_goes_idle_after_spot_without_the_sampler(self) -> None:
+        """REGRESSION (the bug): a spot-only tick that has aged out → the route reads idle.
+
+        Mirrors the broken state: the spot phase pushed the last live tick, then the long
+        F&O phase fed NOTHING, so once the panel's last update is older than the staleness
+        window the route honestly flips to idle (the blank widget the operator saw).
+        """
+        from brutex.dashboard.pull_rate_view import STALE_AFTER_S
+
+        state = DashboardState()
+        # A real spot-phase tick happened…
+        make_rate_observer(state)(
+            {"current_rps": 8.0, "recent_minute": 300, "ceiling_per_min": 500},
+            {"effective_rps": 5.0},
+        )
+        # …but then the F&O phase fed NOTHING, so the tick ages out past the staleness window.
+        with state._lock:  # type: ignore[attr-defined]
+            state.rate_limit.last_update_monotonic = time.monotonic() - (STALE_AFTER_S + 5.0)
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["active"] is False
+        assert body["req_per_min"] == 0  # zeroed — the blank widget
+
+    def test_sampler_keeps_route_live_during_fno_phase(self) -> None:
+        """THE FIX: the sampler ticks the shared controller → the route stays live in F&O.
+
+        Simulates the F&O phase: the SHARED session controller has been paced (its
+        rolling-minute issue count reflects real fetches) but NO spot per-window observe is
+        running. The sampler — wrapped around the pipeline — pushes that controller to the
+        panel, so ``/api/v1/pull/rate`` returns FLOWING (non-idle) DURING the F&O phase.
+        """
+        from brutex.adapters.rate_common import RateController
+        from brutex.dashboard.pull_controller import SessionRateController
+        from brutex.dashboard.rate_sampler import RatePanelSampler
+
+        # A SHARED controller that an F&O pull has been pacing: 360 issues in the trailing
+        # minute (= a real 6 r/s achieved) and a current allowed rate of 8 r/s.
+        controller = RateController(ceiling_per_min=500)
+        for _ in range(360):
+            controller._issues.append(controller._clock())
+        session = SessionRateController(factory=lambda: controller)
+        session.get()  # the F&O phase built the controller (peek now returns it)
+
+        state = DashboardState()
+        sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
+        # The pipeline wraps the metadata + F&O phases in the sampler; here we drive ONE
+        # tick deterministically (what the background loop does on its cadence).
+        assert sampler.sample_once() is True
+
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        # LIVE during the F&O phase — never the blank/idle widget the bug produced.
+        assert body["flow_state"] == "flowing"
+        assert body["active"] is True
+        assert body["req_per_sec_achieved"] == pytest.approx(6.0)  # 360 / 60
+        assert body["req_per_min"] == 360
+        assert body["req_per_hour_observed"] == 360 * 60

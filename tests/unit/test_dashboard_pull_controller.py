@@ -929,6 +929,42 @@ class TestSessionRateController:
         assert second is first  # SAME controller across pulls — the learned rate persists
         assert len(built) == 1  # built ONCE, not per pull
 
+    def test_peek_returns_none_before_first_build(self) -> None:
+        """peek() NEVER builds — it returns None until a real get() has built the controller.
+
+        DEC-PULL-RATE-WIDGET-VISIBILITY-001: the observe-only rate-panel sampler reads the
+        controller via peek() so a dry-run / pre-pull tick conjures no live controller.
+        """
+        from brutex.adapters.rate_common import RateController
+
+        built: list[RateController] = []
+
+        def _factory() -> RateController:
+            ctl = RateController()
+            built.append(ctl)
+            return ctl
+
+        holder = SessionRateController(factory=_factory)
+        # peek() before any get() builds NOTHING and reads None.
+        assert holder.peek() is None
+        assert built == []
+
+    def test_peek_returns_built_controller_without_rebuilding(self) -> None:
+        """After get() builds the controller, peek() returns that SAME instance, no rebuild."""
+        from brutex.adapters.rate_common import RateController
+
+        built: list[RateController] = []
+
+        def _factory() -> RateController:
+            ctl = RateController()
+            built.append(ctl)
+            return ctl
+
+        holder = SessionRateController(factory=_factory)
+        live = holder.get()
+        assert holder.peek() is live  # the same built controller, observed not rebuilt
+        assert len(built) == 1
+
     def test_default_factory_builds_a_real_controller(self) -> None:
         # DEC-GROWW-NO-DAILY-QUOTA-001: the dashboard controller is built with NO
         # DailyQuotaTracker (Groww backtesting has no daily quota, operator-confirmed),
