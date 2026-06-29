@@ -526,12 +526,18 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
         client_factory=lambda _root: _factory(sdk, sink),
         now=_NOW,
     )
-    # ONE pipeline built (default ON), forwarded to every ingest call, drained exactly once.
+    # ONE pipeline built (default ON), forwarded to every ingest call, and DRAINED before return.
     assert len(built) == 1
     the_pipeline = built[0]
     assert pipelines_seen  # at least one ingest call (futures + options buckets)
     assert all(p is the_pipeline for p in pipelines_seen)
-    assert drained == [the_pipeline]
+    # Drained (idempotently) — once inside ``_run_phase`` BEFORE the per-phase ledger persists
+    # (DEC-FNO-ASYNC-PIPELINE-WIRE-001: every consumer tail must ledger.record before the ledger
+    # is written to disk) AND once again in the caller's ``finally`` as a safety net. The real
+    # ``drain()`` is idempotent (a second call with no live threads is a no-op), so >= 1 call,
+    # all targeting the SAME pipeline.
+    assert drained, "the pipeline must be drained before pull_contract_candles returns"
+    assert all(p is the_pipeline for p in drained)
 
 
 def test_fno_pull_write_pool_none_when_fetch_pipeline_on(

@@ -485,6 +485,25 @@ class _PhaseResult:
     failure_symbols: frozenset[str]
 
 
+def _drain_fetch_pipeline_in_phase(pipeline: FetchPipeline | None) -> None:
+    """Drain the async fetch_pipeline from inside ``_run_phase`` BEFORE the ledger persists.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001. Delegates to the COMMON
+    :func:`~brutex.dashboard.pull_controller._drain_fetch_pipeline` (one drain implementation,
+    lazy-imported to avoid a module-load cycle — the SAME pattern
+    :func:`pull_contract_candles` uses for the build/drain helpers). A ``None`` pipeline (the
+    synchronous / dry-run / kill-switch path) is a no-op. Idempotent — the caller's outer
+    ``finally`` drain re-invokes it harmlessly. A captured ``LakeWriteHalt`` PROPAGATES (the
+    graceful pull-halt path); any other drain error is logged + swallowed inside the helper so the
+    ledger persist still runs.
+    """
+    from brutex.dashboard.pull_controller import (
+        _drain_fetch_pipeline,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    _drain_fetch_pipeline(pipeline)
+
+
 def _reconcile_phase_with_pipeline(
     phase: _PhaseResult,
     pipeline: FetchPipeline | None,
@@ -767,6 +786,19 @@ def _run_phase(
         else:
             _one_pass()
     finally:
+        # CRITICAL ORDER (DEC-FNO-ASYNC-PIPELINE-WIRE-001): drain the async fetch_pipeline
+        # BEFORE persisting the ledger. In async mode each contract's tail — incl. the durable
+        # ``sink.append`` AND ``ledger.record`` — runs on a BACKGROUND consumer that the producer
+        # does NOT wait on, so a still-queued tail's ``ledger.record`` would land on an
+        # ALREADY-PERSISTED ledger and be LOST → that window re-fetches needlessly on the next
+        # pull (the no-skip-of-settled invariant, Golden Rule #7). Draining here flushes+joins
+        # every consumer so EVERY window is ledger-recorded before ``end_pull_ledger`` writes it
+        # to disk (settle-after-durable at phase granularity, mirroring the spot spine's
+        # drain-then-persist order in pull_controller). A ``None`` pipeline (synchronous /
+        # dry-run / kill-switch) is a no-op; the caller's ``finally`` drain stays as an idempotent
+        # safety net. The write_pool is NOT drained here — its ``WriteConsumerSink.append`` blocks
+        # until durable, so its synchronous tail already records the ledger before this point.
+        _drain_fetch_pipeline_in_phase(fetch_pipeline)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
 
     # bars/windows SUM across rounds (round N re-appends only newly-fetched windows — the
