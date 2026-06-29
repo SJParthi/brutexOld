@@ -16,7 +16,7 @@ mean_ns(N_small) ≤ ceiling`` routed through
 runner, tightened to the strict 1.1× M4-Pro tier (DEC-O1-STRICT-TIER-001).
 
 Honest envelope (Golden Rule #10): the per-call cost of ``.get`` includes
-building a CONSTANT-SIZE label map (9 pivot / 12 fib entries) — that is a
+building a CONSTANT-SIZE label map (11 pivot / 12 fib entries) — that is a
 fixed per-call constant, O(1) in the data dimension this gate pins (days
 loaded). Setup synthesizes the level values directly; the level ARITHMETIC is
 separately golden-tested bit-identically against the shared Rust core

@@ -15,12 +15,8 @@ import pytest
 from brutex.calendars.nse import has_muhurat_session, is_trading_day
 from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadBarrier
+from brutex.indicators import weekly_anchors
 from brutex.indicators.prev_day_ohlc import DailyCandle
-from brutex.indicators.weekly_anchors import (
-    FibAnchor,
-    rolling_weekly_anchor,
-    weekly_static_anchor,
-)
 
 
 def _trading_days(start: date, count: int) -> list[date]:
@@ -56,7 +52,7 @@ def test_rolling_weekly_anchor_uses_trailing_5_sessions() -> None:
     days = _trading_days(date(2024, 1, 2), 7)  # 7 sessions
     candles = _candles(days)
     today = days[6]
-    anchor = rolling_weekly_anchor(today, candles)
+    anchor = weekly_anchors.rolling_weekly_anchor(today, candles)
     assert anchor is not None
     # The 5 sessions strictly before `today` are days[1..6).
     window = days[1:6]
@@ -68,7 +64,7 @@ def test_rolling_weekly_anchor_uses_trailing_5_sessions() -> None:
 def test_rolling_weekly_cold_start_returns_none() -> None:
     days = _trading_days(date(2024, 1, 2), 4)  # only 3 prior sessions before days[3]
     candles = _candles(days)
-    assert rolling_weekly_anchor(days[3], candles) is None
+    assert weekly_anchors.rolling_weekly_anchor(days[3], candles) is None
 
 
 def test_rolling_weekly_skips_missing_candle() -> None:
@@ -78,7 +74,7 @@ def test_rolling_weekly_skips_missing_candle() -> None:
     days = _trading_days(date(2024, 1, 2), 6)
     candles = _candles(days)
     del candles[days[3]]
-    assert rolling_weekly_anchor(days[5], candles) is None
+    assert weekly_anchors.rolling_weekly_anchor(days[5], candles) is None
 
 
 def test_rolling_weekly_excludes_muhurat_session() -> None:
@@ -98,7 +94,7 @@ def test_rolling_weekly_excludes_muhurat_session() -> None:
         low_paisa=1,
         close_paisa=9_000_000,
     )
-    anchor = rolling_weekly_anchor(days[5], candles)
+    anchor = weekly_anchors.rolling_weekly_anchor(days[5], candles)
     assert anchor is not None
     assert muhurat_day not in anchor.source_days
 
@@ -106,19 +102,19 @@ def test_rolling_weekly_excludes_muhurat_session() -> None:
 def test_rolling_weekly_rejects_non_trading_today() -> None:
     # 2024-01-06 is a Saturday.
     with pytest.raises(ValueError, match="not a trading day"):
-        rolling_weekly_anchor(date(2024, 1, 6), {})
+        weekly_anchors.rolling_weekly_anchor(date(2024, 1, 6), {})
 
 
 def test_rolling_weekly_rejects_bad_sessions() -> None:
     today = _trading_days(date(2024, 1, 2), 1)[0]
     with pytest.raises(ValueError, match="sessions must be"):
-        rolling_weekly_anchor(today, {}, sessions=0)
+        weekly_anchors.rolling_weekly_anchor(today, {}, sessions=0)
 
 
 def test_rolling_weekly_custom_session_window() -> None:
     days = _trading_days(date(2024, 1, 2), 6)
     candles = _candles(days)
-    anchor = rolling_weekly_anchor(days[5], candles, sessions=3)
+    anchor = weekly_anchors.rolling_weekly_anchor(days[5], candles, sessions=3)
     assert anchor is not None
     assert anchor.source_days == tuple(sorted(days[2:5]))
 
@@ -127,16 +123,14 @@ def test_rolling_weekly_no_prior_history_returns_none() -> None:
     # `today` with an EMPTY candle dict → find_prev_trading_day walks back but no
     # candle present → cold-start None (the `candle is None` / out-of-history path).
     days = _trading_days(date(2024, 1, 2), 1)
-    assert rolling_weekly_anchor(days[0], {}) is None
+    assert weekly_anchors.rolling_weekly_anchor(days[0], {}) is None
 
 
 def test_rolling_weekly_breaks_when_no_prior_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
     # Force the defensive `prev is None` break (no trading day in the lookback).
-    import brutex.indicators.weekly_anchors as wa
-
     today = _trading_days(date(2024, 1, 2), 1)[0]
-    monkeypatch.setattr(wa, "find_prev_trading_day", lambda _d: None)
-    assert wa.rolling_weekly_anchor(today, {}) is None
+    monkeypatch.setattr(weekly_anchors, "find_prev_trading_day", lambda _d: None)
+    assert weekly_anchors.rolling_weekly_anchor(today, {}) is None
 
 
 # ─────────────────────────── weekly-static ───────────────────────────
@@ -148,7 +142,7 @@ def test_weekly_static_anchor_uses_last_completed_week() -> None:
     week2 = _trading_days(date(2024, 1, 8), 2)  # Mon-Tue of ISO week 2
     candles = _candles(week1 + week2)
     today = week2[1]
-    anchor = weekly_static_anchor(today, candles)
+    anchor = weekly_anchors.weekly_static_anchor(today, candles)
     assert anchor is not None
     # The last completed week is week1.
     assert anchor.source_days == tuple(sorted(week1))
@@ -160,8 +154,8 @@ def test_weekly_static_frozen_across_current_week() -> None:
     week1 = _trading_days(date(2024, 1, 2), 4)
     week2 = _trading_days(date(2024, 1, 8), 3)
     candles = _candles(week1 + week2)
-    a0 = weekly_static_anchor(week2[0], candles)
-    a2 = weekly_static_anchor(week2[2], candles)
+    a0 = weekly_anchors.weekly_static_anchor(week2[0], candles)
+    a2 = weekly_anchors.weekly_static_anchor(week2[2], candles)
     assert a0 is not None and a2 is not None
     # Same frozen anchor for every session of the current week.
     assert (a0.high_paisa, a0.low_paisa) == (a2.high_paisa, a2.low_paisa)
@@ -171,12 +165,12 @@ def test_weekly_static_cold_start_returns_none() -> None:
     # Only the current week's candles → no completed prior week → None.
     week1 = _trading_days(date(2024, 1, 2), 3)
     candles = _candles(week1)
-    assert weekly_static_anchor(week1[2], candles) is None
+    assert weekly_anchors.weekly_static_anchor(week1[2], candles) is None
 
 
 def test_weekly_static_rejects_non_trading_today() -> None:
     with pytest.raises(ValueError, match="not a trading day"):
-        weekly_static_anchor(date(2024, 1, 6), {})
+        weekly_anchors.weekly_static_anchor(date(2024, 1, 6), {})
 
 
 def test_weekly_static_stops_at_target_week_boundary() -> None:
@@ -191,18 +185,16 @@ def test_weekly_static_stops_at_target_week_boundary() -> None:
     candles[week1[0]] = DailyCandle(
         day=week1[0], open_paisa=1, high_paisa=9_999_999, low_paisa=1, close_paisa=1
     )
-    anchor = weekly_static_anchor(week3[1], candles)
+    anchor = weekly_anchors.weekly_static_anchor(week3[1], candles)
     assert anchor is not None
     assert anchor.source_days == tuple(sorted(week2))
     assert anchor.high_paisa < 9_999_999  # week1 spike did not leak
 
 
 def test_weekly_static_breaks_when_no_prior_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    import brutex.indicators.weekly_anchors as wa
-
     today = _trading_days(date(2024, 1, 2), 1)[0]
-    monkeypatch.setattr(wa, "find_prev_trading_day", lambda _d: None)
-    assert wa.weekly_static_anchor(today, {}) is None
+    monkeypatch.setattr(weekly_anchors, "find_prev_trading_day", lambda _d: None)
+    assert weekly_anchors.weekly_static_anchor(today, {}) is None
 
 
 def test_weekly_static_guard_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,11 +202,11 @@ def test_weekly_static_guard_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None
     # find_prev_trading_day that always returns a date IN the current ISO week →
     # every step `continue`s, never landing in a completed prior week, so the
     # guard runs out and the cold-start `None` is returned.
-    import brutex.indicators.weekly_anchors as wa
-
     today = _trading_days(date(2024, 1, 9), 1)[0]  # mid-week (Tue)
-    monkeypatch.setattr(wa, "find_prev_trading_day", lambda _d: today)  # same-week forever
-    assert wa.weekly_static_anchor(today, {}) is None
+    monkeypatch.setattr(
+        weekly_anchors, "find_prev_trading_day", lambda _d: today
+    )  # same-week forever
+    assert weekly_anchors.weekly_static_anchor(today, {}) is None
 
 
 def test_weekly_static_ignores_today_and_future() -> None:
@@ -224,7 +216,7 @@ def test_weekly_static_ignores_today_and_future() -> None:
     today = week2[0]
     # A future-dated candle must never be read.
     future = week2[2]
-    anchor = weekly_static_anchor(today, candles)
+    anchor = weekly_anchors.weekly_static_anchor(today, candles)
     assert anchor is not None
     assert future not in anchor.source_days
     assert all(d < today for d in anchor.source_days)
@@ -248,8 +240,8 @@ def test_muhurat_session_excluded_automatically() -> None:
         day=muhurat_day, open_paisa=9_000_000, high_paisa=9_999_999, low_paisa=1, close_paisa=1
     )
     today = days[-1]
-    r_anchor = rolling_weekly_anchor(today, candles)
-    s_anchor = weekly_static_anchor(today, candles)
+    r_anchor = weekly_anchors.rolling_weekly_anchor(today, candles)
+    s_anchor = weekly_anchors.weekly_static_anchor(today, candles)
     assert r_anchor is not None
     assert muhurat_day not in r_anchor.source_days
     assert r_anchor.high_paisa < 9_999_999  # the muhurat spike never entered
@@ -303,7 +295,7 @@ def test_rolling_weekly_is_lookahead_clean() -> None:
     days = _trading_days(date(2024, 1, 2), 7)
     today = days[6]
     bdict, barrier, today_index = _barrier_setup(days, today)
-    anchor = rolling_weekly_anchor(today, bdict)
+    anchor = weekly_anchors.rolling_weekly_anchor(today, bdict)
     assert anchor is not None
     # No bar at index >= today's was ever touched.
     assert barrier.max_touched is not None
@@ -316,7 +308,7 @@ def test_weekly_static_is_lookahead_clean() -> None:
     days = week1 + week2
     today = week2[1]
     bdict, barrier, today_index = _barrier_setup(days, today)
-    anchor = weekly_static_anchor(today, bdict)
+    anchor = weekly_anchors.weekly_static_anchor(today, bdict)
     assert anchor is not None
     assert barrier.max_touched is not None
     assert barrier.max_touched < today_index
@@ -333,6 +325,8 @@ def test_barrier_rejects_a_deliberate_future_read() -> None:
 
 
 def test_fib_anchor_is_frozen_dataclass() -> None:
-    anchor = FibAnchor(today=date(2024, 1, 5), high_paisa=10, low_paisa=5, source_days=())
+    anchor = weekly_anchors.FibAnchor(
+        today=date(2024, 1, 5), high_paisa=10, low_paisa=5, source_days=()
+    )
     with pytest.raises((AttributeError, TypeError)):
         anchor.high_paisa = 99  # type: ignore[misc]

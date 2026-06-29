@@ -145,9 +145,15 @@ mod tests {
     fn warmup_returns_none_until_first_volume() {
         let mut v = VwapState::new();
         // First bar is pre-open auction → excluded → still None.
-        assert_eq!(v.update(10_000, 500, true, KEY, DAY, 9 * 3600 + 5 * 60), None);
+        assert_eq!(
+            v.update(10_000, 500, true, KEY, DAY, 9 * 3600 + 5 * 60),
+            None
+        );
         // A zero-volume post-open bar still leaves it cold.
-        assert_eq!(v.update(10_000, 0, false, KEY, DAY, 9 * 3600 + 15 * 60), None);
+        assert_eq!(
+            v.update(10_000, 0, false, KEY, DAY, 9 * 3600 + 15 * 60),
+            None
+        );
         // First real volume warms it.
         assert_eq!(
             v.update(10_000, 100, false, KEY, DAY, 9 * 3600 + 16 * 60),
@@ -159,7 +165,10 @@ mod tests {
     fn vwap_is_volume_weighted() {
         let mut v = VwapState::new();
         // 100 @ 10000 then 300 @ 20000 → (100*10000 + 300*20000)/400 = 17500.
-        assert_eq!(v.update(10_000, 100, false, KEY, DAY, 9 * 3600 + 16 * 60), Some(10_000));
+        assert_eq!(
+            v.update(10_000, 100, false, KEY, DAY, 9 * 3600 + 16 * 60),
+            Some(10_000)
+        );
         assert_eq!(
             v.update(20_000, 300, false, KEY, DAY, 9 * 3600 + 17 * 60),
             Some(17_500)
@@ -220,7 +229,14 @@ mod tests {
         // The VWAP read must still equal the (constant) price (no precision loss).
         let price = 8_000_000i64;
         for k in 0..50 {
-            let got = v.update(price, 100_000_000_000, false, KEY, DAY, 9 * 3600 + 16 * 60 + k);
+            let got = v.update(
+                price,
+                100_000_000_000,
+                false,
+                KEY,
+                DAY,
+                9 * 3600 + 16 * 60 + k,
+            );
             assert_eq!(got, Some(price));
         }
         // cum_pv has far exceeded i64::MAX (8e17 per bar × 50 = 4e19 > 9.2e18).

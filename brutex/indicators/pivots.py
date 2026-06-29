@@ -122,7 +122,7 @@ def compute_pivot_levels(
         pdc_paisa: Previous Day's Close in int64 paisa.
 
     Returns:
-        PivotLevels with all 9 levels (P, R1-R4, S1-S4) in int64 paisa.
+        PivotLevels with all 11 levels (P, R1-R5, S1-S5) in int64 paisa.
 
     Verified against TradingView "Pivots Traditional Auto" screenshot
     (NIFTY 14-May-2026): all 9 levels bit-exact.
