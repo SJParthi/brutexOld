@@ -179,6 +179,57 @@ class TestLifecycle:
             assert not sampler._stop.is_set()
         assert sampler._stop.is_set()
 
+    def test_context_manager_stops_on_exception(self) -> None:
+        """An exception raised in the with-body still stops the daemon + propagates.
+
+        __exit__ never suppresses (it returns None), so a body error must flow OUT of the
+        ``with`` unchanged while the sampler is still cleanly stopped — the daemon never
+        leaks past a failing pull phase.
+        """
+        spawned: list[Callable[[], None]] = []
+        session = _FakeSession(_FakeController({"recent_minute": 90}))
+        observer = _CapturingObserver()
+        sampler = _sampler(session, observer, spawn=spawned.append)
+
+        class _BodyError(RuntimeError):
+            """A sentinel error raised inside the with-body."""
+
+        # PT012: the block asserts live in-context state before raising; SIM117: the
+        # nested `with` is deliberate — `pytest.raises` must wrap the sampler `with` so the
+        # body error flows through __exit__.
+        with pytest.raises(_BodyError):  # noqa: PT012, SIM117
+            with sampler:
+                assert len(spawned) == 1  # entered → the daemon was spawned
+                assert not sampler._stop.is_set()
+                raise _BodyError("phase blew up")
+
+        # The context manager stopped the loop on the way out despite the exception.
+        assert sampler._stop.is_set()
+        assert not sampler._running
+
+    def test_double_start_does_not_spawn_a_second_daemon(self) -> None:
+        """A redundant start() while already running is a no-op (idempotent re-arm).
+
+        The first start spawns one daemon; a second start while still running must NOT
+        spawn another (it would share the single _stop event and leak). After stop() the
+        sampler re-arms — a fresh start spawns again. Asserting the observable spawn COUNT
+        (not the private _running flag) keeps the guard's real contract under test.
+        """
+        spawned: list[Callable[[], None]] = []
+        session = _FakeSession(_FakeController({"recent_minute": 90}))
+        observer = _CapturingObserver()
+        sampler = _sampler(session, observer, spawn=spawned.append)
+
+        sampler.start()
+        assert len(spawned) == 1  # first arm spawned one daemon
+
+        sampler.start()  # already running → guarded no-op, no second daemon
+        assert len(spawned) == 1
+
+        sampler.stop()  # clears the running flag so the sampler can be re-armed
+        sampler.start()  # a fresh arm after stop spawns again
+        assert len(spawned) == 2
+
     def test_default_spawn_runs_on_a_daemon_thread(self) -> None:
         """The production default spawn launches a daemon thread that the loop exits cleanly."""
         session = _FakeSession(_FakeController({"recent_minute": 60}))

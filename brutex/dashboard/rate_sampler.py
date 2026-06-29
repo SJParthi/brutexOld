@@ -147,6 +147,13 @@ class RatePanelSampler:
         self._interval = interval_seconds
         self._spawn = spawn
         self._stop = threading.Event()
+        #: ``True`` between a :meth:`start` that spawned a daemon and the matching
+        #: :meth:`stop`. Guards :meth:`start` against spawning a SECOND daemon on a
+        #: redundant call: the old ``start`` always spawned, so a double-``start`` leaked
+        #: a thread that shared the single ``_stop`` event (a single :meth:`stop` then
+        #: could not reliably halt both). A second ``start`` while already running is now a
+        #: no-op, making the "idempotent re-arm" the docstring promises actually true.
+        self._running = False
 
     def sample_once(self) -> bool:
         """Push ONE controller snapshot to the panel — returns whether a tick fired.
@@ -192,12 +199,26 @@ class RatePanelSampler:
             self.sample_once()
 
     def start(self) -> None:
-        """Clear the stop flag + launch the background sample loop (idempotent re-arm)."""
+        """Clear the stop flag + launch the background sample loop (idempotent re-arm).
+
+        Guarded against a double-start: if a daemon is already running
+        (:attr:`_running` is ``True`` and :meth:`stop` has not since fired) this is a
+        no-op, so a redundant ``start`` never spawns a SECOND daemon sharing the one
+        ``_stop`` event. After a :meth:`stop` the sampler can be re-armed by another
+        ``start`` (the genuine re-arm the docstring promises).
+        """
+        if self._running:
+            return
+        self._running = True
         self._stop.clear()
         self._spawn(self._drive)
 
     def stop(self) -> None:
-        """Signal the background loop to exit at its next wake (O(1), thread-safe)."""
+        """Signal the background loop to exit at its next wake (O(1), thread-safe).
+
+        Clears :attr:`_running` so a later :meth:`start` may re-arm a fresh daemon.
+        """
+        self._running = False
         self._stop.set()
 
     def __enter__(self) -> RatePanelSampler:
