@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import brutex.engine.combo_mask as combo_mask_mod
 from brutex.engine.combo_mask import (
     U64_MASK,
     ResidentBarBuffer,
@@ -114,7 +113,7 @@ def test_resident_buffer_falls_back_when_rust_kernel_unavailable(
         msg = "ResidentBars unavailable in this wheel"
         raise AttributeError(msg)
 
-    monkeypatch.setattr(combo_mask_mod.fno_math, "ResidentBars", _raise)
+    monkeypatch.setattr("brutex.engine.combo_mask.fno_math.ResidentBars", _raise)
     bars = [0b111, 0b101, 0b010]  # all fit u64 -> takes the try/except path
     rb = ResidentBarBuffer(bars)
     # The Rust buffer was NOT built; the numpy two-limb backing serves the count.
