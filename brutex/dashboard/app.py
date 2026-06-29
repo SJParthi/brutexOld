@@ -2434,10 +2434,21 @@ def build_app(
         empty pull.
         """
         dry_run = not groww_credentials_present()
+        # Normalize the date params to ONE definition of "blank" up front: an
+        # empty / whitespace-only value becomes ``None`` so every downstream
+        # helper (``resolve_candle_range`` AND ``_resolve_metadata_years`` AND
+        # ``pull_all_spot``) sees the SAME thing. Without this the two helpers
+        # disagree — ``resolve_candle_range`` strips ``"  "`` to ``None`` (passes)
+        # but ``_resolve_metadata_years`` does not, so ``date.fromisoformat("  ")``
+        # would raise uncaught → a 500 on a whitespace param (unreachable from the
+        # date-input UI, but ``/pull-pipeline`` is a public API) — DEC-UNIVERSE-
+        # PULL-DATERANGE-001. Normalized blank ⇒ the canonical 2020→prev-day default.
+        from_date = (from_date or "").strip() or None
+        to_date = (to_date or "").strip() or None
         # Validate the spot date range EARLY (before the background job is queued)
-        # so a reversed / below-2020 / non-ISO pick is a clean 400 (DEC-UNIVERSE-
-        # PULL-DATERANGE-001). The resolved window is recomputed inside the spot
-        # phase from the SAME strings — this call is the fail-fast guard.
+        # so a reversed / below-2020 / non-ISO pick is a clean 400. The resolved
+        # window is recomputed inside the spot phase from the SAME strings — this
+        # call is the fail-fast guard.
         try:
             resolve_candle_range(
                 from_date=from_date,

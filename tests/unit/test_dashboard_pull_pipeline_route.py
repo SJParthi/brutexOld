@@ -394,3 +394,30 @@ def test_pull_pipeline_non_iso_date_is_400(
         params={"from_date": "01-03-2021"},
     )
     assert resp.status_code == 400
+
+
+def test_pull_pipeline_whitespace_dates_behave_as_blank(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace-only date params behave byte-identically to blank (200, not 500).
+
+    ONE definition of "blank" (DEC-UNIVERSE-PULL-DATERANGE-001): a whitespace-only
+    value is normalized to ``None`` at the top of the route, so it threads ``None``
+    to the spot phase + the full 2020-origin metadata-year grid — exactly like an
+    omitted param. Without the normalization the two helpers disagreed
+    (``resolve_candle_range`` stripped ``"  "`` to None but ``_resolve_metadata_years``
+    did not → ``date.fromisoformat("  ")`` raised → a 500). Unreachable from the
+    date-input UI, but ``/pull-pipeline`` is a public API.
+    """
+    _force_dry_run(monkeypatch)
+    spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "  ", "to_date": " "},
+    )
+    assert resp.status_code == 200, "whitespace dates must NOT 500 — normalized to blank"
+    assert _wait_for_job(client)["state"] == "done"
+    # Threaded as blank: None to the spot phase + the full 2020-origin year grid.
+    assert spot_calls[0]["from_date"] is None
+    assert spot_calls[0]["to_date"] is None
+    assert metadata_calls[0]["years"][0] == 2020
