@@ -232,7 +232,10 @@ jobs:
     # shared runners - was CANCELLED at exactly 15:11 mid-way through the
     # strict per-module gates, failing the CI OK aggregate with zero real
     # failures. 25 keeps an honest hang guard with headroom for contention.
-    timeout-minutes: 25
+    # 25 -> 40 (2026-06-29): the suite re-crossed 25m; the PR-event coverage
+    # job was killed at 25:12 mid touched-module gate (reported `cancelled`,
+    # tests PASS at 100%). Continues the 2026-06-10 15->25 ratchet.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
