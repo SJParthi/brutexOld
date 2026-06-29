@@ -23,6 +23,10 @@ def test_panel_defaults_include_live_rate_monitor_fields() -> None:
     panel = RateLimitPanel()
     assert panel.recent_minute == 0
     assert panel.ceiling_per_min == -1
+    # The expanded-monitor trailing-window real counts default to 0 (idle; no live pull).
+    assert panel.recent_1s == 0
+    assert panel.recent_600s == 0
+    assert panel.recent_3600s == 0
     # The freshness baseline starts "never updated".
     assert panel.last_update_monotonic == float("-inf")
 
@@ -37,13 +41,29 @@ def test_observer_maps_recent_minute_and_per_min_cap() -> None:
             "recent_hits": 1,
             "recent_minute": 412,
             "ceiling_per_min": 500,
+            "recent_1s": 7,
+            "recent_600s": 4120,
+            "recent_3600s": 24720,
         },
         {"effective_rps": 6.4, "latency_ms_p95": 180.0},
     )
     assert state.rate_limit.recent_minute == 412
     assert state.rate_limit.ceiling_per_min == 500
+    # The expanded-monitor trailing-window real counts flow through (DEC-RATE-MONITOR-EXPAND-001).
+    assert state.rate_limit.recent_1s == 7
+    assert state.rate_limit.recent_600s == 4120
+    assert state.rate_limit.recent_3600s == 24720
     # A live tick stamped the freshness baseline to a real monotonic reading.
     assert state.rate_limit.last_update_monotonic >= before
+
+
+def test_observer_defaults_absent_measured_counts_to_zero() -> None:
+    """A snapshot from an older controller (no recent_1s/600s/3600s) → honest 0 panel counts."""
+    state = DashboardState()
+    make_rate_observer(state)({"current_rps": 5.0, "recent_minute": 100}, {})
+    assert state.rate_limit.recent_1s == 0
+    assert state.rate_limit.recent_600s == 0
+    assert state.rate_limit.recent_3600s == 0
 
 
 def test_observer_maps_absent_per_min_cap_to_sentinel() -> None:
@@ -86,6 +106,10 @@ class TestPullRateRoute:
         assert body["req_per_sec_achieved"] == 0.0
         assert body["req_per_min"] == 0
         assert body["req_per_hour_observed"] == 0
+        # The new measured req/10min + req/hour + req/sec evidence are present + zeroed idle.
+        assert body["req_per_10min"] == 0
+        assert body["req_per_hour_measured"] == 0
+        assert body["req_per_sec_count"] == 0
         assert body["seconds_since_update"] is None  # never updated
         # The limits are real even while idle.
         assert body["ceiling_rps"] == CEILING_RPS_LIMIT
@@ -100,6 +124,9 @@ class TestPullRateRoute:
                 "recent_hits": 3,
                 "recent_minute": 390,
                 "ceiling_per_min": 500,
+                "recent_1s": 6,
+                "recent_600s": 3900,
+                "recent_3600s": 23400,
             },
             {"effective_rps": 6.4, "latency_ms_p95": 200.0},
         )
@@ -112,6 +139,12 @@ class TestPullRateRoute:
         assert body["req_per_sec_allowed"] == 8.0
         assert body["req_per_min"] == 390
         assert body["req_per_hour_observed"] == 390 * 60  # observed extrapolation
+        # The NEW measured trailing-window real counts reach the route end to end
+        # (DEC-RATE-MONITOR-EXPAND-001): req/10min = trailing-600s count, req/hour MEASURED =
+        # trailing-3600s count, req/sec count = trailing-1s evidence.
+        assert body["req_per_10min"] == 3900
+        assert body["req_per_hour_measured"] == 23400
+        assert body["req_per_sec_count"] == 6
         assert body["recent_429_count"] == 3
         assert body["seconds_since_update"] is not None
         assert body["seconds_since_update"] >= 0.0
@@ -149,6 +182,16 @@ class TestPullRateRoute:
             uni = c.get("/universe")
         assert js.status_code == 200
         assert "/api/v1/pull/rate" in js.text
+        # The expanded monitor (DEC-RATE-MONITOR-EXPAND-001): the req/10min metric, the
+        # MEASURED req/hour field, the click-to-expand overlay + its idempotent guard, and the
+        # raw-evidence count rendering are all present in the served widget.
+        assert "req/10min" in js.text
+        assert "req_per_10min" in js.text
+        assert "req_per_hour_measured" in js.text
+        assert "bxRateMonitorOverlay" in js.text
+        assert "req_per_sec_count" in js.text
+        # Idempotent guard preserved (only one widget ever built).
+        assert "document.getElementById(WIDGET_ID)" in js.text
         assert uni.status_code == 200
         assert "/static/bx-rate-monitor.js" in uni.text
 
@@ -259,3 +302,55 @@ class TestFnoPhaseLiveness:
         assert body["req_per_sec_achieved"] == pytest.approx(6.0)  # 360 / 60
         assert body["req_per_min"] == 360
         assert body["req_per_hour_observed"] == 360 * 60
+
+
+class TestMeasuredCountsAreRealEndToEnd:
+    """PROOF the displayed req/10min + req/hour are REAL tracking, not fabricated.
+
+    DEC-RATE-MONITOR-EXPAND-001 (MIGRATION.md #1004). Drive a REAL ``RateController`` through
+    ``pace()`` at known clock instants, push its real ``snapshot()`` through the production
+    ``make_rate_observer`` onto the panel, and assert the ``/api/v1/pull/rate`` route reports
+    the EXACT measured trailing-window counts the controller derived from actual issue
+    timestamps — so the numbers the operator sees provably come from real per-request
+    tracking, end to end.
+    """
+
+    def test_route_reports_controllers_real_window_counts(self) -> None:
+        from brutex.adapters.rate_common import RateController
+
+        class _Clock:
+            def __init__(self) -> None:
+                self.t = 1000.0
+
+            def __call__(self) -> float:
+                return self.t
+
+            def advance(self, seconds: float) -> None:
+                self.t += seconds
+
+        clock = _Clock()
+        # A real controller with a governor (production shape). No sleeping in tests.
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_per_min=500)
+        # Issue 5 real paces over 5 s — every issue is timestamped by pace() itself.
+        for _ in range(5):
+            ctl.pace()
+            clock.advance(1.0)
+        # Now (t=1005): all 5 issues are within the last 60s / 600s / 3600s; only the most
+        # recent (t=1004, 1s before now) is within the trailing 1s window.
+        snap = ctl.snapshot()
+        # Sanity: the controller's own real counts.
+        assert snap["recent_60s"] == 5
+        assert snap["recent_600s"] == 5
+        assert snap["recent_3600s"] == 5
+
+        state = DashboardState()
+        make_rate_observer(state)(snap, {"effective_rps": 5.0})
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        # The route's measured metrics EQUAL the controller's real windowed issue counts —
+        # provably real tracking, not a per-second figure multiplied up.
+        assert body["req_per_min"] == 5
+        assert body["req_per_10min"] == 5
+        assert body["req_per_hour_measured"] == 5
+        # The req/sec evidence count is the controller's trailing-1s count (a real subset).
+        assert body["req_per_sec_count"] == snap["recent_1s"]

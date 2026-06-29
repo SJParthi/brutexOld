@@ -22,6 +22,10 @@ from brutex.adapters.rate_common import (
     CEILING_RPS,
     CLOCK_GAP_THRESHOLD_S,
     FLOOR_RPS,
+    LOG_WINDOW_1S,
+    LOG_WINDOW_60S,
+    LOG_WINDOW_600S,
+    LOG_WINDOW_3600S,
     PER_MIN_WINDOW,
     RATE_LIMIT_STORM_FLOOR_RPS,
     SNAPSHOT_LOG_INTERVAL_S,
@@ -32,6 +36,7 @@ from brutex.adapters.rate_common import (
     STEP_UP_WINDOW,
     STORM_HITS,
     TIMEOUT_FLOOR_RPS,
+    TRAILING_LOG_WINDOW_S,
     RateController,
 )
 from brutex.orchestrator.quota_tracker import DailyQuotaTracker
@@ -79,13 +84,19 @@ def _hammer(ctl: RateController, clock: _Clock, *, hits: int, spread: float = 1.
 def test_starts_at_ceiling() -> None:
     ctl = _controller(_Clock())
     assert ctl.current_rps == CEILING_RPS  # 5.0
-    # Governor disabled by default → recent_minute 0, ceiling_per_min None.
+    # Governor disabled by default → recent_minute 0, ceiling_per_min None. The expanded-
+    # monitor trailing-window real counts are 0 on a fresh controller (nothing issued yet;
+    # DEC-RATE-MONITOR-EXPAND-001).
     assert ctl.snapshot() == {
         "current_rps": 5.0,
         "recent_hits": 0,
         "recent_timeouts": 0,
         "recent_minute": 0,
         "ceiling_per_min": None,
+        "recent_1s": 0,
+        "recent_60s": 0,
+        "recent_600s": 0,
+        "recent_3600s": 0,
     }
 
 
@@ -550,13 +561,18 @@ class TestQuotaWiring:
 
     def test_snapshot_omits_quota_without_tracker(self) -> None:
         # The default (test) controller has no tracker → no quota keys; the base rate
-        # fields + the always-present governor gauges are the full set.
+        # fields + the always-present governor gauges + the expanded-monitor trailing-window
+        # real counts (DEC-RATE-MONITOR-EXPAND-001) are the full set.
         assert set(_controller(_Clock()).snapshot()) == {
             "current_rps",
             "recent_hits",
             "recent_timeouts",
             "recent_minute",
             "ceiling_per_min",
+            "recent_1s",
+            "recent_60s",
+            "recent_600s",
+            "recent_3600s",
         }
 
     def test_quota_exhausted_true_at_limit(self, tmp_path: Path) -> None:
@@ -1149,3 +1165,110 @@ class TestClockGapSleepWake:
         assert CLOCK_GAP_THRESHOLD_S == 5.0 * PER_MIN_WINDOW == 300.0
         assert CLOCK_GAP_THRESHOLD_S > STEP_UP_WINDOW
         assert CLOCK_GAP_THRESHOLD_S > STEP_DOWN_WINDOW
+
+
+class TestTrailingWindowIssueLog:
+    """The OBSERVE-ONLY trailing-hour issue log feeds REAL windowed counts.
+
+    DEC-RATE-MONITOR-EXPAND-001 (MIGRATION.md #1004). These are the TRUST/TRANSPARENCY
+    tests the operator asked for: feed KNOWN issue timestamps and assert the snapshot's
+    ``recent_1s`` / ``recent_60s`` / ``recent_600s`` / ``recent_3600s`` equal the EXACT
+    count of issues in each trailing window — proving the displayed req/sec·min·10min·hour
+    are genuine measured counts, not a per-second figure multiplied up.
+    """
+
+    def test_window_constants_are_the_documented_seconds(self) -> None:
+        # 1 s / 60 s / 600 s / 3600 s — the four trailing windows the monitor reports.
+        assert LOG_WINDOW_1S == 1.0
+        assert LOG_WINDOW_60S == 60.0 == PER_MIN_WINDOW
+        assert LOG_WINDOW_600S == 600.0
+        assert LOG_WINDOW_3600S == 3600.0 == TRAILING_LOG_WINDOW_S
+
+    def test_counts_equal_real_issues_in_each_window(self) -> None:
+        # Feed issue instants at KNOWN times relative to ``now`` and assert each window's
+        # count is EXACTLY the number of issues inside it (the arithmetic the operator can
+        # verify by eye). ``now`` = 5000.0; we stamp the log at hand-chosen offsets.
+        clock = _Clock()
+        ctl = _controller(clock)
+        now = 5000.0
+        # offsets (seconds BEFORE now) → expected membership:
+        #   0.5  -> in 1s, 60s, 600s, 3600s
+        #   0.9  -> in 1s, 60s, 600s, 3600s
+        #   30   -> in 60s, 600s, 3600s
+        #   120  -> in 600s, 3600s
+        #   900  -> in 3600s
+        #   4000 -> in NONE (older than the hour; pruned)
+        for offset in (4000.0, 900.0, 120.0, 30.0, 0.9, 0.5):
+            ctl._record_issue_locked(now - offset)
+        clock.t = now
+        snap = ctl.snapshot()
+        assert snap["recent_1s"] == 2  # the 0.5 + 0.9 instants
+        assert snap["recent_60s"] == 3  # + the 30 s instant
+        assert snap["recent_600s"] == 4  # + the 120 s instant
+        assert snap["recent_3600s"] == 5  # + the 900 s instant (the 4000 s one was pruned)
+        # The req/sec·min·10min·hour the widget shows ARE these counts (1 s window ⇒
+        # rps == recent_1s exactly): the transparency contract. No governor wired here, so
+        # recent_minute stays 0 while the observe-only log carries the real trailing-60 s count.
+        assert snap["recent_minute"] == 0
+
+    def test_snapshot_prunes_stale_instants_when_no_newer_push(self) -> None:
+        # The snapshot-time prune (separate from the push-time prune) evicts an instant that
+        # has aged past the hour when NO newer pace has pushed since — so the reported counts
+        # never include a > 1 h-old issue even on an idle-then-polled controller.
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl._record_issue_locked(1000.0)  # logged at t=1000
+        clock.t = 1000.0 + TRAILING_LOG_WINDOW_S + 5.0  # poll an hour-plus later, no new push
+        snap = ctl.snapshot()
+        assert list(ctl._issue_log) == []  # the stale instant was pruned by snapshot()
+        assert snap["recent_3600s"] == 0
+        assert snap["recent_60s"] == 0
+
+    def test_recording_prunes_to_one_hour_on_push(self) -> None:
+        # The push-time prune keeps the log bounded to the trailing hour, so an instant
+        # older than 3600 s is evicted the moment a newer one is recorded (O(1) amortized).
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl._record_issue_locked(0.0)  # very old
+        ctl._record_issue_locked(3700.0)  # > 1 h later ⇒ the 0.0 instant ages out on push
+        assert list(ctl._issue_log) == [3700.0]
+
+    def test_recent_60s_cross_checks_recent_minute_under_governor(self) -> None:
+        # With a governor wired, the issue-log ``recent_60s`` and the governor's own
+        # ``recent_minute`` are TWO INDEPENDENT counts of the same trailing-60 s window
+        # (one from _issue_log, one from the governor's _issues deque) — so they agree, a
+        # built-in cross-check the operator can trust.
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_per_min=500)
+        # Three real paces through the full gate stack (governor + bucket both stamp).
+        for _ in range(3):
+            ctl.pace()
+            clock.advance(0.5)
+        snap = ctl.snapshot()
+        assert snap["recent_60s"] == snap["recent_minute"] == 3
+
+    def test_pace_records_an_issue_without_a_governor(self) -> None:
+        # Governor OFF: _issues stays empty (recent_minute 0), but the OBSERVE-ONLY issue
+        # log STILL records every admitted issue, so req/sec·min·10min·hour are real even
+        # without a per-minute governor wired.
+        clock = _Clock()
+        ctl = _controller(clock)  # no governor
+        for _ in range(4):
+            ctl.pace()
+            clock.advance(0.1)
+        snap = ctl.snapshot()
+        assert snap["recent_minute"] == 0  # no governor deque
+        assert snap["recent_60s"] == 4  # the issue log counted all 4
+        assert snap["recent_3600s"] == 4
+
+    def test_clock_gap_clears_the_issue_log(self) -> None:
+        # A laptop sleep/wake clock jump must forget pre-sleep instants so a post-wake
+        # snapshot does not count stale issues into the windows (DEC-RATE-CLOCK-SLEEPWAKE-001
+        # extended to the issue log). A jump > CLOCK_GAP_THRESHOLD_S triggers the reset.
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl.pace()  # one real issue logged at t=1000
+        assert len(ctl._issue_log) == 1
+        clock.advance(CLOCK_GAP_THRESHOLD_S + 1.0)  # the machine "slept"
+        ctl.on_success()  # any critical section runs the clock-gap handler first
+        assert len(ctl._issue_log) == 0

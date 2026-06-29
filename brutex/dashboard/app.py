@@ -325,6 +325,16 @@ class RateLimitPanel:
     #: ``-1`` when no per-minute governor is wired (the dry-run / no-live default).
     recent_minute: int = 0
     ceiling_per_min: int = -1
+    #: The controller's OBSERVE-ONLY trailing-window REAL issue counts measured from actual
+    #: issue timestamps (``recent_1s`` / ``recent_600s`` / ``recent_3600s``;
+    #: DEC-RATE-MONITOR-EXPAND-001, MIGRATION.md #1004). These feed the live-rate monitor's
+    #: req/sec, req/10min + MEASURED req/hour evidence so the operator can verify each rate is
+    #: a genuine windowed count, not a per-second figure multiplied up. ``recent_60s`` reuses
+    #: :attr:`recent_minute` (the same trailing-60s count, two independent controller sources).
+    #: ``0`` when no live pull has ticked (the honest idle default).
+    recent_1s: int = 0
+    recent_600s: int = 0
+    recent_3600s: int = 0
     #: The monotonic timestamp of the LAST live rate tick (a pull pushed a snapshot via
     #: :func:`make_rate_observer`). ``-inf`` (the default) means "never updated" — the
     #: live-pull-rate monitor reads this to tell an ACTIVE pull from an IDLE / ended one,
@@ -559,6 +569,9 @@ class DashboardState:
         quota_limit: int = -1,
         recent_minute: int = 0,
         ceiling_per_min: int = -1,
+        recent_1s: int = 0,
+        recent_600s: int = 0,
+        recent_3600s: int = 0,
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
@@ -573,6 +586,11 @@ class DashboardState:
         ALSO stamps :attr:`RateLimitPanel.last_update_monotonic` (the staleness baseline
         the monitor reads to tell an active pull from an idle one) via
         :meth:`_stamp_rate_update`.
+
+        ``recent_1s`` / ``recent_600s`` / ``recent_3600s`` are the controller's OBSERVE-ONLY
+        trailing-window REAL issue counts (DEC-RATE-MONITOR-EXPAND-001) feeding the monitor's
+        req/sec, req/10min + MEASURED req/hour evidence; they default to ``0`` so a snapshot
+        from an older controller (or a non-live caller) leaves them honestly zeroed.
         """
         with self._lock:
             self.rate_limit.current_rps = current_rps
@@ -583,6 +601,9 @@ class DashboardState:
             self.rate_limit.quota_limit = quota_limit
             self.rate_limit.recent_minute = recent_minute
             self.rate_limit.ceiling_per_min = ceiling_per_min
+            self.rate_limit.recent_1s = recent_1s
+            self.rate_limit.recent_600s = recent_600s
+            self.rate_limit.recent_3600s = recent_3600s
             self._stamp_rate_update()
 
     def _stamp_rate_update(self) -> None:
@@ -790,6 +811,12 @@ def make_rate_observer(
             quota_limit=int(rate.get("quota_limit", -1)),
             recent_minute=int(rate.get("recent_minute", 0)),
             ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
+            # OBSERVE-ONLY trailing-window real issue counts (DEC-RATE-MONITOR-EXPAND-001):
+            # absent on an older controller snapshot → default 0 (honest idle), never a
+            # fabricated number.
+            recent_1s=int(rate.get("recent_1s", 0)),
+            recent_600s=int(rate.get("recent_600s", 0)),
+            recent_3600s=int(rate.get("recent_3600s", 0)),
         )
         state.update_throughput(
             effective_rps=float(meter.get("effective_rps", 0.0)),
@@ -1172,6 +1199,9 @@ def build_app(
             panel_current_rps = panel.current_rps
             panel_recent_minute = panel.recent_minute
             panel_recent_429 = panel.recent_429_count
+            panel_recent_1s = panel.recent_1s
+            panel_recent_600s = panel.recent_600s
+            panel_recent_3600s = panel.recent_3600s
             panel_last_update = panel.last_update_monotonic
         if math.isinf(panel_last_update):
             panel_age = math.inf
@@ -1187,6 +1217,9 @@ def build_app(
         bridge_current_rps: float | None = None
         bridge_recent_minute: int | None = None
         bridge_recent_429: int | None = None
+        bridge_recent_1s: int | None = None
+        bridge_recent_600s: int | None = None
+        bridge_recent_3600s: int | None = None
         bridge_lake_root = _rate_bridge_lake_root_or_none(instrument_store)
         if bridge_lake_root is not None:
             from brutex.data.rate_bridge import read_rate_snapshot
@@ -1198,6 +1231,9 @@ def build_app(
                 bridge_current_rps = snapshot.current_rps
                 bridge_recent_minute = snapshot.recent_minute
                 bridge_recent_429 = snapshot.recent_429
+                bridge_recent_1s = snapshot.recent_1s
+                bridge_recent_600s = snapshot.recent_600s
+                bridge_recent_3600s = snapshot.recent_3600s
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -1205,11 +1241,17 @@ def build_app(
             panel_recent_minute=panel_recent_minute,
             panel_recent_429_count=panel_recent_429,
             panel_seconds_since_update=panel_age,
+            panel_recent_1s=panel_recent_1s,
+            panel_recent_600s=panel_recent_600s,
+            panel_recent_3600s=panel_recent_3600s,
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
             bridge_recent_429_count=bridge_recent_429,
             bridge_seconds_since_update=bridge_age,
+            bridge_recent_1s=bridge_recent_1s,
+            bridge_recent_600s=bridge_recent_600s,
+            bridge_recent_3600s=bridge_recent_3600s,
         )
         return JSONResponse(view.to_dict())
 
