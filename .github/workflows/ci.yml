@@ -1002,9 +1002,16 @@ jobs:
           else
             echo "(brutex.data.models test file not present yet — gate inactive)"
           fi
-          # 19i · brutex.engine.combo_mask (44 stmts, 18 branches, 48 tests)
+          # 19i · brutex.engine.combo_mask (133 stmts, 52 branches — grown for
+          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012). The
+          # base scalar suite is test_engine_combo_mask.py; the u128 two-limb
+          # numpy oracle/fallback paths (the >=64-bit headroom + the
+          # kernel-unavailable ResidentBars fallback) live in the dedicated
+          # test_engine_combo_mask_u128.py — BOTH are required to reach 100%
+          # line+branch (COMMON, composed not duplicated — mirrors the
+          # quota_tracker two-file gate above).
           if compgen -G "tests/unit/test_engine_combo_mask.py" > /dev/null; then
-            pytest --cov=brutex.engine.combo_mask --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_combo_mask.py
+            pytest --cov=brutex.engine.combo_mask --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_combo_mask.py tests/unit/test_engine_combo_mask_u128.py
           else
             echo "(brutex.engine.combo_mask test file not present yet — gate inactive)"
           fi
