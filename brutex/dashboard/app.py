@@ -143,6 +143,7 @@ from brutex.dashboard.pull_controller import (
     resolve_pull_targets,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.rate_sampler import RatePanelSampler
 from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.spot_cascade import (
     SpotCascadeIndex,
@@ -2043,7 +2044,18 @@ def build_app(
 
             # The (completed, total, current) → sync_from_ledger mapping lives in the
             # module-level _metadata_progress_sync (unit-tested); partial binds this job.
-            with RegistryStore.open(registry_path) as registry:
+            #
+            # Keep the live PULL RATE panel fed through this STANDALONE metadata phase too
+            # (DEC-PULL-RATE-WIDGET-VISIBILITY-001 MINOR-1): the metadata pull has no
+            # per-window observe seam, so without the sampler the panel goes stale →
+            # /api/v1/pull/rate reports `idle` for the whole chain enumeration even while
+            # the SHARED controller is pacing real expiry/contract calls. The sampler ticks
+            # the SAME controller through make_rate_observer (observe-only, best-effort,
+            # never builds a controller), mirroring the /pull-pipeline wrap.
+            with (
+                RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)),
+                RegistryStore.open(registry_path) as registry,
+            ):
                 report = pull_expiries_contracts(
                     instruments,
                     registry=registry,
@@ -2148,7 +2160,17 @@ def build_app(
             def _hist_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
 
-            with RegistryStore.open(registry_path) as registry:
+            # Keep the live PULL RATE panel fed through this STANDALONE composite
+            # (metadata + long F&O/historical) phase too (DEC-PULL-RATE-WIDGET-VISIBILITY-001
+            # MINOR-1): neither half has a per-window observe seam, so without the sampler
+            # the panel goes stale → /api/v1/pull/rate reports `idle` for the whole
+            # ~38-min F&O fill even while the SHARED controller paces real fetches. The
+            # sampler ticks the SAME controller through make_rate_observer (observe-only,
+            # best-effort, never builds a controller), mirroring the /pull-pipeline wrap.
+            with (
+                RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)),
+                RegistryStore.open(registry_path) as registry,
+            ):
                 report = pull_historical_for_underlyings(
                     instruments,
                     reference_only_ids=reference_only_ids,
@@ -2310,7 +2332,17 @@ def build_app(
             def _hist_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
 
-            with RegistryStore.open(registry_path) as registry:
+            # Keep the live PULL RATE panel fed through this STANDALONE F&O/historical
+            # phase too (DEC-PULL-RATE-WIDGET-VISIBILITY-001 MINOR-1): the contract-candle
+            # pull has no per-window observe seam, so without the sampler the panel goes
+            # stale → /api/v1/pull/rate reports `idle` for the whole candle fill even while
+            # the SHARED controller is pacing real fetches. The sampler ticks the SAME
+            # controller through make_rate_observer (observe-only, best-effort, never builds
+            # a controller), mirroring the /pull-pipeline wrap.
+            with (
+                RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)),
+                RegistryStore.open(registry_path) as registry,
+            ):
                 report = pull_contract_candles(
                     selected,
                     lake_root=lake_root,
@@ -2645,15 +2677,24 @@ def build_app(
                 _summary_cache.mark_dirty()  # the new derived partitions are fresh datasets
                 return report.symbols_ok
 
-            report = run_full_pipeline(
-                run_spot=_run_spot,
-                run_metadata=_run_metadata,
-                run_historical=_run_historical,
-                warm_spot_movers=_warm_spot_movers,
-                warm_futures_movers=_warm_futures_movers,
-                warm_options_movers=_warm_options_movers,
-                run_prebuild=_prebuild_timeframes,
-            )
+            # Keep the live PULL RATE panel fed through EVERY phase, not just spot
+            # (DEC-PULL-RATE-WIDGET-VISIBILITY-001). The spot phase pushes the panel on its
+            # per-window observe seam, but the metadata + F&O/historical phases have no such
+            # seam, so without this the panel goes stale → /api/v1/pull/rate reports `idle`
+            # for the entire ~38-min F&O phase even while the SHARED controller is pacing
+            # real fetches. The sampler ticks the SAME controller through make_rate_observer
+            # (observe-only, best-effort, never builds a controller) so the widget stays
+            # live the whole pull.
+            with RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)):
+                report = run_full_pipeline(
+                    run_spot=_run_spot,
+                    run_metadata=_run_metadata,
+                    run_historical=_run_historical,
+                    warm_spot_movers=_warm_spot_movers,
+                    warm_futures_movers=_warm_futures_movers,
+                    warm_options_movers=_warm_options_movers,
+                    run_prebuild=_prebuild_timeframes,
+                )
             if report.spot is not None:
                 _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
             return report.to_dict()

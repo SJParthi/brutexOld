@@ -910,6 +910,22 @@ class SessionRateController:
                 self._controller = self._factory()
             return self._controller
 
+    def peek(self) -> RateController | None:
+        """Return the session's controller IFF already built, else ``None`` — NEVER builds.
+
+        The non-building twin of :meth:`get`, for OBSERVE-ONLY readers (the live-rate
+        panel sampler, :class:`~brutex.dashboard.rate_sampler.RatePanelSampler`) that
+        must never FORCE a live controller into existence. :meth:`get` lazily builds a
+        LIVE :class:`RateController` (which on the production factory needs creds) on
+        first call; a sampler that called it would conjure a live controller during a
+        dry-run / a phase that has not yet paced anything. :meth:`peek` only ever
+        observes a controller a REAL pull already built, so an idle / dry-run sampler
+        reads ``None`` and pushes nothing (the panel stays honestly idle). Thread-safe +
+        O(1) (one lock, one read).
+        """
+        with self._lock:
+            return self._controller
+
 
 #: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
 #: ``RateController.snapshot()`` (current_rps + recent_hits) and a
