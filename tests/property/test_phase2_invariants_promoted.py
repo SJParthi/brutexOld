@@ -260,12 +260,12 @@ def test_p_24_supermask_count_order_and_partition_invariant(
 def test_p_25_vocabulary_has_no_vix_bit() -> None:
     """P-25: India-VIX is REFERENCE-ONLY (CLAUDE.md §2 Rule 3) — no atomic
     condition references it, so a generated pattern mask cannot leak VIX."""
-    assert TOTAL_CONDITIONS == 52
-    assert len(ALL_CONDITION_NAMES) == 52
+    assert TOTAL_CONDITIONS == 60  # grow-only: 52 + 8 new layout-only bits (ADR-0012 D4)
+    assert len(ALL_CONDITION_NAMES) == TOTAL_CONDITIONS
     assert set(NAME_TO_BIT) == set(ALL_CONDITION_NAMES)
-    # The bit map is a dense 0..51 bijection.
-    assert sorted(NAME_TO_BIT.values()) == list(range(52))
-    assert set(BIT_TO_NAME) == set(range(52))
+    # The bit map is a dense 0..TOTAL-1 bijection.
+    assert sorted(NAME_TO_BIT.values()) == list(range(TOTAL_CONDITIONS))
+    assert set(BIT_TO_NAME) == set(range(TOTAL_CONDITIONS))
     # No condition name (or its bit alias) mentions VIX in any casing.
     for name in ALL_CONDITION_NAMES:
         assert "vix" not in name.lower()
@@ -274,9 +274,9 @@ def test_p_25_vocabulary_has_no_vix_bit() -> None:
 @given(mask=_u52)
 @settings(max_examples=200)
 def test_p_25_every_mask_bit_maps_to_a_non_vix_condition(mask: int) -> None:
-    """P-25: every set bit of any 52-bit mask resolves to a named non-VIX
+    """P-25: every set bit of any vocabulary mask resolves to a named non-VIX
     condition — there is no bit position a VIX leak could occupy."""
-    for pos in range(52):
+    for pos in range(TOTAL_CONDITIONS):
         if mask & (1 << pos):
             assert pos in BIT_TO_NAME
             assert "vix" not in BIT_TO_NAME[pos].lower()

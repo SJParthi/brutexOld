@@ -76,6 +76,7 @@ from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
+from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from brutex.vocabulary.describe import matched_condition_names
 
 _LOG = structlog.get_logger("brutex.engine.results_store")
@@ -90,11 +91,20 @@ ROW_GROUP_SIZE: Final[int] = 100_000
 _INT64_MIN: Final[int] = -(2**63)
 _INT64_MAX: Final[int] = 2**63 - 1
 
-#: Largest valid strategy mask — the 52 atomic condition bits (0..51) all set.
-#: Bits 52..63 are RESERVED (``brutex.vocabulary.bits``); a mask is rejected if it
-#: sets any of them, so ``mask_bits`` always fits Parquet ``Int64`` (2**52-1 ≪ 2**63)
-#: and ``condition_names`` decodes to a defined name for every set bit.
-MASK_BITS_MAX: Final[int] = (1 << 52) - 1
+#: Largest valid strategy mask — every defined condition bit (0..TOTAL_CONDITIONS-1)
+#: set. The mask is a u128 (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4) — too wide for
+#: a single signed Parquet ``Int64`` — so it is persisted as TWO columns
+#: ``mask_bits_lo`` / ``mask_bits_hi`` (the two u64 limbs, each held as an unsigned
+#: value in a signed ``Int64`` via :func:`_to_signed_i64` / :func:`_from_signed_i64`).
+#: A mask is rejected if it sets a bit ``>= TOTAL_CONDITIONS`` (an undefined /
+#: layout-only / reserved bit), so ``condition_names`` decodes to a defined name for
+#: every set bit. (Was ``(1<<52)-1`` pre-u128.)
+MASK_BITS_MAX: Final[int] = (1 << TOTAL_CONDITIONS) - 1
+
+#: Per-limb mask for the two-column u128 split.
+_U64_MASK: Final[int] = (1 << 64) - 1
+#: Offset to map a u64 (0..2**64-1) into signed-int64 range for Parquet ``Int64``.
+_U64_TO_I64_OFFSET: Final[int] = 1 << 63
 
 #: Separator joining the matched-condition NAMES in the readable ``condition_names``
 #: column — reads as the combo's rule ("close_above_ema20 AND near_fib_618").
@@ -113,8 +123,12 @@ _STRING_FIELDS: Final[tuple[str, ...]] = (
     "mode",
     "condition_names",
 )
-#: int64 strategy-mask column — the u64 combo mask (set bits = required conditions).
-_MASK_FIELDS: Final[tuple[str, ...]] = ("mask_bits",)
+#: int64 strategy-mask LIMB columns — the u128 combo mask (set bits = required
+#: conditions) split into two u64 limbs (lo, hi), each stored in a signed Parquet
+#: ``Int64`` via an unsigned↔signed offset (a u128 does not fit one signed Int64).
+#: The in-memory :class:`ResultRow` carries the single ``mask_bits`` int; these two
+#: columns are the on-disk encoding, reassembled on read.
+_MASK_LIMB_FIELDS: Final[tuple[str, ...]] = ("mask_bits_lo", "mask_bits_hi")
 #: int64 paisa money columns. ``*_pnl`` / ``expectancy`` may be signed; the
 #: gross/drawdown magnitudes are validated ``>= 0`` (see :class:`ResultRow`).
 _MONEY_PAISA_FIELDS: Final[tuple[str, ...]] = (
@@ -258,8 +272,8 @@ class ResultRow:
         if not 0 <= self.mask_bits <= MASK_BITS_MAX:
             raise ResultsStoreError(
                 f"ResultRow.mask_bits={self.mask_bits} is out of range "
-                f"[0, {MASK_BITS_MAX}] (the 52 atomic condition bits; reserved bits "
-                f"52..63 are not allowed)"
+                f"[0, {MASK_BITS_MAX}] (the {TOTAL_CONDITIONS} defined condition bits; "
+                f"bits >= {TOTAL_CONDITIONS} are reserved/undefined and not allowed)"
             )
         # Derive the readable decode from the SINGLE source of truth (the vocabulary
         # name table) so condition_names can never drift from mask_bits.
@@ -542,9 +556,12 @@ class ResultsStore:
 
         ordered = [self._rows[run_id] for run_id in sorted(self._rows)]
         columns: dict[str, list[object]] = {}
+        for name in _STRING_FIELDS:
+            columns[name] = [getattr(row, name) for row in ordered]
+        # The u128 mask is encoded as two signed-Int64 limb columns (lo, hi).
+        columns["mask_bits_lo"] = [_encode_limb(row.mask_bits, hi=False) for row in ordered]
+        columns["mask_bits_hi"] = [_encode_limb(row.mask_bits, hi=True) for row in ordered]
         for name in (
-            *_STRING_FIELDS,
-            *_MASK_FIELDS,
             *_MONEY_PAISA_FIELDS,
             *_COUNT_FIELDS,
             *_METRIC_FIELDS,
@@ -558,13 +575,15 @@ class ResultsStore:
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
-        # fixed insertion order above (identity → mask → money → counts → metrics
-        # → deflated → prices) for a reproducible byte stream.
+        # fixed insertion order above (identity → mask limbs → money → counts →
+        # metrics → deflated → prices) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={
                 **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
-                **dict.fromkeys((*_MASK_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64),
+                **dict.fromkeys(
+                    (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
+                ),
                 **dict.fromkeys(
                     (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS), pl.Float64
                 ),
@@ -624,6 +643,29 @@ def _field_getter(name: str) -> Callable[[ResultRow], float]:
     return _get
 
 
+def _encode_limb(mask: int, *, hi: bool) -> int:
+    """Encode one u64 limb of a u128 ``mask`` as a SIGNED int64 for Parquet ``Int64``.
+
+    A u64 (0..2**64-1) does not fit a signed int64, so we subtract 2**63 to centre
+    it: an unsigned ``u`` maps to the signed value ``u - 2**63`` ∈ [-2**63, 2**63-1].
+    :func:`_decode_mask` inverts it. ``hi=False`` returns the low limb
+    (``mask & U64``), ``hi=True`` the high limb (``mask >> 64``).
+    """
+    limb = (mask >> 64) if hi else (mask & _U64_MASK)
+    return limb - _U64_TO_I64_OFFSET
+
+
+def _decode_mask(lo_signed: int, hi_signed: int) -> int:
+    """Reassemble a u128 mask from its two SIGNED-int64 limb columns.
+
+    Inverse of :func:`_encode_limb`: add back the 2**63 offset to recover each
+    unsigned u64 limb, then ``hi << 64 | lo``.
+    """
+    lo = lo_signed + _U64_TO_I64_OFFSET
+    hi = hi_signed + _U64_TO_I64_OFFSET
+    return (hi << 64) | lo
+
+
 def _row_from_record(record: dict[str, object]) -> ResultRow:
     """Rebuild a :class:`ResultRow` from one polars ``iter_rows(named=True)`` record.
 
@@ -631,7 +673,9 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
     snap reproduces the exact 2dp value, keeping the round-trip bit-stable.
     ``condition_names`` is NOT read back — it is re-derived from ``mask_bits`` at
     construction (single source of truth), so the stored string can never desync.
-    ``deflated_sharpe`` is nullable: a Parquet null reads back as ``None``.
+    The u128 mask is reassembled from the two signed-Int64 limb columns
+    (``mask_bits_lo`` / ``mask_bits_hi``). ``deflated_sharpe`` is nullable: a
+    Parquet null reads back as ``None``.
     """
     deflated = record["deflated_sharpe"]
     return ResultRow(
@@ -640,7 +684,10 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         tf=str(record["tf"]),
         direction=str(record["direction"]),
         mode=str(record["mode"]),
-        mask_bits=int(record["mask_bits"]),  # type: ignore[call-overload]
+        mask_bits=_decode_mask(
+            int(record["mask_bits_lo"]),  # type: ignore[call-overload]
+            int(record["mask_bits_hi"]),  # type: ignore[call-overload]
+        ),
         deflated_sharpe=None if deflated is None else float(deflated),  # type: ignore[arg-type]
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]

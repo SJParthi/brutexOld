@@ -205,11 +205,11 @@ class TestSweepGridConfig:
         # shared axis must fail AT CONFIG TIME (the CLI catches ValueError and
         # exits cleanly), NOT abort the whole grid mid-enumeration with a bare
         # ValueError from one tuple's lazy mask enumeration.
-        with pytest.raises(ValueError, match=r"condition_bits \[99\] out of range \[0, 64\)"):
-            _grid(condition_bits=[0, 1, 99])
+        with pytest.raises(ValueError, match=r"condition_bits \[199\] out of range \[0, 128\)"):
+            _grid(condition_bits=[0, 1, 199])
 
     def test_negative_condition_bit_rejected_at_config_time(self) -> None:
-        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 64\)"):
+        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 128\)"):
             _grid(condition_bits=[-1, 0, 1])
 
     def test_top_condition_bit_in_range_is_valid(self) -> None:

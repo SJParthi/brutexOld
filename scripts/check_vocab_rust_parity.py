@@ -63,10 +63,9 @@ def main() -> int:
             c["prior"]["prior_n"],
             c["prior"]["flags"],
         )
-        if got != c["expected_u64"]:
-            mismatches.append(
-                f"case {c['id']}: expected {c['expected_u64']:#015x}, got {got:#015x}"
-            )
+        expected = int(c["expected_mask"], 16)
+        if got != expected:
+            mismatches.append(f"case {c['id']}: expected {expected:#034x}, got {got:#034x}")
 
     print(
         f"trading_core {trading_core.version()} | TOTAL_CONDITIONS={trading_core.TOTAL_CONDITIONS}"

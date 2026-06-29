@@ -115,7 +115,7 @@ class TestProductionPathParity:
     """The path BruteX actually runs: ``evaluate_with_levels`` over real levels."""
 
     def test_evaluate_with_levels_reproduces_every_golden_vector(self) -> None:
-        """The production entry point reproduces all 400 frozen ``u64``s."""
+        """The production entry point reproduces every frozen mask (u128 hex string)."""
         mismatches: list[str] = []
         for case in _CASES:
             day = datetime.fromisoformat(case["timestamp_ist"]).date()
@@ -124,10 +124,9 @@ class TestProductionPathParity:
             )
             fb = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
             got = _with_levels(case, _pivot_levels_10(pv), _fib_levels_15(fb))
-            if got != case["expected_u64"]:
-                mismatches.append(
-                    f"case {case['id']}: expected {case['expected_u64']:#015x}, got {got:#015x}"
-                )
+            expected = int(case["expected_mask"], 16)
+            if got != expected:
+                mismatches.append(f"case {case['id']}: expected {expected:#034x}, got {got:#034x}")
         assert not mismatches, "production-path drift:\n" + "\n".join(mismatches[:20])
 
     def test_evaluate_with_levels_equals_evaluate_from_raw(self) -> None:

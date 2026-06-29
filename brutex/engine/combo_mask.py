@@ -1,41 +1,54 @@
 """Track 1 brute-force engine — combo mask iteration + evaluation.
 
-Implements the u64 bitmask combo iteration foundation per
+Implements the u128 bitmask combo iteration foundation per
 `docs/TRACK1_BACKTEST_SPEC.md §"Stage 1A"`.
 
 ## The bitmask model
 
-The 52-condition vocabulary (per `docs/TRACK1_VOCABULARY.md`) packs
-into a single u64. At each bar, all 52 conditions are evaluated and
-their truth values packed into one u64 — the **bar_bits**.
+The condition vocabulary (per `docs/TRACK1_VOCABULARY.md` +
+`rust/trading-core/conditions.toml`) packs into a single **u128** mask
+(DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4). At each bar, the conditions are
+evaluated and their truth values packed into one mask — the **bar_bits**.
 
-A **strategy mask** is also a u64: each bit set = a required condition.
+A **strategy mask** is also a u128: each bit set = a required condition.
 The bar matches the strategy iff:
 
     (bar_bits & strategy_mask) == strategy_mask
 
-This is one AND + one CMP per bar per strategy — O(1) per evaluation.
-Foundation for the 33B-trial brute-force sweep.
+This is one AND + one CMP per bar per strategy — O(1) per evaluation (a u128 AND
+is two u64 ANDs, still constant-time per bar). Foundation for the brute-force sweep.
 
 ## Why bitmasks
 
 - Chess-engine bitboard idiom (Agent B 2026-05-16 deep research)
 - Vectorizes trivially in Numba / Rust
-- One u64 covers all 52 conditions (head-room to 64; ADR required to go u128)
+- u128 covers the vocabulary with ~64 bits of headroom (ADR-0012 / DEC-PLUGIN-001
+  is the satisfied gate for the u64→u128 widening — not a silent transition)
 - Bit-equality comparison is the natural reproducibility check
+
+## numpy + u128 (the honest envelope)
+
+numpy has NO uint128 dtype. The Python scalar path uses arbitrary-precision
+`int` (already u128-safe). The vectorised numpy oracle / fallback represents a
+u128 as **two u64 limbs** `(lo, hi)` and tests
+`((bar_lo & m_lo) == m_lo) & ((bar_hi & m_hi) == m_hi)` — two u64 ANDs per bar,
+still O(1) per bar. The production Rust kernel (`fno_math`) is u64-native; when a
+mask or bar exceeds 64 bits the batch count routes to the two-limb numpy
+reference so no high bit is ever silently truncated (the new VWAP/R5-S5/BOS/CHoCH
+bits 52-59 still fit u64; the >=64-bit headroom is exercised by the tests).
 
 ## Combo iteration
 
-For a 52-condition vocab and AND-mask of size K, the count is C(52,K):
+For a 60-condition vocab and AND-mask of size K, the count is C(60,K):
 
-    K=1   52
-    K=2   1,326
-    K=3   22,100
-    K=4   270,725
-    K=5   2,598,960
+    K=1   60
+    K=2   1,770
+    K=3   34,220
+    K=4   487,635
+    K=5   5,461,512
 
 This module exposes ``iter_masks_k_of_n(k, n)`` that yields every
-u64 mask with exactly K bits set. The implementation is currently
+u128 mask with exactly K bits set. The implementation is currently
 ``itertools.combinations``-based (correct, sufficient for K≤5 +
 synthetic-data tests); a Gosper's-hack or LUT optimization is a
 later Phase-3 throughput task.
@@ -49,7 +62,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from itertools import combinations
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import fno_math
 
@@ -59,6 +72,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_VOCAB_BITS",
+    "U64_MASK",
     "VOCAB_BITS",
     "ResidentBarBuffer",
     "bits_to_mask",
@@ -78,13 +92,19 @@ __all__ = [
 # Constants
 # ─────────────────────────────────────────────────────────────────
 
-VOCAB_BITS: int = 52
-"""Current 52-condition vocabulary size (per docs/TRACK1_VOCABULARY.md).
-DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove."""
+VOCAB_BITS: int = 60
+"""Current condition vocabulary size (the dense bit count from
+``rust/trading-core/conditions.toml`` / ``brutex.vocabulary.bits.TOTAL_CONDITIONS``).
+DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove (grow-only)."""
 
-MAX_VOCAB_BITS: int = 64
-"""u64 ceiling. Exceeding requires an explicit ADR per
-DEC-PLUGIN-001 (no silent transition to u128)."""
+MAX_VOCAB_BITS: int = 128
+"""u128 ceiling. The u64→u128 widening is ADR-gated by ADR-0012
+(DEC-NIFTY-DYNAMIC-STRATEGY-001) / DEC-VOCAB-U128-CODEGEN-001 — the explicit gate
+DEC-PLUGIN-001 requires for a mask-width transition (NOT a silent change)."""
+
+#: 64-bit limb mask — splits a u128 into ``(lo, hi)`` u64 limbs for the numpy
+#: oracle/fallback (numpy has no uint128). ``lo = m & U64_MASK``, ``hi = m >> 64``.
+U64_MASK: int = (1 << 64) - 1
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -211,9 +231,9 @@ def evaluate_mask(bar_bits: int, required_mask: int) -> bool:
     Parameters
     ----------
     bar_bits : int
-        u64 truth-vector at one bar (all 52 conditions evaluated).
+        u128 truth-vector at one bar (all 60 conditions evaluated).
     required_mask : int
-        u64 strategy mask. A bit set here means the condition is
+        u128 strategy mask. A bit set here means the condition is
         required to fire.
 
     Returns
@@ -246,10 +266,10 @@ def mask_to_entry_signals(bar_bits: Sequence[int], required_mask: int) -> list[b
     Parameters
     ----------
     bar_bits : Sequence[int]
-        Per-bar u64 truth-vectors (e.g. from
+        Per-bar u128 truth-vectors (e.g. from
         :func:`brutex.engine.stage1a.build_bar_bits`).
     required_mask : int
-        The u64 strategy mask. An empty mask (``0``) fires on every bar.
+        The u128 strategy mask. An empty mask (``0``) fires on every bar.
 
     Returns
     -------
@@ -310,12 +330,44 @@ def count_supermasks_reference(bar_bits: Sequence[int], masks: Sequence[int]) ->
         return []
     if len(bar_bits) == 0:
         return [0] * len(masks)
-    # numpy uint64 — the lake's native bar_bits dtype. Pure-integer, so the
-    # result is bit-exact and reduction-order independent (Golden Rule #4).
+    # u128 via two u64 limbs (numpy has no uint128). Pure-integer, so the result
+    # is bit-exact and reduction-order independent (Golden Rule #4). The limb
+    # split + per-mask count own their numpy imports.
+    bar_lo, bar_hi = _split_limbs(bar_bits)
+    return [_count_two_limb(bar_lo, bar_hi, mask) for mask in masks]
+
+
+def _split_limbs(values: Sequence[int]) -> tuple[npt.NDArray[np.uint64], npt.NDArray[np.uint64]]:
+    """Split a sequence of u128 ints into two parallel ``uint64`` numpy arrays.
+
+    Returns ``(lo, hi)`` where ``lo = v & U64_MASK`` and ``hi = v >> 64`` — the
+    two-limb representation the numpy oracle/fallback uses because numpy has no
+    uint128. Python-int masking happens BEFORE the numpy cast so a value with
+    bits >= 64 never overflows a ``np.uint64`` construction (CLAUDE.md §11 COMMON
+    — the ONE limb-split, reused by the free reference + the resident buffer).
+    """
     import numpy as np
 
-    bar_arr = np.asarray(bar_bits, dtype=np.uint64)
-    return [int(((bar_arr & np.uint64(mask)) == np.uint64(mask)).sum()) for mask in masks]
+    lo = np.asarray([v & U64_MASK for v in values], dtype=np.uint64)
+    hi = np.asarray([v >> 64 for v in values], dtype=np.uint64)
+    return lo, hi
+
+
+def _count_two_limb(
+    bar_lo: npt.NDArray[np.uint64], bar_hi: npt.NDArray[np.uint64], mask: int
+) -> int:
+    """Two-limb SUPERSET count: bars whose ``(bar & mask) == mask`` over u128.
+
+    ``((bar_lo & m_lo) == m_lo) & ((bar_hi & m_hi) == m_hi)`` — two u64 ANDs +
+    two compares per bar, bit-identical to the scalar ``(bar & mask) == mask``.
+    """
+    import numpy as np
+
+    m_lo = np.uint64(mask & U64_MASK)
+    m_hi = np.uint64(mask >> 64)
+    lo_ok = (bar_lo & m_lo) == m_lo
+    hi_ok = (bar_hi & m_hi) == m_hi
+    return int((lo_ok & hi_ok).sum())
 
 
 def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]:
@@ -353,6 +405,13 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     >>> count_supermasks([0b1, 0b10], [])
     []
     """
+    # The Rust hot kernel is u64-native. If any mask OR bar uses a bit >= 64
+    # (the u128 headroom) the kernel would silently truncate it — so route to the
+    # bit-exact two-limb numpy reference instead (no high bit is ever dropped).
+    # Today's vocabulary (bits 0-59) fits u64, so the fast Rust path is the norm;
+    # the >=64-bit branch is the correctness guard for future growth.
+    if any(m > U64_MASK for m in masks) or any(b > U64_MASK for b in bar_bits):
+        return count_supermasks_reference(bar_bits, masks)
     return list(fno_math.count_supermasks_u64s(list(bar_bits), list(masks)))
 
 
@@ -408,26 +467,33 @@ class ResidentBarBuffer:
         Parameters
         ----------
         bar_bits : Sequence[int]
-            Per-bar packed u64 condition bitsets for the pre-sliced window.
+            Per-bar packed u128 condition bitsets for the pre-sliced window.
         """
-        try:
-            import fno_math
-
-            self._rust: fno_math.ResidentBars | None = fno_math.ResidentBars(list(bar_bits))
-            self._bars: npt.NDArray[np.uint64] | None = None
-        except (ImportError, AttributeError):
-            import numpy as np
-
-            self._rust = None
-            self._bars = np.asarray(bar_bits, dtype=np.uint64)
+        self._n = len(bar_bits)
+        # The Rust resident kernel is u64-native; only use it when EVERY bar fits
+        # u64 (no high-bit truncation). A bar with bits >= 64 forces the two-limb
+        # numpy backing (numpy has no uint128) — bit-exact for the full u128.
+        fits_u64 = all(b <= U64_MASK for b in bar_bits)
+        self._rust: object | None = None
+        #: Raw bar list kept alongside the Rust buffer so a (rare) u128 mask can
+        #: be served via the two-limb numpy path without crossing the u64 kernel.
+        self._raw: tuple[int, ...] = tuple(bar_bits)
+        self._bar_lo: npt.NDArray[np.uint64] | None = None
+        self._bar_hi: npt.NDArray[np.uint64] | None = None
+        if fits_u64:
+            try:
+                self._rust = fno_math.ResidentBars(list(bar_bits))
+                return
+            except (ImportError, AttributeError):
+                pass
+        self._bar_lo, self._bar_hi = _split_limbs(bar_bits)
 
     @property
     def n_bars(self) -> int:
         """Number of bars in the resident window."""
         if self._rust is not None:
-            return self._rust.n_bars
-        bars = cast("npt.NDArray[np.uint64]", self._bars)
-        return int(bars.shape[0])
+            return int(self._rust.n_bars)  # type: ignore[attr-defined]
+        return self._n
 
     def count_supermasks(self, masks: Sequence[int]) -> list[int]:
         """Per-mask SUPERSET count over the resident bars.
@@ -437,17 +503,22 @@ class ResidentBarBuffer:
         ``masks`` → ``[]``; empty bar window → ``0`` per mask; ``mask == 0``
         matches every bar. Only ``masks`` crosses the FFI boundary.
         """
-        if self._rust is not None:
-            return list(self._rust.count_supermasks(list(masks)))
-        # numpy fallback — reproduces count_supermasks_reference bit-for-bit.
+        # The u64 Rust kernel can serve only u64-fitting masks; a u128 mask
+        # routes through the two-limb numpy reference (rebuilding the limbs once
+        # for this call). The fast path is the norm (today's vocab fits u64).
+        if self._rust is not None and all(m <= U64_MASK for m in masks):
+            return list(self._rust.count_supermasks(list(masks)))  # type: ignore[attr-defined]
         if len(masks) == 0:
             return []
-        import numpy as np
-
-        bars = cast("npt.NDArray[np.uint64]", self._bars)
-        if bars.shape[0] == 0:
+        if self._n == 0:
             return [0] * len(masks)
-        return [int(((bars & np.uint64(m)) == np.uint64(m)).sum()) for m in masks]
+        if self._bar_lo is None or self._bar_hi is None:
+            # Rust-backed buffer asked for a u128 mask: rebuild limbs from the
+            # kept raw bars once for this call (the kernel cannot serve u128).
+            bar_lo, bar_hi = _split_limbs(self._raw)
+        else:
+            bar_lo, bar_hi = self._bar_lo, self._bar_hi
+        return [_count_two_limb(bar_lo, bar_hi, m) for m in masks]
 
     def count_supermask(self, mask: int) -> int:
         """Single-mask SUPERSET count over the resident bars."""
@@ -460,7 +531,7 @@ class ResidentBarBuffer:
 
 
 def count_combos(k: int, n: int = VOCAB_BITS) -> int:
-    """Count the number of u64 masks with exactly ``k`` of ``n`` bits set.
+    """Count the number of u128 masks with exactly ``k`` of ``n`` bits set.
 
     Equivalent to C(n, k). Useful for sizing the sweep upfront.
 
@@ -469,7 +540,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     k : int
         Number of required bits. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 52).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 60).
 
     Returns
     -------
@@ -496,8 +567,11 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
         raise ValueError(msg)
     if n > MAX_VOCAB_BITS:
         msg = (
-            f"count_combos: n={n} exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS}; "
-            f"ADR required for u128 transition (DEC-PLUGIN-001)"
+            f"count_combos: n={n} exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS} (the u128 "
+            f"ceiling). The u64→u128 widening is ALREADY gated by ADR-0012 "
+            f"(DEC-NIFTY-DYNAMIC-STRATEGY-001 / DEC-VOCAB-U128-CODEGEN-001 — the "
+            f"DEC-PLUGIN-001-mandated mask-width gate); going past u128 would need "
+            f"a further ADR."
         )
         raise ValueError(msg)
     # math.comb in Python 3.8+; integer-exact
@@ -507,7 +581,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
 
 
 def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
-    """Yield every u64 mask with exactly ``k`` of ``n`` bits set.
+    """Yield every u128 mask with exactly ``k`` of ``n`` bits set.
 
     Iteration order is lexicographic on bit-position tuples
     (matches itertools.combinations). The total count is
@@ -527,12 +601,12 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
     k : int
         Number of bits to set in each yielded mask. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 52).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 60).
 
     Yields
     ------
     int
-        u64 masks with exactly ``k`` bits set, in lexicographic order.
+        u128 masks with exactly ``k`` bits set, in lexicographic order.
 
     Examples
     --------
@@ -550,8 +624,11 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
         raise ValueError(msg)
     if n > MAX_VOCAB_BITS:
         msg = (
-            f"iter_masks_k_of_n: n={n} exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS}; "
-            f"ADR required for u128 transition (DEC-PLUGIN-001)"
+            f"iter_masks_k_of_n: n={n} exceeds MAX_VOCAB_BITS={MAX_VOCAB_BITS} (the "
+            f"u128 ceiling). The u64→u128 widening is ALREADY gated by ADR-0012 "
+            f"(DEC-NIFTY-DYNAMIC-STRATEGY-001 / DEC-VOCAB-U128-CODEGEN-001 — the "
+            f"DEC-PLUGIN-001-mandated mask-width gate); going past u128 would need "
+            f"a further ADR."
         )
         raise ValueError(msg)
     for positions in combinations(range(n), k):
@@ -562,11 +639,11 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
 
 
 def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
-    """Yield every u64 mask with exactly ``k`` of the GIVEN condition bits set.
+    """Yield every u128 mask with exactly ``k`` of the GIVEN condition bits set.
 
     Generalises :func:`iter_masks_k_of_n` — which enumerates over the first ``n``
     *contiguous* bits ``0..n-1`` — to an **arbitrary subset** of condition bits, so
-    a sweep can brute-force over a chosen handful of the 52 conditions (e.g. only
+    a sweep can brute-force over a chosen handful of the 60 conditions (e.g. only
     the pivot + Fibonacci bits), ``k`` at a time, instead of a contiguous prefix.
     Positions are de-duplicated and sorted ascending, so the iteration order is
     deterministic (lexicographic on the sorted positions) and the total count is
@@ -583,7 +660,7 @@ def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
     Yields
     ------
     int
-        u64 masks with exactly ``k`` of the chosen bits set, lexicographic order.
+        u128 masks with exactly ``k`` of the chosen bits set, lexicographic order.
 
     Raises
     ------

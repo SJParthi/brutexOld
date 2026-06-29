@@ -1,10 +1,14 @@
-//! The 52-condition evaluator — a bit-for-bit port of
+//! The condition evaluator — a bit-for-bit port of
 //! `brutex/vocabulary/evaluator.py::evaluate_atoms`.
 //!
 //! Pure function of its inputs (int64 paisa), no state, no allocation: the same
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
-//! live tick path (native). Returns a `u64` mask with bits 0..=51 set per the
-//! [`crate::bits`] layout; bits 52-63 are always 0.
+//! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
+//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); only the IMPLEMENTED bits
+//! (0..=51 today) ever fire. The LAYOUT-ONLY bits (VWAP/R5-S5/BOS/CHoCH, bits
+//! 52..=59, `implemented=false` in `conditions.toml`) have NO branch here, so the
+//! evaluator emits 0 for them until a later PR (PR-2) supplies their math. A u128
+//! AND is two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
 use crate::indicators::fib::FibLevels;
@@ -19,13 +23,14 @@ const AFTERNOON_END: u32 = 15 * 3600; // 15:00
 
 /// The single-bit mask for condition `pos` (`1 << pos`). Routing every
 /// `mask |= …` through this one site is the DYNAMIC/COMMON discipline (one shift
-/// expression, not 52) and removes the `1u64 << 0` ⇔ `1u64 >> 0` equivalent
-/// mutant at bit 0: because this helper is called for every bit 0..=51, a
+/// expression, not 52) and removes the `1u128 << 0` ⇔ `1u128 >> 0` equivalent
+/// mutant at bit 0: because this helper is called for every implemented bit, a
 /// `<<`→`>>` perturbation breaks bit 1+ and is killed
-/// (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
+/// (DEC-TRADING-CORE-PROPTEST-MUTANTS-001). `u128` (ADR-0012 D4) — the shift is
+/// the only width-sensitive site; bit positions stay `u32`.
 #[inline]
-const fn bit(pos: u32) -> u64 {
-    1u64 << pos
+const fn bit(pos: u32) -> u128 {
+    1u128 << pos
 }
 
 /// All per-bar indicator values consumed by [`evaluate_atoms`]. Money is int64
@@ -100,10 +105,14 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
     (close - level).abs() <= tolerance
 }
 
-/// Evaluate all 52 atomic conditions on one bar → a `u64` mask (bits 0..=51).
+/// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
+///
+/// Only the IMPLEMENTED bits (0..=51 today) can fire; the LAYOUT-ONLY bits
+/// (52..=59, `implemented=false`) have no branch below so they are always 0
+/// until a later PR supplies their math.
 #[must_use]
-pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u64 {
-    let mut mask: u64 = 0;
+pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
+    let mut mask: u128 = 0;
     let close = s.close_paisa;
 
     // ── Group 1: EMA Position (bits 0-5) ──

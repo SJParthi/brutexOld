@@ -126,7 +126,10 @@ def _run(tmp_path: Path, tag: str) -> SweepRunSummary:
 # ────── Pinned run-identity ──────
 
 #: The hand-pinned BLAKE3 run-identity of mask 0b101 under the fixed context.
-_GOLDEN_RUN_ID = "1d4c8830c1d3c9f12e7fc407a6bec3058da214b9096bcf71c5cc27f187bd5942"
+#: Re-locked for DEC-VOCAB-U128-CODEGEN-001: the run-id encodes the mask as
+#: ``mask:%032x`` (u128, 32 hex) instead of ``%016x`` (u64, 16 hex), so the
+#: BLAKE3 input — and thus the digest — moved by design.
+_GOLDEN_RUN_ID = "1e0a9b9856cd756e2462ff7d6676116cebc39a22c4c31fed9c2bcaccf6e1c617"
 
 
 def test_golden_run_id_is_byte_stable() -> None:
@@ -140,8 +143,11 @@ def test_golden_run_id_is_byte_stable() -> None:
 #: are the version-robust contract).
 # Re-locked for DEC-SWEEP-WINNERS-BY-NAME-001: the readable-mask surface added the
 # mask_bits + condition_names + (nullable) deflated_sharpe columns to the persisted
-# Parquet schema, so the deterministic content hash moved by design.
-_GOLDEN_CONTENT_HASH = "d3070e20afc27fcc060df3862b1b5053cea838e48748e46933fe1c8b26486d74"
+# Parquet schema, so the deterministic content hash moved by design. Re-locked AGAIN
+# for DEC-VOCAB-U128-CODEGEN-001: the u128 mask is persisted as two Int64 limb
+# columns (mask_bits_lo/mask_bits_hi) replacing the single mask_bits Int64 column,
+# and the run-id encoding widened to %032x — both move the deterministic hash.
+_GOLDEN_CONTENT_HASH = "6fc0fda6782bc921ca054e0ff26f9286cdd2df31f59463ae331c83394391b270"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
