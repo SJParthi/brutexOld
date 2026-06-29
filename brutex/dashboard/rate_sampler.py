@@ -229,8 +229,8 @@ class RatePanelSampler:
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         """Stop the background sampler (context-manager exit; never suppresses)."""
         self.stop()
