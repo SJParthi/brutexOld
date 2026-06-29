@@ -828,16 +828,19 @@ def _spot_run_parallel(controller: RateController | None) -> RunParallel | None:
 
 
 def _build_live_controller() -> RateController:
-    """Construct the shared adaptive [3..5] r/s controller (the session factory).
+    """Construct the shared adaptive [3..8] r/s controller (the session factory).
 
-    The controller starts at the operator-DIRECTED 5 r/s ceiling
+    The controller starts at the operator-DIRECTED 8 r/s ceiling
     (:data:`~brutex.adapters.groww.constants.GROWW_RATE_LIMIT_RPS_CEILING`,
-    operator-approved 2026-06-22, lowered 8 → 5) — the per-second backtesting cap
-    stays officially UNVERIFIED; 5×60 = 300/min stays well under the 500/min governor
-    so the per-second ceiling is the binding gate, and a live-log audit showed the
-    vendor 429s even at 3–5 r/s so probing up to 8 only wasted ~870 429-retries. The
-    adaptive AIMD ladder is unchanged: a 429 burst still steps 5→…→3 (soft floor) and
-    recovers back to 5.
+    operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 — see
+    CLAUDE.md §6) — the per-second backtesting cap stays officially UNVERIFIED; 8×60 =
+    480/min stays under the 500/min governor so the HARD per-minute cap can never be
+    overshot, and the ceiling was raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001
+    Lever 2 (pool 2→4) gave the pull enough connections to GENERATE demand toward it. A
+    CEILING raise only ALLOWS a higher rate — the adaptive AIMD ladder still steps DOWN on
+    a 429 burst (soft floor 3) and recovers UP only as far as the vendor tolerates, so the
+    worst case at 8 is identical to 5; SUSTAINED 8 is UNVERIFIED (the log shows the vendor
+    429ing at 5).
 
     The controller is threaded into BOTH the per-window pacing hooks (``pace`` /
     ``on_rate_limit`` / ``on_success``) AND the pool sizing
@@ -845,7 +848,7 @@ def _build_live_controller() -> RateController:
     current rate (DEC-DHAN-ADAPTIVE-RPS-001 + DEC-DHAN-PARALLEL-INGEST-001). Built
     ONCE per dashboard session and reused across pulls via
     :class:`SessionRateController` (DEC-DHAN-PERSIST-RATE-001) so the learned rate
-    carries over instead of every pull restarting at the 5 r/s ceiling.
+    carries over instead of every pull restarting at the 8 r/s ceiling.
 
     The controller is built with **NO** :class:`~brutex.orchestrator.quota_tracker.\
 DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
@@ -875,12 +878,13 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     # spot path (cli.py also builds the controller with quota_tracker=None). The
     # phantom 100,000/day cap would have wrongly HALTED a large multi-day backfill,
     # since Groww backtesting has no daily quota (operator-confirmed 2026-06-13).
-    # The per-second start AND upshift cap is the operator-DIRECTED 5 r/s ceiling
-    # (GROWW_RATE_LIMIT_RPS_CEILING, lowered 8 → 5 on 2026-06-22) — 5×60 = 300/min
-    # stays well under the 500/min governor, so the per-second ceiling is the binding
-    # gate without ever fighting the per-minute cap; the AIMD ladder still steps DOWN on
-    # 429s. Lowered from the prior 8 r/s because a live-log audit showed the vendor 429s
-    # even at 3–5 r/s, so probing up to 8 only wasted ~870 429-retries.
+    # The per-second start AND upshift cap is the operator-DIRECTED 8 r/s ceiling
+    # (GROWW_RATE_LIMIT_RPS_CEILING, RAISED 5 → 8 on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002,
+    # CLAUDE.md §6) — 8×60 = 480/min stays under the 500/min governor, so the HARD per-minute
+    # cap can never be overshot; the AIMD ladder still steps DOWN on 429s (soft floor 3) and
+    # recovers UP only as far as the vendor tolerates. Raised back to 8 once Lever 2 (pool
+    # 2→4, DEC-FETCH-WRITE-OVERLAP-001) gave the pull enough connections to generate demand
+    # toward the ceiling; SUSTAINED 8 is UNVERIFIED (the vendor 429s as low as 3–5 r/s).
     # OPTIONAL anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001): default OFF
     # (byte-identical), enabled only when BRUTEX_GROWW_SMOOTH_PACING is truthy. When
     # ON, issuance is spread evenly at a ``1/current_rps`` minimum interval so the
@@ -898,16 +902,16 @@ class SessionRateController:
     """Persist ONE :class:`RateController` across pulls in a dashboard session.
 
     DEC-DHAN-PERSIST-RATE-001. Each ``POST /universe/pull`` used to build a FRESH
-    controller at the 5 r/s ceiling (:func:`_build_live_controller`, the
-    operator-DIRECTED ceiling, lowered 8 → 5 on 2026-06-22), so every symbol-pull
-    re-opened at 5 r/s and re-hit Groww's wall — the 429 storm the operator saw at
-    the start of *every* pull, re-learnt per symbol. This holder builds the
+    controller at the 8 r/s ceiling (:func:`_build_live_controller`, the
+    operator-DIRECTED ceiling, RAISED 5 → 8 on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002),
+    so every symbol-pull re-opened at 8 r/s and re-hit Groww's wall — the 429 storm the
+    operator saw at the start of *every* pull, re-learnt per symbol. This holder builds the
     controller ONCE (lazily, thread-safe) and hands the SAME instance to every pull,
     so the rate the system LEARNED (e.g. stepped down to 3 r/s) CARRIES OVER: symbol
-    2, 3, 4… start at the learned rate, not 5. The controller is itself thread-safe
+    2, 3, 4… start at the learned rate, not 8. The controller is itself thread-safe
     (DEC-DHAN-PARALLEL-INGEST-001), so sharing it across sequential AND concurrent
-    pulls correctly keeps the AGGREGATE issue rate ≤ 5 r/s (Rule #6) — concurrent
-    pulls now share one global budget instead of each running its own 5 r/s.
+    pulls correctly keeps the AGGREGATE issue rate ≤ 8 r/s (Rule #6) — concurrent
+    pulls now share one global budget instead of each running its own 8 r/s.
     """
 
     def __init__(self, factory: Callable[[], RateController] | None = None) -> None:
