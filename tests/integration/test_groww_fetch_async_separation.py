@@ -464,7 +464,7 @@ class TestHungWriteDoesNotBlockFetchLane:
         pipeline = FetchPipeline(workers=1, queue_maxsize=1, drain_join_timeout_seconds=1.0)
 
         done = threading.Event()
-        error: list[BaseException] = []
+        error: list[Exception] = []
 
         def _run() -> None:
             try:
@@ -479,7 +479,7 @@ class TestHungWriteDoesNotBlockFetchLane:
                     now_ist=_now,
                     fetch_pipeline=pipeline,
                 )
-            except BaseException as exc:  # surface ANY deadlock/raise to the test, never swallow
+            except Exception as exc:  # surface ANY worker-thread raise to the test, never swallow
                 error.append(exc)
             finally:
                 done.set()
@@ -620,7 +620,7 @@ class TestHungWriteDoesNotBlockFetchLane:
         pipeline = FetchPipeline(workers=1, queue_maxsize=1, drain_join_timeout_seconds=1.0)
 
         done = threading.Event()
-        error: list[BaseException] = []
+        error: list[Exception] = []
 
         def _run() -> None:
             try:
@@ -635,7 +635,7 @@ class TestHungWriteDoesNotBlockFetchLane:
                     now_ist=_now,
                     fetch_pipeline=pipeline,
                 )
-            except BaseException as exc:  # surface ANY deadlock/raise to the test, never swallow
+            except Exception as exc:  # surface ANY worker-thread raise to the test, never swallow
                 error.append(exc)
             finally:
                 done.set()
@@ -705,7 +705,7 @@ class TestHungWriteDoesNotBlockFetchLane:
         sink = _PerSymbolSink(writer=ParquetWriter(lake_root=lake), catalog=None)
 
         done = threading.Event()
-        error: list[BaseException] = []
+        error: list[Exception] = []
 
         def _run() -> None:
             try:
@@ -721,7 +721,7 @@ class TestHungWriteDoesNotBlockFetchLane:
                         now_ist=_now,
                         fetch_pipeline=pipeline,
                     )
-            except BaseException as exc:  # surface ANY deadlock/raise to the test, never swallow
+            except Exception as exc:  # surface ANY worker-thread raise to the test, never swallow
                 error.append(exc)
             finally:
                 done.set()
