@@ -1,8 +1,10 @@
 """Integration tests for the /api/v1/universe/mapping-integrity route.
 
-DEC-MAPPING-INTEGRITY-RECONCILE-001 — exercises the thin route over a real wired
-:class:`InstrumentStore`: an options-eligible spot with zero pulled expiries (M&M-style)
-turns the verdict RED; a fully-covered spot stays green; an unwired store → 503.
+DEC-MAPPING-INTEGRITY-RECONCILE-001 / DEC-MAPPING-INTEGRITY-ATTEMPTED-001 — exercises the
+thin route over a real wired :class:`InstrumentStore`: an options-eligible spot that was
+ATTEMPTED yet pulled zero expiries (M&M-style — a coverage row with ``expiries_pulled=0``)
+turns the verdict RED; a never-attempted spot (no coverage row, a selective pull) stays
+GREEN as ``not_attempted``; a fully-covered spot stays green; an unwired store → 503.
 """
 
 from __future__ import annotations
@@ -72,10 +74,17 @@ def store(tmp_path: Path):
     s.close()
 
 
-def test_mapping_integrity_flags_zero_coverage_eligible_spot(store: InstrumentStore) -> None:
-    """RELIANCE covered every expected year; M&M pulled nothing → RED, M&M gating none."""
+def test_mapping_integrity_flags_attempted_zero_coverage_spot(store: InstrumentStore) -> None:
+    """RELIANCE covered; M&M ATTEMPTED yet zero expiries (a row) → RED, M&M gating none.
+
+    The attempted-and-empty marker is a coverage row with ``expiries_pulled=0`` (what Phase-1
+    expiry discovery writes for a silent-vanish underlying), so the gate still catches the real
+    failure (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+    """
     for year in _coverage_years():
         store.upsert_coverage(_cov("RELIANCE", year))
+    # M&M was attempted but discovered nothing — one zero-expiry cell records the attempt.
+    store.upsert_coverage(_cov("M&M", _coverage_years()[0], expiries=0))
     client = TestClient(build_app(DashboardState(), instrument_store=store))
 
     body = client.get("/api/v1/universe/mapping-integrity").json()
@@ -83,10 +92,32 @@ def test_mapping_integrity_flags_zero_coverage_eligible_spot(store: InstrumentSt
     assert body["is_green"] is False
     assert body["total_eligible"] == 2 and body["fully_covered"] == 1
     assert body["gating_failures"] == 1
+    assert body["not_attempted"] == 0
     [under] = body["under_pulled"]
     assert under["symbol"] == "M&M" and under["reason"] == "none"
     assert under["whitelisted"] is False
     assert body["expected_years"] == _coverage_years()
+
+
+def test_mapping_integrity_green_on_clean_selective_pull(store: InstrumentStore) -> None:
+    """The headline fix: a selective pull (only RELIANCE attempted) reads GREEN, not RED.
+
+    M&M was NEVER attempted (no coverage row), so it is the neutral ``not_attempted`` state,
+    never a gating ``none`` — the false-RED-on-selective-pull bug is closed
+    (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+    """
+    for year in _coverage_years():
+        store.upsert_coverage(_cov("RELIANCE", year))
+    client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+    body = client.get("/api/v1/universe/mapping-integrity").json()
+
+    assert body["is_green"] is True
+    assert body["total_eligible"] == 2 and body["fully_covered"] == 1
+    assert body["gating_failures"] == 0
+    assert body["not_attempted"] == 1
+    [under] = body["under_pulled"]
+    assert under["symbol"] == "M&M" and under["reason"] == "not_attempted"
 
 
 def test_mapping_integrity_green_when_all_eligible_covered(store: InstrumentStore) -> None:
@@ -100,6 +131,7 @@ def test_mapping_integrity_green_when_all_eligible_covered(store: InstrumentStor
 
     assert body["is_green"] is True
     assert body["total_eligible"] == 2 and body["fully_covered"] == 2
+    assert body["not_attempted"] == 0
     assert body["under_pulled"] == []
 
 

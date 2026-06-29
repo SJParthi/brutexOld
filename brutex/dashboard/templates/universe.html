@@ -590,8 +590,10 @@
   </div>
 
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
-       (DEC-MAPPING-INTEGRITY-RECONCILE-001). VERIFIED = every options-eligible spot pulled
-       its option history; RED = a spot pulled ZERO expiries (e.g. M&M before the F2 fix). -->
+       (DEC-MAPPING-INTEGRITY-RECONCILE-001 / DEC-MAPPING-INTEGRITY-ATTEMPTED-001). VERIFIED =
+       every ATTEMPTED options-eligible spot pulled its option history; RED = a spot was
+       attempted yet pulled ZERO expiries (e.g. M&M); never-pulled names read "not pulled yet"
+       (neutral), so a clean selective pull is green. -->
   <div id="mappanel" role="status" aria-live="polite"
        style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
               border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
@@ -966,8 +968,10 @@ async function loadCompleteness() {
 
 async function loadMappingIntegrity() {
   /* Read-only: the green/red spot↔options mapping verdict (DEC-MAPPING-INTEGRITY-RECONCILE-001).
-     VERIFIED when every options-eligible spot pulled >=1 expiry; RED lists the spots that
-     pulled ZERO (e.g. M&M before the F2 options-fetch fix). Never throws — keeps last shown. */
+     VERIFIED when every options-eligible spot that was ATTEMPTED pulled >=1 expiry; RED lists
+     only the ATTEMPTED-and-ZERO spots (e.g. M&M, the special-char options-fetch bug). A spot
+     never pulled yet (no coverage row) is the neutral "not attempted" tally — NEVER red, so a
+     clean selective pull reads green (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). Never throws. */
   try {
     const r = await fetch("/api/v1/universe/mapping-integrity");
     if (!r.ok) return;
@@ -977,18 +981,20 @@ async function loadMappingIntegrity() {
     const detail = document.getElementById("mapdetail");
     if (!panel) return;
     panel.style.display = "block";
+    const pending = m.not_attempted || 0;
+    const pendingNote = pending ? (" · " + pending + " not pulled yet") : "";
     if (m.is_green) {
       verdict.textContent = " ✅ VERIFIED";
       verdict.style.color = "#4ade80";
       detail.textContent = " · " + m.fully_covered + "/" + m.total_eligible +
-        " eligible spots pulled their option history";
+        " eligible spots pulled their option history" + pendingNote;
     } else {
       const reds = (m.under_pulled || [])
         .filter(u => u.reason === "none" && !u.whitelisted).map(u => u.symbol);
-      verdict.textContent = " ❌ " + m.gating_failures + " spot(s) pulled ZERO expiries";
+      verdict.textContent = " ❌ " + m.gating_failures + " spot(s) attempted but pulled ZERO expiries";
       verdict.style.color = "#f87171";
-      detail.textContent = reds.length ? (" · " + reds.slice(0, 12).join(", ") +
-        (reds.length > 12 ? " …" : "")) : "";
+      detail.textContent = (reds.length ? (" · " + reds.slice(0, 12).join(", ") +
+        (reds.length > 12 ? " …" : "")) : "") + pendingNote;
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
