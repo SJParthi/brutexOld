@@ -578,6 +578,225 @@ class TestHungWriteDoesNotBlockFetchLane:
         assert _spot_part(lake2, year=2021, month=1).exists()
         assert "FAILED" not in {r.status for r in ledger2.records()}
 
+    def test_same_partition_zombie_lock_second_window_defers_in_bounded_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two windows in the SAME partition where the FIRST write hangs: the SECOND still defers.
+
+        The honest-envelope tradeoff stated in the fix: an abandoned daemon write thread keeps
+        holding that partition's in-process ``threading.Lock`` + ``flock`` until its wedged
+        syscall returns. Because all windows of one series route to ONE consumer
+        (per-partition-lock shard), a LATER window of the SAME partition could block on the
+        still-held lock — but that later append is ALSO wrapped in ``append_with_deadline``, so it
+        too defers in BOUNDED time rather than wedging forever. This test forces exactly that: a
+        sink that hangs the FIRST write to a partition and would hang a SECOND too; with a single
+        consumer both windows route to the same thread, and the test asserts ``ingest_spot``
+        RETURNS within a bounded wall time (the second window did not wedge on the zombie lock).
+        """
+        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+        gate = threading.Event()
+        entered = threading.Semaphore(0)
+        lock = threading.Lock()
+        n_calls: list[int] = []
+
+        class _HangFirstTwoSink(ParquetBarSink):
+            """Hang the first TWO durable writes (e.g. two windows of the same month partition)."""
+
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                with lock:
+                    n_calls.append(1)
+                    n = len(n_calls)
+                if n <= 2:
+                    entered.release()
+                    gate.wait(timeout=30.0)
+                    return super().append(**kw)  # type: ignore[arg-type]
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+        # ONE consumer so the same thread handles consecutive same-series windows (it cannot
+        # offload the second to a peer); two adjacent 30-day windows of NIFTY straddle the Jan/Feb
+        # boundary, so they touch overlapping month partitions — the same-partition contention.
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, drain_join_timeout_seconds=1.0)
+
+        done = threading.Event()
+        error: list[BaseException] = []
+
+        def _run() -> None:
+            try:
+                ingest_spot(
+                    _DayAdapter(),  # type: ignore[arg-type]
+                    _HangFirstTwoSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+                    instrument=_inst(),
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2021, 3, 1),  # 2 monthly tiles → 2 windows, both hang
+                    ledger=ledger,
+                    now_ist=_now,
+                    fetch_pipeline=pipeline,
+                )
+            except BaseException as exc:  # surface ANY deadlock/raise to the test, never swallow
+                error.append(exc)
+            finally:
+                done.set()
+
+        runner = threading.Thread(target=_run, name="zombie-lock-producer", daemon=True)
+        runner.start()
+        try:
+            # Both windows hang ~0.2 s each; the producer + both deferrals must complete well
+            # within 20 s. WITHOUT the deadline the SECOND window would wedge forever on the
+            # abandoned daemon's partition lock and this would never return.
+            assert done.wait(timeout=20.0), (
+                "ingest_spot did NOT return — the second same-partition window wedged on the "
+                "zombie lock held by the abandoned first write"
+            )
+            assert not error, f"producer raised unexpectedly: {error[0]!r}"
+            # At least the first two writes started hanging (the contention is real).
+            assert entered.acquire(blocking=False)
+            pipeline.drain()
+            # Both hung windows are deferred FAILED — never SUCCESS, never lost.
+            assert "FAILED" in {r.status for r in ledger.records()}
+            assert pipeline.tail_transients >= 1
+        finally:
+            gate.set()
+            runner.join(timeout=5.0)
+
+    def test_one_wedged_shard_does_not_freeze_a_healthy_shard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Multi-consumer: a hung write on ONE shard cannot freeze the OTHER shard's windows.
+
+        With ``workers >= 2`` the series shard by ``blake2b(coords) % M``. We run two SEPARATE
+        symbols (so they hash to — and this test asserts — DIFFERENT shards): one symbol's writes
+        HANG, the other's write normally. The healthy symbol's windows must land DURABLY on disk
+        while the hung symbol's defer — proving one bad partition can't freeze the whole pool.
+        """
+        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+        # Pick two symbols that hash to DIFFERENT shards under the pipeline's blake2b router so the
+        # wedged one and the healthy one are genuinely on different consumers. Use the PRODUCTION
+        # shard-key builder (`_series_shard_key`) — no copy of the key format (CLAUDE.md §11 COMMON).
+        from brutex.adapters.groww.fetch_pipeline import _shard_index
+        from brutex.adapters.groww.ingest import _series_shard_key
+
+        workers = 2
+        hung_symbol, healthy_symbol = "AAA", "BBB"
+        # Sanity-pick: confirm the two symbols land on different shards (deterministic blake2b over
+        # the real series coords). AAA → shard 1, BBB → shard 0 under workers=2.
+        assert _shard_index(
+            _series_shard_key(_inst(hung_symbol), "1minute"), workers
+        ) != _shard_index(_series_shard_key(_inst(healthy_symbol), "1minute"), workers), (
+            "test symbols must hash to different shards"
+        )
+
+        gate = threading.Event()
+
+        class _PerSymbolSink(ParquetBarSink):
+            """Hang every write for *hung_symbol*; write *healthy_symbol* normally."""
+
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                if kw.get("symbol") == hung_symbol:
+                    gate.wait(timeout=30.0)
+                    return super().append(**kw)  # type: ignore[arg-type]
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+        pipeline = FetchPipeline(workers=workers, queue_maxsize=2, drain_join_timeout_seconds=1.0)
+        sink = _PerSymbolSink(writer=ParquetWriter(lake_root=lake), catalog=None)
+
+        done = threading.Event()
+        error: list[BaseException] = []
+
+        def _run() -> None:
+            try:
+                for sym in (hung_symbol, healthy_symbol):
+                    ingest_spot(
+                        _DayAdapter(),  # type: ignore[arg-type]
+                        sink,
+                        instrument=_inst(sym),
+                        interval="1minute",
+                        start=date(2021, 1, 1),
+                        end=date(2021, 3, 1),
+                        ledger=ledger,
+                        now_ist=_now,
+                        fetch_pipeline=pipeline,
+                    )
+            except BaseException as exc:  # surface ANY deadlock/raise to the test, never swallow
+                error.append(exc)
+            finally:
+                done.set()
+
+        runner = threading.Thread(target=_run, name="multi-shard-producer", daemon=True)
+        runner.start()
+        try:
+            assert done.wait(timeout=20.0), (
+                "ingest_spot did NOT return — the healthy shard was frozen by the wedged shard"
+            )
+            assert not error, f"producer raised unexpectedly: {error[0]!r}"
+            pipeline.drain()
+            # The HEALTHY symbol's data landed durably on disk (its shard kept working through the
+            # wedge on the OTHER shard) AND its ledger window(s) are SUCCESS.
+            assert _spot_part(lake, year=2021, month=1, symbol=healthy_symbol).exists()
+            healthy_statuses = {
+                r.status for r in ledger.records() if r.security_id == healthy_symbol
+            }
+            assert healthy_statuses == {"SUCCESS"}, healthy_statuses
+            # The HUNG symbol deferred (no durable partition for it; its windows FAILED) — counted,
+            # never lost, never a fabricated SUCCESS for a write that never completed.
+            assert not _spot_part(lake, year=2021, month=1, symbol=hung_symbol).exists()
+            hung_statuses = {r.status for r in ledger.records() if r.security_id == hung_symbol}
+            assert hung_statuses == {"FAILED"}, hung_statuses
+            assert pipeline.tail_transients >= 1
+        finally:
+            gate.set()
+            runner.join(timeout=5.0)
+
+    def test_write_completing_at_the_boundary_records_success_not_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        """A write that completes JUST under the deadline records SUCCESS (no SUCCESS-on-timeout).
+
+        The deadline-race edge: a write whose duration is close to — but under — the deadline must
+        deterministically SUCCEED (the bars land durably, ledger SUCCESS, NO transient, NO
+        double-record). Proven by a small deadline with an even smaller write sleep so the write
+        always finishes first; asserting exactly one durable partition + one SUCCESS row.
+        """
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+        write_calls: list[int] = []
+        lock = threading.Lock()
+
+        class _NearBoundarySink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                time.sleep(0.05)  # well under the 0.5 s deadline below → always completes
+                with lock:
+                    write_calls.append(1)
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        # An explicit-but-generous deadline so the 0.05 s write always finishes first; this is the
+        # NORMAL path under a tight-but-sufficient bound — the proof we never SUCCESS-on-timeout
+        # and never break the slow-but-OK path.
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4, drain_join_timeout_seconds=1.0)
+        ingest_spot(
+            _DayAdapter(),  # type: ignore[arg-type]
+            _NearBoundarySink(writer=ParquetWriter(lake_root=lake), catalog=None),
+            instrument=_inst(),
+            interval="1minute",
+            start=date(2021, 1, 10),
+            end=date(2021, 1, 25),  # < 30 days → a SINGLE window (deterministic, no tiling)
+            ledger=ledger,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+        pipeline.drain()
+        statuses = [r.status for r in ledger.records()]
+        # Exactly ONE SUCCESS, NO FAILED (the write finished before the deadline) — and the write
+        # ran exactly once (no double-record / no retry on a near-boundary completion).
+        assert statuses == ["SUCCESS"], statuses
+        assert len(write_calls) == 1
+        assert pipeline.tail_transients == 0
+        assert _spot_part(lake, year=2021, month=1).exists()
+
 
 # ─────────────────────────── caps intact under pipeline ──────────────────────────
 

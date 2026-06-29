@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Mapping
 
 import pytest
-from brutex.adapters.groww.deadline import run_with_deadline
+from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
 
 
 def test_returns_the_value_when_fast() -> None:
@@ -50,6 +50,47 @@ def test_raises_timeout_when_fn_blows_the_deadline() -> None:
             run_with_deadline(_hang, 0.05)
     finally:
         release.set()  # let the abandoned daemon worker exit
+
+
+def test_deadline_timeout_is_a_deadline_exceeded_subclass() -> None:
+    """The guard's own timeout is a ``DeadlineExceeded`` — a ``TimeoutError`` SUBCLASS.
+
+    DEC-FETCH-HUNG-WRITE-DEADLINE-001 hardening: the distinct subclass lets a caller tell the
+    GUARD's timeout apart from a ``TimeoutError`` raised by ``fn`` itself, while every existing
+    ``except TimeoutError`` caller (reauth re-mint + the candle-call classification) still catches
+    it because ``DeadlineExceeded`` IS a ``TimeoutError``.
+    """
+    release = threading.Event()
+
+    def _hang() -> Mapping[str, object]:
+        release.wait(timeout=5.0)
+        return {"candles": []}
+
+    try:
+        with pytest.raises(DeadlineExceeded) as excinfo:
+            run_with_deadline(_hang, 0.05)
+        assert isinstance(excinfo.value, TimeoutError)  # back-compat: existing callers still catch
+        assert "deadline exceeded" in str(excinfo.value)  # message hint unchanged
+    finally:
+        release.set()
+
+
+def test_fn_own_timeout_error_propagates_not_retyped() -> None:
+    """A real ``TimeoutError`` raised by ``fn`` itself propagates UNCHANGED (not a DeadlineExceeded).
+
+    The guard only RAISES ``DeadlineExceeded`` for its OWN deadline; an ``fn``-raised
+    ``TimeoutError`` rides the ``failure`` re-raise path and is NOT re-typed — so
+    ``append_with_deadline`` can match ``DeadlineExceeded`` and let a writer's own timeout through.
+    """
+    sentinel = TimeoutError("fn's own timeout")
+
+    def _boom() -> Mapping[str, object]:
+        raise sentinel
+
+    with pytest.raises(TimeoutError) as excinfo:
+        run_with_deadline(_boom, 5.0)
+    assert excinfo.value is sentinel  # the exact object, never re-typed to DeadlineExceeded
+    assert not isinstance(excinfo.value, DeadlineExceeded)
 
 
 def test_is_generic_over_the_return_type() -> None:

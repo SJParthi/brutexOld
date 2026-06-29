@@ -255,6 +255,39 @@ class _LockTimeoutSink:
         raise PartitionLockTimeout(self._timeout_seconds)
 
 
+class _HungWriteSink:
+    """A sink whose ``append`` BLOCKS past the durable-write deadline (a wedged fsync/replace).
+
+    The hang is REAL — ``append`` waits on an :class:`threading.Event` the test never sets
+    until teardown — so ``append_with_deadline``'s ``run_with_deadline`` raises a genuine
+    ``TimeoutError`` after the (patched-small) deadline, which the spine reclassifies to a
+    real :class:`~brutex.data.errors.WriteDeadlineExceeded`. This drives the F&O defer arm with
+    an ACTUAL timeout (not a directly-raised exception), the coordinator-flagged "covered but
+    never run" gap. The gate is released at teardown so the abandoned daemon worker exits.
+    """
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+        self.calls = 0
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, bars, merge_mode
+        self.calls += 1
+        self.entered.set()
+        self.gate.wait(timeout=30.0)  # the wedged write — bounded only by the deadline guard
+        return SinkAppendResult(bars_appended=0, partitions_written=0, write_results=())
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # contract_exchange + fetch_option_candles
 # ─────────────────────────────────────────────────────────────────────────
@@ -539,6 +572,88 @@ def test_ingest_partition_lock_timeout_no_ledger_logs_deferred() -> None:
     assert deferred  # the unified write-defer WARNING fired
     # A lock-acquire timeout is distinguished from a write-deadline by ``error_type``.
     assert deferred[0]["error_type"] == "PartitionLockTimeout"
+
+
+def test_ingest_hung_write_real_timeout_defers_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A REAL hung durable write (deadline-exceeding) drives the F&O ``WriteDeadlineExceeded`` arm.
+
+    DEC-FETCH-HUNG-WRITE-DEADLINE-001 — the coordinator-flagged "covered-but-never-run" gap: the
+    F&O defer branch (`option_ingest.py` lines 601-611, the ``WriteDeadlineExceeded`` half of the
+    ``except (PartitionLockTimeout, WriteDeadlineExceeded)``) was only ever driven by the spot
+    path. Here the F&O spine's own durable write HANGS past a patched-small (0.2 s) deadline, so
+    ``append_with_deadline``'s ``run_with_deadline`` raises a GENUINE ``TimeoutError`` →
+    ``WriteDeadlineExceeded`` → the F&O arm DEFERS the contract window: recorded FAILED + counted
+    transient (re-pulls next round), the worker freed, NOT a contract-wide quarantine and NOT an
+    infinite block. The lane keeps going (this synchronous call RETURNS in bounded time).
+    """
+    monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+    sdk = _FakeSDK(payload=_candles())
+    sink = _HungWriteSink()
+    ledger = WindowLedger()
+    try:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=0,
+            now_ist=_now,
+        )
+    finally:
+        sink.gate.set()  # release the abandoned daemon write thread (no orphan)
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    assert report.transient_failures == 1 and report.still_failed_windows == 1
+    assert sink.calls == 1  # the fetch ran; the write started then hung
+    assert sink.entered.is_set()  # the hang was REAL (the write began)
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull
+
+
+def test_ingest_hung_write_real_timeout_logs_write_deadline_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The F&O real-timeout defer logs ``write_deferred`` with ``error_type=WriteDeadlineExceeded``.
+
+    Proves the defer WARNING distinguishes a hung WRITE (``WriteDeadlineExceeded``) from a lock
+    ACQUIRE timeout (``PartitionLockTimeout``) — the ``defer_seconds`` branch on line 609-611 that
+    reads ``exc.deadline_seconds`` (NOT ``exc.timeout_seconds``) is exercised by a REAL timeout.
+    """
+    monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+    sdk = _FakeSDK(payload=_candles())
+    sink = _HungWriteSink()
+    try:
+        with capture_logs() as logs:
+            report = ingest_option_contract(
+                _client(sdk),
+                sink,
+                contract=_ce(),
+                interval="1day",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                ledger=None,
+                max_attempts=0,
+                now_ist=_now,
+            )
+    finally:
+        sink.gate.set()
+    assert report.transient_failures == 1
+    deferred = [r for r in logs if r["event"] == "option.ingest.window.write_deferred"]
+    assert deferred
+    assert deferred[0]["error_type"] == "WriteDeadlineExceeded"
+    # ``defer_seconds`` carries the exhausted DEADLINE (read via the else-arm exc.deadline_seconds).
+    assert deferred[0]["defer_seconds"] == 0.2
 
 
 def test_ingest_async_pipeline_tail_lock_timeout_folds_transient() -> None:

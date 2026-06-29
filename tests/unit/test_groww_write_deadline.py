@@ -277,3 +277,18 @@ class TestUnderlyingErrorsPropagate:
         sink = _RaisingSink(WriterError("boom"))
         with pytest.raises(WriterError):
             _call(sink, deadline_seconds=5.0)
+
+    def test_sink_own_timeout_error_propagates_not_reclassified(self) -> None:
+        # DEC-FETCH-HUNG-WRITE-DEADLINE-001 hardening: a real ``TimeoutError`` raised by
+        # ``sink.append`` ITSELF (a future network-backed writer; ``socket.timeout`` is an alias
+        # of ``TimeoutError`` on 3.10+) must propagate UNCHANGED — it is NOT the deadline guard's
+        # own ``DeadlineExceeded``, so it is NOT silently deferred as a hung durable write. The
+        # except arm matches ``DeadlineExceeded`` (the subclass), not the broad ``TimeoutError``.
+        own = TimeoutError("the writer's own socket timed out")
+        sink = _RaisingSink(own)
+        with pytest.raises(TimeoutError) as excinfo:
+            _call(sink, deadline_seconds=5.0)
+        # It is the writer's OWN error object, NOT a reclassified WriteDeadlineExceeded.
+        assert excinfo.value is own
+        assert not isinstance(excinfo.value, WriteDeadlineExceeded)
+        assert "writer's own socket" in str(excinfo.value)
