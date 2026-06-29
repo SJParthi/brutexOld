@@ -480,26 +480,28 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
       3. DRAIN it once at pull end (before the ledger persist + 1-day derivation).
     Spies on the COMMON helpers + the ingest call capture the construct / pass / drain.
     """
-    import brutex.dashboard.pull_controller as pc
     from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+    from brutex.dashboard.pull_controller import (
+        _build_fetch_pipeline as _real_build_fetch_pipeline,
+    )
+    from brutex.dashboard.pull_controller import (
+        _drain_fetch_pipeline as _real_drain_fetch_pipeline,
+    )
 
     monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
     built: list[FetchPipeline] = []
     drained: list[object] = []
     pipelines_seen: list[object] = []
 
-    real_build = pc._build_fetch_pipeline
-    real_drain = pc._drain_fetch_pipeline
-
     def _spy_build(*, dry_run: bool) -> FetchPipeline | None:
-        pipeline = real_build(dry_run=dry_run)
+        pipeline = _real_build_fetch_pipeline(dry_run=dry_run)
         if pipeline is not None:
             built.append(pipeline)
         return pipeline
 
     def _spy_drain(pipeline: FetchPipeline | None) -> None:
         drained.append(pipeline)
-        real_drain(pipeline)
+        _real_drain_fetch_pipeline(pipeline)
 
     def _spy_ingest(
         *_args: object, fetch_pipeline: object = None, **_kw: object
@@ -507,8 +509,8 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
         pipelines_seen.append(fetch_pipeline)
         return _empty_ingest_report()
 
-    monkeypatch.setattr(pc, "_build_fetch_pipeline", _spy_build)
-    monkeypatch.setattr(pc, "_drain_fetch_pipeline", _spy_drain)
+    monkeypatch.setattr("brutex.dashboard.pull_controller._build_fetch_pipeline", _spy_build)
+    monkeypatch.setattr("brutex.dashboard.pull_controller._drain_fetch_pipeline", _spy_drain)
     monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
     sdk = _FakeSDK()
     sink = _RecordingSink()
