@@ -32,6 +32,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
+    SUSPECTED_PARTIAL_WINDOW_EVENT,
     UNDERLYING_ALL_EMPTY_EVENT,
     AllEmptyScan,
     GrowwOptionIngestReport,
@@ -2263,3 +2264,125 @@ class TestSuspiciousEmptyFlag:
             )
         assert report.bars_appended == 1  # the pull itself is unaffected
         assert any(r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT for r in logs)
+
+
+def _partial_bar(d: date) -> CandleBar:
+    """A valid in-session option bar whose IST trading date is *d* (for truncation tests)."""
+    return CandleBar(
+        timestamp=datetime(d.year, d.month, d.day, 4, 0, tzinfo=UTC),  # 09:30 IST = 04:00 UTC
+        open=Decimal("100.0"),
+        high=Decimal("110.0"),
+        low=Decimal("90.0"),
+        close=Decimal("105.0"),
+        volume=50,
+        open_interest=7,
+    )
+
+
+def _raw_window(
+    *, last_bar_date: date | None, window_end: date, expiry: date | None
+) -> _oi._OptionRawWindow:
+    """An ``_OptionRawWindow`` carrying one bar on *last_bar_date* (or empty), end *window_end*."""
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=expiry,
+        symbol="NSE-NIFTY-02Jan25-28500-CE",
+        contract_type="CE",
+        strike=28500.0,
+    )
+    key = WindowKey(
+        market="groww-option",
+        security_id=contract.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=window_end,
+    )
+    bars = [] if last_bar_date is None else [_partial_bar(last_bar_date)]
+    return _oi._OptionRawWindow(
+        contract=contract,
+        interval="1day",
+        exchange="NSE",
+        key=key,
+        raw_bars=bars,
+        fetch_count=1,
+        settle_empty=False,
+        attempt=0,
+    )
+
+
+class TestPartialWindowFlag:
+    """DEC-PARTIAL-WINDOW-DETECT-001 — observe-only truncated-SUCCESS-window WARNING."""
+
+    def test_truncated_window_fires_one_warning(self) -> None:
+        # A SUCCESS window whose last bar (2020-03-04) stops far before its end (2020-04-02),
+        # contract still live to 2025 → the suspected-partial WARNING fires once.
+        raw = _raw_window(
+            last_bar_date=date(2020, 3, 4),
+            window_end=date(2020, 4, 2),
+            expiry=date(2025, 1, 2),
+        )
+        with capture_logs() as logs:
+            _oi._observe_partial_window(
+                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
+            )
+        warns = [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["symbol"] == repr(raw.contract.symbol)
+        assert warns[0]["last_bar_date"] == "2020-03-04"
+        assert warns[0]["missing_sessions"] > 5
+
+    def test_sparse_complete_window_silent(self) -> None:
+        # Last bar reaches the window end → COMPLETE → no WARNING (illiquid-but-complete guard).
+        raw = _raw_window(
+            last_bar_date=date(2020, 4, 1),
+            window_end=date(2020, 4, 2),
+            expiry=date(2025, 1, 2),
+        )
+        with capture_logs() as logs:
+            _oi._observe_partial_window(
+                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
+            )
+        assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
+
+    def test_empty_window_silent(self) -> None:
+        # An EMPTY window (no bars) is never a truncation → silent.
+        raw = _raw_window(last_bar_date=None, window_end=date(2020, 4, 2), expiry=date(2025, 1, 2))
+        with capture_logs() as logs:
+            _oi._observe_partial_window(
+                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
+            )
+        assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
+
+    def test_diagnostic_error_is_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The classifier raising must NEVER break the pull — it logs the error event instead.
+        def _boom(*_a: object, **_k: object) -> object:
+            raise RuntimeError("classify blew up")
+
+        monkeypatch.setattr(_oi, "classify_partial_window", _boom)
+        raw = _raw_window(
+            last_bar_date=date(2020, 3, 4), window_end=date(2020, 4, 2), expiry=date(2025, 1, 2)
+        )
+        with capture_logs() as logs:
+            _oi._observe_partial_window(
+                raw, pull_id="pid-1", fields={"symbol": raw.contract.symbol, "interval": "1day"}
+            )
+        assert any(r["event"] == _oi.SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT for r in logs)
+        assert [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
+
+    def test_wired_into_success_tail(self) -> None:
+        # End-to-end through the SUCCESS-path consumer tail: a truncated window fires the flag.
+        raw = _raw_window(
+            last_bar_date=date(2020, 3, 4), window_end=date(2020, 4, 2), expiry=date(2025, 1, 2)
+        )
+        with capture_logs() as logs:
+            report = _oi._process_option_window_tail(
+                _Sink(),
+                raw,
+                ledger=None,
+                on_success=None,
+                pull_id="pid-1",
+                fields={"symbol": raw.contract.symbol, "interval": "1day"},
+            )
+        assert report.bars_appended == 1  # the SUCCESS write happened
+        warns = [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT]
+        assert len(warns) == 1

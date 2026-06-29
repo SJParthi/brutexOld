@@ -95,6 +95,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
+from brutex.data.partial_window_detect import classify_partial_window
 from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
@@ -670,6 +671,11 @@ def _process_option_window_tail(
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
         )
+    # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): WARN if this SUCCESS window's bars
+    # stop materially before its expected end (a truncation the SUCCESS classifier +
+    # skip rule would otherwise never revisit). Fully guarded inside — never breaks the
+    # pull, changes no status/ledger/return.
+    _observe_partial_window(raw, pull_id=pull_id, fields=fields)
     if on_success is not None:
         on_success()
     return IngestReport(
@@ -762,6 +768,14 @@ class GrowwOptionIngestReport:
 # only "0 partitions" and cannot tell a clean-but-empty vendor response from an
 # underlying we never pulled.
 # ──────────────────────────────────────────────────────────────────────────
+
+#: The structlog event a SUSPECTED-PARTIAL (truncated-but-marked-SUCCESS) F&O
+#: contract window emits (observe-only; DEC-PARTIAL-WINDOW-DETECT-001). A WARNING
+#: for human triage — it changes NO status / ledger / skip / engine input.
+SUSPECTED_PARTIAL_WINDOW_EVENT = "window.suspected_partial"
+#: Emitted if the observe-only partial-window scan itself raises — it NEVER breaks
+#: the pull (mirrors :data:`UNDERLYING_ALL_EMPTY_ERROR_EVENT`).
+SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT = "window.suspected_partial_error"
 
 #: The structlog event a whole-underlying 100%-empty F&O pull emits (observe-only;
 #: the pull-side twin of ``completeness.RECONCILE_MISMATCH_EVENT``).
@@ -888,6 +902,57 @@ def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> Non
             attempted_pairs=rep.attempted_pairs,
             stored_bars=rep.stored_bars,
         )
+
+
+def _observe_partial_window(
+    raw: _OptionRawWindow,
+    *,
+    pull_id: str | None,
+    fields: dict[str, str],
+) -> None:
+    """Observe-only: WARN if this SUCCESS window's bars stop materially before its end.
+
+    DEC-PARTIAL-WINDOW-DETECT-001. Runs the pure, false-positive-safe
+    :func:`~brutex.data.partial_window_detect.classify_partial_window` over this
+    window's RAW bars (the last bar's timestamp) vs the window's end bound + the
+    contract's expiry, and emits ONE :data:`SUSPECTED_PARTIAL_WINDOW_EVENT` WARNING
+    when (and only when) the window is a SUSPECTED truncation — a window the pull
+    marked ``SUCCESS`` (it returned bars) yet whose last bar lags the expected end
+    by more than the conservative tolerance, with the contract still live past it.
+
+    Fully wrapped: any failure of the diagnostic is swallowed + logged
+    (:data:`SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT`), so it can NEVER block / slow /
+    crash the pull. It changes NO status, NO ledger row, NO return value (observe-only,
+    Golden Rule #10). Called only on the SUCCESS path with non-empty bars (an EMPTY
+    window is excluded by the classifier anyway).
+    """
+    try:
+        last_bar_ts = raw.raw_bars[-1].timestamp if raw.raw_bars else None
+        verdict = classify_partial_window(
+            last_bar_ts=last_bar_ts,
+            window_end=raw.key.end,
+            now=datetime.now(UTC),
+            expiry=raw.contract.expiry,
+        )
+        if verdict.is_suspected_partial():
+            _LOG.warning(
+                SUSPECTED_PARTIAL_WINDOW_EVENT,
+                pull_id=pull_id,
+                symbol=repr(raw.contract.symbol),
+                interval=fields.get("interval"),
+                window_start=raw.key.start.isoformat(),
+                window_end=raw.key.end.isoformat(),
+                last_bar_date=(
+                    verdict.last_bar_date.isoformat() if verdict.last_bar_date else None
+                ),
+                expected_end_date=(
+                    verdict.expected_end_date.isoformat() if verdict.expected_end_date else None
+                ),
+                missing_sessions=verdict.missing_sessions,
+                expiry=raw.contract.expiry.isoformat() if raw.contract.expiry else None,
+            )
+    except Exception as exc:  # observe-only diagnostic must never break the pull
+        _LOG.warning(SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT, pull_id=pull_id, error=str(exc))
 
 
 #: Live-progress hook fired once per ``(contract, interval)`` pair after it is
@@ -1437,6 +1502,7 @@ def ingest_underlying_futures(
 
 
 __all__ = [
+    "SUSPECTED_PARTIAL_WINDOW_EVENT",
     "UNDERLYING_ALL_EMPTY_EVENT",
     "AllEmptyScan",
     "ContractWindows",
