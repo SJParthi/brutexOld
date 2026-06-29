@@ -704,6 +704,85 @@ def test_reconcile_phase_with_pipeline_unmatched_series_kept() -> None:
         pipeline.drain()
 
 
+def test_reconcile_round1_transient_then_round2_success_is_complete() -> None:
+    """MAJOR-1: a contract that transient'd in round 1 but DURABLY SUCCEEDS in round 2 is COMPLETE.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 regression (direction 1). The cumulative-transient bug
+    left the series ``transient == 1`` forever, so the reconcile EXCLUDED it from ``complete`` and
+    reported ``still_failed_windows=1, clean=False`` even though its 50 bars were durably in the
+    lake — a MISLEADING verdict + a needless re-pull. With the LAST-WRITE-WINS fix the round-2
+    success clears the flag → ``complete``, ``still_failed_windows=0``, ``clean=True``.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    key = ("ABC25JAN20000CE", "1minute")
+    pipeline = FetchPipeline(workers=1)
+    try:
+        # Round 1: a PartitionLockTimeout deferred this contract's window (0 bars).
+        pipeline.fold_tail_transient(key)
+        # Round 2: the SAME window is re-pulled and durably succeeds (50 bars).
+        pipeline.fold_totals(bars_appended=50, conflicts=0, series_key=key)
+        phase = hp._PhaseResult(
+            bars=0,  # deferred — the producer reported 0 each round
+            windows=2,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset({"ABC25JAN20000CE"}),
+            clean=True,
+            merged_pairs={key: IngestReport(windows=1, bars_appended=0, transient_failures=0)},
+            failure_symbols=frozenset(),
+        )
+        out = hp._reconcile_phase_with_pipeline(
+            phase, pipeline, selected_symbols=frozenset({"ABC25JAN20000CE"})
+        )
+        assert out.bars == 50  # durable bars folded
+        assert out.still_failed_windows == 0  # NOT a stale cumulative transient
+        assert out.complete == frozenset({"ABC25JAN20000CE"})  # resolved → complete
+        assert out.clean is True
+    finally:
+        pipeline.drain()
+
+
+def test_reconcile_round1_success_then_round2_transient_stays_failing() -> None:
+    """MAJOR-1 (direction 2): a success FOLLOWED by a transient is NOT falsely marked complete.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 regression — the case the NAIVE ``still = transient if
+    bars==0 else 0`` shortcut would BREAK (the accumulated round-1 bars would zero out the round-2
+    transient → false complete). LAST-WRITE-WINS keeps the newest (transient) outcome, so the
+    series is correctly ``still_failing`` / excluded from ``complete`` even with durable bars.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    key = ("ABC25JAN20000CE", "1minute")
+    pipeline = FetchPipeline(workers=1)
+    try:
+        # Round 1: a durable success (50 bars).
+        pipeline.fold_totals(bars_appended=50, conflicts=0, series_key=key)
+        # Round 2: the newest outcome is a tail transient (a later window deferred).
+        pipeline.fold_tail_transient(key)
+        phase = hp._PhaseResult(
+            bars=0,
+            windows=2,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset({"ABC25JAN20000CE"}),
+            clean=True,
+            merged_pairs={key: IngestReport(windows=1, bars_appended=0, transient_failures=0)},
+            failure_symbols=frozenset(),
+        )
+        out = hp._reconcile_phase_with_pipeline(
+            phase, pipeline, selected_symbols=frozenset({"ABC25JAN20000CE"})
+        )
+        assert out.bars == 50  # the round-1 bars still accumulate
+        assert out.still_failed_windows == 1  # newest outcome is a transient
+        assert out.complete == frozenset()  # NOT falsely complete
+        assert out.clean is False  # the barrier breaks
+    finally:
+        pipeline.drain()
+
+
 def test_market_pull_order_sorts_unknown_market_last() -> None:
     """The order key sorts the two known markets futures-first, an unknown market LAST.
 

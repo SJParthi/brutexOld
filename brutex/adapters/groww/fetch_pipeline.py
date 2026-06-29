@@ -260,8 +260,16 @@ class SeriesTotals:
     conflicts
         Total keep-first vendor re-statements detected for this series.
     transient
-        Tail-side transient defers (``PartitionLockTimeout``) for this series — the async
-        ``still_failed_windows`` so the across-pull retry round still re-pulls them.
+        The series' LAST-FOLD tail-transient state — ``1`` iff the most recently processed
+        window of this series was deferred by a ``PartitionLockTimeout``, ``0`` once a later
+        window of the SAME series folds a durable success (LAST-WRITE-WINS, NOT a cumulative
+        count; DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 fix). All windows of one series route to
+        ONE consumer thread (the per-partition-lock invariant), so these folds are SERIALISED in
+        processing order and the value reflects the series' NEWEST outcome — matching the
+        synchronous spine's ``passes[-1].still_failed_windows`` last-round residual semantics. A
+        contract that transient'd in an early until-clean round but DURABLY SUCCEEDS in a later
+        round therefore reads ``transient == 0`` (resolved), not a stale cumulative ``1`` (which
+        would falsely report it ``still_failing`` / ``clean=False`` with its bars already durable).
     """
 
     bars_appended: int = 0
@@ -447,8 +455,11 @@ class FetchPipeline:
             self._bars_appended += bars_appended
             self._conflicts += conflicts
             if series_key is not None:
+                # A durable success CLEARS the series' last-fold transient flag (this window
+                # resolved) — LAST-WRITE-WINS, so an early-round transient that later succeeds
+                # is no longer reported still-failing (DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1).
                 self._accumulate_series(
-                    series_key, bars_appended=bars_appended, conflicts=conflicts
+                    series_key, bars_appended=bars_appended, conflicts=conflicts, transient=0
                 )
 
     def fold_tail_transient(self, series_key: tuple[str, str] | None = None) -> None:
@@ -467,6 +478,8 @@ class FetchPipeline:
             self._processed += 1
             self._tail_transients += 1
             if series_key is not None:
+                # SET the series' last-fold transient flag (this window deferred); a later
+                # success of the same series clears it (LAST-WRITE-WINS, MAJOR-1).
                 self._accumulate_series(series_key, transient=1)
 
     def _accumulate_series(
@@ -477,12 +490,22 @@ class FetchPipeline:
         conflicts: int = 0,
         transient: int = 0,
     ) -> None:
-        """Fold one window's outcome into the per-series totals (caller holds ``_totals_lock``)."""
+        """Fold one window's outcome into the per-series totals (caller holds ``_totals_lock``).
+
+        ``bars_appended`` / ``conflicts`` ACCUMULATE across the series' windows (and across
+        until-clean rounds — the keep-first sink makes a re-pull append only new bars). The
+        ``transient`` flag is LAST-WRITE-WINS, NOT cumulative: it is OVERWRITTEN to the caller's
+        value (``1`` from a tail-transient fold, ``0`` from a durable-success fold) so the stored
+        value reflects the series' MOST RECENT outcome — matching the synchronous spine's
+        ``passes[-1]`` last-round residual semantics (DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 fix).
+        Per-series single-consumer-thread routing serialises these folds, so the last fold seen
+        here is the series' newest window outcome.
+        """
         prior = self._series.get(series_key, SeriesTotals())
         self._series[series_key] = SeriesTotals(
             bars_appended=prior.bars_appended + bars_appended,
             conflicts=prior.conflicts + conflicts,
-            transient=prior.transient + transient,
+            transient=transient,
         )
 
     @property
