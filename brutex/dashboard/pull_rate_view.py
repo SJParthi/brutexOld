@@ -243,6 +243,97 @@ def build_pull_rate_view(
     )
 
 
+def build_pull_rate_view_merged(
+    *,
+    panel_effective_rps: float,
+    panel_current_rps: float,
+    panel_recent_minute: int,
+    panel_recent_429_count: int,
+    panel_seconds_since_update: float,
+    bridge_effective_rps: float | None = None,
+    bridge_current_rps: float | None = None,
+    bridge_recent_minute: int | None = None,
+    bridge_recent_429_count: int | None = None,
+    bridge_seconds_since_update: float | None = None,
+    stale_after_s: float = STALE_AFTER_S,
+    stall_rps_floor: float = STALL_RPS_FLOOR,
+) -> PullRateView:
+    """Project the FRESHER of the in-memory dashboard panel and the cross-process bridge.
+
+    DEC-CLI-RATE-BRIDGE-001. The dashboard-pull rate lives in the in-memory
+    :class:`~brutex.dashboard.app.RateLimitPanel`; a CLI ``brutex fetch`` pull (a SEPARATE
+    process) publishes its rate to ``<lake_root>/.rate/pull_rate.json`` (the bridge), read
+    by :func:`~brutex.data.rate_bridge.read_rate_snapshot`. This picks whichever source
+    ticked most recently — the SMALLER ``seconds_since_update`` — and projects it through
+    :func:`build_pull_rate_view`, so the widget shows the ACTIVE pull's real measured rate
+    regardless of which process is pulling. When the bridge is absent (no CLI file) the
+    behaviour is BYTE-IDENTICAL to projecting the panel alone (the no-CLI-file fallback). A
+    bridge fresher than the panel surfaces the CLI numbers; a panel fresher than (or equal
+    to) the bridge keeps the dashboard numbers. When BOTH are stale, the fresher one's age
+    is still stale ⇒ :func:`build_pull_rate_view` zeroes everything to an honest IDLE
+    (never a fabricated live number — Golden Rule #1).
+
+    The ages are passed pre-computed (the route computes ``now_monotonic -
+    last_update_monotonic`` for the panel and ``now_wall - bridge.wall_time`` for the file)
+    so this function stays PURE + clock-free + cross-process-clock-agnostic — the only thing
+    it does with the two clocks is COMPARE their already-derived staleness in seconds, which
+    is the SAME unit on both sides.
+
+    Parameters
+    ----------
+    panel_effective_rps, panel_current_rps, panel_recent_minute, panel_recent_429_count
+        The in-memory panel's measured rate fields.
+    panel_seconds_since_update
+        The panel's age in seconds (``inf`` when never updated). Always real.
+    bridge_effective_rps, bridge_current_rps, bridge_recent_minute, bridge_recent_429_count
+        The bridge snapshot's measured rate fields (``None`` when no bridge file is present).
+    bridge_seconds_since_update
+        The bridge snapshot's age in seconds (``None`` when no bridge file is present).
+    stale_after_s
+        Idle threshold (default :data:`STALE_AFTER_S`).
+    stall_rps_floor
+        Achieved-r/s stall floor (default :data:`STALL_RPS_FLOOR`).
+
+    Returns
+    -------
+    PullRateView
+        The honest projection of whichever source is freshest (idle when none is fresh).
+    """
+    # No bridge file (or it had no usable age) → project the panel alone, byte-identical to
+    # the pre-bridge behaviour (the no-CLI-file in-memory fallback). The ``is not None`` test
+    # narrows ``bridge_seconds_since_update`` to ``float`` for the ``build_pull_rate_view`` call.
+    if (
+        bridge_seconds_since_update is not None
+        and bridge_seconds_since_update < panel_seconds_since_update
+    ):
+        # The bridge fields are written together by the publisher, so a present age implies
+        # present values; a defensive ``is not None`` defaults each to 0 regardless.
+        return build_pull_rate_view(
+            effective_rps=bridge_effective_rps if bridge_effective_rps is not None else 0.0,
+            current_rps=bridge_current_rps if bridge_current_rps is not None else 0.0,
+            recent_minute=bridge_recent_minute if bridge_recent_minute is not None else 0,
+            recent_429_count=(
+                bridge_recent_429_count if bridge_recent_429_count is not None else 0
+            ),
+            last_update_monotonic=0.0,
+            now_monotonic=bridge_seconds_since_update,
+            stale_after_s=stale_after_s,
+            stall_rps_floor=stall_rps_floor,
+        )
+    return build_pull_rate_view(
+        effective_rps=panel_effective_rps,
+        current_rps=panel_current_rps,
+        recent_minute=panel_recent_minute,
+        recent_429_count=panel_recent_429_count,
+        last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
+        now_monotonic=panel_seconds_since_update
+        if math.isfinite(panel_seconds_since_update)
+        else 0.0,
+        stale_after_s=stale_after_s,
+        stall_rps_floor=stall_rps_floor,
+    )
+
+
 __all__ = [
     "CEILING_PER_MIN_LIMIT",
     "CEILING_RPS_LIMIT",
@@ -253,4 +344,5 @@ __all__ = [
     "STALL_RPS_FLOOR",
     "PullRateView",
     "build_pull_rate_view",
+    "build_pull_rate_view_merged",
 ]

@@ -20,6 +20,7 @@ from brutex.dashboard.pull_rate_view import (
     STALL_RPS_FLOOR,
     PullRateView,
     build_pull_rate_view,
+    build_pull_rate_view_merged,
 )
 
 
@@ -209,3 +210,143 @@ def test_view_is_frozen() -> None:
         pass
     else:  # pragma: no cover - frozen dataclass always raises
         raise AssertionError("PullRateView should be frozen")
+
+
+# ---------------------------------------------------------------------------
+# build_pull_rate_view_merged — the cross-process bridge merge (DEC-CLI-RATE-BRIDGE-001).
+# ---------------------------------------------------------------------------
+
+
+def test_merged_no_bridge_projects_panel_byte_identically() -> None:
+    """No bridge file (every bridge arg None) → the panel alone, identical to the legacy view."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=6.4,
+        panel_current_rps=8.0,
+        panel_recent_minute=380,
+        panel_recent_429_count=2,
+        panel_seconds_since_update=1.0,
+    )
+    legacy = build_pull_rate_view(
+        effective_rps=6.4,
+        current_rps=8.0,
+        recent_minute=380,
+        recent_429_count=2,
+        last_update_monotonic=0.0,
+        now_monotonic=1.0,
+    )
+    assert merged == legacy
+    assert merged.flow_state == FLOW_FLOWING
+
+
+def test_merged_no_bridge_never_updated_panel_is_idle_inf() -> None:
+    """No bridge + a never-updated panel (inf age) → idle with an infinite age (the -inf path)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=math.inf,
+    )
+    assert merged.flow_state == FLOW_IDLE
+    assert math.isinf(merged.seconds_since_update)
+
+
+def test_merged_bridge_fresher_surfaces_cli_numbers() -> None:
+    """A bridge fresher than the panel → the CLI bridge numbers win (flowing)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=math.inf,  # dashboard never pulled
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=3,
+        bridge_seconds_since_update=1.5,  # CLI ticked 1.5 s ago
+    )
+    assert merged.flow_state == FLOW_FLOWING
+    assert merged.req_per_sec_achieved == 4.8
+    assert merged.req_per_sec_allowed == 5.0
+    assert merged.req_per_min == 290
+    assert merged.recent_429_count == 3
+    assert merged.seconds_since_update == 1.5
+
+
+def test_merged_panel_fresher_keeps_dashboard_numbers() -> None:
+    """A panel fresher than the bridge → the dashboard numbers win (the bridge is older)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=7.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=400,
+        panel_recent_429_count=1,
+        panel_seconds_since_update=0.5,  # dashboard ticked 0.5 s ago
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=3,
+        bridge_seconds_since_update=2.0,  # CLI bridge is older
+    )
+    assert merged.req_per_sec_achieved == 7.0
+    assert merged.req_per_min == 400
+    assert merged.seconds_since_update == 0.5
+
+
+def test_merged_equal_age_prefers_panel() -> None:
+    """Equal ages → the panel wins (the strict `<` guard means a tie is NOT the bridge)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=7.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=400,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=2.0,
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=2.0,
+    )
+    assert merged.req_per_sec_achieved == 7.0
+
+
+def test_merged_bridge_fresher_but_stale_is_idle() -> None:
+    """The bridge is the fresher source but itself stale → idle (every live number zeroed)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=math.inf,
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=3,
+        bridge_seconds_since_update=STALE_AFTER_S + 1.0,  # CLI ended a while ago
+    )
+    assert merged.flow_state == FLOW_IDLE
+    assert merged.req_per_sec_achieved == 0.0
+    assert merged.req_per_min == 0
+
+
+def test_merged_bridge_age_present_but_fields_none_defaults_safely() -> None:
+    """A fresher bridge age with None fields defaults each to 0 (the defensive else branches)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=9.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=400,
+        panel_recent_429_count=9,
+        panel_seconds_since_update=math.inf,
+        # The bridge is fresher (a finite age beats inf) but its value fields are absent.
+        bridge_effective_rps=None,
+        bridge_current_rps=None,
+        bridge_recent_minute=None,
+        bridge_recent_429_count=None,
+        bridge_seconds_since_update=1.0,
+    )
+    # All bridge fields defaulted to 0 → achieved 0.0 ≤ floor while ACTIVE ⇒ stalled.
+    assert merged.flow_state == FLOW_STALLED
+    assert merged.req_per_sec_achieved == 0.0
+    assert merged.req_per_sec_allowed == 0.0
+    assert merged.req_per_min == 0
+    assert merged.recent_429_count == 0
+    assert merged.seconds_since_update == 1.0
