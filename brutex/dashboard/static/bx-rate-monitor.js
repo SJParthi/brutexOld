@@ -19,7 +19,7 @@
  * "expand" affordance) opens a LARGE fixed-position overlay panel — easy to read at a
  * glance — that ALSO shows the RAW EVIDENCE: the actual integer request counts in the
  * trailing 1s / 60s / 600s / 3600s windows, measured by the rate controller from REAL
- * per-request timestamps. The operator can see the arithmetic add up — e.g. req/sec is
+ * per-second issue counts. The operator can see the arithmetic add up — e.g. req/sec is
  * literally the trailing-1s count, req/min the trailing-60s count, req/10min the
  * trailing-600s count, req/hour the trailing-3600s count — so the numbers are provably
  * real tracking, not fabricated. The overlay is fixed-position + dismissible (an ✕ button
@@ -29,7 +29,7 @@
  * HONEST labelling (Golden Rule #1 + #10): when the backend reports flow_state="idle"
  * the widget shows "idle" + zeroed numbers — it NEVER shows a stale "live" figure once a
  * pull has ended. req/sec, req/min, req/10min and the MEASURED req/hour are all REAL
- * counts of issues in their window (from the rate controller's per-issue timestamp log);
+ * counts of issues in their window (from the rate controller's per-second issue ring);
  * the older req/hour "obs" figure carries an "obs" tag because it is the current
  * minute-rate projected to an hour, not a measured count. During the first hour of a
  * pull the MEASURED req/hour is the honest partial-hour count SO FAR (it grows as the
@@ -134,74 +134,130 @@
     document.head.appendChild(style);
   }
 
+  // DOM builder — programmatic createElement + textContent only (no markup parsing), so the
+  // widget carries ZERO HTML-injection sink (CodeQL-clean: every value below is a static
+  // string literal set via textContent/className/id, never parsed as markup).
+  function el(tag, opts, kids) {
+    var node = document.createElement(tag);
+    if (opts) {
+      if (opts.id) {
+        node.id = opts.id;
+      }
+      if (opts.cls) {
+        node.className = opts.cls;
+      }
+      if (opts.text != null) {
+        node.textContent = opts.text;
+      }
+      if (opts.attrs) {
+        for (var k in opts.attrs) {
+          if (Object.prototype.hasOwnProperty.call(opts.attrs, k)) {
+            node.setAttribute(k, opts.attrs[k]);
+          }
+        }
+      }
+    }
+    if (kids) {
+      for (var i = 0; i < kids.length; i++) {
+        node.appendChild(kids[i]);
+      }
+    }
+    return node;
+  }
+
+  // A compact pill row: a "k" label + a "v" value span (id valueId). When limId is given a
+  // "/ <lim>" suffix is added. Returns the row div.
+  function pillRow(label, valueId, limId) {
+    var v = el("span", { cls: "v" }, [el("span", { id: valueId, text: "—" })]);
+    if (limId) {
+      v.appendChild(document.createTextNode(" "));
+      v.appendChild(
+        el("span", { cls: "lim" }, [
+          document.createTextNode("/ "),
+          el("span", { id: limId, text: "—" }),
+        ])
+      );
+    }
+    return el("div", { cls: "bxrm-row" }, [el("span", { cls: "k", text: label }), v]);
+  }
+
   function buildWidget() {
-    var w = document.createElement("div");
-    w.id = WIDGET_ID;
-    w.setAttribute("aria-live", "polite");
-    w.setAttribute(
-      "title",
-      "Live Groww pull rate — click to expand. green flowing, red stalled, dark idle"
+    var head = el("div", { cls: "bxrm-head" }, [
+      el("span", { id: "bxrmDot", cls: "bxrm-dot idle" }),
+      el("span", { text: "Pull rate" }),
+      el("span", { id: "bxrmState", cls: "bxrm-state idle", text: "idle" }),
+      el("span", { cls: "bxrm-exp", text: "expand" }),
+    ]);
+    var w = el(
+      "div",
+      {
+        id: WIDGET_ID,
+        attrs: {
+          "aria-live": "polite",
+          title: "Live Groww pull rate — click to expand. green flowing, red stalled, dark idle",
+        },
+      },
+      [
+        head,
+        pillRow("req/sec", "bxrmSec", "bxrmSecLim"),
+        pillRow("req/min", "bxrmMin", "bxrmMinLim"),
+        pillRow("req/10min", "bxrmTenMin", null),
+        pillRow("req/hour", "bxrmHour", null),
+      ]
     );
-    w.innerHTML =
-      '<div class="bxrm-head">' +
-      '<span class="bxrm-dot idle" id="bxrmDot"></span>' +
-      "<span>Pull rate</span>" +
-      '<span class="bxrm-state idle" id="bxrmState">idle</span>' +
-      '<span class="bxrm-exp">expand</span>' +
-      "</div>" +
-      '<div class="bxrm-row"><span class="k">req/sec</span>' +
-      '<span class="v"><span id="bxrmSec">—</span> ' +
-      '<span class="lim">/ <span id="bxrmSecLim">—</span></span></span></div>' +
-      '<div class="bxrm-row"><span class="k">req/min</span>' +
-      '<span class="v"><span id="bxrmMin">—</span> ' +
-      '<span class="lim">/ <span id="bxrmMinLim">—</span></span></span></div>' +
-      '<div class="bxrm-row"><span class="k">req/10min</span>' +
-      '<span class="v" id="bxrmTenMin">—</span></div>' +
-      '<div class="bxrm-row"><span class="k">req/hour</span>' +
-      '<span class="v" id="bxrmHour">—</span></div>';
     w.addEventListener("click", openOverlay);
     document.body.appendChild(w);
     return w;
   }
 
+  // One expanded-grid metric: a "gk" label + a big "gv" value + a small "gc" evidence count.
+  function gridMetric(label, valueId, countId) {
+    return [
+      el("span", { cls: "gk", text: label }),
+      el("span", { id: valueId, cls: "gv", text: "—" }),
+      el("span", { id: countId, cls: "gc", text: "—" }),
+    ];
+  }
+
   function buildOverlay() {
-    var o = document.createElement("div");
-    o.id = OVERLAY_ID;
-    o.innerHTML =
-      '<div class="bxrm-card">' +
-      '<div class="bxrm-ehead">' +
-      '<span class="bxrm-edot idle" id="bxrmEDot"></span>' +
-      "<span>Live pull rate</span>" +
-      '<span class="bxrm-estate idle" id="bxrmEState">idle</span>' +
-      '<button class="bxrm-close" id="bxrmClose" aria-label="Close">&times;</button>' +
-      "</div>" +
-      '<div class="bxrm-grid">' +
-      '<span class="gk">req/sec</span><span class="gv" id="bxrmESec">—</span>' +
-      '<span class="gc" id="bxrmESecC">—</span>' +
-      '<span class="gk">req/min</span><span class="gv" id="bxrmEMin">—</span>' +
-      '<span class="gc" id="bxrmEMinC">—</span>' +
-      '<span class="gk">req/10min</span><span class="gv" id="bxrmETenMin">—</span>' +
-      '<span class="gc" id="bxrmETenMinC">—</span>' +
-      '<span class="gk">req/hour</span><span class="gv" id="bxrmEHour">—</span>' +
-      '<span class="gc" id="bxrmEHourC">—</span>' +
-      "</div>" +
-      '<div class="bxrm-evidence" id="bxrmEvidence">' +
-      "Evidence (real counts from the rate controller's per-request timestamps): " +
-      "the rates above ARE these trailing-window issue counts — req/sec = count in the " +
-      "last 1s, req/min = last 60s, req/10min = last 600s, req/hour = last 3600s." +
-      "</div>" +
-      "</div>";
+    var closeBtn = el("button", {
+      id: "bxrmClose",
+      cls: "bxrm-close",
+      text: "×",
+      attrs: { "aria-label": "Close", type: "button" },
+    });
+    var ehead = el("div", { cls: "bxrm-ehead" }, [
+      el("span", { id: "bxrmEDot", cls: "bxrm-edot idle" }),
+      el("span", { text: "Live pull rate" }),
+      el("span", { id: "bxrmEState", cls: "bxrm-estate idle", text: "idle" }),
+      closeBtn,
+    ]);
+    var grid = el(
+      "div",
+      { cls: "bxrm-grid" },
+      gridMetric("req/sec", "bxrmESec", "bxrmESecC")
+        .concat(gridMetric("req/min", "bxrmEMin", "bxrmEMinC"))
+        .concat(gridMetric("req/10min", "bxrmETenMin", "bxrmETenMinC"))
+        .concat(gridMetric("req/hour", "bxrmEHour", "bxrmEHourC"))
+    );
+    var evidence = el("div", {
+      id: "bxrmEvidence",
+      cls: "bxrm-evidence",
+      text:
+        "Evidence (real counts from the rate controller's per-second issue ring): " +
+        "the rates above ARE these trailing-window issue counts — req/sec = count in the " +
+        "last 1s, req/min = last 60s, req/10min = last 600s, req/hour = last 3600s.",
+    });
+    var card = el("div", { cls: "bxrm-card" }, [ehead, grid, evidence]);
+    var o = el("div", { id: OVERLAY_ID }, [card]);
     o.addEventListener("click", function (ev) {
       // Click on the backdrop (outside the card) closes; clicks inside the card do not.
       if (ev.target === o) {
         closeOverlay();
       }
     });
+    closeBtn.addEventListener("click", closeOverlay);
     document.body.appendChild(o);
-    var closeBtn = o.querySelector("#bxrmClose");
-    if (closeBtn) {
-      closeBtn.addEventListener("click", closeOverlay);
-    }
     return o;
   }
 

@@ -36,6 +36,7 @@ from brutex.adapters.rate_common import (
     STEP_UP_WINDOW,
     STORM_HITS,
     TIMEOUT_FLOOR_RPS,
+    TRAILING_LOG_BUCKETS,
     TRAILING_LOG_WINDOW_S,
     RateController,
 )
@@ -1211,32 +1212,55 @@ class TestTrailingWindowIssueLog:
         # recent_minute stays 0 while the observe-only log carries the real trailing-60 s count.
         assert snap["recent_minute"] == 0
 
-    def test_snapshot_prunes_stale_instants_when_no_newer_push(self) -> None:
-        # The snapshot-time prune (separate from the push-time prune) evicts an instant that
-        # has aged past the hour when NO newer pace has pushed since — so the reported counts
-        # never include a > 1 h-old issue even on an idle-then-polled controller.
+    def test_snapshot_rolls_ring_forward_when_no_newer_push(self) -> None:
+        # The ring advances to ``now`` at snapshot time (separate from the push advance), so an
+        # issue that has aged past the hour when NO newer pace has pushed since reads 0 — the
+        # reported counts never include a > 1 h-old issue even on an idle-then-polled controller.
         clock = _Clock()
         ctl = _controller(clock)
-        ctl._record_issue_locked(1000.0)  # logged at t=1000
+        ctl._record_issue_locked(1000.0)  # counted in the second 1000 bucket
         clock.t = 1000.0 + TRAILING_LOG_WINDOW_S + 5.0  # poll an hour-plus later, no new push
         snap = ctl.snapshot()
-        assert list(ctl._issue_log) == []  # the stale instant was pruned by snapshot()
-        assert snap["recent_3600s"] == 0
+        assert snap["recent_3600s"] == 0  # the stale second aged out as the ring rolled forward
         assert snap["recent_60s"] == 0
+        assert ctl._issue_newest_sec == int(clock.t)  # the ring head followed ``now``
 
-    def test_recording_prunes_to_one_hour_on_push(self) -> None:
-        # The push-time prune keeps the log bounded to the trailing hour, so an instant
-        # older than 3600 s is evicted the moment a newer one is recorded (O(1) amortized).
+    def test_advance_on_unseeded_ring_is_a_noop(self) -> None:
+        # The defensive guard: advancing the ring before any issue is recorded (newest is None)
+        # is a no-op — the ring stays unseeded + all-zero (both production callers seed/guard
+        # first, but the guard keeps the method total).
         clock = _Clock()
         ctl = _controller(clock)
-        ctl._record_issue_locked(0.0)  # very old
-        ctl._record_issue_locked(3700.0)  # > 1 h later ⇒ the 0.0 instant ages out on push
-        assert list(ctl._issue_log) == [3700.0]
+        ctl._advance_issue_ring_locked(1234)
+        assert ctl._issue_newest_sec is None
+        assert sum(ctl._issue_buckets) == 0
+
+    def test_ring_is_fixed_size_regardless_of_rate(self) -> None:
+        # The per-second ring is O(1) MEMORY — a FIXED TRAILING_LOG_BUCKETS ints regardless of
+        # how many issues are recorded (the SCALABLE replacement for a per-issue deque, the
+        # DEC-MEMLEAK-GATE-001 ceiling). Recording many issues never grows the structure.
+        clock = _Clock()
+        ctl = _controller(clock)
+        assert len(ctl._issue_buckets) == TRAILING_LOG_BUCKETS
+        for i in range(5000):  # far more than the ring size
+            ctl._record_issue_locked(2000.0 + i * 0.1)
+        assert len(ctl._issue_buckets) == TRAILING_LOG_BUCKETS  # still fixed — no growth
+
+    def test_ring_zeroes_whole_window_on_a_long_jump(self) -> None:
+        # A forward jump of ≥ the ring size zeroes the WHOLE ring exactly once (every old count
+        # has aged out) — bounded advance, never an unbounded loop.
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl._record_issue_locked(0.0)  # second 0
+        ctl._record_issue_locked(10_000.0)  # ≫ 3600 s later ⇒ the whole ring zeroes once
+        # Only the new second holds a count; the trailing-hour total is exactly 1.
+        clock.t = 10_000.0
+        assert ctl.snapshot()["recent_3600s"] == 1
 
     def test_recent_60s_cross_checks_recent_minute_under_governor(self) -> None:
-        # With a governor wired, the issue-log ``recent_60s`` and the governor's own
+        # With a governor wired, the issue-ring ``recent_60s`` and the governor's own
         # ``recent_minute`` are TWO INDEPENDENT counts of the same trailing-60 s window
-        # (one from _issue_log, one from the governor's _issues deque) — so they agree, a
+        # (one from _issue_buckets, one from the governor's _issues deque) — so they agree, a
         # built-in cross-check the operator can trust.
         clock = _Clock()
         ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_per_min=500)
@@ -1249,7 +1273,7 @@ class TestTrailingWindowIssueLog:
 
     def test_pace_records_an_issue_without_a_governor(self) -> None:
         # Governor OFF: _issues stays empty (recent_minute 0), but the OBSERVE-ONLY issue
-        # log STILL records every admitted issue, so req/sec·min·10min·hour are real even
+        # ring STILL counts every admitted issue, so req/sec·min·10min·hour are real even
         # without a per-minute governor wired.
         clock = _Clock()
         ctl = _controller(clock)  # no governor
@@ -1258,17 +1282,19 @@ class TestTrailingWindowIssueLog:
             clock.advance(0.1)
         snap = ctl.snapshot()
         assert snap["recent_minute"] == 0  # no governor deque
-        assert snap["recent_60s"] == 4  # the issue log counted all 4
+        assert snap["recent_60s"] == 4  # the issue ring counted all 4
         assert snap["recent_3600s"] == 4
 
-    def test_clock_gap_clears_the_issue_log(self) -> None:
-        # A laptop sleep/wake clock jump must forget pre-sleep instants so a post-wake
-        # snapshot does not count stale issues into the windows (DEC-RATE-CLOCK-SLEEPWAKE-001
-        # extended to the issue log). A jump > CLOCK_GAP_THRESHOLD_S triggers the reset.
+    def test_clock_gap_clears_the_issue_ring(self) -> None:
+        # A laptop sleep/wake clock jump must forget pre-sleep counts so a post-wake snapshot
+        # does not count stale issues into the windows (DEC-RATE-CLOCK-SLEEPWAKE-001 extended to
+        # the issue ring). A jump > CLOCK_GAP_THRESHOLD_S triggers the reset.
         clock = _Clock()
         ctl = _controller(clock)
-        ctl.pace()  # one real issue logged at t=1000
-        assert len(ctl._issue_log) == 1
+        ctl.pace()  # one real issue counted at t=1000
+        assert ctl._issue_newest_sec is not None
+        assert sum(ctl._issue_buckets) == 1
         clock.advance(CLOCK_GAP_THRESHOLD_S + 1.0)  # the machine "slept"
         ctl.on_success()  # any critical section runs the clock-gap handler first
-        assert len(ctl._issue_log) == 0
+        assert ctl._issue_newest_sec is None  # ring reset
+        assert sum(ctl._issue_buckets) == 0
