@@ -248,15 +248,17 @@ class TestLevelListLengthGuard:
     """The ABI rejects a wrong-length pivot/fib level list with ``ValueError``."""
 
     def test_short_pivot_list_raises(self) -> None:
-        with pytest.raises(ValueError, match="pivot_levels must have 10 entries"):
+        # PR-2: pivot_levels is now 12 entries ([…, r5, s5]); the vwap_paisa arg
+        # sits after ema200_paisa in the ABI.
+        with pytest.raises(ValueError, match="pivot_levels must have 12 entries"):
             trading_core.evaluate_with_levels(
-                0, 1, 1, 1, 1, None, None, [0] * 9, [0] * 15, 1, 1, 1, 10, 10, 10, 3, []
+                0, 1, 1, 1, 1, None, None, None, [0] * 11, [0] * 15, 1, 1, 1, 10, 10, 10, 3, []
             )
 
     def test_short_fib_list_raises(self) -> None:
         with pytest.raises(ValueError, match="fib_levels must have 15 entries"):
             trading_core.evaluate_with_levels(
-                0, 1, 1, 1, 1, None, None, [0] * 10, [0] * 14, 1, 1, 1, 10, 10, 10, 3, []
+                0, 1, 1, 1, 1, None, None, None, [0] * 12, [0] * 14, 1, 1, 1, 10, 10, 10, 3, []
             )
 
 

@@ -208,7 +208,10 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 Just(candle),
                 day_strat,
                 ood_strat,
-                (arb_ema(close), arb_ema(close)),
+                // ema20, ema200 AND the session VWAP all share the `arb_ema`
+                // around-close strategy (above / below / None) so the Group-10
+                // VWAP-position bits are exercised both ways by the property suite.
+                (arb_ema(close), arb_ema(close), arb_ema(close)),
                 arb_tod(),
                 arb_proximity(),
                 arb_prior(),
@@ -218,7 +221,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
             |(pivots, fib, candle, day, open_of_day, emas, tod_seconds, proximity, prior)| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
-                let (ema20, ema200) = emas;
+                let (ema20, ema200, vwap) = emas;
                 let snapshot = IndicatorSnapshot {
                     tod_seconds,
                     open_paisa: open,
@@ -227,6 +230,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     close_paisa: close,
                     ema20_paisa: ema20,
                     ema200_paisa: ema200,
+                    vwap_paisa: vwap,
                     pivots,
                     fib,
                     day_high_paisa: day_high,
@@ -449,6 +453,24 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_OUTSIDE_DAY;
     }
 
+    // Group 10: VWAP position (bits 52-53). `None` (warm-up / 1day) fires nothing.
+    if let Some(vwap) = s.vwap_paisa {
+        if c > vwap {
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_VWAP;
+        }
+        if c < vwap {
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_VWAP;
+        }
+    }
+
+    // Group 11: pivot R5/S5 proximity (bits 54-55) — same tolerance as Group 2.
+    if oracle_is_near(c, pv.r5_paisa, bp) {
+        m |= 1u128 << bits::BIT_NEAR_PIVOT_R5;
+    }
+    if oracle_is_near(c, pv.s5_paisa, bp) {
+        m |= 1u128 << bits::BIT_NEAR_PIVOT_S5;
+    }
+
     m
 }
 
@@ -599,6 +621,7 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -1096,7 +1119,48 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         &no_prior,
     );
 
-    assert_eq!(seen, FULL_MASK, "not all 52 bits were exercised");
+    // Group 10: VWAP position (bits 52-53). close above / below a session VWAP.
+    check(
+        bits::BIT_CLOSE_ABOVE_VWAP,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            vwap_paisa: Some(1_000_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_VWAP,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            vwap_paisa: Some(1_100_000),
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 11: pivot R5/S5 proximity (bits 54-55). close exactly ON R5 / S5.
+    check(
+        bits::BIT_NEAR_PIVOT_R5,
+        IndicatorSnapshot {
+            close_paisa: pivots.r5_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_S5,
+        IndicatorSnapshot {
+            close_paisa: pivots.s5_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+
+    assert_eq!(
+        seen, FULL_MASK,
+        "not all implemented bits (now incl. VWAP/R5-S5) were exercised"
+    );
 }
 
 // ───────────────────── deterministic equality boundaries ────────────────────
@@ -1118,6 +1182,7 @@ fn equality_boundaries_keep_strict_bits_clear() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -1373,6 +1438,7 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,

@@ -5,10 +5,12 @@
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
 //! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
 //! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); only the IMPLEMENTED bits
-//! (0..=51 today) ever fire. The LAYOUT-ONLY bits (VWAP/R5-S5/BOS/CHoCH, bits
-//! 52..=59, `implemented=false` in `conditions.toml`) have NO branch here, so the
-//! evaluator emits 0 for them until a later PR (PR-2) supplies their math. A u128
-//! AND is two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
+//! (0..=55 after PR-2 — DEC-NIFTY-INDICATORS-001) ever fire. PR-2 added the VWAP
+//! position (bits 52-53) and pivot R5/S5 proximity (bits 54-55) branches; the
+//! BOS/CHoCH bits (56-59) remain LAYOUT-ONLY (`implemented=false` in
+//! `conditions.toml`) with NO branch here, so the evaluator emits 0 for them
+//! until a later PR supplies their look-ahead-clean math. A u128 AND is two u64
+//! ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
 use crate::indicators::fib::FibLevels;
@@ -46,6 +48,10 @@ pub struct IndicatorSnapshot {
     pub close_paisa: i64,
     pub ema20_paisa: Option<i64>,
     pub ema200_paisa: Option<i64>,
+    /// Session-anchored intraday VWAP (paisa). `None` during the warm-up bar and
+    /// on the 1day timeframe (ADR-0012 D12 — VWAP is intraday-only/NA on 1day),
+    /// so the Group-10 bits simply do not fire.
+    pub vwap_paisa: Option<i64>,
     pub pivots: PivotLevels,
     pub fib: FibLevels,
     pub day_high_paisa: i64,
@@ -107,9 +113,9 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// Only the IMPLEMENTED bits (0..=51 today) can fire; the LAYOUT-ONLY bits
-/// (52..=59, `implemented=false`) have no branch below so they are always 0
-/// until a later PR supplies their math.
+/// Only the IMPLEMENTED bits (0..=55 after PR-2) can fire; the still-LAYOUT-ONLY
+/// BOS/CHoCH bits (56..=59, `implemented=false`) have no branch below so they are
+/// always 0 until a later PR supplies their look-ahead-clean math.
 #[must_use]
 pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
     let mut mask: u128 = 0;
@@ -346,6 +352,34 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     }
     if s.day_high_paisa > pdh && s.day_low_paisa < pdl {
         mask |= bit(bits::BIT_OUTSIDE_DAY);
+    }
+
+    // ── Group 10: VWAP Position (bits 52-53) ──
+    // Session-anchored intraday futures VWAP (ADR-0012 D12). `None` during the
+    // warm-up bar (no post-09:15 volume yet) AND on the 1day timeframe (a session
+    // VWAP is degenerate with one bar/session) — so the bit simply does not fire,
+    // mirroring the EMA warm-up `if let Some(..)` pattern. The running VWAP math
+    // (cum(price·vol)/cum(vol), reset at 09:15 IST, auction-volume excluded, i128
+    // accumulators, reset on contract roll) lives in the stateful
+    // `indicators::vwap::VwapState`; the evaluator only reads the resolved level.
+    if let Some(vwap) = s.vwap_paisa {
+        if close > vwap {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_VWAP);
+        }
+        if close < vwap {
+            mask |= bit(bits::BIT_CLOSE_BELOW_VWAP);
+        }
+    }
+
+    // ── Group 11: Pivot Proximity Extended (R5/S5, bits 54-55) ──
+    // R5/S5 extend the standard floor-trader pivot ladder past R4/S4
+    // (`indicators::pivots`); the proximity check reuses the same `is_near`
+    // primitive + the Group-2 pivot tolerance.
+    if is_near(close, pv.r5_paisa, bps) {
+        mask |= bit(bits::BIT_NEAR_PIVOT_R5);
+    }
+    if is_near(close, pv.s5_paisa, bps) {
+        mask |= bit(bits::BIT_NEAR_PIVOT_S5);
     }
 
     mask

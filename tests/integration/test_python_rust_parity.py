@@ -50,8 +50,13 @@ def _tod_seconds(ts_iso: str) -> int:
     return ts.hour * 3600 + ts.minute * 60 + ts.second
 
 
-def _pivot_levels_10(pv: PivotLevels) -> list[int]:
-    """The 10-element ``pivot_levels`` list ``evaluate_with_levels`` expects."""
+def _pivot_levels_12(pv: PivotLevels) -> list[int]:
+    """The 12-element ``pivot_levels`` list ``evaluate_with_levels`` expects.
+
+    PR-2 (DEC-NIFTY-INDICATORS-001) appended R5/S5 at indices 10/11 (the original
+    10 plus the two new extended-pivot levels), so the production ABI now reads a
+    12-entry list ``[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]``.
+    """
     return [
         pv.p_paisa,
         pv.r1_paisa,
@@ -63,6 +68,8 @@ def _pivot_levels_10(pv: PivotLevels) -> list[int]:
         pv.pdh_paisa,
         pv.pdl_paisa,
         pv.pdc_paisa,
+        pv.r5_paisa,
+        pv.s5_paisa,
     ]
 
 
@@ -97,6 +104,7 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
+        case["vwap_paisa"],
         pivot_levels,
         fib_levels,
         case["day_high_paisa"],
@@ -123,7 +131,7 @@ class TestProductionPathParity:
                 day, case["prev_pdh_paisa"], case["prev_pdl_paisa"], case["prev_pdc_paisa"]
             )
             fb = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
-            got = _with_levels(case, _pivot_levels_10(pv), _fib_levels_15(fb))
+            got = _with_levels(case, _pivot_levels_12(pv), _fib_levels_15(fb))
             expected = int(case["expected_mask"], 16)
             if got != expected:
                 mismatches.append(f"case {case['id']}: expected {expected:#034x}, got {got:#034x}")
@@ -138,7 +146,7 @@ class TestProductionPathParity:
                 day, case["prev_pdh_paisa"], case["prev_pdl_paisa"], case["prev_pdc_paisa"]
             )
             fb = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
-            with_levels = _with_levels(case, _pivot_levels_10(pv), _fib_levels_15(fb))
+            with_levels = _with_levels(case, _pivot_levels_12(pv), _fib_levels_15(fb))
             from_raw: int = trading_core.evaluate_from_raw(
                 _tod_seconds(case["timestamp_ist"]),
                 case["open_paisa"],
@@ -147,6 +155,7 @@ class TestProductionPathParity:
                 case["close_paisa"],
                 case["ema20_paisa"],
                 case["ema200_paisa"],
+                case["vwap_paisa"],
                 case["prev_pdh_paisa"],
                 case["prev_pdl_paisa"],
                 case["prev_pdc_paisa"],
@@ -172,7 +181,8 @@ class TestProductionPathParity:
         carry such levels for a session with no valid prior close, and the Group-9
         gap conditions must simply stay clear (no recompute to reject them).
         """
-        # [p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc=0]
+        # [p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc=0, r5, s5] — 12 entries after
+        # PR-2 appended R5/S5 at indices 10/11 (DEC-NIFTY-INDICATORS-001).
         pivot_levels = [
             24_000_00,
             24_050_00,
@@ -184,6 +194,8 @@ class TestProductionPathParity:
             24_050_00,
             23_950_00,
             0,
+            24_250_00,
+            23_750_00,
         ]
         fib_levels = [24_050_00] * 15
         mask: int = trading_core.evaluate_with_levels(
@@ -194,6 +206,7 @@ class TestProductionPathParity:
             24_005_00,
             None,
             None,
+            None,  # vwap_paisa — no session VWAP in this hand-built gap-day case
             pivot_levels,
             fib_levels,
             24_010_00,
@@ -229,7 +242,10 @@ class TestIndicatorComputeParity:
             pdc = rnd.randint(pdl, pdh)
             pv = compute_pivot_levels(day, pdh, pdl, pdc)
             rust = trading_core.compute_pivot_levels(pdh, pdl, pdc)
+            # R5/S5 appended in PR-2 (DEC-NIFTY-INDICATORS-001): the wrapper now
+            # packs 11 entries ``[r5, r4, r3, r2, r1, p, s1, s2, s3, s4, s5]``.
             expected = [
+                pv.r5_paisa,
                 pv.r4_paisa,
                 pv.r3_paisa,
                 pv.r2_paisa,
@@ -239,6 +255,7 @@ class TestIndicatorComputeParity:
                 pv.s2_paisa,
                 pv.s3_paisa,
                 pv.s4_paisa,
+                pv.s5_paisa,
             ]
             if list(rust) != expected:
                 mismatches += 1

@@ -473,7 +473,7 @@ name = "close_above_vwap"
 group = "VWAP Position"
 description = "close strictly above the session-anchored intraday VWAP (futures)"
 applies_to_1day = false
-implemented = false
+implemented = true
 
 [[condition]]
 bit = 53
@@ -481,7 +481,7 @@ name = "close_below_vwap"
 group = "VWAP Position"
 description = "close strictly below the session-anchored intraday VWAP (futures)"
 applies_to_1day = false
-implemented = false
+implemented = true
 
 # ─────────────────────── Group 11: Pivot Proximity Extended (bits 54-55) ────────
 # R5/S5 proximity (ADR-0012 D3/D4 — the pivot ladder extended past R4/S4).
@@ -491,7 +491,7 @@ name = "near_pivot_r5"
 group = "Pivot Proximity Extended"
 description = "close within tolerance of resistance R5"
 applies_to_1day = true
-implemented = false
+implemented = true
 
 [[condition]]
 bit = 55
@@ -499,7 +499,7 @@ name = "near_pivot_s5"
 group = "Pivot Proximity Extended"
 description = "close within tolerance of support S5"
 applies_to_1day = true
-implemented = false
+implemented = true
 
 # ─────────────────────── Group 12: Market Structure (bits 56-59) ────────────────
 # Break-of-structure (BOS) + change-of-character (CHoCH) (ADR-0012 D3/D4).

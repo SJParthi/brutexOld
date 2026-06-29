@@ -130,8 +130,27 @@ class TestGetByKey:
         assert levels.get("P") == levels.p_paisa
         assert levels.get("R1") == levels.r1_paisa
         assert levels.get("R4") == levels.r4_paisa
+        assert levels.get("R5") == levels.r5_paisa
         assert levels.get("S1") == levels.s1_paisa
         assert levels.get("S4") == levels.s4_paisa
+        assert levels.get("S5") == levels.s5_paisa
+
+    def test_r5_s5_extend_the_linear_ladder(self) -> None:
+        # R5/S5 (PR-2) continue the constant-step floor-trader ladder past R4/S4.
+        levels = compute_pivot_levels(
+            trading_day=date(2026, 5, 14),
+            pdh_paisa=2_377_715,
+            pdl_paisa=2_342_650,
+            pdc_paisa=2_368_965,
+        )
+        # R5 = PDH + 4·(P − PDL); S5 = PDL − 4·(PDH − P).
+        assert levels.r5_paisa == 2_377_715 + 4 * (levels.p_paisa - 2_342_650)
+        assert levels.s5_paisa == 2_342_650 - 4 * (2_377_715 - levels.p_paisa)
+        # Constant arithmetic step + strict monotone ladder (range > 0 here).
+        assert levels.r5_paisa - levels.r4_paisa == levels.r4_paisa - levels.r3_paisa
+        assert levels.s4_paisa - levels.s5_paisa == levels.s3_paisa - levels.s4_paisa
+        assert levels.r5_paisa > levels.r4_paisa > levels.r3_paisa
+        assert levels.s5_paisa < levels.s4_paisa < levels.s3_paisa
 
     def test_invalid_key_raises(self) -> None:
         levels = compute_pivot_levels(
@@ -141,7 +160,7 @@ class TestGetByKey:
             pdc_paisa=2_368_965,
         )
         with pytest.raises(KeyError):
-            levels.get("R5")
+            levels.get("R6")
         with pytest.raises(KeyError):
             levels.get("invalid")
 

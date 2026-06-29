@@ -39,6 +39,7 @@ pub mod indicators;
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
 pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
+pub use indicators::vwap::VwapState;
 
 #[cfg(feature = "python")]
 mod python;
