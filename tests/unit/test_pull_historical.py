@@ -37,6 +37,7 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
     OPTION_SEGMENT,
 )
+from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport
 from brutex.adapters.protocol import DerivativeContract
 from brutex.dashboard import historical_pull as hp
@@ -389,6 +390,10 @@ def test_fno_pull_threads_write_pool_when_flag_on(
     from brutex.data.write_consumer import BatchingWriteConsumer
 
     monkeypatch.setenv("BRUTEX_WRITE_BATCH", "1")
+    # The fetch_pipeline SUBSUMES the Lever-1 write_pool (DEC-FNO-ASYNC-PIPELINE-WIRE-001), so the
+    # batched write_pool is built ONLY when the pipeline is OFF — exercise the write_pool fallback
+    # by disabling the (default-ON) pipeline via its kill-switch.
+    monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
     pools_seen: list[object] = []
 
     def _spy_ingest(
@@ -428,6 +433,10 @@ def test_fno_pull_write_pool_none_when_flag_off(
     writer), so the F&O write path is unchanged unless the operator opts in.
     """
     monkeypatch.delenv("BRUTEX_WRITE_BATCH", raising=False)
+    # Disable the (default-ON) fetch_pipeline too, isolating the write_pool=None decision to the
+    # batch flag being off (the pipeline would also force write_pool=None, but this proves the
+    # batch-flag-off path itself; DEC-FNO-ASYNC-PIPELINE-WIRE-001).
+    monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
     pools_seen: list[object] = []
 
     def _spy_ingest(
@@ -453,6 +462,331 @@ def test_fno_pull_write_pool_none_when_flag_off(
     )
     assert pools_seen
     assert all(p is None for p in pools_seen)
+
+
+def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The F&O pull CONSTRUCTS + PASSES + DRAINS the async fetch_pipeline (DEFAULT ON).
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 — the bulk of the 67k-window backfill runs through the F&O
+    historical pull, which previously NEVER built a fetch_pipeline (fully synchronous tail on the
+    fetch worker, ~75% pool idle). This wires the SAME async fetch/process separation the spot
+    spine uses (DEC-GROWW-FETCH-ASYNC-SEPARATION-001). A LIVE (dry_run=False) pull with the
+    pipeline ON (the default) MUST:
+      1. build ONE :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline` via the COMMON
+         ``pull_controller._build_fetch_pipeline`` helper,
+      2. forward that SAME pipeline into EVERY ``run_groww_option_ingest`` call,
+      3. DRAIN it once at pull end (before the ledger persist + 1-day derivation).
+    Spies on the COMMON helpers + the ingest call capture the construct / pass / drain.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+    from brutex.dashboard.pull_controller import (
+        _build_fetch_pipeline as _real_build_fetch_pipeline,
+    )
+    from brutex.dashboard.pull_controller import (
+        _drain_fetch_pipeline as _real_drain_fetch_pipeline,
+    )
+
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    built: list[FetchPipeline] = []
+    drained: list[object] = []
+    pipelines_seen: list[object] = []
+
+    def _spy_build(*, dry_run: bool) -> FetchPipeline | None:
+        pipeline = _real_build_fetch_pipeline(dry_run=dry_run)
+        if pipeline is not None:
+            built.append(pipeline)
+        return pipeline
+
+    def _spy_drain(pipeline: FetchPipeline | None) -> None:
+        drained.append(pipeline)
+        _real_drain_fetch_pipeline(pipeline)
+
+    def _spy_ingest(
+        *_args: object, fetch_pipeline: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        pipelines_seen.append(fetch_pipeline)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr("brutex.dashboard.pull_controller._build_fetch_pipeline", _spy_build)
+    monkeypatch.setattr("brutex.dashboard.pull_controller._drain_fetch_pipeline", _spy_drain)
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    # ONE pipeline built (default ON), forwarded to every ingest call, and DRAINED before return.
+    assert len(built) == 1
+    the_pipeline = built[0]
+    assert pipelines_seen  # at least one ingest call (futures + options buckets)
+    assert all(p is the_pipeline for p in pipelines_seen)
+    # Drained (idempotently) — once inside ``_run_phase`` BEFORE the per-phase ledger persists
+    # (DEC-FNO-ASYNC-PIPELINE-WIRE-001: every consumer tail must ledger.record before the ledger
+    # is written to disk) AND once again in the caller's ``finally`` as a safety net. The real
+    # ``drain()`` is idempotent (a second call with no live threads is a no-op), so >= 1 call,
+    # all targeting the SAME pipeline.
+    assert drained, "the pipeline must be drained before pull_contract_candles returns"
+    assert all(p is the_pipeline for p in drained)
+
+
+def test_fno_pull_write_pool_none_when_fetch_pipeline_on(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The fetch_pipeline SUBSUMES write_pool — never BOTH (no double-write / lost-write).
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001: the pipeline owns the ENTIRE tail (incl. ``sink.append``),
+    so the Lever-1 batched ``write_pool`` is built ONLY when the pipeline is OFF. Even with
+    ``BRUTEX_WRITE_BATCH=1`` set, a default-ON pipeline forces ``write_pool=None`` at EVERY
+    ingest call (the pipeline's consumer is the single writer) — proving the mutual exclusion
+    that guards against a double background write hop.
+    """
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    monkeypatch.setenv(
+        "BRUTEX_WRITE_BATCH", "1"
+    )  # would build a write_pool if the pipeline were off
+    seen: list[tuple[object, object]] = []
+
+    def _spy_ingest(
+        *_args: object,
+        write_pool: object = None,
+        fetch_pipeline: object = None,
+        **_kw: object,
+    ) -> GrowwOptionIngestReport:
+        seen.append((write_pool, fetch_pipeline))
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen
+    # The pipeline is built (not None) and write_pool is ALWAYS None — never both.
+    assert all(write_pool is None for write_pool, _fp in seen)
+    assert all(fp is not None for _wp, fp in seen)
+
+
+def test_reconcile_phase_with_pipeline_folds_deferred_totals() -> None:
+    """The post-drain reconcile folds the consumer's per-series totals back into the phase.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 completion-count fix: in async mode the producer returns a
+    DEFERRED per-pair report with ``bars_appended == 0`` and a tail-transient is folded onto the
+    pipeline, so the phase result reads 0 bars and would falsely mark a tail-transient-deferred
+    contract complete. The reconcile OVERRIDES bars/still-failed from the consumer totals and
+    RE-DERIVES the clean set (excluding a contract with a tail-transient residual).
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    pipeline = FetchPipeline(workers=1)
+    try:
+        # SYM-A: durable bars folded → clean. SYM-B: a tail transient → still failing → NOT clean.
+        pipeline.fold_totals(bars_appended=30, conflicts=0, series_key=("SYM-A", "1minute"))
+        pipeline.fold_tail_transient(("SYM-B", "1minute"))
+        phase = hp._PhaseResult(
+            bars=0,  # deferred — the producer reported 0
+            windows=4,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset({"SYM-A", "SYM-B"}),  # producer falsely thought both clean
+            clean=True,
+            merged_pairs={
+                ("SYM-A", "1minute"): IngestReport(
+                    windows=2, bars_appended=0, transient_failures=0
+                ),
+                ("SYM-B", "1minute"): IngestReport(
+                    windows=2, bars_appended=0, transient_failures=0
+                ),
+            },
+            failure_symbols=frozenset(),
+        )
+        out = hp._reconcile_phase_with_pipeline(
+            phase, pipeline, selected_symbols=frozenset({"SYM-A", "SYM-B"})
+        )
+        assert out.bars == 30  # folded from the consumer totals
+        assert out.still_failed_windows == 1  # SYM-B tail transient
+        assert out.complete == frozenset({"SYM-A"})  # SYM-B excluded (still failing)
+        assert out.clean is False  # the barrier breaks: not every selected contract is clean
+    finally:
+        pipeline.drain()
+
+
+def test_reconcile_phase_with_pipeline_synchronous_is_noop() -> None:
+    """A ``None`` pipeline (synchronous path) returns the phase byte-identically (same object)."""
+    phase = hp._PhaseResult(
+        bars=12,
+        windows=3,
+        failed_pairs=0,
+        still_failed_windows=0,
+        auth_aborted=False,
+        complete=frozenset({"SYM-A"}),
+        clean=True,
+        merged_pairs={
+            ("SYM-A", "1minute"): IngestReport(windows=3, bars_appended=12, transient_failures=0)
+        },
+        failure_symbols=frozenset(),
+    )
+    assert hp._reconcile_phase_with_pipeline(phase, None, selected_symbols=frozenset()) is phase
+
+
+def test_reconcile_phase_with_pipeline_empty_totals_is_noop() -> None:
+    """A pipeline that folded NOTHING (no consumer ran) returns the phase unchanged."""
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    pipeline = FetchPipeline(workers=1)
+    try:
+        phase = hp._PhaseResult(
+            bars=0,
+            windows=1,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset(),
+            clean=True,
+            merged_pairs={},
+            failure_symbols=frozenset(),
+        )
+        assert (
+            hp._reconcile_phase_with_pipeline(phase, pipeline, selected_symbols=frozenset())
+            is phase
+        )
+    finally:
+        pipeline.drain()
+
+
+def test_reconcile_phase_with_pipeline_unmatched_series_kept() -> None:
+    """A merged pair with NO folded total (every window a producer skip) keeps its report."""
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    pipeline = FetchPipeline(workers=1)
+    try:
+        pipeline.fold_totals(bars_appended=5, conflicts=0, series_key=("SYM-A", "1minute"))
+        kept = IngestReport(windows=2, bars_appended=0, transient_failures=0, skipped_windows=2)
+        phase = hp._PhaseResult(
+            bars=0,
+            windows=4,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset({"SYM-A", "SYM-B"}),
+            clean=True,
+            merged_pairs={
+                ("SYM-A", "1minute"): IngestReport(
+                    windows=2, bars_appended=0, transient_failures=0
+                ),
+                ("SYM-B", "1minute"): kept,  # no folded total → kept as-is
+            },
+            failure_symbols=frozenset(),
+        )
+        out = hp._reconcile_phase_with_pipeline(
+            phase, pipeline, selected_symbols=frozenset({"SYM-A", "SYM-B"})
+        )
+        assert out.bars == 5  # only SYM-A folded; SYM-B's kept report has 0 bars
+        assert out.merged_pairs[("SYM-B", "1minute")] is kept
+        assert out.complete == frozenset({"SYM-A", "SYM-B"})  # neither still-failing
+        assert out.clean is True
+    finally:
+        pipeline.drain()
+
+
+def test_reconcile_round1_transient_then_round2_success_is_complete() -> None:
+    """MAJOR-1: a contract that transient'd in round 1 but DURABLY SUCCEEDS in round 2 is COMPLETE.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 regression (direction 1). The cumulative-transient bug
+    left the series ``transient == 1`` forever, so the reconcile EXCLUDED it from ``complete`` and
+    reported ``still_failed_windows=1, clean=False`` even though its 50 bars were durably in the
+    lake — a MISLEADING verdict + a needless re-pull. With the LAST-WRITE-WINS fix the round-2
+    success clears the flag → ``complete``, ``still_failed_windows=0``, ``clean=True``.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    key = ("ABC25JAN20000CE", "1minute")
+    pipeline = FetchPipeline(workers=1)
+    try:
+        # Round 1: a PartitionLockTimeout deferred this contract's window (0 bars).
+        pipeline.fold_tail_transient(key)
+        # Round 2: the SAME window is re-pulled and durably succeeds (50 bars).
+        pipeline.fold_totals(bars_appended=50, conflicts=0, series_key=key)
+        phase = hp._PhaseResult(
+            bars=0,  # deferred — the producer reported 0 each round
+            windows=2,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset({"ABC25JAN20000CE"}),
+            clean=True,
+            merged_pairs={key: IngestReport(windows=1, bars_appended=0, transient_failures=0)},
+            failure_symbols=frozenset(),
+        )
+        out = hp._reconcile_phase_with_pipeline(
+            phase, pipeline, selected_symbols=frozenset({"ABC25JAN20000CE"})
+        )
+        assert out.bars == 50  # durable bars folded
+        assert out.still_failed_windows == 0  # NOT a stale cumulative transient
+        assert out.complete == frozenset({"ABC25JAN20000CE"})  # resolved → complete
+        assert out.clean is True
+    finally:
+        pipeline.drain()
+
+
+def test_reconcile_round1_success_then_round2_transient_stays_failing() -> None:
+    """MAJOR-1 (direction 2): a success FOLLOWED by a transient is NOT falsely marked complete.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 regression — the case the NAIVE ``still = transient if
+    bars==0 else 0`` shortcut would BREAK (the accumulated round-1 bars would zero out the round-2
+    transient → false complete). LAST-WRITE-WINS keeps the newest (transient) outcome, so the
+    series is correctly ``still_failing`` / excluded from ``complete`` even with durable bars.
+    """
+    from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+    key = ("ABC25JAN20000CE", "1minute")
+    pipeline = FetchPipeline(workers=1)
+    try:
+        # Round 1: a durable success (50 bars).
+        pipeline.fold_totals(bars_appended=50, conflicts=0, series_key=key)
+        # Round 2: the newest outcome is a tail transient (a later window deferred).
+        pipeline.fold_tail_transient(key)
+        phase = hp._PhaseResult(
+            bars=0,
+            windows=2,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            complete=frozenset({"ABC25JAN20000CE"}),
+            clean=True,
+            merged_pairs={key: IngestReport(windows=1, bars_appended=0, transient_failures=0)},
+            failure_symbols=frozenset(),
+        )
+        out = hp._reconcile_phase_with_pipeline(
+            phase, pipeline, selected_symbols=frozenset({"ABC25JAN20000CE"})
+        )
+        assert out.bars == 50  # the round-1 bars still accumulate
+        assert out.still_failed_windows == 1  # newest outcome is a transient
+        assert out.complete == frozenset()  # NOT falsely complete
+        assert out.clean is False  # the barrier breaks
+    finally:
+        pipeline.drain()
 
 
 def test_market_pull_order_sorts_unknown_market_last() -> None:
@@ -988,7 +1322,6 @@ def test_build_note_branches() -> None:
 
 def test_clean_symbols_excludes_quarantine_and_still_failing() -> None:
     """``_clean_symbols`` returns only the pairs that succeeded with no residual."""
-    from brutex.adapters.groww.ingest import IngestReport
     from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport, OptionPairFailure
 
     report = GrowwOptionIngestReport(

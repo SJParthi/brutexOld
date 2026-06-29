@@ -197,6 +197,44 @@ class TestProcessingAndSharding:
         assert sum(t.bars_appended for t in per_series.values()) == 18  # 15 + 3, not the keyless 7
         pipeline.drain()
 
+    def test_per_series_transient_is_last_write_wins_not_cumulative(self) -> None:
+        """MAJOR-1: an early-round transient CLEARED by a later durable success → transient==0.
+
+        DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1 regression. The per-series ``transient`` flag is
+        LAST-WRITE-WINS, NOT a cumulative count: a contract that tail-transient'd in until-clean
+        round 1 (0 bars) but DURABLY SUCCEEDED in round 2 (50 bars) must read ``transient == 0``
+        (resolved), so the reconcile does NOT falsely report it still-failing with its bars
+        already in the lake. The cumulative bug left ``transient == 1`` forever.
+        """
+        pipeline = FetchPipeline(workers=1)
+        key = ("ABC", "1minute")
+        # Round 1: the window deferred on a PartitionLockTimeout (0 bars).
+        pipeline.fold_tail_transient(key)
+        assert pipeline.per_series_totals()[key].transient == 1
+        # Round 2: the SAME window is re-pulled and durably succeeds (50 bars).
+        pipeline.fold_totals(bars_appended=50, conflicts=0, series_key=key)
+        per_series = pipeline.per_series_totals()
+        assert per_series[key].transient == 0  # CLEARED — not a stale cumulative 1
+        assert per_series[key].bars_appended == 50  # bars still accumulate (durable)
+        pipeline.drain()
+
+    def test_per_series_transient_success_then_transient_stays_failing(self) -> None:
+        """MAJOR-1 (the other direction): a success FOLLOWED by a transient stays still-failing.
+
+        The robust fix must NOT use the naive ``still = transient if bars==0 else 0`` shortcut —
+        that would FALSE-mark-complete a series whose FINAL fold was a transient just because an
+        earlier fold had bars. LAST-WRITE-WINS keeps ``transient == 1`` when the newest outcome is
+        a transient, even with accumulated bars (DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1).
+        """
+        pipeline = FetchPipeline(workers=1)
+        key = ("ABC", "1minute")
+        pipeline.fold_totals(bars_appended=50, conflicts=0, series_key=key)  # earlier success
+        pipeline.fold_tail_transient(key)  # newest outcome: a transient
+        per_series = pipeline.per_series_totals()
+        assert per_series[key].transient == 1  # still failing (last fold wins)
+        assert per_series[key].bars_appended == 50  # the earlier bars still accumulate
+        pipeline.drain()
+
 
 # ─────────────────────── anti-pileup / bounded backpressure ─────────────────────
 
