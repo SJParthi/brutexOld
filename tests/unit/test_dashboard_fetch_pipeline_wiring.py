@@ -1,8 +1,12 @@
-"""Wiring tests for the dashboard FULL async fetch/process pipeline build/drain helpers.
+"""Wiring tests for the COMMON async fetch/process pipeline build/drain helpers.
 
-DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — every branch of the best-effort
-:func:`~brutex.dashboard.pull_controller._build_fetch_pipeline` +
-:func:`~brutex.dashboard.pull_controller._drain_fetch_pipeline`:
+DEC-GROWW-FETCH-ASYNC-SEPARATION-001 + DEC-CLI-FETCH-ISOLATION-001 — these helpers were
+relocated from ``brutex.dashboard.pull_controller`` to the COMMON
+:mod:`brutex.adapters.groww.pull_pipeline` module (the single source of truth shared by
+the dashboard spot/F&O build sites AND the CLI ``brutex fetch`` build site, no copy-paste).
+Every branch of the best-effort
+:func:`~brutex.adapters.groww.pull_pipeline.build_fetch_pipeline` +
+:func:`~brutex.adapters.groww.pull_pipeline.drain_fetch_pipeline`:
 
 * a dry-run never builds a pipeline (no real writes);
 * the pipeline is ON BY DEFAULT — an UNSET flag builds a live
@@ -13,7 +17,7 @@ DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — every branch of the best-effort
   captured :class:`~brutex.data.errors.LakeWriteHalt` (the graceful pull-halt path).
 """
 
-# Whitebox test of the module-private build/drain helpers (sanctioned).
+# Whitebox test of the module-private stall hook (sanctioned).
 # pyright: reportPrivateUsage=none
 
 from __future__ import annotations
@@ -23,11 +27,17 @@ from typing import Any
 import pytest
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport
-from brutex.dashboard.pull_controller import (
-    _build_fetch_pipeline,
-    _drain_fetch_pipeline,
+from brutex.adapters.groww.pull_pipeline import (
     _pipeline_stall_alert,
-    _reconcile_pairs_with_pipeline,
+)
+from brutex.adapters.groww.pull_pipeline import (
+    build_fetch_pipeline as _build_fetch_pipeline,
+)
+from brutex.adapters.groww.pull_pipeline import (
+    drain_fetch_pipeline as _drain_fetch_pipeline,
+)
+from brutex.adapters.groww.pull_pipeline import (
+    reconcile_pairs_with_pipeline as _reconcile_pairs_with_pipeline,
 )
 from brutex.data.errors import LakeWriteHalt
 

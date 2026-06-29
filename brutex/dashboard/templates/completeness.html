@@ -122,6 +122,9 @@
   }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
+<!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
+     polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
+<script defer src="/static/bx-rate-monitor.js"></script>
 </head>
 <body>
   <header>

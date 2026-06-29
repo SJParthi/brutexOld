@@ -230,7 +230,32 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fetch-hung-write-deadline` (**DEC-FETCH-HUNG-WRITE-DEADLINE-001, MIGRATION.md #999** — the
+- **Active branch:** `claude/pull-rate-widget-visibility` (**DEC-PULL-RATE-WIDGET-VISIBILITY-001, MIGRATION.md #1000** —
+  the live PULL RATE widget no longer goes BLANK mid-pull. TWO confirmed gaps closed (observe-only — NO pacing change):
+  (1) FRONTEND — the self-injecting widget `<script defer src="/static/bx-rate-monitor.js">` (DEC-LIVE-RATE-MONITOR-001)
+  loaded ONLY on `v29.html`+`universe.html`, so it was ABSENT from the pages a pull is WATCHED on (coverage/spot_coverage/
+  fetch_windows/completeness/db/movers/results/reports/expired_options); now injected before `</head>` in EVERY template
+  that lacked it (self-contained + idempotent, guard at `bx-rate-monitor.js:33`, so site-wide is safe). (2) BACKEND (the
+  important one) — the `RateLimitPanel` feeding `/api/v1/pull/rate` was fed ONLY on the SPOT phase's per-window `on_window`
+  observe (`make_window_observer`); the METADATA (`pull_expiries_contracts`) + long F&O/historical (`run_groww_option_ingest`)
+  phases had NO rate-observe seam, so ~12 s (`STALE_AFTER_S`) after the ~42 s spot phase the route reported `idle` for the
+  ENTIRE ~38-min F&O phase even while the SHARED `RateController` was pacing real fetches. FIX (ONE COMMON observe-only
+  mechanism — REUSE `make_rate_observer`, NO copy; a periodic snapshot chosen OVER threading an `on_window` seam through the
+  4-layer F&O spine because it ALSO covers the metadata phase + needs ONLY the shared `SessionRateController`, not the F&O
+  call-meter built inside the candle factory): NEW `brutex/dashboard/rate_sampler.py::RatePanelSampler` — a context-managed
+  daemon that every 2 s reads the controller via the NEW `SessionRateController.peek()` (returns it IFF a real pull built one,
+  else `None` — NEVER builds, so a dry-run conjures no live controller + the panel stays honestly idle) and pushes its
+  `snapshot()` to the panel through `make_rate_observer(state)`; achieved r/s = the controller's MEASURED `recent_minute / 60`
+  (a real per-minute average, openly so — the snapshot lacks the call-meter `effective_rps`) so the flow/stall verdict is
+  honest not a fake-0 "stalled". The `/pull-pipeline` route wraps the whole `run_full_pipeline` in the sampler. HONEST:
+  observe-only (reads controller, writes panel; touches no pacing — fetch rate byte-unchanged); O(1) + best-effort per tick
+  (a tick error is swallowed/logged, never crashes the pull); the `_work` wiring rides the existing `# pragma: no cover`,
+  the sampler PRIMITIVE is separately tested at 100%. NEW `test_dashboard_rate_sampler.py` (8) + `peek()` tests +
+  `TestFnoPhaseLiveness` (the bug PINNED: idle-after-spot regression + the FIX proving `/api/v1/pull/rate` returns
+  `flowing` during the F&O phase) + every-template widget test. `rate_sampler.py` + `pull_controller.py` BOTH 100% line+branch
+  (48/4 + 501/118); ruff/ruff-format/`mypy --strict`/`pyright` clean on every touched file. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. Prior on `claude/fetch-hung-write-deadline`:
+  **DEC-FETCH-HUNG-WRITE-DEADLINE-001, MIGRATION.md #999** — the
   durable lake write (`sink.append` → `os.fsync` + atomic `os.replace`) is now BOUNDED by a wall-clock DEADLINE so a
   HUNG write (a wedged fsync/replace on a stalled external SSD / NFS mount that NEVER raises) can never permanently
   stall the fetch lane. The async fetch pipeline (#951/#998) decouples the write onto a bounded-queue consumer, but the
