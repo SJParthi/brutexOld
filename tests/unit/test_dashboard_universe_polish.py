@@ -51,10 +51,10 @@ def test_pull_toolbar_is_grouped_and_labelled() -> None:
     html = _render_universe_html()
     assert 'class="pullbar" role="toolbar"' in html, "the pull bar must be a labelled toolbar"
     assert 'class="pull-row"' in html, "the control row grouping is missing"
-    # The from→to date GROUP was REMOVED (DEC-UNIVERSE-PULL-CONSOLIDATE-001 FIX-FIRST
-    # follow-up — the pipeline accepts no from/to, so the picker was dead UI). The
-    # toolbar still groups the static window + granularity fields.
-    assert 'class="daterange"' not in html, "the dead date-range group must be removed"
+    # The from→to spot date GROUP is RE-ADDED + wired (DEC-UNIVERSE-PULL-DATERANGE-001
+    # — the pipeline route now threads from_date/to_date into the spot phase). The
+    # toolbar groups it alongside the static granularity field.
+    assert 'class="daterange"' in html, "the spot date-range group must be present"
     assert 'class="ctl-field"' in html, "the granularity field group is missing"
     # every pull-bar button shares ONE height so the row aligns.
     assert re.search(r"\.pullbtn, \.loadbtn \{[^}]*min-height:var\(--ctl-h\)", html), (

@@ -230,7 +230,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-rate-widget-visibility` (**DEC-PULL-RATE-WIDGET-VISIBILITY-001, MIGRATION.md #1000** —
+- **Active branch:** `claude/universe-pull-daterange` (**DEC-UNIVERSE-PULL-DATERANGE-001, MIGRATION.md #1007** —
+  the `/universe` "Pull · full pipeline" section RE-GAINS a from/to spot DATE PICKER, now PROPERLY WIRED through the
+  `/pull-pipeline` route (resolving the honesty concern of DEC-UNIVERSE-PULL-CONSOLIDATE-001 #920, which had removed the
+  picker BECAUSE the route ignored from/to). The backend already supported explicit dates everywhere else
+  (`resolve_candle_range` floor `GROWW_HISTORY_FLOOR=2020-01-01` + prev-day cap + `from>to`→ValueError; `pull_all_spot(from_date,
+  to_date, …)`; `default_date_range` UI pre-fill); the ONLY gap was the `/pull-pipeline` route hard-coding `from_date=None,
+  to_date=None` + `_resolve_metadata_years(None, None)`. FIX (READ-ONLY / pull-PLANNING only — NO lake-schema/stored-bar/rate/
+  vocab/engine change): (1) FRONTEND `universe.html` — the static "window · 2020 → prev-day (fixed)" chip becomes a `.daterange`
+  group with `id="pipeFrom"`/`id="pipeTo"` (`type="date" min="2020-01-01"`, max=today-IST, value pre-filled by the SHARED
+  `_fill_default_dates`→`default_date_range`), styled like the `/db` picker; a `pipelineDateQuery()` helper appends
+  `&from_date=`/`&to_date=` to the pull URL ONLY when non-blank (blank ⇒ default), folded into both the scoped + bare onclick
+  URLs (DOM built via static template/`textContent`, NEVER `innerHTML` — CodeQL XSS guard). (2) BACKEND `/pull-pipeline` route
+  — NEW `from_date`/`to_date` Query params, validated EAGERLY via `resolve_candle_range(...)` in a `try/except ValueError→400`,
+  threaded into the SPOT phase `pull_all_spot(from_date, to_date, …)` + `years = _resolve_metadata_years(from_date, to_date)`;
+  the F&O HISTORICAL phase deliberately keeps its per-contract default lookback (futures expiry−60d / options expiry−30d) — an
+  over-pull-safety scoping decision (a wide explicit range over the whole options chain would pull far too much). DEFAULT-
+  PRESERVATION (pinned): blank ⇒ no params ⇒ route passes None ⇒ byte-identical to the 2020→prev-day default. `app.py` stays
+  100% line+branch (the validation try/except runs in the route tests; the `_work` body rides the existing `# pragma: no cover`);
+  NEW route tests pin blank-default / explicit-threaded / reversed-or-non-ISO-400 / below-2020-clamped, and the prior
+  picker-removed assertions are flipped to picker-re-added. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior: **DEC-PULL-RATE-WIDGET-VISIBILITY-001, MIGRATION.md #1000** —
   the live PULL RATE widget no longer goes BLANK mid-pull. TWO confirmed gaps closed (observe-only — NO pacing change):
   (1) FRONTEND — the self-injecting widget `<script defer src="/static/bx-rate-monitor.js">` (DEC-LIVE-RATE-MONITOR-001)
   loaded ONLY on `v29.html`+`universe.html`, so it was ABSENT from the pages a pull is WATCHED on (coverage/spot_coverage/

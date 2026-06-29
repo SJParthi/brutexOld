@@ -59,25 +59,32 @@ def test_kept_controls_are_present() -> None:
         assert needle in html, f"kept control missing: {needle}"
 
 
-def test_dead_date_range_picker_is_removed() -> None:
-    """The from/to date-range picker is GONE (FIX-FIRST review follow-up).
+def test_spot_date_range_picker_is_readded_and_wired() -> None:
+    """The from/to date-range picker is RE-ADDED + properly wired (DEC-UNIVERSE-PULL-DATERANGE-001).
 
-    The consolidated ``▶ Pull · full pipeline`` button posts the gated route, which
-    accepts NO from/to and ALWAYS pulls the fixed default window — so an inert picker
-    the button silently ignored was dead/misleading UI implying a scoping it no longer
-    provides. It is removed in favour of a static "window · 2020 → prev-day (fixed)"
-    label; a pull is scoped by TICKING ROWS, not by date (Golden Rule #10 honesty).
+    DEC-UNIVERSE-PULL-CONSOLIDATE-001 had removed the picker BECAUSE the route ignored
+    it (an inert/misleading control). The route now accepts ``from_date`` / ``to_date``
+    and threads them into the SPOT history phase, so the picker is re-added with a real
+    wiring — resolving that honesty concern. The two native date inputs carry the
+    pre-fill + ceiling tokens (``_fill_default_dates`` fills them per render), and the
+    onclick appends ``&from_date=`` / ``&to_date=`` ONLY when non-blank.
     """
     html = _render_universe_html()
-    # The native date inputs + their range container are GONE from the page.
-    assert 'id="fromDate"' not in html, "the dead from-date input must be removed"
-    assert 'id="toDate"' not in html, "the dead to-date input must be removed"
-    assert 'data-bxdp="range"' not in html, "the date-range component container must be removed"
-    # The placeholder tokens the (now-removed) picker carried are gone with it.
-    assert "__BRUTEX_DATE_MAX__" not in html, "no unfilled date token may leak"
-    # The honest static window label replaces the picker.
-    assert "window · <b>2020 → prev-day</b> (fixed)" in html, (
-        "the static fixed-window label must replace the removed picker"
+    # The two spot date inputs + their range container are present.
+    assert 'id="pipeFrom"' in html, "the spot from-date input must be present"
+    assert 'id="pipeTo"' in html, "the spot to-date input must be present"
+    assert 'aria-label="Spot history date range"' in html, "the daterange group must be present"
+    # The pre-fill / ceiling tokens are SUBSTITUTED (no raw token leaks).
+    assert "__BRUTEX_DATE_FROM__" not in html, "no unfilled from-date token may leak"
+    assert "__BRUTEX_DATE_TO__" not in html, "no unfilled to-date token may leak"
+    assert "__BRUTEX_DATE_MAX__" not in html, "no unfilled max token may leak"
+    # The onclick appends the picked dates ONLY when non-blank (default-preservation).
+    assert "function pipelineDateQuery" in html, "the date-query helper is missing"
+    assert '"&from_date=" + encodeURIComponent(fromEl.value)' in html, (
+        "from_date is appended only when the input is non-blank"
+    )
+    assert '"&to_date=" + encodeURIComponent(toEl.value)' in html, (
+        "to_date is appended only when the input is non-blank"
     )
 
 
@@ -85,11 +92,12 @@ def test_pull_button_is_selection_aware() -> None:
     """The ONE button pulls the ticks, or the whole universe when none are ticked."""
     html = _render_universe_html()
     assert "function pipelineSelection" in html, "the selection-scope helper is missing"
-    # Ticked rows → ?symbols= (scoped); no ticks → the bare route (whole universe).
-    assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids)' in html, (
-        "the ticked branch must post the scoped pipeline route"
+    # Ticked rows → ?symbols= (scoped, + optional date query); no ticks → the bare
+    # route (whole universe) with the date query folded into the URL when present.
+    assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids) + dq' in html, (
+        "the ticked branch must post the scoped pipeline route with the date query"
     )
-    assert '"/api/v1/universe/pull-pipeline",' in html, (
+    assert '"/api/v1/universe/pull-pipeline"' in html, (
         "the no-selection branch must post the bare (whole-universe) pipeline route"
     )
 
