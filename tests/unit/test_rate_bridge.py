@@ -246,14 +246,13 @@ def test_publish_enospc_maps_to_lake_write_halt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A full-disk ENOSPC at the bridge write maps to LakeWriteHalt (lake_write_guard)."""
-    import brutex.data.rate_bridge as rb
 
     def _enospc(*_args: object, **_kwargs: object) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
     # The dir already exists so the mkdir is a no-op; the atomic write itself hits ENOSPC.
     (tmp_path / RATE_BRIDGE_SUBDIR).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(rb, "atomic_write_simple", _enospc)
+    monkeypatch.setattr("brutex.data.rate_bridge.atomic_write_simple", _enospc)
     with pytest.raises(LakeWriteHalt) as excinfo:
         publish_rate_snapshot(
             tmp_path,
