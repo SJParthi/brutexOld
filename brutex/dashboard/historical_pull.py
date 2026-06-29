@@ -66,7 +66,7 @@ leaves it ``none``). A contract that quarantined or left a transient window is l
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -82,6 +82,8 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
 from brutex.adapters.groww.contracts import parse_contract_symbol
+from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
     ContractWindows,
     GrowwOptionIngestReport,
@@ -474,6 +476,77 @@ class _PhaseResult:
     auth_aborted: bool
     complete: frozenset[str]
     clean: bool
+    #: The union of every round's per-``(contract symbol, interval)`` :class:`IngestReport`
+    #: (last-round-wins) + the set of quarantined contract symbols — kept ONLY so the async
+    #: post-drain reconcile (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) can fold the background
+    #: consumer's real durable per-series counts back in (in async mode the producer returned
+    #: ``bars_appended == 0``). Empty for the synchronous path / an empty selection.
+    merged_pairs: dict[tuple[str, str], IngestReport]
+    failure_symbols: frozenset[str]
+
+
+def _reconcile_phase_with_pipeline(
+    phase: _PhaseResult,
+    pipeline: FetchPipeline | None,
+    *,
+    selected_symbols: frozenset[str],
+) -> _PhaseResult:
+    """Fold the async pipeline's post-drain per-series totals back into a phase result — pure.
+
+    DEC-FNO-ASYNC-PIPELINE-WIRE-001 completion-count fix — the F&O twin of the spot spine's
+    :func:`~brutex.dashboard.pull_controller._reconcile_pairs_with_pipeline`. In async-pipeline
+    mode (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) every contract's SUCCESS-path tail (durable
+    ``sink.append`` + ``ledger.record``) runs on a BACKGROUND consumer, so the producer returns a
+    DEFERRED per-pair :class:`IngestReport` with ``bars_appended == 0`` and any tail-side
+    transient (a ``PartitionLockTimeout``) is folded onto the pipeline (NOT the synchronous report).
+    Without this reconcile :attr:`_PhaseResult.bars` would read 0 and a tail-transient-deferred
+    contract would be falsely marked clean → ``candle_status=complete``.
+
+    Called AFTER :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.drain` (so the consumer
+    totals are final), this OVERRIDES each deferred pair's ``bars_appended`` / ``conflicts`` /
+    ``still_failed_windows`` (== the consumer's per-series ``transient``) with the real durable
+    totals, then RE-DERIVES :attr:`bars` (the per-series bar sum), :attr:`still_failed_windows`
+    (the tail-transient total), :attr:`complete` (the clean set excluding any contract with a
+    quarantine OR a tail-transient residual), and the :attr:`clean` barrier — so the async-mode
+    counts + verdict equal the synchronous path's. ``windows`` / ``failed_pairs`` / ``auth_aborted``
+    are producer-resolved (correct as-is) and are left untouched. A ``None`` pipeline (the
+    synchronous default) returns *phase* unchanged.
+    """
+    if pipeline is None:
+        return phase
+    per_series = pipeline.per_series_totals()
+    if not per_series:
+        return phase
+    reconciled_pairs: dict[tuple[str, str], IngestReport] = {}
+    for key, report in phase.merged_pairs.items():
+        totals = per_series.get(key)
+        if totals is None:
+            reconciled_pairs[key] = report
+            continue
+        reconciled_pairs[key] = replace(
+            report,
+            bars_appended=totals.bars_appended,
+            conflicts=totals.conflicts,
+            transient_failures=totals.transient,
+            still_failed_windows=totals.transient,
+        )
+    # Re-derive the clean set from the reconciled pairs: a contract is clean iff it landed at
+    # least one pair, was not quarantined, and left NO transient residual (now visible post-drain).
+    still_failing = {
+        symbol
+        for (symbol, _interval), pair in reconciled_pairs.items()
+        if pair.still_failed_windows
+    }
+    landed = {symbol for (symbol, _interval) in reconciled_pairs}
+    complete = frozenset(landed - phase.failure_symbols - still_failing)
+    return replace(
+        phase,
+        bars=sum(r.bars_appended for r in reconciled_pairs.values()),
+        still_failed_windows=sum(r.still_failed_windows for r in reconciled_pairs.values()),
+        complete=complete,
+        clean=selected_symbols <= complete,
+        merged_pairs=reconciled_pairs,
+    )
 
 
 def _build_note(
@@ -568,6 +641,7 @@ def _run_phase(
     contract_windows: ContractWindows | None,
     run_parallel: RunParallel | None,
     write_pool: WriteConsumer | None,
+    fetch_pipeline: FetchPipeline | None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -594,6 +668,11 @@ def _run_phase(
             flush()
 
     passes: list[_PassResult] = []
+    # Merged per-pair reports + quarantined symbols across ALL rounds/buckets (last-round-wins),
+    # kept ONLY for the async post-drain reconcile (DEC-FNO-ASYNC-PIPELINE-WIRE-001). The
+    # synchronous path never reads them (the reconcile is a no-op when ``fetch_pipeline`` is None).
+    merged_pairs: dict[tuple[str, str], IngestReport] = {}
+    failure_symbols: set[str] = set()
 
     def _one_pass() -> _PassResult:
         """Run ONE full ingest pass over EVERY market bucket at *interval*; collect clean.
@@ -633,6 +712,7 @@ def _run_phase(
                 run_parallel=run_parallel,
                 capture_hook_factory=capture_hook_factory,
                 write_pool=write_pool,
+                fetch_pipeline=fetch_pipeline,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows
@@ -640,6 +720,10 @@ def _run_phase(
             pass_still_failed += report.still_failed_windows
             pass_auth = pass_auth or report.auth_aborted
             clean |= _clean_symbols(report)
+            # Fold this bucket's per-pair reports + quarantines into the phase-wide merge so the
+            # async post-drain reconcile can override the deferred counts (no-op synchronously).
+            merged_pairs.update(report.pairs)
+            failure_symbols.update(f.symbol for f in report.failures)
             if pass_auth:
                 break
         result = _PassResult(
@@ -702,6 +786,8 @@ def _run_phase(
         auth_aborted=passes[-1].auth_aborted if passes else False,
         complete=complete,
         clean=barrier_clean,
+        merged_pairs=merged_pairs,
+        failure_symbols=frozenset(failure_symbols),
     )
 
 
@@ -966,21 +1052,36 @@ def pull_contract_candles(
     if run_parallel is None:
         run_parallel = _option_run_parallel(dry_run=dry_run, session_rate=session_rate)
     client, sink = client_factory(lake_root)
-    # Coalescing batched write consumer (DEC-WRITE-BATCH-COALESCE-001) for the F&O
-    # (futures + options) pull — the SAME background writer the spot spine uses, behind the
-    # SAME ``BRUTEX_WRITE_BATCH`` flag (DEFAULT OFF). It changes ONLY how fetched F&O bars are
-    # WRITTEN (one O(month-depth) coalesced merge per drain cycle instead of one per window),
-    # so the fetch lane stops idling on its own write; the RateController (per-second ceiling
-    # + 500/min governor) is UNTOUCHED, so the issue rate still binds at the controller's
-    # allowed cap (Golden Rule #6). ``None`` (the default / a dry-run) keeps the synchronous
-    # write path byte-identical. Built + drained via the COMMON helpers in pull_controller
-    # (one wiring surface, CLAUDE.md §11 COMMON); the lazy import avoids a module-load cycle.
+    # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) for the F&O
+    # (futures + options) pull — the F&O TWIN of the spot spine's wiring
+    # (DEC-FNO-ASYNC-PIPELINE-WIRE-001). When built (DEFAULT ON; ``None`` for a dry-run / the
+    # ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch / a construction failure), each contract's
+    # SUCCESS-path tail (session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record``)
+    # is handed OFF to a background consumer so the fetch lane does ONLY fetch + enqueue —
+    # internal processing can never block or slow the fetch. The RateController (per-second
+    # ceiling + 500/min governor) stays entirely producer-side, UNTOUCHED (CLAUDE.md §2 Rule 6),
+    # so it lets the connection pool USE the allowed headroom rather than idling ~75% on its own
+    # serial write tail. Built + drained via the COMMON helpers in pull_controller (one wiring
+    # surface, CLAUDE.md §11 COMMON); the lazy import avoids a module-load cycle.
     from brutex.dashboard.pull_controller import (
+        _build_fetch_pipeline,  # pyright: ignore[reportPrivateUsage]
         _build_write_consumer,  # pyright: ignore[reportPrivateUsage]
+        _drain_fetch_pipeline,  # pyright: ignore[reportPrivateUsage]
         _drain_write_consumer,  # pyright: ignore[reportPrivateUsage]
     )
 
-    write_pool = _build_write_consumer(sink, dry_run=dry_run)
+    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
+    # The fetch_pipeline SUBSUMES the Lever-1 write-only decouple (DEC-FETCH-WRITE-OVERLAP-LEVER1-001):
+    # it owns the ENTIRE tail (incl. ``sink.append``), so the batched ``write_pool`` is built ONLY when
+    # the pipeline is OFF (the kill-switch / dry-run path) — never BOTH. This makes the pipeline's
+    # consumer the SINGLE writer, so there is no double-write / lost-write race and no redundant
+    # double background hop even when ``BRUTEX_WRITE_BATCH`` is also set (the documented "ONE or the
+    # other" contract, brutex/adapters/groww/run_ingest.py:347). With the pipeline ON the synchronous
+    # ``write_pool`` is ``None`` so the per-contract write rides the pipeline consumer; with it OFF the
+    # existing Lever-1 batched-write fallback is byte-identical.
+    write_pool = (
+        None if fetch_pipeline is not None else _build_write_consumer(sink, dry_run=dry_run)
+    )
     rebuilt = _rebuild_contracts(contracts)
     selected_symbols = frozenset(row.contract_symbol for row, _contract in rebuilt)
     # Option + future legs ride DISTINCT ledger namespaces (DEC-GROWW-FUTURE-INGEST-001),
@@ -1021,13 +1122,29 @@ def pull_contract_candles(
             contract_windows=minute_windows,
             run_parallel=run_parallel,
             write_pool=write_pool,
+            fetch_pipeline=fetch_pipeline,
         )
     finally:
-        # Drain the batched writer BEFORE the 1-day derivation reads the just-written
-        # 1-minute lake (every settled window must be durable first) and BEFORE returning
-        # (so the caller's ledger persist sees a fully-flushed lake). Best-effort + a no-op
-        # when ``write_pool`` is ``None`` (the synchronous default).
+        # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute lake
+        # (every settled window must be durable first) and BEFORE returning (so the caller's
+        # ledger persist sees a fully-flushed lake). Drain the fetch_pipeline FIRST (it owns the
+        # tail incl. ``sink.append`` → ``ledger.record``), then the write_pool — mirroring the
+        # #951 MAJOR-4 drain-order fix (the producer must flush before the writer). Only ONE is
+        # ever non-``None`` (they are mutually exclusive above), so this is a single real drain;
+        # both helpers are best-effort + a no-op on ``None``.
+        _drain_fetch_pipeline(fetch_pipeline)
         _drain_write_consumer(write_pool)
+
+    # Fold the async pipeline's post-drain per-series totals back into the phase result
+    # (DEC-FNO-ASYNC-PIPELINE-WIRE-001 completion-count fix): in async mode the producer returned
+    # ``bars_appended == 0`` per pair (the consumer did the durable write on a background thread)
+    # and a tail-side transient was folded onto the pipeline, so without this the report would
+    # read 0 bars and a tail-transient-deferred contract would be falsely marked complete. The
+    # pipeline is already DRAINED above, so its totals are final; a no-op (byte-identical) on the
+    # synchronous path when ``fetch_pipeline`` is ``None``.
+    minute = _reconcile_phase_with_pipeline(
+        minute, fetch_pipeline, selected_symbols=selected_symbols
+    )
 
     # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
     # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the
