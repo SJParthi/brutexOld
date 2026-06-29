@@ -22,6 +22,10 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.fetch_pipeline import (
@@ -33,7 +37,20 @@ from brutex.adapters.groww.fetch_pipeline import (
     _shard_index,
     resolve_fetch_pipeline_size,
 )
+from brutex.adapters.groww.fetch_spill import FetchSpillArea
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.models import CandleBar
+
+#: One valid spillable bar reused by the spill-overflow tests.
+_BAR = CandleBar(
+    timestamp=datetime(2021, 1, 4, 4, 5, tzinfo=UTC),
+    open=Decimal("100.00"),
+    high=Decimal("110.00"),
+    low=Decimal("90.00"),
+    close=Decimal("105.00"),
+    volume=3,
+    open_interest=None,
+)
 
 
 def _tail(shard_key: str, process) -> FetchTail:  # type: ignore[no-untyped-def]
@@ -825,3 +842,211 @@ class TestNoDeadlock:
         never.set()
         # A clean drain (no consumer failure) — the wedged consumer is REPORTED, never hangs.
         pipeline.drain()
+
+
+# ──────────────── spill-to-disk overflow (DEC-FETCH-NONBLOCKING-HANDOFF-001) ─────────────────
+
+
+class TestSpillOverflow:
+    """The bounded on-disk spill so a SLOW (not hung) consumer never blocks the producer.
+
+    Every branch of the new ``submit`` / ``_spill_full_window`` / ``_drain_overflow`` /
+    ``_process_one`` spill paths:
+
+    * a FULL queue SPILLS to the OVERFLOW deque (the producer returns immediately, never blocks)
+      + the consumer REHYDRATES + processes the spilled bars + DISCARDS the spill file;
+    * the spill CAP hit falls back to bounded back-pressure (bars intact, never lost);
+    * a tail with NO rehydrate hook / NO spill area falls back to back-pressure;
+    * a spilled overflow window dropped fail-fast on a hard-stop still has its spill discarded;
+    * drain sweeps any straggler spill files + drains the overflow before exit.
+    """
+
+    def _spill_area(self, tmp_path: Path, *, max_bytes: int = 1 << 30) -> FetchSpillArea:
+        return FetchSpillArea(spill_dir=tmp_path / "spill", max_bytes=max_bytes)
+
+    def _spillable_result(self, shard_key: str, bars: list[CandleBar], seen: list[list[CandleBar]]):  # type: ignore[no-untyped-def]
+        """A result whose tail reads its bars from a mutable cell + records what ``process`` saw."""
+        cell = list(bars)
+
+        def _process(_tail: FetchTail) -> None:
+            seen.append(list(cell))  # snapshot the (possibly rehydrated) bars at process time
+
+        def _rehydrate(new_bars: Sequence[CandleBar]) -> None:
+            cell[:] = new_bars
+
+        tail = FetchTail(shard_key=shard_key, process=_process, raw_bars=cell, rehydrate=_rehydrate)
+        return RawFetchResult(tail=tail)
+
+    def test_full_queue_spills_to_overflow_and_consumer_rehydrates(self, tmp_path: Path) -> None:
+        """A wedged-then-released consumer: the over-queue window SPILLS + later processes durably."""
+        area = self._spill_area(tmp_path)
+        release = threading.Event()
+        first_in = threading.Event()
+        seen: list[list[CandleBar]] = []
+
+        def _slow(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=5.0)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=area)
+        try:
+            # 1st item is pulled by the consumer (wedged on release); 2nd fills the queue (maxsize=1).
+            pipeline.submit(_result("s", _slow))
+            assert first_in.wait(timeout=2.0)
+            pipeline.submit(_result("s", _slow))
+            # The queue is now FULL. The 3rd submit must NOT block — it SPILLS to the overflow deque
+            # + returns fast (this would BLOCK on the full queue without the spill).
+            bars = [_BAR]
+            spill_done = threading.Event()
+
+            def _submit_third() -> None:
+                pipeline.submit(self._spillable_result("s", bars, seen))
+                spill_done.set()
+
+            t = threading.Thread(target=_submit_third, daemon=True)
+            t.start()
+            assert spill_done.wait(timeout=2.0), "producer BLOCKED on the full queue — spill failed"
+            t.join(timeout=2.0)
+            assert area.reserved_bytes > 0  # the window's bars live on disk while overflowed
+            assert len(pipeline._overflow[0]) >= 1  # the handle sits in the shard overflow deque
+            release.set()
+        finally:
+            pipeline.drain()
+        # The spilled window was rehydrated + processed with its REAL bars (not dropped-to-empty).
+        assert [_BAR] in seen
+        assert area.reserved_bytes == 0  # discarded after processing
+        assert not pipeline._overflow[0]  # overflow fully drained
+
+    def test_cap_hit_falls_back_to_back_pressure_bars_intact(self, tmp_path: Path) -> None:
+        """A spill CAP of 1 byte rejects every spill → bounded back-pressure, bars never lost."""
+        area = self._spill_area(tmp_path, max_bytes=1)  # below any pickled payload
+        release = threading.Event()
+        first_in = threading.Event()
+        seen: list[list[CandleBar]] = []
+
+        def _slow(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=5.0)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=area)
+        try:
+            pipeline.submit(_result("s", _slow))
+            assert first_in.wait(timeout=2.0)
+            pipeline.submit(_result("s", _slow))  # queue full
+            bars = [_BAR]
+            done = threading.Event()
+
+            def _submit_third() -> None:
+                pipeline.submit(self._spillable_result("s", bars, seen))
+                done.set()
+
+            t = threading.Thread(target=_submit_third, daemon=True)
+            t.start()
+            # The cap rejects the spill → the producer BLOCKS on back-pressure (bars intact).
+            assert not done.wait(timeout=0.4), "cap-hit should back-pressure, not spill"
+            assert area.reserved_bytes == 0  # nothing spilled
+            assert not pipeline._overflow[0]  # the overflow stays empty (cap rejected)
+            release.set()  # let the consumer drain → the back-pressured producer proceeds
+            assert done.wait(timeout=5.0)
+            t.join(timeout=2.0)
+        finally:
+            pipeline.drain()
+        # The window still processed with its REAL bars (back-pressure path, never dropped).
+        assert [_BAR] in seen
+
+    def test_no_rehydrate_hook_falls_back_to_back_pressure(self, tmp_path: Path) -> None:
+        """A tail with NO rehydrate hook is not spillable → bounded back-pressure (bars intact)."""
+        area = self._spill_area(tmp_path)
+        release = threading.Event()
+        first_in = threading.Event()
+
+        def _slow(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=5.0)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=area)
+        try:
+            pipeline.submit(_result("s", _slow))
+            assert first_in.wait(timeout=2.0)
+            pipeline.submit(_result("s", _slow))  # queue full
+            done = threading.Event()
+
+            def _submit_third() -> None:
+                pipeline.submit(_result("s", _slow))  # NO rehydrate hook (the _result helper)
+                done.set()
+
+            t = threading.Thread(target=_submit_third, daemon=True)
+            t.start()
+            assert not done.wait(timeout=0.4), "no-rehydrate should back-pressure, not spill"
+            assert area.reserved_bytes == 0
+            assert not pipeline._overflow[0]
+            release.set()
+            assert done.wait(timeout=5.0)
+            t.join(timeout=2.0)
+        finally:
+            pipeline.drain()
+
+    def test_no_spill_area_uses_back_pressure(self) -> None:
+        """No spill area wired → the original bounded back-pressure path (byte-identical)."""
+        release = threading.Event()
+        first_in = threading.Event()
+
+        def _slow(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=5.0)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1)  # NO spill_area
+        try:
+            pipeline.submit(_result("s", _slow))
+            assert first_in.wait(timeout=2.0)
+            pipeline.submit(_result("s", _slow))  # queue full
+            done = threading.Event()
+
+            def _submit_third() -> None:
+                pipeline.submit(_result("s", _slow))
+                done.set()
+
+            t = threading.Thread(target=_submit_third, daemon=True)
+            t.start()
+            assert not done.wait(timeout=0.4)
+            release.set()
+            assert done.wait(timeout=5.0)
+            t.join(timeout=2.0)
+        finally:
+            pipeline.drain()
+
+    def test_spilled_overflow_dropped_on_hard_stop_still_discards_spill(
+        self, tmp_path: Path
+    ) -> None:
+        """A pool hard-stop drops a spilled overflow window fail-fast but DISCARDS its spill file."""
+        area = self._spill_area(tmp_path)
+        seen: list[list[CandleBar]] = []
+        spillable = self._spillable_result("s", [_BAR], seen)
+        # Spill the window directly (as the producer would on a full queue) + drop the in-memory.
+        handle = area.try_spill(spillable.tail.raw_bars)
+        assert handle is not None
+        assert spillable.tail.rehydrate is not None
+        spillable.tail.rehydrate(())
+        dropped = RawFetchResult(tail=spillable.tail, spilled=handle)
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4, spill_area=area)
+        try:
+            # Trip the stop WITHOUT a captured exc (so drain stays clean), then process the dropped
+            # spilled window: it is skipped fail-fast — but its spill file is still discarded.
+            pipeline._stopped.set()
+            pipeline._process_one(dropped)
+            assert seen == []  # the tail never ran (dropped fail-fast)
+            assert not handle.path.exists()  # spill discarded in the finally
+            assert area.reserved_bytes == 0
+        finally:
+            pipeline.drain()
+
+    def test_drain_cleans_up_straggler_spill(self, tmp_path: Path) -> None:
+        """drain() sweeps any straggler spill file (a never-processed overflow)."""
+        area = self._spill_area(tmp_path)
+        # Leave a straggler spill on disk (as if a consumer were killed mid-tail).
+        straggler = area.try_spill([_BAR])
+        assert straggler is not None and straggler.path.is_file()
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4, spill_area=area)
+        pipeline.drain()
+        assert not straggler.path.exists()
+        assert area.reserved_bytes == 0

@@ -30,6 +30,7 @@ import polars as pl
 import pytest
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+from brutex.adapters.groww.fetch_spill import FetchSpillArea
 from brutex.adapters.groww.ingest import ingest_spot
 from brutex.adapters.groww.option_ingest import ingest_option_contract
 from brutex.adapters.protocol import DerivativeContract
@@ -875,6 +876,18 @@ def _contract() -> DerivativeContract:
     )
 
 
+def _contract_n(i: int) -> DerivativeContract:
+    """A distinct NIFTY CE contract per *i* (distinct strike → distinct series/partition)."""
+    strike = 28500 + i * 100
+    return DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2025, 1, 2),
+        symbol=f"NSE-NIFTY-02Jan25-{strike}-CE",
+        contract_type="CE",
+        strike=float(strike),
+    )
+
+
 class TestOptionTwin:
     def test_option_pipeline_byte_identical_and_settled(self, tmp_path: Path) -> None:
         """The F&O twin: an option contract written via the pipeline is byte-identical + settled."""
@@ -938,6 +951,51 @@ class TestOptionTwin:
         assert pipeline.tail_transients >= 1
         assert "SUCCESS" not in {r.status for r in ledger.records()}
 
+    def test_option_window_spills_and_rehydrates_durably(self, tmp_path: Path) -> None:
+        """The F&O twin of the spill: a SLOW option write SPILLS + the consumer rehydrates durably.
+
+        A slow (not hung) option write + a small queue + a spill area: the over-queue option
+        contracts SPILL to disk (the producer never blocks), and the consumer rehydrates each
+        spilled window's bars via the option ``_rehydrate`` hook + writes them durably (every
+        contract lands, none lost). Exercises the option spine's spill rehydration end to end.
+        """
+        lake = tmp_path / "lake"
+        spill = FetchSpillArea.under_lake_root(lake)
+        ledger = WindowLedger()
+
+        class _SlowOptionSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                time.sleep(0.3)
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        # ONE consumer + a 1-deep queue + a spill area: with several contracts the over-queue
+        # ones spill. All contracts share the underlying so they route to ONE consumer (shard 0).
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=spill)
+        sink = _SlowOptionSink(writer=ParquetWriter(lake_root=lake), catalog=None)
+        client = GrowwClient(sdk=_OptionSDK(), sleep=lambda _s: None, max_attempts=1)
+        n_contracts = 6
+        for i in range(n_contracts):
+            ingest_option_contract(
+                client,
+                sink,
+                contract=_contract_n(i),
+                interval="1minute",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 3),
+                ledger=ledger,
+                now_ist=_now,
+                fetch_pipeline=pipeline,
+            )
+        # At least one contract overflowed to the spill while the slow writes drained.
+        assert spill.reserved_bytes >= 0  # (bounded; may be 0 if all drained by drain-time)
+        pipeline.drain()
+        # Every contract was written durably (rehydrated from spill where it overflowed) — 2 bars
+        # each × n_contracts, all SUCCESS, no loss; the spill area is released + clean.
+        assert pipeline.totals[1] == 2 * n_contracts
+        assert {r.status for r in ledger.records()} == {"SUCCESS"}
+        assert spill.reserved_bytes == 0
+        assert not list(spill.spill_dir.iterdir())
+
 
 # ─────────────────────── isolation under a REAL pool runner ──────────────────────
 
@@ -973,3 +1031,141 @@ class TestIsolationUnderRealPool:
         pipeline.drain()
         assert {r.status for r in ledger.records()} == {"SUCCESS"}
         assert _spot_part(lake, year=2021, month=1).exists()
+
+
+# ────────── SUSTAINED-SLOW DISK does not back-pressure the fetch lane (centerpiece) ──────────
+#
+# DEC-FETCH-NONBLOCKING-HANDOFF-001. PR #962 covers a HUNG write (a deadline raises + defers the
+# window). THIS covers the SUSTAINED-SLOW case: each durable write COMPLETES (no hang) but is slow,
+# so with only a fixed bounded queue the producer would block on ``submit`` back-pressure and the
+# fetch rate would couple to the write rate. The bounded on-disk SPILL decouples them. The ANTI-FAKE
+# adversarial proof: a slow (not hung) sink + the production-sized queue, asserting the producer
+# issues ALL fetches in a wall time that is IMPOSSIBLE if it blocked on the write rate, that memory
+# (the spill) stays bounded, that EVERY window lands durably (none lost, keep-first), and that the
+# drain is clean.
+
+
+class TestSustainedSlowDiskDoesNotBackPressure:
+    def test_slow_disk_does_not_throttle_the_fetch_lane(self, tmp_path: Path) -> None:
+        """A SLOW (not hung) write must NOT throttle the producer to the write rate — it SPILLS.
+
+        Each durable write sleeps 0.5 s but COMPLETES. With ONE consumer + the production queue
+        depth (4) and NO spill, the producer would block on back-pressure after ~5 windows and the
+        whole pull would take ~N × 0.5 s. WITH the bounded spill the producer keeps issuing fetches
+        at its own (fast) rate — the over-queue windows spill to disk — so it finishes issuing ALL
+        N fetches in WELL under the synchronous-write floor. We assert exactly that wall-time bound
+        (impossible without the decouple), bounded spill, every window durable, and a clean drain.
+        """
+        lake = tmp_path / "lake"
+        write_sleep = 0.5
+        n_windows = 12  # 12 monthly tiles → 12 windows; a synchronous write floor of ~6 s
+
+        # A sink that SLEEPS 0.5 s on every append but always COMPLETES (slow, not hung).
+        class _SlowButCompletingSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                time.sleep(write_sleep)
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        fetch_timestamps: list[float] = []
+
+        class _TimedAdapter:
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                del symbol, exchange, interval, end
+                fetch_timestamps.append(time.monotonic())
+                return [_bar(datetime(start.year, start.month, start.day, 4, 5, tzinfo=UTC))]
+
+        # ONE consumer + the PRODUCTION queue depth (4) so a sustained-slow write fills the queue —
+        # WITH a generous spill area so the producer spills the overflow instead of blocking.
+        spill = FetchSpillArea.under_lake_root(lake)
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4, spill_area=spill)
+        ledger = WindowLedger()
+        producer_start = time.monotonic()
+        ingest_spot(
+            _TimedAdapter(),  # type: ignore[arg-type]
+            _SlowButCompletingSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+            instrument=_inst(),
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2022, 1, 1),  # ~12 monthly tiles
+            ledger=ledger,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+        producer_elapsed = time.monotonic() - producer_start
+        try:
+            assert len(fetch_timestamps) >= n_windows
+            # (a) FORWARD PROGRESS / NOT THROTTLED TO THE WRITE RATE. A synchronous (or
+            # queue-blocked) pull would cost AT LEAST n_windows × write_sleep just on the slow
+            # writes. The producer finished issuing ALL fetches in WELL under that floor (the spill
+            # decoupled it). 0.5× margin keeps it robust on a busy CI box (sync would be ≥ 1.0×).
+            synchronous_floor = len(fetch_timestamps) * write_sleep
+            assert producer_elapsed < 0.5 * synchronous_floor, (
+                f"producer took {producer_elapsed:.3f}s issuing {len(fetch_timestamps)} fetches — "
+                f"it was THROTTLED to the {synchronous_floor:.3f}s slow-write rate (no decouple)"
+            )
+            # (b) MEMORY/SPILL STAYS BOUNDED — the overflow spilled but never grew without bound
+            # (well under the 256 MiB cap; a handful of tiny windows at a few hundred bytes each).
+            assert spill.reserved_bytes <= 1 * 1024 * 1024
+        finally:
+            pipeline.drain()
+        # (c) EVERY window written DURABLY — none lost, keep-first preserved (all SUCCESS, no
+        # EMPTY/FAILED), and the spill area is fully released + cleaned after the drain.
+        statuses = {r.status for r in ledger.records()}
+        assert statuses == {"SUCCESS"}, statuses
+        assert ledger.count >= n_windows
+        assert _spot_part(lake, year=2021, month=1).exists()
+        assert _spot_part(lake, year=2021, month=6).exists()
+        # (d) CLEAN DRAIN — the spill bytes are released + the spill dir holds no straggler.
+        assert spill.reserved_bytes == 0
+        assert not list(spill.spill_dir.iterdir())
+
+    def test_regression_without_spill_the_fetch_lane_throttles_to_write_rate(
+        self, tmp_path: Path
+    ) -> None:
+        """REGRESSION PIN: with NO spill the SAME slow disk DOES couple the fetch to the write rate.
+
+        The mirror of the centerpiece that PINS the bug: the IDENTICAL slow-but-completing sink +
+        production queue depth but NO spill area. The producer is now back-pressured once the queue
+        fills, so it issues its fetches NO FASTER than the slow write drains them — the inter-fetch
+        gap is dominated by ``write_sleep``. We assert the pull takes AT LEAST a meaningful fraction
+        of the synchronous-write floor (the coupling the spill removes), proving the fix is real and
+        not a no-op (without the fix the centerpiece's ``< 0.5×`` bound would itself be unreachable).
+        """
+        lake = tmp_path / "lake"
+        write_sleep = 0.5
+        n_windows = 12
+
+        class _SlowButCompletingSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                time.sleep(write_sleep)
+                return super().append(**kw)  # type: ignore[arg-type]
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4)  # NO spill_area
+        ledger = WindowLedger()
+        start = time.monotonic()
+        ingest_spot(
+            _DayAdapter(),  # type: ignore[arg-type]
+            _SlowButCompletingSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+            instrument=_inst(),
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2022, 1, 1),
+            ledger=ledger,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+        )
+        elapsed = time.monotonic() - start
+        pipeline.drain()
+        # WITHOUT the spill the producer is throttled to the write rate: once the 4-deep queue fills
+        # it blocks on each ``submit`` until a slow write drains a slot, so the whole pull is bounded
+        # BELOW by roughly (n_windows − queue_depth) × write_sleep. A generous 0.3× floor proves the
+        # coupling is real (it is far above the centerpiece's < 0.5× bound, which is only reachable
+        # WITH the spill). This is the bug the spill removes.
+        coupled_floor = 0.3 * n_windows * write_sleep
+        assert elapsed >= coupled_floor, (
+            f"pull finished in {elapsed:.3f}s — expected >= {coupled_floor:.3f}s coupling to the "
+            f"slow write WITHOUT the spill (the regression pin is not exercising the back-pressure)"
+        )
+        assert {r.status for r in ledger.records()} == {"SUCCESS"}

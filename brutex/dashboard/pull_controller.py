@@ -1111,7 +1111,7 @@ def _drain_write_consumer(consumer: BatchingWriteConsumer | None) -> None:
         _LOG.exception("pull.write_batch.drain_failed")
 
 
-def _build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
+def _build_fetch_pipeline(*, dry_run: bool, lake_root: Path) -> FetchPipeline | None:
     """Build the FULL async fetch/process separation pool (DEFAULT ON, kill-switchable).
 
     DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — the operator's core requirement: the fetch
@@ -1124,6 +1124,13 @@ def _build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
     atomic 500/min governor) is UNTOUCHED — it stays entirely on the producer side
     (CLAUDE.md §2 Rule 6). The synchronous byte-identical path is still reachable via the
     ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch.
+
+    The pipeline is wired with a bounded on-disk SPILL area under *lake_root*
+    (DEC-FETCH-NONBLOCKING-HANDOFF-001) so a SUSTAINED-SLOW (not hung) disk can never
+    back-pressure the fetch lane: a full consumer queue spills the window's bars to disk + the
+    producer returns immediately, up to a bounded cap (past which it back-pressures, preferring a
+    slowdown to an OOM). A disk-full at the spill maps to the existing
+    :class:`~brutex.data.errors.LakeWriteHalt` graceful-pull-halt path.
 
     Returns ``None`` (the byte-identical synchronous path — no thread, no queue) when: the
     kill-switch is set (``BRUTEX_GROWW_FETCH_PIPELINE`` is an explicit falsy token), this is a
@@ -1139,12 +1146,16 @@ def _build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
             FetchPipeline,
             resolve_fetch_pipeline_size,
         )
+        from brutex.adapters.groww.fetch_spill import FetchSpillArea
 
         size = resolve_fetch_pipeline_size()
         if size is None:
             return None
-        pipeline = FetchPipeline(workers=size, on_stall=_pipeline_stall_alert)
-        _LOG.info("pull.fetch_pipeline.enabled", workers=size)
+        spill_area = FetchSpillArea.under_lake_root(lake_root)
+        pipeline = FetchPipeline(
+            workers=size, on_stall=_pipeline_stall_alert, spill_area=spill_area
+        )
+        _LOG.info("pull.fetch_pipeline.enabled", workers=size, spill=str(spill_area.spill_dir))
         return pipeline
     except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
         _LOG.exception("pull.fetch_pipeline.build_failed")
@@ -1603,7 +1614,7 @@ def pull_all_spot(
         # (the ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch / a dry-run) keeps the
         # synchronous path byte-identical; drained in the ``finally`` before the ledger is
         # saved (so every queued window is processed + ledger-recorded first).
-        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
+        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2358,7 +2369,7 @@ def pull_candles(
         # processing can never block or slow the fetch. The RateController (8/500 + AIMD)
         # stays entirely producer-side, UNTOUCHED. ``None`` (default / dry-run) keeps the
         # synchronous path byte-identical; drained in the ``finally`` before the ledger save.
-        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
+        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)

@@ -525,10 +525,18 @@ def ingest_option_contract(
             series_key=series_key,
         )
 
+    def _rehydrate(bars: Sequence[CandleBar]) -> None:
+        # The pipeline's spill hook (DEC-FETCH-NONBLOCKING-HANDOFF-001): swap the window's bars
+        # in place in the closure's captured ``raw`` so ``_process_option_window_tail`` reads the
+        # (dropped-on-spill / restored-on-reload) bars. ``raw`` is frozen but ``raw_bars`` is a
+        # mutable list — assigning its slice mutates the SAME object the tail reads.
+        raw.raw_bars[:] = bars
+
     tail = FetchTail(
         shard_key=_option_series_shard_key(exchange, contract.symbol, interval),
         process=_run_tail,
-        raw_bars=raw_bars,
+        raw_bars=raw.raw_bars,
+        rehydrate=_rehydrate,
     )
     fetch_pipeline.submit(RawFetchResult(tail=tail))
     # DEFERRED: the consumer owns the bars/conflicts (pull-level totals); the producer

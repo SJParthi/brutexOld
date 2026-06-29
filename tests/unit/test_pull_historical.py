@@ -493,8 +493,8 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
     drained: list[object] = []
     pipelines_seen: list[object] = []
 
-    def _spy_build(*, dry_run: bool) -> FetchPipeline | None:
-        pipeline = _real_build_fetch_pipeline(dry_run=dry_run)
+    def _spy_build(*, dry_run: bool, lake_root: Path) -> FetchPipeline | None:
+        pipeline = _real_build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
         if pipeline is not None:
             built.append(pipeline)
         return pipeline

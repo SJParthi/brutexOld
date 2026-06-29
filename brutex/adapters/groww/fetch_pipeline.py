@@ -69,27 +69,38 @@ synchronous + write-consumer paths do.)
 * **consumer crash mid-drain** → the captured exception is stored + re-raised at the
   next :meth:`submit` / :meth:`drain`; a SUCCESS is NEVER settled for a window whose
   tail did not complete.
-* **back-pressure** → each queue is bounded; a ``put`` BLOCKS when full, so a slow
-  consumer throttles the producer (the fetch lane) to the processing rate instead of
-  growing an unbounded backlog that OOMs. This is the ONLY way internal work touches
-  the fetch lane — and it is bounded, never per-window blocking on durability.
+* **back-pressure on a SLOW (not hung) write** → each queue is bounded; when it fills,
+  the producer does NOT block on the slow write — it SPILLS the window's bars to the
+  bounded on-disk overflow (:class:`~brutex.adapters.groww.fetch_spill.FetchSpillArea`,
+  DEC-FETCH-NONBLOCKING-HANDOFF-001) + returns immediately, so a SUSTAINED-SLOW disk
+  can never back-pressure the fetch lane to the write rate while memory stays bounded
+  (the bulk bars live on disk while overflowed). PAST the spill cap (a disk that falls
+  behind for the WHOLE pull) the producer falls back to the original bounded
+  back-pressure ``put`` (a slowdown — preferring it to an OOM), which a wedged consumer
+  can NEVER block forever (the stop / drain re-check). A disk-full at the spill maps to
+  :class:`~brutex.data.errors.LakeWriteHalt` (the graceful-halt path).
 * **rate controller (8/500 + AIMD)** stays ENTIRELY on the producer side, UNCHANGED.
 
 ## Honest envelope (Golden Rule #10)
 
 This delivers **ISOLATION** — the fetch lane's throughput is decoupled from the
-internal processing (proven by a stalled-consumer test where the producer keeps
-issuing at full rate). It is **NOT** a throughput increase: the achieved rate is
-still vendor-bound (Groww 429s above ~5 r/s), and the controller still caps the
-issue rate. The benefit is fault + latency isolation of the fetch. The pipeline is ON
+internal processing: a stalled consumer never blocks the producer (a stalled-consumer
+test keeps the producer issuing at full rate), and a SUSTAINED-SLOW write is absorbed by
+the bounded on-disk spill so the fetch lane never throttles to the write rate (up to the
+spill cap; past it the bounded back-pressure resumes — a slowdown, never an OOM). It is
+**NOT** a throughput increase: the achieved rate is still vendor-bound (Groww 429s above
+~5 r/s), and the controller still caps the issue rate. It bounds the OVERFLOW; it is not
+an OS-level RSS ceiling (out of scope, as in DEC-LAKE-WRITE-HALT-001). The pipeline is ON
 BY DEFAULT (operator-authorized 2026-06-28); ``None`` (the kill-switch, set
 ``BRUTEX_GROWW_FETCH_PIPELINE=off``) reproduces TODAY's fully-synchronous path
 BYTE-IDENTICALLY. stdlib-only at import (``queue`` / ``threading`` / ``dataclasses`` /
-``hashlib`` / ``os``).
+``hashlib`` / ``os``); the spill is the COMMON
+:func:`~brutex.data.atomic_io.atomic_write_via`.
 """
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import os
 import queue
@@ -101,6 +112,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from brutex.adapters.groww.fetch_spill import FetchSpillArea, SpilledWindow
 from brutex.data.errors import LakeWriteHalt
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -232,12 +244,22 @@ class FetchTail:
         spine's thread-safe aggregator). It may raise :class:`LakeWriteHalt` (disk-full) /
         any sink error — the pipeline captures + propagates it.
     raw_bars
-        The bars to process (empty for an EMPTY window; never ``None``).
+        The bars to process (empty for an EMPTY window; never ``None``). The pipeline SPILLS
+        these to disk when the queue is full (so the producer never blocks on a slow write) and
+        reloads them with *rehydrate* before the consumer runs ``process``.
+    rehydrate
+        Optional spine hook ``(bars) -> None`` the pipeline calls to swap the window's bars in
+        the closure's captured state — ``rehydrate(())`` after a spill (DROP the in-memory bulk),
+        ``rehydrate(loaded)`` after a reload (RESTORE before processing). The spine wires it so
+        ``process`` reads the (possibly-rehydrated) bars rather than a stale captured copy
+        (DEC-FETCH-NONBLOCKING-HANDOFF-001). ``None`` (a tail with no spillable bars) DISABLES
+        spilling for that window — it back-pressures as before, never an OOM.
     """
 
     shard_key: str
     process: Callable[[FetchTail], None] = field(compare=False)
     raw_bars: Sequence[CandleBar] = ()
+    rehydrate: Callable[[Sequence[CandleBar]], None] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,9 +308,22 @@ class RawFetchResult:
     :mod:`brutex.data.write_consumer`): the producer does not block on durability, so the
     consumer's outcome is folded straight into the spine's thread-safe aggregator by the
     ``process`` closure, never returned to the producer.
+
+    Attributes
+    ----------
+    tail
+        The window's :class:`FetchTail` (the closure + its bars + the rehydrate hook).
+    spilled
+        When the window's bars were SPILLED to disk (a full queue + a slow consumer), this is
+        the on-disk :class:`~brutex.adapters.groww.fetch_spill.SpilledWindow` handle and the
+        tail's in-memory bars were dropped via ``rehydrate(())``. The consumer reloads + restores
+        the bars before processing, then discards the spill file. ``None`` for an in-memory
+        window (the common path — the queue was not full). Kept as an ``object`` so this module
+        imports nothing heavy at module scope.
     """
 
     tail: FetchTail
+    spilled: object | None = None
 
     def shard_key(self) -> str:
         """The deterministic routing key — the wrapped tail's series coordinates."""
@@ -325,6 +360,7 @@ class FetchPipeline:
         stall_watchdog_seconds: float = _DEFAULT_STALL_WATCHDOG_SECONDS,
         on_stall: Callable[[float], None] | None = None,
         drain_join_timeout_seconds: float = _DEFAULT_DRAIN_JOIN_TIMEOUT_SECONDS,
+        spill_area: FetchSpillArea | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Start *workers* consumer threads, each draining a ``queue_maxsize``-bounded queue.
@@ -345,6 +381,13 @@ class FetchPipeline:
         drain_join_timeout_seconds
             Bounded per-thread join timeout at :meth:`drain` (``> 0``). A wedged consumer is
             REPORTED rather than hanging the pull's ``finally`` forever.
+        spill_area
+            Optional bounded on-disk OVERFLOW (DEC-FETCH-NONBLOCKING-HANDOFF-001). When given,
+            a FULL shard queue SPILLS the window's bars to disk + returns immediately (the fetch
+            lane never blocks on a slow write) instead of blocking on back-pressure, up to the
+            spill cap; past the cap it falls back to the bounded back-pressure (preferring a
+            slowdown to an OOM). ``None`` (the default / a dry-run) keeps the pure bounded
+            back-pressure — byte-identical to the pre-spill path.
         monotonic
             Injected monotonic clock (tests pass a fake to drive the watchdog deterministically).
         """
@@ -363,6 +406,7 @@ class FetchPipeline:
         self._stall_watchdog_seconds = stall_watchdog_seconds
         self._on_stall = on_stall
         self._drain_join_timeout_seconds = drain_join_timeout_seconds
+        self._spill_area = spill_area
         self._monotonic = monotonic
         # `object` poison-pill sentinel: a unique instance per pipeline so a stray
         # RawFetchResult can never be mistaken for the stop signal.
@@ -370,6 +414,16 @@ class FetchPipeline:
         self._queues: list[queue.Queue[RawFetchResult | object]] = [
             queue.Queue(maxsize=queue_maxsize) for _ in range(workers)
         ]
+        # Per-shard OVERFLOW deque of SPILLED windows (DEC-FETCH-NONBLOCKING-HANDOFF-001). When a
+        # shard's bounded queue is FULL the producer spills the window's bars to disk + appends the
+        # TINY handle here (a Path + int), so the fetch lane returns immediately instead of blocking
+        # on a slow write. The deque is unbounded in COUNT but bounded in MEMORY: the real bytes
+        # live on disk, gated by the spill area's byte cap (a full cap re-applies the bounded
+        # back-pressure — no OOM). The consumer drains its queue FIRST, then this overflow (FIFO).
+        self._overflow: list[collections.deque[RawFetchResult]] = [
+            collections.deque() for _ in range(workers)
+        ]
+        self._overflow_lock = threading.Lock()
         # A pull-wide hard-stop flag: tripped on a consumer failure so every queued +
         # subsequently-submitted request fails fast (the producer re-raises the captured
         # exception) instead of fetching more work that can never be processed.
@@ -532,30 +586,32 @@ class FetchPipeline:
             return dict(self._series)
 
     def submit(self, result: RawFetchResult) -> None:
-        """Route *result* to its series shard; block ONLY on back-pressure, never on durability.
+        """Route *result* to its series shard; the fetch lane NEVER blocks on a slow write.
 
-        Routes to ``shard = blake2b(series) % M`` and ``put``s the request (blocking when
-        the shard queue is full — the bounded back-pressure that throttles the fetch lane to
-        the processing rate, never an OOM). Returns IMMEDIATELY once enqueued — the producer
-        does NOT wait on the consumer's tail (the whole point: internal work never blocks the
-        fetch lane on durability).
+        Routes to ``shard = blake2b(series) % M`` and tries a NON-BLOCKING ``put`` of the
+        request. When the shard queue is FULL (a slow consumer falling behind), the producer
+        does NOT block on durability — it SPILLS the window's bars to the bounded on-disk
+        overflow (:attr:`_spill_area`, DEC-FETCH-NONBLOCKING-HANDOFF-001), enqueues the tiny
+        spill handle in its place, and returns IMMEDIATELY. So a SUSTAINED-SLOW (not hung) disk
+        can never back-pressure the fetch lane to the write rate, while memory stays bounded (the
+        bulk bars live on disk while overflowed). The consumer reloads the bars from the spill
+        before processing, then deletes the spill file. Returns once enqueued (in-memory OR
+        spilled) — the producer never waits on the consumer's tail.
 
         If a consumer already failed (a captured exception — e.g. a
         :class:`~brutex.data.errors.LakeWriteHalt`), the request is REJECTED immediately by
         re-raising that exception on the producer thread, so a pull-wide stop reaches the
         spine's ``_GLOBAL_STOP_ERRORS`` path without waiting for the rest of the pull.
 
-        The back-pressure ``put`` is BOUNDED + stop-aware (the B1 liveness fix): a producer
-        blocked on a FULL shard queue whose OWN consumer is wedged forever (a stalled external
-        SSD / NFS hiccup inside ``sink.append``) is RELEASED the moment ANY consumer trips the
-        pool-wide stop — instead of an UNBOUNDED ``put`` that could wedge the fetch thread
-        FOREVER even though the pull has logically halted ("looks alive but stuck"). The ``put``
-        is a loop of ``put(result, timeout=_CONSUMER_GET_POLL_SECONDS)`` that, on
-        :class:`queue.Full`, rechecks :meth:`_raise_if_stopped` (a peer halt re-raises and
+        The fallback bounded back-pressure (the B1 liveness path) is retained for the cases where
+        the spill cannot absorb the window — NO spill area (a dry-run / kill-switch), the spill
+        CAP is hit (a disk that falls behind for the whole pull — preferring a slowdown to an
+        OOM), or the tail has no rehydrate hook. There the ``put`` loops with a timeout that, on
+        each :class:`queue.Full`, rechecks :meth:`_raise_if_stopped` (a peer halt re-raises +
         releases the producer) AND :attr:`_draining` (a pull-end drain drops the window — it
-        re-fetches next pull, idempotent keep-first) before retrying. A HEALTHY-but-slow
-        consumer keeps the producer blocked across retries (back-pressure preserved — the window
-        is NEVER dropped while the pull is live), so isolation + no-OOM are intact.
+        re-fetches next pull, idempotent keep-first) before retrying — so a wedged-consumer queue
+        can NEVER block the fetch lane forever, the window is never dropped while the pull is
+        live, and no-OOM is intact.
         """
         self._raise_if_stopped()
         # Count the window in flight BEFORE the (possibly blocking) put, so the watchdog sees
@@ -566,9 +622,62 @@ class FetchPipeline:
             self._submitted += 1
         shard = _shard_index(result.shard_key(), self._workers)
         q = self._queues[shard]
-        # Bounded, stop-aware back-pressure: retry the put on a full queue, but on EACH timeout
-        # recheck the pool-wide stop / drain so a wedged-consumer queue can NEVER block the fetch
-        # lane forever (the B1 fix — distinct from the drain() poison-put fix).
+        # FAST PATH: a non-blocking put. The common case (queue not full) enqueues the in-memory
+        # window immediately and returns — zero overhead, byte-identical to before.
+        try:
+            q.put_nowait(result)
+            return
+        except queue.Full:
+            pass
+        # FULL QUEUE: the consumer is behind. Try to SPILL the window's bars to disk + append the
+        # TINY handle to the shard's OVERFLOW deque so the producer returns immediately (the fetch
+        # lane is decoupled from the slow write). On a spill miss (no area / cap hit / no rehydrate
+        # hook) fall through to the bounded back-pressure on the ORIGINAL in-memory result (bars
+        # intact — never lost), preferring a slowdown to an OOM.
+        if self._spill_full_window(shard, result):
+            return
+        self._back_pressure_put(q, shard, result)
+
+    def _spill_full_window(self, shard: int, result: RawFetchResult) -> bool:
+        """Spill *result*'s bars to disk + append the handle to the shard overflow; ``True`` on spill.
+
+        The overflow deque (not the bounded queue) absorbs the window, so a FULL queue can never
+        block the producer: the bulk bars go to disk (gated by the spill byte cap) and the tiny
+        handle is appended to the unbounded-in-COUNT, bounded-in-MEMORY overflow. Ownership of the
+        shared ``raw_bars`` list is handed off CLEANLY — the producer DROPS the in-memory bars
+        (``rehydrate(())``) AFTER appending the handle to the overflow under ``_overflow_lock``, so
+        the consumer cannot dequeue + restore the list before the producer is done with it. Returns
+        ``False`` when the spill cannot route — no :attr:`_spill_area`, no ``rehydrate`` hook (the
+        spine opted out), or the cap is hit (:meth:`~FetchSpillArea.try_spill` → ``None``) — leaving
+        the original ``result``'s bars intact for the bounded back-pressure fallback (never a
+        dropped-bars EMPTY window). A disk-full at the spill raises
+        :class:`~brutex.data.errors.LakeWriteHalt` from ``try_spill`` and propagates to halt the
+        pull (the existing graceful-halt path). O(1) per window.
+        """
+        area = self._spill_area
+        rehydrate = result.tail.rehydrate
+        if area is None or rehydrate is None:
+            return False
+        handle = area.try_spill(result.tail.raw_bars)
+        if handle is None:
+            return False  # cap hit — fall back to bounded back-pressure (no OOM), bars intact
+        with self._overflow_lock:
+            # Append the tiny handle FIRST (the spill holds the only durable bars copy), THEN drop
+            # the in-memory bulk — both under the lock so a consumer draining the overflow cannot
+            # observe a half-handed-off list (the producer never touches it again after this block).
+            self._overflow[shard].append(RawFetchResult(tail=result.tail, spilled=handle))
+            rehydrate(())
+        return True
+
+    def _back_pressure_put(
+        self, q: queue.Queue[object], shard: int, result: RawFetchResult
+    ) -> None:
+        """Bounded, stop-aware back-pressure ``put`` (the fallback when the spill cannot absorb).
+
+        Retries the put on a full queue, but on EACH timeout rechecks the pool-wide stop / drain
+        so a wedged-consumer queue can NEVER block the fetch lane forever (the B1 fix — distinct
+        from the drain() poison-put fix). The window is never dropped while the pull is live.
+        """
         while True:
             try:
                 q.put(result, timeout=_CONSUMER_GET_POLL_SECONDS)
@@ -602,31 +711,40 @@ class FetchPipeline:
                 raise exc
 
     def _run_consumer(self, shard: int) -> None:
-        """Drain shard *shard*'s queue until the poison-pill, processing each window's tail.
+        """Drain shard *shard*'s queue (then its OVERFLOW), processing each window's tail.
 
         Each tail's ``process`` is wrapped so a failure (disk-full / any sink error) is
         captured into the pool-wide stop (so the producer + drain re-raise it) — never
         swallowed. The consumer thread stays alive to drain the rest of its queue (so no
         producer blocks forever on a full queue), settling subsequent windows fail-fast.
 
+        After each queue item — AND whenever the queue is momentarily empty — the consumer
+        drains the shard's SPILL OVERFLOW deque (DEC-FETCH-NONBLOCKING-HANDOFF-001): every
+        spilled window is reloaded from disk + processed, so the overflow can never strand work.
+
         The ``queue.get`` is TIMED (``_CONSUMER_GET_POLL_SECONDS``) so a consumer whose
         poison-pill could NOT be enqueued — its queue was FULL because a PEER consumer is
         wedged on ``sink.append`` and the producer's bounded poison ``put`` was skipped — still
-        notices :attr:`_draining` and exits once its OWN queue drains (the guaranteed-exit
-        companion to the best-effort producer poison; the BLOCKER fix).
+        notices :attr:`_draining` and exits once its OWN queue + overflow drain (the
+        guaranteed-exit companion to the best-effort producer poison; the BLOCKER fix).
         """
         q = self._queues[shard]
         while True:
             try:
                 item = q.get(timeout=_CONSUMER_GET_POLL_SECONDS)
             except queue.Empty:
-                # No work right now: if the pull is draining, an empty queue means this
-                # consumer is done (every still-queued window has been processed). Exit even
-                # without a poison-pill (it may never have been enqueued on a full queue).
-                if self._draining.is_set():
+                # No queued work right now: first drain any spilled overflow (a full queue spilled
+                # windows here), then — if the pull is draining and BOTH the queue and overflow are
+                # empty — this consumer is done (exit even without a poison-pill, which may never
+                # have been enqueued on a full queue).
+                self._drain_overflow(shard)
+                if self._draining.is_set() and not self._overflow[shard]:
                     return
                 continue
             if item is self._poison:
+                # Drain any remaining spilled overflow BEFORE honouring the poison so no spilled
+                # window is stranded behind the stop signal.
+                self._drain_overflow(shard)
                 return
             # `item` is a RawFetchResult here: the queue only ever carries a RawFetchResult
             # or the unique poison-pill sentinel, and the sentinel already returned above.
@@ -634,32 +752,72 @@ class FetchPipeline:
             if result is None:  # pragma: no cover — only poison + RawFetchResult are queued
                 continue
             self._process_one(result)
+            # Drain any spilled overflow that built up while this in-memory window processed.
+            self._drain_overflow(shard)
+
+    def _drain_overflow(self, shard: int) -> None:
+        """Process every spilled window currently in shard *shard*'s overflow deque (FIFO).
+
+        Pops one handle at a time under ``_overflow_lock`` (so a concurrent producer ``append`` +
+        ``rehydrate`` is never observed half-done) and processes it OUTSIDE the lock (the tail's
+        durable write must not hold the producer's overflow lock). A window the producer appends
+        WHILE this drains is picked up on the next ``_run_consumer`` iteration. O(overflow) — each
+        spilled window is reloaded + processed exactly once.
+        """
+        while True:
+            with self._overflow_lock:
+                if not self._overflow[shard]:
+                    return
+                result = self._overflow[shard].popleft()
+            self._process_one(result)
 
     def _process_one(self, result: RawFetchResult) -> None:
         """Run ONE window's tail; capture any failure into the pool-wide stop.
 
+        A SPILLED window (its bars on disk because the producer overflowed a full queue) is
+        REHYDRATED first — the bars are reloaded + restored into the tail's closure via
+        ``rehydrate`` — and the spill file is DISCARDED afterwards (the byte budget released) in a
+        ``finally`` so a failed / stop-dropped tail never leaks the spill (DEC-FETCH-NONBLOCKING-HANDOFF-001).
+
         Once the pool has hard-stopped (a prior failure), subsequent windows are DROPPED
         without processing — a full disk fails every remaining window identically, so re-
         running the tail would just hammer it. The dropped window's ledger row stays
-        UNSETTLED → re-fetched next pull (idempotent keep-first).
+        UNSETTLED → re-fetched next pull (idempotent keep-first). A dropped SPILLED window still
+        has its spill file discarded (the ``finally``), so a halt never leaves stale spill bytes.
         """
-        if self._stopped.is_set():
-            # Dropped fail-fast — still a "completion" for the in-flight accounting so the
-            # watchdog does not flag a permanently-stuck window after a halt.
-            self._mark_completed()
-            return
-        tail = result.tail
+        spilled = result.spilled
         try:
-            tail.process(tail)
-        except Exception as exc:  # surface ANY tail FAILURE, never swallow
-            # Narrow to ``Exception`` (NOT ``BaseException``) so a ``KeyboardInterrupt`` /
-            # ``SystemExit`` is NOT captured as a recoverable failure — it propagates out of
-            # the consumer so an interpreter shutdown / operator interrupt is honoured.
-            self._trip(exc)
+            if self._stopped.is_set():
+                # Dropped fail-fast — still a "completion" for the in-flight accounting so the
+                # watchdog does not flag a permanently-stuck window after a halt.
+                self._mark_completed()
+                return
+            tail = result.tail
+            if (
+                isinstance(spilled, SpilledWindow)
+                and self._spill_area is not None
+                and tail.rehydrate is not None
+            ):
+                # REHYDRATE: reload the spilled bars + restore them into the tail's closure so
+                # ``process`` reads the real bars (not the dropped-to-empty in-memory copy).
+                tail.rehydrate(self._spill_area.load(spilled))
+            try:
+                tail.process(tail)
+            except Exception as exc:  # surface ANY tail FAILURE, never swallow
+                # Narrow to ``Exception`` (NOT ``BaseException``) so a ``KeyboardInterrupt`` /
+                # ``SystemExit`` is NOT captured as a recoverable failure — it propagates out of
+                # the consumer so an interpreter shutdown / operator interrupt is honoured.
+                self._trip(exc)
+            finally:
+                # Advance progress on EVERY processed window (success or captured failure) so the
+                # stall watchdog re-arms — a steadily-failing-but-progressing pipeline is not stuck.
+                self._mark_completed()
         finally:
-            # Advance progress on EVERY processed window (success or captured failure) so the
-            # stall watchdog re-arms — a steadily-failing-but-progressing pipeline is not stuck.
-            self._mark_completed()
+            # Discard the spill file + release its bytes on EVERY exit (success, captured tail
+            # failure, or stop-drop) so the bounded spill area never leaks — the bars are already
+            # durable (success) or re-pulled next pull (failure/drop, the ledger row is unsettled).
+            if isinstance(spilled, SpilledWindow) and self._spill_area is not None:
+                self._spill_area.discard(spilled)
 
     def _mark_completed(self) -> None:
         """Record ONE window finished — advance the watchdog progress clock + re-arm the stall."""
@@ -783,6 +941,11 @@ class FetchPipeline:
             conflicts=conflicts,
             tail_transients=self.tail_transients,
         )
+        # Best-effort sweep any straggler spill files (a window dropped fail-fast on a halt, or a
+        # consumer killed mid-tail). Each processed window already discarded its own spill in
+        # ``_process_one``'s finally, so this is the bounded final cleanup. Never raises.
+        if self._spill_area is not None:
+            self._spill_area.cleanup()
         exc = self._exc
         if exc is not None:
             raise exc
