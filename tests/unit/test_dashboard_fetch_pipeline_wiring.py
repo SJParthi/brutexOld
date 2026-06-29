@@ -22,6 +22,7 @@ Every branch of the best-effort
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -43,50 +44,60 @@ from brutex.data.errors import LakeWriteHalt
 
 
 class TestBuildFetchPipeline:
-    def test_dry_run_never_builds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dry_run_never_builds(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "1")
-        assert _build_fetch_pipeline(dry_run=True) is None
+        assert _build_fetch_pipeline(dry_run=True, lake_root=tmp_path) is None
 
-    def test_default_unset_builds_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_unset_builds_pipeline(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """DEFAULT ON: with NO env flag set, the production build site constructs the pipeline."""
         monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)
         monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE_SIZE", raising=False)
-        pipeline = _build_fetch_pipeline(dry_run=False)
+        pipeline = _build_fetch_pipeline(dry_run=False, lake_root=tmp_path)
         try:
             assert isinstance(pipeline, FetchPipeline)
             assert pipeline.workers == 4  # the audited default size
             # MINOR-5: the watchdog stall hook is wired to the pull-health stalled alert.
             assert pipeline._on_stall is _pipeline_stall_alert  # pyright: ignore[reportPrivateUsage]
+            # DEC-FETCH-NONBLOCKING-HANDOFF-001: the bounded spill area is wired under lake_root.
+            assert pipeline._spill_area is not None  # pyright: ignore[reportPrivateUsage]
         finally:
             _drain_fetch_pipeline(pipeline)
 
-    def test_kill_switch_off_keeps_synchronous_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_kill_switch_off_keeps_synchronous_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """KILL-SWITCH: ``=off`` disables the pipeline → the byte-identical synchronous path."""
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
-        assert _build_fetch_pipeline(dry_run=False) is None
+        assert _build_fetch_pipeline(dry_run=False, lake_root=tmp_path) is None
 
-    def test_kill_switch_explicit_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_kill_switch_explicit_zero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "0")
-        assert _build_fetch_pipeline(dry_run=False) is None
+        assert _build_fetch_pipeline(dry_run=False, lake_root=tmp_path) is None
 
-    def test_flag_on_builds_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_flag_on_builds_pipeline(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "1")
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE_SIZE", "2")
-        pipeline = _build_fetch_pipeline(dry_run=False)
+        pipeline = _build_fetch_pipeline(dry_run=False, lake_root=tmp_path)
         try:
             assert isinstance(pipeline, FetchPipeline)
             assert pipeline.workers == 2
         finally:
             _drain_fetch_pipeline(pipeline)
 
-    def test_construction_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_construction_failure_is_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "1")
 
         def _boom(*_a: Any, **_k: Any) -> FetchPipeline:
             raise RuntimeError("construction boom")
 
         monkeypatch.setattr("brutex.adapters.groww.fetch_pipeline.FetchPipeline", _boom)
-        assert _build_fetch_pipeline(dry_run=False) is None
+        assert _build_fetch_pipeline(dry_run=False, lake_root=tmp_path) is None
 
 
 class TestReconcilePairsWithPipeline:
@@ -178,9 +189,11 @@ class TestDrainFetchPipeline:
     def test_drain_none_is_noop(self) -> None:
         _drain_fetch_pipeline(None)  # no raise
 
-    def test_drain_calls_pipeline_drain(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_drain_calls_pipeline_drain(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "1")
-        pipeline = _build_fetch_pipeline(dry_run=False)
+        pipeline = _build_fetch_pipeline(dry_run=False, lake_root=tmp_path)
         assert pipeline is not None
         _drain_fetch_pipeline(pipeline)
         # A second drain is idempotent (the threads are already dead).

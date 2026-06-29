@@ -1431,7 +1431,7 @@ def pull_all_spot(
         # (the ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch / a dry-run) keeps the
         # synchronous path byte-identical; drained in the ``finally`` before the ledger is
         # saved (so every queued window is processed + ledger-recorded first).
-        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
+        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2186,7 +2186,7 @@ def pull_candles(
         # processing can never block or slow the fetch. The RateController (8/500 + AIMD)
         # stays entirely producer-side, UNTOUCHED. ``None`` (default / dry-run) keeps the
         # synchronous path byte-identical; drained in the ``finally`` before the ledger save.
-        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
+        _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)

@@ -1160,6 +1160,67 @@ class TestIngestSpotAsyncPipeline:
         series = pipeline.per_series_totals()
         assert series[("NIFTY", "1day")].transient == 1
 
+    def test_spine_wires_a_rehydrate_hook_that_swaps_bars_in_place(self) -> None:
+        """DEC-FETCH-NONBLOCKING-HANDOFF-001 — the spot spine wires the spill ``rehydrate`` hook.
+
+        The async spine builds a :class:`~brutex.adapters.groww.fetch_pipeline.FetchTail` whose
+        ``rehydrate`` swaps the window's bars in place in the captured ``raw`` (the pipeline calls
+        it ``rehydrate(())`` on spill / ``rehydrate(loaded)`` on reload). Captured via a fake
+        pipeline so the swap is asserted DETERMINISTICALLY (no slow-disk race): calling the wired
+        ``rehydrate`` mutates the SAME ``raw_bars`` list the consumer's ``process`` reads, so after
+        a reload ``_process_window_tail`` appends the RESTORED bars (covers ``ingest.py`` line 635).
+        """
+        from brutex.adapters.groww.fetch_pipeline import RawFetchResult
+
+        class _CapturePipeline:
+            """Captures the submitted tail (no thread) so the spill hook can be driven by hand."""
+
+            def __init__(self) -> None:
+                self.captured: RawFetchResult | None = None
+                self.folded: tuple[int, int] | None = None
+
+            def submit(self, result: RawFetchResult) -> None:
+                self.captured = result
+
+            def fold_totals(
+                self, *, bars_appended: int, conflicts: int, series_key: object
+            ) -> None:
+                del series_key
+                self.folded = (bars_appended, conflicts)
+
+        sink = _Sink()
+        pipeline = _CapturePipeline()
+        report = ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            run_parallel=_sync_run_parallel,
+            fetch_pipeline=pipeline,  # type: ignore[arg-type]
+        )
+        # Producer DEFERRED: one window submitted, zero bars on the synchronous report.
+        assert report.windows == 1
+        assert report.bars_appended == 0
+        captured = pipeline.captured
+        assert captured is not None
+        tail = captured.tail
+        assert tail.rehydrate is not None
+        # The pipeline drops the bulk on spill, then RESTORES them on reload. Drive the wired
+        # hook by hand: drop, then restore TWO fresh bars (a different count proves the swap).
+        tail.rehydrate(())  # spill: drop the in-memory bulk
+        assert list(tail.raw_bars) == []
+        restored = [_bar(), _bar(datetime(2021, 1, 5, 4, 5, tzinfo=UTC))]
+        tail.rehydrate(restored)  # reload: restore before the consumer processes
+        assert list(tail.raw_bars) == restored
+        # Now the consumer's ``process`` reads the RESTORED bars (both in-session) + appends them,
+        # then folds the real totals onto the pipeline (proving the rehydrated bars reached the
+        # durable write, not a stale captured copy).
+        tail.process(tail)
+        assert sink.appends == [2]
+        assert pipeline.folded == (2, 0)
+
 
 class TestPaceRps:
     def test_returns_controller_rps_when_valid(self) -> None:

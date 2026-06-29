@@ -2390,7 +2390,7 @@ def cmd_fetch(
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
-        fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist)
+        fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=resolved)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""

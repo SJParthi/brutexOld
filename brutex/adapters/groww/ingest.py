@@ -59,7 +59,7 @@ rate is hardcoded here — ``pace`` is injected and is the single governor.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from time import sleep as _time_sleep
@@ -627,10 +627,18 @@ def _ingest_one_window(
             series_key=series_key,
         )
 
+    def _rehydrate(bars: Sequence[CandleBar]) -> None:
+        # The pipeline's spill hook (DEC-FETCH-NONBLOCKING-HANDOFF-001): swap the window's bars
+        # in place in the closure's captured ``raw`` so ``_process_window_tail`` reads the
+        # (dropped-on-spill / restored-on-reload) bars. ``raw`` is frozen but ``raw_bars`` is a
+        # mutable list — assigning its slice mutates the SAME object the tail reads.
+        raw.raw_bars[:] = bars
+
     tail = FetchTail(
         shard_key=_series_shard_key(instrument, interval),
         process=_run_tail,
         raw_bars=raw.raw_bars,
+        rehydrate=_rehydrate,
     )
     fetch_pipeline.submit(RawFetchResult(tail=tail))
     # DEFERRED: the consumer owns the bars/conflicts (pull-level totals); the producer

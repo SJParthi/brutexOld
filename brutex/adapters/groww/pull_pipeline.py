@@ -34,6 +34,8 @@ import structlog
 from brutex.adapters.groww.ingest import IngestReport
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from brutex.adapters.groww.fetch_pipeline import FetchPipeline
     from brutex.data.sink import BarSink
     from brutex.data.write_consumer import BatchingWriteConsumer
@@ -102,7 +104,7 @@ def drain_write_consumer(consumer: BatchingWriteConsumer | None) -> None:
         _LOG.exception("pull.write_batch.drain_failed")
 
 
-def build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
+def build_fetch_pipeline(*, dry_run: bool, lake_root: Path | None = None) -> FetchPipeline | None:
     """Build the FULL async fetch/process separation pool (DEFAULT ON, kill-switchable).
 
     DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — the operator's core requirement: the fetch
@@ -115,6 +117,15 @@ def build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
     atomic 500/min governor) is UNTOUCHED — it stays entirely on the producer side
     (CLAUDE.md §2 Rule 6). The synchronous byte-identical path is still reachable via the
     ``BRUTEX_GROWW_FETCH_PIPELINE=off`` kill-switch.
+
+    When *lake_root* is given the pipeline is wired with a bounded on-disk SPILL area under it
+    (DEC-FETCH-NONBLOCKING-HANDOFF-001) so a SUSTAINED-SLOW (not hung) disk can never
+    back-pressure the fetch lane: a full consumer queue spills the window's bars to disk + the
+    producer returns immediately, up to a bounded cap (past which it back-pressures, preferring a
+    slowdown to an OOM). A disk-full at the spill maps to the existing
+    :class:`~brutex.data.errors.LakeWriteHalt` graceful-pull-halt path. When *lake_root* is
+    ``None`` (e.g. a build site with no resolved lake root) the pipeline is built WITHOUT a spill
+    area — byte-identical to the pre-spill bounded back-pressure behaviour.
 
     Returns ``None`` (the byte-identical synchronous path — no thread, no queue) when: the
     kill-switch is set (``BRUTEX_GROWW_FETCH_PIPELINE`` is an explicit falsy token), this is a
@@ -130,12 +141,20 @@ def build_fetch_pipeline(*, dry_run: bool) -> FetchPipeline | None:
             FetchPipeline,
             resolve_fetch_pipeline_size,
         )
+        from brutex.adapters.groww.fetch_spill import FetchSpillArea
 
         size = resolve_fetch_pipeline_size()
         if size is None:
             return None
-        pipeline = FetchPipeline(workers=size, on_stall=_pipeline_stall_alert)
-        _LOG.info("pull.fetch_pipeline.enabled", workers=size)
+        spill_area = None if lake_root is None else FetchSpillArea.under_lake_root(lake_root)
+        pipeline = FetchPipeline(
+            workers=size, on_stall=_pipeline_stall_alert, spill_area=spill_area
+        )
+        _LOG.info(
+            "pull.fetch_pipeline.enabled",
+            workers=size,
+            spill=None if spill_area is None else str(spill_area.spill_dir),
+        )
         return pipeline
     except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
         _LOG.exception("pull.fetch_pipeline.build_failed")

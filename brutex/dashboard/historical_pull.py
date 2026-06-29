@@ -1111,7 +1111,7 @@ def pull_contract_candles(
         drain_write_consumer as _drain_write_consumer,
     )
 
-    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run)
+    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
     # The fetch_pipeline SUBSUMES the Lever-1 write-only decouple (DEC-FETCH-WRITE-OVERLAP-LEVER1-001):
     # it owns the ENTIRE tail (incl. ``sink.append``), so the batched ``write_pool`` is built ONLY when
     # the pipeline is OFF (the kill-switch / dry-run path) — never BOTH. This makes the pipeline's
