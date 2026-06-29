@@ -475,17 +475,17 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
     spine uses (DEC-GROWW-FETCH-ASYNC-SEPARATION-001). A LIVE (dry_run=False) pull with the
     pipeline ON (the default) MUST:
       1. build ONE :class:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline` via the COMMON
-         ``pull_controller._build_fetch_pipeline`` helper,
+         ``brutex.adapters.groww.pull_pipeline.build_fetch_pipeline`` helper,
       2. forward that SAME pipeline into EVERY ``run_groww_option_ingest`` call,
       3. DRAIN it once at pull end (before the ledger persist + 1-day derivation).
     Spies on the COMMON helpers + the ingest call capture the construct / pass / drain.
     """
     from brutex.adapters.groww.fetch_pipeline import FetchPipeline
-    from brutex.dashboard.pull_controller import (
-        _build_fetch_pipeline as _real_build_fetch_pipeline,
+    from brutex.adapters.groww.pull_pipeline import (
+        build_fetch_pipeline as _real_build_fetch_pipeline,
     )
-    from brutex.dashboard.pull_controller import (
-        _drain_fetch_pipeline as _real_drain_fetch_pipeline,
+    from brutex.adapters.groww.pull_pipeline import (
+        drain_fetch_pipeline as _real_drain_fetch_pipeline,
     )
 
     monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
@@ -509,8 +509,8 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
         pipelines_seen.append(fetch_pipeline)
         return _empty_ingest_report()
 
-    monkeypatch.setattr("brutex.dashboard.pull_controller._build_fetch_pipeline", _spy_build)
-    monkeypatch.setattr("brutex.dashboard.pull_controller._drain_fetch_pipeline", _spy_drain)
+    monkeypatch.setattr("brutex.adapters.groww.pull_pipeline.build_fetch_pipeline", _spy_build)
+    monkeypatch.setattr("brutex.adapters.groww.pull_pipeline.drain_fetch_pipeline", _spy_drain)
     monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
     sdk = _FakeSDK()
     sink = _RecordingSink()

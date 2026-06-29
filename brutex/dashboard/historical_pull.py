@@ -489,7 +489,7 @@ def _drain_fetch_pipeline_in_phase(pipeline: FetchPipeline | None) -> None:
     """Drain the async fetch_pipeline from inside ``_run_phase`` BEFORE the ledger persists.
 
     DEC-FNO-ASYNC-PIPELINE-WIRE-001. Delegates to the COMMON
-    :func:`~brutex.dashboard.pull_controller._drain_fetch_pipeline` (one drain implementation,
+    :func:`~brutex.adapters.groww.pull_pipeline.drain_fetch_pipeline` (one drain implementation,
     lazy-imported to avoid a module-load cycle — the SAME pattern
     :func:`pull_contract_candles` uses for the build/drain helpers). A ``None`` pipeline (the
     synchronous / dry-run / kill-switch path) is a no-op. Idempotent — the caller's outer
@@ -497,11 +497,9 @@ def _drain_fetch_pipeline_in_phase(pipeline: FetchPipeline | None) -> None:
     graceful pull-halt path); any other drain error is logged + swallowed inside the helper so the
     ledger persist still runs.
     """
-    from brutex.dashboard.pull_controller import (
-        _drain_fetch_pipeline,  # pyright: ignore[reportPrivateUsage]
-    )
+    from brutex.adapters.groww.pull_pipeline import drain_fetch_pipeline
 
-    _drain_fetch_pipeline(pipeline)
+    drain_fetch_pipeline(pipeline)
 
 
 def _reconcile_phase_with_pipeline(
@@ -513,7 +511,7 @@ def _reconcile_phase_with_pipeline(
     """Fold the async pipeline's post-drain per-series totals back into a phase result — pure.
 
     DEC-FNO-ASYNC-PIPELINE-WIRE-001 completion-count fix — the F&O twin of the spot spine's
-    :func:`~brutex.dashboard.pull_controller._reconcile_pairs_with_pipeline`. In async-pipeline
+    :func:`~brutex.adapters.groww.pull_pipeline.reconcile_pairs_with_pipeline`. In async-pipeline
     mode (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) every contract's SUCCESS-path tail (durable
     ``sink.append`` + ``ledger.record``) runs on a BACKGROUND consumer, so the producer returns a
     DEFERRED per-pair :class:`IngestReport` with ``bars_appended == 0`` and any tail-side
@@ -1093,13 +1091,20 @@ def pull_contract_candles(
     # internal processing can never block or slow the fetch. The RateController (per-second
     # ceiling + 500/min governor) stays entirely producer-side, UNTOUCHED (CLAUDE.md §2 Rule 6),
     # so it lets the connection pool USE the allowed headroom rather than idling ~75% on its own
-    # serial write tail. Built + drained via the COMMON helpers in pull_controller (one wiring
-    # surface, CLAUDE.md §11 COMMON); the lazy import avoids a module-load cycle.
-    from brutex.dashboard.pull_controller import (
-        _build_fetch_pipeline,  # pyright: ignore[reportPrivateUsage]
-        _build_write_consumer,  # pyright: ignore[reportPrivateUsage]
-        _drain_fetch_pipeline,  # pyright: ignore[reportPrivateUsage]
-        _drain_write_consumer,  # pyright: ignore[reportPrivateUsage]
+    # serial write tail. Built + drained via the COMMON helpers in
+    # brutex.adapters.groww.pull_pipeline (one wiring surface, CLAUDE.md §11 COMMON); the lazy
+    # import avoids a module-load cycle.
+    from brutex.adapters.groww.pull_pipeline import (
+        build_fetch_pipeline as _build_fetch_pipeline,
+    )
+    from brutex.adapters.groww.pull_pipeline import (
+        build_write_consumer as _build_write_consumer,
+    )
+    from brutex.adapters.groww.pull_pipeline import (
+        drain_fetch_pipeline as _drain_fetch_pipeline,
+    )
+    from brutex.adapters.groww.pull_pipeline import (
+        drain_write_consumer as _drain_write_consumer,
     )
 
     fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)

@@ -1,8 +1,11 @@
-"""Wiring tests for the dashboard coalescing-batched-write build/drain helpers.
+"""Wiring tests for the COMMON coalescing-batched-write build/drain helpers.
 
-DEC-WRITE-BATCH-COALESCE-001 — every branch of the best-effort
-:func:`~brutex.dashboard.pull_controller._build_write_consumer` +
-:func:`~brutex.dashboard.pull_controller._drain_write_consumer`:
+DEC-WRITE-BATCH-COALESCE-001 + DEC-CLI-FETCH-ISOLATION-001 — these helpers were relocated
+from ``brutex.dashboard.pull_controller`` to the COMMON
+:mod:`brutex.adapters.groww.pull_pipeline` module (the single source of truth shared by the
+dashboard AND CLI build sites). Every branch of the best-effort
+:func:`~brutex.adapters.groww.pull_pipeline.build_write_consumer` +
+:func:`~brutex.adapters.groww.pull_pipeline.drain_write_consumer`:
 
 * a dry-run never builds a consumer (no real writes);
 * the ``BRUTEX_WRITE_BATCH`` flag OFF (the default) keeps the synchronous path;
@@ -11,7 +14,6 @@ DEC-WRITE-BATCH-COALESCE-001 — every branch of the best-effort
 * drain is a guarded no-op on ``None`` + swallows a drain error.
 """
 
-# Whitebox test of the module-private build/drain helpers (sanctioned).
 # pyright: reportPrivateUsage=none
 
 from __future__ import annotations
@@ -19,9 +21,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from brutex.dashboard.pull_controller import (
-    _build_write_consumer,
-    _drain_write_consumer,
+from brutex.adapters.groww.pull_pipeline import (
+    build_write_consumer as _build_write_consumer,
+)
+from brutex.adapters.groww.pull_pipeline import (
+    drain_write_consumer as _drain_write_consumer,
 )
 from brutex.data.sink import NullBarSink
 from brutex.data.write_consumer import BatchingWriteConsumer

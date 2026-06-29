@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -316,13 +316,21 @@ def test_cmd_fetch_dry_run_inspect_persists_nothing(
 
 @dataclass(frozen=True)
 class _FakeIngestReport:
-    """Duck-typed ``DhanIngestReport`` surface the fetch summary printing reads."""
+    """Duck-typed ``GrowwIngestReport`` surface the fetch summary printing reads.
+
+    Carries the empty ``pairs`` mapping the async-pipeline completion-count reconcile
+    folds into (DEC-CLI-FETCH-ISOLATION-001) — the fake ingest enqueues nothing, so the
+    drained pipeline has no per-series totals and ``reconcile_pairs_with_pipeline`` returns
+    ``pairs`` unchanged, leaving the explicit count fields above authoritative for the
+    summary print + the exit-code residual.
+    """
 
     windows: int
     bars_appended: int
     failed_pairs: int
     transient_failures: int
     still_failed_windows: int
+    pairs: dict[tuple[str, str], Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

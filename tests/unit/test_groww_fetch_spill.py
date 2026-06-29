@@ -79,13 +79,40 @@ class TestFetchSpillArea:
         assert isinstance(handle, SpilledWindow)
         assert handle.path.is_file()
         assert area.reserved_bytes == handle.size_bytes > 0
-        # Load restores byte-equal bars (exact Decimal round-trip via pickle).
+        # Load restores byte-equal bars (exact Decimal round-trip via the JSON spill format).
         loaded = area.load(handle)
         assert loaded == bars
         # Discard deletes the file + releases the budget.
         area.discard(handle)
         assert not handle.path.exists()
         assert area.reserved_bytes == 0
+
+    def test_round_trip_preserves_open_interest_int(self, tmp_path: Path) -> None:
+        # An F&O bar carries an INTEGER open_interest — the JSON decode's ``oi is not None`` arm
+        # must round-trip it to an int (the OI=None arm is covered by the other round-trip tests).
+        area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
+        fno_bar = CandleBar(
+            timestamp=datetime(2021, 1, 4, 4, 5, tzinfo=UTC),
+            open=Decimal("100.05"),
+            high=Decimal("110.10"),
+            low=Decimal("90.95"),
+            close=Decimal("105.55"),
+            volume=42,
+            open_interest=1234,
+        )
+        handle = area.try_spill([fno_bar])
+        assert handle is not None
+        loaded = area.load(handle)
+        assert loaded == [fno_bar]
+        assert loaded[0].open_interest == 1234
+
+    def test_round_trip_empty_window(self, tmp_path: Path) -> None:
+        # A zero-bar window spills + reloads to an empty list (the JSON encode/decode loops handle
+        # the empty case — no special path needed).
+        area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
+        handle = area.try_spill([])
+        assert handle is not None
+        assert area.load(handle) == []
 
     def test_discard_is_idempotent(self, tmp_path: Path) -> None:
         area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
@@ -97,7 +124,7 @@ class TestFetchSpillArea:
         assert area.reserved_bytes == 0
 
     def test_cap_rejects_when_exceeded(self, tmp_path: Path) -> None:
-        # A cap of 1 byte is below any real pickled payload → the first spill is rejected.
+        # A cap of 1 byte is below any real JSON spill payload → the first spill is rejected.
         area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=1)
         assert area.try_spill([_bar()]) is None
         assert area.reserved_bytes == 0  # nothing reserved on a rejection

@@ -707,6 +707,79 @@ def test_ingest_async_pipeline_tail_lock_timeout_folds_transient() -> None:
     assert not ledger.is_skippable(key)
 
 
+def test_ingest_async_pipeline_spine_wires_rehydrate_hook() -> None:
+    """DEC-FETCH-NONBLOCKING-HANDOFF-001 — the F&O spine wires the spill ``rehydrate`` hook.
+
+    The async F&O spine builds a :class:`~brutex.adapters.groww.fetch_pipeline.FetchTail` whose
+    ``rehydrate`` swaps the contract window's bars in place in the captured ``raw`` (the pipeline
+    calls it ``rehydrate(())`` on spill / ``rehydrate(loaded)`` on reload). Captured via a fake
+    pipeline so the swap is asserted DETERMINISTICALLY (no slow-disk race): calling the wired
+    ``rehydrate`` mutates the SAME ``raw_bars`` list the consumer's ``process`` reads, so after a
+    reload ``_process_option_window_tail`` appends the RESTORED bars (covers ``option_ingest.py``
+    line 533).
+    """
+    from brutex.adapters.groww.fetch_pipeline import RawFetchResult
+
+    class _CapturePipeline:
+        def __init__(self) -> None:
+            self.captured: RawFetchResult | None = None
+            self.folded: tuple[int, int] | None = None
+
+        def submit(self, result: RawFetchResult) -> None:
+            self.captured = result
+
+        def fold_totals(self, *, bars_appended: int, conflicts: int, series_key: object) -> None:
+            del series_key
+            self.folded = (bars_appended, conflicts)
+
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    ledger = WindowLedger()
+    pipeline = _CapturePipeline()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=ledger,
+        max_attempts=0,
+        now_ist=_now,
+        fetch_pipeline=pipeline,  # type: ignore[arg-type]
+    )
+    # Producer DEFERRED: one window submitted, zero bars on the synchronous report.
+    assert report.windows == 1
+    assert report.bars_appended == 0
+    captured = pipeline.captured
+    assert captured is not None
+    tail = captured.tail
+    assert tail.rehydrate is not None
+
+    def _option_bar() -> CandleBar:
+        return CandleBar(
+            timestamp=datetime(2024, 1, 2, 4, 0, tzinfo=UTC),  # 09:30 IST — in-session
+            open=Decimal("100.0"),
+            high=Decimal("110.0"),
+            low=Decimal("90.0"),
+            close=Decimal("105.0"),
+            volume=50,
+            open_interest=7,
+        )
+
+    # Drive the wired hook by hand: spill drops the bulk, reload restores it before processing.
+    tail.rehydrate(())  # spill
+    assert list(tail.raw_bars) == []
+    restored = [_option_bar()]
+    tail.rehydrate(restored)  # reload
+    assert list(tail.raw_bars) == restored
+    # The consumer's ``process`` reads the RESTORED bar + appends it (one in-session bar).
+    tail.process(tail)
+    assert len(sink.appends) == 1
+    assert sink.appends[0][4] == 1
+    assert pipeline.folded == (1, 0)
+
+
 def test_ingest_transient_no_hooks_no_ledger() -> None:
     # timeout with on_timeout=None + ledger=None — exercises the no-hook branches.
     sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall")])

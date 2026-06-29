@@ -30,11 +30,15 @@ catches up, processes the window's tail durably, then deletes the spill file. So
 
 ## Serialisation
 
-The spilled payload is the window's ``list[CandleBar]`` (frozen ``slots`` dataclasses of
-``Decimal`` / ``datetime`` / ``int`` — fully picklable with exact round-trip). ``pickle`` is used
-because the spill is an EPHEMERAL same-process, same-run overflow buffer (written + read + deleted
-within one pull by this process), NEVER a durable/interchange format and NEVER read from an
-untrusted source, so the well-known ``pickle`` trust caveat does not apply here. The atomic write
+The spilled payload is the window's ``list[CandleBar]`` serialised as **JSON** — one object per
+bar with the ``timestamp`` as an ISO-8601 string, the ``open`` / ``high`` / ``low`` / ``close``
+prices as their exact ``str(Decimal)`` text (so the rupee value round-trips bit-for-bit with NO
+float drift — the byte-for-byte reproducibility invariant ``NFR-DET-001``), and ``volume`` /
+``open_interest`` as integers (``open_interest`` may be ``null``). JSON is deliberately chosen
+over ``pickle`` (no arbitrary-code-execution surface on load, and a self-describing on-disk format)
+even though the spill is only an EPHEMERAL same-process, same-run overflow buffer. Reload
+reconstructs each :class:`~brutex.data.models.CandleBar`, whose ``__post_init__`` re-validates the
+bar, so a corrupt spill can never yield a malformed bar. The atomic write
 (tmp → ``fsync`` → ``os.replace``) guarantees a reader never sees a torn file.
 
 ## Honest envelope (Golden Rule #10)
@@ -46,31 +50,33 @@ It is NOT a throughput increase (the achieved rate is still vendor-bound). It bo
 it does not bound RSS at the OS level (a true RSS ceiling needs ``setrlimit`` / cgroups — out of
 scope, as in DEC-LAKE-WRITE-HALT-001). The spill files are best-effort cleaned at drain; any
 straggler is a small bounded set under the spill root, removed on the next clean drain. O(1) per
-window — one ``atomic_write_via`` / one ``pickle.load`` / one ``unlink``, NOT per-bar.
+window — one ``atomic_write_via`` / one ``json.loads`` / one ``unlink``, NOT per-bar.
 
-stdlib-only at import (``os`` / ``pickle`` / ``tempfile`` / ``threading`` / ``dataclasses`` /
-``pathlib``) plus the COMMON :func:`~brutex.data.atomic_io.atomic_write_via`.
+stdlib-only at import (``os`` / ``json`` / ``tempfile`` / ``threading`` / ``dataclasses`` /
+``datetime`` / ``decimal`` / ``pathlib``) plus the COMMON
+:func:`~brutex.data.atomic_io.atomic_write_via` + :class:`~brutex.data.models.CandleBar`.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
-import pickle
 import tempfile
 import threading
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 
 from brutex.data.atomic_io import atomic_write_via
+from brutex.data.models import CandleBar
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
-
-    from brutex.data.models import CandleBar
 
 __all__ = [
     "FETCH_SPILL_MAX_BYTES_ENV",
@@ -98,6 +104,53 @@ _SPILL_DIRNAME: str = ".fetch-spill"
 
 #: The suffix the atomic-write tmp carries; stripped to derive the final spill file path.
 _TMP_SUFFIX: str = ".tmp"
+
+
+def _encode_bars(bars: Sequence[CandleBar]) -> bytes:
+    """Serialise *bars* to a compact JSON byte string with exact ``Decimal`` round-trip.
+
+    Each :class:`~brutex.data.models.CandleBar` becomes one JSON object: ``timestamp`` as an
+    ISO-8601 string, the four prices as their exact ``str(Decimal)`` text (NO float — the
+    byte-for-byte reproducibility invariant), ``volume`` as an int, ``open_interest`` as an int or
+    ``null``. UTF-8 encoded. O(bars), one pass (the spill is a per-window O(1) handoff). The inverse
+    is :func:`_decode_bars`.
+    """
+    payload = [
+        {
+            "ts": bar.timestamp.isoformat(),
+            "o": str(bar.open),
+            "h": str(bar.high),
+            "l": str(bar.low),
+            "c": str(bar.close),
+            "v": bar.volume,
+            "oi": bar.open_interest,
+        }
+        for bar in bars
+    ]
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def _decode_bars(data: bytes) -> list[CandleBar]:
+    """Reconstruct ``list[CandleBar]`` from the JSON bytes produced by :func:`_encode_bars`.
+
+    Each object is rebuilt into a :class:`~brutex.data.models.CandleBar` — ``timestamp`` via
+    :meth:`datetime.fromisoformat`, prices via ``Decimal(str)`` (exact, no float drift), volume/OI
+    as ints (``oi`` may be ``None``). The dataclass ``__post_init__`` re-validates every bar, so a
+    corrupt spill raises rather than yielding a malformed bar. O(bars), one pass.
+    """
+    rows = json.loads(data)
+    return [
+        CandleBar(
+            timestamp=datetime.fromisoformat(row["ts"]),
+            open=Decimal(row["o"]),
+            high=Decimal(row["h"]),
+            low=Decimal(row["l"]),
+            close=Decimal(row["c"]),
+            volume=int(row["v"]),
+            open_interest=None if row["oi"] is None else int(row["oi"]),
+        )
+        for row in rows
+    ]
 
 
 def resolve_fetch_spill_max_bytes(raw: str | None = None) -> int:
@@ -136,7 +189,7 @@ class SpilledWindow:
     Attributes
     ----------
     path
-        The atomic spill file holding this window's pickled ``list[CandleBar]``.
+        The atomic spill file holding this window's JSON-serialised ``list[CandleBar]``.
     size_bytes
         The file's byte size, reserved against the spill cap (released on
         :meth:`FetchSpillArea.discard`).
@@ -206,15 +259,16 @@ class FetchSpillArea:
     def try_spill(self, bars: Sequence[CandleBar]) -> SpilledWindow | None:
         """Atomically spill *bars* to disk + reserve their size; ``None`` if the cap is hit.
 
-        Pickles *bars* to a temp file, measures its size, and reserves it against the cap UNDER
-        the lock (a two-phase reserve so two concurrent spills can never jointly overshoot). When
-        the reservation would exceed the cap the temp is deleted and ``None`` is returned — the
-        caller falls back to bounded back-pressure (never an OOM). On success the temp is atomically
-        promoted via :func:`~brutex.data.atomic_io.atomic_write_via` (tmp → ``fsync`` → ``os.replace``;
-        disk-full → :class:`~brutex.data.errors.LakeWriteHalt`), and a :class:`SpilledWindow` handle
-        is returned. O(1) per window (one pickle dump + one atomic rename), NOT per-bar.
+        Serialises *bars* to JSON (:func:`_encode_bars`), measures its size, and reserves it against
+        the cap UNDER the lock (a two-phase reserve so two concurrent spills can never jointly
+        overshoot). When the reservation would exceed the cap the temp is deleted and ``None`` is
+        returned — the caller falls back to bounded back-pressure (never an OOM). On success the temp
+        is atomically promoted via :func:`~brutex.data.atomic_io.atomic_write_via`
+        (tmp → ``fsync`` → ``os.replace``; disk-full → :class:`~brutex.data.errors.LakeWriteHalt`),
+        and a :class:`SpilledWindow` handle is returned. O(1) per window (one JSON dump + one atomic
+        rename), NOT per-bar.
         """
-        payload = pickle.dumps(list(bars), protocol=pickle.HIGHEST_PROTOCOL)
+        payload = _encode_bars(list(bars))
         size = len(payload)
         with self._lock:
             if self._reserved + size > self._max_bytes:
@@ -241,16 +295,13 @@ class FetchSpillArea:
     def load(self, handle: SpilledWindow) -> list[CandleBar]:
         """Reload the spilled bars for *handle* (the consumer rehydration on dequeue).
 
-        Reads + unpickles the spill file. The file is NOT deleted here — :meth:`discard` deletes it
-        AFTER the window's tail is durably processed, so a consumer crash mid-tail leaves the spill
-        on disk for :meth:`cleanup` rather than losing the bars before they were written.
+        Reads + JSON-decodes the spill file (:func:`_decode_bars`, re-validating every bar). The
+        file is NOT deleted here — :meth:`discard` deletes it AFTER the window's tail is durably
+        processed, so a consumer crash mid-tail leaves the spill on disk for :meth:`cleanup` rather
+        than losing the bars before they were written.
         """
         data = handle.path.read_bytes()
-        # The spill is an EPHEMERAL same-process / same-run overflow buffer written + read +
-        # deleted by THIS process within one pull (see the module docstring); it is NEVER read from
-        # an untrusted source, so the pickle trust caveat does not apply here.
-        bars: list[CandleBar] = pickle.loads(data)  # noqa: S301 — trusted same-process spill
-        return bars
+        return _decode_bars(data)
 
     def discard(self, handle: SpilledWindow) -> None:
         """Delete *handle*'s spill file + release its reserved bytes (after durable processing).
