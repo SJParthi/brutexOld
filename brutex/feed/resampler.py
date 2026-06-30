@@ -36,9 +36,17 @@ Field          Rule
 
 ## Input contract
 
-Bars must be sorted ascending by timestamp; the resampler does **not**
-re-sort. All timestamps must be timezone-aware UTC — naive datetimes
-are rejected early rather than silently ambiguous.
+Bars must be sorted **strictly ascending** by timestamp; the resampler
+does **not** re-sort. A non-increasing timestamp — an out-of-order bar
+*or* an exact duplicate — is a feed-integrity violation and is rejected
+with a :class:`~brutex.feed.errors.ResampleError` the moment it is seen
+(O(1) per bar — only the previous bar's timestamp is tracked, never a
+growing set). This mirrors the feed-integrity guard in
+:meth:`brutex.execution.driver.BacktestDriver.run`
+(``this_ts <= prev_ts`` ⇒ :class:`~brutex.execution.errors.NonMonotonicBarError`):
+silently mis-bucketing such a bar would double-count VWAP volume and
+corrupt the aggregated OHLC. All timestamps must be timezone-aware UTC —
+naive datetimes are rejected early rather than silently ambiguous.
 """
 
 from __future__ import annotations
@@ -133,8 +141,10 @@ def resample_bars(
     ------
     ResampleError
         If an interval is unknown, up-sampling is requested, target
-        is not a multiple of source, or any input bar has a naive
-        timestamp.
+        is not a multiple of source, any input bar has a naive
+        timestamp, or any bar's timestamp is not strictly greater than
+        the previous bar's (an out-of-order or duplicate bar — bars must
+        be strictly increasing).
     """
     _validate_interval(source_interval, which="source")
     _validate_interval(target_interval, which="target")
@@ -164,12 +174,25 @@ def resample_bars(
     out: list[CandleBar] = []
     bucket: list[CandleBar] = []
     current_bucket_start: datetime | None = None
+    # O(1) feed-integrity guard: only the PREVIOUS bar's raw timestamp is
+    # tracked (never a growing set), so the strictly-increasing check costs
+    # O(1) time + O(1) extra space per bar. Mirrors BacktestDriver.run's
+    # `this_ts <= prev_ts` rejection — a non-increasing bar would otherwise be
+    # silently mis-bucketed (double-counted VWAP volume / corrupted OHLC).
+    prev_ts: datetime | None = None
 
     for bar in bars:
         if bar.timestamp.tzinfo is None:
             raise ResampleError(
                 f"resample_bars requires tz-aware timestamps, got naive {bar.timestamp!r}"
             )
+        if prev_ts is not None and bar.timestamp <= prev_ts:
+            raise ResampleError(
+                f"resample_bars requires strictly-increasing timestamps, got "
+                f"{bar.timestamp.isoformat()} <= previous {prev_ts.isoformat()} "
+                f"(an out-of-order or duplicate bar mis-buckets the aggregate)"
+            )
+        prev_ts = bar.timestamp
         bucket_start = _bucket_start(bar.timestamp, tgt_s)
         if current_bucket_start is None or bucket_start != current_bucket_start:
             if bucket:
