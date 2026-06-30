@@ -857,17 +857,22 @@ class TestLoadRegistryExpiries:
     ) -> None:
         from pathlib import Path
 
-        import brutex.dashboard.movers_options as mod
+        import pytest
         from brutex.data.registry_store import RegistryError
 
         assert isinstance(tmp_path, Path)
+        assert isinstance(monkeypatch, pytest.MonkeyPatch)
         path = tmp_path / "registry.duckdb"
         path.write_text("not a real duckdb file")  # exists but unreadable
 
         def _boom(_p: Path) -> object:
             raise RegistryError("corrupt cache")
 
-        monkeypatch.setattr(mod.RegistryStore, "open", staticmethod(_boom))  # type: ignore[attr-defined]
+        # Patch the `RegistryStore.open` the production module looks up — addressed by
+        # the dotted string so the module is referenced ONE way (the top-of-file
+        # `from brutex.dashboard.movers_options import ...`), never re-imported as a
+        # second binding (resolves the CodeQL "imported with both import and import-from").
+        monkeypatch.setattr("brutex.dashboard.movers_options.RegistryStore.open", _boom)
         assert load_registry_expiries(path) is None
 
 
