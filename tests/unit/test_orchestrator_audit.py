@@ -917,11 +917,17 @@ class TestRfcSafeJson:
 
 
 class TestKillRecovery:
-    def test_torn_last_line_is_detected_not_silently_accepted(self, audit_path: Path) -> None:
-        # Simulate a crash that wrote a PARTIAL final line (no closing
-        # brace / newline) after two durable entries. verify_chain must
-        # RAISE (AuditError) — it must never silently accept a torn tail
-        # as a valid entry.
+    def test_torn_last_line_is_recovered_not_chained_in(self, audit_path: Path) -> None:
+        # Updated contract (DEC-AUDIT-TORN-TAIL-001): a crash that wrote a
+        # PARTIAL final line (no closing brace / newline) after two durable
+        # entries leaves a TORN TAIL — an interrupted, newline-less append.
+        # verify_chain must TOLERATE it: the torn line is uncommitted (it was
+        # never newline-terminated), so it is SKIPPED, never chained in as a
+        # valid entry, and the durable two-entry prefix verifies cleanly. This
+        # is the auto-resume guarantee — an unattended restart must not die on
+        # a torn tail. (A torn line that DOES carry a trailing newline — i.e.
+        # was fully committed — is real corruption and STILL raises; see
+        # test_committed_garbage_final_line_still_raises.)
         with AuditWriter.open(audit_path) as log:
             log.append(action="A", subject="s1", ts_utc=1.0)
             log.append(action="B", subject="s2", ts_utc=2.0)
@@ -929,6 +935,18 @@ class TestKillRecovery:
         # between write() and the next flush/fsync would leave.
         with open(audit_path, "a", encoding="utf-8") as f:
             f.write('{"seq": 2, "prev_hash": "abc", "ts_utc": 3.0, "act')  # torn
+        # The torn tail is skipped; the durable prefix verifies to its length.
+        assert verify_chain(audit_path) == 2
+
+    def test_committed_garbage_final_line_still_raises(self, audit_path: Path) -> None:
+        # The torn-tail tolerance is NARROW: a malformed FINAL line that DOES
+        # carry a trailing newline was fully committed by a write(), so garbage
+        # there is real corruption (a flipped byte), NOT an interrupted append.
+        # It must STILL raise — never be silently skipped (DEC-AUDIT-TORN-TAIL-001).
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", ts_utc=1.0)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write("this is not json\n")  # committed (newline-terminated) garbage
         with pytest.raises(AuditError, match="Malformed audit line"):
             verify_chain(audit_path)
 

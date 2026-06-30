@@ -33,6 +33,12 @@ from brutex.engine.sweep_audit import (
     read_entries,
     verify_chain,
 )
+from brutex.engine.sweep_audit import (
+    _read_entries_with_torn_tail as _sweep_read_with_tail,
+)
+from brutex.engine.sweep_audit import (
+    _truncate_torn_tail as _sweep_truncate,
+)
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -292,3 +298,103 @@ def test_property_single_payload_tamper_breaks_chain(tmp_path: Path) -> None:
     _write_lines(p, [tampered, entries[1]])
     with pytest.raises(SweepAuditChainCorruption):
         verify_chain(p)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-AUDIT-TORN-TAIL-001 — sweep-side torn-tail recovery
+#
+# A crash / SIGKILL mid-append can leave an unterminated final JSONL line on
+# the sweep audit log. The reader skips it + flags it; the writer's resume path
+# truncates it; a malformed COMMITTED (newline-terminated) line is still real
+# corruption and must raise. These tests cover sweep_audit.py lines 303,
+# 485-486 (the torn-tail flag in _read_entries_with_torn_tail) and 528-542
+# (the body of _truncate_torn_tail) so the engine 100% coverage gate stays
+# green WITHOUT depending on tests/unit/test_audit_torn_tail.py (which is
+# scoped to the orchestrator-audit gate).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _append_raw(path: Path, text: str) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(text)
+
+
+def test_sweep_torn_tail_partial_json_recovers(tmp_path: Path) -> None:
+    """An unterminated final JSONL line is skipped + flagged as a torn tail."""
+    path = tmp_path / "sweep_partial.jsonl"
+    with SweepAuditWriter.open(path) as log:
+        log.append(action="A", subject="s0", payload={"i": 0}, ts_utc=1.0)
+        log.append(action="B", subject="s1", payload={"i": 1}, ts_utc=2.0)
+    _append_raw(path, '{"seq": 2, "prev_hash": "abc", "ts_utc": 3.0, "act')
+
+    entries, torn = _sweep_read_with_tail(path)
+    assert torn is True
+    assert [e.seq for e in entries] == [0, 1]
+
+
+def test_sweep_torn_tail_resume_truncates_and_continues(tmp_path: Path) -> None:
+    """open(resume=True) over a torn tail truncates it and resumes a clean chain.
+
+    Exercises the resume-branch ``_truncate_torn_tail(path)`` call at line 303
+    PLUS the body of ``_truncate_torn_tail`` itself (lines 528-542).
+    """
+    path = tmp_path / "sweep_resume.jsonl"
+    with SweepAuditWriter.open(path) as log:
+        log.append(action="A", subject="s0", payload={"i": 0}, ts_utc=1.0)
+        log.append(action="B", subject="s1", payload={"i": 1}, ts_utc=2.0)
+    _append_raw(path, '{"seq": 2, "prev_hash": "abc", "ts_utc": 3.0, "act')
+
+    with SweepAuditWriter.open(path, resume=True) as log:
+        recovered = log.append(action="C", subject="s2", payload={"i": 2}, ts_utc=3.0)
+
+    assert recovered.seq == 2
+    # The torn bytes are gone and the whole chain verifies end-to-end.
+    assert verify_chain(path) == 3
+
+
+def test_sweep_truncate_keeps_committed_prefix(tmp_path: Path) -> None:
+    """_truncate_torn_tail keeps exactly the committed (newline-terminated) bytes."""
+    path = tmp_path / "sweep_trunc.jsonl"
+    with SweepAuditWriter.open(path) as log:
+        log.append(action="A", subject="s0", payload={"i": 0}, ts_utc=1.0)
+        log.append(action="B", subject="s1", payload={"i": 1}, ts_utc=2.0)
+    committed = path.read_bytes()
+    _append_raw(path, '{"seq": 2, "prev')  # torn remnant
+
+    _sweep_truncate(path)
+
+    assert path.read_bytes() == committed
+    entries, torn = _sweep_read_with_tail(path)
+    assert torn is False
+    assert [e.seq for e in entries] == [0, 1]
+    # The atomic-replace temp file was cleaned up.
+    assert list(path.parent.glob("*.torn-tail-*.tmp")) == []
+
+
+def test_sweep_truncate_only_torn_line_empties_file(tmp_path: Path) -> None:
+    """A file consisting only of a torn line truncates to an empty file.
+
+    Exercises the ``cut == -1`` branch (no newline anywhere) of
+    ``_truncate_torn_tail``.
+    """
+    path = tmp_path / "sweep_trunc_only.jsonl"
+    _append_raw(path, '{"seq": 0, "prev')
+
+    _sweep_truncate(path)
+
+    assert path.read_bytes() == b""
+
+
+def test_sweep_truncate_io_error_wraps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OSError during the atomic replace is wrapped in SweepAuditWriteError."""
+    path = tmp_path / "sweep_trunc_fail.jsonl"
+    with SweepAuditWriter.open(path) as log:
+        log.append(action="A", subject="s0", payload={"i": 0}, ts_utc=1.0)
+    _append_raw(path, '{"seq": 1, "prev')
+
+    def _boom(_src: object, _dst: object) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("brutex.engine.sweep_audit.os.replace", _boom)
+    with pytest.raises(SweepAuditWriteError):
+        _sweep_truncate(path)

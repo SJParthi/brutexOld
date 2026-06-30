@@ -288,7 +288,19 @@ class SweepAuditWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if resume and path.exists():
-            entries = _read_entries(path)
+            # A torn final line (an interrupted append from a crash / SIGKILL
+            # mid-write) is tolerated + skipped; if present we truncate the file
+            # to its last committed (newline-terminated) byte BEFORE re-opening
+            # for append, so the resumed chain continues from the last complete
+            # hash-valid entry on pristine bytes (DEC-AUDIT-TORN-TAIL-001). Real
+            # corruption of a committed line still raises out of
+            # _read_entries_with_torn_tail. This mirrors the ingest-side fix in
+            # brutex.orchestrator.audit (the two chains are deliberately
+            # STANDALONE — SHA256 vs BLAKE3 — so the logic is duplicated here,
+            # not imported).
+            entries, torn_tail = _read_entries_with_torn_tail(path)
+            if torn_tail:
+                _truncate_torn_tail(path)
             if entries:
                 last = entries[-1]
                 writer = cls(
@@ -422,21 +434,114 @@ class SweepAuditWriter:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _read_entries(path: Path) -> list[SweepAuditEntry]:
-    """Read every entry from *path* without verifying the chain."""
+def _read_entries_with_torn_tail(path: Path) -> tuple[list[SweepAuditEntry], bool]:
+    """Read every entry from *path*, tolerating a single torn final line.
+
+    Returns the parsed entries plus a flag that is ``True`` when the file's
+    LAST line was a **torn tail** — an interrupted append left behind by a
+    crash / ``SIGKILL`` mid-write (DEC-AUDIT-TORN-TAIL-001).
+
+    Torn-tail discriminator (hash-chain-safe)
+    -----------------------------------------
+    The writer always appends ``line + "\\n"`` in one :py:meth:`write` call, so
+    a committed record is **defined** as a line terminated by ``"\\n"``. A crash
+    mid-append can therefore only ever leave its damage on the FINAL line and
+    only when that line is missing its trailing newline (the write was cut off
+    before, or partway through, the ``"\\n"``). That newline-less final line —
+    whether its JSON is partial or even complete-but-unterminated — is an
+    UNCOMMITTED torn tail and is skipped so an unattended resume can recover
+    from the last complete, hash-valid entry instead of dying with
+    :class:`SweepAuditError`.
+
+    Everything that IS newline-terminated is a committed record and is parsed
+    strictly: a malformed line that carries a trailing newline (so it is NOT
+    the file's final line) is REAL corruption and still raises
+    :class:`SweepAuditError`. Mid-file integrity is NOT weakened — only an
+    unterminated tail is forgiven, and the hash chain over the committed prefix
+    is still verified by :func:`verify_chain`.
+
+    This is the deliberate STANDALONE twin of
+    :func:`brutex.orchestrator.audit._read_entries_with_torn_tail` (that chain
+    is SHA256, this one BLAKE3 — they do not import one another).
+
+    Raises
+    ------
+    SweepAuditError
+        If the file is missing, or any committed (newline-terminated) line is
+        malformed / missing required fields.
+    """
     if not path.exists():
         raise SweepAuditError(f"Sweep audit log not found: {path}")
     entries: list[SweepAuditEntry] = []
+    torn_tail = False
     with open(path, encoding="utf-8") as f:
         for line_no, raw in enumerate(f, start=1):
+            terminated = raw.endswith("\n")
             line = raw.rstrip("\n")
+            if not terminated:
+                # Unterminated final line == interrupted append == torn tail.
+                # Skip it (committed or not, it is uncommitted) and flag the
+                # tail so the resume path truncates it.
+                torn_tail = True
+                continue
             if not line:
+                # A blank committed (newline-terminated) line is benign filler.
                 continue
             try:
                 entries.append(SweepAuditEntry.from_json_line(line))
             except SweepAuditError as exc:
                 raise SweepAuditError(f"{path}:{line_no}: {exc}") from exc
+    return entries, torn_tail
+
+
+def _read_entries(path: Path) -> list[SweepAuditEntry]:
+    """Read every entry from *path* without verifying the chain.
+
+    A torn final line (an interrupted append left by a crash mid-write) is
+    tolerated and skipped (DEC-AUDIT-TORN-TAIL-001); real corruption of a
+    committed (newline-terminated) line still raises :class:`SweepAuditError`.
+    See :func:`_read_entries_with_torn_tail` for the full discriminator.
+    """
+    entries, _torn_tail = _read_entries_with_torn_tail(path)
     return entries
+
+
+def _truncate_torn_tail(path: Path) -> None:
+    """Drop a torn final line so the next append continues a clean chain.
+
+    Rewrites *path* keeping ONLY its committed (newline-terminated) bytes — the
+    longest prefix ending in ``"\\n"`` — so the uncommitted torn remnant a crash
+    left behind is removed and :meth:`SweepAuditWriter.append` resumes a
+    pristine chain (DEC-AUDIT-TORN-TAIL-001). Done with an atomic
+    ``os.replace`` of a sibling temp file so an interruption DURING the repair
+    can never itself corrupt the committed prefix. A best-effort ``fsync``
+    mirrors the writer's durability guard.
+
+    The STANDALONE twin of
+    :func:`brutex.orchestrator.audit._truncate_torn_tail`.
+
+    Raises
+    ------
+    SweepAuditWriteError
+        If the rewrite fails for any I/O reason.
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        cut = data.rfind(b"\n")
+        # cut == -1 → no committed line at all → keep nothing.
+        committed = data[: cut + 1] if cut != -1 else b""
+        tmp = path.with_name(f"{path.name}.torn-tail-{os.getpid()}.tmp")
+        with open(tmp, "wb") as out:
+            out.write(committed)
+            out.flush()
+            with contextlib.suppress(OSError):
+                os.fsync(out.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise SweepAuditWriteError(
+            f"Failed to truncate torn tail of sweep audit log {path}: {exc}"
+        ) from exc
 
 
 def read_entries(path: Path) -> list[SweepAuditEntry]:
