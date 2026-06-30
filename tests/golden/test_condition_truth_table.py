@@ -47,7 +47,7 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
-_EXPECTED_SHA256 = "8c308e2f91728e0e2a74577e1ced6f85de91d38d4d2ba973a469bb69f006e145"
+_EXPECTED_SHA256 = "e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33"
 
 
 def _read_rows() -> list[dict[str, str]]:

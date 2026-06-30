@@ -8,24 +8,31 @@
 //! ## What BOS and CHoCH are
 //!
 //! Working off CONFIRMED swing points (fractal pivots), with the prevailing
-//! trend tracked as a running state:
+//! trend tracked as a running state. Like every other atomic condition in the
+//! vocabulary, these are PER-BAR LEVEL-POSITION PREDICATES (re-evaluated on
+//! every bar against the levels known so far), NOT one-shot "events" or edges —
+//! a bit reads `true` on each bar whose close holds beyond the relevant
+//! confirmed swing, and reads `false` again once the close no longer does (or
+//! until a newer swing is confirmed):
 //!
-//! * **BOS** (Break of Structure — trend CONTINUATION): in an up-trend the close
-//!   takes out the most recent confirmed swing HIGH (bullish BOS); in a
-//!   down-trend the close takes out the most recent confirmed swing LOW (bearish
-//!   BOS). With no established trend yet, the first such break also sets the
-//!   trend and counts as a BOS in that direction.
-//! * **CHoCH** (Change of Character — trend REVERSAL): the FIRST break in the
-//!   OPPOSITE direction of the prevailing trend — in a DOWN-trend the close takes
-//!   out the last confirmed swing HIGH (bullish CHoCH → trend flips up); in an
-//!   UP-trend the close takes out the last confirmed swing LOW (bearish CHoCH →
-//!   trend flips down).
+//! * **BOS** (Break of Structure — trend CONTINUATION): bullish on any bar whose
+//!   close is above the most recent confirmed swing HIGH while the prevailing
+//!   trend is up (or not yet set); bearish on any bar whose close is below the
+//!   most recent confirmed swing LOW while the prevailing trend is down (or not
+//!   yet set). The break also sets/confirms the trend to match.
+//! * **CHoCH** (Change of Character — trend REVERSAL): bullish on a bar whose
+//!   close takes out the last confirmed swing HIGH while the prevailing trend is
+//!   DOWN (which flips the trend up); bearish on a bar whose close takes out the
+//!   last confirmed swing LOW while the prevailing trend is UP (which flips the
+//!   trend down). Because crossing flips the trend, the very next held-beyond bar
+//!   reads as a BOS (continuation) rather than a CHoCH — the CHoCH/BOS split is a
+//!   function of the trend AT THE BAR, not a stateful "first time only" latch.
 //!
-//! A single bar fires at most ONE of `{bos_bullish, choch_bullish}` and at most
-//! ONE of `{bos_bearish, choch_bearish}` (which one depends only on the
+//! On any one bar at most ONE of `{bos_bullish, choch_bullish}` and at most ONE
+//! of `{bos_bearish, choch_bearish}` reads `true` (which one depends only on the
 //! prevailing trend at that bar). The up-side and down-side are independent: a
 //! bar that takes out BOTH the last swing high AND the last swing low (a large
-//! engulfing bar) can fire one up-bit and one down-bit.
+//! engulfing bar) can read one up-bit and one down-bit.
 //!
 //! ## Look-ahead safety (the crux — ADR-0012 §4.5 #13, Property P-06)
 //!
