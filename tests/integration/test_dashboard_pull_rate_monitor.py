@@ -318,23 +318,26 @@ class TestMeasuredCountsAreRealEndToEnd:
     def test_route_reports_controllers_real_window_counts(self) -> None:
         from brutex.adapters.rate_common import RateController
 
-        class _Clock:
-            def __init__(self) -> None:
-                self.t = 1000.0
+        # A plain ``def`` clock closure over a mutable holder — NOT a callable CLASS.
+        # CodeQL's points-to analysis cannot resolve ``__call__`` through the
+        # ``clock: Callable[[], float]`` cross-function flow, so a callable-class fixture
+        # would make it wrongly report the production ``clock()`` call sites in
+        # ``rate_common.py`` as ``py/call-to-non-callable``; a plain ``def`` is
+        # unambiguously callable, so the analysis stays correct (same time-control behaviour).
+        clock_state = {"t": 1000.0}
 
-            def __call__(self) -> float:
-                return self.t
+        def clock() -> float:
+            return clock_state["t"]
 
-            def advance(self, seconds: float) -> None:
-                self.t += seconds
+        def advance(seconds: float) -> None:
+            clock_state["t"] += seconds
 
-        clock = _Clock()
         # A real controller with a governor (production shape). No sleeping in tests.
         ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_per_min=500)
         # Issue 5 real paces over 5 s — every issue is timestamped by pace() itself.
         for _ in range(5):
             ctl.pace()
-            clock.advance(1.0)
+            advance(1.0)
         # Now (t=1005): all 5 issues are within the last 60s / 600s / 3600s; only the most
         # recent (t=1004, 1s before now) is within the trailing 1s window.
         snap = ctl.snapshot()
