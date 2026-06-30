@@ -327,6 +327,16 @@ class RateLimitPanel:
     #: ``-1`` when no per-minute governor is wired (the dry-run / no-live default).
     recent_minute: int = 0
     ceiling_per_min: int = -1
+    #: The controller's OBSERVE-ONLY trailing-window REAL issue counts measured from actual
+    #: issue timestamps (``recent_1s`` / ``recent_600s`` / ``recent_3600s``;
+    #: DEC-RATE-MONITOR-EXPAND-001, MIGRATION.md #1004). These feed the live-rate monitor's
+    #: req/sec, req/10min + MEASURED req/hour evidence so the operator can verify each rate is
+    #: a genuine windowed count, not a per-second figure multiplied up. ``recent_60s`` reuses
+    #: :attr:`recent_minute` (the same trailing-60s count, two independent controller sources).
+    #: ``0`` when no live pull has ticked (the honest idle default).
+    recent_1s: int = 0
+    recent_600s: int = 0
+    recent_3600s: int = 0
     #: The monotonic timestamp of the LAST live rate tick (a pull pushed a snapshot via
     #: :func:`make_rate_observer`). ``-inf`` (the default) means "never updated" — the
     #: live-pull-rate monitor reads this to tell an ACTIVE pull from an IDLE / ended one,
@@ -561,6 +571,9 @@ class DashboardState:
         quota_limit: int = -1,
         recent_minute: int = 0,
         ceiling_per_min: int = -1,
+        recent_1s: int = 0,
+        recent_600s: int = 0,
+        recent_3600s: int = 0,
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
@@ -575,6 +588,11 @@ class DashboardState:
         ALSO stamps :attr:`RateLimitPanel.last_update_monotonic` (the staleness baseline
         the monitor reads to tell an active pull from an idle one) via
         :meth:`_stamp_rate_update`.
+
+        ``recent_1s`` / ``recent_600s`` / ``recent_3600s`` are the controller's OBSERVE-ONLY
+        trailing-window REAL issue counts (DEC-RATE-MONITOR-EXPAND-001) feeding the monitor's
+        req/sec, req/10min + MEASURED req/hour evidence; they default to ``0`` so a snapshot
+        from an older controller (or a non-live caller) leaves them honestly zeroed.
         """
         with self._lock:
             self.rate_limit.current_rps = current_rps
@@ -585,6 +603,9 @@ class DashboardState:
             self.rate_limit.quota_limit = quota_limit
             self.rate_limit.recent_minute = recent_minute
             self.rate_limit.ceiling_per_min = ceiling_per_min
+            self.rate_limit.recent_1s = recent_1s
+            self.rate_limit.recent_600s = recent_600s
+            self.rate_limit.recent_3600s = recent_3600s
             self._stamp_rate_update()
 
     def _stamp_rate_update(self) -> None:
@@ -792,6 +813,12 @@ def make_rate_observer(
             quota_limit=int(rate.get("quota_limit", -1)),
             recent_minute=int(rate.get("recent_minute", 0)),
             ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
+            # OBSERVE-ONLY trailing-window real issue counts (DEC-RATE-MONITOR-EXPAND-001):
+            # absent on an older controller snapshot → default 0 (honest idle), never a
+            # fabricated number.
+            recent_1s=int(rate.get("recent_1s", 0)),
+            recent_600s=int(rate.get("recent_600s", 0)),
+            recent_3600s=int(rate.get("recent_3600s", 0)),
         )
         state.update_throughput(
             effective_rps=float(meter.get("effective_rps", 0.0)),
@@ -1174,6 +1201,9 @@ def build_app(
             panel_current_rps = panel.current_rps
             panel_recent_minute = panel.recent_minute
             panel_recent_429 = panel.recent_429_count
+            panel_recent_1s = panel.recent_1s
+            panel_recent_600s = panel.recent_600s
+            panel_recent_3600s = panel.recent_3600s
             panel_last_update = panel.last_update_monotonic
         if math.isinf(panel_last_update):
             panel_age = math.inf
@@ -1189,6 +1219,9 @@ def build_app(
         bridge_current_rps: float | None = None
         bridge_recent_minute: int | None = None
         bridge_recent_429: int | None = None
+        bridge_recent_1s: int | None = None
+        bridge_recent_600s: int | None = None
+        bridge_recent_3600s: int | None = None
         bridge_lake_root = _rate_bridge_lake_root_or_none(instrument_store)
         if bridge_lake_root is not None:
             from brutex.data.rate_bridge import read_rate_snapshot
@@ -1200,6 +1233,9 @@ def build_app(
                 bridge_current_rps = snapshot.current_rps
                 bridge_recent_minute = snapshot.recent_minute
                 bridge_recent_429 = snapshot.recent_429
+                bridge_recent_1s = snapshot.recent_1s
+                bridge_recent_600s = snapshot.recent_600s
+                bridge_recent_3600s = snapshot.recent_3600s
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -1207,11 +1243,17 @@ def build_app(
             panel_recent_minute=panel_recent_minute,
             panel_recent_429_count=panel_recent_429,
             panel_seconds_since_update=panel_age,
+            panel_recent_1s=panel_recent_1s,
+            panel_recent_600s=panel_recent_600s,
+            panel_recent_3600s=panel_recent_3600s,
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
             bridge_recent_429_count=bridge_recent_429,
             bridge_seconds_since_update=bridge_age,
+            bridge_recent_1s=bridge_recent_1s,
+            bridge_recent_600s=bridge_recent_600s,
+            bridge_recent_3600s=bridge_recent_3600s,
         )
         return JSONResponse(view.to_dict())
 
@@ -5963,7 +6005,7 @@ def _load_db_template() -> str:
     template fetches ``/api/v1/db/tables`` for the table list + row counts,
     then ``/api/v1/db/columns/{name}`` + ``/api/v1/db/query/{name}`` when a
     table is clicked, escaping every column name + cell via an ``esc()``
-    helper before it touches innerHTML (XSS — values originate from the
+    helper before it is inserted into the DOM (XSS — values originate from the
     instrument-master CSV). **Read fresh** (no module cache) so a redeployed
     template takes effect on the next request without a server restart — the
     load-once cache was why a clicked table showed nothing after a deploy
@@ -6084,18 +6126,22 @@ async function loadInstruments() {
     const body = await r.json();
     const rows = body.instruments || [];
     const tb = document.querySelector('#ins-table tbody');
-    tb.innerHTML = rows.map(i =>
-      `<tr>
-        <td>${i.symbol_name}</td>
-        <td>${i.instrument}</td>
-        <td>${i.segment}</td>
-        <td>${i.underlying_symbol || '-'}</td>
-        <td>${i.sm_expiry_date || '-'}</td>
-        <td>${i.strike_price || '-'}</td>
-        <td>${i.lot_size || '-'}</td>
-        <td>${i.sm_freeze_qty || '-'}</td>
-      </tr>`
-    ).join('');
+    // Build rows via createElement + textContent (NO markup parsing) so server-derived
+    // instrument values can never be interpreted as HTML — XSS-safe by construction.
+    tb.replaceChildren();
+    rows.forEach(i => {
+      const tr = document.createElement('tr');
+      [
+        i.symbol_name, i.instrument, i.segment,
+        i.underlying_symbol || '-', i.sm_expiry_date || '-',
+        i.strike_price || '-', i.lot_size || '-', i.sm_freeze_qty || '-'
+      ].forEach(val => {
+        const td = document.createElement('td');
+        td.textContent = (val == null ? '' : String(val));
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
     status.textContent = rows.length + ' rows';
   } catch (e) { status.textContent = 'error: ' + e.message; }
 }
@@ -6205,19 +6251,40 @@ function renderState(s) {
   runId.textContent = s.run_id || '(no run)';
   runDot.className = 'status-dot ' + (s.run_status || 'idle');
 
-  phasesEl.innerHTML = '';
+  phasesEl.replaceChildren();
   (s.phases || []).forEach(p => {
+    // Build the phase card via createElement + textContent (NO markup parsing) so
+    // server-derived phase/status/message text can never be interpreted as HTML (XSS-safe).
     const div = document.createElement('div');
     div.className = 'card phase-card';
-    div.innerHTML = `
-      <h3>${p.phase} <span class="badge ${p.status}">${p.status}</span></h3>
-      <div class="bar"><div style="width:${p.percent}%"></div></div>
-      <div class="stats">
-        ${p.done}/${p.total} (${p.percent}%) ·
-        ok: ${p.success} · no_data: ${p.no_data} · quarantined: ${p.quarantined}
-        ${p.elapsed_seconds ? '· ' + p.elapsed_seconds.toFixed(1) + 's' : ''}
-        ${p.message ? '<br><span style="color:#ef4444">' + p.message + '</span>' : ''}
-      </div>`;
+    const h3 = document.createElement('h3');
+    h3.textContent = (p.phase == null ? '' : String(p.phase)) + ' ';
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (p.status || '');
+    badge.textContent = (p.status == null ? '' : String(p.status));
+    h3.appendChild(badge);
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const fill = document.createElement('div');
+    fill.style.width = (Number(p.percent) || 0) + '%';
+    bar.appendChild(fill);
+    const stats = document.createElement('div');
+    stats.className = 'stats';
+    let line = p.done + '/' + p.total + ' (' + p.percent + '%) · '
+      + 'ok: ' + p.success + ' · no_data: ' + p.no_data
+      + ' · quarantined: ' + p.quarantined;
+    if (p.elapsed_seconds) { line += ' · ' + p.elapsed_seconds.toFixed(1) + 's'; }
+    stats.textContent = line;
+    if (p.message) {
+      stats.appendChild(document.createElement('br'));
+      const msg = document.createElement('span');
+      msg.style.color = '#ef4444';
+      msg.textContent = String(p.message);
+      stats.appendChild(msg);
+    }
+    div.appendChild(h3);
+    div.appendChild(bar);
+    div.appendChild(stats);
     phasesEl.appendChild(div);
   });
 
@@ -6245,18 +6312,36 @@ function renderState(s) {
   document.getElementById('tg-fail').textContent = tg.dropped_on_failure || 0;
   document.getElementById('tg-dup').textContent = tg.dropped_on_dedupe || 0;
 
+  // Build the workers + events rows via createElement + textContent (NO markup parsing),
+  // so server-derived worker/task/event/message text can never be interpreted as HTML.
+  const mkRow = (cells, lastClass) => {
+    const tr = document.createElement('tr');
+    cells.forEach((val, idx) => {
+      const td = document.createElement('td');
+      if (lastClass && idx === cells.length - 1) { td.className = lastClass; }
+      td.textContent = (val == null ? '' : String(val));
+      tr.appendChild(td);
+    });
+    return tr;
+  };
+
   const wtb = document.querySelector('#workers tbody');
-  wtb.innerHTML = (s.workers || []).map(w =>
-    `<tr><td>${w.worker_id}</td><td>${w.status}</td>
-     <td>${w.current_task || '-'}</td><td>${w.elapsed_seconds.toFixed(1)}s</td></tr>`
-  ).join('');
+  wtb.replaceChildren();
+  (s.workers || []).forEach(w => {
+    wtb.appendChild(mkRow([
+      w.worker_id, w.status, w.current_task || '-',
+      w.elapsed_seconds.toFixed(1) + 's'
+    ]));
+  });
 
   const etb = document.querySelector('#events tbody');
-  etb.innerHTML = (s.recent_events || []).slice(-20).reverse().map(e =>
-    `<tr><td>${e.at.split('T')[1].slice(0,8)}</td>
-     <td>${e.phase || '-'}</td><td>${e.kind}</td>
-     <td class="stats">${e.message || e.item_id || ''}</td></tr>`
-  ).join('');
+  etb.replaceChildren();
+  (s.recent_events || []).slice(-20).reverse().forEach(e => {
+    etb.appendChild(mkRow([
+      e.at.split('T')[1].slice(0,8), e.phase || '-', e.kind,
+      e.message || e.item_id || ''
+    ], 'stats'));
+  });
 }
 
 function connect() {

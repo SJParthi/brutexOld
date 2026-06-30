@@ -41,17 +41,23 @@ def test_publish_then_read_round_trips_every_field(tmp_path: Path) -> None:
         recent_minute=380,
         recent_429=2,
         ceiling_per_min=500,
+        recent_1s=7,
+        recent_600s=3800,
+        recent_3600s=22800,
         wall_time=1_700_000_000.5,
         monotonic=12345.6,
     )
     snap = read_rate_snapshot(tmp_path)
     assert snap == RateBridgeSnapshot(
-        schema=1,
+        schema=2,
         effective_rps=6.4,
         current_rps=8.0,
         recent_minute=380,
         recent_429=2,
         ceiling_per_min=500,
+        recent_1s=7,
+        recent_600s=3800,
+        recent_3600s=22800,
         wall_time=1_700_000_000.5,
         monotonic=12345.6,
     )
@@ -114,6 +120,9 @@ def test_publish_from_snapshots_maps_controller_and_meter_fields(tmp_path: Path)
             "recent_minute": 350,
             "recent_hits": 4,
             "ceiling_per_min": 500,
+            "recent_1s": 7,
+            "recent_600s": 3500,
+            "recent_3600s": 21000,
         },
         {"effective_rps": 6.1},
         wall_time=100.0,
@@ -126,6 +135,10 @@ def test_publish_from_snapshots_maps_controller_and_meter_fields(tmp_path: Path)
     assert snap.recent_minute == 350
     assert snap.recent_429 == 4
     assert snap.ceiling_per_min == 500
+    # The expanded-monitor trailing-window real counts (DEC-RATE-MONITOR-EXPAND-001).
+    assert snap.recent_1s == 7
+    assert snap.recent_600s == 3500
+    assert snap.recent_3600s == 21000
     assert snap.wall_time == 100.0
     assert snap.monotonic == 200.0
 
@@ -147,6 +160,10 @@ def test_publish_from_snapshots_defaults_missing_keys_safely(tmp_path: Path) -> 
     assert snap.recent_429 == 0
     # ``ceiling_per_min`` absent → the -1 "no governor wired" sentinel (the None branch).
     assert snap.ceiling_per_min == -1
+    # Absent trailing-window counts default to 0 (DEC-RATE-MONITOR-EXPAND-001) — no KeyError.
+    assert snap.recent_1s == 0
+    assert snap.recent_600s == 0
+    assert snap.recent_3600s == 0
 
 
 def test_publish_from_snapshots_maps_none_governor_to_minus_one(tmp_path: Path) -> None:
@@ -207,7 +224,7 @@ def test_read_missing_field_returns_none(tmp_path: Path) -> None:
     path = rate_bridge_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Right schema, but ``effective_rps`` (and others) absent.
-    path.write_text(json.dumps({"schema": 1, "current_rps": 1.0}), encoding="utf-8")
+    path.write_text(json.dumps({"schema": 2, "current_rps": 1.0}), encoding="utf-8")
     assert read_rate_snapshot(tmp_path) is None
 
 
@@ -216,12 +233,15 @@ def test_read_wrong_typed_field_returns_none(tmp_path: Path) -> None:
     path = rate_bridge_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema": 1,
+        "schema": 2,
         "effective_rps": "not-a-number",
         "current_rps": 1.0,
         "recent_minute": 1,
         "recent_429": 0,
         "ceiling_per_min": -1,
+        "recent_1s": 1,
+        "recent_600s": 1,
+        "recent_3600s": 1,
         "wall_time": 1.0,
         "monotonic": 1.0,
     }
@@ -270,12 +290,15 @@ def test_publish_enospc_maps_to_lake_write_halt(
 def test_snapshot_to_json_bytes_is_compact_utf8(tmp_path: Path) -> None:
     """``to_json_bytes`` is compact UTF-8 JSON the reader round-trips."""
     snap = RateBridgeSnapshot(
-        schema=1,
+        schema=2,
         effective_rps=1.5,
         current_rps=2.5,
         recent_minute=10,
         recent_429=1,
         ceiling_per_min=500,
+        recent_1s=2,
+        recent_600s=95,
+        recent_3600s=540,
         wall_time=9.0,
         monotonic=8.0,
     )
@@ -283,4 +306,5 @@ def test_snapshot_to_json_bytes_is_compact_utf8(tmp_path: Path) -> None:
     assert b", " not in raw  # compact separators (no spaces after commas)
     decoded = json.loads(raw)
     assert decoded["effective_rps"] == 1.5
-    assert decoded["schema"] == 1
+    assert decoded["schema"] == 2
+    assert decoded["recent_600s"] == 95
