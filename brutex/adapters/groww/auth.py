@@ -13,7 +13,14 @@ the only ``# pragma: no cover`` lines, mirroring the canonical adapter auth layo
 
 Secret hygiene: :class:`GrowwAuthError` is raised with a ``safe_message`` so
 ``str(exc)`` (which the audit log / dashboard persist) NEVER leaks the api_key or
-TOTP secret.
+TOTP secret. The ``safe_message`` now carries the SANITIZED vendor reason (the SDK
+exception's text — typically ``Groww API Error 400: <displayMessage>``) with every
+api_key / TOTP-secret / 6-digit-code occurrence scrubbed to ``***``
+(:func:`_sanitize_reason`), so the operator finally sees WHY auth failed (wrong
+TOTP secret, expired key, IP not whitelisted, …) instead of only a bare
+"issuance failed" — DEC-GROWW-AUTH-ERROR-DETAIL-001. The same sanitized reason
+is emitted on a ``groww.token.issuance_failed`` structlog event so it lands in
+``brutex.log``.
 """
 
 from __future__ import annotations
@@ -23,7 +30,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
+import structlog
+
 from brutex.adapters.groww.errors import GrowwAuthError
+
+_LOG = structlog.get_logger("brutex.adapters.groww.auth")
 
 #: Env var carrying the Groww TOTP api key.
 ENV_API_KEY: Final[str] = "BRUTEX_GROWW_API_KEY"
@@ -91,6 +102,43 @@ def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
     return True
 
 
+def _sanitize_reason(text: str, *secrets: str) -> str:
+    """Scrub every *secrets* occurrence in *text* to ``***`` (secret hygiene).
+
+    Used to make the vendor's failure reason VISIBLE without leaking the api_key,
+    the TOTP shared secret, or the minted 6-digit TOTP code. A blank/empty secret
+    is skipped (``str.replace("", …)`` would otherwise corrupt the whole string by
+    inserting between every character). The longest secrets are scrubbed first so a
+    secret that contains another as a substring is fully masked.
+    """
+    sanitized = text
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        sanitized = sanitized.replace(secret, "***")
+    return sanitized
+
+
+def _vendor_status(exc: Exception) -> int | None:
+    """Best-effort HTTP-ish status off an SDK exception (``code``), else ``None``.
+
+    The Groww SDK's ``GrowwAPIException`` carries a ``code`` (e.g. ``400``, or the
+    digit-string ``"503"``); a plain exception (``RuntimeError``) carries none. A
+    ``bool`` is rejected (it is an ``int`` subclass but never a status). Only a
+    genuine NUMERIC status survives — an int, or a digit-only string coerced to int
+    (mirroring :func:`brutex.adapters.groww.errors._classify_generic`) — so an
+    arbitrary vendor-controlled ``code`` string can NEVER reach the ``status`` log
+    field unscrubbed (the secret surface stays narrow; ``reason`` is the only
+    free-text channel and it is sanitized). Anything non-numeric returns ``None``.
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, bool):
+        return None
+    if isinstance(code, int):
+        return code
+    if isinstance(code, str) and code.strip().isdigit():
+        return int(code)
+    return None
+
+
 def get_access_token(
     creds: GrowwCredentials,
     *,
@@ -100,17 +148,31 @@ def get_access_token(
     """Mint a TOTP code and issue a Groww access token.
 
     Both side effects are injected (defaults wrap the real pyotp/SDK calls). Any
-    failure is wrapped as a :class:`GrowwAuthError` with a redacting
-    ``safe_message`` so the secret never reaches a log.
+    failure is wrapped as a :class:`GrowwAuthError` whose SANITIZED vendor reason
+    is the ``safe_message`` (so the operator sees WHY — wrong TOTP secret, expired
+    key, IP not whitelisted — not just "issuance failed") with every api_key /
+    TOTP-secret / minted-code occurrence scrubbed to ``***`` so no secret can reach
+    a log or the dashboard (DEC-GROWW-AUTH-ERROR-DETAIL-001). The same sanitized
+    reason is also attached as :attr:`GrowwAuthError.detail` and emitted on a
+    ``groww.token.issuance_failed`` structlog event (with the vendor status when
+    present).
     """
     totp = totp_minter(creds.totp_secret)
     try:
         token = token_factory(creds.api_key, totp)
     except Exception as exc:
-        raise GrowwAuthError(
-            f"Groww access-token issuance failed: {exc}",
-            safe_message="Groww access-token issuance failed",
-        ) from exc
+        reason = _sanitize_reason(str(exc), creds.api_key, creds.totp_secret, totp)
+        safe_message = f"Groww access-token issuance failed: {reason}"
+        status = _vendor_status(exc)
+        _LOG.error(
+            "groww.token.issuance_failed",
+            reason=reason,
+            status=status,
+            error_type=type(exc).__name__,
+        )
+        error = GrowwAuthError(safe_message, safe_message=safe_message)
+        error.detail = reason
+        raise error from exc
     return TokenInfo(access_token=token)
 
 
