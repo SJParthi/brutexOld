@@ -169,11 +169,14 @@ def resolve_active_future_expiry(underlying: OptionsUnderlying, on_date: date) -
     15:20 — no overnight roll); the next session resolves the new near month.
 
     The calendar's monthly expiry is computed AT OR AFTER *on_date*, then
-    holiday-shifted. If the holiday shift pulls the shifted expiry to a date
-    **before** *on_date* (i.e. *on_date* sits in the 1-2 day gap between a
-    holiday-shifted expiry and the original calendar last-<dow>), the contract
-    has already expired, so the NEXT month's contract is resolved instead — the
-    correct near month for that gap.
+    holiday-shifted. The roll-to-next-month branch (the holiday shift pulling the
+    shifted expiry to a date **before** *on_date*) is **defensive-only**: under
+    the monthly last-``<dow>`` rule the calendar expiry is always computed at or
+    after *on_date*, so a single-day prior-trading-day shift can never land
+    strictly before it — the gap branch has zero real occurrences. It is RETAINED
+    for a future weekly / Monday-expiry regime, where a multi-day shift across a
+    holiday cluster could open such a gap; the Rust decision then resolves the
+    NEXT month's contract — the correct near month for that gap.
 
     Parameters
     ----------

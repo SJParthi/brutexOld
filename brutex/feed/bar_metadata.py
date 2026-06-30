@@ -4,7 +4,7 @@ Per ADR-0012 D8 (``DEC-NIFTY-ROLL-METADATA-001``) every bar and every simulated
 trade is stamped with:
 
 * the **calendar date** (IST trading day),
-* the **weekday** (0=Mon … 4=Fri — Python's :meth:`datetime.date.weekday`),
+* the **weekday** (0=Mon … 6=Sun — Python's :meth:`datetime.date.weekday`),
 * the **minute-of-session** (whole minutes since the session open, 09:15 IST for
   a regular session; the ACTUAL open for a Muhurat / half-day session),
 * the active **contract expiry** (the holiday-shifted near-month futures expiry —
