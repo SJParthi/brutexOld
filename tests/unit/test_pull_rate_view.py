@@ -33,6 +33,9 @@ def test_flowing_when_recent_tick_above_floor() -> None:
         recent_429_count=2,
         last_update_monotonic=100.0,
         now_monotonic=101.0,
+        recent_1s=7,
+        recent_600s=3800,
+        recent_3600s=22800,
     )
     assert view.flow_state == FLOW_FLOWING
     assert view.active is True
@@ -42,6 +45,12 @@ def test_flowing_when_recent_tick_above_floor() -> None:
     assert view.req_per_min == 380
     # req/hour is the OBSERVED extrapolation = req/min × 60.
     assert view.req_per_hour_observed == 380 * 60
+    # MEASURED trailing-window real counts (DEC-RATE-MONITOR-EXPAND-001) — the new metrics +
+    # evidence. req/10min is the real trailing-600s count, req/hour MEASURED is the real
+    # trailing-3600s count, and the req/sec count is the trailing-1s evidence.
+    assert view.req_per_sec_count == 7
+    assert view.req_per_10min == 3800
+    assert view.req_per_hour_measured == 22800
     assert view.recent_429_count == 2
     assert view.seconds_since_update == 1.0
     assert view.ceiling_rps == CEILING_RPS_LIMIT == 8.0
@@ -76,6 +85,9 @@ def test_idle_when_tick_is_stale() -> None:
         recent_429_count=5,
         last_update_monotonic=10.0,
         now_monotonic=10.0 + STALE_AFTER_S + 0.01,  # just past stale
+        recent_1s=8,  # stale measured counts that must ALSO be zeroed when idle
+        recent_600s=4800,
+        recent_3600s=28800,
     )
     assert view.flow_state == FLOW_IDLE
     assert view.active is False
@@ -84,6 +96,11 @@ def test_idle_when_tick_is_stale() -> None:
     assert view.req_per_sec_allowed == 0.0
     assert view.req_per_min == 0
     assert view.req_per_hour_observed == 0
+    # The measured trailing-window counts are ALSO zeroed when idle (never a stale "live"
+    # count — Golden Rule #1).
+    assert view.req_per_sec_count == 0
+    assert view.req_per_10min == 0
+    assert view.req_per_hour_measured == 0
     assert view.recent_429_count == 0
     # The staleness gauge + limits stay REAL even while idle.
     assert view.seconds_since_update > STALE_AFTER_S
@@ -350,3 +367,85 @@ def test_merged_bridge_age_present_but_fields_none_defaults_safely() -> None:
     assert merged.req_per_min == 0
     assert merged.recent_429_count == 0
     assert merged.seconds_since_update == 1.0
+
+
+def test_to_dict_carries_measured_window_fields() -> None:
+    """The JSON payload exposes the new measured req/10min + req/hour + req/sec evidence."""
+    view = build_pull_rate_view(
+        effective_rps=6.4,
+        current_rps=8.0,
+        recent_minute=380,
+        recent_429_count=2,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        recent_1s=7,
+        recent_600s=3800,
+        recent_3600s=22800,
+    )
+    data = view.to_dict()
+    assert data["req_per_sec_count"] == 7
+    assert data["req_per_10min"] == 3800
+    assert data["req_per_hour_measured"] == 22800
+    # The older observed extrapolation is RETAINED alongside the measured count.
+    assert data["req_per_hour_observed"] == 380 * 60
+
+
+def test_merged_panel_measured_counts_flow_through() -> None:
+    """The in-memory panel's measured trailing-window counts reach the view (panel path)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=7.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=400,
+        panel_recent_429_count=1,
+        panel_seconds_since_update=0.5,
+        panel_recent_1s=7,
+        panel_recent_600s=4000,
+        panel_recent_3600s=24000,
+    )
+    assert merged.req_per_sec_count == 7
+    assert merged.req_per_10min == 4000
+    assert merged.req_per_hour_measured == 24000
+
+
+def test_merged_bridge_measured_counts_flow_through() -> None:
+    """A fresher bridge's measured trailing-window counts reach the view (bridge path)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=math.inf,  # dashboard never pulled
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=3,
+        bridge_seconds_since_update=1.5,
+        bridge_recent_1s=5,
+        bridge_recent_600s=2900,
+        bridge_recent_3600s=17400,
+    )
+    assert merged.req_per_sec_count == 5
+    assert merged.req_per_10min == 2900
+    assert merged.req_per_hour_measured == 17400
+
+
+def test_merged_bridge_measured_counts_none_default_to_zero() -> None:
+    """A fresher bridge with None measured counts defaults each to 0 (the defensive else)."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=9.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=400,
+        panel_recent_429_count=9,
+        panel_seconds_since_update=math.inf,
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=3,
+        bridge_seconds_since_update=1.0,
+        bridge_recent_1s=None,
+        bridge_recent_600s=None,
+        bridge_recent_3600s=None,
+    )
+    assert merged.req_per_sec_count == 0
+    assert merged.req_per_10min == 0
+    assert merged.req_per_hour_measured == 0
