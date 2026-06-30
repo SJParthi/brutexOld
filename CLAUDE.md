@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fetch-per-window-guarantee` (**DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1017** —
+- **Active branch:** `claude/fetch-per-window-guarantee` (**DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1021** —
   adaptive strike-chain bounding drives the F&O option-pull fetches-per-window from a MEASURED `2.54` toward `~1.2`,
   making the operator's worst-case-`3 r/s` 8-hour pull a MEASURED CI GATE — with NO data lost. THE ARITHMETIC: at the AIMD
   soft-floor `3 r/s`, `3×3600×8h = 86,400` fetches are available in 8h; a production pull spent `2.54` fetches per
