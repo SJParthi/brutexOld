@@ -47,8 +47,10 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "popcount_bytes",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
+        "MarketStructureState",
         "PIVOT_LEVELS_LEN",
         "TOTAL_CONDITIONS",
+        "VwapState",
         "compute_ema",
         "compute_fib_levels",
         "compute_pivot_levels",
