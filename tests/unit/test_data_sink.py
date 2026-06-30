@@ -270,10 +270,11 @@ class TestParquetBarSinkProperties:
 
 
 class TestParquetBarSinkDedupCount:
-    """``SinkAppendResult.bars_appended`` sums the per-partition DEDUPED ``bars_added`` —
-    a re-pull of bars already in the lake reports 0, not the input batch size."""
+    """``SinkAppendResult.bars_net_new`` sums the per-partition DEDUPED ``bars_added`` —
+    a re-pull of bars already in the lake reports 0 net-new, while ``bars_appended`` (the
+    historical input-count contract that ``> 0`` gates depend on) stays the input size."""
 
-    def test_fresh_append_reports_input_count(self, tmp_path: Path) -> None:
+    def test_fresh_append_net_new_equals_input(self, tmp_path: Path) -> None:
         import pytest
 
         pytest.importorskip("polars")
@@ -287,10 +288,11 @@ class TestParquetBarSinkDedupCount:
             interval="1minute",
             bars=[_bar(2024, 1, 10), _bar(2024, 2, 5)],  # two partitions, both fresh
         )
-        assert result.bars_appended == 2
+        assert result.bars_appended == 2  # input count (the unchanged gate contract)
+        assert result.bars_net_new == 2  # fresh → every bar is net-new
         assert result.partitions_written == 2
 
-    def test_full_repull_reports_zero_appended(self, tmp_path: Path) -> None:
+    def test_full_repull_net_new_is_zero_but_appended_stays_input(self, tmp_path: Path) -> None:
         import pytest
 
         pytest.importorskip("polars")
@@ -301,9 +303,10 @@ class TestParquetBarSinkDedupCount:
         sink.append(
             exchange="NSE", segment="CASH", symbol="NSE-NIFTY", interval="1minute", bars=bars
         )
-        # Re-pull the SAME bars — every one already stored → the honest count is 0, NOT 2.
+        # Re-pull the SAME bars — every one already stored → net-new is 0, the honest count.
         second = sink.append(
             exchange="NSE", segment="CASH", symbol="NSE-NIFTY", interval="1minute", bars=bars
         )
-        assert second.bars_appended == 0
+        assert second.bars_net_new == 0  # the honest deduped count
+        assert second.bars_appended == 2  # the input-count gate contract is UNCHANGED
         assert second.partitions_written == 2  # both partitions were still touched (merge read)

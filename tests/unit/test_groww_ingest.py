@@ -858,6 +858,56 @@ class TestIngestSpotCompletenessRepull:
         rec = led.records()[0]
         assert rec.status == SUCCESS  # 1day is exempt from the re-pull demotion
 
+    def test_non_index_equity_is_warned_but_not_demoted(self) -> None:
+        # A non-index (REFERENCE_ONLY equity) spot symbol can be legitimately sparse
+        # (an illiquid micro-cap / a delisted name), so an interior hole there is NOT a
+        # genuine completeness gap — it is OBSERVE-only WARNed but NEVER demoted (no re-pull
+        # storm). The demotion gate is ``instrument.is_index``.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        equity = _inst("RELIANCE")
+        equity = Instrument(
+            exch_id=equity.exch_id,
+            security_id=equity.security_id,
+            symbol_name=equity.symbol_name,
+            display_name=equity.display_name,
+            instrument=InstrumentType.EQ,  # a non-index equity
+            segment=Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=1,  # EQ requires a positive lot size
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+        assert equity.is_index is False
+        gappy = [
+            _bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 26, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 29, 4, 5, tzinfo=UTC)),
+        ]
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=gappy),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=equity,
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 3, 30),
+                ledger=led,
+            )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS  # NOT demoted — the equity stays settled
+        assert rec.last_error is None
+        # The observe-only WARNING STILL fires (visibility unchanged) even though it is not demoted.
+        assert any(e["event"] == "window.interior_gap" for e in logs)
+
 
 class TestIngestSpotInRunRetry:
     """In-run transient-window auto-retry (mirror of the Dhan spine)."""

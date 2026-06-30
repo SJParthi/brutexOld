@@ -1010,13 +1010,20 @@ def _process_window_tail(
     )
     truncated = partial_verdict is not None and partial_verdict.is_suspected_partial()
     interior_gap = interior_verdict is not None and interior_verdict.is_interior_gap()
-    # DEMOTE only the FETCHED ``1minute`` interval. The derived ``1day`` partition is
-    # RESAMPLED from the stored 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never
-    # vendor-fetched, and carries at most one bar per session, so re-pulling a "truncated"
-    # daily window is meaningless — its completeness follows the 1-minute it is derived from.
-    # The observe-only WARNING above still fires for every interval (visibility unchanged);
-    # only the re-pull demotion is 1-minute-scoped.
-    degraded = interval != _DAILY and (truncated or interior_gap)
+    # DEMOTE only a DENSE INDEX on the FETCHED ``1minute`` interval. Two hard gates:
+    #   (1) ``instrument.is_index`` — the false-positive-safety rationale (a hole/truncation
+    #       is a GENUINE completeness gap, not liquidity noise) holds ONLY for the densely-
+    #       traded indices (NIFTY/BANKNIFTY/SENSEX), which print every session. The spot pull
+    #       ALSO fans out over the ~750 REFERENCE_ONLY underlyings (illiquid NTM small/mid/
+    #       micro-caps + delisted/suspended names), where a multi-session no-print stretch is
+    #       legitimately sparse-but-complete — demoting those would be a re-pull storm (the
+    #       exact false-positive class the options exclusion guards against). For a non-index
+    #       the WARNING above STILL fires (observe-only visibility), but we never re-pull.
+    #   (2) ``interval != _DAILY`` — the derived ``1day`` partition is RESAMPLED from the
+    #       stored 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never vendor-fetched, so a
+    #       "truncated" daily window is meaningless; its completeness follows the 1-minute.
+    demotable = instrument.is_index and interval != _DAILY
+    degraded = demotable and (truncated or interior_gap)
     degraded_reason = (
         (INTERIOR_GAP if interior_gap else SUSPECTED_PARTIAL if truncated else None)
         if degraded
