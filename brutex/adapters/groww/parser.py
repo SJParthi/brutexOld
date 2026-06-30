@@ -64,7 +64,18 @@ def parse_timestamp_ist(raw: object) -> datetime:
             naive = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
         except ValueError as exc:
             raise CandleParseError(f"unparseable Groww timestamp: {raw!r}") from exc
-        return naive.replace(tzinfo=_IST).astimezone(UTC)
+        try:
+            # A pathological out-of-range year (e.g. ``"0001-01-01T00:00:00"``)
+            # parses cleanly but raises ``OverflowError("date value out of
+            # range")`` when shifted to UTC — the IST→UTC conversion can push a
+            # year-0001 datetime below ``datetime.min``. Mirror the epoch branch:
+            # map it to a quarantinable ``CandleParseError`` (a ``BruteXError``) so
+            # ONE bad vendor row isolates that symbol instead of crashing the whole
+            # multi-symbol pull with a raw ``OverflowError`` (run_ingest re-raises
+            # any non-``BruteXError``).
+            return naive.replace(tzinfo=_IST).astimezone(UTC)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise CandleParseError(f"out-of-range candle timestamp: {raw!r}") from exc
     if isinstance(raw, (int, float)):
         epoch = float(raw)
         if not math.isfinite(epoch):

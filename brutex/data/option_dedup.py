@@ -41,6 +41,7 @@ from typing import Protocol
 
 import fno_math
 
+from brutex.data.candle_fields import CandleParseError
 from brutex.data.models import OptionBar
 from brutex.orchestrator.bloom import DEFAULT_CAPACITY, DEFAULT_FPR, BloomFilter
 
@@ -91,13 +92,32 @@ def option_bar_key(
     it are duplicates. Fields are joined with the ASCII unit separator (never
     present in a value) so distinct tuples cannot collide on concatenation.
 
+    Raises
+    ------
+    CandleParseError
+        If any field VALUE itself contains the unit separator. The collision-
+        safety of the concatenation rests on the separator never appearing in a
+        value (the docstring's "never present in a value" claim); without this
+        guard a separator-bearing value would let two DISTINCT tuples hash to the
+        SAME key — a silent false-dedup that DROPS a real bar (Golden Rule #1 /
+        §2 Rule 7 idempotence: dedup must never lose data). A vendor symbol /
+        expiry / strike is plain ASCII, so this never fires in practice; it is a
+        cheap guard turning an impossible-but-catastrophic collision into a loud,
+        quarantinable :class:`~brutex.data.candle_fields.CandleParseError` (a
+        :class:`~brutex.models.BruteXError`).
+
     Returns
     -------
     bytes
         The raw 32-byte blake3 digest (not hex — the Bloom + exact tiers
         consume raw bytes; call ``.hex()`` at a display/audit boundary).
     """
-    payload = _FIELD_SEP.join([underlying, expiry, strike, side, str(epoch)])
+    fields = [underlying, expiry, strike, side, str(epoch)]
+    if any(_FIELD_SEP in field for field in fields):
+        raise CandleParseError(
+            f"option-bar key field contains the reserved unit separator: {fields!r}"
+        )
+    payload = _FIELD_SEP.join(fields)
     return fno_math.blake3_hash(payload.encode("utf-8"))
 
 

@@ -73,13 +73,24 @@ def has_no_price(value: object) -> bool:
     negative price + range, the Golden-Rule-#1 corruption this guard exists to
     prevent (symmetric with the zero guard). An unparseable positive value returns
     ``False`` so the strict :func:`to_price` flags it (malformed, not empty).
+
+    A NON-FINITE value (``inf`` / ``-inf`` / ``nan``) also returns ``False`` so it
+    falls through to :func:`to_price`'s loud non-finite guard. Without this guard a
+    present ``-inf`` round-trips through ``Decimal`` as ``-Infinity <= 0`` → ``True``
+    and was SILENTLY swallowed as a "no-price" partial-bar skip, while ``+inf`` /
+    ``nan`` correctly raised ``CandleParseError`` — an asymmetry that hid genuinely
+    malformed ``-inf`` data instead of surfacing it (Golden Rule #1: a non-finite
+    price is a data mismatch, never a no-trade bar).
     """
     if is_absent(value):
         return True
     try:
-        return Decimal(str(value)) <= 0
+        decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return False
+    if not decimal_value.is_finite():
+        return False
+    return decimal_value <= 0
 
 
 def to_price(raw: object, field: str) -> Decimal:
@@ -98,18 +109,41 @@ def to_price(raw: object, field: str) -> Decimal:
     return value
 
 
+#: Inclusive upper bound a count field (volume / open-interest) may carry: the
+#: lake persists both as Parquet ``Int64`` (see ``parquet_writer``), so a value
+#: above ``2**63 - 1`` cannot be stored — polars raises a raw ``TypeError``
+#: ("found value of type Int128") while BUILDING the ``pl.Int64`` Series, which
+#: would escape the per-symbol quarantine (``run_ingest`` re-raises any
+#: non-``BruteXError``) and crash the whole multi-symbol pull.
+_INT64_MAX: int = 2**63 - 1
+
+
 def to_int(raw: object, field: str) -> int:
-    """Parse an integer field (volume / OI); reject bools + non-numerics."""
+    """Parse an integer field (volume / OI); reject bools + non-numerics.
+
+    Also rejects a value that overflows the lake's ``Int64`` storage
+    (``> 2**63 - 1``): a vendor-glitch oversized volume / open-interest would
+    otherwise pass parsing and crash the Parquet write with a raw ``TypeError``,
+    escaping the per-symbol quarantine. Raising :class:`CandleParseError` (a
+    :class:`~brutex.models.BruteXError`) here quarantines the ONE bad symbol
+    instead — mirroring the negative-count clamp in :func:`assemble_candle`,
+    which already keeps an impossible count from crashing a multi-year pull.
+    """
     if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
         raise CandleParseError(f"{field} must be an integer, got bool: {raw!r}")
     if not isinstance(raw, (int, float, str)):
         raise CandleParseError(f"unparseable {field}: {raw!r}")
     try:
-        return int(raw)
+        value = int(raw)
     except (ValueError, OverflowError) as exc:
         # OverflowError covers ``int(inf)``; ValueError covers ``int('xyz')``
         # / ``int(nan)``.
         raise CandleParseError(f"unparseable {field}: {raw!r}") from exc
+    if value > _INT64_MAX:
+        raise CandleParseError(
+            f"{field} exceeds the lake's int64 storage ceiling ({_INT64_MAX}): {raw!r}"
+        )
+    return value
 
 
 def assemble_candle(

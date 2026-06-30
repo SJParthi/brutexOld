@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+from brutex.data.candle_fields import CandleParseError
 from brutex.data.models import OptionBar
 from brutex.data.option_dedup import (
     OptionDedupIndex,
@@ -70,6 +72,29 @@ class TestKey:
         a = option_bar_key(underlying="NIFTY", expiry="E", strike="100", side="CE", epoch=1)
         b = option_bar_key(underlying="NIFTY", expiry="E", strike="100", side="PE", epoch=1)
         assert a != b
+
+    @pytest.mark.parametrize("field", ["underlying", "expiry", "strike", "side"])
+    def test_separator_in_value_rejected(self, field: str) -> None:
+        # DEC-PULL-QUARANTINE-ROBUST-001 FIX 5: a field VALUE carrying the reserved unit
+        # separator is rejected with a quarantinable CandleParseError. Without the guard two
+        # DISTINCT tuples could hash to the SAME key (e.g. underlying="A\x1fB",expiry="E" vs
+        # underlying="A",expiry="B\x1fE") — a SILENT false-dedup that DROPS a real bar.
+        kwargs: dict[str, object] = {
+            "underlying": "A",
+            "expiry": "E",
+            "strike": "100",
+            "side": "CE",
+            "epoch": 1,
+        }
+        kwargs[field] = "x\x1fy"
+        with pytest.raises(CandleParseError, match="reserved unit separator"):
+            option_bar_key(**kwargs)  # type: ignore[arg-type]
+
+    def test_separator_collision_is_prevented(self) -> None:
+        # The exact collision the guard exists to prevent now raises instead of returning
+        # equal keys for two distinct tuples.
+        with pytest.raises(CandleParseError):
+            option_bar_key(underlying="A\x1fB", expiry="E", strike="S", side="CE", epoch=1)
 
     def test_key_for_bar_uses_bar_fields(self) -> None:
         bar = _bar(side="PE", strike="200")

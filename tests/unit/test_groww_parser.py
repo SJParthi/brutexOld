@@ -53,6 +53,16 @@ def test_out_of_range_epoch_rejected() -> None:
         parser.parse_timestamp_ist(1e30)
 
 
+def test_out_of_range_string_year_rejected() -> None:
+    # DEC-PULL-QUARANTINE-ROBUST-001 FIX 1: a parseable-but-pathological year-0001 string
+    # raises OverflowError("date value out of range") on the IST→UTC shift (it pushes the
+    # datetime below datetime.min). The string branch must map it to a quarantinable
+    # CandleParseError (mirroring the epoch branch) — NOT let a raw OverflowError escape the
+    # per-symbol quarantine and crash the whole multi-symbol pull.
+    with pytest.raises(CandleParseError, match="out-of-range candle timestamp"):
+        parser.parse_timestamp_ist("0001-01-01T00:00:00")
+
+
 def test_wrong_type_timestamp_rejected() -> None:
     with pytest.raises(CandleParseError, match="must be a string or epoch"):
         parser.parse_timestamp_ist(["2025-09-24"])

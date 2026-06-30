@@ -773,6 +773,49 @@ def test_candle_parse_error_quarantines_pair_not_crashes_pull(
     assert quarantine["error"] == "unparseable open price: None"
 
 
+def test_year0001_vendor_row_quarantines_pair_not_crashes_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-PULL-QUARANTINE-ROBUST-001 FIX 1 (end-to-end): a REAL pathological vendor candle
+    # row (a year-0001 timestamp) flows through the ACTUAL `parse_candle_rows` parser. Pre-fix
+    # the string branch raised a raw OverflowError("date value out of range") that escaped the
+    # per-symbol quarantine (`run_ingest` re-raises any non-BruteXError) and crashed the WHOLE
+    # multi-symbol pull. Post-fix the parser raises a quarantinable CandleParseError, so ONLY
+    # the BADTS symbol is isolated and the run CONTINUES for the good symbol.
+    from brutex.adapters.groww.parser import parse_candle_rows
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        if instrument.symbol_name == "BADTS":
+            # The real parser is what must turn the bad row into a quarantinable error.
+            parse_candle_rows({"candles": [["0001-01-01T00:00:00", 100, 101, 99, 100, 5, None]]})
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with capture_logs() as logs:
+        report = run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BADTS", token=91)],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )
+    assert report.failed_pairs == 1
+    assert report.failures == (
+        PairFailure(
+            symbol="BADTS",
+            interval="1day",
+            error="out-of-range candle timestamp: '0001-01-01T00:00:00'",
+            auth_failure=False,
+        ),
+    )
+    assert report.auth_aborted is False
+    assert ("NIFTY", "1day") in report.pairs  # the good symbol still landed
+    assert report.bars_appended == 5
+    (quarantine,) = _events(logs, "ingest.quarantine")
+    assert quarantine["error"] == "out-of-range candle timestamp: '0001-01-01T00:00:00'"
+
+
 def test_out_of_scope_error_quarantines_pair_not_crashes_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
