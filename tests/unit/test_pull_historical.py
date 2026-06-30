@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 from brutex.adapters.groww.client import GrowwClient
@@ -55,6 +56,7 @@ from brutex.data.registry_store import (
 from brutex.data.sink import BarSink, SinkAppendResult
 from brutex.orchestrator.parallel import SerialRunParallel
 from brutex.orchestrator.universe_phases import ItemResult
+from structlog.testing import capture_logs
 
 pytest.importorskip("duckdb", reason="RegistryStore needs duckdb")
 
@@ -538,6 +540,67 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
     # all targeting the SAME pipeline.
     assert drained, "the pipeline must be drained before pull_contract_candles returns"
     assert all(p is the_pipeline for p in drained)
+
+
+class _EmptyCandleSDK:
+    """A ``GrowwSDK``-shaped fake whose every candle fetch returns a CLEAN EMPTY 200.
+
+    The silent-vanish failure mode (BAJAJ-AUTO / M&M): every contract fetches cleanly
+    but yields ZERO bars, so each pair lands SUCCESS-but-empty and the whole underlying
+    stores nothing — indistinguishable from a legit no-data gap without the detector.
+    """
+
+    def __init__(self) -> None:
+        self.candle_symbols: list[str] = []
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        """Record the symbol + return a clean empty candle list (no bars)."""
+        self.candle_symbols.append(str(kw["groww_symbol"]))
+        return {"candles": []}
+
+
+def test_silent_vanish_underlying_warns_in_production_pipeline_pull(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The PRODUCTION (pipeline-wired) F&O pull EMITS the all-empty WARNING on a silent vanish.
+
+    DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001 — the regression that proves the
+    whole-underlying silent-empty detector is no longer DEAD in a real pull. Before the
+    fix the only ``scan_underlying_all_empty`` call site (inside ``run_groww_option_ingest``)
+    was gated ``if fetch_pipeline is None:`` and the production pull ALWAYS wires a
+    non-None pipeline, so the detector never ran. This LIVE (``dry_run=False``,
+    pipeline default-ON) pull over a NIFTY chain whose every contract fetches CLEANLY
+    EMPTY must now surface exactly ONE ``pull.underlying_all_empty`` WARNING naming
+    NIFTY, fired POST-DRAIN over the reconciled per-pair counts.
+    """
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    sdk = _EmptyCandleSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")  # 3 contracts (CE/PE/FUT)
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+    # The whole chain fetched cleanly but stored ZERO bars.
+    assert report.bars_appended == 0
+    # All 3 contracts attempted (each re-fetched a few times by the in-pull empty retry).
+    assert set(sdk.candle_symbols) == {r.contract_symbol for r in selected}
+    # EXACTLY one observe-only WARNING, naming NIFTY — the detector is ALIVE in production.
+    warns = [r for r in logs if r["event"] == "pull.underlying_all_empty"]
+    assert len(warns) == 1
+    assert warns[0]["underlying"] == repr("NIFTY")
+    assert warns[0]["attempted_pairs"] == 3
+    assert warns[0]["stored_bars"] == 0
+    # No scan-error event (the guarded scan ran cleanly).
+    assert [r for r in logs if r["event"] == "pull.underlying_all_empty_error"] == []
 
 
 def test_fno_pull_write_pool_none_when_fetch_pipeline_on(
