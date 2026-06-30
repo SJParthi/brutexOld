@@ -28,6 +28,7 @@ from brutex.calendars.nse import (
     HolidayDataUnavailableError,
     SessionType,
     expected_bars_per_day_for_tf,
+    forced_exit_seconds_for_session,
     forced_exit_time_for_session,
     get_session,
     has_muhurat_session,
@@ -613,6 +614,31 @@ class TestForcedExitTimeForSession:
         session = get_session(date(2021, 11, 4))  # 18:15-19:15 evening
         assert session is not None
         assert forced_exit_time_for_session(session) == time(19, 5)
+
+
+class TestForcedExitSecondsForSession:
+    """forced_exit_seconds_for_session: the integer (seconds-since-midnight)
+    twin of forced_exit_time_for_session, in the unit is_forced_exit_bar
+    compares against — 15:20 for a regular session, scaled for a short one."""
+
+    def test_regular_session_yields_15200_seconds(self) -> None:
+        session = get_session(date(2024, 2, 20))  # regular Tuesday
+        assert session is not None
+        # 15:20 IST == 15 * 3600 + 20 * 60 == 55200 seconds-since-midnight.
+        assert forced_exit_seconds_for_session(session) == 55200
+
+    def test_seconds_matches_time_twin(self) -> None:
+        session = get_session(date(2024, 2, 20))
+        assert session is not None
+        forced = forced_exit_time_for_session(session)
+        expected = forced.hour * 3600 + forced.minute * 60 + forced.second
+        assert forced_exit_seconds_for_session(session) == expected
+
+    def test_muhurat_afternoon_2025_scales_to_close_minus_10(self) -> None:
+        session = get_session(date(2025, 10, 21))  # 13:45-14:45 afternoon
+        assert session is not None
+        # 14:35 IST == 14 * 3600 + 35 * 60 == 52500 seconds.
+        assert forced_exit_seconds_for_session(session) == 52500
 
 
 class TestBoundaryTimestamps:

@@ -34,10 +34,14 @@ conservative choice (DEC-TRADESIM-001):
 * **Same-bar SL+TP** — when one bar's range spans BOTH levels,
   :data:`SameBarTie.SL_FIRST` (default, *pessimistic* — assume the loss) or
   :data:`SameBarTie.TP_FIRST` (*optimistic*).
-* **Forced 15:20 IST exit** — *locked*: fills at the OPEN of the first bar whose
-  window reaches 15:20 IST and **overrides every other exit** (spec line 658).
-  Detected via :func:`brutex.calendars.nse.is_forced_exit_bar` (timeframe-aware
-  after the DEC-TRADESIM-001 fix) on the bar's IST time-of-day.
+* **Forced session-close exit** — *locked*: fills at the OPEN of the first bar
+  whose window reaches the SESSION's forced-exit instant and **overrides every
+  other exit** (spec line 658). The boundary is the bar session's own close −
+  10min — 15:20 IST for a regular day, the early close − 10min for a half-day /
+  Muhurat session — resolved per bar via
+  :func:`brutex.calendars.nse.forced_exit_seconds_for_session` and applied with
+  the timeframe-aware :func:`brutex.calendars.nse.is_forced_exit_bar`
+  (DEC-SESSION-FORCED-EXIT-001; timeframe-awareness from DEC-TRADESIM-001).
 * **Mode-B signal exit** — *locked* to the next bar's OPEN (symmetry with
   entry; spec line 641). Supplied via the optional ``exit_signal`` stream.
 * **End of data** — a position still open when the feed ends closes at the last
@@ -70,13 +74,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from brutex.calendars.nse import IST, is_forced_exit_bar
+from brutex.calendars.nse import (
+    IST,
+    forced_exit_seconds_for_session,
+    get_session,
+    is_forced_exit_bar,
+)
 
 # Intentional friend access (DEC-P0-017 per-site convention): ``_price_to_paisa``
 # is the canonical Decimal-rupees → int64-paisa seam (one source of truth,
@@ -200,7 +209,8 @@ class TradeSimWalker:
     Feed contract: the walker opens an armed entry at the *very next bar's* open
     regardless of any calendar gap between bars, so the caller must supply a
     contiguous intraday feed for one instrument (the lake /
-    :class:`~brutex.feed.replay.ReplayFeed` already do). The 15:20 forced exit
+    :class:`~brutex.feed.replay.ReplayFeed` already do). The session forced exit
+    (15:20 IST on a regular day, close − 10min on a half-day / Muhurat session)
     means an entry signal on a session's last usable bar is dropped (its next
     bar is a forced-exit bar), so signals are not expected to arm across a
     trading-day boundary.
@@ -260,6 +270,15 @@ class TradeSimWalker:
         self._pending_entry = False
         self._pending_exit: _ExitReason | None = None
         self._index = -1
+        # Session-aware forced-exit boundary cache (DEC-SESSION-FORCED-EXIT-001).
+        # The boundary (seconds-since-midnight IST) is the bar session's own
+        # close − 10min: 15:20 for a regular day, the early close − 10min for a
+        # half-day / Muhurat session. It is constant within one IST trading day,
+        # so we resolve it ONCE per date and memoise the LAST date only (O(1)
+        # per bar, O(1) space — a bar stream is chronological so a 1-slot cache
+        # hits on every bar after the first of each day).
+        self._fe_cache_date: date | None = None
+        self._fe_cache_seconds: int | None = None
 
     # ── Batch path ────────────────────────────────────────────────────────
 
@@ -310,6 +329,31 @@ class TradeSimWalker:
             trades.append(final)
         return trades
 
+    # ── Session-aware forced-exit boundary ─────────────────────────────────
+
+    def _forced_exit_seconds(self, bar_day_ist: date) -> int | None:
+        """Resolve ``bar_day_ist``'s forced-exit boundary (seconds-since-midnight IST).
+
+        Returns the bar session's own close − 10min: 15:20 for a regular day,
+        the early close − 10min for a half-day / Muhurat session
+        (DEC-SESSION-FORCED-EXIT-001). Returns ``None`` when the IST date has no
+        trading session (:func:`~brutex.calendars.nse.get_session` ``None``):
+        ``is_forced_exit_bar`` then falls back to its standard 15:20 boundary, so
+        a bar dated on a non-session day is handled deterministically rather than
+        crashing — a real, contiguous intraday feed never hits this, but a
+        crafted / malformed feed must not raise.
+
+        Memoises the LAST IST date only (O(1) per bar, O(1) space): a
+        chronological feed re-resolves only on the first bar of each new day.
+        """
+        if bar_day_ist != self._fe_cache_date:
+            session = get_session(bar_day_ist)
+            self._fe_cache_date = bar_day_ist
+            self._fe_cache_seconds = (
+                None if session is None else forced_exit_seconds_for_session(session)
+            )
+        return self._fe_cache_seconds
+
     # ── Streaming path ────────────────────────────────────────────────────
 
     def push(
@@ -344,11 +388,15 @@ class TradeSimWalker:
         # when opening a pending entry or managing an open position, so skip it
         # entirely on a flat, no-pending bar (keeps the idle path cheap).
         need_forced = self._position is not None or self._pending_entry
-        forced = (
-            is_forced_exit_bar(bar.timestamp.astimezone(IST).time(), self._tf_minutes)
-            if need_forced
-            else False
-        )
+        if need_forced:
+            ts_ist = bar.timestamp.astimezone(IST)
+            forced = is_forced_exit_bar(
+                ts_ist.time(),
+                self._tf_minutes,
+                self._forced_exit_seconds(ts_ist.date()),
+            )
+        else:
+            forced = False
 
         # (A) Open a pending entry at THIS bar's open (cannot open at/after 15:20).
         if self._position is None and self._pending_entry:

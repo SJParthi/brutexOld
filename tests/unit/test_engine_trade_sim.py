@@ -18,12 +18,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
 import pytest
-from brutex.calendars.nse import IST
+from brutex.calendars.nse import IST, SessionType, TradingSession
 from brutex.data.models import CandleBar
+from brutex.engine import trade_sim as ts_mod
 from brutex.engine.trade_sim import (
     DEFAULT_FILL_POLICY,
     FillPolicy,
@@ -549,3 +550,215 @@ class TestExcursions:
         trades = simulate_trades(bars, [True, False, False], direction=Side.SELL, tf_minutes=1)
         assert trades[0].mfe_paisa == 40
         assert trades[0].mae_paisa == 90
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Session-aware forced exit (DEC-SESSION-FORCED-EXIT-001)
+#
+# The forced-exit boundary is the bar SESSION's own close − 10min: 15:20 IST
+# on a regular day (unchanged regression), the early close − 10min on a
+# half-day / Muhurat session. Each case drives the REAL ``TradeSimWalker.push``
+# production path and asserts the resolved exit timestamp.
+# ────────────────────────────────────────────────────────────────────────
+
+# Real in-scope short sessions (verified from ``MUHURAT_SESSIONS``):
+_EVENING_MUHURAT = date(2021, 11, 4)  # 18:15-19:15 IST → forced 19:05
+_AFTERNOON_MUHURAT = date(2025, 10, 21)  # 13:45-14:45 IST → forced 14:35
+
+
+def _trade_with_signal_then_ride(
+    bars: list[CandleBar], *, tf_minutes: int = 1
+) -> list[ClosedTrade]:
+    """Signal on bar[0], then ride flat: a position opens at bar[1]'s open and is
+    only ever closed by the session forced exit (huge SL/TP disable the legs)."""
+    signals = [i == 0 for i in range(len(bars))]
+    return simulate_trades(
+        bars,
+        signals,
+        direction=Side.BUY,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=100_000,
+        take_profit_paisa=100_000,
+    )
+
+
+class TestSessionAwareForcedExit:
+    def test_regular_day_still_exits_at_1520_unchanged(self) -> None:
+        # Regression: a regular trading day forces out at 15:20 IST exactly.
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 19, "100", "100", "100", "100"),
+            _bar(15, 20, "100.30", "101", "100", "100.50"),
+            _bar(15, 21, "100", "100", "100", "100"),
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 20)  # forced @ the 15:20 bar OPEN
+        assert trades[0].pnl_paisa == 30  # filled at OPEN 100.30
+
+    def test_regular_day_no_premature_exit_before_1520(self) -> None:
+        # A bar at 15:19 (one minute BEFORE the 15:20 boundary) does NOT force out;
+        # the 15:20 bar does.
+        bars = [
+            _bar(15, 17, "100", "100", "100", "100"),
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 19, "100", "100", "100", "100"),  # NOT forced (close 15:20 ≯ 15:20)
+            _bar(15, 20, "100.70", "101", "100", "100.90"),  # forced here
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 20)
+        assert trades[0].holding_bars == 3  # 15:18, 15:19, 15:20
+
+    def test_evening_muhurat_exits_at_close_minus_10_not_1520(self) -> None:
+        # The 2021 evening Diwali Muhurat runs 18:15-19:15 IST → forced exit 19:05.
+        # On origin/main this trade would force out IMMEDIATELY on the first
+        # managed bar (every evening bar is "≥ 15:20"); the fix exits at 19:05.
+        bars = [
+            _bar(18, 30, "100", "100", "100", "100", day=_EVENING_MUHURAT),
+            _bar(18, 31, "100", "100", "100", "100", day=_EVENING_MUHURAT),
+            _bar(19, 4, "100", "100", "100", "100", day=_EVENING_MUHURAT),  # NOT forced
+            _bar(19, 5, "100.40", "101", "100", "100.60", day=_EVENING_MUHURAT),  # forced
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(19, 5, day=_EVENING_MUHURAT)  # NOT 15:20
+        assert trades[0].pnl_paisa == 40  # forced at 19:05 bar OPEN 100.40
+
+    def test_afternoon_muhurat_2025_exits_at_close_minus_10(self) -> None:
+        # The 2025 afternoon Muhurat runs 13:45-14:45 IST → forced exit 14:35.
+        bars = [
+            _bar(14, 0, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),  # NOT forced
+            _bar(14, 35, "100.20", "101", "100", "100.30", day=_AFTERNOON_MUHURAT),  # forced
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)
+        assert trades[0].pnl_paisa == 20
+
+    def test_position_open_exactly_at_forced_minute_exits_that_bar(self) -> None:
+        # A position still open exactly AT the forced-exit boundary bar exits on
+        # THAT bar (at its open), not the next.
+        bars = [
+            _bar(14, 33, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 35, "100.50", "101", "100", "100.90", day=_AFTERNOON_MUHURAT),  # boundary
+            _bar(14, 36, "200", "200", "200", "200", day=_AFTERNOON_MUHURAT),  # never reached
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)  # THIS bar
+        assert trades[0].pnl_paisa == 50  # OPEN 100.50, not the next bar's 200
+
+    def test_half_day_session_exits_at_early_close_minus_10(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No real HALF_DAY date exists in 2021-2026 (NSE retired pre-festival
+        # half-days; the enum is forward-compat). Drive a genuine HALF_DAY
+        # session (12:30 early close → forced 12:20) through the production
+        # ``get_session`` seam so the real ``_forced_exit_seconds`` resolver runs.
+        half_day = date(2024, 1, 2)
+        session = TradingSession(
+            date=half_day,
+            session_type=SessionType.HALF_DAY,
+            open_time_ist=time(9, 15),
+            close_time_ist=time(12, 30),
+        )
+        monkeypatch.setattr(
+            ts_mod,
+            "get_session",
+            lambda d: session if d == half_day else None,
+        )
+        bars = [
+            _bar(12, 0, "100", "100", "100", "100", day=half_day),
+            _bar(12, 19, "100", "100", "100", "100", day=half_day),  # NOT forced
+            _bar(12, 20, "100.10", "101", "100", "100.30", day=half_day),  # forced @ 12:20
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(12, 20, day=half_day)
+        assert trades[0].pnl_paisa == 10
+
+    def test_session_with_no_reachable_forced_exit_closes_at_end_of_data(self) -> None:
+        # A short Muhurat feed that ENDS before the 19:05 boundary never force-
+        # exits — it closes deterministically at the last bar's CLOSE (no crash,
+        # the standard end-of-data path).
+        bars = [
+            _bar(18, 30, "100", "100", "100", "100", day=_EVENING_MUHURAT),
+            _bar(18, 31, "100", "100", "100", "100", day=_EVENING_MUHURAT),
+            _bar(18, 45, "100", "100.50", "99.80", "100.40", day=_EVENING_MUHURAT),
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(18, 45, day=_EVENING_MUHURAT)  # last close
+        assert trades[0].pnl_paisa == 40  # last CLOSE 100.40, not a forced fill
+
+    def test_non_session_date_falls_back_to_1520_no_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A bar dated on a date with NO trading session (get_session → None) must
+        # not crash; the resolver returns None and is_forced_exit_bar falls back
+        # to the standard 15:20 boundary. A contiguous real feed never hits this.
+        monkeypatch.setattr(ts_mod, "get_session", lambda d: None)
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 19, "100", "100", "100", "100"),
+            _bar(15, 20, "100.30", "101", "100", "100.50"),
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 20)  # default 15:20 boundary
+        assert trades[0].pnl_paisa == 30
+
+    def test_boundary_cache_resolves_once_per_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # O(1)-per-bar / O(1)-space: the boundary is resolved ONCE per IST date
+        # and memoised (1-slot, last-date), so a 3-bar single-day feed calls
+        # get_session exactly once.
+        calls: list[date] = []
+        real_get_session = ts_mod.get_session
+
+        def _counting_get_session(d: date) -> TradingSession | None:
+            calls.append(d)
+            return real_get_session(d)
+
+        monkeypatch.setattr(ts_mod, "get_session", _counting_get_session)
+        bars = [
+            _bar(15, 17, "100", "100", "100", "100"),
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 20, "100.30", "101", "100", "100.50"),
+        ]
+        _trade_with_signal_then_ride(bars)
+        # All three bars are the same IST date → one resolve (the rest hit cache).
+        assert calls == [_DAY]
+
+    def test_multi_day_feed_re_resolves_boundary_per_date(self) -> None:
+        # A SINGLE simulate_trades call over a feed spanning TWO distinct IST
+        # dates pins the 1-slot cache RE-RESOLVE-on-date-change branch: day-1 is
+        # a regular day (forced 15:20), day-2 is the 2025 afternoon Muhurat
+        # (forced 14:35). Two independent trades, each force-exiting at its OWN
+        # session's boundary, prove the boundary is re-resolved on the date step.
+        bars = [
+            # Day-1 (regular): signal @15:17 → enter @15:18 → forced @15:20.
+            _bar(15, 17, "100", "100", "100", "100"),
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 20, "100.30", "101", "100", "100.50"),
+            # Day-2 (afternoon Muhurat): signal @14:33 → enter @14:34 → forced @14:35.
+            _bar(14, 33, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 35, "100.10", "101", "100", "100.30", day=_AFTERNOON_MUHURAT),
+        ]
+        signals = [True, False, False, True, False, False]
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=100_000,
+            take_profit_paisa=100_000,
+        )
+        assert len(trades) == 2
+        assert trades[0].exit_ts == _ts(15, 20)  # day-1 regular boundary
+        assert trades[1].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)  # day-2 Muhurat
+        assert trades[0].pnl_paisa == 30
+        assert trades[1].pnl_paisa == 10
