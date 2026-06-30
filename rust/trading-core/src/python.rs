@@ -14,6 +14,7 @@ use pyo3::wrap_pyfunction;
 
 use crate::bits::TOTAL_CONDITIONS;
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
+use crate::indicators::ema::{compute_ema, ema_alpha, ema_seed, ema_step};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
 use crate::indicators::market_structure::MarketStructureSignal;
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
@@ -706,6 +707,49 @@ fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>
     ])
 }
 
+/// Compute the full EMA series from a list of `f64` closes — the shared
+/// single-source recurrence BruteX's `compute_ema` / `latest_ema` delegate to
+/// (DEC-EMA-RUST-PORT-001). Returns a list the same length as `values` with the
+/// first `period - 1` entries `None` (warm-up).
+///
+/// A `period < 1` OR a non-finite value (NaN / ±∞) raises a clean `ValueError`
+/// (matching `ema.py`), never a panic → `abort` under `panic="abort"`. The float
+/// recurrence runs entirely in `f64`; the caller (`_ema_to_paisa`) snaps the
+/// result to paisa separately.
+#[pyfunction]
+#[pyo3(name = "compute_ema", signature = (values, period))]
+fn py_compute_ema(values: Vec<f64>, period: i64) -> PyResult<Vec<Option<f64>>> {
+    compute_ema(&values, period).map_err(PyValueError::new_err)
+}
+
+/// The EMA smoothing factor `α = 2 / (period + 1)` — the shared single-source
+/// helper BruteX's `EMAState` / `alpha()` delegate to. `period < 1` raises a
+/// clean `ValueError` (matching `ema.py::alpha`).
+#[pyfunction]
+#[pyo3(name = "ema_alpha", signature = (period))]
+fn py_ema_alpha(period: i64) -> PyResult<f64> {
+    ema_alpha(period).map_err(PyValueError::new_err)
+}
+
+/// The SMA seed at bar `N-1`: `seed_sum / period` — the shared single-source
+/// helper BruteX's streaming `EMAState` delegates its seed division to. A
+/// `period < 1` raises a clean `ValueError`.
+#[pyfunction]
+#[pyo3(name = "ema_seed", signature = (seed_sum, period))]
+fn py_ema_seed(seed_sum: f64, period: i64) -> PyResult<f64> {
+    ema_seed(seed_sum, period).map_err(PyValueError::new_err)
+}
+
+/// The post-seed recurrence step `α·close + (1 − α)·prior` — the shared
+/// single-source helper BruteX's streaming `EMAState` delegates its per-bar step
+/// to. Pure arithmetic (no error path); a non-finite input would propagate as an
+/// IEEE result (the `EMAState` shell guards `close` finiteness before calling).
+#[pyfunction]
+#[pyo3(name = "ema_step", signature = (alpha, close, prior))]
+fn py_ema_step(alpha: f64, close: f64, prior: f64) -> f64 {
+    ema_step(alpha, close, prior)
+}
+
 /// Derive the eval-path per-bar metadata (DEC-NIFTY-ROLL-METADATA-001) — the
 /// shared Rust core BruteX's `brutex.feed.bar_metadata` shim delegates to so the
 /// backtest + TickVault derive IDENTICAL `tod_seconds` / weekday / minute-of-
@@ -796,6 +840,10 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_with_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_pivot_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_fib_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compute_ema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_ema_alpha, m)?)?;
+    m.add_function(wrap_pyfunction!(py_ema_seed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_ema_step, m)?)?;
     m.add_function(wrap_pyfunction!(py_derive_bar_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(py_weekday_from_ordinal, m)?)?;
     m.add_function(wrap_pyfunction!(py_minute_of_session, m)?)?;

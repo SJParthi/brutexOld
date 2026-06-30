@@ -39,6 +39,7 @@ pub mod evaluator;
 pub mod indicators;
 
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
+pub use indicators::ema::{EmaState, compute_ema, ema_alpha, ema_seed, ema_step};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
 pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
 pub use indicators::metadata::{

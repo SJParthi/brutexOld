@@ -138,6 +138,35 @@ class TestStateLifecycle:
         assert replay == [None, None, 20.0, 30.0, 40.0]
 
 
+class TestStatePeriodOne:
+    """`EMAState.update` with period == 1 collapses to the identity (no
+    warm-up, no seed): every bar's EMA equals that bar's close. This exercises
+    the streaming period-1 fast path that `compute_ema` (the batch Rust call)
+    never routes through.
+    """
+
+    def test_update_period_1_returns_each_close(self) -> None:
+        state = EMAState.new(period=1)
+        out = [state.update(v) for v in [10.0, 25.5, 7.0, 7.0, 99.0]]
+        # Identity: EMA == close on every bar, never None (no warm-up).
+        assert out == [10.0, 25.5, 7.0, 7.0, 99.0]
+
+    def test_update_period_1_tracks_bars_and_value(self) -> None:
+        state = EMAState.new(period=1)
+        assert state.update(42.0) == 42.0
+        d = state.to_dict()
+        assert d["value"] == 42.0
+        assert d["bars_seen"] == 1
+        # period-1 never accumulates a warm-up seed
+        assert d["seed_sum"] == 0.0
+
+    def test_update_period_1_matches_compute_ema(self) -> None:
+        values = [10.0, 25.5, 7.0, 7.0, 99.0]
+        state = EMAState.new(period=1)
+        streamed = [state.update(v) for v in values]
+        assert streamed == compute_ema(values, period=1)
+
+
 class TestStateSerialization:
     def test_to_dict_during_warmup(self) -> None:
         state = EMAState.new(period=5)
