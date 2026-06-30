@@ -83,6 +83,23 @@ def test_drop_volume_zeros_volume() -> None:
     assert bars[0].volume == 0
 
 
+def test_partial_negative_price_row_is_skipped() -> None:
+    # DEC-ADVERSARIAL-HARDENING-001 FIX 3 via the PRODUCTION parse path: a row with a
+    # NEGATIVE open among real prices is un-storable junk and must be gracefully dropped
+    # (the parser's `except EmptyCandleRow: continue`), never silently stored with the
+    # high=max/low=min clamp hiding the negative. The good row alongside it still parses.
+    bars = parser.parse_candle_rows(
+        {
+            "candles": [
+                _row(),
+                ["2025-09-24T10:31:00", -5.0, 110.0, 90.0, 105.0, 1000, None],
+            ]
+        }
+    )
+    assert len(bars) == 1  # the negative-price bar is gracefully dropped
+    assert bars[0].open == Decimal("100.0")
+
+
 def test_fno_open_interest_preserved() -> None:
     bars = parser.parse_candle_rows({"candles": [["2025-09-24T10:30:00", 1, 2, 1, 2, 5, 42]]})
     assert bars[0].open_interest == 42
