@@ -69,6 +69,17 @@ class TestHasNoPrice:
         # so the strict to_price() flags it instead.
         assert has_no_price("abc") is False
 
+    @pytest.mark.parametrize(
+        "value", [float("-inf"), float("inf"), float("nan"), Decimal("-Infinity")]
+    )
+    def test_non_finite_is_not_no_price(self, value: object) -> None:
+        # DEC-PULL-QUARANTINE-ROBUST-001 FIX 3: a NON-FINITE value (incl. ``-inf``,
+        # which Decimal compares ``-Infinity <= 0`` → True) must return False so it
+        # falls through to the strict to_price() non-finite guard — never SILENTLY
+        # swallowed as a "no-price" partial-bar skip. This keeps ``-inf`` LOUD,
+        # symmetric with ``+inf`` / ``nan`` (the asymmetry the fix closes).
+        assert has_no_price(value) is False
+
 
 class TestToPrice:
     def test_valid(self) -> None:
@@ -104,6 +115,20 @@ class TestToInt:
     def test_overflow_rejected(self) -> None:
         with pytest.raises(CandleParseError, match="unparseable open_interest"):
             to_int(float("inf"), "open_interest")
+
+    def test_int64_ceiling_kept(self) -> None:
+        # The exact int64 max is storable — the boundary is INCLUSIVE.
+        assert to_int(2**63 - 1, "volume") == 2**63 - 1
+
+    @pytest.mark.parametrize("field", ["volume", "open_interest"])
+    def test_int64_overflow_rejected(self, field: str) -> None:
+        # DEC-PULL-QUARANTINE-ROBUST-001 FIX 2: a value above the lake's Int64
+        # storage ceiling (``2**63 - 1``) is rejected at PARSE time with a
+        # quarantinable CandleParseError — instead of passing parsing and crashing
+        # the Parquet write with a raw TypeError (Int128) that escapes the
+        # per-symbol quarantine and kills the whole pull.
+        with pytest.raises(CandleParseError, match="exceeds the lake's int64 storage ceiling"):
+            to_int(2**70, field)
 
 
 class TestAssembleCandle:
@@ -208,6 +233,16 @@ class TestAssembleCandle:
         # Every OHLC price negative → the all-empty guard treats them as no-price → skip.
         with pytest.raises(EmptyCandleRow, match="no OHLC data"):
             self._call(open_="-1", high="-1", low="-1", close="-1")
+
+    @pytest.mark.parametrize("field", ["open_", "high", "low", "close"])
+    def test_partial_negative_infinity_is_loud_not_skipped(self, field: str) -> None:
+        # DEC-PULL-QUARANTINE-ROBUST-001 FIX 3: a present ``-inf`` price among real prices is
+        # NON-FINITE junk — it must raise the LOUD non-finite CandleParseError (a genuine
+        # malformation worth surfacing), NOT be silently swallowed as a "partial vendor bar"
+        # EmptyCandleRow skip the way it was pre-fix (``has_no_price(-inf)`` returned True).
+        # Symmetric with +inf / nan, which already hard-errored.
+        with pytest.raises(CandleParseError, match="non-finite"):
+            self._call(**{field: float("-inf")})
 
     def test_present_but_unparseable_still_hard_errors(self) -> None:
         # The partial-absent skip must NOT mask a genuine malformation: a price that is
