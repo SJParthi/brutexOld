@@ -74,11 +74,13 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 import fno_math
+import trading_core
 
-from brutex.calendars.nse import IST
+from brutex.calendars.nse import IST, is_pre_open
 from brutex.indicators.day_extremes import DayExtremesState
 from brutex.indicators.ema import EMAState
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
+from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.money import round_money
 from brutex.vocabulary import bits as B  # noqa: N812 — B = bit-position namespace
@@ -103,6 +105,24 @@ _EMA_SLOW_PERIOD: Final[int] = 200
 #: Default look-back for the prior-bar pattern group when the caller does not
 #: pin one. Matches :class:`PriorBarHistory`'s own default (``prior_n = 3``).
 _DEFAULT_PRIOR_N: Final[int] = 3
+
+#: The HLC3 "typical price" divisor — ``(high + low + close) / 3`` — the standard
+#: per-bar VWAP proxy. The ONE source of truth for this divisor is
+#: :data:`brutex.dashboard.movers_snapshot._HLC3_DIVISOR`; the value is restated
+#: here (not imported) only to keep this engine module free of a dashboard import,
+#: and the typical price is routed through the SAME :func:`_price_to_paisa`
+#: ``round_money``-snap (``(h + l + c) / 3`` snapped to the 2-dp tick grid), so the
+#: snap rule has one definition (CLAUDE.md §11 COMMON).
+_HLC3_DIVISOR: Final[Decimal] = Decimal(3)
+
+#: Engine-injected contract/session key fed to :class:`VwapState`. B1 (this PR)
+#: wires VWAP + market-structure with a CONSTANT key, so :class:`VwapState` resets
+#: only on the IST-date change (its ``session_day`` argument) — matching the
+#: existing day-rollover rule the rest of this builder applies. The roll-aware,
+#: per-contract ``session_key`` (B2 — reset on a futures roll, not only a date
+#: change) is a SEPARATE follow-up; until then the constant keeps behaviour
+#: identical for the continuous spot-index series the engine sweeps.
+_DEFAULT_SESSION_KEY: Final[int] = 0
 
 
 def _anchor_dependent_bits() -> int:
@@ -294,6 +314,17 @@ class Stage1AMatrixBuilder:
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._day_extremes = DayExtremesState()
+        # Session-anchored intraday VWAP (Group 10, bits 52-53) and BOS/CHoCH market
+        # structure (Group 12, bits 56-59) are the SHARED Rust ``trading_core`` state
+        # objects — the per-bar compute (the VWAP ``cum(price·vol)/cum(vol)`` math and
+        # the look-ahead-clean fractal-swing BOS/CHoCH logic) runs IN RUST, never
+        # re-implemented in Python, so the backtest is bit-identical to TickVault's
+        # native path (DEC-STAGE1A-WIRE-VWAP-BOS-001 — the Rust pyclasses ported in
+        # this PR; same delegation pattern as the EMA recurrence DEC-EMA-RUST-PORT-001).
+        # VWAP resets at each new IST trading day via its ``session_day`` argument; the
+        # market-structure state is continuous (look-ahead-clean, non-repainting).
+        self._vwap = trading_core.VwapState()
+        self._structure = trading_core.MarketStructureState()
         self._current_day: date | None = None
         # OHLC of the IST day currently being walked (None before the 1st bar).
         self._today_ohlc: _DayOHLC | None = None
@@ -334,7 +365,7 @@ class Stage1AMatrixBuilder:
             yield self.push(bar)
 
     def push(self, bar: CandleBar) -> int:
-        """Evaluate one bar and return its u64 condition mask (O(1) per bar).
+        """Evaluate one bar and return its u128 condition mask (O(1) per bar).
 
         Advances every running state, handles the IST day rollover (rotating
         the completed day's OHLC into the prior-day anchors), constructs the
@@ -351,7 +382,10 @@ class Stage1AMatrixBuilder:
         Returns
         -------
         int
-            The u64 condition mask (bits 0-51) for this bar.
+            The u128 condition mask (bits 0-59) for this bar — including the
+            Group-10 VWAP-position bits (52-53) and the Group-12 BOS/CHoCH bits
+            (56-59), now populated from the running :class:`VwapState` /
+            :class:`MarketStructureState` (DEC-STAGE1A-WIRE-VWAP-BOS-001).
         """
         ts_ist = bar.timestamp.astimezone(IST)
         bar_day = ts_ist.date()
@@ -382,6 +416,43 @@ class Stage1AMatrixBuilder:
             ts_ist=ts_ist, high_paisa=high_paisa, low_paisa=low_paisa
         )
 
+        # ── Group 10: session-anchored VWAP (bits 52-53) ──
+        # The ONLY arithmetic here is the typical price = HLC3 = (high + low + close)
+        # / 3, ``round_money``-snapped to the 2-dp tick grid via the SAME
+        # :func:`_price_to_paisa` seam as OHLC/EMA (one snap definition, CLAUDE.md §11
+        # COMMON, equal to the dashboard's turnover proxy). The VWAP itself — the
+        # ``cum(price·vol)/cum(vol)`` accumulation, the 09:15 reset, the 09:00-09:15
+        # auction exclusion — is computed IN RUST by ``trading_core.VwapState`` (this
+        # builder only feeds the bar in and reads the resolved level out). ``None``
+        # during warm-up → the bits do not fire. O(1) per bar, O(1) Rust-side state.
+        tod_seconds = ts_ist.hour * 3600 + ts_ist.minute * 60 + ts_ist.second
+        typical_paisa = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        vwap_paisa = self._vwap.update(
+            typical_paisa,
+            bar.volume,
+            is_pre_open(ts_ist.time()),
+            _DEFAULT_SESSION_KEY,
+            bar_day.toordinal(),
+            tod_seconds,
+        )
+
+        # ── Group 12: BOS/CHoCH market structure (bits 56-59) ──
+        # The look-ahead-clean (a swing is confirmed only k bars LATER, all ≤ N),
+        # non-repainting fractal-swing detection runs IN RUST by
+        # ``trading_core.MarketStructureState`` (this builder feeds the bar in and
+        # reads the four resolved booleans out). They thread into the snapshot exactly
+        # like the resolved PriorBarHistory flags. O(1) per bar (k is a fixed constant),
+        # O(1) Rust-side state (a bounded 2k+1 ring).
+        bos_bull, bos_bear, choch_bull, choch_bear = self._structure.update(
+            high_paisa, low_paisa, close_paisa
+        )
+        market_structure = MarketStructureSignal(
+            bos_bullish=bos_bull,
+            bos_bearish=bos_bear,
+            choch_bullish=choch_bull,
+            choch_bearish=choch_bear,
+        )
+
         has_anchors = self._anchors is not None
         pivots = self._anchors.pivots if self._anchors is not None else _PLACEHOLDER_PIVOTS
         fib = self._anchors.fib if self._anchors is not None else _PLACEHOLDER_FIB
@@ -399,6 +470,8 @@ class Stage1AMatrixBuilder:
             day_high_paisa=day_high_paisa,
             day_low_paisa=day_low_paisa,
             open_of_day_paisa=today_ohlc.open_paisa,
+            vwap_paisa=vwap_paisa,
+            market_structure=market_structure,
         )
 
         mask = evaluate_atoms(snapshot, self._proximity, self._prior_history)
