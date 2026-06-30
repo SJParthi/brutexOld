@@ -66,6 +66,43 @@ def test_make_rate_observer_maps_both_snapshots_onto_the_panel() -> None:
     assert state.rate_limit.latency_ms_p95 == 198.3
     assert state.rate_limit.rps_1s == 4
     assert state.rate_limit.rps_1s_max == 5
+    # A real spot CallMeter snapshot carries no ``meter_present`` key → defaults True
+    # (DEC-RATE-WIDGET-FNO-HONEST-001: the meter-fed contract).
+    assert state.rate_limit.meter_present is True
+
+
+def test_rate_panel_default_meter_present_is_true() -> None:
+    """DEC-RATE-WIDGET-FNO-HONEST-001: the panel defaults to the meter-fed contract."""
+    panel = RateLimitPanel()
+    assert panel.meter_present is True
+
+
+def test_update_throughput_records_meter_present_flag() -> None:
+    """DEC-RATE-WIDGET-FNO-HONEST-001: update_throughput stores the meter-present flag."""
+    state = DashboardState()
+    state.update_throughput(effective_rps=0.0, latency_ms_p95=0.0, meter_present=False)
+    assert state.rate_limit.meter_present is False
+    # And back to the meter-fed contract on a real spot tick.
+    state.update_throughput(effective_rps=4.0, latency_ms_p95=10.0, meter_present=True)
+    assert state.rate_limit.meter_present is True
+
+
+def test_make_rate_observer_maps_meter_absent_sentinel() -> None:
+    """DEC-RATE-WIDGET-FNO-HONEST-001: the sampler's meter_present=False reaches the panel.
+
+    The admission-only :class:`RatePanelSampler` pushes a meter snapshot of just
+    ``{"meter_present": False}`` — the observer must map it onto the panel + keep the
+    (absent) ``effective_rps`` an honest 0, never a fabricated completed-rate.
+    """
+    state = DashboardState()
+    observe = make_rate_observer(state)
+    observe(
+        {"current_rps": 8.0, "recent_hits": 0, "recent_minute": 210},
+        {"meter_present": False},
+    )
+    assert state.rate_limit.meter_present is False
+    assert state.rate_limit.effective_rps == 0.0
+    assert state.rate_limit.recent_minute == 210
 
 
 def test_make_rate_observer_tolerates_missing_keys() -> None:

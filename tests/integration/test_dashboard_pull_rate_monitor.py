@@ -272,16 +272,21 @@ class TestFnoPhaseLiveness:
         """THE FIX: the sampler ticks the shared controller → the route stays live in F&O.
 
         Simulates the F&O phase: the SHARED session controller has been paced (its
-        rolling-minute issue count reflects real fetches) but NO spot per-window observe is
+        rolling-minute ADMISSION count reflects real fetches) but NO spot per-window observe is
         running. The sampler — wrapped around the pipeline — pushes that controller to the
         panel, so ``/api/v1/pull/rate`` returns FLOWING (non-idle) DURING the F&O phase.
+
+        DEC-RATE-WIDGET-FNO-HONEST-001: the widget stays LIVE, but ``req_per_sec_achieved`` is
+        now an HONEST 0 this phase (no reachable completed-rate meter — never the old
+        ``recent_minute / 60`` over-report poured into the achieved slot); the admission
+        per-minute average is surfaced separately in ``req_per_min_rate``.
         """
         from brutex.adapters.rate_common import RateController
         from brutex.dashboard.pull_controller import SessionRateController
         from brutex.dashboard.rate_sampler import RatePanelSampler
 
         # A SHARED controller that an F&O pull has been pacing: 360 issues in the trailing
-        # minute (= a real 6 r/s achieved) and a current allowed rate of 8 r/s.
+        # minute (= 360 ADMITTED calls/min) and a current allowed rate of 8 r/s.
         controller = RateController(ceiling_per_min=500)
         for _ in range(360):
             controller._issues.append(controller._clock())
@@ -299,9 +304,38 @@ class TestFnoPhaseLiveness:
         # LIVE during the F&O phase — never the blank/idle widget the bug produced.
         assert body["flow_state"] == "flowing"
         assert body["active"] is True
-        assert body["req_per_sec_achieved"] == pytest.approx(6.0)  # 360 / 60
+        # HONEST achieved: 0 (no measured completed-rate this phase), NOT the fabricated 6.0.
+        assert body["req_per_sec_achieved"] == 0.0
+        # The admission per-minute average is in its own labelled field (360 / 60 = 6.0).
+        assert body["req_per_min_rate"] == pytest.approx(6.0)
         assert body["req_per_min"] == 360
         assert body["req_per_hour_observed"] == 360 * 60
+
+    def test_route_reads_idle_when_no_admissions_in_fno_phase(self) -> None:
+        """DEC-RATE-WIDGET-FNO-HONEST-001 (test iii): zero admissions in F&O → stalled, not fake.
+
+        A built-but-idle controller (no issues in the trailing minute) pushed by the
+        admission-only sampler must read STALLED at the route — the meter-less phase falls back
+        to the admission signal (``recent_minute == 0``), never a fabricated "flowing".
+        """
+        from brutex.adapters.rate_common import RateController
+        from brutex.dashboard.pull_controller import SessionRateController
+        from brutex.dashboard.rate_sampler import RatePanelSampler
+
+        controller = RateController(ceiling_per_min=500)  # built but never paced → 0 admissions
+        session = SessionRateController(factory=lambda: controller)
+        session.get()
+
+        state = DashboardState()
+        sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
+        assert sampler.sample_once() is True
+
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["active"] is True  # a tick just landed → the pull is "active"
+        assert body["flow_state"] == "stalled"  # but issuing NOTHING → honestly stalled
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["req_per_min_rate"] == 0.0
 
 
 class TestMeasuredCountsAreRealEndToEnd:
