@@ -185,6 +185,22 @@ def test_option_count_key_namespaced_away_from_spot_key() -> None:
     assert opt.startswith("opt|")
 
 
+def test_no_spot_exchange_can_collide_with_the_opt_prefix() -> None:
+    """The collision-freedom invariant: NO allowed spot exchange begins ``opt``.
+
+    A spot key opens with the partition ``exchange`` token, restricted to
+    ``VALID_EXCHANGES`` by ``_validate_candle_coords`` before any key is built — so a
+    spot key can never begin ``opt|``. Pinning the invariant the namespace relies on
+    (so a future allowlist edit that added an ``opt…`` exchange would fail HERE).
+    """
+    from brutex.dashboard.db_view import VALID_EXCHANGES, candle_count_key
+
+    assert all(not exch.lower().startswith("opt") for exch in VALID_EXCHANGES)
+    for exch in VALID_EXCHANGES:
+        spot = candle_count_key(exch, "CASH", _OPT_SERIES, "1minute", None, None)
+        assert not spot.startswith("opt|")
+
+
 # ── byte-identical total ──────────────────────────────────────────────────────────
 
 

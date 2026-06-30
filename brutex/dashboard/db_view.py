@@ -2244,7 +2244,10 @@ def option_candle_count_key(series: str, start: str | None, end: str | None) -> 
     rejected from a validated series segment (``_OPTION_SEGMENT_RE``) and cannot
     appear in an ISO date, so the join is unambiguous; ``None`` bounds render as an
     empty segment. The ``opt|`` prefix namespaces the key away from the spot
-    :func:`candle_count_key` so the two may share one injected cache instance.
+    :func:`candle_count_key` so the two may share one injected cache instance —
+    collision-free because a spot key opens with the partition ``exchange`` token,
+    which ``_validate_candle_coords`` restricts to ``VALID_EXCHANGES`` (``NSE`` /
+    ``BSE``) before any key is built, so a spot key can never begin ``opt|``.
     """
     return f"opt|{series}|{start or ''}|{end or ''}"
 
