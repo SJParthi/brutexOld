@@ -125,9 +125,12 @@ TRAILING_LOG_BUCKETS: int = 3600
 LOG_WINDOW_1S: float = 1.0
 
 #: The trailing-minute evidence window (req/min = ``recent_60s``) — matches
-#: :data:`PER_MIN_WINDOW`, so the issue-log ``recent_60s`` equals the governor's
-#: ``recent_minute`` when a governor is wired (one number, two INDEPENDENT sources — a
-#: built-in cross-check the operator can verify, DEC-RATE-MONITOR-EXPAND-001).
+#: :data:`PER_MIN_WINDOW`, so the issue-log ``recent_60s`` approximates the governor's
+#: ``recent_minute`` (to within one boundary second) when a governor is wired (one number,
+#: two INDEPENDENT sources — a built-in cross-check the operator can verify,
+#: DEC-RATE-MONITOR-EXPAND-001). The two windows are NOT bit-identical by construction: the
+#: governor's deque uses exact float instants ``(now - 60, now]`` while the ring is binned to
+#: integer seconds, so they can legitimately differ by the single boundary second's issues.
 LOG_WINDOW_60S: float = 60.0
 
 #: The trailing-TEN-minute evidence window (req/10min = ``recent_600s``) — the NEW metric,
@@ -583,8 +586,14 @@ class RateController:
         the last issue are correctly counted as empty (a poll long after the last issue reads
         0, never a stale count). A bucket for integer second ``s`` holds issues in ``[s,
         s+1)``, so a trailing ``(now - window, now]`` touches the buckets for seconds
-        ``ceil(now - window) .. floor(now)`` — that span (``floor(now) - ceil(now-window) +
-        1`` buckets, capped at the ring size) is summed walking backward from the head.
+        ``floor(now - window) .. floor(now)`` — that span (``floor(now) - floor(now-window) +
+        1`` buckets, capped at the ring size) is summed walking backward from the head. The
+        oldest bucket uses ``floor`` (NOT ``ceil``): the bucket holding ``now - window`` —
+        second ``floor(now - window)`` — also holds the sub-range ``(now - window, floor(now -
+        window) + 1)`` that IS inside the trailing window, so ``ceil`` would DROP that boundary
+        second and undercount it (the off-by-one that made the documented ``recent_60s ==
+        recent_minute`` cross-check falsely UNEQUAL near a fractional-second boundary — the two
+        windows now agree to within one boundary second).
         Returns 0 when no issue has ever been recorded (the ring is unseeded). O(window-seconds)
         — a bounded sum, honestly NOT O(1) (Golden Rule #10); a per-second figure from a 60 s
         ring would be cheaper but would not be a measured trailing-window count, which is
@@ -595,8 +604,10 @@ class RateController:
         # Roll the ring forward to ``now`` so idle seconds since the last issue read as empty.
         head_sec = math.floor(now)
         self._advance_issue_ring_locked(head_sec)
-        # Buckets touched by ``(now - window, now]`` = seconds ceil(now-window)..floor(now).
-        oldest_sec = math.ceil(now - window)
+        # Buckets touched by ``(now - window, now]`` = seconds floor(now-window)..floor(now).
+        # ``floor`` (not ``ceil``): the bucket holding ``now - window`` also holds the sub-range
+        # ``(now - window, …)`` inside the window, so ``ceil`` would drop that boundary second.
+        oldest_sec = math.floor(now - window)
         span = min(max(head_sec - oldest_sec + 1, 0), TRAILING_LOG_BUCKETS)
         count = 0
         for offset in range(span):
@@ -929,8 +940,10 @@ class RateController:
             # from the fixed per-second issue ring. The operator can verify rps == recent_1s,
             # req/min == recent_60s, req/10min == recent_600s, req/hour == recent_3600s —
             # every rate is a genuine windowed count of issues, not a per-second figure
-            # multiplied up. ``recent_60s`` equals ``recent_minute`` when a governor is wired
-            # (two independent sources, a built-in cross-check). Each count first rolls the
+            # multiplied up. ``recent_60s`` approximates ``recent_minute`` (to within one
+            # boundary second — the ring is integer-second-binned, the deque uses exact float
+            # instants) when a governor is wired (two independent sources, a built-in
+            # cross-check). Each count first rolls the
             # ring forward to ``now`` so idle seconds read as empty, then sums its window.
             snap: dict[str, object] = {
                 "current_rps": self._rps,

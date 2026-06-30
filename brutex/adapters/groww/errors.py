@@ -231,14 +231,21 @@ _CODE_TO_ERROR: dict[int, type[GrowwError]] = {
     504: GrowwTimeoutError,
 }
 
-#: Message substrings (lower-cased) that mark a RETRYABLE failure when the SDK
+#: Message PHRASES (lower-cased) that mark a RETRYABLE rate-limit failure when the SDK
 #: raised a generic exception with no typed subclass + no recognised ``code``. The
 #: live Groww SDK surfaces a rate-limit as
 #: ``GrowwAPIException("Rate limit has breached for your request. ...")`` — the
 #: BASE client-error class, NOT ``GrowwAPIRateLimitException`` — so the message is
-#: the only reliable signal. Kept narrow (only the two transient classes) so an
-#: unknown failure is never blindly retried (Golden Rule #1).
-_RATE_LIMIT_HINTS: tuple[str, ...] = ("rate limit", "too many request", "429")
+#: the only reliable signal. Phrase-only — NO bare ``"429"`` numeric substring: it
+#: would false-match any UNRELATED message merely CONTAINING ``429`` (a delisted-strike
+#: error code, a timestamp, an order id), wrongly classifying a TERMINAL error retryable
+#: → re-pulled forever, needlessly stepping the rate ladder down, escaping per-symbol
+#: quarantine. A GENUINE status-429 rate-limit is already caught STRUCTURALLY by
+#: :data:`_CODE_TO_ERROR` (``code == 429`` int OR digit-string, consumed first in
+#: :func:`_classify_generic`); these phrase hints cover the message-only case. Kept
+#: narrow (only the two transient classes) so an unknown failure is never blindly
+#: retried (Golden Rule #1).
+_RATE_LIMIT_HINTS: tuple[str, ...] = ("rate limit", "too many request")
 _TIMEOUT_HINTS: tuple[str, ...] = ("timed out", "timeout", "deadline exceeded")
 #: Unambiguous 5xx signatures for a GENERIC exception with no recognised ``code``
 #: (DEC-GROWW-SERVER-ERROR-RETRY-001). Phrase-only — NO bare ``"500"``/``"503"``
