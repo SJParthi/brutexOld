@@ -8,17 +8,40 @@ and the redacting mint-failure path — with no ``growwapi`` / ``pyotp`` and no 
 
 from __future__ import annotations
 
+import contextlib
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Generator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import SupportsIndex
 
 import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
-from brutex.adapters.groww.errors import GrowwAuthError, GrowwTimeoutError
+from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
+from brutex.adapters.groww.errors import (
+    GrowwAuthError,
+    GrowwTimeoutError,
+    GrowwTokenIssuanceThrottled,
+)
 from brutex.adapters.groww.reauth import SdkRefresher
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
 
 _CREDS = GrowwCredentials(api_key="fake_key", totp_secret="fake_secret")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_token_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the on-disk token cache at a clean tmp file for EVERY test in this module.
+
+    Without this the cache-first cold-start (DEC-GROWW-TOKEN-DISK-CACHE-001) would read a
+    real ``~/.brutex/cache/groww_access_token.json`` and skip the mint the legacy tests
+    assert happens. A fresh tmp path has no file ⇒ cache MISS ⇒ the byte-identical
+    mint-at-construction behaviour these tests already pin. The cache-specific tests below
+    inject their OWN cache hooks, bypassing the on-disk path entirely.
+    """
+    monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(tmp_path / "tok.json"))
 
 
 class _FakeSDK:
@@ -350,3 +373,310 @@ def test_fast_remint_within_deadline_still_bumps_generation() -> None:
     second = refresher.current_sdk()
     assert second is not first
     assert len(built) == 2  # exactly one re-mint within the deadline
+
+
+# --------------------------------------------------------------------------- #
+# DEC-GROWW-TOKEN-DISK-CACHE-001 — cache-first cold-start + B1 forced reauth mint
+# --------------------------------------------------------------------------- #
+from brutex.adapters.groww.token_cache import CachedToken  # noqa: E402
+
+_NOW = datetime(2026, 6, 30, 2, 30, tzinfo=UTC)
+
+
+def _cache_hooks(
+    cached: CachedToken | None,
+) -> tuple[list[tuple[str, str]], Callable[..., CachedToken | None], Callable[..., bool]]:
+    """A (stores, load, store) triple: ``load`` returns *cached*; ``store`` records writes."""
+    stores: list[tuple[str, str]] = []
+
+    def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+        return cached
+
+    def store(creds: GrowwCredentials, token: str, *, now_utc: datetime) -> bool:
+        stores.append((creds.api_key, token))
+        return True
+
+    return stores, load, store
+
+
+class TestColdStartCache:
+    """The cold-start ``__init__`` path is cache-first (DEC-GROWW-TOKEN-DISK-CACHE-001)."""
+
+    def test_cache_hit_skips_mint(self) -> None:
+        minted, _t, built, totp_minter, token_factory, sdk_factory = _counting_factories()
+        _stores, load, store = _cache_hooks(
+            CachedToken(access_token="CACHED-TOK", issued_for_session=_NOW.date())
+        )
+        refresher = SdkRefresher(
+            _CREDS,
+            token_factory=token_factory,
+            totp_minter=totp_minter,
+            sdk_factory=sdk_factory,
+            token_cache_load=load,
+            token_cache_store=store,
+            clock=lambda: _NOW,
+        )
+        sdk = refresher.current_sdk()
+        assert isinstance(sdk, _FakeSDK)
+        assert sdk.token == "CACHED-TOK"  # the CACHED token was reused
+        assert minted == []  # NO network mint
+        assert built == ["CACHED-TOK"]
+
+    def test_cache_miss_mints_and_writes_cache(self) -> None:
+        minted, _t, _built, totp_minter, token_factory, sdk_factory = _counting_factories()
+        stores, load, store = _cache_hooks(None)
+        refresher = SdkRefresher(
+            _CREDS,
+            token_factory=token_factory,
+            totp_minter=totp_minter,
+            sdk_factory=sdk_factory,
+            token_cache_load=load,
+            token_cache_store=store,
+            clock=lambda: _NOW,
+        )
+        assert refresher.current_sdk().token == "ACCESS-1"  # type: ignore[attr-defined]
+        assert minted == ["fake_secret"]  # ONE real mint
+        assert stores == [(_CREDS.api_key, "ACCESS-1")]  # the fresh token was cached
+
+    def test_three_refreshers_share_one_mint_via_cache(self) -> None:
+        """The 3-phase pipeline collapses to ONE real mint: phase 1 writes, 2+3 read."""
+        minted, _t, _b, totp_minter, token_factory, sdk_factory = _counting_factories()
+        # A shared dict cache the store writes + the load reads (a tiny in-memory disk).
+        box: dict[str, CachedToken] = {}
+
+        def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            return box.get("tok")
+
+        def store(creds: GrowwCredentials, token: str, *, now_utc: datetime) -> bool:
+            box["tok"] = CachedToken(access_token=token, issued_for_session=now_utc.date())
+            return True
+
+        for _phase in range(3):
+            SdkRefresher(
+                _CREDS,
+                token_factory=token_factory,
+                totp_minter=totp_minter,
+                sdk_factory=sdk_factory,
+                token_cache_load=load,
+                token_cache_store=store,
+                clock=lambda: _NOW,
+            )
+        assert minted == ["fake_secret"]  # exactly ONE network mint across 3 phases
+
+    def test_raising_cache_load_degrades_to_mint_never_crashes_init(self) -> None:
+        """A cache-load that RAISES must degrade to a real mint, NOT crash ``__init__``.
+
+        Belt-and-suspenders for the MAJOR (``load_cached_token`` raising
+        ``UnicodeDecodeError`` on a non-UTF-8 cache file): even if a future load path
+        regresses and raises, ``_safe_cache_load`` swallows it → the cold-start falls
+        through to a real mint, so the whole pull build can NEVER crash on a cache
+        problem. This test FAILS before the defensive guard (the raise escapes
+        ``SdkRefresher.__init__``).
+        """
+        minted, _t, _built, totp_minter, token_factory, sdk_factory = _counting_factories()
+        stores, _load, store = _cache_hooks(None)
+
+        def boom_load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            # The exact failure mode of the MAJOR: a non-UTF-8 file's decode error.
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        # __init__ must NOT raise — it degrades the broken cache to a real mint.
+        refresher = SdkRefresher(
+            _CREDS,
+            token_factory=token_factory,
+            totp_minter=totp_minter,
+            sdk_factory=sdk_factory,
+            token_cache_load=boom_load,
+            token_cache_store=store,
+            clock=lambda: _NOW,
+        )
+        assert refresher.current_sdk().token == "ACCESS-1"  # type: ignore[attr-defined]
+        assert minted == ["fake_secret"]  # the broken cache degraded to a real mint
+        assert stores == [(_CREDS.api_key, "ACCESS-1")]  # the fresh token was cached
+
+
+class TestColdStartThrottle:
+    """The cold-start mint rides out an issuance throttle with bounded back-off (M2)."""
+
+    def test_throttle_then_cache_recovers(self) -> None:
+        """A racing phase writes the cache while we are throttled → we reuse it, no crash."""
+        attempts: list[int] = []
+        box: dict[str, CachedToken] = {}
+
+        def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            # First read: miss. After the first throttled mint, a "racing phase" populated it.
+            return box.get("tok")
+
+        def token_factory(_api_key: str, _totp: str) -> str:
+            attempts.append(1)
+            # simulate a racing writer landing a cache between our attempts
+            box["tok"] = CachedToken(access_token="RACED-TOK", issued_for_session=_NOW.date())
+            raise _throttle()
+
+        sleeps: list[float] = []
+        with _patched_sleep(sleeps):
+            refresher = SdkRefresher(
+                _CREDS,
+                token_factory=token_factory,
+                totp_minter=lambda _s: "111111",
+                sdk_factory=_FakeSDK,
+                token_cache_load=load,
+                token_cache_store=lambda *_a, **_k: True,
+                clock=lambda: _NOW,
+            )
+        assert refresher.current_sdk().token == "RACED-TOK"  # type: ignore[attr-defined]
+        assert len(attempts) == 1  # one throttled mint, then the cache hit on retry
+        assert len(sleeps) == 1  # one back-off slept before the retry
+
+    def test_persistent_throttle_no_cache_reraises_retryable(self) -> None:
+        """Budget exhausted with NO cache ⇒ re-raise the RETRYABLE throttle (no crash)."""
+        attempts: list[int] = []
+
+        def token_factory(_api_key: str, _totp: str) -> str:
+            attempts.append(1)
+            raise _throttle()
+
+        sleeps: list[float] = []
+        with _patched_sleep(sleeps), pytest.raises(GrowwTokenIssuanceThrottled):
+            SdkRefresher(
+                _CREDS,
+                token_factory=token_factory,
+                totp_minter=lambda _s: "111111",
+                sdk_factory=_FakeSDK,
+                token_cache_load=lambda *_a, **_k: None,  # always a miss
+                token_cache_store=lambda *_a, **_k: True,
+                clock=lambda: _NOW,
+            )
+        # GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS=3 → 3 mints, 2 back-offs between them.
+        assert len(attempts) == 3
+        assert len(sleeps) == 2
+
+    def test_terminal_auth_error_not_retried(self) -> None:
+        """A NON-throttle auth failure on cold-start is NOT backed off — it raises at once."""
+        attempts: list[int] = []
+
+        def token_factory(_api_key: str, _totp: str) -> str:
+            attempts.append(1)
+            raise _ApiExc400("Groww API Error 400: Invalid TOTP")
+
+        with pytest.raises(GrowwAuthError) as ei:
+            SdkRefresher(
+                _CREDS,
+                token_factory=token_factory,
+                totp_minter=lambda _s: "111111",
+                sdk_factory=_FakeSDK,
+                token_cache_load=lambda *_a, **_k: None,
+                token_cache_store=lambda *_a, **_k: True,
+                clock=lambda: _NOW,
+            )
+        assert not isinstance(ei.value, GrowwTokenIssuanceThrottled)
+        assert len(attempts) == 1  # NO retry on a terminal credential error
+
+
+class TestReauthForcedMint:
+    """B1 (BLOCKER): in-pull ``reauth`` FORCES a real mint and NEVER reads the cache."""
+
+    def test_reauth_does_not_read_cache(self) -> None:
+        """Even with a (stale, valid-session) cache present, reauth force-mints a NEW token."""
+        minted, _t, _built, totp_minter, token_factory, sdk_factory = _counting_factories()
+        load_calls: list[int] = []
+
+        def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            load_calls.append(1)
+            return CachedToken(access_token="STALE-TOK", issued_for_session=_NOW.date())
+
+        stores: list[str] = []
+
+        def store(creds: GrowwCredentials, token: str, *, now_utc: datetime) -> bool:
+            stores.append(token)
+            return True
+
+        refresher = SdkRefresher(
+            _CREDS,
+            token_factory=token_factory,
+            totp_minter=totp_minter,
+            sdk_factory=sdk_factory,
+            token_cache_load=load,
+            token_cache_store=store,
+            clock=lambda: _NOW,
+        )
+        # Cold-start was a cache HIT (STALE-TOK), no mint yet.
+        assert refresher.current_sdk().token == "STALE-TOK"  # type: ignore[attr-defined]
+        assert minted == []
+        assert load_calls == [1]  # the cache was read ONCE, at cold-start only
+
+        # The token is "revoked" → reauth FORCES a real mint, IGNORING the cache.
+        refresher.reauth(seen_generation=0)
+        assert load_calls == [1]  # reauth did NOT read the cache again (B1)
+        assert minted == ["fake_secret"]  # a REAL mint happened
+        assert refresher.current_sdk().token == "ACCESS-1"  # type: ignore[attr-defined]
+        assert stores == ["ACCESS-1"]  # reauth OVERWROTE the cache with the fresh token
+
+    def test_revoked_token_self_corrects_no_loop(self) -> None:
+        """REGRESSION (B1): a revoked-but-valid-session cache does NOT loop the dead token.
+
+        Cold-start serves the cached (dead) token; reauth must force a mint that
+        OVERWRITES it, so the next cold-start would see the GOOD token — proving the
+        ``max_reauths=1`` self-heal is not defeated by cache-first reauth.
+        """
+        box: dict[str, CachedToken] = {
+            "tok": CachedToken(access_token="DEAD-TOK", issued_for_session=_NOW.date())
+        }
+        minted: list[str] = []
+
+        def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            return box.get("tok")
+
+        def store(creds: GrowwCredentials, token: str, *, now_utc: datetime) -> bool:
+            box["tok"] = CachedToken(access_token=token, issued_for_session=now_utc.date())
+            return True
+
+        def token_factory(_api_key: str, _totp: str) -> str:
+            minted.append("GOOD")
+            return "GOOD-TOK"
+
+        refresher = SdkRefresher(
+            _CREDS,
+            token_factory=token_factory,
+            totp_minter=lambda _s: "111111",
+            sdk_factory=_FakeSDK,
+            token_cache_load=load,
+            token_cache_store=store,
+            clock=lambda: _NOW,
+        )
+        assert refresher.current_sdk().token == "DEAD-TOK"  # type: ignore[attr-defined]
+        # The dead token is rejected → reauth force-mints GOOD and overwrites the cache.
+        refresher.reauth(seen_generation=0)
+        assert minted == ["GOOD"]  # a real mint, NOT a cache re-read of DEAD-TOK
+        assert box["tok"].access_token == "GOOD-TOK"  # the cache was self-corrected
+
+
+class _ApiExc400(RuntimeError):
+    code = 400
+
+
+def _throttle() -> RuntimeError:
+    class _RateExc(RuntimeError):
+        code = 429
+
+    return _RateExc("Rate limit exceeded")
+
+
+@contextlib.contextmanager
+def _patched_sleep(sink: list[float]) -> Generator[None]:
+    """Record (and skip) the cold-start back-off ``time.sleep`` calls.
+
+    ``reauth`` does ``import time`` then ``time.sleep(...)``, so patching the attribute
+    on the SHARED stdlib :mod:`time` module object intercepts it (no module-private
+    access). The real sleeper is restored on exit.
+    """
+    orig = time.sleep
+
+    def _record(seconds: float | SupportsIndex) -> None:
+        sink.append(float(seconds))
+
+    time.sleep = _record  # records the requested seconds, sleeps for none
+    try:
+        yield
+    finally:
+        time.sleep = orig

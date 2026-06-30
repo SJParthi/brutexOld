@@ -188,3 +188,17 @@ def test_resolve_smooth_pacing_falsy_and_unknown_stay_off(monkeypatch) -> None:
     for raw in ("", "  ", "0", "false", "no", "off", "maybe", "2"):
         monkeypatch.setenv(c.GROWW_SMOOTH_PACING_ENV, raw)
         assert c.resolve_smooth_pacing() is False
+
+
+def test_token_disk_cache_constants() -> None:
+    """DEC-GROWW-TOKEN-DISK-CACHE-001 constants are present + sane (regression pins)."""
+    assert c.GROWW_TOKEN_RESET_HOUR_IST == 6  # 06:00 IST reset (CLAUDE.md §6 / ADR-0009)
+    assert c.GROWW_TOKEN_RESET_HOUR_ENV == "BRUTEX_GROWW_TOKEN_RESET_HOUR_IST"
+    assert c.GROWW_TOKEN_CACHE_PATH_ENV == "BRUTEX_GROWW_TOKEN_CACHE_PATH"
+    # the basename MUST match the .gitignore **/groww_access_token* glob (M3)
+    assert c.GROWW_TOKEN_CACHE_FILENAME.startswith("groww_access_token")
+    assert c.GROWW_TOKEN_CACHE_SCHEMA == 1
+    # a positive, capped back-off budget so the cold-start throttle ride-out is bounded
+    assert c.GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS >= 1
+    assert c.GROWW_TOKEN_ISSUANCE_RETRY_BASE_S > 0.0
+    assert c.GROWW_TOKEN_ISSUANCE_RETRY_CAP_S >= c.GROWW_TOKEN_ISSUANCE_RETRY_BASE_S

@@ -73,6 +73,7 @@ runs/
 secrets/
 **/api_token*
 **/groww_token*
+**/groww_access_token*
 **/access_token*
 *_API_AUTH_TOKEN*
 *_ACCESS_TOKEN*

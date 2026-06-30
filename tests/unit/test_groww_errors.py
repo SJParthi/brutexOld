@@ -355,6 +355,17 @@ def test_is_rate_limit() -> None:
 def test_is_auth_failure() -> None:
     assert e.is_auth_failure(e.GrowwAuthError("x")) is True
     assert e.is_auth_failure(e.GrowwBadRequestError("x")) is False
+    # DEC-GROWW-TOKEN-DISK-CACHE-001: the throttle is a GrowwAuthError subclass, so it
+    # STILL reads as an auth failure (every `except GrowwAuthError` site keeps matching).
+    assert e.is_auth_failure(e.GrowwTokenIssuanceThrottled("x")) is True
+
+
+def test_token_issuance_throttle_is_retryable_auth_subclass() -> None:
+    """DEC-GROWW-TOKEN-DISK-CACHE-001: the issuance throttle is the ONE retryable auth error."""
+    throttle = e.GrowwTokenIssuanceThrottled("x")
+    assert isinstance(throttle, e.GrowwAuthError)  # subclass — every auth site matches
+    assert e.is_retryable(throttle) is True  # but it IS retryable (backs off / re-pulls)
+    assert e.is_rate_limit(throttle) is False  # NOT a data-fetch rate-limit (no ladder step)
 
 
 @pytest.mark.parametrize(
@@ -365,6 +376,7 @@ def test_is_auth_failure() -> None:
         (e.GrowwEmptyResponseError("x"), True),
         (e.GrowwServerError("x"), True),
         (e.GrowwNetworkError("x"), True),
+        (e.GrowwTokenIssuanceThrottled("x"), True),
         (e.GrowwBadRequestError("x"), False),
         (e.GrowwAuthError("x"), False),
         (e.GrowwNotFoundError("x"), False),
