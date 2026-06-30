@@ -706,6 +706,83 @@ fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>
     ])
 }
 
+/// Derive the eval-path per-bar metadata (DEC-NIFTY-ROLL-METADATA-001) — the
+/// shared Rust core BruteX's `brutex.feed.bar_metadata` shim delegates to so the
+/// backtest + TickVault derive IDENTICAL `tod_seconds` / weekday / minute-of-
+/// session / is-expiry-day from the same arithmetic.
+///
+/// Returns `(tod_seconds, weekday, minute_of_session, is_expiry_day)`. The caller
+/// passes the bar's IST CIVIL components (no timezone library here): the trading-
+/// date proleptic-Gregorian ordinal, the wall-clock h/m/s, the session-open
+/// seconds-since-midnight (resolved from the shared NSE calendar), and the active
+/// contract's expiry ordinal. Pure — no `PyErr` path (every input is a primitive),
+/// so the no-libpython `cargo test` covers the derivation directly.
+#[pyfunction]
+#[pyo3(name = "derive_bar_metadata", signature = (
+    day_ordinal, hour, minute, second, session_open_seconds, expiry_ordinal,
+))]
+fn py_derive_bar_metadata(
+    day_ordinal: i64,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    session_open_seconds: i64,
+    expiry_ordinal: i64,
+) -> (u32, u8, i32, bool) {
+    let m = crate::indicators::metadata::derive_bar_metadata(
+        day_ordinal,
+        hour,
+        minute,
+        second,
+        session_open_seconds,
+        expiry_ordinal,
+    );
+    (
+        m.tod_seconds,
+        m.weekday,
+        m.minute_of_session,
+        m.is_expiry_day,
+    )
+}
+
+/// The weekday `0 = Mon … 6 = Sun` of a proleptic-Gregorian day-ordinal
+/// (== Python `date.weekday()` for `date.toordinal()`). Shared so BruteX +
+/// TickVault agree bit-for-bit (DEC-NIFTY-ROLL-METADATA-001).
+#[pyfunction]
+#[pyo3(name = "weekday_from_ordinal", signature = (day_ordinal,))]
+fn py_weekday_from_ordinal(day_ordinal: i64) -> u8 {
+    crate::indicators::metadata::weekday_from_ordinal(day_ordinal)
+}
+
+/// Whole minutes from the session open to a bar's IST time-of-day (both seconds
+/// since midnight); a pre-open bar floors NEGATIVE, honest not clamped. Shared
+/// derivation (DEC-NIFTY-ROLL-METADATA-001).
+#[pyfunction]
+#[pyo3(name = "minute_of_session", signature = (tod_seconds, session_open_seconds))]
+fn py_minute_of_session(tod_seconds: i64, session_open_seconds: i64) -> i32 {
+    crate::indicators::metadata::minute_of_session(tod_seconds, session_open_seconds)
+}
+
+/// Resolve the active near-month future a trade entering on `entry_ordinal` uses,
+/// given the caller-supplied holiday-shifted candidate + next-month expiries
+/// (ADR-0012 D11). Returns the active contract's expiry ordinal. Shared decision
+/// (DEC-NIFTY-ROLL-METADATA-001).
+#[pyfunction]
+#[pyo3(name = "resolve_near_month", signature = (
+    entry_ordinal, candidate_shifted_ordinal, next_month_shifted_ordinal,
+))]
+fn py_resolve_near_month(
+    entry_ordinal: i64,
+    candidate_shifted_ordinal: i64,
+    next_month_shifted_ordinal: i64,
+) -> i64 {
+    crate::indicators::metadata::resolve_near_month(
+        entry_ordinal,
+        candidate_shifted_ordinal,
+        next_month_shifted_ordinal,
+    )
+}
+
 /// The Python extension module `trading_core._trading_core`.
 #[pymodule]
 fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -719,6 +796,10 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_with_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_pivot_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_fib_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(py_derive_bar_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(py_weekday_from_ordinal, m)?)?;
+    m.add_function(wrap_pyfunction!(py_minute_of_session, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_near_month, m)?)?;
     Ok(())
 }
 
