@@ -1,11 +1,14 @@
 //! Evaluate-time indicators the condition vocabulary consumes: Standard Pivot
-//! Points (now incl. R5/S5), Static Daily Fibonacci levels, the session-
-//! anchored intraday futures VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001), and
-//! the BOS/CHoCH market-structure state (DEC-NIFTY-BOS-CHOCH-001). (EMA is NOT
-//! here — the evaluator consumes precomputed `ema20`/`ema200` paisa from the
-//! snapshot, so EMA recurrence is a later phase. VWAP + market structure are
-//! STATE objects whose resolved values are fed into the snapshot, mirroring EMA.)
+//! Points (now incl. R5/S5), Static Daily Fibonacci levels, the EMA 20/200
+//! recurrence (DEC-EMA-RUST-PORT-001), the session-anchored intraday futures
+//! VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001), and the BOS/CHoCH
+//! market-structure state (DEC-NIFTY-BOS-CHOCH-001). EMA, VWAP, and market
+//! structure are STATE objects whose resolved (paisa) values are fed into the
+//! snapshot; the evaluator still consumes precomputed `ema20`/`ema200` paisa
+//! (BruteX's `_ema_to_paisa` snaps the Rust EMA's `f64` rupees to paisa), so
+//! porting the EMA recurrence here completes the all-Rust shared indicator core.
 
+pub mod ema;
 pub mod fib;
 pub mod market_structure;
 pub mod pivots;
