@@ -1282,8 +1282,17 @@ class InstrumentStore(metaclass=_StoreMeta):
         (DEC-INSTRUMENTSTORE-O1-001).
         """
         index: dict[str, list[tuple[date, Instrument]]] = {}
+        # Deterministic tiebreak (DEC-INSTRUMENTSTORE-O1-001, NIT-1): two DISTINCT
+        # instruments (different ``security_id``) can share the SAME
+        # ``(symbol_name, snapshot_date)`` — ``symbol_name`` is NOT in the PK — so
+        # without a stable final sort key the newest-first head of a symbol's list
+        # (what ``get(as_of=None)`` returns) would be order-unspecified across DuckDB
+        # plans. Appending ``security_id`` pins a total order, so a same-snapshot-date
+        # collision resolves identically on every build (lowest ``security_id`` is the
+        # head among same-date rows) — same-snapshot determinism, no behaviour change
+        # when (the normal case) at most one row exists per (symbol_name, snapshot_date).
         for row in self._conn.execute(
-            "SELECT * FROM instruments ORDER BY symbol_name, snapshot_date DESC"
+            "SELECT * FROM instruments ORDER BY symbol_name, snapshot_date DESC, security_id"
         ).fetchall():
             instrument = _row_to_instrument(row)
             # ``snapshot_date`` is not a field of Instrument, so read it straight

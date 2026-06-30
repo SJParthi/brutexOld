@@ -11,8 +11,22 @@ This pins the fix for the H9 defect: before DEC-INSTRUMENTSTORE-O1-001, ``get``
 ran a DuckDB ``SELECT * FROM instruments WHERE symbol_name = ? ORDER BY
 snapshot_date DESC LIMIT 1`` per call. No index covers ``symbol_name``, so the
 planner used a full ``SEQ_SCAN`` — **O(rows) per call** — while the docstring
-falsely claimed "O(1) lookup". A regression back to a per-call scan would make
-the latency scale with the master size and blow past the ceiling here.
+falsely claimed "O(1) lookup".
+
+Honest envelope for THIS bench (Golden Rule #1 / #10). This timing tier is a
+**flat-latency smoke check**: it asserts the NEW index-served ``get`` does not
+get measurably SLOWER as the master grows (the new code measures ~1.01× across
+the 100× size jump). It is NOT, by itself, a tight catch of a regression back
+to the per-call scan: at the 40/4000 sizes used here the OLD ``SEQ_SCAN`` ``get``
+empirically measures only ~1.14× — DuckDB's ~3 µs fixed per-query dispatch
+overhead swamps the tiny linear scan — so the OLD path would still sit UNDER
+the shared-CI ``ratio_ceiling(5.0)``. The real, timing-independent O(n)-regression
+guard is the **zero-query structural test** in
+``tests/integration/test_instrument_store.py``
+(``TestGetO1Index.test_primed_get_issues_zero_duckdb_queries``), which proves a
+primed ``get`` issues ZERO DuckDB queries — so any reintroduction of a per-call
+scan fails THERE regardless of timing noise. This bench is the complementary
+"did the new index stay flat?" check, not the O(n) gate.
 
 Strategy mirrors ``tests/bench/test_universe_cache_o1.py``: prime the index,
 then time many hit calls at a SMALL vs a LARGE master and assert the latency
@@ -98,10 +112,14 @@ class TestGetIsO1:
         """Empirical hit-latency ratio at 4000 / 40 underlyings must be < the ceiling.
 
         The ceiling is ``ratio_ceiling(5.0)`` — 5× on the shared GHA runner,
-        tightened to the strict 1.1× M4-Pro tier (DEC-O1-STRICT-TIER-001). A
-        regression to the prior per-call O(rows) DuckDB ``SEQ_SCAN`` would scale
-        with the master size and blow past this bound — the explicit O(1)
-        hot-path gate that was MISSING before DEC-INSTRUMENTSTORE-O1-001.
+        tightened to the strict 1.1× M4-Pro tier (DEC-O1-STRICT-TIER-001). This
+        asserts the NEW index-served ``get`` stays FLAT (~1.01× measured) across
+        the 100× size jump — a flat-latency smoke check, NOT the O(n)-regression
+        gate (see the module docstring: at 40/4000 the old per-call SEQ_SCAN also
+        sits under this ceiling because DuckDB's fixed dispatch overhead dominates
+        the tiny scan). The structural O(n)-regression guard is the zero-query
+        test in ``tests/integration/test_instrument_store.py``; this bench is its
+        timing complement.
         """
 
         def _time(store: InstrumentStore, symbol: str, iters: int) -> float:
