@@ -1124,6 +1124,8 @@ def run_groww_option_ingest(
     now_ist: Callable[[], datetime] | None = None,
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     contract_windows: ContractWindows | None = None,
+    empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    empty_retry_by_symbol: Mapping[str, int] | None = None,
     run_parallel: RunParallel | None = None,
     on_raw_payload: RawPayloadHook | None = None,
     capture_hook_factory: CaptureHookFactory | None = None,
@@ -1211,6 +1213,19 @@ def run_groww_option_ingest(
     synchronous path. The caller owns the pool's lifetime and MUST :meth:`drain` it
     before saving the window ledger.
 
+    *empty_retry_attempts* / *empty_retry_by_symbol* (DEC-FETCH-PER-WINDOW-GUARANTEE-001)
+    bound the in-pull EMPTY-retry budget. *empty_retry_attempts* is the FULL budget every
+    contract gets by default (:data:`~brutex.adapters.ingest_common.DEFAULT_EMPTY_RETRY_ATTEMPTS`
+    = 3). *empty_retry_by_symbol* is an OPTIONAL ``{groww_symbol: attempts}`` map (built by
+    :func:`~brutex.adapters.groww.strike_chain_bound.build_empty_retry_budget`) that assigns a
+    REDUCED budget to confirmed-deep far-OTM strikes — a strike far outside the chain's traded
+    band almost certainly never traded, so paying 3× to re-confirm its empty is waste; the
+    reduced budget (default 1) confirms the dead strike in ONE fetch. A symbol ABSENT from the
+    map (or a ``None`` map) keeps the full *empty_retry_attempts*, so this never starves an
+    in-band strike and is byte-identical to the pre-feature path when unwired. NO data is lost:
+    the first non-empty fetch always wins, so a deep strike that DOES return bars is stored
+    exactly as before — only the empty re-confirmation count changes.
+
     *fetch_pipeline* (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) is the F&O twin of the spot
     spine's full async separation: when supplied, each contract's SUCCESS-path tail
     (session-filter + ``sink.append`` + conflict-aggregate + ``ledger.record``) is handed
@@ -1283,6 +1298,18 @@ def run_groww_option_ingest(
             contract_hook = capture_hook_factory(
                 contract_exchange(contract), OPTION_SEGMENT, contract.symbol
             )
+        # Per-contract EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001): a confirmed-deep
+        # far-OTM strike gets a REDUCED budget (default 1) so a dead strike costs ONE fetch to
+        # confirm empty instead of three — driving fetches-per-window toward ~1.0 WITHOUT losing
+        # data (the first non-empty fetch still wins, so a deep strike that DOES return bars is
+        # stored exactly as before). A symbol absent from the map keeps the full
+        # ``empty_retry_attempts`` (every in-band option + every future), so a ``None`` map is
+        # byte-identical to the pre-feature behaviour.
+        contract_empty_retry = (
+            empty_retry_attempts
+            if empty_retry_by_symbol is None
+            else empty_retry_by_symbol.get(contract.symbol, empty_retry_attempts)
+        )
         with pull_id_scope(pull_id):
             return ingest_option_contract(
                 client,
@@ -1298,6 +1325,7 @@ def run_groww_option_ingest(
                 on_success=on_success,
                 max_attempts=max_attempts,
                 backoff=backoff,
+                empty_retry_attempts=contract_empty_retry,
                 now_ist=now_ist,
                 market=market,
                 on_raw_payload=contract_hook,
