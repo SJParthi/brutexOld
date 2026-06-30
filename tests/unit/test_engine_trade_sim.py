@@ -731,3 +731,34 @@ class TestSessionAwareForcedExit:
         _trade_with_signal_then_ride(bars)
         # All three bars are the same IST date → one resolve (the rest hit cache).
         assert calls == [_DAY]
+
+    def test_multi_day_feed_re_resolves_boundary_per_date(self) -> None:
+        # A SINGLE simulate_trades call over a feed spanning TWO distinct IST
+        # dates pins the 1-slot cache RE-RESOLVE-on-date-change branch: day-1 is
+        # a regular day (forced 15:20), day-2 is the 2025 afternoon Muhurat
+        # (forced 14:35). Two independent trades, each force-exiting at its OWN
+        # session's boundary, prove the boundary is re-resolved on the date step.
+        bars = [
+            # Day-1 (regular): signal @15:17 → enter @15:18 → forced @15:20.
+            _bar(15, 17, "100", "100", "100", "100"),
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 20, "100.30", "101", "100", "100.50"),
+            # Day-2 (afternoon Muhurat): signal @14:33 → enter @14:34 → forced @14:35.
+            _bar(14, 33, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _bar(14, 35, "100.10", "101", "100", "100.30", day=_AFTERNOON_MUHURAT),
+        ]
+        signals = [True, False, False, True, False, False]
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=100_000,
+            take_profit_paisa=100_000,
+        )
+        assert len(trades) == 2
+        assert trades[0].exit_ts == _ts(15, 20)  # day-1 regular boundary
+        assert trades[1].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)  # day-2 Muhurat
+        assert trades[0].pnl_paisa == 30
+        assert trades[1].pnl_paisa == 10
