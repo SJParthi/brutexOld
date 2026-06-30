@@ -230,7 +230,38 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/universe-pull-daterange` (**DEC-UNIVERSE-PULL-DATERANGE-001, MIGRATION.md #1007** —
+- **Active branch:** `claude/rate-widget-fno-honest` (**DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1015** —
+  the live PULL RATE widget's "achieved r/s" is now HONEST during the metadata + F&O phases, and the stall verdict is no
+  longer blind to an issued-but-failing pull. ROOT (confirmed by deep log+code audit): the SPOT phase feeds the widget the
+  transport `CallMeter`'s MEASURED completed-rate, but the metadata + F&O phases have no rate-observe seam, so
+  DEC-PULL-RATE-WIDGET-VISIBILITY-001 (#1000)'s `RatePanelSampler` kept the widget live by SYNTHESIZING
+  `meter_snapshot = {"effective_rps": recent_minute / 60}` — the controller's ADMISSION count ÷ 60 — into the panel's
+  "achieved" (measured-completed) slot. That (a) OVER-reported vs the true completed rate (log: 204/min admitted shown as
+  3.4 r/s while real completed ~169/min ≈ 2.82 r/s) and (b) BLINDED `build_pull_rate_view`'s `stalled = effective_rps <=
+  floor` to an issued-but-ALL-FAILING pull (it would read "flowing 3 r/s" even with every fetch failing — a fake-alive
+  illusion, Golden Rule #1). FIX (the HONEST MINIMUM — option 3, because the F&O `CallMeter` is genuinely UNREACHABLE from
+  the sampler seam: it is built fresh inside `build_live_pool`→`_build_live_client`, the pragma-no-cover live client factory
+  invoked deep in `run_groww_option_ingest`, and the `SessionRateController` holds ONLY the `RateController`, never that
+  meter — so option 2 would need plumbing a publish callback through the 4-layer pragma-no-cover F&O spine, not feasible
+  cleanly): the sampler STOPS fabricating a completed-rate and pushes an explicit `meter_present=False` sentinel;
+  `build_pull_rate_view` gains a `meter_present` param (default `True` — the spot/meter-fed + CLI-bridge contract is
+  byte-unchanged) that splits the verdict — `meter_present=True` (spot) reads the MEASURED `effective_rps` (so an
+  issued-but-failing pull whose completed-rate sits at/below the floor reads STALLED — the fake-alive case is now CAUGHT),
+  `meter_present=False` (metadata/F&O) keeps `req_per_sec_achieved` an HONEST 0 + falls back to the controller's ADMISSION
+  signal (`recent_minute == 0` ⇒ stalled/idle, any admissions ⇒ flowing); the admission per-minute average is surfaced in a
+  NEW distinctly-labelled `req_per_min_rate` field (`bx-rate-monitor.js` shows it as "req/min rate · admission avg
+  (issued ÷ 60)", explicitly NOT a measured completed rate), never the "achieved" slot. The `RateLimitPanel` gains a
+  `meter_present` flag (default `True`) threaded `update_throughput` ← `make_rate_observer` (a real spot meter snapshot has
+  no `meter_present` key → defaults `True`; the sampler's `{"meter_present": False}` flips it) → the `/api/v1/pull/rate`
+  route (`panel_meter_present` into `build_pull_rate_view_merged`; the CLI bridge stays `bridge_meter_present=True`).
+  HONEST: READ-ONLY (no pacing/rate-cap change, fetch rate byte-unchanged); the widget stays LIVE in F&O (the #1000
+  visibility win preserved) but now tells the TRUTH — "achieved" is the measured completed rate where a meter exists, an
+  honest 0 (with a separate admission average) where it does not, never a fabricated middle figure; the F&O phase detects
+  an IDLE pull (no admissions) but NOT an issued-but-all-failing one (that needs publishing the F&O meter — an explicit
+  FOLLOW-UP, NOT claimed); the SPOT phase DOES catch issued-but-failing now (regression-pinned). `pull_rate_view.py` +
+  `rate_sampler.py` BOTH 100% line+branch; touched `app.py` lines covered; ruff/ruff-format/`mypy --strict`/`pyright` clean.
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior: **DEC-UNIVERSE-PULL-DATERANGE-001, MIGRATION.md #1007** —
   the `/universe` "Pull · full pipeline" section RE-GAINS a from/to spot DATE PICKER, now PROPERLY WIRED through the
   `/pull-pipeline` route (resolving the honesty concern of DEC-UNIVERSE-PULL-CONSOLIDATE-001 #920, which had removed the
   picker BECAUSE the route ignored from/to). The backend already supported explicit dates everywhere else

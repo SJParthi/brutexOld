@@ -133,6 +133,17 @@ class PullRateView:
         companion to ``req_per_hour_observed``. During the first hour of a pull it is the true
         count SO FAR (an honest partial-hour count that grows as the window fills, never
         inflated). Zeroed when idle.
+    req_per_min_rate
+        The controller's ADMISSION-derived per-minute average expressed as an r/s figure
+        (``recent_minute / 60``) — DEC-RATE-WIDGET-FNO-HONEST-001. This is the HONEST
+        companion to :attr:`req_per_sec_achieved` for the phases (metadata + F&O) where the
+        transport :class:`~brutex.adapters.call_meter.CallMeter` (the source of the MEASURED
+        completed-rate) is unreachable: it is a per-minute ADMISSION average — calls the
+        controller ISSUED ÷ 60 — NOT a measured completed throughput, so it is surfaced in its
+        OWN field + labelled "req/min rate" in the widget, never poured into the "achieved"
+        (measured completed) slot (the over-report + fake-alive bug this decision fixes). Zeroed
+        when idle. Always populated (it is a pure projection of ``recent_minute``), so the spot
+        phase also carries it as a secondary view alongside its real ``req_per_sec_achieved``.
     recent_429_count
         Recent vendor 429 hits (``recent_hits``) — context for WHY the achieved rate may
         sit below the ceiling. Zeroed when idle.
@@ -155,6 +166,7 @@ class PullRateView:
     req_per_sec_count: int
     req_per_10min: int
     req_per_hour_measured: int
+    req_per_min_rate: float
     recent_429_count: int
     seconds_since_update: float
     ceiling_rps: float
@@ -183,6 +195,7 @@ def build_pull_rate_view(
     recent_1s: int = 0,
     recent_600s: int = 0,
     recent_3600s: int = 0,
+    meter_present: bool = True,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -211,6 +224,17 @@ def build_pull_rate_view(
         (DEC-RATE-MONITOR-EXPAND-001) — the evidence behind req/sec, req/10min + the MEASURED
         req/hour. Default ``0`` (an older controller / idle), so a panel that never carried
         them projects honestly zeroed.
+    meter_present
+        Whether the panel's ``effective_rps`` is a REAL measured completed-rate from the
+        transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001).
+        ``True`` (the default — the spot phase, where the meter is wired) ⇒ the ``stalled``
+        verdict reads the MEASURED ``effective_rps`` (an issued-but-all-failing pull reads
+        STALLED because its completed-rate is at/below the floor — the fake-alive case). ``False``
+        (the metadata + F&O phases, whose meter is unreachable from the sampler seam) ⇒ there is
+        NO completed-rate measurement, so the verdict falls back to the controller's ADMISSION
+        signal (``recent_minute == 0`` ⇒ stalled / idle) and ``req_per_sec_achieved`` stays a
+        HONEST ``0`` (no fabricated completed-rate), the per-minute admission average being
+        carried separately in :attr:`~PullRateView.req_per_min_rate`.
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -247,18 +271,39 @@ def build_pull_rate_view(
             req_per_sec_count=0,
             req_per_10min=0,
             req_per_hour_measured=0,
+            req_per_min_rate=0.0,
             recent_429_count=0,
             seconds_since_update=seconds_since_update,
             ceiling_rps=CEILING_RPS_LIMIT,
             ceiling_per_min=CEILING_PER_MIN_LIMIT,
         )
 
-    stalled = effective_rps <= stall_rps_floor
+    # The ADMISSION-derived per-minute average expressed as r/s (DEC-RATE-WIDGET-FNO-HONEST-001):
+    # what the controller ISSUED ÷ 60. It is NOT a measured completed throughput — surfaced in
+    # its own field + labelled "req/min rate" in the widget, never the "achieved" slot.
+    req_per_min_rate = recent_minute / 60.0
+
+    if meter_present:
+        # The spot phase: ``effective_rps`` is the transport CallMeter's MEASURED completed-rate,
+        # so the verdict reads it directly — an issued-but-all-failing pull (admissions happening
+        # but nothing COMPLETING) reads STALLED because its measured completed-rate is at/below the
+        # floor. ``req_per_sec_achieved`` carries that real measured number.
+        stalled = effective_rps <= stall_rps_floor
+        achieved = effective_rps
+    else:
+        # The metadata + F&O phases: the meter is unreachable from the sampler seam, so there is
+        # NO measured completed-rate. Fall back to the controller's ADMISSION signal — a pull with
+        # ZERO admissions in the trailing minute is idle/stalled; any admissions ⇒ flowing — and
+        # keep ``achieved`` an HONEST 0 (never the fabricated ``recent_minute / 60`` the old
+        # sampler poured into this slot, which both over-reported AND blinded the stall verdict).
+        stalled = recent_minute == 0
+        achieved = 0.0
+
     return PullRateView(
         flow_state=FLOW_STALLED if stalled else FLOW_FLOWING,
         active=True,
         stalled=stalled,
-        req_per_sec_achieved=effective_rps,
+        req_per_sec_achieved=achieved,
         req_per_sec_allowed=current_rps,
         req_per_min=recent_minute,
         # OBSERVED extrapolation: the current rolling-minute rate × 60 (Golden Rule #10 —
@@ -269,6 +314,7 @@ def build_pull_rate_view(
         req_per_sec_count=recent_1s,
         req_per_10min=recent_600s,
         req_per_hour_measured=recent_3600s,
+        req_per_min_rate=req_per_min_rate,
         recent_429_count=recent_429_count,
         seconds_since_update=seconds_since_update,
         ceiling_rps=CEILING_RPS_LIMIT,
@@ -286,6 +332,7 @@ def build_pull_rate_view_merged(
     panel_recent_1s: int = 0,
     panel_recent_600s: int = 0,
     panel_recent_3600s: int = 0,
+    panel_meter_present: bool = True,
     bridge_effective_rps: float | None = None,
     bridge_current_rps: float | None = None,
     bridge_recent_minute: int | None = None,
@@ -294,6 +341,7 @@ def build_pull_rate_view_merged(
     bridge_recent_1s: int | None = None,
     bridge_recent_600s: int | None = None,
     bridge_recent_3600s: int | None = None,
+    bridge_meter_present: bool = True,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -327,6 +375,12 @@ def build_pull_rate_view_merged(
     panel_recent_1s, panel_recent_600s, panel_recent_3600s
         The in-memory panel's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
         (DEC-RATE-MONITOR-EXPAND-001) — req/sec·10min·hour evidence. Default ``0``.
+    panel_meter_present
+        Whether the in-memory panel's ``effective_rps`` is a REAL measured completed-rate
+        (the spot phase) or absent (the metadata + F&O phases fed by the admission-only
+        sampler) — DEC-RATE-WIDGET-FNO-HONEST-001. Threaded into
+        :func:`build_pull_rate_view` so the ``stalled`` verdict reads the measured rate when
+        present and the admission signal otherwise. Default ``True`` (the meter-fed contract).
     bridge_effective_rps, bridge_current_rps, bridge_recent_minute, bridge_recent_429_count
         The bridge snapshot's measured rate fields (``None`` when no bridge file is present).
     bridge_seconds_since_update
@@ -334,6 +388,10 @@ def build_pull_rate_view_merged(
     bridge_recent_1s, bridge_recent_600s, bridge_recent_3600s
         The bridge snapshot's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
         (``None`` when absent — an older bridge file → projected as ``0``, honestly zeroed).
+    bridge_meter_present
+        Whether the bridge snapshot's ``effective_rps`` is a REAL measured completed-rate
+        (DEC-RATE-WIDGET-FNO-HONEST-001). The CLI ``brutex fetch`` pull publishes a real meter
+        rate, so this defaults ``True`` (the bridge contract is unchanged).
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -363,6 +421,7 @@ def build_pull_rate_view_merged(
             recent_1s=bridge_recent_1s if bridge_recent_1s is not None else 0,
             recent_600s=bridge_recent_600s if bridge_recent_600s is not None else 0,
             recent_3600s=bridge_recent_3600s if bridge_recent_3600s is not None else 0,
+            meter_present=bridge_meter_present,
             last_update_monotonic=0.0,
             now_monotonic=bridge_seconds_since_update,
             stale_after_s=stale_after_s,
@@ -376,6 +435,7 @@ def build_pull_rate_view_merged(
         recent_1s=panel_recent_1s,
         recent_600s=panel_recent_600s,
         recent_3600s=panel_recent_3600s,
+        meter_present=panel_meter_present,
         last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
         now_monotonic=panel_seconds_since_update
         if math.isfinite(panel_seconds_since_update)
