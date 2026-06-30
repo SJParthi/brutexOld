@@ -54,7 +54,14 @@ and the :class:`~brutex.metrics.cascade.CandidateInput` is filled as:
   win-loss / recovery / max-DD% / consecutive-losses / skew / kurtosis) — from
   :func:`brutex.metrics.compute.compute_metrics` (the per-**trade** moments),
   a ``None`` (mathematically-undefined) value mapped to ``0.0`` (the same
-  documented choice as :func:`brutex.engine.sweep_run.ranked_combo_to_result_row`);
+  documented choice as :func:`brutex.engine.sweep_run.ranked_combo_to_result_row`).
+  The one exception is ``kurtosis``: ``compute_metrics`` stores **excess**
+  kurtosis (Gaussian ``0``) but :class:`~brutex.metrics.cascade.CandidateInput`
+  (and the DSR PSR radicand it feeds) wants the **non-excess** form (Gaussian
+  ``3``), so :data:`~brutex.metrics.deflated_sharpe.GAUSSIAN_KURTOSIS` is added
+  back here — exactly as the sibling
+  :func:`brutex.metrics.compute.with_stage4_statistics` does
+  (DEC-DSR-KURTOSIS-FIX-001);
 * ``returns`` — the **per-bar** change in the realised-equity curve as a
   fraction of the notional base (the equal-length pool axis for CPCV / WFO / DSR
   and the SPA/RW/PBO matrix);
@@ -81,6 +88,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
+from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.models import BruteXError
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
@@ -660,7 +668,14 @@ def build_candidate_input(
         training_sharpe=_finite(sharpe_of_returns(per_bar)),
         training_max_drawdown=_max_drawdown_return_units(per_bar),
         skew=_finite(metrics.skewness),
-        kurtosis=_finite(metrics.kurtosis),
+        # CandidateInput.kurtosis is the NON-EXCESS (Pearson) kurtosis the DSR
+        # PSR radicand expects (Gaussian == 3.0); compute_metrics stores EXCESS
+        # kurtosis (Gaussian == 0.0, via _excess_kurtosis), so add GAUSSIAN_KURTOSIS
+        # back here exactly as the sibling with_stage4_statistics does
+        # (compute.py). Without the +3 the DSR kill-gate was fed excess kurtosis,
+        # shrinking the estimator-variance radicand and OVER-stating the DSR —
+        # biasing the gate toward PASS (DEC-DSR-KURTOSIS-FIX-001).
+        kurtosis=_finite(metrics.kurtosis) + GAUSSIAN_KURTOSIS,
         returns=per_bar,
         lockbox_returns=per_bar,
         lockbox_days=day_ordinals,
