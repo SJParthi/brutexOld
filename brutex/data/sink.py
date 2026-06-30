@@ -44,7 +44,15 @@ class SinkAppendResult:
     Attributes
     ----------
     bars_appended
-        Total number of bars accepted by the sink.
+        Number of bars actually ADDED to the lake by this call — the DEDUPED
+        count (DEC-SINK-DEDUP-COUNT-001), summed from each partition's
+        :attr:`~brutex.data.parquet_writer.WriteResult.bars_added`. A re-pull of a
+        window whose bars are all already stored reports ``0`` (the idempotent
+        keep-first merge added nothing), NOT the input batch size — so a ledger /
+        report figure built on this count reflects NEW bars, never an inflated
+        "re-counted what was already there". The :class:`NullBarSink` (which does
+        not deduplicate) reports the input count, since nothing is stored to dedupe
+        against.
     partitions_written
         Number of distinct ``(year, month)`` partition files touched.
     write_results
@@ -205,8 +213,14 @@ class ParquetBarSink:
                 )
                 self._catalog.upsert(entry)
 
+        # Report the DEDUPED added count (DEC-SINK-DEDUP-COUNT-001), summed across the
+        # partitions this call touched — NOT ``len(bars)``: a re-pull whose bars are all
+        # already in the lake merges to ``bars_added == 0`` per partition, so the honest
+        # "bars accepted by the sink" figure is the sum of the per-partition deduped adds,
+        # never the input batch size. The on-disk merge already dedups idempotently — this
+        # only corrects the REPORTED count (no data behaviour change).
         return SinkAppendResult(
-            bars_appended=len(bars),
+            bars_appended=sum(wr.bars_added for wr in results),
             partitions_written=len(results),
             write_results=tuple(results),
         )

@@ -182,6 +182,15 @@ class WriteResult:
         Timestamp bounds of the bars written.
     bytes_written
         Size of the final Parquet file in bytes.
+    bars_added
+        Number of incoming bars actually ADDED to the partition by THIS write —
+        the DEDUPED count (DEC-SINK-DEDUP-COUNT-001). A fresh partition adds every
+        incoming bar; a merge adds only the timestamps not already stored (a re-pull
+        of bars already in the lake adds ``0``); a same-timestamp/different-value
+        keep-first conflict adds ``0`` (the stored bar is kept). Distinct from
+        :attr:`row_count` (the partition's total size after the write) and from the
+        INPUT batch size — this is the honest "how many new bars did this write
+        contribute" count the sink reports as ``bars_appended``.
     conflicts
         Vendor re-statements detected during this write: timestamps whose
         stored bar differed from the incoming bar (DEC-LAKE-CONFLICT-KEEPFIRST-001).
@@ -195,6 +204,7 @@ class WriteResult:
     first_ts: datetime
     last_ts: datetime
     bytes_written: int
+    bars_added: int = 0
     conflicts: tuple[BarConflict, ...] = ()
 
 
@@ -382,6 +392,7 @@ class ParquetWriter:
                     first_ts=first_ts,
                     last_ts=last_ts,
                     bytes_written=len(content_bytes),
+                    bars_added=len(sorted_bars),
                 )
             append_ms = (time.perf_counter() - write_start) * 1000.0
 
@@ -461,6 +472,7 @@ class ParquetWriter:
                 first_ts=merged_sorted[0].timestamp,
                 last_ts=merged_sorted[-1].timestamp,
                 bytes_written=len(existing_bytes),
+                bars_added=added,  # 0 on the no-op path (every incoming bar already stored)
                 conflicts=tuple(conflicts),
             )
 
@@ -473,6 +485,7 @@ class ParquetWriter:
             first_ts=merged_sorted[0].timestamp,
             last_ts=merged_sorted[-1].timestamp,
             bytes_written=len(content_bytes),
+            bars_added=added,
             conflicts=tuple(conflicts),
         )
 

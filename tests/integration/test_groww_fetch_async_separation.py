@@ -22,7 +22,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from brutex.adapters.groww.option_ingest import ingest_option_contract
 from brutex.adapters.protocol import DerivativeContract
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.partial_window_detect import last_completed_session_on_or_before
 from brutex.data.partition import build_partition_path
 from brutex.data.sink import ParquetBarSink
 from brutex.data.window_ledger import WindowLedger
@@ -84,7 +85,14 @@ def _now() -> datetime:
 
 
 class _DayAdapter:
-    """Fake MarketAdapter returning one in-session bar per fetch, dated to the window start."""
+    """Fake MarketAdapter returning one in-session bar per fetch, dated to the window's last session.
+
+    The bar lands on the LAST completed trading session strictly before the window's
+    end-exclusive bound, so the window reads COMPLETE to the data-completeness scans
+    (DEC-PARTIAL-WINDOW-REPULL-001 / DEC-INTERIOR-GAP-DETECT-001) and is never demoted —
+    these tests pin async write SEPARATION / durability, not completeness. (For a one-month
+    window the last session is still inside that month, so the asserted partition is unchanged.)
+    """
 
     def __init__(self) -> None:
         self.calls = 0
@@ -92,10 +100,10 @@ class _DayAdapter:
     def fetch_ohlcv(
         self, *, symbol: str, exchange: object, interval: str, start: date, end: date
     ) -> list[CandleBar]:
-        del symbol, exchange, interval, end
+        del symbol, exchange, interval, start
         self.calls += 1
-        # A bar timestamped inside the window's first day's session (deterministic per window).
-        ts = datetime(start.year, start.month, start.day, 4, 5, tzinfo=UTC)
+        last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+        ts = datetime(last_session.year, last_session.month, last_session.day, 4, 5, tzinfo=UTC)
         return [_bar(ts)]
 
 
@@ -361,10 +369,13 @@ class TestIsolationProof:
             def fetch_ohlcv(
                 self, *, symbol: str, exchange: object, interval: str, start: date, end: date
             ) -> list[CandleBar]:
-                del symbol, exchange, interval, end
+                del symbol, exchange, interval, start
                 fetch_timestamps.append(time.monotonic())
                 self.calls += 1
-                ts = datetime(start.year, start.month, start.day, 4, 5, tzinfo=UTC)
+                last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+                ts = datetime(
+                    last_session.year, last_session.month, last_session.day, 4, 5, tzinfo=UTC
+                )
                 return [_bar(ts)]
 
         # A queue big enough that the producer is NOT back-pressured for this small N — the
@@ -1072,9 +1083,21 @@ class TestSustainedSlowDiskDoesNotBackPressure:
             def fetch_ohlcv(
                 self, *, symbol: str, exchange: object, interval: str, start: date, end: date
             ) -> list[CandleBar]:
-                del symbol, exchange, interval, end
+                del symbol, exchange, interval, start
                 fetch_timestamps.append(time.monotonic())
-                return [_bar(datetime(start.year, start.month, start.day, 4, 5, tzinfo=UTC))]
+                last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+                return [
+                    _bar(
+                        datetime(
+                            last_session.year,
+                            last_session.month,
+                            last_session.day,
+                            4,
+                            5,
+                            tzinfo=UTC,
+                        )
+                    )
+                ]
 
         # ONE consumer + the PRODUCTION queue depth (4) so a sustained-slow write fills the queue —
         # WITH a generous spill area so the producer spills the overflow instead of blocking.

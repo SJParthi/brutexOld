@@ -64,6 +64,7 @@ class FakeWriter:
             first_ts=first,
             last_ts=last,
             bytes_written=100,
+            bars_added=len(bars),  # fresh-write fake: every incoming bar is added (deduped count)
         )
 
     def make_catalog_entry(
@@ -261,3 +262,48 @@ class TestParquetBarSinkProperties:
     def test_catalog_property_is_none_when_unwired(self, tmp_path: Path) -> None:
         sink = ParquetBarSink(writer=FakeWriter(lake_root=tmp_path), catalog=None)  # type: ignore[arg-type]
         assert sink.catalog is None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Real-writer dedup count (DEC-SINK-DEDUP-COUNT-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestParquetBarSinkDedupCount:
+    """``SinkAppendResult.bars_appended`` sums the per-partition DEDUPED ``bars_added`` —
+    a re-pull of bars already in the lake reports 0, not the input batch size."""
+
+    def test_fresh_append_reports_input_count(self, tmp_path: Path) -> None:
+        import pytest
+
+        pytest.importorskip("polars")
+        from brutex.data.parquet_writer import ParquetWriter
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path), catalog=None)
+        result = sink.append(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(2024, 1, 10), _bar(2024, 2, 5)],  # two partitions, both fresh
+        )
+        assert result.bars_appended == 2
+        assert result.partitions_written == 2
+
+    def test_full_repull_reports_zero_appended(self, tmp_path: Path) -> None:
+        import pytest
+
+        pytest.importorskip("polars")
+        from brutex.data.parquet_writer import ParquetWriter
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path), catalog=None)
+        bars = [_bar(2024, 1, 10), _bar(2024, 2, 5)]
+        sink.append(
+            exchange="NSE", segment="CASH", symbol="NSE-NIFTY", interval="1minute", bars=bars
+        )
+        # Re-pull the SAME bars — every one already stored → the honest count is 0, NOT 2.
+        second = sink.append(
+            exchange="NSE", segment="CASH", symbol="NSE-NIFTY", interval="1minute", bars=bars
+        )
+        assert second.bars_appended == 0
+        assert second.partitions_written == 2  # both partitions were still touched (merge read)

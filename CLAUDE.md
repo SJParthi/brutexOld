@@ -230,7 +230,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rate-widget-fno-honest` (**DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
+- **Active branch:** `claude/fetch-completeness-honesty` (**DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 /
+  DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1027** — PR-A of the triaged fetch-path edge-case sweep: a SUCCESS spot window
+  with a CONFIRMED interior multi-session hole OR a trailing truncation is DEMOTED to a re-pullable ledger status
+  (BOUNDED — it settles SKIPPED after `EMPTY_TERMINAL_THRESHOLD` flagged pulls so the universe pull still converges, and
+  the stored bars are always KEPT), and the sink reports the DEDUPED bars-added count, not the input batch size. HONEST
+  SEVERITY: these are MED/LOW data-completeness-honesty fixes — NONE is a crash or a HIGH bug (the adversarial triage
+  DISPROVED the alleged HIGH non-`Mapping`-payload whole-pull-crash against the actually-installed `growwapi` SDK). THREE
+  fixes: (1) interior-gap (#1, MED) — NEW pure `brutex/data/interior_gap_detect.py` flags ONLY a contiguous run of
+  bar-LESS NSE trading sessions `> INTERIOR_GAP_TOLERANCE_SESSIONS` (default 5) strictly INTERIOR to the covered span, so
+  a low-liquidity-but-continuous window is NEVER false-flagged (signal = a long contiguous hole, NOT density;
+  out-of-calendar years ABSTAIN); (2) partial-window promote (#3, MED) — `partial_window_detect.observe_partial_window`
+  now RETURNS its verdict (back-compat) so the spot tail DEMOTES a confirmed truncation, all the prior
+  covered-year/liquidity/live-edge/at-expiry guards preserved; (3) dup-bars accounting (#6, LOW) — NEW
+  `WriteResult.bars_added` (deduped) summed into `SinkAppendResult.bars_appended` (`data/sink.py`), so a re-pull of
+  already-stored bars reports 0, not `len(bars)` — NO data change, the merge was already idempotent. MECHANISM: a NEW
+  `degraded` flag threaded `classify_window_status` → `WindowLedger.record(degraded=, degraded_reason=)` records a
+  demoted SUCCESS as FAILED+reason and BUMPS the `empty_streak` (REUSING the genuine-EMPTY bounded-terminal machinery);
+  scoped to the FETCHED `1minute` interval — the derived `1day` is exempt. HONEST envelope: SPOT spine ONLY (the F&O
+  `option_ingest` partial-window observe stays observe-only — an explicit non-goal); ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change; all 7 touched files at 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/`pyright` clean; 579 regression tests green. NEW tests: `test_interior_gap_detect.py`
+  (17) + `TestDegradedDemotion` + `TestBarsAddedDedup` + `TestParquetBarSinkDedupCount` + `TestIngestSpotCompletenessRepull`
+  (each fails-before / passes-after). Prior on `claude/rate-widget-fno-honest`: **DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
   the live PULL RATE widget's "achieved r/s" is now HONEST during the metadata + F&O phases, and the stall verdict is no
   longer blind to an issued-but-failing pull. ROOT (confirmed by deep log+code audit): the SPOT phase feeds the widget the
   transport `CallMeter`'s MEASURED completed-rate, but the metadata + F&O phases have no rate-observe seam, so
