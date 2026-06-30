@@ -38,6 +38,7 @@ comparisons).
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -95,6 +96,48 @@ STEP_DOWN_WINDOW: float = 60.0
 #: itself is INJECTED per vendor (``ceiling_per_min``); this controller stays free of
 #: vendor numbers (mirrors :data:`CEILING_RPS`'s injected-width policy).
 PER_MIN_WINDOW: float = 60.0
+
+#: Trailing window (seconds) the OBSERVE-ONLY per-second issue COUNTER ring
+#: (:attr:`RateController._issue_buckets`) retains — ONE HOUR. EVERY admitted issue
+#: (governor-on OR governor-off) increments the current second's bucket AFTER the per-second
+#: token bucket clears, so :meth:`RateController.snapshot` can report the REAL integer request
+#: count in ANY trailing window up to 3600 s (req/sec, req/min, req/10min, req/hour) measured
+#: from ACTUAL per-second issue counts — not a per-second figure multiplied up
+#: (DEC-RATE-MONITOR-EXPAND-001, MIGRATION.md #1004). The counter is PURELY observational: it
+#: is NEVER read by any pacing gate (the governor still reads its own 60 s :attr:`_issues`
+#: deque), so it changes NO pacing decision — the fetch rate is byte-for-byte unchanged.
+#: O(1) MEMORY: a FIXED 3600-int ring (:data:`TRAILING_LOG_BUCKETS`) regardless of the issue
+#: rate — chosen OVER a per-issue timestamp deque (which would grow O(rate × 3600) ≈ 18k
+#: floats at 5 r/s and exceed the DEC-MEMLEAK-GATE-001 256 KiB sustained ceiling). Push is
+#: O(1) amortized; a :meth:`snapshot` count is O(window-seconds) (a bounded sum over the last
+#: W buckets — documented honestly, NOT claimed O(1)).
+TRAILING_LOG_WINDOW_S: float = 3600.0
+
+#: The number of per-second COUNT buckets in the observe-only trailing-hour issue counter ring
+#: (:attr:`RateController._issue_buckets`) — one per second of :data:`TRAILING_LOG_WINDOW_S`.
+#: The ring is FIXED at this size (3600 ints) so the controller's observability memory is O(1)
+#: in the issue rate (DEC-RATE-MONITOR-EXPAND-001).
+TRAILING_LOG_BUCKETS: int = 3600
+
+#: The trailing-1 s EVIDENCE window (req/sec = ``recent_1s``) the issue log reports so the
+#: operator can see the per-second number is a real trailing-1 s issue count, not a derived
+#: average (DEC-RATE-MONITOR-EXPAND-001).
+LOG_WINDOW_1S: float = 1.0
+
+#: The trailing-minute evidence window (req/min = ``recent_60s``) — matches
+#: :data:`PER_MIN_WINDOW`, so the issue-log ``recent_60s`` equals the governor's
+#: ``recent_minute`` when a governor is wired (one number, two INDEPENDENT sources — a
+#: built-in cross-check the operator can verify, DEC-RATE-MONITOR-EXPAND-001).
+LOG_WINDOW_60S: float = 60.0
+
+#: The trailing-TEN-minute evidence window (req/10min = ``recent_600s``) — the NEW metric,
+#: a REAL count of issues in the trailing 600 s (DEC-RATE-MONITOR-EXPAND-001).
+LOG_WINDOW_600S: float = 600.0
+
+#: The trailing-HOUR evidence window (req/hour = ``recent_3600s``) — a MEASURED trailing-hour
+#: count from real timestamps (DEC-RATE-MONITOR-EXPAND-001), equal to
+#: :data:`TRAILING_LOG_WINDOW_S` (the log's full retention).
+LOG_WINDOW_3600S: float = TRAILING_LOG_WINDOW_S
 
 #: The DEEPER floor the **429** ladder may reach under a SUSTAINED rate-limit storm
 #: (DEC-DHAN-RATE-STORM-FLOOR-001). The 429 ladder reaches the soft :data:`FLOOR_RPS`
@@ -300,6 +343,29 @@ class RateController:
         #: deque stays empty + ``pace`` skips both governor phases entirely.
         self._ceiling_per_min: int | None = ceiling_per_min
         self._issues: deque[float] = deque()
+        #: OBSERVE-ONLY trailing-hour issue COUNTER (DEC-RATE-MONITOR-EXPAND-001). A
+        #: FIXED-SIZE ring of :data:`TRAILING_LOG_BUCKETS` (3600) per-second COUNT buckets —
+        #: ``_issue_buckets[i]`` is the number of issues admitted in the integer second
+        #: ``_issue_newest_sec - ((_issue_head - i) mod 3600)``. EVERY admitted issue
+        #: (governor-on OR governor-off) increments the current second's bucket in
+        #: :meth:`pace` AFTER the per-second token bucket clears; advancing to a newer second
+        #: zeroes the buckets for the elapsed (now-evicted) seconds. This is the SCALABLE
+        #: replacement for a per-issue timestamp deque (which would grow O(rate × 3600) ≈ 18k
+        #: floats at 5 r/s and tripped the DEC-MEMLEAK-GATE-001 256 KiB stress ceiling): the
+        #: ring is **O(1) MEMORY** — a FIXED 3600 ints regardless of the issue rate — so the
+        #: controller's sustained memory stays flat. It is NEVER read by any pacing decision
+        #: (the governor still reads its own 60 s :attr:`_issues` deque); it feeds ONLY
+        #: :meth:`snapshot`'s REAL windowed counts (``recent_1s`` / ``recent_60s`` /
+        #: ``recent_600s`` / ``recent_3600s``), so the operator can verify req/sec·min·10min·
+        #: hour are genuine per-second issue counts, not a rate multiplied up. Push is O(1)
+        #: amortized (one increment + a bounded advance that zeroes at most 3600 buckets once);
+        #: a windowed count is O(window-seconds) (a bounded sum over the last W buckets).
+        self._issue_buckets: list[int] = [0] * TRAILING_LOG_BUCKETS
+        #: Ring index of the bucket holding :attr:`_issue_newest_sec` (the current second).
+        self._issue_head: int = 0
+        #: The integer second (``floor(clock())``) the head bucket currently counts. ``None``
+        #: until the FIRST issue is recorded (an all-zero ring reads 0 in every window).
+        self._issue_newest_sec: int | None = None
         #: Optional anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001). ``False``
         #: ⇒ the smooth gate is skipped ENTIRELY in :meth:`pace` (byte-identical to the
         #: prior behaviour) and ``_last_issue_ts`` is never read/written. ``True`` ⇒ the
@@ -397,6 +463,15 @@ class RateController:
         """
         if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
             self._issues.clear()
+            # Clear the observe-only trailing-hour issue counter ring too
+            # (DEC-RATE-MONITOR-EXPAND-001): a laptop sleep/wake makes every pre-sleep count
+            # stale, so a post-wake snapshot must not count them into req/sec·min·10min·hour.
+            # Zero the buckets + reset the anchor so the ring restarts fresh. Observability
+            # only — no pacing effect (the ring is never read by a gate).
+            for i in range(TRAILING_LOG_BUCKETS):
+                self._issue_buckets[i] = 0
+            self._issue_head = 0
+            self._issue_newest_sec = None
             self._hits.clear()
             self._timeouts.clear()
             self._last_step = now
@@ -455,6 +530,78 @@ class RateController:
         interval = 1.0 / self._rps
         wait = (self._last_issue_ts + interval) - now
         return wait if wait > 0.0 else 0.0
+
+    def _advance_issue_ring_locked(self, sec: int) -> None:
+        """Advance the per-second issue ring's head to integer second *sec* (caller holds lock).
+
+        DEC-RATE-MONITOR-EXPAND-001. Moves the ring head forward by ``sec - newest`` seconds,
+        ZEROING each newly-entered bucket (those seconds had no issues yet and the bucket they
+        re-use held a now-evicted >1 h-old count). Idempotent when ``sec`` equals the current
+        newest second (no advance). A jump of ≥ :data:`TRAILING_LOG_BUCKETS` seconds zeroes the
+        WHOLE ring once (every old count has aged out) — bounded to one full pass, never more.
+        O(min(elapsed, 3600)) — O(1) amortized across the hour. A ``None`` ``_issue_newest_sec``
+        (the ring never seeded) is a no-op: both callers seed/guard it before calling, but the
+        explicit guard keeps this total + narrows the type without an ``assert``.
+        """
+        newest = self._issue_newest_sec
+        if newest is None:
+            return  # ring unseeded — nothing to advance (both callers guard, defensive)
+        steps = sec - newest
+        if steps <= 0:
+            return  # same second (or a tiny backward skew already gap-handled): no advance
+        # Zero at most a full ring: beyond 3600 elapsed seconds every old bucket has aged out.
+        for _ in range(min(steps, TRAILING_LOG_BUCKETS)):
+            self._issue_head = (self._issue_head + 1) % TRAILING_LOG_BUCKETS
+            self._issue_buckets[self._issue_head] = 0
+        self._issue_newest_sec = sec
+
+    def _record_issue_locked(self, now: float) -> None:
+        """Count one issue at *now* in the observe-only trailing-hour ring (caller holds lock).
+
+        DEC-RATE-MONITOR-EXPAND-001. Called from :meth:`pace` for EVERY admitted issue (after
+        the per-second token bucket clears), regardless of whether a governor is wired. Bins
+        the issue into its integer second's bucket: on the FIRST issue it seeds the head at
+        ``floor(now)``; otherwise it advances the ring head to that second (zeroing the elapsed
+        buckets) then increments the head bucket. O(1) AMORTIZED (a bounded advance + one
+        increment). NEVER read by a pacing gate — it feeds ONLY :meth:`snapshot`'s real
+        windowed counts (the trust/transparency evidence). O(1) MEMORY (the fixed ring).
+        """
+        sec = math.floor(now)
+        if self._issue_newest_sec is None:
+            self._issue_newest_sec = sec  # seed the ring on the first ever issue
+        else:
+            self._advance_issue_ring_locked(sec)
+        self._issue_buckets[self._issue_head] += 1
+
+    def _count_in_window_locked(self, now: float, window: float) -> int:
+        """Count issues in the trailing *window* seconds from the ring (caller holds lock).
+
+        DEC-RATE-MONITOR-EXPAND-001. The REAL request count in the trailing window
+        ``(now - window, now]`` from the per-second issue ring — the evidence behind req/sec
+        (``window=1``), req/min (``60``), req/10min (``600``), and req/hour (``3600``). FIRST
+        advances the ring head to ``floor(now)`` so that elapsed-but-issue-free seconds since
+        the last issue are correctly counted as empty (a poll long after the last issue reads
+        0, never a stale count). A bucket for integer second ``s`` holds issues in ``[s,
+        s+1)``, so a trailing ``(now - window, now]`` touches the buckets for seconds
+        ``ceil(now - window) .. floor(now)`` — that span (``floor(now) - ceil(now-window) +
+        1`` buckets, capped at the ring size) is summed walking backward from the head.
+        Returns 0 when no issue has ever been recorded (the ring is unseeded). O(window-seconds)
+        — a bounded sum, honestly NOT O(1) (Golden Rule #10); a per-second figure from a 60 s
+        ring would be cheaper but would not be a measured trailing-window count, which is
+        exactly the trust the operator asked for.
+        """
+        if self._issue_newest_sec is None:
+            return 0
+        # Roll the ring forward to ``now`` so idle seconds since the last issue read as empty.
+        head_sec = math.floor(now)
+        self._advance_issue_ring_locked(head_sec)
+        # Buckets touched by ``(now - window, now]`` = seconds ceil(now-window)..floor(now).
+        oldest_sec = math.ceil(now - window)
+        span = min(max(head_sec - oldest_sec + 1, 0), TRAILING_LOG_BUCKETS)
+        count = 0
+        for offset in range(span):
+            count += self._issue_buckets[(self._issue_head - offset) % TRAILING_LOG_BUCKETS]
+        return count
 
     def pace(self) -> None:
         """Block until every rate gate allows an issue — **O(1)** amortized fast path.
@@ -559,6 +706,14 @@ class RateController:
         with self._lock:
             bucket = self._bucket
         bucket.acquire()
+        # Observe-only trailing-hour issue log (DEC-RATE-MONITOR-EXPAND-001): the per-second
+        # bucket has now cleared, so THIS is the single true "a request is being issued"
+        # point — covering BOTH the governor-on and governor-off paths with one record (the
+        # governor's own _issues deque is only stamped when a governor is wired). Stamping it
+        # here, never read by a pacing gate, feeds snapshot()'s real req/sec·min·10min·hour
+        # evidence counts. O(1) amortized under a short lock.
+        with self._lock:
+            self._record_issue_locked(self._clock())
         # Liveness beat (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15): a pull pacing
         # through the per-minute governor / token bucket IS making progress — beat the
         # watchdog so a slow-but-progressing pull (heavily throttled, but advancing) is
@@ -762,19 +917,31 @@ class RateController:
         to avoid nesting the controller lock over the tracker's own lock + LMDB read.
         """
         with self._lock:
+            now = self._clock()
             # Evict aged-out issue instants first so ``recent_minute`` is an accurate
             # rolling-60s gauge (DEC-GROWW-RATE-PERMIN-001). No-op when disabled (the
             # deque is always empty in that case).
             if self._ceiling_per_min is not None:
-                now = self._clock()
                 while self._issues and (self._issues[0] + PER_MIN_WINDOW) - now <= 0.0:
                     self._issues.popleft()
+            # OBSERVE-ONLY trailing-window evidence counts (DEC-RATE-MONITOR-EXPAND-001): the
+            # REAL integer request count in the trailing 1 s / 60 s / 600 s / 3600 s, summed
+            # from the fixed per-second issue ring. The operator can verify rps == recent_1s,
+            # req/min == recent_60s, req/10min == recent_600s, req/hour == recent_3600s —
+            # every rate is a genuine windowed count of issues, not a per-second figure
+            # multiplied up. ``recent_60s`` equals ``recent_minute`` when a governor is wired
+            # (two independent sources, a built-in cross-check). Each count first rolls the
+            # ring forward to ``now`` so idle seconds read as empty, then sums its window.
             snap: dict[str, object] = {
                 "current_rps": self._rps,
                 "recent_hits": len(self._hits),
                 "recent_timeouts": len(self._timeouts),
                 "recent_minute": len(self._issues),
                 "ceiling_per_min": self._ceiling_per_min,
+                "recent_1s": self._count_in_window_locked(now, LOG_WINDOW_1S),
+                "recent_60s": self._count_in_window_locked(now, LOG_WINDOW_60S),
+                "recent_600s": self._count_in_window_locked(now, LOG_WINDOW_600S),
+                "recent_3600s": self._count_in_window_locked(now, LOG_WINDOW_3600S),
             }
         if self._quota is not None:
             snap["quota_used"] = self._quota.current_count()
@@ -800,6 +967,10 @@ __all__ = [
     "CEILING_RPS",
     "CLOCK_GAP_THRESHOLD_S",
     "FLOOR_RPS",
+    "LOG_WINDOW_1S",
+    "LOG_WINDOW_60S",
+    "LOG_WINDOW_600S",
+    "LOG_WINDOW_3600S",
     "PER_MIN_WINDOW",
     "RATE_LIMIT_STORM_FLOOR_RPS",
     "SNAPSHOT_LOG_INTERVAL_S",
@@ -810,5 +981,7 @@ __all__ = [
     "STEP_UP_WINDOW",
     "STORM_HITS",
     "TIMEOUT_FLOOR_RPS",
+    "TRAILING_LOG_BUCKETS",
+    "TRAILING_LOG_WINDOW_S",
     "RateController",
 ]

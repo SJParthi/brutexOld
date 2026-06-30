@@ -74,8 +74,12 @@ RATE_BRIDGE_FILENAME = "pull_rate.json"
 
 #: The bridge schema version. Bumped if the field set changes incompatibly; the reader
 #: ignores a snapshot whose ``schema`` it does not recognise (forward-safe — never a
-#: KeyError / wrong-shape crash).
-_SCHEMA_VERSION = 1
+#: KeyError / wrong-shape crash). Bumped 1 → 2 to carry the trailing-window real issue counts
+#: (``recent_1s`` / ``recent_600s`` / ``recent_3600s``) for the expanded rate monitor
+#: (DEC-RATE-MONITOR-EXPAND-001, MIGRATION.md #1004); an old (schema-1) CLI bridge file is
+#: ignored as unrecognised, so the dashboard simply projects the in-memory panel until the
+#: CLI re-publishes — never a crash, never a fabricated number.
+_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +106,11 @@ class RateBridgeSnapshot:
         Recent vendor 429 hits (``recent_hits``) — context for a depressed achieved rate.
     ceiling_per_min
         The HARD per-minute governor cap (``ceiling_per_min``); ``-1`` when none is wired.
+    recent_1s, recent_600s, recent_3600s
+        The controller's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
+        (``recent_1s`` / ``recent_600s`` / ``recent_3600s``; DEC-RATE-MONITOR-EXPAND-001) —
+        the req/sec, req/10min + MEASURED req/hour evidence carried across to the dashboard
+        widget so a CLI pull's expanded monitor shows the same real counts.
     wall_time
         Seconds since the Unix epoch (``time.time()``) at the tick — the CROSS-PROCESS
         freshness clock the reader compares against ``now``.
@@ -116,6 +125,9 @@ class RateBridgeSnapshot:
     recent_minute: int
     recent_429: int
     ceiling_per_min: int
+    recent_1s: int
+    recent_600s: int
+    recent_3600s: int
     wall_time: float
     monotonic: float
 
@@ -150,6 +162,9 @@ def publish_rate_snapshot(
     ceiling_per_min: int,
     wall_time: float,
     monotonic: float,
+    recent_1s: int = 0,
+    recent_600s: int = 0,
+    recent_3600s: int = 0,
 ) -> None:
     """Atomically write one rate snapshot to the lake-root bridge file (best-effort, O(1)).
 
@@ -172,6 +187,10 @@ def publish_rate_snapshot(
         ``time.time()`` at the tick (the cross-process freshness clock).
     monotonic
         ``time.monotonic()`` at the tick (in-process diagnostic parity only).
+    recent_1s, recent_600s, recent_3600s
+        The controller's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
+        (DEC-RATE-MONITOR-EXPAND-001), default ``0`` so a caller without them publishes an
+        honest zero rather than omitting the field.
     """
     snapshot = RateBridgeSnapshot(
         schema=_SCHEMA_VERSION,
@@ -180,6 +199,9 @@ def publish_rate_snapshot(
         recent_minute=recent_minute,
         recent_429=recent_429,
         ceiling_per_min=ceiling_per_min,
+        recent_1s=recent_1s,
+        recent_600s=recent_600s,
+        recent_3600s=recent_3600s,
         wall_time=wall_time,
         monotonic=monotonic,
     )
@@ -232,6 +254,11 @@ def publish_from_snapshots(
         recent_minute=int(controller_snap.get("recent_minute", 0)),
         recent_429=int(controller_snap.get("recent_hits", 0)),
         ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
+        # The expanded-monitor trailing-window real counts (DEC-RATE-MONITOR-EXPAND-001);
+        # absent on an older controller snapshot → default 0 (no KeyError, honest zero).
+        recent_1s=int(controller_snap.get("recent_1s", 0)),
+        recent_600s=int(controller_snap.get("recent_600s", 0)),
+        recent_3600s=int(controller_snap.get("recent_3600s", 0)),
         wall_time=wall_time,
         monotonic=monotonic,
     )
@@ -280,6 +307,9 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
             recent_minute=int(data["recent_minute"]),
             recent_429=int(data["recent_429"]),
             ceiling_per_min=int(data["ceiling_per_min"]),
+            recent_1s=int(data["recent_1s"]),
+            recent_600s=int(data["recent_600s"]),
+            recent_3600s=int(data["recent_3600s"]),
             wall_time=float(data["wall_time"]),
             monotonic=float(data["monotonic"]),
         )
