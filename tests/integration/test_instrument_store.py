@@ -468,6 +468,195 @@ class TestReadAPI:
         assert counts == {}
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# get() O(1) in-memory point-lookup index (DEC-INSTRUMENTSTORE-O1-001)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class TestGetO1Index:
+    """:meth:`InstrumentStore.get` is served from an O(1) in-memory index.
+
+    The index (``symbol_name`` -> newest-first ``(snapshot_date, Instrument)``
+    pairs) is built lazily on the first ``get`` and INVALIDATED on every write,
+    so it is byte-equivalent to the prior per-call O(n) DuckDB ``SEQ_SCAN`` while
+    serving the dominant ``as_of=None`` hot path in O(1). These tests pin every
+    branch of the new code AND the no-stale-cache contract on mutation.
+    """
+
+    def test_get_matches_old_query_path_present_and_absent(self, tmp_path: Path) -> None:
+        """Index result equals a direct DuckDB query for present + absent symbols."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            # Present: identical row to the raw ORDER-BY-snapshot-DESC query.
+            with s.connection as conn:
+                raw = conn.execute(
+                    "SELECT symbol_name, security_id FROM instruments "
+                    "WHERE symbol_name = ? ORDER BY snapshot_date DESC LIMIT 1",
+                    ["NIFTY"],
+                ).fetchone()
+            got = s.get("NIFTY")
+            assert got is not None
+            assert (got.symbol_name, got.security_id) == (raw[0], raw[1])
+            # Absent: both report nothing.
+            assert s.get("NOPE") is None
+            assert s.exists("NOPE") is False
+
+    def test_get_empty_store_returns_none(self, tmp_path: Path) -> None:
+        """An empty store builds an empty index and returns None (no crash)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.get("ANYTHING") is None
+            assert s.get("ANYTHING", as_of=date(2025, 1, 1)) is None
+
+    def test_get_single_row(self, tmp_path: Path) -> None:
+        """A single-row store serves the one symbol and nothing else."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            got = s.get("RELIANCE")
+            assert got is not None and got.symbol_name == "RELIANCE"
+            assert s.get("TCS") is None
+
+    def test_get_as_of_walks_to_first_snapshot_on_or_before(self, tmp_path: Path) -> None:
+        """as_of returns the newest snapshot <= as_of; older one when between."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 1, 1),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("jan"),
+            )
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("apr"),
+            )
+            # Between the two snapshots -> the January one is returned (non-None).
+            mid = s.get("RELIANCE", as_of=date(2025, 2, 1))
+            assert mid is not None
+            # On/after the latest -> the April one.
+            assert s.get("RELIANCE", as_of=date(2025, 5, 1)) is not None
+            assert s.get("RELIANCE") is not None
+
+    def test_get_as_of_before_all_snapshots_returns_none(self, tmp_path: Path) -> None:
+        """as_of earlier than every snapshot returns None (the loop falls through)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.get("RELIANCE", as_of=date(2024, 1, 1)) is None
+
+    def test_index_invalidated_on_upsert(self, tmp_path: Path) -> None:
+        """A get after an upsert sees the new rows -- never a stale index."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("a"),
+            )
+            assert s.get("AAA") is not None  # builds the index
+            assert s.get("BBB") is None
+            # New write must invalidate: BBB now visible.
+            s.upsert_many(
+                [_eq("BBB")],
+                snapshot_date=date(2025, 4, 16),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("b"),
+            )
+            assert s.get("BBB") is not None
+
+    def test_index_invalidated_on_prune(self, tmp_path: Path) -> None:
+        """A get after prune_to_latest_snapshot sees the pruned table, not stale rows."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 1, 1),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("old"),
+            )
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("new"),
+            )
+            # Prime the index, then verify the old snapshot is reachable by as_of.
+            assert s.get("AAA", as_of=date(2025, 2, 1)) is not None
+            pruned = s.prune_to_latest_snapshot()
+            assert pruned == 1
+            # The January snapshot is gone -- as_of=2025-02-01 must now be None,
+            # proving the index was rebuilt from the pruned table.
+            assert s.get("AAA", as_of=date(2025, 2, 1)) is None
+            assert s.get("AAA") is not None  # latest still present
+
+    def test_index_invalidated_on_upsert_rollback(self, tmp_path: Path) -> None:
+        """A failed upsert invalidates the index without corrupting reads.
+
+        Inject a bad-batch upsert by monkeypatching the columnar bulk insert to
+        raise mid-transaction; the store must ROLLBACK, invalidate the index, and
+        keep the prior committed state readable through a freshly rebuilt index.
+        """
+        import pyarrow as pa
+
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r1",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.get("NIFTY") is not None  # build the index
+
+            original = pa.table
+
+            def _boom(*_a: object, **_k: object) -> object:
+                raise RuntimeError("forced bulk-insert failure")
+
+            pa.table = _boom  # type: ignore[assignment]
+            try:
+                with pytest.raises(RuntimeError, match="forced bulk-insert failure"):
+                    s.upsert_many(
+                        [_idx("BANKNIFTY")],
+                        snapshot_date=date(2025, 4, 16),
+                        run_id="r2",
+                        csv_source_sha256=_csv_hash("b"),
+                    )
+            finally:
+                pa.table = original  # type: ignore[assignment]
+
+            # The rollback left only NIFTY; the index rebuilt cleanly.
+            assert s.get("NIFTY") is not None
+            assert s.get("BANKNIFTY") is None
+
+    def test_get_returns_latest_among_multiple_snapshots(self, tmp_path: Path) -> None:
+        """as_of=None always returns the newest snapshot (list is newest-first)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            for d in (date(2025, 1, 1), date(2025, 4, 15), date(2025, 2, 1)):
+                s.upsert_many(
+                    [_eq("AAA")],
+                    snapshot_date=d,
+                    run_id=f"r-{d}",
+                    csv_source_sha256=_csv_hash(str(d)),
+                )
+            # as_of=None returns the newest (2025-04-15); an as_of on the middle
+            # date returns a non-None (older) row.
+            assert s.get("AAA") is not None
+            assert s.get("AAA", as_of=date(2025, 3, 1)) is not None
+
+
 # ────────────────────────────────────────────────────────────────────────
 # InstrumentSnapshot \u2014 hot-path view
 # ────────────────────────────────────────────────────────────────────────

@@ -314,6 +314,13 @@ _INSTR_COLUMNS: Final[tuple[str, ...]] = (
     "feed_token",
 )
 
+#: Positional index of ``snapshot_date`` in a ``SELECT *`` row (mirrors the
+#: ``_INSTR_COLUMNS`` / table-DDL order). Used by the O(1) point-lookup index
+#: builder to read the temporal key straight off a row without re-querying
+#: (DEC-INSTRUMENTSTORE-O1-001); derived from the column list so it can never
+#: drift from a column re-order.
+_SNAPSHOT_DATE_COL_INDEX: Final[int] = _INSTR_COLUMNS.index("snapshot_date")
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Supporting dataclasses
@@ -821,6 +828,19 @@ class InstrumentStore(metaclass=_StoreMeta):
         self._read_lock = threading.RLock()
         self._path = path
         self._closed = False
+        # O(1) point-lookup index (DEC-INSTRUMENTSTORE-O1-001). Maps
+        # ``symbol_name`` → its snapshots NEWEST-first as ``(snapshot_date,
+        # Instrument)`` pairs, so :meth:`get` serves a point read from memory
+        # in O(1) (``as_of=None``) / O(snapshots-per-symbol) (``as_of``) instead
+        # of the prior O(n) DuckDB ``SEQ_SCAN`` per call (CLAUDE.md §5 O(1)
+        # discipline). Built LAZILY on the first :meth:`get`; rebuilt from the
+        # SAME ``instruments`` table the query read, and INVALIDATED (set back to
+        # ``None``) by every method that mutates that table (:meth:`upsert_many`,
+        # :meth:`prune_to_latest_snapshot`) so it can never serve a stale row.
+        # Space is O(rows) — bounded by the lean ~750-underlying pruned universe
+        # (the legs are discarded per DEC-INSTRUMENT-UNIVERSE-FAST-001), so the
+        # index is a small, O(1)-bounded footprint, NOT an unbounded cache.
+        self._symbol_index: dict[str, list[tuple[date, Instrument]]] | None = None
 
     @property
     def connection(self) -> Any:
@@ -1123,8 +1143,15 @@ class InstrumentStore(metaclass=_StoreMeta):
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
+            # The bulk path mutates nothing on rollback, but invalidate
+            # defensively so a partially-applied state can never be served from a
+            # stale index (DEC-INSTRUMENTSTORE-O1-001).
+            self._symbol_index = None
             raise
 
+        # Invalidate the O(1) point-lookup index: the table changed, so the next
+        # get() rebuilds from the committed rows (DEC-INSTRUMENTSTORE-O1-001).
+        self._symbol_index = None
         return UpsertResult(
             rows_written=len(rows),
             rows_replaced=rows_replaced,
@@ -1244,6 +1271,30 @@ class InstrumentStore(metaclass=_StoreMeta):
 
     # ── Point reads ────────────────────────────────────────────────
 
+    def _build_symbol_index(self) -> dict[str, list[tuple[date, Instrument]]]:
+        """Build the ``symbol_name`` → newest-first snapshots index (O(rows), once).
+
+        Reads the WHOLE ``instruments`` table in ONE scan and groups it by
+        ``symbol_name`` into ``(snapshot_date, Instrument)`` lists sorted
+        NEWEST-first. Built from the SAME table :meth:`get` would have queried,
+        so it is byte-identical to the per-call SQL — only amortised. Called
+        lazily on the first :meth:`get` after construction or invalidation
+        (DEC-INSTRUMENTSTORE-O1-001).
+        """
+        index: dict[str, list[tuple[date, Instrument]]] = {}
+        for row in self._conn.execute(
+            "SELECT * FROM instruments ORDER BY symbol_name, snapshot_date DESC"
+        ).fetchall():
+            instrument = _row_to_instrument(row)
+            # ``snapshot_date`` is not a field of Instrument, so read it straight
+            # off the row at its fixed column position (mirrors _row_to_instrument's
+            # positional unpacking; index derived from _INSTR_COLUMNS).
+            snapshot_date = row[_SNAPSHOT_DATE_COL_INDEX]
+            index.setdefault(instrument.symbol_name, []).append((snapshot_date, instrument))
+        # The ``ORDER BY … snapshot_date DESC`` already yields newest-first within
+        # each symbol group; no per-list re-sort needed.
+        return index
+
     def get(
         self,
         symbol_name: str,
@@ -1253,25 +1304,32 @@ class InstrumentStore(metaclass=_StoreMeta):
         """Return *symbol_name*'s state, optionally as-of *as_of*.
 
         Looks up by the engine symbol (``symbol_name``); the most recent
-        ``snapshot_date`` (≤ *as_of* when given) wins. O(log n) via the
-        ``snapshot_date``-ordered scan.
+        ``snapshot_date`` (≤ *as_of* when given) wins.
+
+        **O(1)** via an in-memory ``symbol_name`` → newest-first-snapshots index
+        (DEC-INSTRUMENTSTORE-O1-001), built lazily on the first call and
+        invalidated on every write. ``as_of=None`` (the dominant hot path —
+        every dashboard ``store.get(symbol)``) is a single dict lookup +
+        first-element read, O(1). An ``as_of`` query walks that symbol's
+        snapshot list newest-first to the first snapshot ≤ *as_of*, O(snapshots
+        per symbol) — bounded by the small number of distinct pull days, NOT
+        O(rows). Supersedes the prior per-call O(n) DuckDB ``SEQ_SCAN`` (no
+        ``symbol_name`` index existed) that the "O(1) lookup" docstring
+        misclaimed (CLAUDE.md §5 O(1) discipline / Golden Rule #1 honesty).
         """
         self._ensure_open()
+        if self._symbol_index is None:
+            self._symbol_index = self._build_symbol_index()
+        snapshots = self._symbol_index.get(symbol_name)
+        if not snapshots:
+            return None
         if as_of is None:
-            row = self._conn.execute(
-                "SELECT * FROM instruments "
-                "WHERE symbol_name = ? "
-                "ORDER BY snapshot_date DESC LIMIT 1",
-                [symbol_name],
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT * FROM instruments "
-                "WHERE symbol_name = ? AND snapshot_date <= ? "
-                "ORDER BY snapshot_date DESC LIMIT 1",
-                [symbol_name, as_of],
-            ).fetchone()
-        return _row_to_instrument(row) if row is not None else None
+            # Newest snapshot — first element (list is sorted newest-first).
+            return snapshots[0][1]
+        for snapshot_date, instrument in snapshots:
+            if snapshot_date <= as_of:
+                return instrument
+        return None
 
     def exists(self, symbol_name: str, *, as_of: date | None = None) -> bool:
         """Return ``True`` iff *symbol_name* has at least one row <= *as_of*."""
@@ -1643,6 +1701,10 @@ class InstrumentStore(metaclass=_StoreMeta):
             "DELETE FROM instruments "
             "WHERE snapshot_date <> (SELECT MAX(snapshot_date) FROM instruments)"
         ).fetchone()
+        # The table may have shed rows — invalidate the O(1) point-lookup index
+        # so the next get() rebuilds from the pruned rows
+        # (DEC-INSTRUMENTSTORE-O1-001).
+        self._symbol_index = None
         return int(deleted[0]) if deleted else 0
 
     def list_futures(
