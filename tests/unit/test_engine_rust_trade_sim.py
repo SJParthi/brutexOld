@@ -252,3 +252,132 @@ class TestParity:
             masks, direction=Side.BUY, stop_loss_paisa=300, take_profit_paisa=400
         )
         assert rust_out == fb_out
+
+
+# ── parity on a NON-regular session (DEC-SESSION-FORCED-EXIT-001) ────────────
+#
+# The Rust kernel's precomputed `forced` flags must be SESSION-AWARE — byte-
+# identical to the simulate_trades oracle — on a half-day / Muhurat session, not
+# just the regular 15:20 day. These tests would FAIL if ResidentTradeSim kept
+# deriving `forced` against the hardcoded 15:20 (its flags would force-exit
+# every evening/afternoon bar while the oracle exits at the real close − 10min).
+
+_AFTERNOON_MUHURAT = date(2025, 10, 21)  # 13:45-14:45 IST → forced exit 14:35
+
+
+def _muhurat_ts(hh: int, mm: int) -> datetime:
+    """UTC-aware timestamp for an IST ``hh:mm`` on the 2025 afternoon Muhurat."""
+    return datetime(
+        _AFTERNOON_MUHURAT.year,
+        _AFTERNOON_MUHURAT.month,
+        _AFTERNOON_MUHURAT.day,
+        hh,
+        mm,
+        tzinfo=IST,
+    ).astimezone(UTC)
+
+
+def _muhurat_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
+    return CandleBar(
+        timestamp=_muhurat_ts(hh, mm),
+        open=Decimal(o),
+        high=Decimal(h),
+        low=Decimal(lo),
+        close=Decimal(c),
+        volume=0,
+        open_interest=None,
+    )
+
+
+class TestSessionAwareForcedExitParity:
+    def test_rust_kernel_forced_flags_session_aware_match_oracle(self) -> None:
+        # An afternoon-Muhurat feed straddling the 14:35 forced exit. The Rust
+        # kernel + the simulate_trades oracle must agree field-for-field (the
+        # kernel's `forced` array is now resolved against the 14:35 boundary).
+        bars = [
+            _muhurat_bar(14, 0, "100", "100", "100", "100"),
+            _muhurat_bar(14, 33, "100", "100", "100", "100"),
+            _muhurat_bar(14, 34, "100", "100", "100", "100"),  # NOT forced
+            _muhurat_bar(14, 35, "100.20", "101", "100", "100.30"),  # forced @ 14:35
+            _muhurat_bar(14, 36, "200", "200", "200", "200"),  # never reached
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 1 << 63]
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        got = sim.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=100_000,
+                take_profit_paisa=100_000,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+        # Anti-vacuity: the fire-every-bar mask actually opens AND force-exits at
+        # the 14:35 Muhurat boundary (NOT 15:20, NOT skipped) — proves the flags
+        # are session-aware, not just "two paths agree on nothing".
+        fire_trades = got[0]
+        assert len(fire_trades) == 1
+        assert fire_trades[0].exit_ts == _muhurat_ts(14, 35)
+        assert fire_trades[0].pnl_paisa == 20  # forced at OPEN 100.20, not 200
+
+    def test_rust_and_fallback_agree_on_muhurat(self) -> None:
+        # The Rust path and the forced pure-Python fallback agree on a Muhurat
+        # session too (the whole contract, on a non-regular day).
+        bars = [
+            _muhurat_bar(14, 30, "100", "100", "100", "100"),
+            _muhurat_bar(14, 34, "100", "100", "100", "100"),
+            _muhurat_bar(14, 35, "100.50", "101", "100", "100.90"),
+            _muhurat_bar(14, 36, "100", "100", "100", "100"),
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 2, 3]
+        rust = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        rust_out = rust.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        fallback = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        fallback._rust = None
+        fb_out = fallback.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        assert rust_out == fb_out
+
+    def test_rust_kernel_multi_day_forced_flags_match_oracle(self) -> None:
+        # A SINGLE window spanning day-1 regular (exits 15:20) + day-2 Muhurat
+        # (exits 14:35) pins the 1-slot date-cache RE-RESOLVE branch in the
+        # kernel's `forced` precompute against the oracle.
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100"),  # day-1 regular, near 15:20
+            _bar(15, 20, "100.30", "101", "100", "100.50"),  # day-1 forced @ 15:20
+            _muhurat_bar(14, 34, "100", "100", "100", "100"),  # day-2 NOT forced
+            _muhurat_bar(14, 35, "100.10", "101", "100", "100.30"),  # day-2 forced @ 14:35
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1]
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        got = sim.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=100_000,
+                take_profit_paisa=100_000,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
