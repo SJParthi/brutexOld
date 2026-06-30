@@ -230,7 +230,25 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/universe-pull-daterange` (**DEC-UNIVERSE-PULL-DATERANGE-001, MIGRATION.md #1007** —
+- **Active branch:** `claude/empty-detector-production-wiring` (**DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001, MIGRATION.md #1013** —
+  the whole-underlying "silent-empty / silent-vanish" detector (DEC-SUSPICIOUS-EMPTY-FLAG-001 #919) is WAKED in the real
+  production F&O pull. It was DEAD in every live pull: its only call site in `run_groww_option_ingest` is gated
+  `if fetch_pipeline is None:` (the correct in-async-mode skip — a producer-resolved per-pair `IngestReport` reads
+  `bars_appended == 0` BEFORE the background consumer folds the real counts), and the production pull
+  (`dashboard/historical_pull.py::pull_contract_candles`) ALWAYS wires a non-None `fetch_pipeline` (default-ON), so
+  the BAJAJ-AUTO/M&M failure mode the detector exists to catch was uncatchable in production. FIX (COMMON · OBSERVE-ONLY ·
+  best-effort): NEW `option_ingest.emit_underlying_all_empty(pairs, contract_list, *, pull_id=None)` — the ONE guarded
+  scan→log helper (runs `scan_underlying_all_empty` then `_log_underlying_all_empty`, wrapped so a scan error logs
+  `pull.underlying_all_empty_error` and NEVER breaks the pull; `pull_id` defaults to `current_pull_id()`); the in-driver
+  synchronous call is refactored onto it (byte-identical). `pull_contract_candles` calls it POST-DRAIN, right after
+  `_reconcile_phase_with_pipeline` folds the REAL durable per-pair `bars_appended` back into `minute.merged_pairs` (the
+  only point those counts exist), guarded `if fetch_pipeline is not None:` (the sync path already emitted in-driver — no
+  double-warn). HONEST: pure DETECT+WARN — no return/ledger/engine change; the #919 false-positive guards are reused
+  verbatim; F&O lake stays REFERENCE_ONLY; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change. NEW
+  `test_silent_vanish_underlying_warns_in_production_pipeline_pull` (a LIVE pipeline-wired pull over an all-empty NIFTY
+  chain emits EXACTLY one `pull.underlying_all_empty` naming NIFTY) + 4 `emit_underlying_all_empty` unit tests;
+  `option_ingest.py` + `historical_pull.py` stay 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright` clean.
+  Prior: **DEC-UNIVERSE-PULL-DATERANGE-001, MIGRATION.md #1007** —
   the `/universe` "Pull · full pipeline" section RE-GAINS a from/to spot DATE PICKER, now PROPERLY WIRED through the
   `/pull-pipeline` route (resolving the honesty concern of DEC-UNIVERSE-PULL-CONSOLIDATE-001 #920, which had removed the
   picker BECAUSE the route ignored from/to). The backend already supported explicit dates everywhere else
