@@ -312,6 +312,39 @@ class TestWriterErrors:
             writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
         assert exc_info.value.reason == "out_of_memory"
 
+    def test_merge_loop_oom_halts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A MemoryError INSIDE the merge dict-build / sort body → LakeWriteHalt, not a raw crash.
+
+        DEC-LAKE-MERGE-OOM-HALT-001: the read + render were already guarded, but the in-Python
+        merge loop + the final ``sorted()`` (which materialise a potentially-large merged dict)
+        were NOT — an OOM there crashed the whole pull raw. The loop is now wrapped in
+        ``lake_write_guard``, so an OOM in the SAME-timestamp value-equality check (called per
+        bar in the loop) maps to a graceful ``LakeWriteHalt("out_of_memory")``.
+        """
+        pytest.importorskip("polars")
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        # First write creates the partition; the merge read SUCCEEDS on the second write.
+        writer.write(bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords)
+
+        def _oom(*_a: object, **_k: object) -> object:
+            raise MemoryError("merge loop OOM")
+
+        # Force the OOM INSIDE the merge loop (the per-bar same-timestamp value check), AFTER
+        # the guarded read — re-pulling timestamp 0 with a different value reaches that branch.
+        monkeypatch.setattr(writer, "_bar_values_equal", _oom)
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            writer.write(bars=[_bar(0, open_="101", high="111", low="91", close="106")], **coords)
+        assert exc_info.value.reason == "out_of_memory"
+
     def test_render_bytes_raises_on_missing_polars(self, tmp_path: Path) -> None:
         """_render_bytes raises WriterError with install hint when polars is absent."""
         import sys

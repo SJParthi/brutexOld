@@ -28,6 +28,7 @@ from brutex.adapters.ingest_common import (
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
     DateWindow,
     clamp_window_end,
+    drop_bars_after,
     fetch_until_nonempty,
     now_ist,
     plan_windows,
@@ -115,6 +116,47 @@ class TestClampWindowEnd:
         """From 15:30 IST the full session exists → intraday bound allows today + 1."""
         ist = datetime(2026, 6, 12, 16, 0, tzinfo=UTC)  # after 15:30
         assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
+
+
+class TestDropBarsAfter:
+    """DEC-CANDLE-DROP-FUTURE-BAR-001: drop a vendor bar timestamped STRICTLY AFTER the
+    clamped window end (a future phantom) while KEEPING an on-boundary bar (behaviour-preserving)."""
+
+    @staticmethod
+    def _bar(d: date, hour_utc: int = 4) -> CandleBar:
+        # 04:00 UTC = 09:30 IST (in-session) on the given IST trading date.
+        return CandleBar(
+            timestamp=datetime(d.year, d.month, d.day, hour_utc, 0, tzinfo=UTC),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("90"),
+            close=Decimal("105"),
+            volume=1,
+            open_interest=None,
+        )
+
+    def test_keeps_bars_on_or_before_the_window_end(self) -> None:
+        end = date(2024, 1, 10)
+        bars = [self._bar(date(2024, 1, 8)), self._bar(date(2024, 1, 9)), self._bar(end)]
+        kept = drop_bars_after(bars, end)
+        assert kept == bars  # boundary bar (on the end date) is KEPT — byte-unchanged
+
+    def test_drops_a_future_phantom_bar(self) -> None:
+        end = date(2024, 1, 10)
+        future = self._bar(date(2024, 1, 15))  # a clock-skew / out-of-window phantom
+        kept = drop_bars_after([self._bar(date(2024, 1, 9)), future], end)
+        assert future not in kept
+        assert len(kept) == 1
+
+    def test_empty_input_is_empty(self) -> None:
+        assert drop_bars_after([], date(2024, 1, 10)) == []
+
+    def test_uses_ist_trading_date_not_utc_date(self) -> None:
+        # 20:00 UTC on the end date = 01:30 IST the NEXT day → IST date is end+1 → DROPPED.
+        end = date(2024, 1, 10)
+        late_utc = self._bar(end, hour_utc=20)  # 20:00 UTC Jan-10 = 01:30 IST Jan-11
+        kept = drop_bars_after([late_utc], end)
+        assert kept == []  # the IST date (Jan-11) is strictly after the end
 
 
 class TestNowIst:

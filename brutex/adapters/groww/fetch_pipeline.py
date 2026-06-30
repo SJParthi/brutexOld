@@ -118,6 +118,38 @@ from brutex.data.errors import LakeWriteHalt
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
 
+
+def _is_pool_isolatable(exc: BaseException) -> bool:
+    """True iff *exc* is a PER-SYMBOL-quarantinable error that must NOT trip the pool-wide stop.
+
+    DEC-FETCH-CORRUPT-PARTITION-ISOLATE-001. Mirrors the synchronous spine's quarantine
+    carve-out (``run_ingest._GLOBAL_STOP_ERRORS``): a :class:`~brutex.models.BruteXError`
+    is per-symbol-quarantinable (isolate to its own series, re-pull next pull) UNLESS it is
+    a pull-wide STOP — a :class:`~brutex.data.errors.LakeWriteHalt` (disk-full / OOM) or a
+    quota stop (:class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` /
+    ``QuotaInvariantError``), which fail every remaining window identically and so MUST halt
+    the whole pull. A non-``BruteXError`` (a genuine code bug) is NEVER isolatable — it
+    trips the pool so the bug is surfaced, never silently swallowed.
+
+    The heavy ``quota_tracker`` import is LAZY (inside the function) so this module stays
+    stdlib-light at import (the async-pipeline import-cost contract). The
+    ``run_ingest._GLOBAL_STOP_ERRORS`` tuple cannot be imported here directly (``run_ingest``
+    imports THIS module — a cycle), so the global-stop classes are re-listed; a unit test
+    pins this list against ``run_ingest._GLOBAL_STOP_ERRORS`` so the two can never drift.
+    """
+    from brutex.models import BruteXError
+
+    if not isinstance(exc, BruteXError):
+        return False  # a genuine code bug → trip the pool (surface it)
+    if isinstance(exc, LakeWriteHalt):
+        return False  # disk-full / OOM → pull-wide halt
+    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+    # A quota stop → pull-wide halt; anything else is a per-symbol-quarantinable
+    # BruteXError (e.g. a corrupt-partition WriterError) → isolate, do NOT trip the pool.
+    return not isinstance(exc, (DailyQuotaExceeded, QuotaInvariantError))
+
+
 __all__ = [
     "FETCH_PIPELINE_ENV",
     "FETCH_PIPELINE_SIZE_ENV",
@@ -807,7 +839,30 @@ class FetchPipeline:
                 # Narrow to ``Exception`` (NOT ``BaseException``) so a ``KeyboardInterrupt`` /
                 # ``SystemExit`` is NOT captured as a recoverable failure — it propagates out of
                 # the consumer so an interpreter shutdown / operator interrupt is honoured.
-                self._trip(exc)
+                #
+                # PER-SYMBOL ISOLATION (DEC-FETCH-CORRUPT-PARTITION-ISOLATE-001): a
+                # per-symbol-quarantinable ``BruteXError`` — e.g. a ``WriterError`` from a single
+                # CORRUPT existing Parquet partition (``ParquetWriter._read_existing_bars``) — must
+                # NOT trip the POOL-wide stop. In SYNC mode such an error is isolated to ONE symbol
+                # by the outer ``run_groww_*_ingest`` quarantine (it is NOT in
+                # ``_GLOBAL_STOP_ERRORS``); without this branch the async consumer's generic
+                # ``except`` routed it to ``_trip`` → ``_stopped`` → every symbol/contract after it
+                # quarantined for the rest of the pull (a severe availability regression for a
+                # single bad file). We mirror the sync isolation: a quarantinable error advances
+                # progress (so the watchdog re-arms) but does NOT set ``_stopped``. The window's
+                # ledger row was NOT recorded (the tail raised before ``ledger.record``), so it
+                # stays UNSETTLED → re-fetched next pull (idempotent keep-first; a re-pull that
+                # re-reads the still-corrupt file re-isolates the SAME one window). A
+                # ``LakeWriteHalt`` / quota (in ``_GLOBAL_STOP_ERRORS``) and any non-``BruteXError``
+                # genuine code bug STILL trip the pool, exactly as before.
+                if _is_pool_isolatable(exc):
+                    _LOG.warning(
+                        "fetch_pipeline.window_quarantined",
+                        error_type=type(exc).__name__,
+                        shard_key=tail.shard_key,
+                    )
+                else:
+                    self._trip(exc)
             finally:
                 # Advance progress on EVERY processed window (success or captured failure) so the
                 # stall watchdog re-arms — a steadily-failing-but-progressing pipeline is not stuck.

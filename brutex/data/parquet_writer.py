@@ -534,23 +534,34 @@ class ParquetWriter:
         added = 0
         rewrite = False
         conflicts: list[BarConflict] = []
-        for bar in new_bars:
-            prev = merged.get(bar.timestamp)
-            if prev is None:
-                merged[bar.timestamp] = bar
-                added += 1
-            elif not self._bar_values_equal(prev, bar):
-                if merge_mode == "latest-wins":
-                    # Overwrite the stored bar with the corrected re-derivation;
-                    # no conflict recorded (an intentional latest-wins restate).
+        # Wrap the in-Python merge-dict build + the final ``sorted()`` in ``lake_write_guard``
+        # (DEC-LAKE-MERGE-OOM-HALT-001): a deep month partition merged with a large incoming
+        # chunk grows ``merged`` (and materialises a sorted copy) in memory, so a ``MemoryError``
+        # HERE — between the already-guarded read (`_read_existing_bytes`) and the already-guarded
+        # render/write (`_render_bytes`/`_atomic_write`) — must map to a `LakeWriteHalt(
+        # "out_of_memory")` pull-wide stop (a member of both spines' `_GLOBAL_STOP_ERRORS`)
+        # instead of crashing the whole pull RAW as an "escaped code bug". This closes the ONE
+        # unguarded OOM site in the merge path; every other allocation here is already guarded
+        # (DEC-LAKE-WRITE-HALT-001 — "every allocation/failure site is guarded").
+        with lake_write_guard():
+            for bar in new_bars:
+                prev = merged.get(bar.timestamp)
+                if prev is None:
                     merged[bar.timestamp] = bar
-                    rewrite = True
-                else:
-                    # Keep the STORED bar (keep-first — prev stays in `merged`).
-                    # Record the discrepancy; do NOT increment `added`.
-                    conflicts.append(BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar))
-
-        merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
+                    added += 1
+                elif not self._bar_values_equal(prev, bar):
+                    if merge_mode == "latest-wins":
+                        # Overwrite the stored bar with the corrected re-derivation;
+                        # no conflict recorded (an intentional latest-wins restate).
+                        merged[bar.timestamp] = bar
+                        rewrite = True
+                    else:
+                        # Keep the STORED bar (keep-first — prev stays in `merged`).
+                        # Record the discrepancy; do NOT increment `added`.
+                        conflicts.append(
+                            BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar)
+                        )
+            merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
         if added == 0 and not rewrite:
             # Every incoming bar is already stored identically or is a conflict
             # (kept-first) → no rewrite needed; the stored file is unchanged. Reuse the

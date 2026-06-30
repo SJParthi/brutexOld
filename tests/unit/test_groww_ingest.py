@@ -346,6 +346,23 @@ class TestIngestSpot:
         assert report.bars_appended == 0  # dropped by the session filter
         assert sink.appends == [0]
 
+    def test_drops_future_dated_phantom_bar(self) -> None:
+        # DEC-CANDLE-DROP-FUTURE-BAR-001: a vendor bar dated AFTER the window end (a clock-skew /
+        # out-of-window phantom) is dropped before the lake write, never writing a future partition.
+        # 2021-01-25 09:30 IST is IN-SESSION (survives the session filter) but PAST the Jan-20 end.
+        future_ts = datetime(2021, 1, 25, 4, 5, tzinfo=UTC)
+        sink = _Sink()
+        report = ingest_spot(
+            _Adapter(bars=[_bar(_IN_SESSION_TS), _bar(future_ts)]),  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 20),  # 1 window; the Jan-25 bar is past the end
+        )
+        assert report.bars_appended == 1  # only the in-window Jan-4 bar; the Jan-25 phantom dropped
+        assert sink.appends == [1]
+
     def test_intraday_mixed_session_bars_filtered(self) -> None:
         # One in-session + one out-of-session bar → only the in-session bar kept.
         sink = _Sink()
