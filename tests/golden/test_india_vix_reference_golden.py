@@ -5,17 +5,22 @@ DEC-PHASE2-CORPORA-001 (``tests/golden/fixtures/README.md`` corpus #4 —
 
 India VIX is **REFERENCE ONLY** (CLAUDE.md §1/§3): it is fetched + stored and
 stamped as ``vix_at_entry`` / ``vix_at_exit`` on every trade, but is **NEVER**
-part of the brute-force pattern combinations or the 52-condition vocabulary.
-This corpus locks both halves of that contract against REAL components:
+part of the brute-force pattern combinations or the 60-condition vocabulary.
+This corpus locks all three halves of that contract against REAL components:
 
 * **reference data path** — VIX one-week 1-minute bars resample through the
   canonical :func:`brutex.data.tf_resampler.resample_1m_to_tf` to the daily
   (1d) timeframe exactly like any spot series (the lake stores the reference
   series too). The two daily bars are hand-derived OHLC aggregations.
+* **per-trade stamp (DEC-VIX-TRADE-STAMP-001)** — a constructed trade run
+  through the real
+  :class:`~brutex.engine.reference_series.TradeReferenceStamper` over this VIX
+  week carries the ACTUAL VIX close at its entry + exit instants, and ``None``
+  (never a fabricated number) when no VIX bar exists at that timestamp.
 * **no signal bits** — the universe scope filters
   (:mod:`brutex.universe`) classify INDIA VIX as ``reference_only`` and
   **exclude** it from the brute-force engine, so no VIX bar is ever fed to the
-  52-condition evaluator. The ``is_reference_only`` / ``is_in_brute_force_scope``
+  60-condition evaluator. The ``is_reference_only`` / ``is_in_brute_force_scope``
   mutual-exclusivity is the engine-isolation guarantee
   (DEC-ENGINE-ISOLATION-INVARIANT-001).
 
@@ -28,13 +33,16 @@ Hand-derived daily aggregation (left-closed, anchored at the 09:15 IST open):
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import polars as pl
+from brutex.data.models import CandleBar
 from brutex.data.tf_resampler import resample_1m_to_tf
 from brutex.data.timeframes import DAILY_TF_MINUTES
+from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.strategies.types import Side
 from brutex.universe import (
     BRUTE_FORCE_INDEX_UNDERLYINGS,
     BRUTE_FORCE_INDICES,
@@ -147,3 +155,78 @@ def test_reference_only_and_brute_force_partitions_are_disjoint() -> None:
     assert (Exchange.NSE, "INDIAVIX") not in BRUTE_FORCE_INDEX_UNDERLYINGS
     assert {s.underlying_symbol for s in REFERENCE_ONLY_INDICES} == {"INDIAVIX"}
     assert {s.underlying_symbol for s in BRUTE_FORCE_INDICES} == {"NIFTY", "BANKNIFTY", "SENSEX"}
+
+
+def _vix_candlebars() -> list[CandleBar]:
+    """The VIX week as tz-aware :class:`CandleBar` reference bars (DEC-VIX-TRADE-STAMP-001)."""
+    bars: list[CandleBar] = []
+    for base, day in ((_DAY1_OPEN_UTC, _DAY1_BARS), (_DAY2_OPEN_UTC, _DAY2_BARS)):
+        for j, (o, h, lo, c) in enumerate(day):
+            bars.append(
+                CandleBar(
+                    timestamp=(base + timedelta(minutes=j)).replace(tzinfo=UTC),
+                    open=Decimal(str(o)),
+                    high=Decimal(str(h)),
+                    low=Decimal(str(lo)),
+                    close=Decimal(str(c)),
+                    volume=0,
+                    open_interest=None,
+                )
+            )
+    return bars
+
+
+def test_vix_stamps_real_close_on_a_constructed_trade() -> None:
+    """A trade over this VIX week is stamped with the ACTUAL VIX close at entry+exit.
+
+    Entry @ the day-1 first bar (close 15.10), exit @ the day-1 last bar
+    (close 15.45) — the stamp must equal those hand-listed closes exactly
+    (full Decimal precision, never money-rounded).
+    """
+    stamper = TradeReferenceStamper.from_vix_bars(_vix_candlebars())
+    entry_ts = _DAY1_OPEN_UTC.replace(tzinfo=UTC)
+    exit_ts = (_DAY1_OPEN_UTC + timedelta(minutes=3)).replace(tzinfo=UTC)
+    vix_entry, vix_exit = stamper.stamp(entry_ts, exit_ts)
+    assert vix_entry == Decimal("15.10")  # _DAY1_BARS[0] close
+    assert vix_exit == Decimal("15.45")  # _DAY1_BARS[3] close
+
+
+def test_vix_stamp_is_none_when_no_bar_at_instant() -> None:
+    """A trade whose entry/exit instant has no VIX bar stamps ``None`` (no hallucination)."""
+    stamper = TradeReferenceStamper.from_vix_bars(_vix_candlebars())
+    # An instant inside the gap between the two trading days has no VIX bar.
+    off_grid = (_DAY1_OPEN_UTC + timedelta(hours=2)).replace(tzinfo=UTC)
+    vix_entry, vix_exit = stamper.stamp(off_grid, off_grid)
+    assert vix_entry is None
+    assert vix_exit is None
+
+
+def test_constructed_closed_trade_carries_vix_stamp() -> None:
+    """A real ``simulate_trades`` round-trip over this VIX week carries the stamp."""
+    from brutex.engine.trade_sim import simulate_trades
+
+    # A spot index feed aligned to the VIX day-1 grid: signal @bar0 → enter
+    # @bar1 (VIX 15.25) → end-of-data exit @bar2 close (VIX 15.35).
+    def _spot(minute: int, close: str) -> CandleBar:
+        value = Decimal(close)
+        return CandleBar(
+            timestamp=(_DAY1_OPEN_UTC + timedelta(minutes=minute)).replace(tzinfo=UTC),
+            open=value,
+            high=value,
+            low=value,
+            close=value,
+            volume=0,
+            open_interest=None,
+        )
+
+    spot = [_spot(0, "21000"), _spot(1, "21010"), _spot(2, "21020")]
+    trades = simulate_trades(
+        spot,
+        [True, False, False],
+        direction=Side.BUY,
+        tf_minutes=1,
+        reference_stamper=TradeReferenceStamper.from_vix_bars(_vix_candlebars()),
+    )
+    assert len(trades) == 1
+    assert trades[0].vix_at_entry == Decimal("15.25")  # _DAY1_BARS[1] close
+    assert trades[0].vix_at_exit == Decimal("15.35")  # _DAY1_BARS[2] close
