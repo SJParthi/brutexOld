@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-read-o1-audit` (**DEC-LAKE-READ-O1-AUDIT-001, MIGRATION.md #1017** —
+- **Active branch:** `claude/lake-read-o1-audit` (**DEC-LAKE-READ-O1-AUDIT-001, MIGRATION.md #1020** —
   a full audit of every BruteX DB-FETCH / lake-READ entry point for O(1)/O(page) latency. The verdict: the prior
   O(1)/O(page) PRs (#860/#863/#864/#867/#893/#895/#896/#933) have ALREADY bounded essentially every hot read — the
   engine bar stream is O(1)/bar (catalog-window-indexed `Catalog.get_bars`), `LakeOptionBarSource.load_pair` is O(1)/leg
