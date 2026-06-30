@@ -131,8 +131,9 @@ _PRICE_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 #: ``Decimal(str(x))`` never performs — which flips the 2dp answer for long-tail floats
 #: near a ``.xx5`` boundary (e.g. ``0.00499999999`` → wrong ``0.01`` vs legacy ``0.00``).
 #: That is exactly the class of value a legacy raw-float partition carries, so the full
-#: scale is load-bearing, not cosmetic. A value so large its repr would exceed precision
-#: 38 (``|x| ≳ 1e21``, unreachable for a bar price) raises a polars error, caught by the
+#: scale is load-bearing, not cosmetic. A value so large that ``x * 100`` exhausts the
+#: precision-38 headroom (``|x| ≳ 1e19`` — empirically the cast overflows between 1e18 and
+#: 1e19, still ~10^15x above any tradable price) raises a polars error, caught by the
 #: per-row fallback in :meth:`ParquetWriter._read_existing_bars` (correctness over speed).
 _SNAP_PARSE_SCALE: Final[int] = 17
 
@@ -185,10 +186,10 @@ def _snap_price_expr(column: str) -> pl.Expr:
       difference. UNREACHABLE: a stored bar price is never negative (the vendor sends
       positive OHLC; nothing writes a negative price). The numeric ``Decimal``/``float``
       values still compare EQUAL.
-    * **Cast overflow.** A value whose repr would exceed ``precision=38``
-      (``|x| ≳ 1e21``) raises a polars error; :meth:`ParquetWriter._read_existing_bars`
-      catches it and falls back to the exact per-row ``Decimal(str(x))`` reconstruction.
-      UNREACHABLE for any tradable price.
+    * **Cast overflow.** A value whose ``x * 100`` exhausts the ``precision=38`` headroom
+      (``|x| ≳ 1e19`` — empirically between 1e18 and 1e19) raises a polars error;
+      :meth:`ParquetWriter._read_existing_bars` catches it and falls back to the exact
+      per-row ``Decimal(str(x))`` reconstruction. UNREACHABLE for any tradable price.
     """
     import polars as pl
 
@@ -658,8 +659,8 @@ class ParquetWriter:
         path is gone.
 
         Correctness fallback: the vectorized snap is BYTE-EXACT for every realistic price
-        (see :func:`_snap_price_expr`), but a value whose ``str`` repr would overflow the
-        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e21``, unreachable for a bar
+        (see :func:`_snap_price_expr`), but a value whose ``x * 100`` overflows the
+        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e19``, unreachable for a bar
         price) raises a ``PolarsError`` from the snap. That is NOT corruption, so it is
         NOT quarantined — it falls back to the exact per-row ``Decimal(str(x))`` +
         ``_tick_round`` reconstruction (:meth:`_reconstruct_bars_per_row`), the proven
@@ -737,8 +738,8 @@ class ParquetWriter:
         The proven legacy 2dp-snap path (DEC-WRITER-COLUMNAR-4A-001), kept as the
         CORRECTNESS fallback for the vectorized :func:`_snap_price_expr`
         (DEC-LAKE-WRITE-VECTORIZE-001): it is invoked ONLY when the columnar snap raises
-        (a value whose ``str`` repr overflows the intermediate ``Decimal(precision=38)``,
-        ``|x| ≳ 1e21`` — unreachable for a real price). Column-wise ``Series.to_list``
+        (a value whose ``x * 100`` overflows the intermediate ``Decimal(precision=38)``,
+        ``|x| ≳ 1e19`` — unreachable for a real price). Column-wise ``Series.to_list``
         extraction (one list per column, no per-row dict) keeps it allocation-lean.
 
         A genuinely-corrupt NON-FINITE (inf/NaN) price reaches this path too: building a

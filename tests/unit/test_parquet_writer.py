@@ -338,13 +338,13 @@ class TestCorruptExistingPartition:
     def test_overflowing_price_falls_back_to_per_row_and_merges(self, tmp_path: Path) -> None:
         """A finite price whose repr overflows the snap's Decimal → exact per-row fallback.
 
-        DEC-LAKE-WRITE-VECTORIZE-001: a value so large its ``str`` repr exceeds the
-        intermediate ``Decimal(precision=38)`` (``|x| >= 1e22``, unreachable for a real
-        bar price but a valid finite ``CandleBar``) makes the columnar snap raise a
-        ``PolarsError``; the reader must FALL BACK to the exact per-row reconstruction
-        (NOT quarantine it) and still merge a new bar into the partition, with the stored
-        large value preserved on the 2dp grid. This pins the correctness-over-speed
-        fallback branch.
+        DEC-LAKE-WRITE-VECTORIZE-001: a value so large its ``x * 100`` overflows the
+        intermediate ``Decimal(precision=38)`` (overflow is empirically between 1e18 and
+        1e19; this test uses 1e22, well past it — unreachable for a real bar price but a
+        valid finite ``CandleBar``) makes the columnar snap raise a ``PolarsError``; the
+        reader must FALL BACK to the exact per-row reconstruction (NOT quarantine it) and
+        still merge a new bar into the partition, with the stored large value preserved on
+        the 2dp grid. This pins the correctness-over-speed fallback branch.
         """
         import polars as pl
         from brutex.data.parquet_writer import ParquetWriter
