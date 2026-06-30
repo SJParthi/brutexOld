@@ -24,9 +24,11 @@ from brutex.dashboard.movers_snapshot import (
     build_snapshot_payload,
     compute_snapshot,
     interval_minutes,
+    normalize_min_volume,
     parse_snapshot_date,
     pending_asset_payload,
     session_bar_times,
+    value_meets_volume_floor,
 )
 from brutex.data.models import CandleBar
 
@@ -362,3 +364,89 @@ def test_pending_asset_payload_escapes_reflected_asset() -> None:
     )
     assert "&amp;" in payload2["note"]
     assert "&quot;" in payload2["note"] or "&#x27;" in payload2["note"]
+
+
+# ── DEC-MOVERS-MIN-VOLUME-001: the COMMON opt-in Top-Volume floor (spot) ──
+
+
+class TestNormalizeMinVolume:
+    def test_none_is_zero(self) -> None:
+        assert normalize_min_volume(None) == 0
+
+    def test_negative_clamps_to_zero(self) -> None:
+        assert normalize_min_volume(-7) == 0
+
+    def test_positive_passes_through(self) -> None:
+        assert normalize_min_volume(500) == 500
+
+    def test_zero_is_zero(self) -> None:
+        assert normalize_min_volume(0) == 0
+
+
+class TestValueMeetsVolumeFloor:
+    def test_zero_volume_excluded_at_default_floor(self) -> None:
+        # Byte-identical to the prior `volume > 0` filter when min_volume == 0.
+        assert value_meets_volume_floor(0, 0) is False
+        assert value_meets_volume_floor(1, 0) is True
+
+    def test_below_floor_excluded(self) -> None:
+        assert value_meets_volume_floor(499, 500) is False
+
+    def test_at_or_above_floor_included(self) -> None:
+        assert value_meets_volume_floor(500, 500) is True
+        assert value_meets_volume_floor(501, 500) is True
+
+    def test_zero_volume_excluded_even_when_floor_is_zero(self) -> None:
+        assert value_meets_volume_floor(0, 0) is False
+
+
+class TestSpotPayloadMinVolume:
+    def test_default_floor_byte_identical(self) -> None:
+        snaps = [
+            _snap(_NIFTY, pct="1", volume=0, value_paisa=10),
+            _snap(_BANK, pct="1", volume=300, value_paisa=20),
+        ]
+        # min_volume omitted == min_volume=0 == prior `volume > 0` behaviour.
+        base = build_snapshot_payload(
+            snaps, interval="1day", date="2024-06-13", time=None, top_n=10, skipped=0
+        )
+        zeroed = build_snapshot_payload(
+            snaps, interval="1day", date="2024-06-13", time=None, top_n=10, skipped=0, min_volume=0
+        )
+        assert [r["symbol"] for r in base["volume"]] == ["BANKNIFTY"]
+        assert base["volume"] == zeroed["volume"]
+        assert base["min_volume"] == 0
+        assert "Min volume" not in base["note"]
+
+    def test_positive_floor_drops_thin_and_notes_it(self) -> None:
+        snaps = [
+            _snap(_NIFTY, pct="1", volume=100, value_paisa=10),
+            _snap(_BANK, pct="1", volume=5000, value_paisa=20),
+        ]
+        payload = build_snapshot_payload(
+            snaps,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=1000,
+        )
+        assert [r["symbol"] for r in payload["volume"]] == ["BANKNIFTY"]
+        assert payload["min_volume"] == 1000
+        assert "Min volume ≥ 1,000." in payload["note"]
+        # The price rankings are NOT affected by the volume floor.
+        assert len(payload["price_gainers"]) == 2
+
+    def test_negative_floor_normalises_in_payload(self) -> None:
+        snaps = [_snap(_NIFTY, pct="1", volume=300, value_paisa=10)]
+        payload = build_snapshot_payload(
+            snaps,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=-99,
+        )
+        assert payload["min_volume"] == 0

@@ -595,6 +595,41 @@ class TestMoversApi:
             assert resp.status_code == 200, f"{interval} must not 422"
             assert resp.json()["interval"] == interval
 
+    def test_min_volume_floor_filters_spot_volume_ranking(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-MIN-VOLUME-001: NIFTY 1day volume 700, BANKNIFTY 250 → a floor of
+        # 400 keeps only NIFTY in the Top Volume ranking; price rankings are untouched.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "spot",
+                "interval": "1day",
+                "date": "2024-06-13",
+                "min_volume": 400,
+            },
+        ).json()
+        assert body["min_volume"] == 400
+        assert [r["symbol"] for r in body["volume"]] == ["NIFTY"]
+        assert "Min volume ≥ 400." in body["note"]
+        # The price rankings still rank BOTH instruments.
+        assert len(body["price_gainers"]) + len(body["price_losers"]) == 2
+
+    def test_min_volume_default_zero_byte_identical_spot(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "spot", "interval": "1day", "date": "2024-06-13"},
+        ).json()
+        assert body["min_volume"] == 0
+        assert {r["symbol"] for r in body["volume"]} == {"NIFTY", "BANKNIFTY"}
+        assert "Min volume" not in body["note"]
+
 
 class TestMoversPage:
     def test_movers_page_renders(self, store: InstrumentStore) -> None:
