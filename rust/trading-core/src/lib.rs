@@ -37,6 +37,7 @@
 pub mod bits;
 pub mod evaluator;
 pub mod indicators;
+pub mod spec;
 
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 pub use indicators::ema::{EmaState, compute_ema, ema_alpha, ema_seed, ema_step};
@@ -47,6 +48,7 @@ pub use indicators::metadata::{
 };
 pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
 pub use indicators::vwap::VwapState;
+pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 
 #[cfg(feature = "python")]
 mod python;

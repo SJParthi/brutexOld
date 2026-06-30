@@ -92,6 +92,7 @@ from brutex.adapters.groww.option_ingest import (
     emit_underlying_all_empty,
     run_groww_option_ingest,
 )
+from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     UntilCleanRound,
@@ -657,6 +658,7 @@ def _run_phase(
     until_clean: bool,
     until_clean_rounds: int,
     contract_windows: ContractWindows | None,
+    empty_retry_by_symbol: dict[str, int] | None,
     run_parallel: RunParallel | None,
     write_pool: WriteConsumer | None,
     fetch_pipeline: FetchPipeline | None,
@@ -727,6 +729,7 @@ def _run_phase(
                 on_progress=_progress,
                 market=market,
                 contract_windows=contract_windows,
+                empty_retry_by_symbol=empty_retry_by_symbol,
                 run_parallel=run_parallel,
                 capture_hook_factory=capture_hook_factory,
                 write_pool=write_pool,
@@ -1141,6 +1144,16 @@ def pull_contract_candles(
         rebuilt=rebuilt, explicit_dates=explicit_dates, start=start, end=end
     )
 
+    # Per-contract EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001): a confirmed-deep
+    # far-OTM strike (outside ITS (underlying, expiry) chain's median ± band — keyed PER
+    # underlying so a mixed all-cached pull never pools two underlyings sharing one monthly
+    # expiry into a bogus median) gets a REDUCED empty-retry budget, so a dead strike costs ONE
+    # fetch to confirm empty instead of three — driving fetches-per-window toward ~1.0. NO data
+    # is lost (the first non-empty fetch wins). The budget is sparse (only the deep strikes), so
+    # an in-band option / every future keeps the full budget. Pure + O(chain), no network/lake I/O.
+    empty_retry_budget = build_empty_retry_budget(contract for _row, contract in rebuilt)
+    empty_retry_by_symbol = dict(empty_retry_budget.by_symbol) or None
+
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
     try:
         minute = _run_phase(
@@ -1162,6 +1175,7 @@ def pull_contract_candles(
             until_clean=until_clean,
             until_clean_rounds=until_clean_rounds,
             contract_windows=minute_windows,
+            empty_retry_by_symbol=empty_retry_by_symbol,
             run_parallel=run_parallel,
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
