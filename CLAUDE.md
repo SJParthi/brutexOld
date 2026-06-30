@@ -230,7 +230,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fetch-per-window-guarantee` (**DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026** —
+- **Active branch:** `claude/fetch-parser-hardening` (**DEC-FETCH-PARSER-HARDENING-001, MIGRATION.md #1034** — PR-B of
+  the triaged fetch-path edge-case sweep (sibling of PR-A DEC-INTERIOR-GAP-DETECT-001): three CONFIRMED non-crash
+  fetch-path resilience gaps closed. HONEST SEVERITY: LOW-probability vendor-corruption / resilience guards — NONE is a
+  crash or a HIGH bug (the alleged non-`Mapping`-payload HIGH was DISPROVEN against the real `growwapi` SDK). SCOPE NOTE
+  (Golden Rule #2): the original plan's #5 (negative-price reject) + #8 (nan/inf loud-reject) were DROPPED because main
+  merged DEC-ADVERSARIAL-HARDENING-001 (#1029, PR #993) FIRST under the authoritative OPPOSITE philosophy (negative price
+  treated like zero → graceful SKIP via `has_no_price`; `to_price` already rejects non-finite) — so they are SUPERSEDED;
+  `candle_fields.py`/`models.py`/`parser.py` are reset to main verbatim, never re-implemented or fought. THREE kept fixes:
+  (1) future-timestamp drop (#9) — NEW pure `drop_bars_after(bars, window_end)` in `adapters/ingest_common.py` drops a bar
+  whose IST date is STRICTLY AFTER the window end (on-boundary KEPT), wired into BOTH the spot + F&O tails; (2) lake-OOM on
+  the MERGE write (#4) — `parquet_writer._merge_write`'s read-modify-write body wrapped in the COMMON `lake_write_guard()`
+  so an ENOSPC/OOM during the MERGE (not just the FRESH render of #885) maps to a graceful `LakeWriteHalt`, a non-ENOSPC
+  OSError NOT mis-escalated; (3) corrupt-partition async isolation (#10) — NEW `fetch_pipeline._is_pool_isolatable(exc)` +
+  `_process_one` QUARANTINES a per-symbol `BruteXError` (e.g. a `WriterError` from one corrupt partition) → logs
+  `fetch_pipeline.window_quarantined` + advances WITHOUT tripping the pool, while a global-stop (`LakeWriteHalt`/quota) or a
+  non-`BruteXError` genuine code bug STILL trips (mirrors the sync spine's per-symbol quarantine; a unit test pins the
+  predicate against `run_ingest._GLOBAL_STOP_ERRORS` so they can't drift). HONEST envelope: no data lost (a quarantined
+  window's ledger row stays unsettled → re-pulled, keep-first idempotent sink); ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX),
+  F&O lake REFERENCE_ONLY, no scope/vocab/rate change; all 5 touched source files at 100% line+branch; ruff/ruff-format/
+  `mypy --strict`/`pyright` clean. Also de-flaked the pre-existing main hung-write test (widened the 0.2 s write-deadline +
+  1.0 s drain-join proportionally, same fix as PR-A). NEW `TestDropBarsAfter` + future-bar-drop tests (both spines) +
+  `test_merge_loop_oom_halts` + `TestIsPoolIsolatable` + the end-to-end quarantine integration test. Prior merged: **DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026** —
   adaptive strike-chain bounding drives the F&O option-pull fetches-per-window from a MEASURED `2.54` toward `~1.2`,
   making the operator's worst-case-`3 r/s` 8-hour pull a MEASURED CI GATE — with NO data lost. THE ARITHMETIC: at the AIMD
   soft-floor `3 r/s`, `3×3600×8h = 86,400` fetches are available in 8h; a production pull spent `2.54` fetches per
