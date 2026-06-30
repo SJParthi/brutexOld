@@ -1093,11 +1093,21 @@ class TestPullPopulatesLedger:
     def test_live_pull_writes_success_rows(self, tmp_path: Path) -> None:
         from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 
+        # Scope to a narrow 1-day window (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001):
+        # the production pull now OPTS IN to the data-completeness re-pull demotion, and the
+        # SyntheticSpotAdapter returns only a few bars on each window's FIRST day — so a WIDE
+        # 1-minute window would (correctly) classify as truncated and demote to FAILED. The
+        # ``1day`` interval is never demotable (a derived daily window), and a narrow range keeps
+        # the synthetic windows complete, so this pins the clean SUCCESS-ledger intent without the
+        # synthetic-truncation artifact (mirrors TestPullAllSpotDecouple).
         report = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-31",
+            intervals=("1day",),
             adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
         )
         assert report.dry_run is False
@@ -1509,11 +1519,19 @@ class TestPullAllSpotLedgerSync:
 
     def test_final_sync_reports_complete_ledger(self, tmp_path: Path) -> None:
         pushes: list[tuple[int, int, int, int, str]] = []
+        # Scope to a narrow 1-day window (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001):
+        # the production pull opts in to the completeness re-pull demotion, and the synthetic
+        # adapter's first-day-only bars would (correctly) classify a WIDE 1-minute window as
+        # truncated → FAILED. ``1day`` is never demotable + a narrow range keeps windows
+        # complete, so this pins the "completed == total, failed == 0" intent cleanly.
         report = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-31",
+            intervals=("1day",),
             adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
             on_ledger_sync=lambda c, t, b, f, cur: pushes.append((c, t, b, f, cur)),
         )

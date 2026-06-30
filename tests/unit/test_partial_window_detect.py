@@ -396,3 +396,50 @@ class TestObservePartialWindow:
         )
         assert [e for e in log.events if e[0] == SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT]
         assert [e for e in log.events if e[0] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
+
+    def test_returns_truncation_verdict_for_caller_demotion(self) -> None:
+        # DEC-PARTIAL-WINDOW-REPULL-001: the helper now RETURNS the verdict so a caller can
+        # demote a truncated SUCCESS window to a re-pullable ledger status (beyond the WARNING).
+        log = _Logger()
+        verdict = observe_partial_window(
+            log,
+            last_bar_ts=_ts(date(2024, 1, 8)),
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=None,
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            pull_id="pid-1",
+        )
+        assert verdict is not None and verdict.is_suspected_partial()
+
+    def test_returns_not_truncated_verdict_for_complete_window(self) -> None:
+        log = _Logger()
+        verdict = observe_partial_window(
+            log,
+            last_bar_ts=_ts(date(2024, 2, 29)),
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=None,
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            pull_id="pid-1",
+        )
+        assert verdict is not None and not verdict.is_suspected_partial()
+
+    def test_returns_none_when_diagnostic_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(**_k: object) -> object:
+            raise RuntimeError("classify blew up")
+
+        monkeypatch.setattr(pwd, "classify_partial_window", _boom)
+        verdict = observe_partial_window(
+            _Logger(),
+            last_bar_ts=_ts(date(2024, 1, 8)),
+            window_end=date(2024, 3, 1),
+            now=_NOW,
+            expiry=None,
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            pull_id="pid-1",
+        )
+        assert verdict is None  # a guarded failure never demotes
