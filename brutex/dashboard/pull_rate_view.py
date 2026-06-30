@@ -118,7 +118,21 @@ class PullRateView:
     req_per_hour_observed
         An OBSERVED / DERIVED extrapolation ``req_per_min × 60`` — the current minute-rate
         projected to an hour, NOT a measured trailing-hour count (Golden Rule #10). Zeroed
-        when idle.
+        when idle. RETAINED for back-compat alongside the new MEASURED
+        :attr:`req_per_hour_measured`.
+    req_per_sec_count
+        The MEASURED trailing-1 s issue count (``recent_1s``) — the EVIDENCE behind req/sec
+        (``rps == this count over 1 s``; DEC-RATE-MONITOR-EXPAND-001). Zeroed when idle.
+    req_per_10min
+        The MEASURED trailing-600 s issue count (``recent_600s``) — the NEW req/10min metric,
+        a REAL count of issues in the trailing ten minutes (DEC-RATE-MONITOR-EXPAND-001), not
+        a per-minute figure multiplied up. Zeroed when idle.
+    req_per_hour_measured
+        The MEASURED trailing-3600 s issue count (``recent_3600s``) — a REAL trailing-hour
+        count from actual issue timestamps (DEC-RATE-MONITOR-EXPAND-001), the TRUSTWORTHY
+        companion to ``req_per_hour_observed``. During the first hour of a pull it is the true
+        count SO FAR (an honest partial-hour count that grows as the window fills, never
+        inflated). Zeroed when idle.
     recent_429_count
         Recent vendor 429 hits (``recent_hits``) — context for WHY the achieved rate may
         sit below the ceiling. Zeroed when idle.
@@ -138,6 +152,9 @@ class PullRateView:
     req_per_sec_allowed: float
     req_per_min: int
     req_per_hour_observed: int
+    req_per_sec_count: int
+    req_per_10min: int
+    req_per_hour_measured: int
     recent_429_count: int
     seconds_since_update: float
     ceiling_rps: float
@@ -163,6 +180,9 @@ def build_pull_rate_view(
     recent_429_count: int,
     last_update_monotonic: float,
     now_monotonic: float,
+    recent_1s: int = 0,
+    recent_600s: int = 0,
+    recent_3600s: int = 0,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -186,6 +206,11 @@ def build_pull_rate_view(
         updated — the panel's default).
     now_monotonic
         The current monotonic clock reading (the route passes ``time.monotonic()``).
+    recent_1s, recent_600s, recent_3600s
+        The controller's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
+        (DEC-RATE-MONITOR-EXPAND-001) — the evidence behind req/sec, req/10min + the MEASURED
+        req/hour. Default ``0`` (an older controller / idle), so a panel that never carried
+        them projects honestly zeroed.
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -219,6 +244,9 @@ def build_pull_rate_view(
             req_per_sec_allowed=0.0,
             req_per_min=0,
             req_per_hour_observed=0,
+            req_per_sec_count=0,
+            req_per_10min=0,
+            req_per_hour_measured=0,
             recent_429_count=0,
             seconds_since_update=seconds_since_update,
             ceiling_rps=CEILING_RPS_LIMIT,
@@ -236,6 +264,11 @@ def build_pull_rate_view(
         # OBSERVED extrapolation: the current rolling-minute rate × 60 (Golden Rule #10 —
         # NOT a measured trailing-hour count; the field name + widget label say "observed").
         req_per_hour_observed=recent_minute * 60,
+        # MEASURED trailing-window real issue counts (DEC-RATE-MONITOR-EXPAND-001) — the
+        # trust/transparency evidence: each is a genuine count of issues in its window.
+        req_per_sec_count=recent_1s,
+        req_per_10min=recent_600s,
+        req_per_hour_measured=recent_3600s,
         recent_429_count=recent_429_count,
         seconds_since_update=seconds_since_update,
         ceiling_rps=CEILING_RPS_LIMIT,
@@ -250,11 +283,17 @@ def build_pull_rate_view_merged(
     panel_recent_minute: int,
     panel_recent_429_count: int,
     panel_seconds_since_update: float,
+    panel_recent_1s: int = 0,
+    panel_recent_600s: int = 0,
+    panel_recent_3600s: int = 0,
     bridge_effective_rps: float | None = None,
     bridge_current_rps: float | None = None,
     bridge_recent_minute: int | None = None,
     bridge_recent_429_count: int | None = None,
     bridge_seconds_since_update: float | None = None,
+    bridge_recent_1s: int | None = None,
+    bridge_recent_600s: int | None = None,
+    bridge_recent_3600s: int | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -285,10 +324,16 @@ def build_pull_rate_view_merged(
         The in-memory panel's measured rate fields.
     panel_seconds_since_update
         The panel's age in seconds (``inf`` when never updated). Always real.
+    panel_recent_1s, panel_recent_600s, panel_recent_3600s
+        The in-memory panel's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
+        (DEC-RATE-MONITOR-EXPAND-001) — req/sec·10min·hour evidence. Default ``0``.
     bridge_effective_rps, bridge_current_rps, bridge_recent_minute, bridge_recent_429_count
         The bridge snapshot's measured rate fields (``None`` when no bridge file is present).
     bridge_seconds_since_update
         The bridge snapshot's age in seconds (``None`` when no bridge file is present).
+    bridge_recent_1s, bridge_recent_600s, bridge_recent_3600s
+        The bridge snapshot's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
+        (``None`` when absent — an older bridge file → projected as ``0``, honestly zeroed).
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -315,6 +360,9 @@ def build_pull_rate_view_merged(
             recent_429_count=(
                 bridge_recent_429_count if bridge_recent_429_count is not None else 0
             ),
+            recent_1s=bridge_recent_1s if bridge_recent_1s is not None else 0,
+            recent_600s=bridge_recent_600s if bridge_recent_600s is not None else 0,
+            recent_3600s=bridge_recent_3600s if bridge_recent_3600s is not None else 0,
             last_update_monotonic=0.0,
             now_monotonic=bridge_seconds_since_update,
             stale_after_s=stale_after_s,
@@ -325,6 +373,9 @@ def build_pull_rate_view_merged(
         current_rps=panel_current_rps,
         recent_minute=panel_recent_minute,
         recent_429_count=panel_recent_429_count,
+        recent_1s=panel_recent_1s,
+        recent_600s=panel_recent_600s,
+        recent_3600s=panel_recent_3600s,
         last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
         now_monotonic=panel_seconds_since_update
         if math.isfinite(panel_seconds_since_update)
