@@ -47,8 +47,10 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "popcount_bytes",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
+        "IMPLEMENTED_MASK",
         "MarketStructureState",
         "PIVOT_LEVELS_LEN",
+        "SPEC_SCHEMA_VERSION",
         "TOTAL_CONDITIONS",
         "VwapState",
         "compute_ema",
@@ -59,6 +61,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "ema_seed",
         "ema_step",
         "evaluate_from_raw",
+        "evaluate_spec",
         "evaluate_with_levels",
         "minute_of_session",
         "resolve_near_month",
