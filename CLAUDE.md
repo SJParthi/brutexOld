@@ -231,7 +231,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/fetch-completeness-honesty` (**DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 /
-  DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1028** — PR-A of the triaged fetch-path edge-case sweep: a SUCCESS spot window
+  DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1031** — PR-A of the triaged fetch-path edge-case sweep: a SUCCESS spot window
   with a CONFIRMED interior multi-session hole OR a trailing truncation is DEMOTED to a re-pullable ledger status
   (BOUNDED — it settles SKIPPED after `EMPTY_TERMINAL_THRESHOLD` flagged pulls so the universe pull still converges, and
   the stored bars are always KEPT), and the sink reports the DEDUPED bars-added count as a SEPARATE `bars_net_new` field.
