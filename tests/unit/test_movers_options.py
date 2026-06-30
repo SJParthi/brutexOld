@@ -731,14 +731,22 @@ class TestTierUniverse:
 
 
 class TestCalendarDrivenTiers:
-    """The operator's regression: a sparsely-pulled lake no longer mislabels a tier."""
+    """Calendar-driven tiers: the FIX yields the correct full-calendar tiers, and the
+    sparse-lake tier-mislabel/skip bug CLASS is demonstrated.
+
+    These use a REPRESENTATIVE, simplified lake + calendar — they do NOT reconstruct the
+    operator's exact reported lake (we do not have it). The point is the behaviour: the
+    calendar set drives the tier, and the sparse-lake-only derivation mislabels/skips
+    (Golden Rule #1 — honest about what is proven).
+    """
 
     _ON = date(2025, 6, 25)
 
     @staticmethod
     def _sparse_contracts() -> list[tuple[str, str, str, date, Decimal, str]]:
-        # The lake holds ONLY 07-Jul + 04-Aug contracts (21/28-Jul were never pulled) —
-        # the exact failure: the lake-only "Far" jumps to 04-Aug.
+        # A REPRESENTATIVE sparse lake: only 07-Jul + 04-Aug contracts on disk (the
+        # intermediate July weeklies 14/21/28-Jul are not pulled) — enough to exercise the
+        # lake-only-derivation mislabel/skip, not a copy of the operator's real lake.
         return [
             _c("NIFTY", date(2025, 7, 7)),
             _c("NIFTY", date(2025, 8, 4)),
@@ -758,9 +766,10 @@ class TestCalendarDrivenTiers:
         }
 
     def test_operator_case_weekly_near_next_far_07_14_21(self) -> None:
-        # OPERATOR REGRESSION (as-of 2025-06-25): with the full calendar the Weekly track
-        # = {07,14,21-Jul} (28-Jul is the monthly), so Near/Next/Far = 07/14/21-Jul —
-        # NOT the wrong 04-Aug the sparse lake produced.
+        # FIX PROOF (as-of 2025-06-25): fed the full registry calendar, the Weekly track
+        # = {07,14,21-Jul} (28-Jul is the monthly), so Near/Next/Far = 07/14/21-Jul — the
+        # CORRECT full-calendar tiers (vs the sparse-lake derivation, which mislabels —
+        # see test_without_calendar_the_sparse_lake_mislabels_far).
         cal = self._full_calendar()
         contracts = self._sparse_contracts()
         near = _tier_expiry_by_underlying(
@@ -786,15 +795,15 @@ class TestCalendarDrivenTiers:
         assert monthly_near["NIFTY"] == date(2025, 7, 28)
 
     def test_without_calendar_the_sparse_lake_mislabels_far(self) -> None:
-        # The bug, pinned: WITHOUT the calendar the lake-only "Far" weekly is wrong
-        # (only 07-Jul + 04-Aug on disk → Near=07-Jul, Far is absent or 04-Aug-ish),
-        # PROVING the calendar is what fixes it.
+        # BUG-CLASS DEMONSTRATION: WITHOUT the calendar, the lake-only derivation over the
+        # representative sparse lake {07-Jul, 04-Aug} does NOT resolve a correct Far weekly
+        # — each is the sole expiry of its month, so both classify as "monthly" and the
+        # weekly track is EMPTY → no Far weekly at all. This is the mislabel/skip the
+        # calendar path fixes (not a reconstruction of the operator's exact 04-Aug screen).
         contracts = self._sparse_contracts()
         far_lake = _tier_expiry_by_underlying(
             contracts, on_date=self._ON, tier="far", track="weekly", calendar_expiries=None
         )
-        # Lake weeklies are {07-Jul, 04-Aug} (each the sole expiry of its month → both
-        # "monthly", so the weekly track is EMPTY) → no Far weekly resolves at all.
         assert "NIFTY" not in far_lake
 
 
