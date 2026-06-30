@@ -4,8 +4,9 @@ DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The Python side of the Rust
 Stage-2 trade-simulation kernel (``fno_math.ResidentSweepSim``). It is the
 trade-sim analogue of :class:`brutex.engine.combo_mask.ResidentBarBuffer`: the
 expensive per-(instrument, tf) inputs — the OHLC→paisa conversion
-(:func:`brutex.engine.stage1a._price_to_paisa`), the 15:20-IST forced-exit flags
-(:func:`brutex.calendars.nse.is_forced_exit_bar`), and the Stage-1A ``bar_bits``
+(:func:`brutex.engine.stage1a._price_to_paisa`), the SESSION-AWARE forced-exit
+flags (:func:`brutex.calendars.nse.is_forced_exit_bar` against each bar session's
+close − 10min; DEC-SESSION-FORCED-EXIT-001), and the Stage-1A ``bar_bits``
 truth-vectors — are computed ONCE in Python (the single source of truth,
 CLAUDE.md §11 COMMON) and handed to a resident Rust buffer. Thereafter a whole
 batch of strategy masks is simulated into round-trip
@@ -37,9 +38,15 @@ compiled wheel produces the exact same trades, never a silent divergence).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 from typing import TYPE_CHECKING
 
-from brutex.calendars.nse import IST, is_forced_exit_bar
+from brutex.calendars.nse import (
+    IST,
+    forced_exit_seconds_for_session,
+    get_session,
+    is_forced_exit_bar,
+)
 from brutex.engine.combo_mask import mask_to_entry_signals
 
 # Intentional friend access (DEC-P0-017 per-site convention): ``_price_to_paisa``
@@ -123,10 +130,30 @@ class ResidentTradeSim:
         self._tf_minutes = tf_minutes
 
         # Derive the resident kernel inputs ONCE, via the canonical Python seams.
-        forced = [
-            is_forced_exit_bar(bar.timestamp.astimezone(IST).time(), tf_minutes)
-            for bar in self._bars
-        ]
+        # The forced-exit flags are SESSION-AWARE — byte-identical to
+        # :func:`~brutex.engine.trade_sim.simulate_trades` — so the boundary is
+        # the bar session's own close − 10min (15:20 IST on a regular day, the
+        # early close − 10min on a half-day / Muhurat session), resolved per IST
+        # date via the COMMON ``get_session`` →
+        # :func:`~brutex.calendars.nse.forced_exit_seconds_for_session`; a date
+        # with no session falls back to 15:20 (DEC-SESSION-FORCED-EXIT-001). The
+        # boundary is memoised by the LAST IST date only (a 1-slot cache, O(1)
+        # per bar) — a chronological feed re-resolves once per new day, exactly
+        # as the streaming walker does, so the precomputed Rust-kernel flags and
+        # the Python-fallback exits never diverge.
+        forced: list[bool] = []
+        cache_date: date | None = None
+        cache_seconds: int | None = None
+        for bar in self._bars:
+            ts_ist = bar.timestamp.astimezone(IST)
+            bar_day = ts_ist.date()
+            if bar_day != cache_date:
+                session = get_session(bar_day)
+                cache_date = bar_day
+                cache_seconds = (
+                    None if session is None else forced_exit_seconds_for_session(session)
+                )
+            forced.append(is_forced_exit_bar(ts_ist.time(), tf_minutes, cache_seconds))
         open_p = [_price_to_paisa(bar.open) for bar in self._bars]
         high_p = [_price_to_paisa(bar.high) for bar in self._bars]
         low_p = [_price_to_paisa(bar.low) for bar in self._bars]
