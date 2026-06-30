@@ -16,8 +16,11 @@ use crate::bits::TOTAL_CONDITIONS;
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 use crate::indicators::ema::{compute_ema, ema_alpha, ema_seed, ema_step};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
-use crate::indicators::market_structure::MarketStructureSignal;
+use crate::indicators::market_structure::{
+    MarketStructureSignal, MarketStructureState as CoreMarketStructureState,
+};
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
+use crate::indicators::vwap::VwapState as CoreVwapState;
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
 ///
@@ -827,6 +830,114 @@ fn py_resolve_near_month(
     )
 }
 
+/// PyO3 handle over the native [`CoreVwapState`] — so BruteX's `stage1a` engine
+/// drives the SHARED Rust session-anchored VWAP per bar (the per-bar compute runs
+/// in Rust, never re-implemented in Python), giving the backtest the bit-identical
+/// VWAP TickVault's native `VwapState` produces (DEC-SHARED-CORE-001 / ADR-0012 D12).
+///
+/// Stateful by design (the running `i128` accumulators ARE the indicator) — held
+/// once per `(instrument, timeframe, contract)` and fed each bar via
+/// [`PyVwapState::update`]. Mirrors the streaming EMA seam, but as a class because
+/// the running sums cannot be a pure step function.
+#[pyclass(name = "VwapState", module = "trading_core")]
+struct PyVwapState {
+    inner: CoreVwapState,
+}
+
+#[pymethods]
+impl PyVwapState {
+    /// A fresh, cold (un-warmed) session-anchored VWAP accumulator.
+    #[new]
+    fn new() -> Self {
+        PyVwapState {
+            inner: CoreVwapState::new(),
+        }
+    }
+
+    /// Feed one bar; return the session VWAP in int64 paisa, or `None` while the
+    /// session has no usable (post-09:15, non-zero) volume yet.
+    ///
+    /// Delegates verbatim to the native [`CoreVwapState::update`] — the
+    /// `cum(price·vol)/cum(vol)` math, the 09:15 reset, the auction exclusion and
+    /// the contract-roll reset all execute in Rust. O(1) per bar.
+    #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
+    fn update(
+        &mut self,
+        typical_paisa: i64,
+        volume: i64,
+        is_pre_open: bool,
+        session_key: u64,
+        session_day: i64,
+        tod_seconds: u32,
+    ) -> Option<i64> {
+        self.inner.update(
+            typical_paisa,
+            volume,
+            is_pre_open,
+            session_key,
+            session_day,
+            tod_seconds,
+        )
+    }
+
+    /// The current session VWAP (paisa), or `None` if no volume has been counted.
+    fn current(&self) -> Option<i64> {
+        self.inner.current()
+    }
+}
+
+/// PyO3 handle over the native [`CoreMarketStructureState`] — so BruteX's `stage1a`
+/// engine drives the SHARED Rust BOS/CHoCH detector per bar (the look-ahead-clean
+/// fractal-swing compute runs in Rust, never re-implemented in Python), giving the
+/// backtest the bit-identical signal TickVault's native state produces
+/// (DEC-SHARED-CORE-001 / ADR-0012 D3/D4).
+///
+/// Stateful (the `(2k+1)` confirmation ring + the running trend ARE the indicator)
+/// — held once per `(instrument, timeframe, contract)` and fed each bar via
+/// [`PyMarketStructureState::update`], which returns the four resolved booleans
+/// `(bos_bullish, bos_bearish, choch_bullish, choch_bearish)`.
+#[pyclass(name = "MarketStructureState", module = "trading_core")]
+struct PyMarketStructureState {
+    inner: CoreMarketStructureState,
+}
+
+#[pymethods]
+impl PyMarketStructureState {
+    /// A fresh detector with fractal half-window `k` (`k >= 1`, default 2 — a
+    /// 5-bar fractal, the production value). `k < 1` raises a clean `ValueError`
+    /// instead of tripping the native `assert!` (which would `abort` under
+    /// `panic = "abort"`).
+    #[new]
+    #[pyo3(signature = (k = 2))]
+    fn new(k: usize) -> PyResult<Self> {
+        if k < 1 {
+            return Err(PyValueError::new_err(format!(
+                "fractal half-window k must be >= 1, got {k}"
+            )));
+        }
+        Ok(PyMarketStructureState {
+            inner: CoreMarketStructureState::new(k),
+        })
+    }
+
+    /// Feed one bar (high/low/close in int64 paisa); return its
+    /// `(bos_bullish, bos_bearish, choch_bullish, choch_bearish)` signal.
+    ///
+    /// Delegates verbatim to the native [`CoreMarketStructureState::update`] — the
+    /// ring push, the look-ahead-clean centre-swing confirmation and the
+    /// trend-aware BOS/CHoCH resolution all execute in Rust. O(1) per bar.
+    #[pyo3(signature = (high, low, close))]
+    fn update(&mut self, high: i64, low: i64, close: i64) -> (bool, bool, bool, bool) {
+        let sig = self.inner.update(high, low, close);
+        (
+            sig.bos_bullish,
+            sig.bos_bearish,
+            sig.choch_bullish,
+            sig.choch_bearish,
+        )
+    }
+}
+
 /// The Python extension module `trading_core._trading_core`.
 #[pymodule]
 fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -848,6 +959,8 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_weekday_from_ordinal, m)?)?;
     m.add_function(wrap_pyfunction!(py_minute_of_session, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_near_month, m)?)?;
+    m.add_class::<PyVwapState>()?;
+    m.add_class::<PyMarketStructureState>()?;
     Ok(())
 }
 
