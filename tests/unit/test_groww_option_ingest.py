@@ -2426,3 +2426,255 @@ class TestPartialWindowFlag:
         assert report.bars_appended == 1  # the SUCCESS write happened
         warns = [r for r in logs if r["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT]
         assert len(warns) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# DEC-FETCH-PER-WINDOW-GUARANTEE-001 — per-contract EMPTY-retry budget routing
+# + the CRITICAL correctness contract: a REDUCED budget bounds ONLY clean-empty
+# re-confirmations and is NEVER counted/triggered by a transient (429 / timeout /
+# 5xx / empty-body-throttle / network), which ALWAYS retries via the separate
+# transient ladder. Every permutation has its own test (the operator's data-loss
+# concern). The budget map keys per-symbol so a far-OTM strike gets the reduced
+# budget while a near-money strike keeps the full budget — proven end-to-end.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class _GenericServerError(Exception):
+    """A generic SDK exception whose MESSAGE maps to a retryable GrowwServerError (5xx)."""
+
+
+class _PerSymbolSDK:
+    """A ``GrowwSDK``-shaped fake scripting a per-SYMBOL behaviour + COUNTING fetches per symbol.
+
+    ``behaviour[symbol]`` is a callable ``(call_index) -> Mapping | Exception`` so a test can,
+    per strike, return clean-empty / data / raise a transient on the Nth call. The default
+    (a symbol not in the map) returns a clean-empty 200. ``fetches[symbol]`` is the per-symbol
+    vendor-call count — the fetches-per-window evidence.
+    """
+
+    def __init__(self, behaviour: Mapping[str, Callable[[int], object]] | None = None) -> None:
+        self._behaviour = dict(behaviour or {})
+        self.fetches: dict[str, int] = {}
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+        symbol = str(kw["groww_symbol"])
+        idx = self.fetches.get(symbol, 0)
+        self.fetches[symbol] = idx + 1
+        fn = self._behaviour.get(symbol)
+        if fn is None:
+            return _EMPTY  # default: a CLEAN empty 200 (a dead strike)
+        out = fn(idx)
+        if isinstance(out, BaseException):
+            raise out
+        return out  # type: ignore[return-value]
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover - unused
+        return {"expiries": []}
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover - unused
+        return {"contracts": []}
+
+
+def _opt(strike: int, opt_type: str = "CE") -> DerivativeContract:
+    return DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 30),
+        symbol=f"NSE-NIFTY-30Jan24-{strike}-{opt_type}",
+        contract_type=opt_type,
+        strike=float(strike),
+    )
+
+
+def _past_clock() -> datetime:
+    """A clock far AFTER the test window so windows are firmly past, no current-day clamp."""
+    return datetime(2024, 6, 1, 8, 0, tzinfo=UTC)
+
+
+def _run_with_budget(
+    sdk: _PerSymbolSDK,
+    contracts: Sequence[DerivativeContract],
+    *,
+    empty_retry_by_symbol: Mapping[str, int] | None,
+    max_attempts: int = 2,
+    ledger: WindowLedger | None = None,
+) -> GrowwOptionIngestReport:
+    # Build the client directly (not via ``_client``, which is narrowly typed to ``_FakeSDK``):
+    # ``_PerSymbolSDK`` satisfies the structural ``GrowwSDK`` Protocol. ``max_attempts=1`` so the
+    # client's own fast-retry never fires — the ingest-level transient ladder is what is tested.
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+    return run_groww_option_ingest(
+        client,
+        _Sink(),
+        contracts=list(contracts),
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),
+        now_ist=_past_clock,
+        max_attempts=max_attempts,
+        backoff=lambda _a: None,
+        ledger=ledger,
+        empty_retry_by_symbol=empty_retry_by_symbol,
+    )
+
+
+def test_budget_clean_empty_far_otm_bounded_to_reduced_fetch() -> None:
+    """PERMUTATION 1 — first-attempt CLEAN 200-empty far-OTM strike → bounded to ONE fetch.
+
+    A deep strike with a reduced empty-retry budget (1) is fetched exactly ONCE to confirm its
+    clean-empty (vs the full 3), driving fetches-per-window down with no data lost.
+    """
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK()  # everything returns a clean empty 200
+    _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1})
+    assert sdk.fetches[deep.symbol] == 1  # ONE fetch — the reduced budget bounded it
+
+
+def test_budget_near_money_keeps_full_empty_retry() -> None:
+    """PERMUTATION 6 — a near-money strike is NEVER reduced: it keeps the full 3 empty-fetches.
+
+    The budget map is sparse: a symbol absent from it keeps the full ``empty_retry_attempts``,
+    so a near-money empty is re-confirmed the full 3 times (never short-circuited).
+    """
+    near = _opt(23000)
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK()
+    # only the deep strike is mapped to the reduced budget; near is absent -> full default (3)
+    _run_with_budget(sdk, [near, deep], empty_retry_by_symbol={deep.symbol: 1})
+    assert sdk.fetches[near.symbol] == 3  # near-money kept the FULL budget
+    assert sdk.fetches[deep.symbol] == 1  # deep reduced
+
+
+def test_budget_429_always_retried_never_counted_as_empty() -> None:
+    """PERMUTATION 2 — first-attempt 429 on a reduced-budget strike → retried, NOT bounded.
+
+    A 429 raises a retryable GrowwRateLimitError handled by the SEPARATE transient ladder
+    (max_attempts), never the empty-retry budget — so the reduced budget does NOT short-circuit
+    a transient. Here the 429 clears on the retry and data lands.
+    """
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK(
+        {deep.symbol: lambda i: GrowwAPIRateLimitException("429") if i == 0 else _candles()}
+    )
+    report = _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=2)
+    # the 429 was retried (transient ladder), then data landed — NOT bounded to 1 by the budget
+    assert sdk.fetches[deep.symbol] == 2
+    assert report.bars_appended == 1  # data captured — no loss
+
+
+def test_budget_timeout_always_retried_never_counted_as_empty() -> None:
+    """PERMUTATION 3 — first-attempt timeout on a reduced-budget strike → retried, NOT bounded."""
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK(
+        {deep.symbol: lambda i: GrowwAPITimeoutException("stall") if i == 0 else _candles()}
+    )
+    report = _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=2)
+    assert sdk.fetches[deep.symbol] == 2  # retried past the transient, NOT bounded
+    assert report.bars_appended == 1
+
+
+def test_budget_5xx_always_retried_never_counted_as_empty() -> None:
+    """PERMUTATION 4 — first-attempt 5xx server error → retried (GrowwServerError), NOT bounded."""
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK(
+        {
+            deep.symbol: lambda i: (
+                _GenericServerError("internal server error") if i == 0 else _candles()
+            )
+        }
+    )
+    report = _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=2)
+    assert sdk.fetches[deep.symbol] == 2  # the 5xx was retried, NOT counted as a clean-empty
+    assert report.bars_appended == 1
+
+
+def test_budget_empty_body_throttle_always_retried_never_counted_as_empty() -> None:
+    """PERMUTATION 5 — an empty/non-JSON body (throttle) → RETRYABLE, re-pulled, NOT bounded.
+
+    DEC-POSTPULL-DATAQUALITY-BATCH-001 #854 maps a ``json.JSONDecodeError`` body to a RETRYABLE
+    GrowwEmptyResponseError precisely so a throttle-empty is re-pulled, NOT treated as no-data.
+    A reduced budget must NOT short-circuit it — it rides the transient ladder.
+    """
+    import json
+
+    deep = _opt(18000)
+
+    def _throttle_then_data(i: int) -> object:
+        if i == 0:
+            return json.JSONDecodeError("Expecting value", "", 0)
+        return _candles()
+
+    sdk = _PerSymbolSDK({deep.symbol: _throttle_then_data})
+    report = _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=2)
+    assert sdk.fetches[deep.symbol] == 2  # throttle-empty was retried, NOT counted as clean-empty
+    assert report.bars_appended == 1  # data recovered on the retry — no loss
+
+
+def test_budget_transient_empty_then_data_strike_not_skipped() -> None:
+    """PERMUTATION 7 — transient-empty followed by data on retry → strike NOT skipped, data kept.
+
+    Even with the most aggressive reduced budget (1), a transient on the first call is retried
+    and the data on the second call is captured — the strike is never wrongly skipped.
+    """
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK(
+        {deep.symbol: lambda i: GrowwAPITimeoutException("stall") if i == 0 else _candles()}
+    )
+    report = _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=3)
+    assert report.bars_appended == 1  # data captured despite the reduced empty budget
+
+
+def test_budget_reduced_empty_strike_remains_refetchable_next_pull() -> None:
+    """PERMUTATION 8 — a wrongly-empty reduced-budget window is RE-FETCHABLE on the next pull.
+
+    A reduced-budget strike that returns a clean empty is recorded but its ONE in-pull fetch is
+    BELOW the CONFIRMED_EMPTY_MIN_FETCHES (2) old-gap fast-settle threshold, so it is NEVER
+    settled SKIPPED permanently — a later idempotent pull re-attempts it (the recovery net,
+    keep-first sink + durable ledger). Even a vendor-bug 200-empty is recoverable.
+    """
+    deep = _opt(18000)
+    ledger = WindowLedger()
+    # an OLD window (clock 6 months later) so the fast-settle WOULD fire IF fetch_count >= 2;
+    # the reduced budget makes fetch_count == 1, so it must NOT fast-settle.
+    sdk = _PerSymbolSDK()
+    _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    rec = ledger.records()[0]
+    assert rec.in_pull_fetches == 1  # only one fetch this pull (reduced)
+    # NOT fast-settled SKIPPED (needs >= 2 in-pull fetches) — so still re-fetchable next pull.
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id=deep.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),
+    )
+    assert not ledger.is_skippable(key)  # a later pull re-attempts it — no permanent loss
+
+    # And the second pull DOES re-fetch it (the recovery net actually re-attempts).
+    sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})  # now it has data
+    _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert sdk2.fetches[deep.symbol] == 1  # re-fetched on the next pull → data recovered
+
+
+def test_budget_none_map_byte_identical_full_budget() -> None:
+    """A ``None`` budget map keeps EVERY strike at the full empty-retry — byte-identical default."""
+    deep = _opt(18000)
+    sdk = _PerSymbolSDK()
+    _run_with_budget(sdk, [deep], empty_retry_by_symbol=None)
+    assert sdk.fetches[deep.symbol] == 3  # full default budget — unwired == pre-feature
+
+
+def test_budget_all_empty_detector_still_fires_with_reduced_budget() -> None:
+    """RULE 6 — the #919 whole-underlying all-empty detector stays ACTIVE under reduced budgets.
+
+    A whole chain that is reduced-budget AND all-empty must STILL flag
+    ``pull.underlying_all_empty`` (never silently accepted) — the detector is unconditional
+    and the reduced budget does not suppress it.
+    """
+    chain = [_opt(18000 + i * 50) for i in range(4)]  # >= _ALL_EMPTY_MIN_CONTRACTS, all empty
+    budget_map = {c.symbol: 1 for c in chain}
+    sdk = _PerSymbolSDK()  # everything clean-empty
+    with capture_logs() as logs:
+        _run_with_budget(sdk, chain, empty_retry_by_symbol=budget_map)
+    assert any(r["event"] == UNDERLYING_ALL_EMPTY_EVENT for r in logs)
+    # each was fetched exactly once (reduced), but the all-empty flag still fired.
+    assert all(sdk.fetches[c.symbol] == 1 for c in chain)
