@@ -145,11 +145,18 @@ def holiday_shifted_expiry(underlying: OptionsUnderlying, calendar_expiry: date)
         If no trading day is found within the holiday-walk lookback (a defensive
         guard against an impossibly long holiday cluster — never expected for a
         real NSE month).
+    brutex.calendars.nse.HolidayDataUnavailableError
+        If *calendar_expiry* falls in an out-of-coverage year (2027+) on a
+        weekday whose trading-day verdict depends on the (missing) holiday list.
+        The strict :func:`is_trading_day_checked` REFUSES to guess rather than
+        silently treat an unknown holiday as a trading day and return the expiry
+        unshifted — symmetric with the PDH/PDL anchor path, which already uses
+        the checked variant.
     """
-    from brutex.calendars.nse import is_trading_day
+    from brutex.calendars.nse import is_trading_day_checked
 
     del underlying  # reserved for a future per-underlying nuance (see docstring)
-    if is_trading_day(calendar_expiry):
+    if is_trading_day_checked(calendar_expiry):
         return calendar_expiry
     shifted = find_prev_trading_day(calendar_expiry)
     if shifted is None:
