@@ -17,6 +17,11 @@ wheel is built by maturin and installed in every CI job that imports
 * ``compute_ema`` / ``ema_alpha`` / ``ema_seed`` / ``ema_step`` — the single-source
   EMA 20/200 recurrence BruteX's ``brutex.indicators.ema`` shim delegates to
   (``DEC-EMA-RUST-PORT-001``).
+* ``VwapState`` / ``MarketStructureState`` — the stateful, look-ahead-clean
+  session-anchored VWAP + BOS/CHoCH detectors BruteX's ``stage1a`` engine drives
+  per bar so the per-bar compute runs in Rust (the bit-identical
+  backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-INDICATORS-001``
+  / ``DEC-NIFTY-BOS-CHOCH-001``).
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ from ._trading_core import (  # type: ignore[import-not-found]
     FIB_LEVELS_LEN,
     PIVOT_LEVELS_LEN,
     TOTAL_CONDITIONS,
+    MarketStructureState,
+    VwapState,
     __version__,
     compute_ema,
     compute_fib_levels,
@@ -46,6 +53,8 @@ __all__ = [
     "FIB_LEVELS_LEN",
     "PIVOT_LEVELS_LEN",
     "TOTAL_CONDITIONS",
+    "MarketStructureState",
+    "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",
