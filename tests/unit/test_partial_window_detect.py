@@ -145,8 +145,9 @@ class TestClassifyPartialWindow:
         assert v.expected_end_date == date(2024, 3, 28)
 
     def test_window_end_outside_calendar_coverage_not_flagged(self) -> None:
-        # MAJOR-1: a window ENDING in an uncovered year (2020) abstains — the holiday list
-        # would miscount weekday holidays as sessions → spurious flag. Honest abstention.
+        # MAJOR-1: a window ENDING in an uncovered year (the year below the list
+        # start — now 2019) abstains — the holiday list would miscount weekday
+        # holidays as sessions → spurious flag. Honest abstention.
         from brutex.calendars.nse import HOLIDAY_COVERAGE_FIRST_YEAR
 
         uncovered_year = HOLIDAY_COVERAGE_FIRST_YEAR - 1

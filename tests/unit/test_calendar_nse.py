@@ -1,7 +1,7 @@
 """Tests for `brutex.calendars.nse` — NSE/BSE Indian market calendar.
 
 Covers:
-- Holiday detection 2021-2026
+- Holiday detection 2020-2026
 - Weekend detection
 - Trading-day filtering
 - Muhurat session lookup
@@ -65,9 +65,10 @@ class TestHolidays:
         # Tuesday 2024-02-20 — no known holiday
         assert not is_holiday(date(2024, 2, 20))
 
-    def test_holiday_list_spans_2021_2026(self) -> None:
-        # At least one holiday per year
+    def test_holiday_list_spans_2020_2026(self) -> None:
+        # At least one holiday per year (2020 added by DEC-CALENDAR-2020-DATA-001).
         from brutex.calendars.nse import (
+            HOLIDAYS_2020,
             HOLIDAYS_2021,
             HOLIDAYS_2022,
             HOLIDAYS_2023,
@@ -77,6 +78,7 @@ class TestHolidays:
         )
 
         for hols in [
+            HOLIDAYS_2020,
             HOLIDAYS_2021,
             HOLIDAYS_2022,
             HOLIDAYS_2023,
@@ -387,10 +389,11 @@ class TestISTOffset:
 class TestHolidayCoverageRange:
     """DEC-CALENDAR-HARDEN-001: detection primitives for out-of-coverage dates.
 
-    The hardcoded holiday list starts in 2021 but the Track-1 data pull floor
-    is 2020-01-01 (CLAUDE.md §3 / MIGRATION.md #722). A 2020 weekday holiday
-    STILL reads as a trading day via the unguarded path (back-compat); these
-    NEW opt-in primitives let a caller DETECT the gap and refuse to guess.
+    The hardcoded holiday list now starts in 2020 (DEC-CALENDAR-2020-DATA-001),
+    matching the Track-1 data pull floor of 2020-01-01 (CLAUDE.md §3 /
+    MIGRATION.md #722) — so the entire pull range is covered. A PRE-2020 (2019)
+    weekday holiday is the new out-of-coverage case; these opt-in primitives let
+    a caller DETECT the gap and refuse to guess at the new 2019/2020 boundary.
     """
 
     def test_coverage_range_derived_from_list(self) -> None:
@@ -398,14 +401,23 @@ class TestHolidayCoverageRange:
         assert max(h.year for h in ALL_HOLIDAYS) == HOLIDAY_COVERAGE_LAST_YEAR
         assert HOLIDAY_COVERAGE_FIRST_YEAR <= HOLIDAY_COVERAGE_LAST_YEAR
 
+    def test_coverage_starts_at_the_2020_pull_floor(self) -> None:
+        # The 2020 list addition makes the holiday coverage start year match the
+        # data-pull floor year — the gap DEC-CALENDAR-2020-DATA-001 closes.
+        assert HOLIDAY_COVERAGE_FIRST_YEAR == 2020
+
     def test_in_coverage_dates_available(self) -> None:
         assert is_holiday_data_available(date(HOLIDAY_COVERAGE_FIRST_YEAR, 1, 1))
         assert is_holiday_data_available(date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31))
         assert is_holiday_data_available(date(2024, 6, 1))
 
-    def test_below_floor_2020_not_available(self) -> None:
-        # 2020 is IN the data-pull scope but OUT of the holiday list.
-        assert not is_holiday_data_available(date(2020, 3, 10))
+    def test_2020_now_available(self) -> None:
+        # 2020 is IN the data-pull scope AND now IN the holiday list.
+        assert is_holiday_data_available(date(2020, 3, 10))
+
+    def test_below_floor_2019_not_available(self) -> None:
+        # 2019 is the new out-of-coverage boundary (below the 2020 list start).
+        assert not is_holiday_data_available(date(2019, 12, 31))
 
     def test_above_ceiling_2027_not_available(self) -> None:
         assert not is_holiday_data_available(date(HOLIDAY_COVERAGE_LAST_YEAR + 1, 1, 26))
@@ -420,11 +432,11 @@ class TestHolidayCoverageRange:
     def test_is_holiday_out_of_range_returns_false_silently(self) -> None:
         # Documented behaviour: is_holiday returns False (absence of data),
         # NOT a verified trading day. The checked variant is the honest path.
-        assert is_holiday(date(2020, 3, 10)) is False
+        assert is_holiday(date(2019, 12, 31)) is False
 
     def test_is_holiday_checked_raises_below_floor(self) -> None:
-        with pytest.raises(HolidayDataUnavailableError, match="2020-03-10"):
-            is_holiday_checked(date(2020, 3, 10))
+        with pytest.raises(HolidayDataUnavailableError, match="2019-12-31"):
+            is_holiday_checked(date(2019, 12, 31))
 
     def test_is_holiday_checked_raises_above_ceiling(self) -> None:
         with pytest.raises(HolidayDataUnavailableError, match="covered span"):
@@ -442,24 +454,32 @@ class TestTradingDayChecked:
         assert is_trading_day_checked(date(2024, 1, 26)) is False  # Republic Day
         assert is_trading_day_checked(date(2024, 5, 11)) is False  # Saturday
 
+    def test_2020_now_resolves_through_checked_variant(self) -> None:
+        # 2020 is now in coverage: Holi 2020-03-10 (Tue) is a listed holiday -> a
+        # honest False (no raise); a 2020 regular weekday is True. The unguarded
+        # and strict variants now AGREE for 2020 (gap closed).
+        assert is_trading_day(date(2020, 3, 10)) is False
+        assert is_trading_day_checked(date(2020, 3, 10)) is False
+        assert is_trading_day_checked(date(2020, 3, 11)) is True  # Wed, no holiday
+
     def test_out_of_range_weekday_raises(self) -> None:
-        # Holi 2020-03-10 (Tuesday): the UNGUARDED is_trading_day still returns
-        # True (back-compat, unchanged) — the NEW strict variant DETECTS the
-        # out-of-coverage case and refuses to guess instead.
-        assert is_trading_day(date(2020, 3, 10)) is True
+        # 2019-12-31 (Tuesday) is the new out-of-coverage weekday: the UNGUARDED
+        # is_trading_day still returns True (back-compat, unchanged) — the strict
+        # variant DETECTS the out-of-coverage case and refuses to guess instead.
+        assert is_trading_day(date(2019, 12, 31)) is True
         with pytest.raises(HolidayDataUnavailableError):
-            is_trading_day_checked(date(2020, 3, 10))
+            is_trading_day_checked(date(2019, 12, 31))
 
     def test_out_of_range_weekend_resolves_false_without_raising(self) -> None:
         # A weekend is non-trading INDEPENDENT of the holiday list, so its
         # verdict consults no missing data and is honest even out of coverage.
-        # 2020-01-04 (below floor) and 2027-01-02 (above ceiling) are Saturdays.
-        assert is_trading_day_checked(date(2020, 1, 4)) is False
+        # 2019-12-28 (below floor) and 2027-01-02 (above ceiling) are Saturdays.
+        assert is_trading_day_checked(date(2019, 12, 28)) is False
         assert is_trading_day_checked(date(2027, 1, 2)) is False
 
     def test_out_of_range_sunday_resolves_false_without_raising(self) -> None:
-        # 2020-01-05 is a Sunday — same data-complete contract.
-        assert is_trading_day_checked(date(2020, 1, 5)) is False
+        # 2019-12-29 is a Sunday — same data-complete contract.
+        assert is_trading_day_checked(date(2019, 12, 29)) is False
 
     def test_special_weekend_session_overrides_even_out_of_coverage(self) -> None:
         # A date the package DOES hold data for resolves without raising even
@@ -498,10 +518,11 @@ class TestLeapYear:
     """Feb 29 on leap years is handled as an ordinary calendar date."""
 
     def test_feb29_2020_is_valid_date(self) -> None:
-        # 2020-02-29 (Saturday) — weekend, not in holiday coverage.
+        # 2020-02-29 (Saturday) — weekend, now IN holiday coverage (2020 added).
         d = date(2020, 2, 29)
         assert is_weekend(d)
-        assert not is_holiday_data_available(d)
+        assert is_holiday_data_available(d)
+        assert is_trading_day_checked(d) is False  # weekend, data-complete
 
     def test_feb29_2024_is_trading_day(self) -> None:
         # 2024-02-29 is a Thursday, no holiday → trading day.
@@ -666,10 +687,10 @@ class TestBoundaryTimestamps:
 
 
 class TestOutOfRangeDates:
-    """Dates outside the curated 2021-2026 holiday window degrade gracefully
+    """Dates outside the curated 2020-2026 holiday window degrade gracefully
     (never crash): only the weekend rule applies, holidays read False."""
 
-    def test_pre_2021_date_not_a_listed_holiday(self) -> None:
+    def test_pre_2020_date_not_a_listed_holiday(self) -> None:
         assert not is_holiday(date(2019, 1, 1))
 
     def test_post_2026_date_not_a_listed_holiday(self) -> None:
