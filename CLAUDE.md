@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-calendar-tiers` (**DEC-MOVERS-CALENDAR-TIERS-001, MIGRATION.md #1029** —
+- **Active branch:** `claude/movers-calendar-tiers` (**DEC-MOVERS-CALENDAR-TIERS-001, MIGRATION.md #1030** —
   the `/movers` Options Near/Next/Far + Weekly/Monthly tiers are now driven by the AUTHORITATIVE vendor expiry calendar
   (`registry.duckdb`) instead of the SPARSE lake-partition set, so a sparsely-pulled lake no longer mislabels a tier (the
   operator REPORTED a wrong Far expiry on a lake missing intermediate July weeklies). FIX 1 (PRIMARY · correctness): NEW
