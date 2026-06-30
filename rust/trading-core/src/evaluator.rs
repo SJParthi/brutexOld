@@ -1,13 +1,21 @@
-//! The 52-condition evaluator — a bit-for-bit port of
+//! The condition evaluator — a bit-for-bit port of
 //! `brutex/vocabulary/evaluator.py::evaluate_atoms`.
 //!
 //! Pure function of its inputs (int64 paisa), no state, no allocation: the same
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
-//! live tick path (native). Returns a `u64` mask with bits 0..=51 set per the
-//! [`crate::bits`] layout; bits 52-63 are always 0.
+//! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
+//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); all 60 IMPLEMENTED bits
+//! (0..=59) can now fire. PR-2 added the VWAP position (bits 52-53) and pivot
+//! R5/S5 proximity (bits 54-55) branches; DEC-NIFTY-BOS-CHOCH-001 added the
+//! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
+//! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
+//! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
+//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. A u128 AND is
+//! two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
 use crate::indicators::fib::FibLevels;
+use crate::indicators::market_structure::MarketStructureSignal;
 use crate::indicators::pivots::PivotLevels;
 
 // Time-of-day cutoffs, in seconds since IST midnight (mirrors evaluator.py:116-120).
@@ -19,13 +27,14 @@ const AFTERNOON_END: u32 = 15 * 3600; // 15:00
 
 /// The single-bit mask for condition `pos` (`1 << pos`). Routing every
 /// `mask |= …` through this one site is the DYNAMIC/COMMON discipline (one shift
-/// expression, not 52) and removes the `1u64 << 0` ⇔ `1u64 >> 0` equivalent
-/// mutant at bit 0: because this helper is called for every bit 0..=51, a
+/// expression, not 52) and removes the `1u128 << 0` ⇔ `1u128 >> 0` equivalent
+/// mutant at bit 0: because this helper is called for every implemented bit, a
 /// `<<`→`>>` perturbation breaks bit 1+ and is killed
-/// (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
+/// (DEC-TRADING-CORE-PROPTEST-MUTANTS-001). `u128` (ADR-0012 D4) — the shift is
+/// the only width-sensitive site; bit positions stay `u32`.
 #[inline]
-const fn bit(pos: u32) -> u64 {
-    1u64 << pos
+const fn bit(pos: u32) -> u128 {
+    1u128 << pos
 }
 
 /// All per-bar indicator values consumed by [`evaluate_atoms`]. Money is int64
@@ -41,11 +50,22 @@ pub struct IndicatorSnapshot {
     pub close_paisa: i64,
     pub ema20_paisa: Option<i64>,
     pub ema200_paisa: Option<i64>,
+    /// Session-anchored intraday VWAP (paisa). `None` during the warm-up bar and
+    /// on the 1day timeframe (ADR-0012 D12 — VWAP is intraday-only/NA on 1day),
+    /// so the Group-10 bits simply do not fire.
+    pub vwap_paisa: Option<i64>,
     pub pivots: PivotLevels,
     pub fib: FibLevels,
     pub day_high_paisa: i64,
     pub day_low_paisa: i64,
     pub open_of_day_paisa: i64,
+    /// The bar's resolved BOS/CHoCH market-structure flags (Group 12, bits
+    /// 56-59), produced by the stateful look-ahead-clean
+    /// [`crate::indicators::market_structure::MarketStructureState`] the engine
+    /// holds per (instrument, timeframe, contract) — fed in exactly like the
+    /// resolved `PriorBarHistory` flags. `default()` (all false) during warm-up
+    /// (before any confirmed swing) so the Group-12 bits simply do not fire.
+    pub market_structure: MarketStructureSignal,
 }
 
 /// Proximity tolerances (basis points) for the `near_*` conditions.
@@ -100,10 +120,13 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
     (close - level).abs() <= tolerance
 }
 
-/// Evaluate all 52 atomic conditions on one bar → a `u64` mask (bits 0..=51).
+/// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
+///
+/// All 60 IMPLEMENTED bits (0..=59) can fire; the BOS/CHoCH bits (56..=59) read
+/// the resolved `snapshot.market_structure` flags (DEC-NIFTY-BOS-CHOCH-001).
 #[must_use]
-pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u64 {
-    let mut mask: u64 = 0;
+pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
+    let mut mask: u128 = 0;
     let close = s.close_paisa;
 
     // ── Group 1: EMA Position (bits 0-5) ──
@@ -337,6 +360,55 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     }
     if s.day_high_paisa > pdh && s.day_low_paisa < pdl {
         mask |= bit(bits::BIT_OUTSIDE_DAY);
+    }
+
+    // ── Group 10: VWAP Position (bits 52-53) ──
+    // Session-anchored intraday futures VWAP (ADR-0012 D12). `None` during the
+    // warm-up bar (no post-09:15 volume yet) AND on the 1day timeframe (a session
+    // VWAP is degenerate with one bar/session) — so the bit simply does not fire,
+    // mirroring the EMA warm-up `if let Some(..)` pattern. The running VWAP math
+    // (cum(price·vol)/cum(vol), reset at 09:15 IST, auction-volume excluded, i128
+    // accumulators, reset on contract roll) lives in the stateful
+    // `indicators::vwap::VwapState`; the evaluator only reads the resolved level.
+    if let Some(vwap) = s.vwap_paisa {
+        if close > vwap {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_VWAP);
+        }
+        if close < vwap {
+            mask |= bit(bits::BIT_CLOSE_BELOW_VWAP);
+        }
+    }
+
+    // ── Group 11: Pivot Proximity Extended (R5/S5, bits 54-55) ──
+    // R5/S5 extend the standard floor-trader pivot ladder past R4/S4
+    // (`indicators::pivots`); the proximity check reuses the same `is_near`
+    // primitive + the Group-2 pivot tolerance.
+    if is_near(close, pv.r5_paisa, bps) {
+        mask |= bit(bits::BIT_NEAR_PIVOT_R5);
+    }
+    if is_near(close, pv.s5_paisa, bps) {
+        mask |= bit(bits::BIT_NEAR_PIVOT_S5);
+    }
+
+    // ── Group 12: Market Structure (BOS/CHoCH, bits 56-59) ──
+    // The four booleans are RESOLVED upstream by the stateful, look-ahead-clean
+    // `indicators::market_structure::MarketStructureState` (a swing is only
+    // confirmed k bars LATER, all at index ≤ N), and threaded in via the snapshot
+    // exactly like the resolved `PriorBarHistory` flags — `evaluate_atoms` stays a
+    // pure, stateless function that only sets bits from the resolved flags
+    // (DEC-NIFTY-BOS-CHOCH-001). All false during warm-up → no bit fires.
+    let ms = &s.market_structure;
+    if ms.bos_bullish {
+        mask |= bit(bits::BIT_BOS_BULLISH);
+    }
+    if ms.bos_bearish {
+        mask |= bit(bits::BIT_BOS_BEARISH);
+    }
+    if ms.choch_bullish {
+        mask |= bit(bits::BIT_CHOCH_BULLISH);
+    }
+    if ms.choch_bearish {
+        mask |= bit(bits::BIT_CHOCH_BEARISH);
     }
 
     mask

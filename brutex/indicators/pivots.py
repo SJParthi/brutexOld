@@ -1,7 +1,8 @@
-"""Standard (Floor Trader) Pivot Points — P, R1-R4, S1-S4.
+"""Standard (Floor Trader) Pivot Points — P, R1-R5, S1-S5.
 
 Per `docs/TRACK1_VOCABULARY.md` Indicator Group 1 (Anchors):
-    "Standard Pivot Points (P, R1-R4, S1-S4)"
+    "Standard Pivot Points (P, R1-R4, S1-S4)" — extended to R5/S5 in PR-2
+    (DEC-NIFTY-INDICATORS-001 / ADR-0012 D3) on the same linear ladder.
 
 Verified against operator's TradingView "Pivots Traditional Auto"
 screenshot (NIFTY 14-May-2026):
@@ -23,6 +24,8 @@ R3 = PDH + 2*(P − PDL)             (third resistance)
 S3 = PDL − 2*(PDH − P)             (third support)
 R4 = PDH + 3*(P − PDL)             (fourth resistance — extension)
 S4 = PDL − 3*(PDH − P)             (fourth support — extension)
+R5 = PDH + 4*(P − PDL)             (fifth resistance — extension, PR-2)
+S5 = PDL − 4*(PDH − P)             (fifth support — extension, PR-2)
 ```
 
 ## When computed
@@ -48,9 +51,12 @@ import trading_core
 
 @dataclass(frozen=True)
 class PivotLevels:
-    """9 standard pivot levels for one (instrument, trading_day).
+    """11 standard pivot levels for one (instrument, trading_day).
 
-    All values in int64 paisa.
+    All values in int64 paisa. R5/S5 extend the same linear floor-trader ladder
+    past R4/S4 (PR-2 — DEC-NIFTY-INDICATORS-001 / ADR-0012 D3); they are
+    CODE-ANCHORED (no operator screenshot pins them), the honest continuation of
+    the screenshot-verified R1-R4 / S1-S4 rungs.
     """
 
     trading_day: date
@@ -60,7 +66,8 @@ class PivotLevels:
     pdl_paisa: int  # Previous Day's Low
     pdc_paisa: int  # Previous Day's Close
 
-    # The 9 pivot levels (5 resistance + pivot + 4 support, top to bottom):
+    # The 11 pivot levels (5 resistance + pivot + 5 support, top to bottom):
+    r5_paisa: int  # 5th resistance (extension — PR-2)
     r4_paisa: int  # 4th resistance (extension)
     r3_paisa: int  # 3rd resistance
     r2_paisa: int  # 2nd resistance
@@ -70,11 +77,12 @@ class PivotLevels:
     s2_paisa: int  # 2nd support
     s3_paisa: int  # 3rd support
     s4_paisa: int  # 4th support (extension)
+    s5_paisa: int  # 5th support (extension — PR-2)
 
     def get(self, key: str) -> int:
         """Lookup by string key.
 
-        Keys: 'P', 'R1'..'R4', 'S1'..'S4'.
+        Keys: 'P', 'R1'..'R5', 'S1'..'S5'.
         """
         mapping = {
             "P": self.p_paisa,
@@ -82,10 +90,12 @@ class PivotLevels:
             "R2": self.r2_paisa,
             "R3": self.r3_paisa,
             "R4": self.r4_paisa,
+            "R5": self.r5_paisa,
             "S1": self.s1_paisa,
             "S2": self.s2_paisa,
             "S3": self.s3_paisa,
             "S4": self.s4_paisa,
+            "S5": self.s5_paisa,
         }
         return mapping[key]
 
@@ -112,7 +122,7 @@ def compute_pivot_levels(
         pdc_paisa: Previous Day's Close in int64 paisa.
 
     Returns:
-        PivotLevels with all 9 levels (P, R1-R4, S1-S4) in int64 paisa.
+        PivotLevels with all 11 levels (P, R1-R5, S1-S5) in int64 paisa.
 
     Verified against TradingView "Pivots Traditional Auto" screenshot
     (NIFTY 14-May-2026): all 9 levels bit-exact.
@@ -131,8 +141,9 @@ def compute_pivot_levels(
             f"data corruption on {trading_day}"
         )
 
-    # Shared Rust core returns [r4, r3, r2, r1, p, s1, s2, s3, s4] (int64 paisa).
-    r4, r3, r2, r1, p, s1, s2, s3, s4 = trading_core.compute_pivot_levels(
+    # Shared Rust core returns [r5, r4, r3, r2, r1, p, s1, s2, s3, s4, s5]
+    # (int64 paisa — R5/S5 added in PR-2, DEC-NIFTY-INDICATORS-001).
+    r5, r4, r3, r2, r1, p, s1, s2, s3, s4, s5 = trading_core.compute_pivot_levels(
         pdh_paisa, pdl_paisa, pdc_paisa
     )
 
@@ -141,6 +152,7 @@ def compute_pivot_levels(
         pdh_paisa=pdh_paisa,
         pdl_paisa=pdl_paisa,
         pdc_paisa=pdc_paisa,
+        r5_paisa=r5,
         r4_paisa=r4,
         r3_paisa=r3,
         r2_paisa=r2,
@@ -150,4 +162,5 @@ def compute_pivot_levels(
         s2_paisa=s2,
         s3_paisa=s3,
         s4_paisa=s4,
+        s5_paisa=s5,
     )

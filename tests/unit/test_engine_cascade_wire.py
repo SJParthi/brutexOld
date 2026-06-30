@@ -153,7 +153,7 @@ class TestCascadeTupleSpec:
         with pytest.raises(cw.CascadeWireError, match="lowercase hex"):
             _spec(winners=((bad, 0),))
 
-    @pytest.mark.parametrize("mask", [-1, (1 << 52)])
+    @pytest.mark.parametrize("mask", [-1, cw._MASK_BITS_MAX + 1])
     def test_out_of_range_mask_raises(self, mask: int) -> None:
         with pytest.raises(cw.CascadeWireError, match="out of range"):
             _spec(winners=((_rid(1), mask),))

@@ -232,7 +232,10 @@ jobs:
     # shared runners - was CANCELLED at exactly 15:11 mid-way through the
     # strict per-module gates, failing the CI OK aggregate with zero real
     # failures. 25 keeps an honest hang guard with headroom for contention.
-    timeout-minutes: 25
+    # 25 -> 40 (2026-06-29): the suite re-crossed 25m; the PR-event coverage
+    # job was killed at 25:12 mid touched-module gate (reported `cancelled`,
+    # tests PASS at 100%). Continues the 2026-06-10 15->25 ratchet.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1002,9 +1005,16 @@ jobs:
           else
             echo "(brutex.data.models test file not present yet — gate inactive)"
           fi
-          # 19i · brutex.engine.combo_mask (44 stmts, 18 branches, 48 tests)
+          # 19i · brutex.engine.combo_mask (133 stmts, 52 branches — grown for
+          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012). The
+          # base scalar suite is test_engine_combo_mask.py; the u128 two-limb
+          # numpy oracle/fallback paths (the >=64-bit headroom + the
+          # kernel-unavailable ResidentBars fallback) live in the dedicated
+          # test_engine_combo_mask_u128.py — BOTH are required to reach 100%
+          # line+branch (COMMON, composed not duplicated — mirrors the
+          # quota_tracker two-file gate above).
           if compgen -G "tests/unit/test_engine_combo_mask.py" > /dev/null; then
-            pytest --cov=brutex.engine.combo_mask --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_combo_mask.py
+            pytest --cov=brutex.engine.combo_mask --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_combo_mask.py tests/unit/test_engine_combo_mask_u128.py
           else
             echo "(brutex.engine.combo_mask test file not present yet — gate inactive)"
           fi

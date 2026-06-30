@@ -28,6 +28,7 @@ from datetime import datetime
 import trading_core
 
 from brutex.indicators.fib_levels import FibLevels
+from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels
 
 # ────── Input dataclasses ──────
@@ -65,6 +66,21 @@ class IndicatorSnapshot:
 
     # Today's open price (computed at session start, constant intraday)
     open_of_day_paisa: int
+
+    # Session-anchored intraday futures VWAP (None during warm-up AND on the 1day
+    # timeframe — ADR-0012 D12; the Group-10 close_above/below_vwap bits then do
+    # not fire). Computed by brutex.indicators.vwap.VwapState (DEC-NIFTY-INDICATORS-001).
+    # Defaulted to None so every existing snapshot caller (which predates PR-2 and
+    # has no futures VWAP) keeps working unchanged — only the NIFTY-futures track
+    # populates it.
+    vwap_paisa: int | None = None
+
+    # Resolved BOS/CHoCH market-structure flags (Group 12, bits 56-59), produced by
+    # the look-ahead-clean brutex.indicators.market_structure.MarketStructureState
+    # (DEC-NIFTY-BOS-CHOCH-001) — threaded in like the resolved PriorBarHistory
+    # flags. Defaulted to an all-false signal so every pre-existing snapshot caller
+    # keeps working unchanged (the Group-12 bits then simply do not fire).
+    market_structure: MarketStructureSignal = field(default_factory=MarketStructureSignal)
 
 
 @dataclass(frozen=True)
@@ -127,7 +143,9 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u64 bitmask with bits 0..51 set per condition. Bits 52-63 always 0.
+        u128 bitmask. All 60 bits 0..59 set per condition (PR-2 added VWAP-position
+        bits 52-53 + pivot R5/S5 bits 54-55; DEC-NIFTY-BOS-CHOCH-001 added the
+        BOS/CHoCH bits 56-59, resolved from ``snapshot.market_structure``).
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
@@ -135,8 +153,9 @@ def evaluate_atoms(
     pv = snapshot.pivots
     fib = snapshot.fib
 
-    # Order MUST match trading_core.evaluate_with_levels:
-    # [p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc] (len = PIVOT_LEVELS_LEN = 10).
+    # Order MUST match trading_core.evaluate_with_levels: p, r1, r2, r3, s1, s2,
+    # s3, pdh, pdl, pdc, then r5, s5 (len = PIVOT_LEVELS_LEN = 12 — R5/S5 appended
+    # in PR-2, never renumbered).
     pivot_levels = [
         pv.p_paisa,
         pv.r1_paisa,
@@ -148,6 +167,8 @@ def evaluate_atoms(
         pv.pdh_paisa,
         pv.pdl_paisa,
         pv.pdc_paisa,
+        pv.r5_paisa,
+        pv.s5_paisa,
     ]
     # [retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
     #  up127, up162, up200, up262, dn127, dn162, dn200, dn262]
@@ -183,6 +204,7 @@ def evaluate_atoms(
         snapshot.close_paisa,
         snapshot.ema20_paisa,
         snapshot.ema200_paisa,
+        snapshot.vwap_paisa,
         pivot_levels,
         fib_levels,
         snapshot.day_high_paisa,
@@ -193,5 +215,9 @@ def evaluate_atoms(
         proximity.fib_proximity_bps,
         prior_history.prior_n,
         prior_history.flags,
+        snapshot.market_structure.bos_bullish,
+        snapshot.market_structure.bos_bearish,
+        snapshot.market_structure.choch_bullish,
+        snapshot.market_structure.choch_bearish,
     )
     return mask

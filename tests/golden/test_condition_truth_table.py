@@ -1,28 +1,28 @@
-"""Golden consumer test for the 52-condition truth table.
+"""Golden consumer test for the condition truth table.
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
 "52-condition truth table / per-condition determinism (G9)").
 
 ``tests/golden/condition_truth_table.csv`` is the flat, human-auditable
-projection of the frozen ``input → u64`` oracle
+projection of the frozen ``input → u128`` oracle
 (``fixtures/vocab_golden_vectors.json``) emitted by
 ``scripts/gen_condition_truth_table.py``. This module is its golden gate. It
 asserts, with NO call to the evaluator (so it runs even where the Rust
 ``trading_core`` wheel is absent — the values are decoded from the already-proven
-``expected_u64`` in the corpus):
+``expected_mask`` in the corpus):
 
 * the table is well-formed (canonical header, ≥ ``MIN_ROWS`` rows, no dup
   ``(snippet, condition)`` pair, only ``true``/``false`` booleans);
 * every ``condition_name`` is a real vocabulary condition and its
   ``bit_position`` matches the ONE source of truth, ``brutex/vocabulary/bits.py``;
 * every ``expected_bool`` equals the bit decoded from the referenced golden
-  case's frozen ``expected_u64`` — so the table cannot drift from the oracle;
-* the G9 both-ways guarantee: each of the 52 conditions fires ``true`` at least
-  once AND ``false`` at least once across the table, and all 52 are present;
+  case's frozen ``expected_mask`` — so the table cannot drift from the oracle;
+* the G9 both-ways guarantee: each implemented condition fires ``true`` at least
+  once AND ``false`` at least once across the table, and all are present;
 * no drift: the on-disk CSV is byte-identical to a fresh generation, and its
   SHA-256 matches the pinned manifest (the README's "SHA-256 manifest" rule).
 
-Because the contract ``evaluate_atoms == expected_u64`` is itself locked by
+Because the contract ``evaluate_atoms == expected_mask`` is itself locked by
 ``test_vocab_golden.py`` (which runs the live evaluator in CI), this CSV is
 transitively a golden assertion against the real evaluator while staying
 evaluator-free here.
@@ -47,7 +47,7 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
-_EXPECTED_SHA256 = "9d796bdeafea1d368eb27fe13c6c20c342df36677d693d5152584deb809fc84d"
+_EXPECTED_SHA256 = "e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33"
 
 
 def _read_rows() -> list[dict[str, str]]:
@@ -57,9 +57,9 @@ def _read_rows() -> list[dict[str, str]]:
 
 
 def _cases_by_id() -> dict[int, int]:
-    """Map golden case id → its frozen ``expected_u64`` from the vectors corpus."""
+    """Map golden case id → its frozen mask int (from the ``expected_mask`` hex)."""
     data = json.loads(_VECTORS_PATH.read_text(encoding="utf-8"))
-    return {case["id"]: case["expected_u64"] for case in data["cases"]}
+    return {case["id"]: int(case["expected_mask"], 16) for case in data["cases"]}
 
 
 def _snippet_to_case_id(snippet_id: str) -> int:
@@ -100,7 +100,7 @@ class TestTruthTableMatchesRegistry:
 
     def test_condition_names_and_bits_match_source_of_truth(self) -> None:
         """``condition_name`` is real and ``bit_position`` matches the registry."""
-        bit_to_name, total = gen.load_bit_registry()
+        bit_to_name, total, _impl = gen.load_bit_registry()
         name_to_bit = {name: bit for bit, name in bit_to_name.items()}
         for row in _read_rows():
             name = row["condition_name"]
@@ -110,10 +110,10 @@ class TestTruthTableMatchesRegistry:
 
 
 class TestTruthTableMatchesOracle:
-    """Every ``expected_bool`` is decoded from the frozen oracle u64."""
+    """Every ``expected_bool`` is decoded from the frozen oracle u128 mask."""
 
     def test_every_row_matches_the_frozen_u64(self) -> None:
-        """``expected_bool`` == bit of the referenced case's ``expected_u64``."""
+        """``expected_bool`` == bit of the referenced case's ``expected_mask``."""
         cases = _cases_by_id()
         mismatches: list[str] = []
         for row in _read_rows():
@@ -131,20 +131,26 @@ class TestTruthTableMatchesOracle:
 
 
 class TestTruthTableBothWaysCoverage:
-    """G9 — every condition is exercised true AND false."""
+    """G9 — every IMPLEMENTED condition is exercised true AND false."""
 
-    def test_all_52_conditions_fire_and_clear(self) -> None:
-        """Each of the 52 conditions appears with ``true`` and with ``false``."""
-        bit_to_name, total = gen.load_bit_registry()
+    def test_all_implemented_conditions_fire_and_clear(self) -> None:
+        """Each IMPLEMENTED condition appears with ``true`` and with ``false``.
+
+        LAYOUT-ONLY conditions (``implemented=false``) are excluded — the
+        evaluator never sets them, so they carry no truth-table row.
+        """
+        bit_to_name, _total, implemented_mask = gen.load_bit_registry()
+        impl_names = {bit_to_name[b] for b in bit_to_name if (implemented_mask >> b) & 1}
         rows = _read_rows()
         seen_true: set[str] = set()
         seen_false: set[str] = set()
         for row in rows:
             (seen_true if row["expected_bool"] == "true" else seen_false).add(row["condition_name"])
-        all_names = set(bit_to_name.values())
-        assert len(all_names) == total
-        assert seen_true == all_names, f"never true: {sorted(all_names - seen_true)}"
-        assert seen_false == all_names, f"never false: {sorted(all_names - seen_false)}"
+        assert seen_true == impl_names, f"never true: {sorted(impl_names - seen_true)}"
+        assert seen_false == impl_names, f"never false: {sorted(impl_names - seen_false)}"
+        # No LAYOUT-ONLY condition leaked a row into the table.
+        layout_names = set(bit_to_name.values()) - impl_names
+        assert (seen_true | seen_false).isdisjoint(layout_names)
 
 
 class TestTruthTableNoDrift:

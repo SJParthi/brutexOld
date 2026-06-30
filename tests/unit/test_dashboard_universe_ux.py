@@ -84,7 +84,7 @@ def test_one_pull_button_is_selection_aware_full_pipeline() -> None:
     assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids)' in html, (
         "the ticked-selection branch must post the scoped pipeline route"
     )
-    assert '"/api/v1/universe/pull-pipeline",' in html, (
+    assert '"/api/v1/universe/pull-pipeline"' in html, (
         "the no-selection branch must post the bare (whole-universe) pipeline route"
     )
     assert "function pipelineSelection" in html, "the selection-scope helper is missing"

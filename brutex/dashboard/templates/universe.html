@@ -257,16 +257,18 @@
   .pull-row { display:flex; flex-wrap:wrap; align-items:center; gap:var(--s-2); width:100%; }
   .pull-div { width:1px; align-self:stretch; min-height:var(--ctl-h);
     background:var(--border-strong); margin:0 3px; }
-  /* The from→to .daterange group was REMOVED with the dead date picker
-     (DEC-UNIVERSE-PULL-CONSOLIDATE-001 FIX-FIRST follow-up); only the static
-     .ctl-field chips (window + granularity) remain. */
-  .ctl-field { display:inline-flex; align-items:center; gap:7px;
+  /* The from→to .daterange group is RE-ADDED + properly wired
+     (DEC-UNIVERSE-PULL-DATERANGE-001) — it scopes the SPOT history phase of the
+     ▶ Pull · full pipeline button (F&O keeps its per-contract default lookback).
+     Shares the chip shape with the static .ctl-field granularity chip. */
+  .daterange, .ctl-field { display:inline-flex; align-items:center; gap:7px;
     min-height:var(--ctl-h); padding:0 12px; background:var(--surface-2);
     border:1px solid var(--border-strong); border-radius:var(--r-md);
     color:var(--muted); font-size:12px; transition:.15s var(--ease); }
-  .ctl-field:focus-within { border-color:var(--blue);
+  .daterange:focus-within, .ctl-field:focus-within { border-color:var(--blue);
     box-shadow:0 0 0 3px rgba(91,141,239,.16); }
-  .ctl-field select { color-scheme:dark; }
+  .daterange .dr-sep { color:var(--border-strong); }
+  .daterange input[type="date"], .ctl-field select { color-scheme:dark; }
   /* Every pull-bar button shares ONE height + shape so the toolbar reads as a
      single aligned row instead of mismatched chips (the alignment report). */
   .pullbtn, .loadbtn { min-height:var(--ctl-h); display:inline-flex; align-items:center;
@@ -522,16 +524,24 @@
   </div>
 
   <div class="pullbar" role="toolbar" aria-label="Pull controls">
-    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above</div>
+    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above. The spot from/to dates below scope the SPOT history phase (blank ⇒ 2020-01-01 → previous trading day); F&amp;O keeps its per-contract default lookback.</div>
     <div class="pull-row">
-      <!-- The from/to date-range picker was REMOVED in DEC-UNIVERSE-PULL-CONSOLIDATE-001
-           follow-up: the single ▶ Pull · full pipeline button posts the gated route, which
-           ALWAYS pulls the fixed default window (spot 2020-01-01→prev-day; F&O per-contract
-           lookback) — it accepts NO from/to. A picker that the button silently ignored was
-           dead/misleading UI implying a scoping it no longer provides, so it is gone rather
-           than left inert (Golden Rule #10 honesty). The static line below states the fixed
-           window so the operator knows exactly what a pull fetches. -->
-      <span class="ctl-field" title="The full pipeline pulls the fixed history window — spot from 2020-01-01 to the previous trading day; F&amp;O per-contract lookback — at 1-minute. There is no date scoping: scope a pull by ticking rows, not by date.">window · <b>2020 → prev-day</b> (fixed)</span>
+      <!-- The from/to date-range picker is RE-ADDED + properly wired
+           (DEC-UNIVERSE-PULL-DATERANGE-001), resolving the honesty concern of
+           DEC-UNIVERSE-PULL-CONSOLIDATE-001 (which removed an inert picker the
+           route ignored). The ▶ Pull · full pipeline onclick now appends
+           &from_date=/&to_date= ONLY when non-blank; blank ⇒ the canonical
+           default [2020-01-01, previous trading day]. The range scopes the SPOT
+           history phase ONLY — F&O keeps its per-contract default lookback
+           (over-pull safety: a wide explicit range over the whole options chain
+           would pull far too much). The inputs pre-fill from
+           __BRUTEX_DATE_FROM__/__BRUTEX_DATE_TO__ (default_date_range); the To
+           ceiling is today (__BRUTEX_DATE_MAX__). -->
+      <div class="daterange" role="group" aria-label="Spot history date range" id="pipeRange">
+        <label title="Inclusive start date for the SPOT history pull — defaults to 2020-01-01 (Track 1 history floor); clear to fall back to it.">spot&nbsp;from <input type="date" id="pipeFrom" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
+        <span class="dr-sep" aria-hidden="true">→</span>
+        <label title="Inclusive end date for the SPOT history pull — defaults to the previous trading day (pick today to include it). F&amp;O is unaffected (per-contract default lookback).">to <input type="date" id="pipeTo" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
+      </div>
       <span class="pull-div" aria-hidden="true"></span>
       <span class="ctl-field" title="1-minute is the ONLY granularity fetched from Groww; 1-day + the 19 intraday timeframes are derived from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).">granularity · <b>1-minute</b> (1-day derived)</span>
       <span class="pull-div" aria-hidden="true"></span>
@@ -580,8 +590,10 @@
   </div>
 
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
-       (DEC-MAPPING-INTEGRITY-RECONCILE-001). VERIFIED = every options-eligible spot pulled
-       its option history; RED = a spot pulled ZERO expiries (e.g. M&M before the F2 fix). -->
+       (DEC-MAPPING-INTEGRITY-RECONCILE-001 / DEC-MAPPING-INTEGRITY-ATTEMPTED-001). VERIFIED =
+       every ATTEMPTED options-eligible spot pulled its option history; RED = a spot was
+       attempted yet pulled ZERO expiries (e.g. M&M); never-pulled names read "not pulled yet"
+       (neutral), so a clean selective pull is green. -->
   <div id="mappanel" role="status" aria-live="polite"
        style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
               border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
@@ -956,8 +968,10 @@ async function loadCompleteness() {
 
 async function loadMappingIntegrity() {
   /* Read-only: the green/red spot↔options mapping verdict (DEC-MAPPING-INTEGRITY-RECONCILE-001).
-     VERIFIED when every options-eligible spot pulled >=1 expiry; RED lists the spots that
-     pulled ZERO (e.g. M&M before the F2 options-fetch fix). Never throws — keeps last shown. */
+     VERIFIED when every options-eligible spot that was ATTEMPTED pulled >=1 expiry; RED lists
+     only the ATTEMPTED-and-ZERO spots (e.g. M&M, the special-char options-fetch bug). A spot
+     never pulled yet (no coverage row) is the neutral "not attempted" tally — NEVER red, so a
+     clean selective pull reads green (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). Never throws. */
   try {
     const r = await fetch("/api/v1/universe/mapping-integrity");
     if (!r.ok) return;
@@ -967,18 +981,20 @@ async function loadMappingIntegrity() {
     const detail = document.getElementById("mapdetail");
     if (!panel) return;
     panel.style.display = "block";
+    const pending = m.not_attempted || 0;
+    const pendingNote = pending ? (" · " + pending + " not pulled yet") : "";
     if (m.is_green) {
       verdict.textContent = " ✅ VERIFIED";
       verdict.style.color = "#4ade80";
       detail.textContent = " · " + m.fully_covered + "/" + m.total_eligible +
-        " eligible spots pulled their option history";
+        " eligible spots pulled their option history" + pendingNote;
     } else {
       const reds = (m.under_pulled || [])
         .filter(u => u.reason === "none" && !u.whitelisted).map(u => u.symbol);
-      verdict.textContent = " ❌ " + m.gating_failures + " spot(s) pulled ZERO expiries";
+      verdict.textContent = " ❌ " + m.gating_failures + " spot(s) attempted but pulled ZERO expiries";
       verdict.style.color = "#f87171";
-      detail.textContent = reds.length ? (" · " + reds.slice(0, 12).join(", ") +
-        (reds.length > 12 ? " …" : "")) : "";
+      detail.textContent = (reds.length ? (" · " + reds.slice(0, 12).join(", ") +
+        (reds.length > 12 ? " …" : "")) : "") + pendingNote;
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1259,20 +1275,38 @@ function pipelineSelection() {
   if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
   return [];
 }
+// Read the spot from/to pickers (DEC-UNIVERSE-PULL-DATERANGE-001) and append
+// &from_date=/&to_date= ONLY when non-blank, so a blank picker yields the bare
+// route → the server resolves the canonical default [2020-01-01, prev-day]
+// (byte-identical to the pre-picker behaviour). The range scopes the SPOT
+// history + metadata-year grid only; F&O keeps its per-contract default lookback.
+function pipelineDateQuery() {
+  const fromEl = document.getElementById("pipeFrom");
+  const toEl = document.getElementById("pipeTo");
+  let q = "";
+  if (fromEl && fromEl.value) q += "&from_date=" + encodeURIComponent(fromEl.value);
+  if (toEl && toEl.value) q += "&to_date=" + encodeURIComponent(toEl.value);
+  return q;
+}
 const PIPELINE_BTN = document.getElementById("pullPipelineBtn");
 if (PIPELINE_BTN) {
   PIPELINE_BTN.onclick = () => {
     const items = pipelineSelection();
+    const dq = pipelineDateQuery();
     if (items.length) {
       const ids = items.map(it => it.pull_symbol).join(",");
       startAndPoll(
-        "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids),
+        "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids) + dq,
         `${items.length} selected — spot → expiries + contracts → historical → pre-build`);
     } else {
       // No selection ⇒ the whole universe (the bare route; resolve_pull_targets
-      // falls back to the whole admitted universe).
+      // falls back to the whole admitted universe). A leading "&" is harmless on a
+      // query string with no "?"-params — guard it so the URL stays well-formed.
+      const url = dq
+        ? "/api/v1/universe/pull-pipeline?" + dq.slice(1)
+        : "/api/v1/universe/pull-pipeline";
       startAndPoll(
-        "/api/v1/universe/pull-pipeline",
+        url,
         "EVERYTHING — spot → expiries + contracts → historical → pre-build");
     }
   };

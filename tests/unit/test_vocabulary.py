@@ -641,13 +641,19 @@ class TestBitsInvariants:
 
     def test_wrong_count_raises(self) -> None:
         bad = {"only_one": 0}
-        with pytest.raises(AssertionError, match=r"Expected 52 conditions, got 1"):
+        with pytest.raises(
+            AssertionError,
+            match=rf"Expected {B.TOTAL_CONDITIONS} conditions, got 1",
+        ):
             B._check_invariants(bad, B.TOTAL_CONDITIONS)
 
     def test_bit_position_gap_raises(self) -> None:
-        # Right count (52) but bit 0 missing — uses 1..52 instead.
+        # Right count but bit 0 missing — uses 1..TOTAL instead.
         bad = {f"cond_{i}": i for i in range(1, B.TOTAL_CONDITIONS + 1)}
-        with pytest.raises(AssertionError, match=r"Bit positions must be 0\.\.51 with no gaps"):
+        with pytest.raises(
+            AssertionError,
+            match=rf"Bit positions must be 0\.\.{B.TOTAL_CONDITIONS - 1} with no gaps",
+        ):
             B._check_invariants(bad, B.TOTAL_CONDITIONS)
 
 
@@ -750,6 +756,7 @@ class TestEvaluatorEdgeCases:
             pdh_paisa=pdh,
             pdl_paisa=pdl,
             pdc_paisa=0,
+            r5_paisa=0,
             r4_paisa=0,
             r3_paisa=0,
             r2_paisa=0,
@@ -759,6 +766,7 @@ class TestEvaluatorEdgeCases:
             s2_paisa=0,
             s3_paisa=0,
             s4_paisa=0,
+            s5_paisa=0,
         )
         base = _make_snapshot()
         s = IndicatorSnapshot(

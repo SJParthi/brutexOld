@@ -14,6 +14,7 @@ import io
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.data.mapping_integrity import (
     REASON_NONE,
+    REASON_NOT_ATTEMPTED,
     REASON_PARTIAL,
     MappingIntegrityReport,
     UnderPulledSpot,
@@ -30,6 +31,7 @@ def _report(
     under: tuple[UnderPulledSpot, ...] = (),
     total: int = 1,
     fully: int = 1,
+    not_attempted: int = 0,
     expected: tuple[int, ...] = (2020, 2021),
     whitelist: tuple[str, ...] = (),
 ) -> MappingIntegrityReport:
@@ -37,6 +39,7 @@ def _report(
         generated_at="2026-06-21T00:00:00+00:00",
         total_eligible=total,
         fully_covered=fully,
+        not_attempted=not_attempted,
         under_pulled=under,
         expected_years=expected,
         whitelist=whitelist,
@@ -83,6 +86,24 @@ def test_partial_row_is_not_gating() -> None:
     assert ["Status", "GREEN"] in rows
     row = next(r for r in rows if r[:2] == ["NSE", "BAJAJ-AUTO"])
     assert row == ["NSE", "BAJAJ-AUTO", "partial", "no", "2024", "2020 2021", "no"]
+
+
+def test_not_attempted_row_is_not_gating_and_counted_in_summary() -> None:
+    """A never-attempted spot reads ``not_attempted``, gating=no, and a SUMMARY tally row."""
+    sbin = UnderPulledSpot(
+        exchange="NSE",
+        symbol="SBIN",
+        reason=REASON_NOT_ATTEMPTED,
+        covered_years=(),
+        missing_years=(2020, 2021),
+        whitelisted=False,
+    )
+    text = mapping_integrity_to_csv(_report(under=(sbin,), total=2, fully=1, not_attempted=1))
+    rows = _parse(text)
+    assert ["Status", "GREEN"] in rows  # not_attempted never gates
+    row = next(r for r in rows if r[:2] == ["NSE", "SBIN"])
+    assert row == ["NSE", "SBIN", "not_attempted", "no", "", "2020 2021", "no"]
+    assert ["Not attempted (no pull run yet)", "1"] in rows
 
 
 def test_whitelisted_none_row_is_not_gating() -> None:

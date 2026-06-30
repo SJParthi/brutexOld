@@ -15,10 +15,14 @@ use pyo3::wrap_pyfunction;
 use crate::bits::TOTAL_CONDITIONS;
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
+use crate::indicators::market_structure::MarketStructureSignal;
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
-const PIVOT_LEVELS_LEN: usize = 10;
+///
+/// `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]` — the original 10 plus the
+/// PR-2 R5/S5 levels appended (never renumbered; DEC-NIFTY-INDICATORS-001).
+const PIVOT_LEVELS_LEN: usize = 12;
 /// Number of `fib_levels` entries [`evaluate_with_levels`] expects.
 const FIB_LEVELS_LEN: usize = 15;
 
@@ -47,7 +51,7 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// The number of atomic conditions (52).
+/// The number of atomic conditions (the dense bit count from the manifest).
 #[pyfunction]
 fn total_conditions() -> u32 {
     TOTAL_CONDITIONS
@@ -206,7 +210,7 @@ fn check_evaluate_inputs(
     Ok(())
 }
 
-/// Evaluate one bar's 52-condition `u64` mask, RECOMPUTING pivots+fib from the
+/// Evaluate one bar's condition `u128` mask, RECOMPUTING pivots+fib from the
 /// previous day's `pdh/pdl/pdc`. Used by the standalone parity check; BruteX
 /// itself uses [`evaluate_with_levels`] (it already holds the levels).
 ///
@@ -228,9 +232,10 @@ fn check_evaluate_inputs(
 )]
 #[pyo3(signature = (
     tod_seconds, open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
+    ema20_paisa, ema200_paisa, vwap_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
+    bos_bullish, bos_bearish, choch_bullish, choch_bearish,
 ))]
 fn evaluate_from_raw(
     tod_seconds: u32,
@@ -240,6 +245,7 @@ fn evaluate_from_raw(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -251,7 +257,11 @@ fn evaluate_from_raw(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> PyResult<u64> {
+    bos_bullish: bool,
+    bos_bearish: bool,
+    choch_bullish: bool,
+    choch_bearish: bool,
+) -> PyResult<u128> {
     // Thin PyO3 wrapper: all logic + validation lives in the pure `_impl` (unit
     // tested without a libpython link), the boundary only maps `Err(String)` to a
     // clean `ValueError` — never a panic → SIGABRT under `panic = "abort"`.
@@ -263,6 +273,7 @@ fn evaluate_from_raw(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        vwap_paisa,
         prev_pdh_paisa,
         prev_pdl_paisa,
         prev_pdc_paisa,
@@ -274,11 +285,17 @@ fn evaluate_from_raw(
         fib_bps,
         prior_n,
         prior_flags,
+        MarketStructureSignal {
+            bos_bullish,
+            bos_bearish,
+            choch_bullish,
+            choch_bearish,
+        },
     )
     .map_err(PyValueError::new_err)
 }
 
-/// Pure logic for [`evaluate_from_raw`] — `Result<u64, String>` so the
+/// Pure logic for [`evaluate_from_raw`] — `Result<u128, String>` so the
 /// no-libpython `cargo test` covers every branch (valid + the validation reject).
 #[expect(
     clippy::too_many_arguments,
@@ -292,6 +309,7 @@ fn evaluate_from_raw_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -303,10 +321,21 @@ fn evaluate_from_raw_impl(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> Result<u64, String> {
+    market_structure: MarketStructureSignal,
+) -> Result<u128, String> {
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
     check_prev_day_ohlc(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa)?;
+    // `vwap_paisa` is only compared in the evaluator (never multiplied); bound it
+    // for hygiene alongside the EMAs.
+    if let Some(v) = vwap_paisa
+        && !bar_in_range(v)
+    {
+        return Err(format!(
+            "vwap_paisa magnitude {v} out of the overflow-safe range \
+             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+        ));
+    }
     // Also bound every per-bar input the EVALUATOR multiplies/subtracts/`.abs()`es
     // (close × bps, body × 10, (close − day_low) × 3, pdc × 50, …). The
     // recomputed pivot/fib R/S/retrace levels are bounded by the validated anchor
@@ -338,11 +367,16 @@ fn evaluate_from_raw_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        // The recompute path now ALSO threads the session VWAP, so the four-way
+        // golden bit-identity (shim == with_levels == from_raw == oracle) holds
+        // for the Group-10 bits too (DEC-NIFTY-INDICATORS-001).
+        vwap_paisa,
         pivots,
         fib,
         day_high_paisa,
         day_low_paisa,
         open_of_day_paisa,
+        market_structure,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
@@ -356,18 +390,22 @@ fn evaluate_from_raw_impl(
     Ok(evaluate_atoms(&snapshot, &proximity, &prior))
 }
 
-/// Evaluate one bar's 52-condition `u64` mask from PRE-BUILT levels (no
+/// Evaluate one bar's condition `u128` mask from PRE-BUILT levels (no
 /// recompute) — BruteX's `evaluate_atoms` delegation target.
 ///
-/// `pivot_levels` (len 10) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc]`.
+/// `pivot_levels` (len 12) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`.
 /// `fib_levels` (len 15) = `[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
-/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`. The struct fields
-/// the 52 conditions never read (pivot r4/s4, fib range/424) are set to 0.
-/// Because the levels are passed verbatim, this is bit-identical to the Python
-/// evaluator for ANY snapshot — including hand-built levels with `pdc == 0`
-/// (the gap conditions' own `pdc > 0` guard handles that, no recompute to reject it).
+/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`. `vwap_paisa` is the
+/// session VWAP (`None` during warm-up / on 1day — the Group-10 bits then do not
+/// fire). The four `bos_*`/`choch_*` booleans are the engine-resolved Group-12
+/// market-structure flags (bits 56-59), produced by the stateful look-ahead-clean
+/// `MarketStructureState` and passed verbatim like the resolved `PriorBarHistory`
+/// flags. The struct fields the conditions never read (pivot r4/s4, fib range/424)
+/// are set to 0. Because the levels are passed verbatim, this is bit-identical to
+/// the Python evaluator for ANY snapshot — including hand-built levels with
+/// `pdc == 0` (the gap conditions' own `pdc > 0` guard handles that).
 ///
-/// The length guards (10 / 15) are validated FIRST (a mismatch would otherwise
+/// The length guards (12 / 15) are validated FIRST (a mismatch would otherwise
 /// index out of bounds → SIGABRT), then every caller-supplied level AND every
 /// per-bar input + bps is bounded ([`check_evaluate_inputs`]) so a garbage value
 /// raises a clean `ValueError` instead of overflowing/`.abs()`-panicking the inner
@@ -379,9 +417,10 @@ fn evaluate_from_raw_impl(
 )]
 #[pyo3(signature = (
     tod_seconds, open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, pivot_levels, fib_levels,
+    ema20_paisa, ema200_paisa, vwap_paisa, pivot_levels, fib_levels,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
+    bos_bullish, bos_bearish, choch_bullish, choch_bearish,
 ))]
 fn evaluate_with_levels(
     tod_seconds: u32,
@@ -391,6 +430,7 @@ fn evaluate_with_levels(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -401,7 +441,11 @@ fn evaluate_with_levels(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> PyResult<u64> {
+    bos_bullish: bool,
+    bos_bearish: bool,
+    choch_bullish: bool,
+    choch_bearish: bool,
+) -> PyResult<u128> {
     // Thin PyO3 wrapper — the length-validation + the level-indexing it guards
     // live in the pure `_impl` (unit-tested without a libpython link). The
     // boundary maps `Err(String)` to a clean `ValueError`; a length-mismatch can
@@ -414,6 +458,7 @@ fn evaluate_with_levels(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        vwap_paisa,
         pivot_levels,
         fib_levels,
         day_high_paisa,
@@ -424,11 +469,17 @@ fn evaluate_with_levels(
         fib_bps,
         prior_n,
         prior_flags,
+        MarketStructureSignal {
+            bos_bullish,
+            bos_bearish,
+            choch_bullish,
+            choch_bearish,
+        },
     )
     .map_err(PyValueError::new_err)
 }
 
-/// Pure logic for [`evaluate_with_levels`] — `Result<u64, String>` so the
+/// Pure logic for [`evaluate_with_levels`] — `Result<u128, String>` so the
 /// length-guard + the indexing it protects are unit-covered without a GIL.
 #[expect(
     clippy::too_many_arguments,
@@ -442,6 +493,7 @@ fn evaluate_with_levels_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -452,7 +504,8 @@ fn evaluate_with_levels_impl(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
-) -> Result<u64, String> {
+    market_structure: MarketStructureSignal,
+) -> Result<u128, String> {
     if pivot_levels.len() != PIVOT_LEVELS_LEN {
         return Err(format!(
             "pivot_levels must have {PIVOT_LEVELS_LEN} entries, got {}",
@@ -477,6 +530,18 @@ fn evaluate_with_levels_impl(
                  [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
             ));
         }
+    }
+    // `vwap_paisa` is only COMPARED (`close > vwap` / `close < vwap`) in the
+    // evaluator — never multiplied or subtracted — so any i64 is overflow-safe;
+    // we still bound it for hygiene alongside the EMAs (a garbage value is a data
+    // bug, not a valid level).
+    if let Some(v) = vwap_paisa
+        && !bar_in_range(v)
+    {
+        return Err(format!(
+            "vwap_paisa magnitude {v} out of the overflow-safe range \
+             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+        ));
     }
     // Bound the per-bar inputs + bps the evaluator multiplies/subtracts/`.abs()`es
     // (`pdc` = pivot_levels[9] is already bar-bounded above).
@@ -506,6 +571,9 @@ fn evaluate_with_levels_impl(
         pdh_paisa: pivot_levels[7],
         pdl_paisa: pivot_levels[8],
         pdc_paisa: pivot_levels[9],
+        // R5/S5 appended at indices 10/11 (PR-2); r4/s4 unused by the conditions.
+        r5_paisa: pivot_levels[10],
+        s5_paisa: pivot_levels[11],
         r4_paisa: 0,
         s4_paisa: 0,
     };
@@ -539,11 +607,13 @@ fn evaluate_with_levels_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
+        vwap_paisa,
         pivots,
         fib,
         day_high_paisa,
         day_low_paisa,
         open_of_day_paisa,
+        market_structure,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
@@ -561,9 +631,10 @@ fn evaluate_with_levels_impl(
 /// single-source indicator math BruteX's `compute_pivot_levels` wrapper packs
 /// into its `PivotLevels` dataclass (so the arithmetic lives ONCE, in Rust).
 ///
-/// Returns a 9-element list in BruteX `PivotLevels` field order:
-/// `[r4, r3, r2, r1, p, s1, s2, s3, s4]` (int64 paisa). The caller supplies
-/// `pdh/pdl/pdc` and already holds them. Invalid prev-day OHLC
+/// Returns an 11-element list in BruteX `PivotLevels` field order:
+/// `[r5, r4, r3, r2, r1, p, s1, s2, s3, s4, s5]` (int64 paisa — R5/S5 added in
+/// PR-2, DEC-NIFTY-INDICATORS-001). The caller supplies `pdh/pdl/pdc` and already
+/// holds them. Invalid prev-day OHLC
 /// (`pdh < pdl`, `pdc` outside `[pdl, pdh]`, or an overflow-prone magnitude) is
 /// REJECTED at the boundary with a clean `ValueError` — matching BruteX's
 /// wrapper AND ensuring a direct/garbage FFI caller can never trip the inner
@@ -586,8 +657,8 @@ fn py_compute_pivot_levels_impl(
     check_prev_day_ohlc(pdh_paisa, pdl_paisa, pdc_paisa)?;
     let p = compute_pivot_levels(pdh_paisa, pdl_paisa, pdc_paisa);
     Ok(vec![
-        p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa, p.s2_paisa,
-        p.s3_paisa, p.s4_paisa,
+        p.r5_paisa, p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa,
+        p.s2_paisa, p.s3_paisa, p.s4_paisa, p.s5_paisa,
     ])
 }
 
@@ -741,11 +812,11 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa, p.s2_paisa,
-                p.s3_paisa, p.s4_paisa,
+                p.r5_paisa, p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa,
+                p.s2_paisa, p.s3_paisa, p.s4_paisa, p.s5_paisa,
             ]
         );
-        assert_eq!(got.len(), 9);
+        assert_eq!(got.len(), 11);
     }
 
     #[test]
@@ -789,7 +860,7 @@ mod tests {
     }
 
     // ── evaluate_from_raw_impl ─────────────────────────────────────────────
-    fn raw(pdh: i64, pdl: i64, pdc: i64) -> Result<u64, String> {
+    fn raw(pdh: i64, pdl: i64, pdc: i64) -> Result<u128, String> {
         evaluate_from_raw_impl(
             10 * 3600, // tod_seconds (mid-morning)
             PDC,
@@ -798,6 +869,7 @@ mod tests {
             PDC, // open/high/low/close
             Some(PDC),
             Some(PDC), // ema20/ema200
+            Some(PDC), // vwap
             pdh,
             pdl,
             pdc,
@@ -809,12 +881,13 @@ mod tests {
             10, // proximity bps
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
     }
 
     #[test]
     fn raw_impl_valid_returns_mask() {
-        // A valid call returns a u64 mask (no panic, no error).
+        // A valid call returns a u128 mask (no panic, no error).
         let m = raw(PDH, PDL, PDC).expect("valid raw");
         // Mid-morning bit must be set (sanity that the evaluator actually ran).
         let _ = m; // exact bits proven by the golden test; here we assert it ran.
@@ -844,7 +917,7 @@ mod tests {
         pivot_bps: i64,
         pdh_pdl_bps: i64,
         fib_bps: i64,
-    ) -> Result<u64, String> {
+    ) -> Result<u128, String> {
         evaluate_from_raw_impl(
             10 * 3600,
             open,
@@ -853,6 +926,7 @@ mod tests {
             close,
             ema20,
             ema200,
+            None, // vwap (the Group-10 bits are not under test here)
             PDH,
             PDL,
             PDC, // VALID anchor
@@ -864,6 +938,7 @@ mod tests {
             fib_bps,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
     }
 
@@ -963,6 +1038,60 @@ mod tests {
     }
 
     #[test]
+    fn raw_impl_rejects_out_of_range_vwap() {
+        // A garbage session VWAP (PR-2) is rejected on BOTH the recompute path …
+        let big = MAX_BAR_PAISA + 1;
+        let err = evaluate_from_raw_impl(
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            Some(big), // vwap out of range
+            PDH,
+            PDL,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
+        // … and the pre-built-levels path.
+        let err = evaluate_with_levels_impl(
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            Some(big), // vwap out of range
+            vec![0i64; PIVOT_LEVELS_LEN],
+            vec![0i64; FIB_LEVELS_LEN],
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
+    }
+
+    #[test]
     fn raw_impl_rejects_close_times_bps_overflow() {
         // A big close (at the bar ceiling) × a big-but-in-cap bps overflows i64 —
         // the `checked_mul` guard rejects it (the close × bps DoS the reviewer
@@ -1052,7 +1181,7 @@ mod tests {
     }
 
     // ── evaluate_with_levels_impl ──────────────────────────────────────────
-    fn with_levels(pivots: Vec<i64>, fibs: Vec<i64>) -> Result<u64, String> {
+    fn with_levels(pivots: Vec<i64>, fibs: Vec<i64>) -> Result<u128, String> {
         evaluate_with_levels_impl(
             10 * 3600,
             PDC,
@@ -1061,6 +1190,7 @@ mod tests {
             PDC,
             Some(PDC),
             Some(PDC),
+            Some(PDC), // vwap_paisa
             pivots,
             fibs,
             PDH,
@@ -1071,12 +1201,13 @@ mod tests {
             10,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
     }
 
     #[test]
     fn with_levels_valid_returns_mask() {
-        // A correctly-sized levels pair (10 + 15) runs the evaluator with no panic.
+        // A correctly-sized levels pair (12 + 15) runs the evaluator with no panic.
         let pivots = vec![0i64; PIVOT_LEVELS_LEN];
         let fibs = vec![0i64; FIB_LEVELS_LEN];
         assert!(with_levels(pivots, fibs).is_ok());
@@ -1124,6 +1255,7 @@ mod tests {
             0,
             None,
             None,
+            None, // vwap_paisa
             ok_p.clone(),
             ok_f.clone(),
             0,
@@ -1134,6 +1266,7 @@ mod tests {
             10,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
         .unwrap_err();
         assert!(err.contains("overflow-safe"), "got: {err}");
@@ -1146,6 +1279,7 @@ mod tests {
             MAX_BAR_PAISA, // close
             None,
             None,
+            None, // vwap_paisa
             ok_p,
             ok_f,
             0,
@@ -1156,6 +1290,7 @@ mod tests {
             0,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
         .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
@@ -1170,6 +1305,93 @@ mod tests {
         assert!(with_levels(pivots, fibs).is_ok());
     }
 
+    #[test]
+    fn market_structure_flags_set_bits_56_to_59() {
+        // The four resolved BOS/CHoCH booleans threaded through the FFI ABI set
+        // exactly their Group-12 bits (56-59) — both entry points (DEC-NIFTY-BOS-CHOCH-001).
+        let cases = [
+            (
+                MarketStructureSignal {
+                    bos_bullish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_BOS_BULLISH,
+            ),
+            (
+                MarketStructureSignal {
+                    bos_bearish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_BOS_BEARISH,
+            ),
+            (
+                MarketStructureSignal {
+                    choch_bullish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_CHOCH_BULLISH,
+            ),
+            (
+                MarketStructureSignal {
+                    choch_bearish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_CHOCH_BEARISH,
+            ),
+        ];
+        for (ms, bit) in cases {
+            // evaluate_from_raw path.
+            let raw = evaluate_from_raw_impl(
+                10 * 3600,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                None,
+                None,
+                None,
+                PDH,
+                PDL,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                ms,
+            )
+            .expect("valid raw");
+            assert_eq!((raw >> bit) & 1, 1, "from_raw bit {bit} should be set");
+            // evaluate_with_levels path.
+            let wl = evaluate_with_levels_impl(
+                10 * 3600,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                None,
+                None,
+                None,
+                vec![PDC; PIVOT_LEVELS_LEN],
+                vec![PDC; FIB_LEVELS_LEN],
+                PDH,
+                PDL,
+                PDC,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                ms,
+            )
+            .expect("valid with_levels");
+            assert_eq!((wl >> bit) & 1, 1, "with_levels bit {bit} should be set");
+        }
+    }
+
     // ── trivial pyfunction helpers (pure) ──────────────────────────────────
     #[test]
     fn version_and_total_conditions() {
@@ -1182,14 +1404,15 @@ mod tests {
     /// (no per-call drift). Also a cheap perf smoke — the work is O(1) per call.
     #[test]
     fn stress_many_anchors_parity_and_no_panic() {
-        let mut acc = 0u64;
+        let mut acc = 0u128;
         for i in 0..50_000i64 {
             let pdl = 1 + (i % 100_000);
             let pdh = pdl + (i % 20_000);
             let pdc = pdl + (i % (pdh - pdl + 1));
             let got = py_compute_pivot_levels_impl(pdh, pdl, pdc).unwrap();
             let p = compute_pivot_levels(pdh, pdl, pdc);
-            assert_eq!(got[4], p.p_paisa);
+            // The 11-element list is [r5, r4, r3, r2, r1, p, s1, …]; p is index 5.
+            assert_eq!(got[5], p.p_paisa);
             let m = evaluate_from_raw_impl(
                 10 * 3600,
                 pdc,
@@ -1198,6 +1421,7 @@ mod tests {
                 pdc,
                 Some(pdc),
                 Some(pdc),
+                Some(pdc), // vwap
                 pdh,
                 pdl,
                 pdc,
@@ -1209,6 +1433,7 @@ mod tests {
                 10,
                 0,
                 vec![],
+                MarketStructureSignal::default(),
             )
             .unwrap();
             acc = acc.wrapping_add(m);
@@ -1248,8 +1473,8 @@ mod tests {
             prop_assert_eq!(
                 got_p,
                 vec![
-                    p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa,
-                    p.s1_paisa, p.s2_paisa, p.s3_paisa, p.s4_paisa,
+                    p.r5_paisa, p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa,
+                    p.s1_paisa, p.s2_paisa, p.s3_paisa, p.s4_paisa, p.s5_paisa,
                 ]
             );
 
@@ -1305,9 +1530,10 @@ mod tests {
             ).is_ok());
             // … and a full valid-anchor evaluate runs without panic.
             let mask = evaluate_from_raw_impl(
-                10 * 3600, open, high, low, close, Some(close), Some(close),
+                10 * 3600, open, high, low, close, Some(close), Some(close), Some(close),
                 1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
                 bps, bps, bps, 0, vec![],
+                MarketStructureSignal::default(),
             );
             prop_assert!(mask.is_ok());
         }

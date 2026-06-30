@@ -1,10 +1,18 @@
-//! `trading-core` — the shared indicator + 52-condition vocabulary kernel.
+//! `trading-core` — the shared indicator + condition vocabulary kernel.
 //!
 //! `DEC-SHARED-CORE-001` (`docs/MIGRATION.md` #441): a bit-for-bit Rust port of
 //! BruteX's Python vocabulary, the single source of truth that **BruteX consumes
 //! today** (via PyO3, live since Phase 2b — `brutex/vocabulary/evaluator.py`
 //! delegates to it) and that **TickVault will share natively (Phase 3, not yet
 //! done)**, so the backtested signal equals the live signal *by construction*.
+//!
+//! The vocabulary mask is a `u128` (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4 —
+//! the DEC-PLUGIN-001-gated u64→u128 widening for headroom). The bit LAYOUT
+//! ([`bits`]) is GENERATED from `conditions.toml` by `scripts/codegen_vocab.py`
+//! (the same manifest emits the Python twin). Bits 52..=55 (VWAP/R5-S5) became
+//! `implemented=true` in PR-2; bits 56..=59 (BOS/CHoCH) became `implemented=true`
+//! in DEC-NIFTY-BOS-CHOCH-001 (the stateful look-ahead-clean
+//! [`MarketStructureState`] resolves the four booleans the evaluator reads).
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral
@@ -32,7 +40,9 @@ pub mod indicators;
 
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
+pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
 pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
+pub use indicators::vwap::VwapState;
 
 #[cfg(feature = "python")]
 mod python;

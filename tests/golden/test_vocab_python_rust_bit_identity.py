@@ -22,12 +22,13 @@ equality gate over the 400 frozen vectors:
    here proves the shim's Python ``compute_pivot_levels`` / ``compute_fib_levels``
    produce bit-identical levels to the Rust recompute — a real cross-check, not a
    re-derivation of the same code.
-4. ``expected_u64`` — the frozen oracle answer-key.
+4. ``expected_mask`` — the frozen oracle answer-key (a u128 hex string).
 
 For every golden case the four must agree bit-for-bit
 (``evaluate_atoms == evaluate_with_levels == evaluate_from_raw == expected``), and
-the per-bit sweep additionally proves every one of the 52 conditions decodes
-identically across all four (both set and clear across the fixture union).
+the per-bit sweep additionally proves every IMPLEMENTED condition decodes
+identically across all four (both set and clear across the fixture union; the
+LAYOUT-ONLY bits are proven inert by ``test_vocab_golden``).
 
 The fixture is loaded via the existing ``test_vocab_golden`` helpers (the ONE
 loader — no duplicated parser, CLAUDE.md §11 COMMON).
@@ -48,9 +49,10 @@ import trading_core
 from brutex.indicators.fib_levels import compute_fib_levels
 from brutex.indicators.pivots import compute_pivot_levels
 from brutex.vocabulary import NAME_TO_BIT
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 from brutex.vocabulary.evaluator import evaluate_atoms
 
-from tests.golden.test_vocab_golden import _CASES, _rebuild
+from tests.golden.test_vocab_golden import _CASES, _expected, _rebuild
 
 
 def _tod_seconds(ts_iso: str) -> int:
@@ -77,6 +79,8 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         pv.pdh_paisa,
         pv.pdl_paisa,
         pv.pdc_paisa,
+        pv.r5_paisa,
+        pv.s5_paisa,
     ]
     fib_levels = [
         fb.retrace_level_at_pdh_paisa,
@@ -105,6 +109,7 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
+        case["vwap_paisa"],
         pivot_levels,
         fib_levels,
         case["day_high_paisa"],
@@ -115,6 +120,10 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         proximity["fib_bps"],
         prior["prior_n"],
         prior["flags"],
+        case["market_structure"]["bos_bullish"],
+        case["market_structure"]["bos_bearish"],
+        case["market_structure"]["choch_bullish"],
+        case["market_structure"]["choch_bearish"],
     )
     return result
 
@@ -133,6 +142,7 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
+        case["vwap_paisa"],
         case["prev_pdh_paisa"],
         case["prev_pdl_paisa"],
         case["prev_pdc_paisa"],
@@ -144,6 +154,10 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         proximity["fib_bps"],
         prior["prior_n"],
         prior["flags"],
+        case["market_structure"]["bos_bullish"],
+        case["market_structure"]["bos_bearish"],
+        case["market_structure"]["choch_bullish"],
+        case["market_structure"]["choch_bearish"],
     )
     return result
 
@@ -153,7 +167,7 @@ def test_shim_rust_recompute_and_oracle_agree_on_every_vector() -> None:
 
     Four-way bit-for-bit agreement — the shim's marshalling, the pre-built-levels
     entry point it delegates to, the independent in-Rust recompute, and the frozen
-    ``expected_u64`` answer-key — so a regression in the shim's marshalling, the
+    ``expected_mask`` answer-key — so a regression in the shim's marshalling, the
     Python level-builders, or the Rust core fails as a golden test.
     """
     mismatches: list[str] = []
@@ -162,11 +176,11 @@ def test_shim_rust_recompute_and_oracle_agree_on_every_vector() -> None:
         shim = evaluate_atoms(snapshot, proximity, prior)
         with_levels = _rust_with_levels(case)
         from_raw = _rust_from_raw(case)
-        expected = case["expected_u64"]
+        expected = _expected(case)
         if not (shim == with_levels == from_raw == expected):
             mismatches.append(
-                f"case {case['id']}: shim={shim:#015x} with_levels={with_levels:#015x} "
-                f"from_raw={from_raw:#015x} expected={expected:#015x}"
+                f"case {case['id']}: shim={shim:#034x} with_levels={with_levels:#034x} "
+                f"from_raw={from_raw:#034x} expected={expected:#034x}"
             )
     assert not mismatches, "shim↔with_levels↔from_raw↔oracle divergence:\n" + "\n".join(
         mismatches[:20]
@@ -178,19 +192,19 @@ def test_every_condition_bit_agrees_across_all_paths() -> None:
 
     Beyond the whole-mask equality above, this asserts PER-BIT agreement for every
     condition name across every golden case — so a single condition can never
-    silently diverge between the shim, either Rust entry point, and the oracle (and
-    across the union of cases each of the 52 names is exercised set AND clear).
+    silently diverge between the shim, either Rust entry point, and the oracle. The
+    both-ways union is checked over the IMPLEMENTED bits only (the LAYOUT-ONLY bits
+    are proven always-clear by ``test_vocab_golden``).
     """
     set_seen = 0
     clear_seen = 0
-    full = (1 << len(NAME_TO_BIT)) - 1
     per_bit_mismatches: list[str] = []
     for case in _CASES:
         snapshot, proximity, prior = _rebuild(case)
         shim = evaluate_atoms(snapshot, proximity, prior)
         with_levels = _rust_with_levels(case)
         from_raw = _rust_from_raw(case)
-        expected = case["expected_u64"]
+        expected = _expected(case)
         for name, bit in NAME_TO_BIT.items():
             shim_bit = (shim >> bit) & 1
             with_bit = (with_levels >> bit) & 1
@@ -202,8 +216,10 @@ def test_every_condition_bit_agrees_across_all_paths() -> None:
                     f"from_raw={raw_bit} expected={exp_bit}"
                 )
         set_seen |= shim
-        clear_seen |= (~shim) & full
+        clear_seen |= (~shim) & IMPLEMENTED_MASK
     assert not per_bit_mismatches, "per-bit divergence:\n" + "\n".join(per_bit_mismatches[:20])
-    # Every bit is exercised both ways across the fixture (name↔bit).
-    assert set_seen == full, "a condition is never set across the golden fixture"
-    assert clear_seen == full, "a condition is never clear across the golden fixture"
+    # Every IMPLEMENTED bit is exercised both ways across the fixture (name↔bit).
+    assert set_seen == IMPLEMENTED_MASK, "an implemented condition is never set across the fixture"
+    assert clear_seen == IMPLEMENTED_MASK, (
+        "an implemented condition is never clear across the fixture"
+    )

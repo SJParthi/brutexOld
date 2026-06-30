@@ -133,12 +133,16 @@ class TestMaskRunId:
         b = mask_run_id(mask=2, params=_PARAMS, **_CTX)
         assert a != b
 
-    def test_strategy_id_encodes_mask_as_16_hex(self) -> None:
-        # mask:%016x — the DEC-MASK-IDENTITY-001 encoding. Two masks differing only
-        # in a high bit must still differ (no truncation to fewer than 16 hex).
+    def test_strategy_id_encodes_mask_as_32_hex(self) -> None:
+        # mask:%032x — the DEC-MASK-IDENTITY-001 / DEC-VOCAB-U128-CODEGEN-001 u128
+        # encoding. Two masks differing only in a HIGH bit (>= 64) must still differ
+        # (no truncation to 16 hex / u64 — the u128 headroom is preserved).
         a = mask_run_id(mask=0, params=_PARAMS, **_CTX)
         b = mask_run_id(mask=1 << 51, params=_PARAMS, **_CTX)
         assert a != b
+        # A bit beyond u64 must NOT alias a u64-truncated mask.
+        hi = mask_run_id(mask=1 << 100, params=_PARAMS, **_CTX)
+        assert hi not in (a, b)
 
     def test_empty_field_rejected(self) -> None:
         ctx = {**_CTX, "instrument": ""}
@@ -213,14 +217,14 @@ class TestSweepRunConfig:
         # the lazy iter_masks_k_of_bits generator mid-enumeration.
         from brutex.engine.combo_mask import MAX_VOCAB_BITS
 
-        with pytest.raises(ValueError, match=r"condition_bits \[99\] out of range \[0, 64\)"):
-            _make_config(condition_bits=[0, 1, 99], k=1)
+        with pytest.raises(ValueError, match=r"condition_bits \[199\] out of range \[0, 128\)"):
+            _make_config(condition_bits=[0, 1, 199], k=1)
         # The boundary bit (== MAX_VOCAB_BITS) is also out of the half-open range.
-        with pytest.raises(ValueError, match=r"out of range \[0, 64\)"):
+        with pytest.raises(ValueError, match=r"out of range \[0, 128\)"):
             _make_config(condition_bits=[MAX_VOCAB_BITS], k=1)
 
     def test_negative_condition_bit_rejected_at_config_time(self) -> None:
-        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 64\)"):
+        with pytest.raises(ValueError, match=r"condition_bits \[-1\] out of range \[0, 128\)"):
             _make_config(condition_bits=[-1, 0, 1], k=1)
 
     def test_top_condition_bit_in_range_is_valid(self) -> None:
@@ -1246,7 +1250,7 @@ class TestSweepComboError:
             )
         msg = str(excinfo.value)
         # The message names the mask hex, the run-id, the tuple coordinate, and k.
-        assert f"0x{boom_mask:016x}" in msg
+        assert f"0x{boom_mask:032x}" in msg
         assert "NIFTY/1m/bull" in msg
         assert "k=1" in msg
         assert "run_id=" in msg
@@ -1665,3 +1669,57 @@ class TestSweepComboError:
         # was never reached → ABSENT, so a resume redoes the whole tuple.
         assert not trial_stats_sidecar_path(store.path).exists()
         assert not completion_sentinel_path(store.path).exists()
+
+
+class TestResidentKernelBarMismatch:
+    """A pre-built kernel whose bar count disagrees with the tuple's bars is rejected.
+
+    ``run_persisted_sweep(..., kernel=)`` accepts a pre-built ``ResidentSweepKernel``
+    to skip rebuilding ``bar_bits``; if the kernel was built from a DIFFERENT bar
+    window than the tuple supplies, the sweep would silently score the wrong bars,
+    so it raises ``ValueError`` at config time instead.
+    """
+
+    def test_kernel_built_from_other_bars_raises(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        # A kernel built from a SHORTER window than this tuple's bars.
+        kernel = ResidentSweepKernel(bars[:-1], proximity=cfg.proximity, prior_n=cfg.prior_n)
+        assert kernel.n_bars == len(bars) - 1
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel has .* bars but .* bars were supplied"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_kernel_matching_bars_is_accepted(self, tmp_path: Path) -> None:
+        """A kernel built from the SAME bars drives the sweep (the happy path)."""
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        assert kernel.n_bars == len(bars)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+        assert summary.enumerated >= 1

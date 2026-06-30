@@ -222,6 +222,45 @@ class TestIngestSpot:
         assert report.bars_appended == 2
         assert sink.appends == [1, 1]
 
+    def test_truncated_spot_window_fires_partial_warning(self) -> None:
+        # DEC-PARTIAL-WINDOW-DETECT-001 (spot wiring): a 1day window [2022-01-01, 2022-06-01)
+        # whose only bar lands 2022-01-04 — months before the window end, with "now" far past
+        # it — is a TRUNCATED SUCCESS spot window → ONE observe-only WARNING. Spot indices
+        # trade densely every session, so this is a genuine, reliably-detectable fetch gap.
+        sink = _Sink()
+        early_bar = _bar(datetime(2022, 1, 4, 4, 5, tzinfo=UTC))
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(bars=[early_bar]),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2022, 1, 1),
+                end=date(2022, 6, 1),
+            )
+        assert report.bars_appended == 1
+        warns = _events(logs, "window.suspected_partial")
+        assert len(warns) == 1
+        assert warns[0]["symbol"] == repr("NIFTY")
+        assert warns[0]["last_bar_date"] == "2022-01-04"
+        assert warns[0]["expiry"] is None  # spot has no expiry
+
+    def test_complete_spot_window_no_partial_warning(self) -> None:
+        # A spot window whose bar reaches its end (here end-of-day before the window end) → no
+        # truncation WARNING (the dense-session complete case).
+        sink = _Sink()
+        last_session_bar = _bar(datetime(2022, 1, 31, 4, 5, tzinfo=UTC))
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=[last_session_bar]),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2022, 1, 1),
+                end=date(2022, 2, 1),
+            )
+        assert _events(logs, "window.suspected_partial") == []
+
     def test_intraday_tiles_into_30_day_windows(self) -> None:
         # 1minute tiles at 30 days; ~212-day range → 8 windows.
         sink = _Sink()

@@ -262,10 +262,12 @@ class TestRankSweepOverBits:
 
     def test_out_of_range_bit_raises_after_cap_passes(self) -> None:
         # C(2, 1) = 2 clears the default cap, so the range check in the generator
-        # is what rejects bit 64.
+        # is what rejects a bit at MAX_VOCAB_BITS (=128). PR-1 widened the mask
+        # u64 -> u128, so the valid range is now [0, 128) and bit 64 is in range;
+        # 128 is the first out-of-range position.
         bars = _session_bars()
         with pytest.raises(ValueError, match="out of range"):
-            rank_sweep_over_bits(bars, [0, 64], 1, direction=Side.BUY, tf_minutes=1)
+            rank_sweep_over_bits(bars, [0, 128], 1, direction=Side.BUY, tf_minutes=1)
 
     def test_default_cap_admits_full_vocab_k_of_4(self) -> None:
         # The documented envelope: the default cap admits C(52,4)=270,725? No — it is

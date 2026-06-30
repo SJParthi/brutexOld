@@ -138,6 +138,7 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     pull_all_spot,
     pull_candles,
+    resolve_candle_range,
     resolve_fetch_intervals,
     resolve_pull_symbols,
     resolve_pull_targets,
@@ -176,6 +177,7 @@ from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.mapping_integrity import (
     EligibleSpot,
     MappingIntegrityReport,
+    attempted_pairs_from_records,
     coverage_years_from_records,
     reconcile_mapping_integrity,
     report_to_dict,
@@ -2421,6 +2423,8 @@ def build_app(
     async def api_universe_pull_pipeline(
         symbols: str | None = Query(default=None),
         symbol: str | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
 
@@ -2458,8 +2462,45 @@ def build_app(
         PRIMARY gate post-cutover, DEC-DHAN-GROWW-REMIGRATE-001) — a no-creds run
         honestly pulls nothing and stops at an empty chain (never fabricated data,
         Golden Rule #1).
+
+        ``from_date`` / ``to_date`` (ISO ``YYYY-MM-DD``) re-add a date range to the
+        SPOT history phase (DEC-UNIVERSE-PULL-DATERANGE-001, re-wiring the picker
+        DEC-UNIVERSE-PULL-CONSOLIDATE-001 had removed as inert): they scope the
+        SPOT pull window AND narrow the metadata-pull YEAR grid. **Blank ⇒ the
+        canonical default** ``[2020-01-01, previous trading day]`` (byte-identical
+        to the pre-picker behaviour). The F&O HISTORICAL phase deliberately does
+        NOT receive these dates — it keeps its per-contract smart default lookback
+        (futures ``expiry − 60d`` / options ``expiry − 30d``) so a wide explicit
+        range can never over-pull the whole options chain. The range is validated
+        EAGERLY via :func:`~brutex.dashboard.pull_controller.resolve_candle_range`
+        — a reversed / below-2020 / non-ISO range is a clean 400, never a silent
+        empty pull.
         """
         dry_run = not groww_credentials_present()
+        # Normalize the date params to ONE definition of "blank" up front: an
+        # empty / whitespace-only value becomes ``None`` so every downstream
+        # helper (``resolve_candle_range`` AND ``_resolve_metadata_years`` AND
+        # ``pull_all_spot``) sees the SAME thing. Without this the two helpers
+        # disagree — ``resolve_candle_range`` strips ``"  "`` to ``None`` (passes)
+        # but ``_resolve_metadata_years`` does not, so ``date.fromisoformat("  ")``
+        # would raise uncaught → a 500 on a whitespace param (unreachable from the
+        # date-input UI, but ``/pull-pipeline`` is a public API) — DEC-UNIVERSE-
+        # PULL-DATERANGE-001. Normalized blank ⇒ the canonical 2020→prev-day default.
+        from_date = (from_date or "").strip() or None
+        to_date = (to_date or "").strip() or None
+        # Validate the spot date range EARLY (before the background job is queued)
+        # so a reversed / below-2020 / non-ISO pick is a clean 400. The resolved
+        # window is recomputed inside the spot phase from the SAME strings — this
+        # call is the fail-fast guard.
+        try:
+            resolve_candle_range(
+                from_date=from_date,
+                to_date=to_date,
+                year=None,
+                now=datetime.now(UTC),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             targets, target_source = resolve_pull_targets(
                 symbols=symbols,
@@ -2471,7 +2512,7 @@ def build_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        years = _resolve_metadata_years(None, None)
+        years = _resolve_metadata_years(from_date, to_date)
         fetch_intervals = resolve_fetch_intervals(None)
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         registry_path = lake_root / "registry.duckdb"
@@ -2507,12 +2548,15 @@ def build_app(
                 )
 
             def _run_spot() -> BulkSpotReport:
+                # The operator-picked spot range (DEC-UNIVERSE-PULL-DATERANGE-001);
+                # blank ⇒ None ⇒ pull_all_spot's resolve_candle_range default
+                # [2020-01-01, prev-day] (byte-identical to the pre-picker pull).
                 return pull_all_spot(
                     targets,
                     lake_root=lake_root,
                     dry_run=dry_run,
-                    from_date=None,
-                    to_date=None,
+                    from_date=from_date,
+                    to_date=to_date,
                     year=None,
                     intervals=fetch_intervals,
                     on_progress=_phase_progress,
@@ -3397,16 +3441,28 @@ def build_app(
         reconciliations. Gathers the two store reads (eligible underlyings + coverage ledger)
         off the event loop and delegates to the 100%-tested
         :func:`~brutex.data.mapping_integrity.reconcile_mapping_integrity`.
+
+        The coverage ledger is read ONCE and projected two ways
+        (DEC-MAPPING-INTEGRITY-ATTEMPTED-001): the covered-years map (cells with
+        ``expiries_pulled > 0``) AND the attempted set (every underlying with ANY row — an
+        expiry pull was actually run, even if it returned zero). Passing the attempted set
+        lets the reconciler distinguish a real attempted-and-zero failure (M&M) from a benign
+        never-pulled name (a selective pull), so the gate is no longer falsely RED. The
+        eligible set is scoped to TRADABLE F&O underlyings (``tradable_only=True``), so the
+        ~539 NIFTY-Total-Market REFERENCE_ONLY constituents (no option chain) never inflate
+        the gate (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
         """
         store = _require_store()
         eligible = [
             EligibleSpot(exchange=exch.value, symbol=sym)
-            for exch, sym in store.fno_eligible_underlyings()
+            for exch, sym in store.fno_eligible_underlyings(tradable_only=True)
         ]
+        coverage = store.list_coverage()
         return reconcile_mapping_integrity(
             eligible_spots=eligible,
-            covered_years=coverage_years_from_records(store.list_coverage()),
+            covered_years=coverage_years_from_records(coverage),
             expected_years=_coverage_years(),
+            attempted=attempted_pairs_from_records(coverage),
             whitelist=(),
             now=datetime.now(UTC),
         )
