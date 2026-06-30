@@ -119,6 +119,8 @@ def test_deep_strikes_get_reduced_budget_in_band_keep_full() -> None:
     assert budget.attempts_for("NSE-NIFTY-30Jan25-23650-CE") == 1  # rank 13 — first deep
     assert budget.attempts_for("NSE-NIFTY-30Jan25-21000-CE") == 1  # far deep
     assert budget.deep_contracts > 0
+    # all 162 contracts are CE/PE options in one (NIFTY, expiry) chain ≥ 7 strikes, so every one
+    # is CONSIDERED — total_contracts counts the considered options, here the whole list.
     assert budget.total_contracts == len(contracts)
 
 
@@ -186,6 +188,58 @@ def test_per_expiry_center_independent() -> None:
     # each expiry's center (its own median) keeps full
     assert budget.attempts_for("NSE-NIFTY-30Jan25-23000-CE") == 3
     assert budget.attempts_for("NSE-NIFTY-30Jan25-30000-CE") == 3
+
+
+def _under_option(underlying: str, strike: float) -> DerivativeContract:
+    """A CE for *underlying* at *strike* on the shared _EXPIRY (the multi-underlying case)."""
+    return DerivativeContract(
+        underlying_symbol=underlying,
+        expiry=_EXPIRY,
+        symbol=f"NSE-{underlying}-30Jan25-{int(strike)}-CE",
+        contract_type="CE",
+        strike=strike,
+    )
+
+
+def test_multi_underlying_same_expiry_not_pooled() -> None:
+    """MAJOR fix: two underlyings with DISJOINT strike ranges on the SAME expiry are NOT pooled.
+
+    RELIANCE (₹2800-3200) + HDFCBANK (₹1600-1780) share the same monthly expiry in the
+    production all-cached pull. Keying by ``(underlying, expiry)`` (not expiry alone) gives each
+    its OWN median — so each underlying's ATM strike keeps the FULL budget. Pooling by expiry
+    alone would land the median in the inter-cluster gap (~₹2290) and over-flag both clusters'
+    live strikes.
+    """
+    contracts: list[DerivativeContract] = []
+    # RELIANCE chain: 2800..3200 step 20 (21 strikes), ATM ~3000.
+    for k in range(2800, 3201, 20):
+        contracts.append(_under_option("RELIANCE", float(k)))
+    # HDFCBANK chain: 1600..1780 step 10 (19 strikes), ATM ~1690.
+    for k in range(1600, 1781, 10):
+        contracts.append(_under_option("HDFCBANK", float(k)))
+
+    budget = build_empty_retry_budget(contracts, full_attempts=3, band=5, deep_attempts=1)
+    # Each underlying's ATM-cluster median keeps the FULL budget (proving NO pooling): the
+    # RELIANCE median (3000) and the HDFCBANK median (1690) are both in-band for their OWN chain.
+    assert budget.attempts_for("NSE-RELIANCE-30Jan25-3000-CE") == 3
+    assert budget.attempts_for("NSE-HDFCBANK-30Jan25-1690-CE") == 3
+    # And a strike near one cluster's center is NOT dragged deep by the other cluster — under the
+    # buggy pooled median (~2290) the HDFCBANK ATM (1690) would have been far-deep; here it's full.
+    assert "NSE-HDFCBANK-30Jan25-1690-CE" not in budget.by_symbol
+    assert "NSE-RELIANCE-30Jan25-3000-CE" not in budget.by_symbol
+
+
+def test_total_contracts_counts_only_considered_options() -> None:
+    """MINOR fix: total_contracts excludes FUT legs + small-chain options (the honest ratio).
+
+    A pull with a big NIFTY chain (considered) + a FUT (no strike, excluded) + a tiny 3-strike
+    chain (left full, excluded) reports total_contracts = only the considered big-chain options.
+    """
+    big = _chain(40)  # 162 CE/PE options in one (NIFTY, _EXPIRY) chain — all considered
+    fut = _future()  # no strike — excluded
+    tiny = [_under_option("TINYCO", float(100 + i * 10)) for i in range(3)]  # < 7 — excluded
+    budget = build_empty_retry_budget([*big, fut, *tiny], full_attempts=3, band=12, deep_attempts=1)
+    assert budget.total_contracts == len(big)  # only the considered options, not 162+1+3
 
 
 def test_empty_chain_is_empty_budget() -> None:

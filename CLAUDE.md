@@ -239,12 +239,14 @@ hostile-review pass._
   `E ≈ 0.77` — the **3× in-pull EMPTY-retry** firing on every clean-but-empty deep-OTM strike that never traded is the
   DOMINANT amplifier (NOT just a "15.8% deep-OTM" subset). FIX (pull-PLANNING / per-contract retry-budget only — NO
   lake-schema/stored-bar/rate-cap/vocab change; F&O lake stays REFERENCE_ONLY): NEW pure
-  `brutex/adapters/groww/strike_chain_bound.py` `build_empty_retry_budget` groups the CE/PE chain by expiry, finds each
-  expiry's MEDIAN strike (a robust ATM/liquidity-center proxy needing NO live spot fetch), and gives a strike OUTSIDE a
-  `±band`-STRIKES envelope (grid-rank, default `±12`, env `BRUTEX_FNO_STRIKE_BAND`) a REDUCED empty-retry budget (default
-  `1`, env `BRUTEX_FNO_DEEP_EMPTY_RETRY`, clamped `[1, full]`) — so a confirmed-DEAD far-OTM strike costs ONE fetch to
-  confirm empty instead of three. A too-small chain, every FUT, and every in-band option keep the FULL budget; the map is
-  SPARSE so a `None` map is byte-identical to today. Threaded an optional `empty_retry_by_symbol` through
+  `brutex/adapters/groww/strike_chain_bound.py` `build_empty_retry_budget` groups the CE/PE chain by
+  `(underlying_symbol, expiry)` (NOT expiry alone — so a mixed all-cached pull never pools two underlyings sharing one
+  monthly expiry into a bogus median; hostile-review MAJOR folded), finds each chain's MEDIAN strike (a robust
+  ATM/liquidity-center proxy needing NO live spot fetch), and gives a strike OUTSIDE a `±band`-STRIKES envelope
+  (grid-rank, default `±12`, env `BRUTEX_FNO_STRIKE_BAND`) a REDUCED empty-retry budget (default `1`, env
+  `BRUTEX_FNO_DEEP_EMPTY_RETRY`, clamped `[1, full]`) — so a confirmed-DEAD far-OTM strike costs ONE fetch to confirm
+  empty instead of three. A too-small chain, every FUT, and every in-band option keep the FULL budget; the map is SPARSE
+  so a `None` map is byte-identical to today. Threaded an optional `empty_retry_by_symbol` through
   `run_groww_option_ingest` → `ingest_option_contract`'s EXISTING `empty_retry_attempts`, built in `historical_pull`
   over the whole chain. CORRECTNESS — NO DATA LOST (Golden Rule #1): the reduction keys ONLY off a CLEAN 200-zero-candles
   return, NEVER off a raised retryable error — by construction the empty-retry loop re-iterates only when the fetch
@@ -265,7 +267,7 @@ hostile-review pass._
   if it returns data); the 8h projection is `total_fetches/3 r/s`, a wall-clock LOWER bound assuming the controller
   sustains 3 r/s (Rule 6 — provable), NOT a claim every real pull finishes in 8h; the empty-RETRY is bounded, NOT a
   plan-time strike SKIP (a walk-outward short-circuit is incompatible with the parallel fan-out + would slow the pull,
-  so the dominant measured lever was chosen). `strike_chain_bound.py` (83/24) + `option_ingest.py` (310/82) +
+  so the dominant measured lever was chosen). `strike_chain_bound.py` (88/24) + `option_ingest.py` (310/82) +
   `historical_pull.py` (257/54) ALL 100% line+branch; NEW unit/property + a per-permutation correctness suite
   (clean-empty→bounded · 429/timeout/5xx/empty-body-throttle→retried+NOT counted · near-money→never reduced ·
   transient-empty-then-data→strike not skipped + data captured · re-pull→re-fetches · #919 detector still fires) + the

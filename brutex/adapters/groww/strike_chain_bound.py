@@ -60,6 +60,13 @@ from brutex.adapters.protocol import DerivativeContract
 
 _LOG = structlog.get_logger("brutex.adapters.groww.strike_chain_bound")
 
+#: The per-chain grouping key — ``(underlying_symbol, expiry)``. Keying on the UNDERLYING too
+#: (not expiry alone) keeps two underlyings that share one monthly expiry from pooling their
+#: strikes into one bogus median (DEC-FETCH-PER-WINDOW-GUARANTEE-001 — the multi-underlying
+#: all-cached pull case). ``expiry`` is typed ``object`` because :class:`DerivativeContract`
+#: allows ``expiry=None`` (a perpetual); a ``None`` expiry simply forms its own chain bucket.
+_ChainKey = tuple[str, object]
+
 #: The OPTION strike types this bounding applies to (``FUT`` has no strike and always keeps
 #: the full budget). Mirrors :data:`~brutex.adapters.groww.contracts._OPTION_TYPES` — kept
 #: local so this pure module imports nothing from the contracts resolver.
@@ -161,7 +168,10 @@ class StrikeChainBudget:
     deep_contracts
         Count of contracts assigned the reduced budget (the fetches-saved driver).
     total_contracts
-        Count of contracts considered (the whole resolved chain).
+        Count of OPTION legs actually CONSIDERED for bounding — the in-band + deep options
+        across all evaluated `(underlying, expiry)` chains. EXCLUDES the FUT legs (no strike)
+        and the small-chain options left FULL, so the `deep_contracts / total_contracts` ratio
+        honestly reflects the option-level reduction, not an inflated whole-list denominator.
     """
 
     by_symbol: Mapping[str, int]
@@ -189,16 +199,22 @@ def build_empty_retry_budget(
     """Build the per-contract empty-retry budget for one chain — pure, O(chain).
 
     DEC-FETCH-PER-WINDOW-GUARANTEE-001. Groups the OPTION (``CE`` / ``PE``) contracts by
-    expiry, and within each expiry finds the median strike (a robust ATM/liquidity-center
-    proxy that needs no live spot fetch). A contract whose strike sits OUTSIDE the
-    ``±band``-strikes envelope around its expiry's median is "confirmed-deep" and gets the
-    REDUCED *deep_attempts* empty-retry budget; every other contract (in-band options,
-    every ``FUT``, every contract in a too-small chain) keeps *full_attempts*.
+    ``(underlying_symbol, expiry)`` — NOT expiry alone — and within each chain finds the median
+    strike (a robust ATM/liquidity-center proxy that needs no live spot fetch). A contract whose
+    strike sits OUTSIDE the ``±band``-strikes envelope around ITS chain's median is
+    "confirmed-deep" and gets the REDUCED *deep_attempts* empty-retry budget; every other
+    contract (in-band options, every ``FUT``, every contract in a too-small chain) keeps
+    *full_attempts*. Keying on the underlying too is essential for the production all-cached
+    pull (one call builds the budget over a chain spanning MANY underlyings): two underlyings
+    sharing the same monthly expiry must NOT have their strikes pooled into one median, or the
+    pooled center lands in the inter-cluster gap and over-flags live strikes (no data is lost,
+    but glitch-recovery on potentially-live strikes erodes — the per-(underlying,expiry) key
+    keeps every median its OWN underlying's ATM proxy).
 
     The band is measured in STRIKES (rank distance on the sorted distinct-strike list of the
-    expiry), NOT in absolute price, so it adapts to the strike grid: a wide-grid index
+    chain), NOT in absolute price, so it adapts to the strike grid: a wide-grid index
     (50-pt strikes) and a tight-grid stock (2.50-pt strikes) get the same ``±band``-strike
-    envelope. An expiry with FEWER than :data:`_MIN_CHAIN_STRIKES` distinct strikes is left
+    envelope. A chain with FEWER than :data:`_MIN_CHAIN_STRIKES` distinct strikes is left
     FULL for every contract (too few strikes to estimate a center — the false-positive guard).
 
     **Never narrows below safe (Golden Rule #1/#10).** *deep_attempts* is clamped into
@@ -234,34 +250,50 @@ def build_empty_retry_budget(
     safe_full = max(1, full_attempts)
     safe_deep = min(max(1, resolved_deep), safe_full)
 
-    # Group OPTION strikes by expiry → the distinct sorted strike list per expiry.
-    strikes_by_expiry: dict[object, list[float]] = {}
+    # Group OPTION strikes by (underlying_symbol, expiry) → the distinct sorted strike list per
+    # chain. Keying on the UNDERLYING too (not expiry alone) is essential for the production
+    # all-cached pull, where ONE call builds the budget over a chain spanning MANY underlyings:
+    # two underlyings sharing the same monthly expiry (the common last-Thursday case) must NOT
+    # have their strikes POOLED into one median — RELIANCE (₹2800-3200) + HDFCBANK (₹1600-1780)
+    # on the same expiry would land the pooled median in the inter-cluster gap and over-flag
+    # live-cluster strikes (it cannot lose data, but it erodes glitch-recovery on live strikes
+    # and makes "median = ATM proxy" false for a mixed pull). The composite key keeps each
+    # underlying's chain independent so every median is its OWN underlying's ATM proxy
+    # (the per-chain key type is the module-level :data:`_ChainKey`).
+    strikes_by_chain: dict[_ChainKey, list[float]] = {}
     for contract in contract_list:
         if contract.contract_type not in _OPTION_TYPES or contract.strike is None:
             continue
-        strikes_by_expiry.setdefault(contract.expiry, []).append(contract.strike)
+        chain_key: _ChainKey = (contract.underlying_symbol, contract.expiry)
+        strikes_by_chain.setdefault(chain_key, []).append(contract.strike)
 
-    # Per expiry: the median (center) + the sorted distinct strikes for rank-distance bounding.
-    center_by_expiry: dict[object, float] = {}
-    sorted_strikes_by_expiry: dict[object, list[float]] = {}
-    for expiry, strikes in strikes_by_expiry.items():
+    # Per (underlying, expiry): the median (center) + the sorted distinct strikes for
+    # rank-distance bounding.
+    center_by_chain: dict[_ChainKey, float] = {}
+    sorted_strikes_by_chain: dict[_ChainKey, list[float]] = {}
+    for chain_key, strikes in strikes_by_chain.items():
         distinct = sorted(set(strikes))
         if len(distinct) < _MIN_CHAIN_STRIKES:
-            continue  # too few strikes to bound — leave the whole expiry FULL (false-positive guard)
-        sorted_strikes_by_expiry[expiry] = distinct
-        center_by_expiry[expiry] = median(distinct)
+            continue  # too few strikes to bound — leave the whole chain FULL (false-positive guard)
+        sorted_strikes_by_chain[chain_key] = distinct
+        center_by_chain[chain_key] = median(distinct)
 
     by_symbol: dict[str, int] = {}
     deep = 0
+    # ``options_considered`` counts only the OPTION legs this bounding actually evaluated (an
+    # in-band or deep classification), so the deep/total ratio is honest about the option-level
+    # reduction — it EXCLUDES the FUT legs (no strike) + the small-chain options left FULL, which
+    # ``len(contract_list)`` would have inflated the denominator with (the #919-style honesty).
+    options_considered = 0
     for contract in contract_list:
         if contract.contract_type not in _OPTION_TYPES or contract.strike is None:
             continue
-        expiry_strikes = sorted_strikes_by_expiry.get(contract.expiry)
-        if expiry_strikes is None:
+        chain_key = (contract.underlying_symbol, contract.expiry)
+        chain_strikes = sorted_strikes_by_chain.get(chain_key)
+        if chain_strikes is None:
             continue  # small chain left full
-        if _is_deep(
-            contract.strike, expiry_strikes, center_by_expiry[contract.expiry], resolved_band
-        ):
+        options_considered += 1
+        if _is_deep(contract.strike, chain_strikes, center_by_chain[chain_key], resolved_band):
             by_symbol[contract.symbol] = safe_deep
             deep += 1
 
@@ -269,6 +301,7 @@ def build_empty_retry_budget(
         _LOG.info(
             "strike_chain.budget",
             deep_contracts=deep,
+            options_considered=options_considered,
             total_contracts=len(contract_list),
             band=resolved_band,
             deep_attempts=safe_deep,
@@ -279,7 +312,7 @@ def build_empty_retry_budget(
         full_attempts=safe_full,
         deep_attempts=safe_deep,
         deep_contracts=deep,
-        total_contracts=len(contract_list),
+        total_contracts=options_considered,
     )
 
 

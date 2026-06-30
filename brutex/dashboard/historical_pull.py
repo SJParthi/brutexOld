@@ -1144,12 +1144,12 @@ def pull_contract_candles(
     )
 
     # Per-contract EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001): a confirmed-deep
-    # far-OTM strike (outside the chain's median ± band, computed over the WHOLE selected chain
-    # so the per-expiry liquidity center is robust) gets a REDUCED empty-retry budget, so a dead
-    # strike costs ONE fetch to confirm empty instead of three — driving fetches-per-window
-    # toward ~1.0. NO data is lost (the first non-empty fetch wins). The budget is sparse (only
-    # the deep strikes), so an in-band option / every future keeps the full budget. Pure +
-    # O(chain), no network/lake I/O.
+    # far-OTM strike (outside ITS (underlying, expiry) chain's median ± band — keyed PER
+    # underlying so a mixed all-cached pull never pools two underlyings sharing one monthly
+    # expiry into a bogus median) gets a REDUCED empty-retry budget, so a dead strike costs ONE
+    # fetch to confirm empty instead of three — driving fetches-per-window toward ~1.0. NO data
+    # is lost (the first non-empty fetch wins). The budget is sparse (only the deep strikes), so
+    # an in-band option / every future keeps the full budget. Pure + O(chain), no network/lake I/O.
     empty_retry_budget = build_empty_retry_budget(contract for _row, contract in rebuilt)
     empty_retry_by_symbol = dict(empty_retry_budget.by_symbol) or None
 
