@@ -69,6 +69,11 @@ pub struct IndicatorSnapshot {
 }
 
 /// Proximity tolerances (basis points) for the `near_*` conditions.
+///
+/// Carries OPTIONAL serde derives (behind the `serde` feature) so it can be
+/// embedded on a serializable [`crate::spec::StrategySpec`]; the core stays
+/// dependency-free when the feature is off (DEC-STRATEGYSPEC-CORE-001).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProximityParams {
     pub pivot_proximity_bps: i64,
