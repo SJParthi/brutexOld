@@ -494,6 +494,44 @@ class TestFailureHandling:
         with pytest.raises(ValueError, match="tail bug"):
             pipeline.drain()
 
+    def test_isolatable_writer_error_quarantines_window_and_does_not_trip(self) -> None:
+        """DEC-FETCH-CORRUPT-PARTITION-ISOLATE-001: an isolatable per-symbol ``BruteXError``
+        (a ``WriterError`` from ONE corrupt existing partition) is QUARANTINED — the window
+        advances + a ``fetch_pipeline.window_quarantined`` WARNING fires, but the pool-wide stop
+        is NOT tripped, so ``drain()`` returns cleanly and later windows still process.
+
+        This drives the ``_is_pool_isolatable(exc) is True`` branch in ``_process_one`` (the
+        per-symbol isolation path), the async twin of the sync spine's per-symbol quarantine.
+        """
+        from brutex.data.errors import WriterError
+        from structlog.testing import capture_logs
+
+        processed: list[str] = []
+
+        def _corrupt(tail: FetchTail) -> None:
+            raise WriterError("corrupt existing partition")
+
+        def _good(tail: FetchTail) -> None:
+            processed.append(tail.shard_key)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4)
+        with capture_logs() as logs:
+            pipeline.submit(_result("corrupt-sym", _corrupt))
+            pipeline.submit(_result("good-sym", _good))
+            # The isolatable error must NOT trip the pool — drain returns cleanly (no re-raise).
+            pipeline.drain()
+
+        # The good window after the corrupt one still processed (the pool was not stopped).
+        assert processed == ["good-sym"]
+        # The corrupt window emitted exactly one quarantine WARNING naming the error + shard.
+        quarantines = [e for e in logs if e["event"] == "fetch_pipeline.window_quarantined"]
+        assert len(quarantines) == 1
+        assert quarantines[0]["error_type"] == "WriterError"
+        assert quarantines[0]["shard_key"] == "corrupt-sym"
+        # The pool-wide stop was NOT set + no exception captured.
+        assert not pipeline._stopped.is_set()
+        assert pipeline._exc is None
+
     def test_blocked_producer_release_on_stop_accounts_in_flight(self) -> None:
         """A producer blocked on a FULL queue that a peer halt releases must NOT leave a
         phantom in-flight window (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996).
@@ -1063,13 +1101,13 @@ class TestIsPoolIsolatable:
 
         assert _is_pool_isolatable(WriterError("corrupt existing partition")) is True
 
-    def test_generic_bruteX_error_is_isolatable(self) -> None:
+    def test_generic_brutex_error_is_isolatable(self) -> None:
         from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
         from brutex.models import BruteXError
 
         assert _is_pool_isolatable(BruteXError("some per-symbol error")) is True
 
-    def test_non_bruteX_error_trips_the_pool(self) -> None:
+    def test_non_brutex_error_trips_the_pool(self) -> None:
         from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
 
         # A genuine code bug (ValueError/KeyError/...) is NEVER isolatable — it trips the pool

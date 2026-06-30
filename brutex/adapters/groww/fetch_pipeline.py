@@ -145,9 +145,10 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
         return False  # disk-full / OOM → pull-wide halt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
-    if isinstance(exc, (DailyQuotaExceeded, QuotaInvariantError)):
-        return False  # quota stop → pull-wide halt
-    return True  # a per-symbol-quarantinable BruteXError (e.g. a corrupt-partition WriterError)
+    # A quota stop → pull-wide halt; anything else is a per-symbol-quarantinable
+    # BruteXError (e.g. a corrupt-partition WriterError) → isolate, do NOT trip the pool.
+    return not isinstance(exc, (DailyQuotaExceeded, QuotaInvariantError))
+
 
 __all__ = [
     "FETCH_PIPELINE_ENV",
