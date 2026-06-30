@@ -12,7 +12,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use crate::bits::TOTAL_CONDITIONS;
+use crate::bits::{IMPLEMENTED_MASK, TOTAL_CONDITIONS};
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 use crate::indicators::ema::{compute_ema, ema_alpha, ema_seed, ema_step};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
@@ -21,6 +21,7 @@ use crate::indicators::market_structure::{
 };
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
 use crate::indicators::vwap::VwapState as CoreVwapState;
+use crate::spec::Direction;
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
 ///
@@ -631,6 +632,161 @@ fn evaluate_with_levels_impl(
     Ok(evaluate_atoms(&snapshot, &proximity, &prior))
 }
 
+/// Evaluate a `StrategySpec` against one bar (strategy-as-DATA, the deploy
+/// contract — DEC-STRATEGYSPEC-CORE-001). Takes the SAME flat pre-built-levels
+/// ABI as [`evaluate_with_levels`] PLUS `condition_mask_hex` (the required-bits
+/// SUPERSET mask, a hex STRING so a bit >= 53 keeps full precision) + `direction`
+/// (`0 = Long`, `1 = Short`).
+///
+/// Returns `(bar_bits, fires, direction)` where `bar_bits` is the bar's full
+/// `u128` condition mask (bit-identical to [`evaluate_with_levels`]) and `fires`
+/// is the superset test `(bar_bits & mask) == mask`. A THIN wrapper — it computes
+/// `bar_bits` via the SAME `evaluate_with_levels_impl` (so the frozen 400-case
+/// golden is untouched) then ANDs. Every input is validated at the FFI boundary
+/// (mask must be IMPLEMENTED-only, direction must be 0/1, the levels/bps via the
+/// reused guards) so garbage raises a clean `ValueError`, never a panic → SIGABRT
+/// under `panic="abort"`.
+#[pyfunction]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat primitive ABI for the BruteX spec binding"
+)]
+#[pyo3(signature = (
+    condition_mask_hex, direction, tod_seconds,
+    open_paisa, high_paisa, low_paisa, close_paisa,
+    ema20_paisa, ema200_paisa, vwap_paisa, pivot_levels, fib_levels,
+    day_high_paisa, day_low_paisa, open_of_day_paisa,
+    pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
+    bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+))]
+fn evaluate_spec(
+    condition_mask_hex: &str,
+    direction: u8,
+    tod_seconds: u32,
+    open_paisa: i64,
+    high_paisa: i64,
+    low_paisa: i64,
+    close_paisa: i64,
+    ema20_paisa: Option<i64>,
+    ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
+    pivot_levels: Vec<i64>,
+    fib_levels: Vec<i64>,
+    day_high_paisa: i64,
+    day_low_paisa: i64,
+    open_of_day_paisa: i64,
+    pivot_bps: i64,
+    pdh_pdl_bps: i64,
+    fib_bps: i64,
+    prior_n: usize,
+    prior_flags: Vec<bool>,
+    bos_bullish: bool,
+    bos_bearish: bool,
+    choch_bullish: bool,
+    choch_bearish: bool,
+) -> PyResult<(u128, bool, u8)> {
+    // Thin PyO3 wrapper: all logic + validation in the pure `_impl` (unit-tested
+    // without a libpython link); the boundary maps `Err(String)` to a clean
+    // `ValueError`.
+    evaluate_spec_impl(
+        condition_mask_hex,
+        direction,
+        tod_seconds,
+        open_paisa,
+        high_paisa,
+        low_paisa,
+        close_paisa,
+        ema20_paisa,
+        ema200_paisa,
+        vwap_paisa,
+        pivot_levels,
+        fib_levels,
+        day_high_paisa,
+        day_low_paisa,
+        open_of_day_paisa,
+        pivot_bps,
+        pdh_pdl_bps,
+        fib_bps,
+        prior_n,
+        prior_flags,
+        MarketStructureSignal {
+            bos_bullish,
+            bos_bearish,
+            choch_bullish,
+            choch_bearish,
+        },
+    )
+    .map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`evaluate_spec`] — `Result<(u128, bool, u8), String>` so the
+/// no-libpython `cargo test` covers every branch (valid + each reject).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat primitive ABI mirrored from the pyfunction"
+)]
+fn evaluate_spec_impl(
+    condition_mask_hex: &str,
+    direction: u8,
+    tod_seconds: u32,
+    open_paisa: i64,
+    high_paisa: i64,
+    low_paisa: i64,
+    close_paisa: i64,
+    ema20_paisa: Option<i64>,
+    ema200_paisa: Option<i64>,
+    vwap_paisa: Option<i64>,
+    pivot_levels: Vec<i64>,
+    fib_levels: Vec<i64>,
+    day_high_paisa: i64,
+    day_low_paisa: i64,
+    open_of_day_paisa: i64,
+    pivot_bps: i64,
+    pdh_pdl_bps: i64,
+    fib_bps: i64,
+    prior_n: usize,
+    prior_flags: Vec<bool>,
+    market_structure: MarketStructureSignal,
+) -> Result<(u128, bool, u8), String> {
+    // Parse + validate the spec axes BEFORE the (more expensive) bar evaluate.
+    let condition_mask = u128::from_str_radix(condition_mask_hex, 16)
+        .map_err(|e| format!("condition_mask_hex {condition_mask_hex:?} is not valid hex: {e}"))?;
+    let unimplemented = condition_mask & !IMPLEMENTED_MASK;
+    if unimplemented != 0 {
+        return Err(format!(
+            "condition_mask requires unimplemented/reserved bits ({unimplemented:#034x}); \
+             only bits in IMPLEMENTED_MASK ({IMPLEMENTED_MASK:#034x}) may be required"
+        ));
+    }
+    let dir = Direction::from_u8(direction)?;
+    // Compute the bar's bitmask via the SAME pre-built-levels impl the production
+    // evaluator uses — so the spec path is bit-identical to the engine path and
+    // the frozen 400-case golden is untouched.
+    let bar_bits = evaluate_with_levels_impl(
+        tod_seconds,
+        open_paisa,
+        high_paisa,
+        low_paisa,
+        close_paisa,
+        ema20_paisa,
+        ema200_paisa,
+        vwap_paisa,
+        pivot_levels,
+        fib_levels,
+        day_high_paisa,
+        day_low_paisa,
+        open_of_day_paisa,
+        pivot_bps,
+        pdh_pdl_bps,
+        fib_bps,
+        prior_n,
+        prior_flags,
+        market_structure,
+    )?;
+    let fires = (bar_bits & condition_mask) == condition_mask;
+    Ok((bar_bits, fires, dir.as_u8()))
+}
+
 /// Compute the 9 standard pivot levels from the previous day's H/L/C — the
 /// single-source indicator math BruteX's `compute_pivot_levels` wrapper packs
 /// into its `PivotLevels` dataclass (so the arithmetic lives ONCE, in Rust).
@@ -945,10 +1101,13 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TOTAL_CONDITIONS", TOTAL_CONDITIONS)?;
     m.add("PIVOT_LEVELS_LEN", PIVOT_LEVELS_LEN)?;
     m.add("FIB_LEVELS_LEN", FIB_LEVELS_LEN)?;
+    m.add("IMPLEMENTED_MASK", IMPLEMENTED_MASK)?;
+    m.add("SPEC_SCHEMA_VERSION", crate::spec::SPEC_SCHEMA_VERSION)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(total_conditions, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_from_raw, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_with_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(evaluate_spec, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_pivot_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_fib_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_ema, m)?)?;
@@ -1683,6 +1842,113 @@ mod tests {
         // Black-box the accumulator so the loop is not optimised away; the exact
         // value is incidental (the per-call parity asserts above are the point).
         std::hint::black_box(acc);
+    }
+
+    // ── evaluate_spec_impl (strategy-as-data deploy binding) ───────────────
+
+    /// `evaluate_spec_impl` over a VALID anchor as 12 pre-built pivot + 15 fib
+    /// levels, mirroring `evaluate_with_levels_impl`'s ABI.
+    fn spec_eval(mask_hex: &str, direction: u8) -> Result<(u128, bool, u8), String> {
+        evaluate_spec_impl(
+            mask_hex,
+            direction,
+            10 * 3600, // mid-morning
+            PDC,
+            PDH,
+            PDL,
+            PDC, // open/high/low/close
+            Some(PDC),
+            Some(PDC), // ema20/ema200
+            None,      // vwap
+            // pivot_levels [p,r1,r2,r3,s1,s2,s3,pdh,pdl,pdc,r5,s5]
+            vec![PDC, PDC, PDC, PDC, PDC, PDC, PDC, PDH, PDL, PDC, PDC, PDC],
+            // fib_levels (15)
+            vec![PDC; FIB_LEVELS_LEN],
+            PDH,
+            PDL,
+            PDC, // day_high/day_low/open_of_day
+            10,
+            10,
+            10, // bps
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+        )
+    }
+
+    #[test]
+    fn spec_impl_fires_when_required_bits_are_present() {
+        // First learn the bar's own mask (empty spec always fires, echoes bar_bits).
+        let (bar_bits, fires, dir) = spec_eval("0", 0).expect("empty mask valid");
+        assert!(fires, "an empty mask is a vacuous always-fire");
+        assert_eq!(dir, 0);
+        // A spec requiring exactly the bar's own bits fires and echoes the mask.
+        let own_hex = format!("{bar_bits:032x}");
+        let (got_bits, got_fires, got_dir) = spec_eval(&own_hex, 1).expect("own mask valid");
+        assert_eq!(got_bits, bar_bits, "wrapper must echo evaluate_with_levels");
+        assert!(got_fires);
+        assert_eq!(got_dir, 1, "Short direction echoed");
+    }
+
+    #[test]
+    fn spec_impl_does_not_fire_when_a_required_bit_is_absent() {
+        let (bar_bits, _, _) = spec_eval("0", 0).expect("empty mask valid");
+        let absent = IMPLEMENTED_MASK & !bar_bits;
+        assert_ne!(absent, 0, "the fixture must leave an implemented bit clear");
+        let want = absent & absent.wrapping_neg();
+        let (got_bits, fires, _) = spec_eval(&format!("{want:032x}"), 0).expect("valid mask");
+        assert_eq!(got_bits, bar_bits);
+        assert!(!fires, "requiring an absent bit must NOT fire");
+    }
+
+    #[test]
+    fn spec_impl_rejects_non_hex_mask() {
+        let err = spec_eval("zzzz", 0).unwrap_err();
+        assert!(err.contains("not valid hex"), "got: {err}");
+    }
+
+    #[test]
+    fn spec_impl_rejects_a_reserved_bit() {
+        // Bit 60 is the first reserved/un-evaluated bit.
+        let reserved = 1u128 << 60;
+        let err = spec_eval(&format!("{reserved:032x}"), 0).unwrap_err();
+        assert!(err.contains("unimplemented/reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn spec_impl_rejects_bad_direction() {
+        let err = spec_eval("0", 2).unwrap_err();
+        assert!(err.contains("must be 0 (Long) or 1 (Short)"), "got: {err}");
+    }
+
+    #[test]
+    fn spec_impl_propagates_evaluate_with_levels_guard() {
+        // A garbage level length must still be rejected (the reused guard fires).
+        let err = evaluate_spec_impl(
+            "0",
+            0,
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            None,
+            vec![0i64; 3], // wrong pivot_levels length
+            vec![0i64; FIB_LEVELS_LEN],
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("pivot_levels must have"), "got: {err}");
     }
 
     // ── property layer ─────────────────────────────────────────────────────
