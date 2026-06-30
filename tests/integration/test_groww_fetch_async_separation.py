@@ -410,6 +410,47 @@ class TestIsolationProof:
         # And the data still landed durably after drain.
         assert _spot_part(lake, year=2021, month=1).exists()
 
+    def test_corrupt_partition_isolates_one_symbol_not_the_pool(self, tmp_path: Path) -> None:
+        """DEC-FETCH-CORRUPT-PARTITION-ISOLATE-001: a corrupt EXISTING partition for ONE symbol
+        quarantines that symbol's window WITHOUT tripping the pool-wide stop — every OTHER symbol
+        after it still writes durably (the sync-path per-symbol quarantine, mirrored in async)."""
+        lake = tmp_path / "lake"
+        bad_symbol, good_symbol = "BADSYM", "GOODSYM"
+        # Pre-create + CORRUPT the bad symbol's January partition so the merge READ raises a
+        # quarantinable WriterError on the next write. The good symbol has no pre-existing file.
+        bad_part = _spot_part(lake, year=2021, month=1, symbol=bad_symbol)
+        bad_part.parent.mkdir(parents=True, exist_ok=True)
+        bad_part.write_bytes(b"this is not a parquet file at all")
+
+        ledger = WindowLedger()
+        pipeline = FetchPipeline(workers=1, queue_maxsize=4)  # 1 worker → deterministic order
+        sink = _sink(lake)
+        # Process the BAD symbol FIRST (it corrupts on write → WriterError) then the GOOD one.
+        for sym in (bad_symbol, good_symbol):
+            ingest_spot(
+                _DayAdapter(),  # type: ignore[arg-type]
+                sink,
+                instrument=_inst(sym),
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 2, 1),  # one January window per symbol
+                ledger=ledger,
+                now_ist=_now,
+                fetch_pipeline=pipeline,
+            )
+        # drain() RE-RAISES on a pool-wide trip. The corrupt-partition WriterError is
+        # per-symbol-quarantinable (NOT in _GLOBAL_STOP_ERRORS), so the pool is NEVER tripped
+        # and drain returns cleanly — the regression: without the isolation it would re-raise.
+        pipeline.drain()
+        # The GOOD symbol's window landed durably (its write was never blocked by the bad one).
+        assert _spot_part(lake, year=2021, month=1, symbol=good_symbol).exists()
+        good_statuses = {r.status for r in ledger.records() if r.security_id == good_symbol}
+        assert good_statuses == {"SUCCESS"}, good_statuses
+        # The BAD symbol's window stayed UNSETTLED (the tail raised before ledger.record), so it
+        # is NOT skippable → re-pulled next pull (no fabricated SUCCESS for a write that failed).
+        bad_statuses = {r.status for r in ledger.records() if r.security_id == bad_symbol}
+        assert "SUCCESS" not in bad_statuses
+
 
 # ───────────────── HUNG-WRITE FREEZE GUARD (DEC-FETCH-HUNG-WRITE-DEADLINE-001) ─────────────────
 
