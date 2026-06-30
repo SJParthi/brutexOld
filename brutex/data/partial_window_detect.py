@@ -281,7 +281,7 @@ def classify_partial_window(
     today = now.astimezone(IST).date()
 
     # OUT-OF-CALENDAR-COVERAGE exclusion (MAJOR-1): the NSE holiday list only covers
-    # ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (currently 2021-2026).
+    # ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (currently 2020-2026).
     # OUTSIDE that span ``is_trading_day`` would silently count a weekday holiday (Holi /
     # Good Friday) as a session, inflating the missing-session count into a SPURIOUS flag.
     # When either the window end OR the last bar falls in an uncovered year we honestly
