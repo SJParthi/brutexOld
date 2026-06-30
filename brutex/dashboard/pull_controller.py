@@ -2248,6 +2248,12 @@ def pull_candles(
                 symbol_windows=phase_windows,
                 write_pool=_write_consumer,
                 fetch_pipeline=_fetch_pipeline,
+                # Real production Groww pull → OPT IN to the data-completeness re-pull demotion
+                # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001). A dense INDEX
+                # 1-minute window with a confirmed interior hole / trailing truncation is
+                # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
+                # false-red on the synthetic adapter's first-day-only bars.
+                detect_completeness_gaps=True,
             )
             merged_pairs.update(phase_report.pairs)
             failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)

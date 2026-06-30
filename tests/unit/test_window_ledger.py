@@ -163,6 +163,87 @@ class TestRecord:
         assert status == SKIPPED
 
 
+class TestDegradedDemotion:
+    """DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001: a bars-returning fetch
+    flagged INCOMPLETE (interior gap / truncation) is demoted to a re-pullable FAILED, BOUNDED
+    by the empty-streak terminal threshold so the universe pull still converges."""
+
+    def test_degraded_success_records_failed_with_reason_and_is_not_skippable(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert status == FAILED
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == "INTERIOR_GAP"  # the completeness reason, not a vendor error
+        assert rec.bars == 5  # the stored bars are preserved
+        assert not ledger.is_skippable(_key())  # re-pulled next pull
+
+    def test_degraded_without_reason_falls_back_to_a_generic_tag(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW, degraded=True)
+        assert ledger.records()[0].last_error == "DEGRADED"
+
+    def test_degraded_repull_is_bounded_settling_skipped_at_threshold(self) -> None:
+        ledger = WindowLedger(_threshold=3)
+        for _ in range(2):
+            status = ledger.record(
+                _key(),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=5,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="TRUNCATED",
+            )
+            assert status == FAILED  # still re-pullable before the threshold
+        # The third consecutive degraded pull reaches the threshold → SKIPPED (gap accepted).
+        final = ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="TRUNCATED",
+        )
+        assert final == SKIPPED
+        assert ledger.is_skippable(_key())  # the pull converges, never loops forever
+
+    def test_a_later_complete_repull_resets_to_success(self) -> None:
+        ledger = WindowLedger(_threshold=3)
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        # The next pull returns a COMPLETE window (degraded=False) → clean SUCCESS, streak reset.
+        status = ledger.record(_key(), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        assert status == SUCCESS
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 0
+        assert rec.last_error is None
+
+    def test_degraded_ignored_for_empty_response(self) -> None:
+        # No bars → still EMPTY even with degraded set (nothing to be incomplete).
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, degraded=True
+        )
+        assert status == EMPTY
+
+
 class TestEmptyStreakR1:
     """R1 (DEC-WINDOW-LEDGER-001): promote on the CONSECUTIVE EMPTY streak, not total attempts."""
 

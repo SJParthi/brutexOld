@@ -269,6 +269,7 @@ def run_groww_spot_ingest(
     symbol_windows: SpotWindows | None = None,
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    detect_completeness_gaps: bool = False,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -420,6 +421,7 @@ def run_groww_spot_ingest(
                 run_parallel=inner_runner,
                 on_window=on_window,
                 fetch_pipeline=fetch_pipeline,
+                detect_completeness_gaps=detect_completeness_gaps,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -606,6 +608,7 @@ def run_groww_spot_ingest_with_retry(
     symbol_windows: SpotWindows | None = None,
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    detect_completeness_gaps: bool = False,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -673,6 +676,7 @@ def run_groww_spot_ingest_with_retry(
             symbol_windows=symbol_windows,
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
+            detect_completeness_gaps=detect_completeness_gaps,
         )
 
     report = _one_pass()
