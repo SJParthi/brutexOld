@@ -15,6 +15,14 @@
  *   - req/10min (MEASURED rolling-600s issue count — the new metric);
  *   - req/hour (MEASURED rolling-3600s count, with the older "obs" extrapolation beside it).
  *
+ * HONEST achieved (DEC-RATE-WIDGET-FNO-HONEST-001): req/sec "achieved" is the MEASURED
+ * COMPLETED rate from the transport call-meter, which is only wired during the SPOT phase.
+ * During the metadata + F&O phases the meter is unreachable, so "achieved" reads an honest 0
+ * (no fabricated completed-rate) and the expanded view instead shows "req/min rate" — the
+ * controller's ADMISSION-derived per-minute average expressed as r/s (recent_minute / 60),
+ * which is openly an ISSUED-calls average, NOT a measured completed throughput. The stall
+ * light during those phases tracks whether ANY calls are being issued (req/min > 0).
+ *
  * BIGGER, TRUSTWORTHY view (DEC-RATE-MONITOR-EXPAND-001): clicking the pill (or its
  * "expand" affordance) opens a LARGE fixed-position overlay panel — easy to read at a
  * glance — that ALSO shows the RAW EVIDENCE: the actual integer request counts in the
@@ -236,6 +244,7 @@
       "div",
       { cls: "bxrm-grid" },
       gridMetric("req/sec", "bxrmESec", "bxrmESecC")
+        .concat(gridMetric("req/min rate", "bxrmEMinRate", "bxrmEMinRateC"))
         .concat(gridMetric("req/min", "bxrmEMin", "bxrmEMinC"))
         .concat(gridMetric("req/10min", "bxrmETenMin", "bxrmETenMinC"))
         .concat(gridMetric("req/hour", "bxrmEHour", "bxrmEHourC"))
@@ -246,7 +255,9 @@
       text:
         "Evidence (real counts from the rate controller's per-second issue ring): " +
         "the rates above ARE these trailing-window issue counts — req/sec = count in the " +
-        "last 1s, req/min = last 60s, req/10min = last 600s, req/hour = last 3600s.",
+        "last 1s, req/min = last 60s, req/10min = last 600s, req/hour = last 3600s. " +
+        "req/sec 'achieved' is the MEASURED completed rate (wired only on the spot phase); " +
+        "'req/min rate' is the admission per-minute average (issued ÷ 60), NOT a completed rate.",
     });
     var card = el("div", { cls: "bxrm-card" }, [ehead, grid, evidence]);
     var o = el("div", { id: OVERLAY_ID }, [card]);
@@ -355,6 +366,10 @@
       fmtNum(data.req_per_sec_achieved) + " → " + fmtNum(data.req_per_sec_allowed)
     );
     setText("bxrmESecC", fmtCount(data.req_per_sec_count, "1s"));
+    // req/min rate (DEC-RATE-WIDGET-FNO-HONEST-001): the admission per-minute average as r/s
+    // (issued ÷ 60) — an ISSUED-calls figure, openly NOT a measured completed rate.
+    setText("bxrmEMinRate", fmtNum(data.req_per_min_rate) + " r/s");
+    setText("bxrmEMinRateC", "admission avg (issued ÷ 60)");
     setText("bxrmEMin", fmtInt(data.req_per_min));
     setText("bxrmEMinC", fmtCount(data.req_per_min, "60s"));
     setText("bxrmETenMin", fmtInt(data.req_per_10min));

@@ -449,3 +449,178 @@ def test_merged_bridge_measured_counts_none_default_to_zero() -> None:
     assert merged.req_per_sec_count == 0
     assert merged.req_per_10min == 0
     assert merged.req_per_hour_measured == 0
+
+
+# ---------------------------------------------------------------------------
+# DEC-RATE-WIDGET-FNO-HONEST-001 — honest achieved-rate + stall verdict across phases.
+#
+# The SPOT phase wires a real CallMeter so ``effective_rps`` is the MEASURED completed
+# rate (``meter_present=True``). The metadata + F&O phases have NO reachable meter, so the
+# admission-only sampler pushes ``meter_present=False`` — the view then keeps "achieved" an
+# honest 0 (no fabricated completed-rate), bases the stall verdict on the controller's
+# admission signal (``recent_minute == 0`` ⇒ stalled), and surfaces the admission per-minute
+# average in its OWN ``req_per_min_rate`` field.
+# ---------------------------------------------------------------------------
+
+
+def test_spot_phase_achieved_is_measured_completed_rate() -> None:
+    """meter_present=True (spot) → req_per_sec_achieved IS the measured effective_rps.
+
+    Test (i): the achieved figure equals the MEASURED completed-rate, never the admission
+    average — and ``req_per_min_rate`` carries the admission average as a SEPARATE field.
+    """
+    view = build_pull_rate_view(
+        effective_rps=2.82,  # the REAL completed rate (e.g. 169 completed/min ≈ 2.82 r/s)
+        current_rps=8.0,
+        recent_minute=204,  # admissions ran AHEAD of completions (204 admitted/min)
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=True,
+    )
+    assert view.req_per_sec_achieved == 2.82  # the MEASURED completed rate, not 204/60 = 3.4
+    assert view.flow_state == FLOW_FLOWING
+    assert view.stalled is False
+    # The admission per-minute average is a distinct field (204 / 60 = 3.4), never the achieved.
+    assert view.req_per_min_rate == 204 / 60.0
+
+
+def test_fno_phase_achieved_is_honest_zero_admission_average_separate() -> None:
+    """meter_present=False (F&O) → achieved is an honest 0; admission average in its own field.
+
+    Test (i), the F&O side: there is NO measured completed-rate this phase, so "achieved" reads
+    a HONEST 0 (never the old fabricated ``recent_minute / 60`` poured into the achieved slot),
+    while the admission per-minute average is surfaced separately in ``req_per_min_rate``.
+    """
+    view = build_pull_rate_view(
+        effective_rps=0.0,  # no meter this phase
+        current_rps=8.0,
+        recent_minute=204,  # the controller IS admitting calls (204 in the trailing minute)
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=False,
+    )
+    # Achieved is honest 0 — no fabricated completed-rate. NOT 204/60 = 3.4 (the over-report bug).
+    assert view.req_per_sec_achieved == 0.0
+    # Admissions are flowing → the pull reads FLOWING (not a fake-0 "stalled").
+    assert view.flow_state == FLOW_FLOWING
+    assert view.stalled is False
+    # The admission per-minute average lives in its OWN honestly-labelled field.
+    assert view.req_per_min_rate == 204 / 60.0
+
+
+def test_spot_phase_issued_but_failing_reads_stalled() -> None:
+    """meter_present=True + admissions high but completed-rate at/below floor → STALLED.
+
+    Test (ii) — the fake-alive regression: in the SPOT phase an issued-but-ALL-FAILING pull
+    (the controller is admitting calls — ``recent_minute`` high — but NOTHING is COMPLETING, so
+    the measured ``effective_rps`` sits at/below the floor) must read STALLED. The OLD sampler
+    fabricated ``effective_rps = recent_minute / 60`` which would have MASKED this as "flowing";
+    reading the real measured rate exposes the stall.
+    """
+    view = build_pull_rate_view(
+        effective_rps=0.0,  # NOTHING completing (every fetch failing)
+        current_rps=8.0,
+        recent_minute=300,  # but the controller is busily ADMITTING calls
+        recent_429_count=40,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=True,
+    )
+    assert view.stalled is True
+    assert view.flow_state == FLOW_STALLED
+    # The achieved figure is the honest measured 0 — proving the verdict is NOT fooled by the
+    # 300 admissions (which the old fabrication would have shown as a healthy 5 r/s "flowing").
+    assert view.req_per_sec_achieved == 0.0
+
+
+def test_fno_phase_no_admissions_reads_stalled() -> None:
+    """meter_present=False + zero admissions in the trailing minute → STALLED (idle pull).
+
+    Test (iii): in the F&O phase, with no meter, the verdict falls back to the admission
+    signal — ``recent_minute == 0`` means the controller is issuing NOTHING, so the pull is
+    effectively dead and reads STALLED (never a fake "flowing" off a fabricated rate).
+    """
+    view = build_pull_rate_view(
+        effective_rps=0.0,
+        current_rps=8.0,
+        recent_minute=0,  # no admissions at all
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=False,
+    )
+    assert view.stalled is True
+    assert view.flow_state == FLOW_STALLED
+    assert view.req_per_sec_achieved == 0.0
+    assert view.req_per_min_rate == 0.0
+
+
+def test_idle_zeroes_req_per_min_rate() -> None:
+    """A stale (idle) panel zeroes req_per_min_rate alongside every other live number."""
+    view = build_pull_rate_view(
+        effective_rps=8.0,
+        current_rps=8.0,
+        recent_minute=400,
+        recent_429_count=5,
+        last_update_monotonic=0.0,
+        now_monotonic=100.0,  # well past STALE_AFTER_S → idle
+        meter_present=False,
+    )
+    assert view.flow_state == FLOW_IDLE
+    assert view.req_per_min_rate == 0.0
+    assert view.req_per_sec_achieved == 0.0
+
+
+def test_to_dict_carries_req_per_min_rate() -> None:
+    """``to_dict`` exposes the new req_per_min_rate field for the widget."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,
+        current_rps=8.0,
+        recent_minute=180,
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=False,
+    )
+    data = view.to_dict()
+    assert data["req_per_min_rate"] == 3.0  # 180 / 60
+
+
+def test_merged_panel_meter_absent_threads_through() -> None:
+    """build_pull_rate_view_merged threads panel_meter_present into the projection.
+
+    The dashboard route reads ``panel.meter_present`` and passes it as ``panel_meter_present``;
+    a metadata/F&O-phase panel (meter absent, admissions flowing) must read FLOWING with an
+    honest 0 achieved — proving the flag reaches ``build_pull_rate_view`` via the merge.
+    """
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=210,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=1.0,
+        panel_meter_present=False,
+    )
+    assert merged.flow_state == FLOW_FLOWING
+    assert merged.req_per_sec_achieved == 0.0
+    assert merged.req_per_min_rate == 210 / 60.0
+
+
+def test_merged_bridge_meter_present_default_keeps_measured_achieved() -> None:
+    """A fresher CLI bridge defaults bridge_meter_present=True → its measured rate is achieved."""
+    merged = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=math.inf,
+        bridge_effective_rps=4.8,
+        bridge_current_rps=5.0,
+        bridge_recent_minute=290,
+        bridge_recent_429_count=3,
+        bridge_seconds_since_update=1.0,
+    )
+    assert merged.req_per_sec_achieved == 4.8
+    assert merged.flow_state == FLOW_FLOWING
