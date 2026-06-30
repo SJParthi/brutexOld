@@ -74,8 +74,15 @@ def _sampler(
 
 
 class TestSampleOnce:
-    def test_pushes_controller_snapshot_with_derived_achieved_rate(self) -> None:
-        """A built controller → one observer push with effective_rps = recent_minute / 60."""
+    def test_pushes_controller_snapshot_with_meter_absent_sentinel(self) -> None:
+        """A built controller → one observer push with NO fabricated effective_rps.
+
+        DEC-RATE-WIDGET-FNO-HONEST-001: the sampler must NOT synthesize an achieved
+        completed-rate from the controller's admission count (the old ``recent_minute / 60``
+        bug that over-reported + blinded the stall verdict). It pushes the controller snapshot
+        VERBATIM + a meter snapshot carrying ONLY a ``meter_present=False`` sentinel (no
+        ``effective_rps`` key), so the view keeps "achieved" an honest 0 this phase.
+        """
         controller = _FakeController(
             {"current_rps": 6.0, "recent_hits": 2, "recent_minute": 300, "ceiling_per_min": 500}
         )
@@ -91,8 +98,10 @@ class TestSampleOnce:
         # The controller snapshot is forwarded VERBATIM (recent_minute / ceiling_per_min etc.).
         assert rate["recent_minute"] == 300
         assert rate["current_rps"] == 6.0
-        # Achieved r/s is the MEASURED rolling-minute count ÷ 60 (300 / 60 = 5.0).
-        assert meter["effective_rps"] == pytest.approx(5.0)
+        # NO fabricated completed-rate — the meter snapshot carries the honest absence sentinel
+        # and never an ``effective_rps`` admission-derived figure.
+        assert meter == {"meter_present": False}
+        assert "effective_rps" not in meter
 
     def test_no_controller_built_pushes_nothing(self) -> None:
         """A session with no built controller (dry-run / pre-pull) → no push, returns False."""
@@ -106,15 +115,19 @@ class TestSampleOnce:
         assert observer.calls == []
         assert session.peek_calls == 1  # it peeked, found nothing, pushed nothing
 
-    def test_missing_recent_minute_defaults_to_zero_achieved(self) -> None:
-        """A snapshot without recent_minute → 0 achieved r/s (no crash, honest zero)."""
-        controller = _FakeController({"current_rps": 4.0})  # no recent_minute key
+    def test_meter_absent_sentinel_independent_of_recent_minute(self) -> None:
+        """The sentinel is pushed regardless of recent_minute (no admission-derived rate at all).
+
+        DEC-RATE-WIDGET-FNO-HONEST-001: even a snapshot WITH a large ``recent_minute`` yields
+        no ``effective_rps`` — the sampler never derives a completed-rate from admissions.
+        """
+        controller = _FakeController({"current_rps": 4.0, "recent_minute": 240})
         observer = _CapturingObserver()
         sampler = _sampler(_FakeSession(controller), observer)
 
         assert sampler.sample_once() is True
         _rate, meter = observer.calls[0]
-        assert meter["effective_rps"] == 0.0
+        assert meter == {"meter_present": False}
 
     def test_snapshot_error_is_swallowed(self) -> None:
         """A raising controller snapshot is best-effort swallowed → returns False, no push."""

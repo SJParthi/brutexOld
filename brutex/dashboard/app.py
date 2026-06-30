@@ -343,6 +343,14 @@ class RateLimitPanel:
     #: so an ended pull never lingers as a fake "live" reading (DEC-LIVE-RATE-MONITOR-001,
     #: Golden Rule #1). Monotonic (not wall-clock) so it is immune to clock adjustments.
     last_update_monotonic: float = float("-inf")
+    #: Whether the panel's :attr:`effective_rps` is a REAL measured completed-rate from the
+    #: transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001).
+    #: ``True`` for a spot-phase tick (the meter is wired); ``False`` for a metadata/F&O-phase
+    #: tick from the admission-only :class:`~brutex.dashboard.rate_sampler.RatePanelSampler`,
+    #: whose meter is unreachable — so the live-rate view keeps "achieved" an honest 0 that phase
+    #: and bases the stall verdict on the controller's admission signal. Defaults ``True`` (the
+    #: pre-decision meter-fed contract; an idle panel never reports a fabricated completed-rate).
+    meter_present: bool = True
 
     def to_json_dict(self) -> dict[str, Any]:
         """Return a JSON-safe panel mapping, DROPPING the monotonic freshness baseline.
@@ -625,6 +633,7 @@ class DashboardState:
         latency_ms_p95: float,
         rps_1s: int = 0,
         rps_1s_max: int = 0,
+        meter_present: bool = True,
     ) -> None:
         """Update the MEASURED throughput half of the rate panel from a ``CallMeter`` snapshot.
 
@@ -634,12 +643,21 @@ class DashboardState:
         all straight from the vendor client's call-meter snapshot
         (DEC-DASHBOARD-RATE-PANEL-001 + DEC-DASHBOARD-RPS1S-PANEL-001). ``rps_1s_max``
         is the real-time proof the 5 r/s cap held (``<= 5`` ⇒ no breach, ever).
+
+        ``meter_present`` (DEC-RATE-WIDGET-FNO-HONEST-001) records whether ``effective_rps``
+        is a REAL measured completed-rate (``True`` — a spot-phase tick whose
+        :class:`~brutex.adapters.call_meter.CallMeter` is wired) or honestly absent (``False``
+        — a metadata/F&O-phase tick from the admission-only sampler, which pushes no measured
+        completed-rate). The ``/api/v1/pull/rate`` view reads it to keep "achieved" an honest 0
+        + use the controller's admission signal for the stall verdict during the meter-less
+        phases, instead of fabricating a completed-rate.
         """
         with self._lock:
             self.rate_limit.effective_rps = effective_rps
             self.rate_limit.latency_ms_p95 = latency_ms_p95
             self.rate_limit.rps_1s = rps_1s
             self.rate_limit.rps_1s_max = rps_1s_max
+            self.rate_limit.meter_present = meter_present
             # The measured-throughput half of a live tick is just as much pull activity as
             # the controller half — stamp the freshness baseline here too so the monitor
             # reads "active" even on a tick where only the meter moved (DEC-LIVE-RATE-MONITOR-001).
@@ -825,6 +843,10 @@ def make_rate_observer(
             latency_ms_p95=float(meter.get("latency_ms_p95", 0.0)),
             rps_1s=int(meter.get("rps_1s", 0)),
             rps_1s_max=int(meter.get("rps_1s_max", 0)),
+            # DEC-RATE-WIDGET-FNO-HONEST-001: the admission-only sampler (metadata + F&O phases)
+            # pushes ``meter_present=False`` (no measured completed-rate this phase); a REAL spot
+            # CallMeter snapshot carries no such key → defaults ``True`` (the meter-fed contract).
+            meter_present=bool(meter.get("meter_present", True)),
         )
 
     return _observe
@@ -1204,6 +1226,7 @@ def build_app(
             panel_recent_1s = panel.recent_1s
             panel_recent_600s = panel.recent_600s
             panel_recent_3600s = panel.recent_3600s
+            panel_meter_present = panel.meter_present
             panel_last_update = panel.last_update_monotonic
         if math.isinf(panel_last_update):
             panel_age = math.inf
@@ -1246,6 +1269,7 @@ def build_app(
             panel_recent_1s=panel_recent_1s,
             panel_recent_600s=panel_recent_600s,
             panel_recent_3600s=panel_recent_3600s,
+            panel_meter_present=panel_meter_present,
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,

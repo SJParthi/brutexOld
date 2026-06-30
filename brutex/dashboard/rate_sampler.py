@@ -34,13 +34,17 @@ covering everything the spot per-window seam does not.
   :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek` (which returns
   ``None`` until a real pull has built one), so a dry-run / pre-pull tick pushes NOTHING
   and the panel stays honestly idle — never a fabricated "live" reading.
-* **Achieved r/s is the controller's MEASURED rolling-60s rate**
-  (``recent_minute / 60``), NOT the transport call-meter's inter-arrival ``effective_rps``
-  (which lives in the F&O client pool, built inside the candle factory + not reachable
-  here). It is a REAL measured achieved rate (the controller's own issue count over the
-  trailing minute), so the widget's flowing / stalled verdict is honest — it is simply a
-  per-minute average rather than the spot phase's per-call inter-arrival figure. The
-  ``req/min`` + ``req/hour`` gauges read the same ``recent_minute`` the spot path does.
+* **NO fabricated "achieved" completed-rate** (DEC-RATE-WIDGET-FNO-HONEST-001). The
+  transport call-meter's MEASURED completed-rate (``effective_rps``) lives in the F&O client
+  pool, built inside the candle factory + NOT reachable from this seam. So the sampler does
+  NOT synthesize an ``effective_rps`` from the controller's admission count — the old
+  ``recent_minute / 60`` fabrication both OVER-reported the achieved rate (admissions ≥
+  completions) and BLINDED the ``stalled`` verdict to an issued-but-all-failing stall. The
+  sampler now pushes an explicit ``meter_present=False`` sentinel, so the view keeps the
+  "achieved" slot an HONEST 0 (no measured completed-rate this phase), bases the stall verdict
+  on the controller's ADMISSION signal (``recent_minute == 0`` ⇒ idle/stalled), and surfaces
+  the admission per-minute average in its OWN labelled ``req/min rate`` field. The ``req/min``
+  + ``req/hour`` gauges read the same ``recent_minute`` the spot path does.
 * **O(1) per tick + bounded.** Each tick is one ``snapshot`` (a small O(1) lock) + one
   panel write; the loop sleeps :data:`DEFAULT_SAMPLE_INTERVAL_S` between ticks. No
   unbounded growth, no look-ahead (it reads only the controller's current state).
@@ -67,12 +71,6 @@ if TYPE_CHECKING:
 #: spinning — observability only; it changes no pacing decision.
 DEFAULT_SAMPLE_INTERVAL_S: Final[float] = 2.0
 
-#: Seconds in the controller's rolling-minute window — divides ``recent_minute`` (the
-#: MEASURED rolling-60s issue count) into the achieved-r/s figure the panel's flow / stall
-#: verdict reads. The controller's own per-minute window is 60 s
-#: (:data:`brutex.adapters.rate_common.PER_MIN_WINDOW`).
-_PER_MIN_SECONDS: Final[float] = 60.0
-
 #: Background-loop spawner type — a callable that runs *fn* off the calling thread. The
 #: production default spawns a daemon thread; tests inject a capturing fake for
 #: deterministic, thread-free coverage (mirrors
@@ -85,18 +83,6 @@ _LOG = structlog.get_logger("brutex.dashboard.rate_sampler")
 def _daemon_spawn(fn: Callable[[], None]) -> None:
     """Run *fn* on a named daemon thread (the production background-loop spawner)."""
     threading.Thread(target=fn, name="dashboard-rate-sampler", daemon=True).start()
-
-
-def _int_or_zero(value: object) -> int:
-    """Narrow a controller-snapshot value (typed ``object``) to ``int``, else ``0``.
-
-    :meth:`~brutex.adapters.rate_common.RateController.snapshot` is typed
-    ``dict[str, object]``, so its values arrive as ``object``. ``recent_minute`` is an
-    ``int`` by contract, but a defensive narrowing keeps this ``mypy --strict``-clean and
-    yields an honest ``0`` for an absent / unexpected value (never a crash, never a
-    fabricated rate). ``bool`` is an ``int`` subclass but never appears for this key.
-    """
-    return value if isinstance(value, int) else 0
 
 
 class RatePanelSampler:
@@ -162,9 +148,11 @@ class RatePanelSampler:
         :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek`. When no
         controller is built yet (a dry-run / a pull that has not paced anything) it
         returns ``False`` and pushes nothing — the panel stays honestly idle. Otherwise it
-        snapshots the controller, derives the achieved r/s from the MEASURED rolling-minute
-        issue count (``recent_minute / 60``), and feeds the *observer* the
-        ``(controller_snapshot, meter_snapshot)`` pair, returning ``True``.
+        snapshots the controller and feeds the *observer* the
+        ``(controller_snapshot, meter_snapshot)`` pair, returning ``True``. The meter snapshot
+        carries an explicit ``meter_present=False`` sentinel and NO fabricated ``effective_rps``
+        (DEC-RATE-WIDGET-FNO-HONEST-001) — the achieved completed-rate is honestly absent this
+        phase; the view bases its stall verdict on the controller's admission signal instead.
 
         Best-effort: a snapshot / observer error is swallowed + logged (the sampler can
         never crash the pull it watches) and reported as ``False``. O(1) per call.
@@ -175,13 +163,20 @@ class RatePanelSampler:
         try:
             snap = controller.snapshot()
             # The controller snapshot carries the ALLOWED rate + the MEASURED rolling-60s
-            # issue count, but NOT the transport call-meter's achieved ``effective_rps``
-            # (that lives in the F&O client pool, unreachable here). Derive a real measured
-            # achieved r/s from the controller's own minute count so the panel's flow /
-            # stall verdict is honest (a per-minute average, openly so) instead of pinned
-            # to a fake 0 (which would falsely read "stalled" all through the F&O phase).
-            recent_minute = _int_or_zero(snap.get("recent_minute"))
-            meter_snapshot = {"effective_rps": recent_minute / _PER_MIN_SECONDS}
+            # ADMISSION count, but NOT the transport call-meter's achieved ``effective_rps``
+            # (the MEASURED COMPLETED rate, which lives in the F&O client pool, unreachable
+            # here — DEC-RATE-WIDGET-FNO-HONEST-001). The OLD sampler fabricated
+            # ``effective_rps = recent_minute / 60`` (an admission-derived per-minute average)
+            # and poured it into the "achieved" slot, which (a) OVER-reported vs the true
+            # completed rate (admissions ≥ completions) and (b) made the ``stalled`` verdict
+            # BLIND to an issued-but-all-failing stall (it would read "flowing" even if every
+            # fetch were failing). Push a meter snapshot that carries NO fabricated
+            # ``effective_rps`` and an explicit ``meter_present=False`` sentinel: the view then
+            # keeps "achieved" an HONEST 0 (no measured completed-rate this phase), bases the
+            # stall verdict on the controller's ADMISSION signal (no admissions ⇒ idle), and
+            # surfaces the admission per-minute average in its OWN labelled field, never the
+            # measured-completed slot.
+            meter_snapshot: dict[str, object] = {"meter_present": False}
             self._observer(snap, meter_snapshot)
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
             _LOG.exception("rate_sampler.tick_failed")
