@@ -683,7 +683,15 @@ class TestHungWriteDoesNotBlockFetchLane:
         HANG, the other's write normally. The healthy symbol's windows must land DURABLY on disk
         while the hung symbol's defer — proving one bad partition can't freeze the whole pool.
         """
-        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.2")
+        # Deadline ordering (the invariant this test needs): healthy single-bar write (~tens of ms)
+        # < write-deadline < drain-join < hung-write wait (30 s). The HUNG symbol's write blocks on
+        # ``gate.wait(timeout=30.0)`` so any deadline ≪ 30 s trips + defers it; the HEALTHY write must
+        # reliably finish UNDER the deadline AND the deadline must fire BEFORE the drain-join so the
+        # defer is counted by ``tail_transients``. The original 0.2 s / 1.0 s pair was too tight on a
+        # contended CI runner (the wedged-write daemon thread + a full parallel suite) — a healthy
+        # write occasionally exceeded 0.2 s, flaking ``healthy_statuses == {"SUCCESS"}``. Widen BOTH
+        # proportionally (0.5 s deadline < 4.0 s drain-join) to keep the same ordering with margin.
+        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.5")
         # Pick two symbols that hash to DIFFERENT shards under the pipeline's blake2b router so the
         # wedged one and the healthy one are genuinely on different consumers. Use the PRODUCTION
         # shard-key builder (`_series_shard_key`) — no copy of the key format (CLAUDE.md §11 COMMON).
@@ -713,7 +721,9 @@ class TestHungWriteDoesNotBlockFetchLane:
 
         lake = tmp_path / "lake"
         ledger = WindowLedger()
-        pipeline = FetchPipeline(workers=workers, queue_maxsize=2, drain_join_timeout_seconds=1.0)
+        # drain-join 4.0 s > the 0.5 s write-deadline so the hung write's deadline ALWAYS fires
+        # (and the defer is counted) before drain gives up; still ≪ the 30 s hung wait + 20 s budget.
+        pipeline = FetchPipeline(workers=workers, queue_maxsize=2, drain_join_timeout_seconds=4.0)
         sink = _PerSymbolSink(writer=ParquetWriter(lake_root=lake), catalog=None)
 
         done = threading.Event()
