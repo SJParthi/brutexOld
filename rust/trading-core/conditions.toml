@@ -503,13 +503,17 @@ implemented = true
 
 # ─────────────────────── Group 12: Market Structure (bits 56-59) ────────────────
 # Break-of-structure (BOS) + change-of-character (CHoCH) (ADR-0012 D3/D4).
+# implemented=true since DEC-NIFTY-BOS-CHOCH-001: the four booleans are RESOLVED
+# by the stateful, look-ahead-clean MarketStructureState (a fractal swing is only
+# confirmed k bars later, all at index <= N) and threaded into the evaluator like
+# the resolved PriorBarHistory flags.
 [[condition]]
 bit = 56
 name = "bos_bullish"
 group = "Market Structure"
 description = "bullish break of structure (price takes out the last swing high)"
 applies_to_1day = true
-implemented = false
+implemented = true
 
 [[condition]]
 bit = 57
@@ -517,7 +521,7 @@ name = "bos_bearish"
 group = "Market Structure"
 description = "bearish break of structure (price takes out the last swing low)"
 applies_to_1day = true
-implemented = false
+implemented = true
 
 [[condition]]
 bit = 58
@@ -525,7 +529,7 @@ name = "choch_bullish"
 group = "Market Structure"
 description = "bullish change of character (trend flips up after a lower-low sequence)"
 applies_to_1day = true
-implemented = false
+implemented = true
 
 [[condition]]
 bit = 59
@@ -533,4 +537,4 @@ name = "choch_bearish"
 group = "Market Structure"
 description = "bearish change of character (trend flips down after a higher-high sequence)"
 applies_to_1day = true
-implemented = false
+implemented = true

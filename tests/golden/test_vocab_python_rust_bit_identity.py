@@ -120,6 +120,10 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         proximity["fib_bps"],
         prior["prior_n"],
         prior["flags"],
+        case["market_structure"]["bos_bullish"],
+        case["market_structure"]["bos_bearish"],
+        case["market_structure"]["choch_bullish"],
+        case["market_structure"]["choch_bearish"],
     )
     return result
 
@@ -150,6 +154,10 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         proximity["fib_bps"],
         prior["prior_n"],
         prior["flags"],
+        case["market_structure"]["bos_bullish"],
+        case["market_structure"]["bos_bearish"],
+        case["market_structure"]["choch_bullish"],
+        case["market_structure"]["choch_bearish"],
     )
     return result
 

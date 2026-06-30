@@ -134,13 +134,13 @@ pub const BIT_NEAR_PIVOT_R5: u32 = 54;
 /// close within tolerance of support S5
 pub const BIT_NEAR_PIVOT_S5: u32 = 55;
 // Market Structure
-/// bullish break of structure (price takes out the last swing high)  (LAYOUT ONLY — implemented=false)
+/// bullish break of structure (price takes out the last swing high)
 pub const BIT_BOS_BULLISH: u32 = 56;
-/// bearish break of structure (price takes out the last swing low)  (LAYOUT ONLY — implemented=false)
+/// bearish break of structure (price takes out the last swing low)
 pub const BIT_BOS_BEARISH: u32 = 57;
-/// bullish change of character (trend flips up after a lower-low sequence)  (LAYOUT ONLY — implemented=false)
+/// bullish change of character (trend flips up after a lower-low sequence)
 pub const BIT_CHOCH_BULLISH: u32 = 58;
-/// bearish change of character (trend flips down after a higher-high sequence)  (LAYOUT ONLY — implemented=false)
+/// bearish change of character (trend flips down after a higher-high sequence)
 pub const BIT_CHOCH_BEARISH: u32 = 59;
 
 /// The number of atomic conditions (dense bits 0..=TOTAL-1).
@@ -153,7 +153,7 @@ pub const MASK_WIDTH: u32 = 128;
 /// LAYOUT-ONLY bits (`implemented=false`, e.g. the new VWAP/R5S5/BOS/CHoCH
 /// bits) are 0 here and the evaluator emits 0 for them until a later PR
 /// supplies the math.
-pub const IMPLEMENTED_MASK: u128 = 72057594037927935;
+pub const IMPLEMENTED_MASK: u128 = 1152921504606846975;
 
 #[cfg(test)]
 mod tests {

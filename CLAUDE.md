@@ -921,12 +921,14 @@ hostile-review pass._
    (lake-only, never in the 52→60-condition vocabulary). The vocabulary itself
    grew 52→60 conditions on a u128 mask in PR-1. **PR-2 (DEC-NIFTY-INDICATORS-001,
    #1011) supplied the indicator math for the VWAP-position (bits 52/53) + pivot
-   R5/S5 (bits 54/55) conditions — now `implemented=true` (56 of 60 implemented)
-   + the two new Fibonacci anchors (rolling-weekly / weekly-static, NO new bits).
-   The BOS/CHoCH bits (56-59) remain LAYOUT-ONLY (`implemented=false`), HONESTLY
-   DEFERRED to a focused follow-up PR because their stateful fractal swing
-   detection is look-ahead-critical (a swing confirmed k bars later must not be
-   peeked) and was not made provably P-06-clean in this pass.**
+   R5/S5 (bits 54/55) conditions + the two new Fibonacci anchors (rolling-weekly /
+   weekly-static, NO new bits). PR-2b (DEC-NIFTY-BOS-CHOCH-001, #1012) then
+   supplied the BOS/CHoCH market-structure math (bits 56-59) — a look-ahead-clean
+   fractal swing-detection state machine (`indicators/market_structure.py` +
+   `rust/trading-core/src/indicators/market_structure.rs`, a swing confirmed only
+   k bars later, proven P-06-clean by a dedicated `LookAheadBarrier` test) — so
+   ALL 60 conditions are now `implemented=true` (`IMPLEMENTED_MASK = (1<<60)-1`)
+   and the data-independent indicator vocabulary is COMPLETE.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally

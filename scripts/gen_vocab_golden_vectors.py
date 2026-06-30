@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from brutex.indicators.fib_levels import compute_fib_levels
+from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import compute_pivot_levels
 from brutex.vocabulary import TOTAL_CONDITIONS
 from brutex.vocabulary.bits import IMPLEMENTED_MASK
@@ -139,6 +140,20 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
     # (52/53) are exercised BOTH ways across the 400 cases (the coverage audit).
     vwap = None if rng.random() < 0.12 else max(1, close + rng.randint(-40_000, 40_000))
 
+    # BOS/CHoCH (DEC-NIFTY-BOS-CHOCH-001): the four resolved Group-12 flags
+    # (bits 56-59). Each fires independently with ~25% probability so across the
+    # 400 cases EVERY one is set in >=1 case AND clear in >=1 case (the both-ways
+    # coverage gate). The look-ahead-clean RESOLUTION of these flags is owned +
+    # proven by brutex.indicators.market_structure.MarketStructureState (its unit +
+    # property + P-06 tests); the golden oracle only carries the resolved flags so
+    # both languages set the same bits from them.
+    market_structure = MarketStructureSignal(
+        bos_bullish=rng.random() < 0.25,
+        bos_bearish=rng.random() < 0.25,
+        choch_bullish=rng.random() < 0.25,
+        choch_bearish=rng.random() < 0.25,
+    )
+
     tod = rng.choice(_TOD_SAMPLES)
     ts = datetime(2024, 1, 2, tod.hour, tod.minute, tzinfo=IST)
 
@@ -165,6 +180,7 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
         day_high_paisa=day_high,
         day_low_paisa=day_low,
         open_of_day_paisa=open_of_day,
+        market_structure=market_structure,
     )
     mask = evaluate_atoms(snap, prox, prior)
 
@@ -190,6 +206,12 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
             "fib_bps": prox.fib_proximity_bps,
         },
         "prior": {"prior_n": prior_n, "flags": list(flags)},
+        "market_structure": {
+            "bos_bullish": market_structure.bos_bullish,
+            "bos_bearish": market_structure.bos_bearish,
+            "choch_bullish": market_structure.choch_bullish,
+            "choch_bearish": market_structure.choch_bearish,
+        },
         # u128 mask serialised as a 32-nibble hex STRING (not a JSON number) so a
         # mask using bits >= 53 keeps full precision across JSON/JS doubles.
         "expected_mask": f"{mask:0{_MASK_HEX_WIDTH}x}",
@@ -203,10 +225,11 @@ def generate() -> dict[str, Any]:
     # Coverage audit: every IMPLEMENTED bit must be set in >=1 case AND clear in
     # >=1 case, so the oracle exercises every condition the evaluator actually
     # computes both ways. PR-2 flipped VWAP (52/53) + pivot R5/S5 (54/55) to
-    # implemented, so they are now part of this both-ways gate (the generator
-    # snaps close onto R5/S5 + varies the VWAP above/below close). The still-
-    # LAYOUT-ONLY BOS/CHoCH bits (56-59, implemented=false) are EXCLUDED — the
-    # evaluator emits 0 for them; a separate test asserts they are ALWAYS clear.
+    # implemented; DEC-NIFTY-BOS-CHOCH-001 flipped the BOS/CHoCH bits (56-59) — so
+    # all 60 bits are now part of this both-ways gate (the generator snaps close
+    # onto R5/S5, varies the VWAP above/below close, and fires each of the four
+    # resolved BOS/CHoCH flags ~25% of the time). No condition bit is layout-only
+    # any more; only the reserved u128 headroom (60..127) stays inert.
     set_seen = 0
     clr_seen = 0
     for c in cases:

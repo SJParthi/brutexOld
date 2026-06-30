@@ -9,8 +9,10 @@
 //! The vocabulary mask is a `u128` (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4 —
 //! the DEC-PLUGIN-001-gated u64→u128 widening for headroom). The bit LAYOUT
 //! ([`bits`]) is GENERATED from `conditions.toml` by `scripts/codegen_vocab.py`
-//! (the same manifest emits the Python twin). New bits 52..=59 (VWAP/R5-S5/
-//! BOS/CHoCH) are LAYOUT-ONLY (`implemented=false`) until their math lands in PR-2.
+//! (the same manifest emits the Python twin). Bits 52..=55 (VWAP/R5-S5) became
+//! `implemented=true` in PR-2; bits 56..=59 (BOS/CHoCH) became `implemented=true`
+//! in DEC-NIFTY-BOS-CHOCH-001 (the stateful look-ahead-clean
+//! [`MarketStructureState`] resolves the four booleans the evaluator reads).
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral
@@ -38,6 +40,7 @@ pub mod indicators;
 
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
+pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
 pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
 pub use indicators::vwap::VwapState;
 

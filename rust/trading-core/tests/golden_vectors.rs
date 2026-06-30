@@ -11,8 +11,8 @@ use std::path::Path;
 use serde::Deserialize;
 use trading_core::bits::{IMPLEMENTED_MASK, TOTAL_CONDITIONS};
 use trading_core::{
-    IndicatorSnapshot, PriorBarHistory, ProximityParams, compute_fib_levels, compute_pivot_levels,
-    evaluate_atoms,
+    IndicatorSnapshot, MarketStructureSignal, PriorBarHistory, ProximityParams, compute_fib_levels,
+    compute_pivot_levels, evaluate_atoms,
 };
 
 /// Parse a 32-nibble hex mask STRING into a `u128`. The fixture serialises the
@@ -34,6 +34,18 @@ struct Prior {
     flags: Vec<bool>,
 }
 
+/// The resolved BOS/CHoCH flags (Group 12, bits 56-59) carried in the fixture —
+/// the engine resolves these from the look-ahead-clean `MarketStructureState`;
+/// the language-neutral oracle carries them verbatim so both languages set the
+/// same bits (DEC-NIFTY-BOS-CHOCH-001).
+#[derive(Deserialize)]
+struct MarketStructure {
+    bos_bullish: bool,
+    bos_bearish: bool,
+    choch_bullish: bool,
+    choch_bearish: bool,
+}
+
 #[derive(Deserialize)]
 struct Case {
     id: i64,
@@ -53,6 +65,7 @@ struct Case {
     open_of_day_paisa: i64,
     proximity: Proximity,
     prior: Prior,
+    market_structure: MarketStructure,
     expected_mask: String,
 }
 
@@ -112,6 +125,12 @@ fn eval_case(c: &Case) -> u128 {
         day_high_paisa: c.day_high_paisa,
         day_low_paisa: c.day_low_paisa,
         open_of_day_paisa: c.open_of_day_paisa,
+        market_structure: MarketStructureSignal {
+            bos_bullish: c.market_structure.bos_bullish,
+            bos_bearish: c.market_structure.bos_bearish,
+            choch_bullish: c.market_structure.choch_bullish,
+            choch_bearish: c.market_structure.choch_bearish,
+        },
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
@@ -156,11 +175,11 @@ fn rust_reproduces_every_golden_vector() {
 
 #[test]
 fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
-    // The both-ways gate is partitioned over the IMPLEMENTED bits only: the
-    // LAYOUT-ONLY bits (implemented=false — VWAP/R5-S5/BOS/CHoCH) have no branch
-    // in the evaluator yet (PR-1 is layout-only), so they never fire. The
-    // separate `layout_only_bits_are_always_clear` test below proves they are
-    // provably inert until PR-2 supplies their math.
+    // The both-ways gate is partitioned over the IMPLEMENTED bits — now all 60
+    // (VWAP/R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001). The
+    // separate `layout_only_bits_are_always_clear` test below proves the only
+    // remaining non-implemented bits — the reserved u128 headroom (60..127) — stay
+    // provably inert.
     let fixture = load_fixture();
     let mut set_any: u128 = 0;
     let mut clear_any: u128 = 0;
@@ -181,9 +200,9 @@ fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
 
 #[test]
 fn layout_only_bits_are_always_clear() {
-    // Every bit OUTSIDE IMPLEMENTED_MASK (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH
-    // bits + the reserved headroom) must be 0 in EVERY evaluated case — the
-    // honest PR-1 guarantee that the new bits are declared but inert.
+    // Every bit OUTSIDE IMPLEMENTED_MASK — now only the reserved u128 headroom
+    // (bits 60..127), since all 60 declared conditions are implemented — must be 0
+    // in EVERY evaluated case.
     let fixture = load_fixture();
     let full: u128 = (1u128 << TOTAL_CONDITIONS) - 1;
     let layout_only = full & !IMPLEMENTED_MASK;

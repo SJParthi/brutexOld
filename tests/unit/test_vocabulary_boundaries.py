@@ -252,13 +252,55 @@ class TestLevelListLengthGuard:
         # sits after ema200_paisa in the ABI.
         with pytest.raises(ValueError, match="pivot_levels must have 12 entries"):
             trading_core.evaluate_with_levels(
-                0, 1, 1, 1, 1, None, None, None, [0] * 11, [0] * 15, 1, 1, 1, 10, 10, 10, 3, []
+                0,
+                1,
+                1,
+                1,
+                1,
+                None,
+                None,
+                None,
+                [0] * 11,
+                [0] * 15,
+                1,
+                1,
+                1,
+                10,
+                10,
+                10,
+                3,
+                [],
+                False,
+                False,
+                False,
+                False,
             )
 
     def test_short_fib_list_raises(self) -> None:
         with pytest.raises(ValueError, match="fib_levels must have 15 entries"):
             trading_core.evaluate_with_levels(
-                0, 1, 1, 1, 1, None, None, None, [0] * 12, [0] * 14, 1, 1, 1, 10, 10, 10, 3, []
+                0,
+                1,
+                1,
+                1,
+                1,
+                None,
+                None,
+                None,
+                [0] * 12,
+                [0] * 14,
+                1,
+                1,
+                1,
+                10,
+                10,
+                10,
+                3,
+                [],
+                False,
+                False,
+                False,
+                False,
             )
 
 
