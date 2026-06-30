@@ -785,6 +785,7 @@ class TestIngestSpotCompletenessRepull:
                 start=date(2021, 3, 1),
                 end=date(2021, 3, 30),
                 ledger=led,
+                detect_completeness_gaps=True,
             )
         assert report.windows == 1
         rec = led.records()[0]
@@ -812,6 +813,7 @@ class TestIngestSpotCompletenessRepull:
                 start=date(2021, 3, 1),
                 end=date(2021, 4, 1),
                 ledger=led,
+                detect_completeness_gaps=True,
             )
         rec = led.records()[0]
         assert rec.status != SUCCESS
@@ -833,6 +835,7 @@ class TestIngestSpotCompletenessRepull:
                 start=date(2021, 3, 1),
                 end=date(2021, 4, 1),
                 ledger=led,
+                detect_completeness_gaps=True,
             )
         rec = led.records()[0]
         assert rec.status == SUCCESS
@@ -854,9 +857,41 @@ class TestIngestSpotCompletenessRepull:
             start=date(2021, 3, 1),
             end=date(2021, 4, 1),
             ledger=led,
+            detect_completeness_gaps=True,
         )
         rec = led.records()[0]
         assert rec.status == SUCCESS  # 1day is exempt from the re-pull demotion
+
+    def test_default_no_detect_does_not_demote_a_dry_run_gappy_window(self) -> None:
+        # The demotion is OPT-IN (detect_completeness_gaps defaults False) so a dry-run /
+        # synthetic / offline pull (whose adapter returns first-day-only bars) is NEVER demoted
+        # — it would otherwise false-red the dry-run. The WARNING still fires (visibility), but
+        # the ledger row stays SUCCESS. This pins the production gate's default-OFF contract.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        gappy = [
+            _bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 26, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 29, 4, 5, tzinfo=UTC)),
+        ]
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=gappy),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,  # an INDEX (is_index True) — only the opt-in flag is missing
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 3, 30),
+                ledger=led,
+                # detect_completeness_gaps defaults False (dry-run / synthetic / test contract)
+            )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS  # NOT demoted — the opt-in gate is off
+        assert rec.last_error is None
+        # The observe-only WARNING STILL fires (visibility is never gated, only the re-pull).
+        assert any(e["event"] == "window.interior_gap" for e in logs)
 
     def test_non_index_equity_is_warned_but_not_demoted(self) -> None:
         # A non-index (REFERENCE_ONLY equity) spot symbol can be legitimately sparse
@@ -901,6 +936,7 @@ class TestIngestSpotCompletenessRepull:
                 start=date(2021, 3, 1),
                 end=date(2021, 3, 30),
                 ledger=led,
+                detect_completeness_gaps=True,
             )
         rec = led.records()[0]
         assert rec.status == SUCCESS  # NOT demoted — the equity stays settled

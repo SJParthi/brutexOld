@@ -231,7 +231,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/fetch-completeness-honesty` (**DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 /
-  DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1027** — PR-A of the triaged fetch-path edge-case sweep: a SUCCESS spot window
+  DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1028** — PR-A of the triaged fetch-path edge-case sweep: a SUCCESS spot window
   with a CONFIRMED interior multi-session hole OR a trailing truncation is DEMOTED to a re-pullable ledger status
   (BOUNDED — it settles SKIPPED after `EMPTY_TERMINAL_THRESHOLD` flagged pulls so the universe pull still converges, and
   the stored bars are always KEPT), and the sink reports the DEDUPED bars-added count as a SEPARATE `bars_net_new` field.
@@ -247,7 +247,9 @@ hostile-review pass._
   `bars_appended` STAYS the input count — so a re-pull of already-stored bars reports `bars_net_new=0` with NO downstream
   `>0`-gate change. MECHANISM: a NEW `degraded` flag threaded `classify_window_status` →
   `WindowLedger.record(degraded=, degraded_reason=)` records a demoted SUCCESS as FAILED+reason and BUMPS the
-  `empty_streak` (REUSING the genuine-EMPTY bounded-terminal machinery); the DEMOTION is gated to a DENSE INDEX
+  `empty_streak` (REUSING the genuine-EMPTY bounded-terminal machinery); the DEMOTION is OPT-IN (a
+  `detect_completeness_gaps` flag set True ONLY at the real-vendor production sites — the dashboard + CLI live pull;
+  a `--dry-run`/synthetic pull leaves it OFF so it never false-reds) AND gated to a DENSE INDEX
   (`instrument.is_index`) on the FETCHED `1minute` interval — the ~750 illiquid REFERENCE_ONLY spot underlyings + the
   derived `1day` are WARNed (observe-only) but never re-pulled. HONEST envelope: SPOT-INDEX spine ONLY (the F&O
   `option_ingest` partial-window observe stays observe-only — an explicit non-goal); ENGINE UNCHANGED

@@ -282,6 +282,7 @@ def ingest_spot(
     now_ist: Callable[[], datetime] | None = None,
     on_window: WindowTick | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    detect_completeness_gaps: bool = False,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -410,6 +411,7 @@ def ingest_spot(
                 empty_retry_backoff=empty_backoff,
                 old_cutoff=old_cutoff,
                 fetch_pipeline=fetch_pipeline,
+                detect_completeness_gaps=detect_completeness_gaps,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -540,6 +542,7 @@ def _ingest_one_window(
     empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
     old_cutoff: date | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    detect_completeness_gaps: bool = False,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -592,6 +595,7 @@ def _ingest_one_window(
             on_success=on_success,
             pull_id=pull_id,
             series_fields=series_fields,
+            detect_completeness_gaps=detect_completeness_gaps,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED outcome immediately and re-paces + fetches the next
@@ -614,6 +618,7 @@ def _ingest_one_window(
             on_success=on_success,
             pull_id=pull_id,
             series_fields=series_fields,
+            detect_completeness_gaps=detect_completeness_gaps,
         )
         if result_outcome.transient:
             # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
@@ -836,6 +841,7 @@ def _process_window_tail(
     on_success: Callable[[], None] | None,
     pull_id: str,
     series_fields: dict[str, str],
+    detect_completeness_gaps: bool = False,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -1010,19 +1016,27 @@ def _process_window_tail(
     )
     truncated = partial_verdict is not None and partial_verdict.is_suspected_partial()
     interior_gap = interior_verdict is not None and interior_verdict.is_interior_gap()
-    # DEMOTE only a DENSE INDEX on the FETCHED ``1minute`` interval. Two hard gates:
-    #   (1) ``instrument.is_index`` — the false-positive-safety rationale (a hole/truncation
-    #       is a GENUINE completeness gap, not liquidity noise) holds ONLY for the densely-
-    #       traded indices (NIFTY/BANKNIFTY/SENSEX), which print every session. The spot pull
-    #       ALSO fans out over the ~750 REFERENCE_ONLY underlyings (illiquid NTM small/mid/
-    #       micro-caps + delisted/suspended names), where a multi-session no-print stretch is
-    #       legitimately sparse-but-complete — demoting those would be a re-pull storm (the
-    #       exact false-positive class the options exclusion guards against). For a non-index
-    #       the WARNING above STILL fires (observe-only visibility), but we never re-pull.
-    #   (2) ``interval != _DAILY`` — the derived ``1day`` partition is RESAMPLED from the
-    #       stored 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never vendor-fetched, so a
-    #       "truncated" daily window is meaningless; its completeness follows the 1-minute.
-    demotable = instrument.is_index and interval != _DAILY
+    # DEMOTE only a DENSE INDEX on the FETCHED ``1minute`` interval, and only when the caller
+    # OPTED IN via *detect_completeness_gaps*. Three hard gates:
+    #   (1) ``detect_completeness_gaps`` — the demotion is a REAL-VENDOR completeness signal,
+    #       OPT-IN at the production live-pull build sites ONLY. A ``--dry-run`` / synthetic /
+    #       offline pull (``cli._DryRunGrowwSpotAdapter`` → ``synthetic_spot_bars``, which returns
+    #       a few bars on the window's FIRST day regardless of span) would otherwise see every
+    #       wide window as "truncated" and demote it to FAILED — a false-red on the dry-run
+    #       whose whole purpose is to prove the pipe runs GREEN. Defaulting OFF keeps dry-run /
+    #       synthetic / unit-test pulls byte-identical; the production dashboard + CLI-live pull
+    #       set it ``True``. (The observe-only WARNING below still fires regardless — visibility
+    #       is never gated, only the re-pull action.)
+    #   (2) ``instrument.is_index`` — the false-positive-safety rationale (a hole/truncation is a
+    #       GENUINE completeness gap, not liquidity noise) holds ONLY for the densely-traded
+    #       indices (NIFTY/BANKNIFTY/SENSEX), which print every session. The spot pull ALSO fans
+    #       out over the ~750 REFERENCE_ONLY underlyings (illiquid NTM small/mid/micro-caps +
+    #       delisted/suspended names), where a multi-session no-print stretch is legitimately
+    #       sparse-but-complete — demoting those would be a re-pull storm.
+    #   (3) ``interval != _DAILY`` — the derived ``1day`` partition is RESAMPLED from the stored
+    #       1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never vendor-fetched, so a "truncated"
+    #       daily window is meaningless; its completeness follows the 1-minute.
+    demotable = detect_completeness_gaps and instrument.is_index and interval != _DAILY
     degraded = demotable and (truncated or interior_gap)
     degraded_reason = (
         (INTERIOR_GAP if interior_gap else SUSPECTED_PARTIAL if truncated else None)
