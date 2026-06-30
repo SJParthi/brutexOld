@@ -133,7 +133,7 @@ def test_from_groww_exception_classifies_generic_by_code_and_message(
         # substring — NONE of these is a rate-limit and none must be retried.
         "Contract NSE-FOO24JUL18500CE error code STK-429-DELISTED, not tradable",
         "order id 1442904291 rejected",  # "429" sits inside the order id
-        "no candles at 2024-04-29T09:15:00",  # "429" sits inside the date
+        "no candles at epoch 1714294290",  # "429" sits inside the epoch timestamp
         "instrument 4290 is not on Groww",
     ],
 )
