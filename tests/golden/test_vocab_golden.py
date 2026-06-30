@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from brutex.indicators.fib_levels import compute_fib_levels
+from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import compute_pivot_levels
 from brutex.vocabulary import TOTAL_CONDITIONS
 from brutex.vocabulary.bits import IMPLEMENTED_MASK
@@ -53,6 +54,7 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
         day, case["prev_pdh_paisa"], case["prev_pdl_paisa"], case["prev_pdc_paisa"]
     )
     fib = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
+    ms = case["market_structure"]
     snapshot = IndicatorSnapshot(
         timestamp_ist=ts,
         open_paisa=case["open_paisa"],
@@ -67,6 +69,12 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
         day_high_paisa=case["day_high_paisa"],
         day_low_paisa=case["day_low_paisa"],
         open_of_day_paisa=case["open_of_day_paisa"],
+        market_structure=MarketStructureSignal(
+            bos_bullish=ms["bos_bullish"],
+            bos_bearish=ms["bos_bearish"],
+            choch_bullish=ms["choch_bullish"],
+            choch_bearish=ms["choch_bearish"],
+        ),
     )
     proximity = ProximityParams(
         pivot_proximity_bps=case["proximity"]["pivot_bps"],

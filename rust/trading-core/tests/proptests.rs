@@ -28,8 +28,8 @@
 
 use proptest::prelude::*;
 use trading_core::{
-    FibLevels, IndicatorSnapshot, PivotLevels, PriorBarHistory, ProximityParams, bits,
-    compute_fib_levels, compute_pivot_levels, evaluate_atoms,
+    FibLevels, IndicatorSnapshot, MarketStructureSignal, PivotLevels, PriorBarHistory,
+    ProximityParams, bits, compute_fib_levels, compute_pivot_levels, evaluate_atoms,
 };
 
 /// Upper bound for generated paisa magnitudes (₹10 billion). See module docs:
@@ -45,7 +45,7 @@ const MIDDAY_END: u32 = 13 * 3600;
 const AFTERNOON_END: u32 = 15 * 3600;
 
 /// All IMPLEMENTED condition bits set — the union the evaluator can ever produce
-/// (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH bits have no branch yet, so they are 0).
+/// (all 60 bits, incl. the VWAP/R5-S5/BOS/CHoCH groups, are implemented now).
 const FULL_MASK: u128 = bits::IMPLEMENTED_MASK;
 
 // ───────────────────────────── strategies ──────────────────────────────────
@@ -215,10 +215,28 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 arb_tod(),
                 arb_proximity(),
                 arb_prior(),
+                // The four resolved BOS/CHoCH flags (Group 12) — generated
+                // independently (each an arbitrary bool) so the oracle-parity
+                // property exercises bits 56-59 BOTH set and clear (the
+                // look-ahead-clean RESOLUTION of these flags is proven separately
+                // by the `MarketStructureState` unit + property tests; here the
+                // evaluator's job is only to copy each flag onto its bit).
+                arb_market_structure(),
             )
         })
         .prop_map(
-            |(pivots, fib, candle, day, open_of_day, emas, tod_seconds, proximity, prior)| {
+            |(
+                pivots,
+                fib,
+                candle,
+                day,
+                open_of_day,
+                emas,
+                tod_seconds,
+                proximity,
+                prior,
+                market_structure,
+            )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
                 let (ema20, ema200, vwap) = emas;
@@ -236,10 +254,27 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     day_high_paisa: day_high,
                     day_low_paisa: day_low,
                     open_of_day_paisa: open_of_day,
+                    market_structure,
                 };
                 (snapshot, proximity, prior)
             },
         )
+}
+
+/// Strategy: an arbitrary `MarketStructureSignal` (each of the four resolved
+/// BOS/CHoCH flags independently true/false). The look-ahead-clean derivation of
+/// these flags is owned + proven by `MarketStructureState`; for the evaluator
+/// oracle-parity property the four flags are simply arbitrary booleans so bits
+/// 56-59 are exercised both set and clear.
+fn arb_market_structure() -> impl Strategy<Value = MarketStructureSignal> {
+    (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+        |(bos_bullish, bos_bearish, choch_bullish, choch_bearish)| MarketStructureSignal {
+            bos_bullish,
+            bos_bearish,
+            choch_bullish,
+            choch_bearish,
+        },
+    )
 }
 
 // ─────────────────────────── independent oracle ─────────────────────────────
@@ -471,6 +506,23 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_NEAR_PIVOT_S5;
     }
 
+    // Group 12: BOS/CHoCH market structure (bits 56-59) — the resolved flags are
+    // simply copied onto their bits (the look-ahead-clean detection lives in
+    // `MarketStructureState`; the evaluator is a pure bit-setter here).
+    let ms = &s.market_structure;
+    if ms.bos_bullish {
+        m |= 1u128 << bits::BIT_BOS_BULLISH;
+    }
+    if ms.bos_bearish {
+        m |= 1u128 << bits::BIT_BOS_BEARISH;
+    }
+    if ms.choch_bullish {
+        m |= 1u128 << bits::BIT_CHOCH_BULLISH;
+    }
+    if ms.choch_bearish {
+        m |= 1u128 << bits::BIT_CHOCH_BEARISH;
+    }
+
     m
 }
 
@@ -627,6 +679,7 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         day_high_paisa: 1_050_000,
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
+        market_structure: MarketStructureSignal::default(),
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 10,
@@ -1157,9 +1210,57 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         &no_prior,
     );
 
+    // Group 12: BOS/CHoCH market structure (bits 56-59). Each resolved flag maps
+    // directly onto its bit (the look-ahead-clean derivation is `MarketStructureState`'s
+    // job, proven there; here we only assert the evaluator surfaces each flag).
+    check(
+        bits::BIT_BOS_BULLISH,
+        IndicatorSnapshot {
+            market_structure: MarketStructureSignal {
+                bos_bullish: true,
+                ..Default::default()
+            },
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BOS_BEARISH,
+        IndicatorSnapshot {
+            market_structure: MarketStructureSignal {
+                bos_bearish: true,
+                ..Default::default()
+            },
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CHOCH_BULLISH,
+        IndicatorSnapshot {
+            market_structure: MarketStructureSignal {
+                choch_bullish: true,
+                ..Default::default()
+            },
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CHOCH_BEARISH,
+        IndicatorSnapshot {
+            market_structure: MarketStructureSignal {
+                choch_bearish: true,
+                ..Default::default()
+            },
+            ..base
+        },
+        &no_prior,
+    );
+
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (now incl. VWAP/R5-S5) were exercised"
+        "not all implemented bits (incl. VWAP/R5-S5/BOS/CHoCH) were exercised"
     );
 }
 
@@ -1188,6 +1289,7 @@ fn equality_boundaries_keep_strict_bits_clear() {
         day_high_paisa: 1_050_000,
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
+        market_structure: MarketStructureSignal::default(),
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
@@ -1444,6 +1546,7 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         day_high_paisa: 1_050_000,
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
+        market_structure: MarketStructureSignal::default(),
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,

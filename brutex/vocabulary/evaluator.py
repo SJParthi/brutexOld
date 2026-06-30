@@ -28,6 +28,7 @@ from datetime import datetime
 import trading_core
 
 from brutex.indicators.fib_levels import FibLevels
+from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels
 
 # ────── Input dataclasses ──────
@@ -73,6 +74,13 @@ class IndicatorSnapshot:
     # has no futures VWAP) keeps working unchanged — only the NIFTY-futures track
     # populates it.
     vwap_paisa: int | None = None
+
+    # Resolved BOS/CHoCH market-structure flags (Group 12, bits 56-59), produced by
+    # the look-ahead-clean brutex.indicators.market_structure.MarketStructureState
+    # (DEC-NIFTY-BOS-CHOCH-001) — threaded in like the resolved PriorBarHistory
+    # flags. Defaulted to an all-false signal so every pre-existing snapshot caller
+    # keeps working unchanged (the Group-12 bits then simply do not fire).
+    market_structure: MarketStructureSignal = field(default_factory=MarketStructureSignal)
 
 
 @dataclass(frozen=True)
@@ -135,9 +143,9 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u128 bitmask. Bits 0..55 set per condition (PR-2 added VWAP-position
-        bits 52-53 + pivot R5/S5 bits 54-55, DEC-NIFTY-INDICATORS-001); the
-        BOS/CHoCH bits 56-59 remain layout-only (always 0) until a later PR.
+        u128 bitmask. All 60 bits 0..59 set per condition (PR-2 added VWAP-position
+        bits 52-53 + pivot R5/S5 bits 54-55; DEC-NIFTY-BOS-CHOCH-001 added the
+        BOS/CHoCH bits 56-59, resolved from ``snapshot.market_structure``).
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
@@ -207,5 +215,9 @@ def evaluate_atoms(
         proximity.fib_proximity_bps,
         prior_history.prior_n,
         prior_history.flags,
+        snapshot.market_structure.bos_bullish,
+        snapshot.market_structure.bos_bearish,
+        snapshot.market_structure.choch_bullish,
+        snapshot.market_structure.choch_bearish,
     )
     return mask

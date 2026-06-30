@@ -4,16 +4,18 @@
 //! Pure function of its inputs (int64 paisa), no state, no allocation: the same
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
 //! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
-//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); only the IMPLEMENTED bits
-//! (0..=55 after PR-2 — DEC-NIFTY-INDICATORS-001) ever fire. PR-2 added the VWAP
-//! position (bits 52-53) and pivot R5/S5 proximity (bits 54-55) branches; the
-//! BOS/CHoCH bits (56-59) remain LAYOUT-ONLY (`implemented=false` in
-//! `conditions.toml`) with NO branch here, so the evaluator emits 0 for them
-//! until a later PR supplies their look-ahead-clean math. A u128 AND is two u64
-//! ANDs — still O(1) per bar (NOT an O(1)-total claim).
+//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); all 60 IMPLEMENTED bits
+//! (0..=59) can now fire. PR-2 added the VWAP position (bits 52-53) and pivot
+//! R5/S5 proximity (bits 54-55) branches; DEC-NIFTY-BOS-CHOCH-001 added the
+//! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
+//! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
+//! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
+//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. A u128 AND is
+//! two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
 use crate::indicators::fib::FibLevels;
+use crate::indicators::market_structure::MarketStructureSignal;
 use crate::indicators::pivots::PivotLevels;
 
 // Time-of-day cutoffs, in seconds since IST midnight (mirrors evaluator.py:116-120).
@@ -57,6 +59,13 @@ pub struct IndicatorSnapshot {
     pub day_high_paisa: i64,
     pub day_low_paisa: i64,
     pub open_of_day_paisa: i64,
+    /// The bar's resolved BOS/CHoCH market-structure flags (Group 12, bits
+    /// 56-59), produced by the stateful look-ahead-clean
+    /// [`crate::indicators::market_structure::MarketStructureState`] the engine
+    /// holds per (instrument, timeframe, contract) — fed in exactly like the
+    /// resolved `PriorBarHistory` flags. `default()` (all false) during warm-up
+    /// (before any confirmed swing) so the Group-12 bits simply do not fire.
+    pub market_structure: MarketStructureSignal,
 }
 
 /// Proximity tolerances (basis points) for the `near_*` conditions.
@@ -113,9 +122,8 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// Only the IMPLEMENTED bits (0..=55 after PR-2) can fire; the still-LAYOUT-ONLY
-/// BOS/CHoCH bits (56..=59, `implemented=false`) have no branch below so they are
-/// always 0 until a later PR supplies their look-ahead-clean math.
+/// All 60 IMPLEMENTED bits (0..=59) can fire; the BOS/CHoCH bits (56..=59) read
+/// the resolved `snapshot.market_structure` flags (DEC-NIFTY-BOS-CHOCH-001).
 #[must_use]
 pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
     let mut mask: u128 = 0;
@@ -380,6 +388,27 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     }
     if is_near(close, pv.s5_paisa, bps) {
         mask |= bit(bits::BIT_NEAR_PIVOT_S5);
+    }
+
+    // ── Group 12: Market Structure (BOS/CHoCH, bits 56-59) ──
+    // The four booleans are RESOLVED upstream by the stateful, look-ahead-clean
+    // `indicators::market_structure::MarketStructureState` (a swing is only
+    // confirmed k bars LATER, all at index ≤ N), and threaded in via the snapshot
+    // exactly like the resolved `PriorBarHistory` flags — `evaluate_atoms` stays a
+    // pure, stateless function that only sets bits from the resolved flags
+    // (DEC-NIFTY-BOS-CHOCH-001). All false during warm-up → no bit fires.
+    let ms = &s.market_structure;
+    if ms.bos_bullish {
+        mask |= bit(bits::BIT_BOS_BULLISH);
+    }
+    if ms.bos_bearish {
+        mask |= bit(bits::BIT_BOS_BEARISH);
+    }
+    if ms.choch_bullish {
+        mask |= bit(bits::BIT_CHOCH_BULLISH);
+    }
+    if ms.choch_bearish {
+        mask |= bit(bits::BIT_CHOCH_BEARISH);
     }
 
     mask

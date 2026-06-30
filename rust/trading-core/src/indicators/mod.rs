@@ -1,11 +1,13 @@
 //! Evaluate-time indicators the condition vocabulary consumes: Standard Pivot
-//! Points (now incl. R5/S5), Static Daily Fibonacci levels, and the session-
-//! anchored intraday futures VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001). (EMA
-//! is NOT here — the evaluator consumes precomputed `ema20`/`ema200` paisa from
-//! the snapshot, so EMA recurrence is a later phase. VWAP is a STATE object whose
-//! resolved level is fed into the snapshot as `vwap_paisa`, mirroring EMA.)
+//! Points (now incl. R5/S5), Static Daily Fibonacci levels, the session-
+//! anchored intraday futures VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001), and
+//! the BOS/CHoCH market-structure state (DEC-NIFTY-BOS-CHOCH-001). (EMA is NOT
+//! here — the evaluator consumes precomputed `ema20`/`ema200` paisa from the
+//! snapshot, so EMA recurrence is a later phase. VWAP + market structure are
+//! STATE objects whose resolved values are fed into the snapshot, mirroring EMA.)
 
 pub mod fib;
+pub mod market_structure;
 pub mod pivots;
 pub mod vwap;
 

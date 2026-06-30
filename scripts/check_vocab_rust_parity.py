@@ -63,6 +63,10 @@ def main() -> int:
             c["proximity"]["fib_bps"],
             c["prior"]["prior_n"],
             c["prior"]["flags"],
+            c["market_structure"]["bos_bullish"],
+            c["market_structure"]["bos_bearish"],
+            c["market_structure"]["choch_bullish"],
+            c["market_structure"]["choch_bearish"],
         )
         expected = int(c["expected_mask"], 16)
         if got != expected:

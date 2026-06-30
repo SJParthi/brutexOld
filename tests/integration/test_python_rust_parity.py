@@ -115,6 +115,10 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["proximity"]["fib_bps"],
         case["prior"]["prior_n"],
         case["prior"]["flags"],
+        case["market_structure"]["bos_bullish"],
+        case["market_structure"]["bos_bearish"],
+        case["market_structure"]["choch_bullish"],
+        case["market_structure"]["choch_bearish"],
     )
     return result
 
@@ -167,6 +171,10 @@ class TestProductionPathParity:
                 case["proximity"]["fib_bps"],
                 case["prior"]["prior_n"],
                 case["prior"]["flags"],
+                case["market_structure"]["bos_bullish"],
+                case["market_structure"]["bos_bearish"],
+                case["market_structure"]["choch_bullish"],
+                case["market_structure"]["choch_bearish"],
             )
             if with_levels != from_raw:
                 mismatches.append(
@@ -217,6 +225,10 @@ class TestProductionPathParity:
             10,
             3,
             [],
+            False,  # bos_bullish — no market-structure break in this gap-day case
+            False,  # bos_bearish
+            False,  # choch_bullish
+            False,  # choch_bearish
         )
         assert not (mask & (1 << B.BIT_GAP_UP_DAY)), "gap-up must stay clear when pdc==0"
         assert not (mask & (1 << B.BIT_GAP_DOWN_DAY)), "gap-down must stay clear when pdc==0"

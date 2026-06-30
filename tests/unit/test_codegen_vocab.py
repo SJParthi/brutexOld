@@ -34,17 +34,16 @@ def test_manifest_loads_and_is_valid() -> None:
     assert m.total_conditions == 60
     # Bits are dense 0..59.
     assert sorted(c.bit for c in m.conditions) == list(range(60))
-    # IMPLEMENTED_MASK is exactly bits 0..55: the original 52 plus the four bits
-    # PR-2 (DEC-NIFTY-INDICATORS-001) flipped to implemented — VWAP 52/53 and
-    # pivot R5/S5 54/55.
-    assert m.implemented_mask == (1 << 56) - 1
-    # The VWAP + R5/S5 bits (52..55) are now implemented; only the BOS/CHoCH bits
-    # (56..59) remain implemented=false (layout only, honestly deferred).
+    # IMPLEMENTED_MASK is now all 60 bits 0..59: the original 52, the four bits
+    # PR-2 (DEC-NIFTY-INDICATORS-001) flipped (VWAP 52/53 + pivot R5/S5 54/55),
+    # and the BOS/CHoCH bits 56..59 PR-2b (DEC-NIFTY-BOS-CHOCH-001) flipped to
+    # implemented with real look-ahead-clean math.
+    assert m.implemented_mask == (1 << 60) - 1
+    # VWAP + R5/S5 (52..55) AND BOS/CHoCH (56..59) are now ALL implemented; no
+    # condition bit is layout-only any more.
     for c in m.conditions:
-        if 52 <= c.bit <= 55:
+        if 52 <= c.bit <= 59:
             assert c.implemented is True
-        elif c.bit >= 56:
-            assert c.implemented is False
     # VWAP bits are masked out on 1day (ADR D12).
     vwap = {c.name: c for c in m.conditions if c.group == "VWAP Position"}
     assert vwap["close_above_vwap"].applies_to_1day is False
@@ -120,7 +119,7 @@ def test_render_rust_has_banner_and_constants() -> None:
     assert "pub const BIT_CLOSE_ABOVE_VWAP: u32 = 52;" in rs
     assert "pub const TOTAL_CONDITIONS: u32 = 60;" in rs
     assert "pub const MASK_WIDTH: u32 = 128;" in rs
-    assert "pub const IMPLEMENTED_MASK: u128 = 72057594037927935;" in rs
+    assert "pub const IMPLEMENTED_MASK: u128 = 1152921504606846975;" in rs
     assert "fn bit_positions_are_dense()" in rs
 
 
@@ -130,7 +129,7 @@ def test_render_python_has_banner_and_constants() -> None:
     assert "BIT_CLOSE_ABOVE_VWAP: Final[int] = 52" in py
     assert "TOTAL_CONDITIONS: Final[int] = 60" in py
     assert "MASK_WIDTH: Final[int] = 128" in py
-    assert "IMPLEMENTED_MASK: Final[int] = 72057594037927935" in py
+    assert "IMPLEMENTED_MASK: Final[int] = 1152921504606846975" in py
     assert '"close_above_vwap": BIT_CLOSE_ABOVE_VWAP,' in py
 
 

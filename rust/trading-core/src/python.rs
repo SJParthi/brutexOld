@@ -15,6 +15,7 @@ use pyo3::wrap_pyfunction;
 use crate::bits::TOTAL_CONDITIONS;
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
+use crate::indicators::market_structure::MarketStructureSignal;
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
@@ -234,6 +235,7 @@ fn check_evaluate_inputs(
     ema20_paisa, ema200_paisa, vwap_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
+    bos_bullish, bos_bearish, choch_bullish, choch_bearish,
 ))]
 fn evaluate_from_raw(
     tod_seconds: u32,
@@ -255,6 +257,10 @@ fn evaluate_from_raw(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
+    bos_bullish: bool,
+    bos_bearish: bool,
+    choch_bullish: bool,
+    choch_bearish: bool,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper: all logic + validation lives in the pure `_impl` (unit
     // tested without a libpython link), the boundary only maps `Err(String)` to a
@@ -279,6 +285,12 @@ fn evaluate_from_raw(
         fib_bps,
         prior_n,
         prior_flags,
+        MarketStructureSignal {
+            bos_bullish,
+            bos_bearish,
+            choch_bullish,
+            choch_bearish,
+        },
     )
     .map_err(PyValueError::new_err)
 }
@@ -309,6 +321,7 @@ fn evaluate_from_raw_impl(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
+    market_structure: MarketStructureSignal,
 ) -> Result<u128, String> {
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
@@ -363,6 +376,7 @@ fn evaluate_from_raw_impl(
         day_high_paisa,
         day_low_paisa,
         open_of_day_paisa,
+        market_structure,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
@@ -383,7 +397,10 @@ fn evaluate_from_raw_impl(
 /// `fib_levels` (len 15) = `[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
 /// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`. `vwap_paisa` is the
 /// session VWAP (`None` during warm-up / on 1day — the Group-10 bits then do not
-/// fire). The struct fields the conditions never read (pivot r4/s4, fib range/424)
+/// fire). The four `bos_*`/`choch_*` booleans are the engine-resolved Group-12
+/// market-structure flags (bits 56-59), produced by the stateful look-ahead-clean
+/// `MarketStructureState` and passed verbatim like the resolved `PriorBarHistory`
+/// flags. The struct fields the conditions never read (pivot r4/s4, fib range/424)
 /// are set to 0. Because the levels are passed verbatim, this is bit-identical to
 /// the Python evaluator for ANY snapshot — including hand-built levels with
 /// `pdc == 0` (the gap conditions' own `pdc > 0` guard handles that).
@@ -403,6 +420,7 @@ fn evaluate_from_raw_impl(
     ema20_paisa, ema200_paisa, vwap_paisa, pivot_levels, fib_levels,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
+    bos_bullish, bos_bearish, choch_bullish, choch_bearish,
 ))]
 fn evaluate_with_levels(
     tod_seconds: u32,
@@ -423,6 +441,10 @@ fn evaluate_with_levels(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
+    bos_bullish: bool,
+    bos_bearish: bool,
+    choch_bullish: bool,
+    choch_bearish: bool,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper — the length-validation + the level-indexing it guards
     // live in the pure `_impl` (unit-tested without a libpython link). The
@@ -447,6 +469,12 @@ fn evaluate_with_levels(
         fib_bps,
         prior_n,
         prior_flags,
+        MarketStructureSignal {
+            bos_bullish,
+            bos_bearish,
+            choch_bullish,
+            choch_bearish,
+        },
     )
     .map_err(PyValueError::new_err)
 }
@@ -476,6 +504,7 @@ fn evaluate_with_levels_impl(
     fib_bps: i64,
     prior_n: usize,
     prior_flags: Vec<bool>,
+    market_structure: MarketStructureSignal,
 ) -> Result<u128, String> {
     if pivot_levels.len() != PIVOT_LEVELS_LEN {
         return Err(format!(
@@ -584,6 +613,7 @@ fn evaluate_with_levels_impl(
         day_high_paisa,
         day_low_paisa,
         open_of_day_paisa,
+        market_structure,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
@@ -851,6 +881,7 @@ mod tests {
             10, // proximity bps
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
     }
 
@@ -907,6 +938,7 @@ mod tests {
             fib_bps,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
     }
 
@@ -1029,6 +1061,7 @@ mod tests {
             10,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
         .unwrap_err();
         assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
@@ -1052,6 +1085,7 @@ mod tests {
             10,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
         .unwrap_err();
         assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
@@ -1167,6 +1201,7 @@ mod tests {
             10,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
     }
 
@@ -1231,6 +1266,7 @@ mod tests {
             10,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
         .unwrap_err();
         assert!(err.contains("overflow-safe"), "got: {err}");
@@ -1254,6 +1290,7 @@ mod tests {
             0,
             0,
             vec![],
+            MarketStructureSignal::default(),
         )
         .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
@@ -1266,6 +1303,93 @@ mod tests {
         let pivots: Vec<i64> = (1..=PIVOT_LEVELS_LEN as i64).collect();
         let fibs: Vec<i64> = (1..=FIB_LEVELS_LEN as i64).collect();
         assert!(with_levels(pivots, fibs).is_ok());
+    }
+
+    #[test]
+    fn market_structure_flags_set_bits_56_to_59() {
+        // The four resolved BOS/CHoCH booleans threaded through the FFI ABI set
+        // exactly their Group-12 bits (56-59) — both entry points (DEC-NIFTY-BOS-CHOCH-001).
+        let cases = [
+            (
+                MarketStructureSignal {
+                    bos_bullish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_BOS_BULLISH,
+            ),
+            (
+                MarketStructureSignal {
+                    bos_bearish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_BOS_BEARISH,
+            ),
+            (
+                MarketStructureSignal {
+                    choch_bullish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_CHOCH_BULLISH,
+            ),
+            (
+                MarketStructureSignal {
+                    choch_bearish: true,
+                    ..Default::default()
+                },
+                crate::bits::BIT_CHOCH_BEARISH,
+            ),
+        ];
+        for (ms, bit) in cases {
+            // evaluate_from_raw path.
+            let raw = evaluate_from_raw_impl(
+                10 * 3600,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                None,
+                None,
+                None,
+                PDH,
+                PDL,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                ms,
+            )
+            .expect("valid raw");
+            assert_eq!((raw >> bit) & 1, 1, "from_raw bit {bit} should be set");
+            // evaluate_with_levels path.
+            let wl = evaluate_with_levels_impl(
+                10 * 3600,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                None,
+                None,
+                None,
+                vec![PDC; PIVOT_LEVELS_LEN],
+                vec![PDC; FIB_LEVELS_LEN],
+                PDH,
+                PDL,
+                PDC,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                ms,
+            )
+            .expect("valid with_levels");
+            assert_eq!((wl >> bit) & 1, 1, "with_levels bit {bit} should be set");
+        }
     }
 
     // ── trivial pyfunction helpers (pure) ──────────────────────────────────
@@ -1309,6 +1433,7 @@ mod tests {
                 10,
                 0,
                 vec![],
+                MarketStructureSignal::default(),
             )
             .unwrap();
             acc = acc.wrapping_add(m);
@@ -1408,6 +1533,7 @@ mod tests {
                 10 * 3600, open, high, low, close, Some(close), Some(close), Some(close),
                 1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
                 bps, bps, bps, 0, vec![],
+                MarketStructureSignal::default(),
             );
             prop_assert!(mask.is_ok());
         }
