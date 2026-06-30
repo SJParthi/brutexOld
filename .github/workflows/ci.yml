@@ -849,8 +849,16 @@ jobs:
           # pipeline / rate_limiter / quota_tracker / bloom — carried
           # residual standalone-coverage gaps; CLOSED by
           # DEC-ORCH-STRICT-GATES-001 below.)
+          # DEC-AUDIT-TORN-TAIL-001 (MIGRATION.md #1042): the torn-tail
+          # auto-resume recovery (_truncate_torn_tail + the resume-path
+          # truncate call) is exercised by the dedicated cross-chain
+          # test_audit_torn_tail.py, NOT test_orchestrator_audit.py, so this
+          # strict gate composes BOTH files (COMMON — mirrors the
+          # quota_tracker two-file compose above). Without it the new
+          # recovery code reads 92.76% (lines 421, 661-675 uncovered) under
+          # this per-module gate even though the aggregate gate is 100%.
           if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py
           else
             echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
           fi
