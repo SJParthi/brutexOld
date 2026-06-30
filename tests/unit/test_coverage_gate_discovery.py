@@ -178,16 +178,21 @@ class TestDiscoverTouchedModules:
         ]
 
     def test_shipped_exclude_allowlist_is_curated_multifile_modules(self, gate: ModuleType) -> None:
-        # Pin the documented invariant: the allowlist holds ONLY the dashboard
-        # modules whose 100% coverage comes from a CURATED multi-file suite (no
-        # single name-matched per-file test reaches 100% standalone), each gated by
-        # the whole-package floor + a dedicated static per-module gate instead:
+        # Pin the documented invariant: the allowlist holds ONLY the modules whose
+        # 100% coverage comes from a CURATED multi-file suite (no single name-matched
+        # per-file test reaches 100% standalone), each gated by the whole-package
+        # floor + a dedicated static per-module gate instead:
         #   * brutex/dashboard/app.py — the route-glue (DEC-DASHBOARD-RESULTS-PAGE-001);
         #   * brutex/dashboard/pull_controller.py — the SPOT pull controller, covered by
         #     the 5-file pull-controller/pool/health/stall/write-batch suite
         #     (DEC-WRITE-BATCH-COALESCE-001);
         #   * brutex/dashboard/db_view.py — the ~720-stmt /db viewer, covered by the
-        #     six-file db_view test family (DEC-DASHBOARD-EMPTY-STATE-001).
+        #     six-file db_view test family (DEC-DASHBOARD-EMPTY-STATE-001);
+        #   * brutex/engine/stage1a.py — the Stage-1A matrix builder, covered by
+        #     test_engine_stage1a.py (builder + VWAP/BOS bits) + test_engine_walk_forward.py
+        #     (the walk-forward helpers that live in stage1a.py); the static engine gate
+        #     runs the whole tests/unit/test_engine_*.py suite at 100%
+        #     (DEC-COVERAGE-DISCOVERY-STAGE1A-001).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -195,6 +200,7 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/app.py",
                     "brutex/dashboard/pull_controller.py",
                     "brutex/dashboard/db_view.py",
+                    "brutex/engine/stage1a.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
