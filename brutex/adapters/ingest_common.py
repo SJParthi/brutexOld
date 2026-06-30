@@ -170,6 +170,35 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
     return min(end, today)
 
 
+def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> list[CandleBar]:
+    """Drop every bar whose IST trading date is STRICTLY AFTER *window_end* — a FUTURE phantom.
+
+    DEC-CANDLE-DROP-FUTURE-BAR-001. *window_end* is the CLAMPED window end (the
+    spine never requests current-day / future data — :func:`clamp_window_end`). A
+    vendor that returns a bar timestamped on a date STRICTLY AFTER *window_end* is
+    handing back a bar PAST the requested window — which, if written, would create a
+    PHANTOM FUTURE partition (e.g. a clock-skew bar, or a bar for a day past the clamp).
+    This pure helper drops any such bar BEFORE the durable write so the lake can never
+    hold a future-dated phantom.
+
+    The bound is STRICTLY-AFTER (``> window_end``), NOT on-or-after: a bar landing
+    exactly on *window_end* is KEPT, preserving the spine's existing boundary behaviour
+    byte-for-byte (this is a DEFENSIVE future-phantom guard, not a re-interpretation of
+    the half-open ``[start, end)`` tiling — only a bar genuinely PAST the clamp is
+    dropped). The IST trading date (not the UTC date) is used because bars are stored
+    UTC but trade on the IST session grid (CLAUDE.md §6) and *window_end* is an IST
+    calendar date, so the comparison must be on the same grid. O(bars) over one window;
+    pure (no I/O). DEFENSIVE: the real Groww SDK returns in-range bars and is not
+    observed to return future-dated rows — this guards against unobserved vendor
+    corruption / a clock-skew edge, never a current crash.
+    """
+    kept: list[CandleBar] = []
+    for bar in bars:
+        if bar.timestamp.astimezone(_IST_ZONE).date() <= window_end:
+            kept.append(bar)
+    return kept
+
+
 #: Resolve a canonical interval to its per-call max-window width (days), or
 #: ``None`` to emit ONE un-tiled window for the whole range (the daily case in
 #: the ingest spine). The vendor injects this so the per-interval tier policy stays
@@ -1365,6 +1394,7 @@ __all__ = [
     "clamp_window_end",
     "classify_pull",
     "decide_until_clean",
+    "drop_bars_after",
     "fetch_until_nonempty",
     "now_ist",
     "plan_windows",
