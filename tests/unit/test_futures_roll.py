@@ -81,6 +81,27 @@ def test_holiday_shift_raises_when_no_trading_day_within_lookback(monkeypatch) -
         futures_roll.holiday_shifted_expiry(NIFTY, sunday)
 
 
+def test_holiday_shift_refuses_out_of_coverage_weekday() -> None:
+    """DEC-ADVERSARIAL-HARDENING-001 FIX 2: an out-of-coverage (2027+) WEEKDAY
+    calendar expiry must RAISE ``HolidayDataUnavailableError`` rather than silently
+    return itself unshifted.
+
+    The unguarded ``is_trading_day`` returns ``True`` for any out-of-coverage
+    non-weekend date (it cannot consult the missing holiday list), so the old code
+    returned the expiry as-is even if it was actually a (now-unknown) holiday — a
+    closed day. Routing through the strict ``is_trading_day_checked`` (the variant
+    the PDH/PDL anchor path already uses) refuses to guess. Republic Day
+    2027-01-26 (a Tuesday) is the regression input.
+    """
+    from brutex.calendars.nse import HolidayDataUnavailableError, is_trading_day
+
+    out_of_coverage = date(2027, 1, 26)  # Republic Day, a weekday, 2027+ (uncovered)
+    # The unguarded predicate WOULD have said "trading day" → unshifted return.
+    assert is_trading_day(out_of_coverage) is True
+    with pytest.raises(HolidayDataUnavailableError):
+        futures_roll.holiday_shifted_expiry(NIFTY, out_of_coverage)
+
+
 # ────── resolve_active_future_expiry ──────
 
 
