@@ -72,10 +72,12 @@ from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
     _prior_session_last_from_minute,
     interval_minutes,
+    normalize_min_volume,
     parse_snapshot_date,
     resolve_candle_datasets,
     session_traded_value_paisa,
     value_crore_str,
+    value_meets_volume_floor,
 )
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -465,9 +467,17 @@ def rank_discount(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMov
     return pool[:top_n]
 
 
-def rank_volume(movers: Sequence[FuturesMover], top_n: int) -> list[FuturesMover]:
-    """Top-``n`` futures by cumulative fresh-session volume, descending."""
-    pool = [m for m in movers if m.volume > 0]
+def rank_volume(
+    movers: Sequence[FuturesMover], top_n: int, *, min_volume: int = 0
+) -> list[FuturesMover]:
+    """Top-``n`` futures by cumulative fresh-session volume, descending.
+
+    With the default ``min_volume == 0`` the pool is byte-identical to the prior
+    ``volume > 0`` filter; a positive OPT-IN floor (DEC-MOVERS-MIN-VOLUME-001) drops
+    contracts below it, via the COMMON
+    :func:`~brutex.dashboard.movers_snapshot.value_meets_volume_floor` predicate.
+    """
+    pool = [m for m in movers if value_meets_volume_floor(m.volume, min_volume)]
     pool.sort(key=lambda m: (-m.volume, _sort_key(m)))
     return pool[:top_n]
 
@@ -616,6 +626,7 @@ def build_futures_payload(
     top_n: int,
     skipped: int,
     expiry_tier: str = _DEFAULT_TIER,
+    min_volume: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -637,6 +648,10 @@ def build_futures_payload(
     expiry_tier
         The serial expiry tier these rows were screened at (``near`` / ``next`` /
         ``far``) — echoed so the page can confirm the active selector.
+    min_volume
+        The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001) applied at RANK
+        time to the ``volume`` ranking only; ``None`` / ``0`` ⇒ the byte-identical
+        no-floor default.
     skipped
         Count of underlyings/contracts dropped — no live contract at the tier,
         no session bars, OR an unreadable Parquet file (logged as
@@ -649,8 +664,16 @@ def build_futures_payload(
         The Futures-tab payload: the eight ranked category lists + the echo +
         ``instrument_count`` / ``skipped_count`` / ``note``.
     """
+    floor = normalize_min_volume(min_volume)
     ranked: dict[str, list[dict[str, Any]]] = {
-        category: [_futures_row(m) for m in rank_fn(movers, top_n)]
+        category: [
+            _futures_row(m)
+            for m in (
+                rank_volume(movers, top_n, min_volume=floor)
+                if category == "volume"
+                else rank_fn(movers, top_n)
+            )
+        ]
         for category, rank_fn in _FUTURES_CATEGORIES.items()
     }
     instrument_count = len(movers) + skipped
@@ -668,6 +691,7 @@ def build_futures_payload(
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the future's previous close, premium is vs the spot."
+            + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
         )
     return {
         "interval": interval,
@@ -675,6 +699,7 @@ def build_futures_payload(
         "time": time,
         "top_n": top_n,
         "expiry_tier": expiry_tier,
+        "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "note": note,

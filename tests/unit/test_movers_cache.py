@@ -149,6 +149,21 @@ class TestLruEviction:
     def test_default_capacity(self) -> None:
         assert MoversSnapshotCache().capacity == DEFAULT_MOVERS_CACHE_CAPACITY
 
+    def test_default_capacity_holds_the_warm_grid(self) -> None:
+        # DEC-MOVERS-WARM-GRID-001: the post-pull warmer warms the whole default-day grid
+        # (options 3×3×3=27 + futures 3×3=9 + spot 3 = 39 keys); the default capacity must
+        # exceed that PLUS headroom for the operator's live coordinates, or a warmed entry
+        # would be evicted before its first /movers open (defeating the warm).
+        from brutex.dashboard.movers_warm import (
+            futures_warm_grid,
+            options_warm_grid,
+            spot_warm_grid,
+        )
+
+        warm_grid = len(options_warm_grid()) + len(futures_warm_grid()) + len(spot_warm_grid())
+        assert warm_grid == 39
+        assert warm_grid < DEFAULT_MOVERS_CACHE_CAPACITY
+
     def test_rejects_non_positive_capacity(self) -> None:
         with pytest.raises(ValueError, match="capacity must be >= 1"):
             MoversSnapshotCache(capacity=0)

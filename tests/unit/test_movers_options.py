@@ -25,9 +25,11 @@ from brutex.dashboard.movers_options import (
     OptionMover,
     _monthly_expiries,
     _tier_expiry_by_underlying,
+    _tier_universe,
     _track_pool,
     build_options_payload,
     compute_option_mover,
+    load_registry_expiries,
     parse_option_symbol,
     rank_highest_oi,
     rank_oi_gainers,
@@ -681,3 +683,286 @@ class TestBuildOptionsPayload:
             [_mover()], interval="1day", date="2025-06-13", time=None, top_n=10, skipped=0
         )
         assert "(daily)" in payload["note"]
+
+
+# ── DEC-MOVERS-CALENDAR-TIERS-001: authoritative vendor-calendar tier selection ──
+
+
+class TestTierUniverse:
+    """:func:`_tier_universe` — the vendor calendar wins, else the lake set (the fallback)."""
+
+    _ON = date(2025, 6, 25)
+
+    def test_no_calendar_falls_back_to_lake_set(self) -> None:
+        lake = {date(2025, 7, 7), date(2025, 7, 14)}
+        assert _tier_universe("NIFTY", lake, on_date=self._ON, calendar_expiries=None) == lake
+
+    def test_underlying_absent_from_calendar_falls_back_to_lake_set(self) -> None:
+        lake = {date(2025, 7, 7)}
+        cal = {"BANKNIFTY": {date(2025, 7, 31)}}
+        assert _tier_universe("NIFTY", lake, on_date=self._ON, calendar_expiries=cal) == lake
+
+    def test_empty_calendar_set_falls_back_to_lake_set(self) -> None:
+        # A present-but-empty calendar entry is treated as "no calendar" (the guard
+        # uses truthiness, so an empty set never shadows real lake data).
+        lake = {date(2025, 7, 7)}
+        cal: dict[str, set[date]] = {"NIFTY": set()}
+        assert _tier_universe("NIFTY", lake, on_date=self._ON, calendar_expiries=cal) == lake
+
+    def test_calendar_wins_and_is_filtered_to_on_or_after_on_date(self) -> None:
+        # The FULL July calendar (incl. an already-expired 13-Jun) → only >= on_date kept,
+        # and it OVERRIDES the sparse lake set (which is missing 21/28-Jul).
+        cal = {
+            "NIFTY": {
+                date(2025, 6, 13),  # < on_date (2025-06-25) → excluded
+                date(2025, 7, 7),
+                date(2025, 7, 14),
+                date(2025, 7, 21),
+                date(2025, 7, 28),
+            }
+        }
+        lake = {date(2025, 7, 7), date(2025, 7, 14)}  # the sparsely-pulled subset
+        assert _tier_universe("NIFTY", lake, on_date=self._ON, calendar_expiries=cal) == {
+            date(2025, 7, 7),
+            date(2025, 7, 14),
+            date(2025, 7, 21),
+            date(2025, 7, 28),
+        }
+
+
+class TestCalendarDrivenTiers:
+    """The operator's regression: a sparsely-pulled lake no longer mislabels a tier."""
+
+    _ON = date(2025, 6, 25)
+
+    @staticmethod
+    def _sparse_contracts() -> list[tuple[str, str, str, date, Decimal, str]]:
+        # The lake holds ONLY 07-Jul + 04-Aug contracts (21/28-Jul were never pulled) —
+        # the exact failure: the lake-only "Far" jumps to 04-Aug.
+        return [
+            _c("NIFTY", date(2025, 7, 7)),
+            _c("NIFTY", date(2025, 8, 4)),
+        ]
+
+    @staticmethod
+    def _full_calendar() -> dict[str, set[date]]:
+        # The AUTHORITATIVE registry calendar: the full July weeklies + the 28-Jul monthly.
+        return {
+            "NIFTY": {
+                date(2025, 7, 7),
+                date(2025, 7, 14),
+                date(2025, 7, 21),
+                date(2025, 7, 28),  # July monthly (last-in-month)
+                date(2025, 8, 4),
+            }
+        }
+
+    def test_operator_case_weekly_near_next_far_07_14_21(self) -> None:
+        # OPERATOR REGRESSION (as-of 2025-06-25): with the full calendar the Weekly track
+        # = {07,14,21-Jul} (28-Jul is the monthly), so Near/Next/Far = 07/14/21-Jul —
+        # NOT the wrong 04-Aug the sparse lake produced.
+        cal = self._full_calendar()
+        contracts = self._sparse_contracts()
+        near = _tier_expiry_by_underlying(
+            contracts, on_date=self._ON, tier="near", track="weekly", calendar_expiries=cal
+        )
+        nxt = _tier_expiry_by_underlying(
+            contracts, on_date=self._ON, tier="next", track="weekly", calendar_expiries=cal
+        )
+        far = _tier_expiry_by_underlying(
+            contracts, on_date=self._ON, tier="far", track="weekly", calendar_expiries=cal
+        )
+        assert near["NIFTY"] == date(2025, 7, 7)
+        assert nxt["NIFTY"] == date(2025, 7, 14)
+        assert far["NIFTY"] == date(2025, 7, 21)
+
+    def test_28jul_classified_monthly_on_the_full_calendar(self) -> None:
+        # 28-Jul is the LAST July expiry → the July monthly, so Monthly + Near = 28-Jul.
+        cal = self._full_calendar()
+        contracts = self._sparse_contracts()
+        monthly_near = _tier_expiry_by_underlying(
+            contracts, on_date=self._ON, tier="near", track="monthly", calendar_expiries=cal
+        )
+        assert monthly_near["NIFTY"] == date(2025, 7, 28)
+
+    def test_without_calendar_the_sparse_lake_mislabels_far(self) -> None:
+        # The bug, pinned: WITHOUT the calendar the lake-only "Far" weekly is wrong
+        # (only 07-Jul + 04-Aug on disk → Near=07-Jul, Far is absent or 04-Aug-ish),
+        # PROVING the calendar is what fixes it.
+        contracts = self._sparse_contracts()
+        far_lake = _tier_expiry_by_underlying(
+            contracts, on_date=self._ON, tier="far", track="weekly", calendar_expiries=None
+        )
+        # Lake weeklies are {07-Jul, 04-Aug} (each the sole expiry of its month → both
+        # "monthly", so the weekly track is EMPTY) → no Far weekly resolves at all.
+        assert "NIFTY" not in far_lake
+
+
+class TestLoadRegistryExpiries:
+    """:func:`load_registry_expiries` — read the full calendar, gracefully fall back."""
+
+    def test_missing_registry_returns_none(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        assert isinstance(tmp_path, Path)
+        assert load_registry_expiries(tmp_path / "registry.duckdb") is None
+
+    def test_empty_registry_returns_none(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        from brutex.data.registry_store import RegistryStore
+
+        assert isinstance(tmp_path, Path)
+        path = tmp_path / "registry.duckdb"
+        with RegistryStore.open(path):
+            pass  # create the schema, persist nothing
+        assert load_registry_expiries(path) is None
+
+    def test_populated_registry_returns_calendar_per_underlying(self, tmp_path: object) -> None:
+        from datetime import UTC, datetime
+        from pathlib import Path
+
+        from brutex.data.registry_store import RegistryStore
+
+        assert isinstance(tmp_path, Path)
+        path = tmp_path / "registry.duckdb"
+        now = datetime(2025, 6, 25, tzinfo=UTC)
+        with RegistryStore.open(path) as reg:
+            for exp in (date(2025, 7, 7), date(2025, 7, 14), date(2025, 7, 28)):
+                reg.upsert_expiry("NSE", "NIFTY", exp, run_id="r1", fetched_at=now)
+            reg.upsert_expiry("NSE", "BANKNIFTY", date(2025, 7, 31), run_id="r1", fetched_at=now)
+        cal = load_registry_expiries(path)
+        assert cal is not None
+        assert cal["NIFTY"] == {date(2025, 7, 7), date(2025, 7, 14), date(2025, 7, 28)}
+        assert cal["BANKNIFTY"] == {date(2025, 7, 31)}
+
+    def test_exchange_filter_scopes_the_calendar(self, tmp_path: object) -> None:
+        from datetime import UTC, datetime
+        from pathlib import Path
+
+        from brutex.data.registry_store import RegistryStore
+
+        assert isinstance(tmp_path, Path)
+        path = tmp_path / "registry.duckdb"
+        now = datetime(2025, 6, 25, tzinfo=UTC)
+        with RegistryStore.open(path) as reg:
+            reg.upsert_expiry("NSE", "NIFTY", date(2025, 7, 7), run_id="r1", fetched_at=now)
+            reg.upsert_expiry("BSE", "SENSEX", date(2025, 7, 8), run_id="r1", fetched_at=now)
+        nse = load_registry_expiries(path, exchange="NSE")
+        assert nse is not None
+        assert set(nse) == {"NIFTY"}
+
+    def test_registry_error_is_swallowed_to_none(
+        self, tmp_path: object, monkeypatch: object
+    ) -> None:
+        from pathlib import Path
+
+        import brutex.dashboard.movers_options as mod
+        from brutex.data.registry_store import RegistryError
+
+        assert isinstance(tmp_path, Path)
+        path = tmp_path / "registry.duckdb"
+        path.write_text("not a real duckdb file")  # exists but unreadable
+
+        def _boom(_p: Path) -> object:
+            raise RegistryError("corrupt cache")
+
+        monkeypatch.setattr(mod.RegistryStore, "open", staticmethod(_boom))  # type: ignore[attr-defined]
+        assert load_registry_expiries(path) is None
+
+
+class TestOptionsMinVolume:
+    """DEC-MOVERS-MIN-VOLUME-001 — the OPT-IN Top-Volume floor on the Options rank/payload."""
+
+    def test_rank_volume_default_zero_is_byte_identical(self) -> None:
+        movers = [_mover(volume=0), _mover(volume=5)]
+        assert rank_volume(movers, 10) == rank_volume(movers, 10, min_volume=0)
+        # Zero-volume still excluded; the positive one kept.
+        assert [m.volume for m in rank_volume(movers, 10)] == [5]
+
+    def test_rank_volume_floor_drops_thin_contracts(self) -> None:
+        movers = [_mover(volume=100), _mover(volume=900), _mover(volume=1500)]
+        kept = rank_volume(movers, 10, min_volume=1000)
+        assert [m.volume for m in kept] == [1500]
+
+    def test_payload_floor_applies_only_to_volume_category(self) -> None:
+        thin = _mover(symbol="NSE-NIFTY-30Jun25-26000-CE", strike=Decimal("26000"), volume=50)
+        thick = _mover(symbol="NSE-NIFTY-30Jun25-24000-CE", strike=Decimal("24000"), volume=9000)
+        payload = build_options_payload(
+            [thin, thick],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=1000,
+        )
+        assert payload["min_volume"] == 1000
+        # The volume ranking drops the thin contract; price rankings are untouched.
+        assert len(payload["volume"]) == 1
+        assert "Min volume ≥ 1,000." in payload["note"]
+
+    def test_payload_default_floor_zero_no_floor_note(self) -> None:
+        payload = build_options_payload(
+            [_mover()], interval="1day", date="2025-06-13", time=None, top_n=10, skipped=0
+        )
+        assert payload["min_volume"] == 0
+        assert "Min volume" not in payload["note"]
+
+    def test_negative_floor_normalises_to_zero(self) -> None:
+        payload = build_options_payload(
+            [_mover()],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=-5,
+        )
+        assert payload["min_volume"] == 0
+
+    def test_floor_note_on_present_but_no_mover_branch(self) -> None:
+        # When the lake has contracts but none clear the floor at this bar, the no-mover
+        # note still carries the applied floor.
+        payload = build_options_payload(
+            [_mover(volume=10, pct_change=None, oi=None, oi_chg_pct=None, value_paisa=0)],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=99999,
+        )
+        assert "Min volume ≥ 99,999." in payload["note"]
+
+
+class TestCalendarOnlyExpiryNote:
+    """DEC-MOVERS-CALENDAR-TIERS-001 — the honest "no data pulled for this expiry" note."""
+
+    def test_calendar_only_expiry_note(self) -> None:
+        payload = build_options_payload(
+            [],
+            interval="1day",
+            date="2025-06-25",
+            time=None,
+            top_n=10,
+            skipped=0,
+            expiry_tier="far",
+            expiry_track="weekly",
+            calendar_only_expiry=True,
+        )
+        assert "vendor calendar" in payload["note"]
+        assert "NO option contract candles" in payload["note"]
+
+    def test_not_calendar_only_keeps_the_pull_first_note(self) -> None:
+        payload = build_options_payload(
+            [],
+            interval="1day",
+            date="2025-06-25",
+            time=None,
+            top_n=10,
+            skipped=0,
+            expiry_tier="near",
+            calendar_only_expiry=False,
+        )
+        assert "pull the F&O" in payload["note"]

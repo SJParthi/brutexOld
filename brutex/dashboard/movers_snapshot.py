@@ -67,12 +67,14 @@ __all__ = [
     "compute_snapshot",
     "compute_spot_candidates",
     "interval_minutes",
+    "normalize_min_volume",
     "parse_snapshot_date",
     "pending_asset_payload",
     "run_movers_snapshot",
     "session_bar_times",
     "session_traded_value_paisa",
     "value_crore_str",
+    "value_meets_volume_floor",
 ]
 
 #: The page opens on the coarse 1-day timeframe (cheapest, always populated if
@@ -304,9 +306,63 @@ def _losers(snaps: Sequence[MoverSnapshot], top_n: int) -> list[MoverSnapshot]:
     return pool[:top_n]
 
 
-def _by_volume(snaps: Sequence[MoverSnapshot], top_n: int) -> list[MoverSnapshot]:
-    """Top-``n`` snapshots by cumulative fresh-session volume, descending."""
-    pool = [s for s in snaps if s.volume > 0]
+def normalize_min_volume(min_volume: int | None) -> int:
+    """Clamp the OPT-IN ``?min_volume=`` floor to a non-negative int (the COMMON source).
+
+    The single source of truth (CLAUDE.md §11 COMMON) shared by the spot / futures /
+    options "Top Volume" rankings (DEC-MOVERS-MIN-VOLUME-001): a ``None`` / negative
+    floor normalises to ``0`` (the byte-identical default — no floor, only the prior
+    zero-volume exclusion applies), so a malformed value can never invert the filter.
+
+    Parameters
+    ----------
+    min_volume
+        The raw ``?min_volume=`` selector (``None`` ⇒ 0 = disabled).
+
+    Returns
+    -------
+    int
+        ``max(0, min_volume or 0)`` — the applied floor.
+    """
+    return max(0, min_volume or 0)
+
+
+def value_meets_volume_floor(volume: int, min_volume: int) -> bool:
+    """Whether *volume* clears the volume ranking's inclusion test (the COMMON predicate).
+
+    The ONE rule the spot / futures / options "Top Volume" pools share
+    (DEC-MOVERS-MIN-VOLUME-001): a contract is included iff its cumulative session
+    ``volume`` is BOTH strictly positive (the long-standing zero-volume exclusion) AND
+    at least the *min_volume* floor. With the default ``min_volume == 0`` this reduces
+    to ``volume > 0`` — byte-identical to the pre-floor behaviour — while a positive
+    floor additionally drops thin contracts below it.
+
+    Parameters
+    ----------
+    volume
+        The contract's cumulative fresh-session traded quantity.
+    min_volume
+        The applied floor (already normalised by :func:`normalize_min_volume`).
+
+    Returns
+    -------
+    bool
+        ``volume > 0 and volume >= min_volume``.
+    """
+    return volume > 0 and volume >= min_volume
+
+
+def _by_volume(
+    snaps: Sequence[MoverSnapshot], top_n: int, *, min_volume: int = 0
+) -> list[MoverSnapshot]:
+    """Top-``n`` snapshots by cumulative fresh-session volume, descending.
+
+    With the default ``min_volume == 0`` the pool is byte-identical to the prior
+    ``volume > 0`` filter; a positive OPT-IN floor (DEC-MOVERS-MIN-VOLUME-001)
+    additionally drops contracts whose volume is below it, via the COMMON
+    :func:`value_meets_volume_floor` predicate.
+    """
+    pool = [s for s in snaps if value_meets_volume_floor(s.volume, min_volume)]
     pool.sort(key=lambda s: (-s.volume, _sort_key(s)))
     return pool[:top_n]
 
@@ -351,6 +407,7 @@ def build_snapshot_payload(
     time: str | None,
     top_n: int,
     skipped: int,
+    min_volume: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -361,9 +418,22 @@ def build_snapshot_payload(
     ``note``. Every value is JSON-native (money is a ``₹`` string, statistical
     metrics are full-precision strings, value is a ₹-crore string) so Starlette's
     ``JSONResponse`` never chokes on a ``Decimal``.
+
+    *min_volume* is the OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001): the
+    ``volume`` ranking additionally drops contracts below it (``None`` / ``0`` ⇒ the
+    byte-identical no-floor default). It is applied at RANK time (the cheap step), so
+    a floor change re-ranks the SAME cached candidate set — never a re-scan.
     """
+    floor = normalize_min_volume(min_volume)
     ranked: dict[str, list[dict[str, Any]]] = {
-        category: [_row(s) for s in rank_fn(snapshots, top_n)]
+        category: [
+            _row(s)
+            for s in (
+                _by_volume(snapshots, top_n, min_volume=floor)
+                if category == "volume"
+                else rank_fn(snapshots, top_n)
+            )
+        ]
         for category, rank_fn in _SPOT_CATEGORIES.items()
     }
     instrument_count = len(snapshots) + skipped
@@ -381,12 +451,14 @@ def build_snapshot_payload(
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the previous day's close, volume is the fresh session."
+            + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
         )
     return {
         "interval": interval,
         "date": date,
         "time": time,
         "top_n": top_n,
+        "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "note": note,
