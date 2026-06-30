@@ -194,7 +194,8 @@ def test_initial_mint_failure_surfaces_redacted_auth_error() -> None:
     """A failed INITIAL token issuance raises a redacting GrowwAuthError (no secret leak)."""
 
     def token_factory(_api_key: str, _totp: str) -> str:
-        raise RuntimeError("issuance down")
+        # embed the secret verbatim so the scrub is genuinely exercised here too
+        raise RuntimeError("issuance down for fake_secret")
 
     with pytest.raises(GrowwAuthError) as exc:
         SdkRefresher(
@@ -203,8 +204,11 @@ def test_initial_mint_failure_surfaces_redacted_auth_error() -> None:
             totp_minter=lambda _s: "000000",
             sdk_factory=_FakeSDK,
         )
-    assert str(exc.value) == "Groww access-token issuance failed"
+    # the redacting safe_message now surfaces the (sanitized) vendor reason
+    assert str(exc.value).startswith("Groww access-token issuance failed: ")
+    assert "issuance down" in str(exc.value)
     assert "fake_secret" not in str(exc.value)
+    assert "***" in str(exc.value)
 
 
 def test_reauth_mint_failure_surfaces_redacted_auth_error() -> None:
