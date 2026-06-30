@@ -33,22 +33,35 @@ module produces the payload; the existing audit writer owns the chain.
   a missing 15:20 bar force-exits on the last real bar ≤ 15:20 instead of
   fabricating one (D13/§4.5 #10).
 
-## Why a cheap O(1) Python stamp, not Rust
+## Rust-vs-Python split (the EVAL-PATH derivation is RUST)
 
-The stamp is a handful of integer / date field reads (timezone conversion +
-subtraction). It runs per bar, but it is NOT the mask-AND sweep kernel — it is
-ingest/feed-time bookkeeping that the hot loop reads, not recomputes. A pure
-O(1) Python dataclass is COMMON, DYNAMIC and SCALABLE here; the Rust
-``trading-core`` crate is reserved for the genuine numeric kernels (the vocab
-mask AND + the indicator math). Documenting the choice per CLAUDE.md §4.
+Per ``DEC-NIFTY-ROLL-METADATA-001`` the metadata that feeds the vocabulary's
+time-of-day group (the bar's ``tod_seconds`` is the evaluator's Group-8 input)
+and the D6 time-of-day × combo expectancy map — the **minute-of-session,
+weekday and is-expiry-day DERIVATION** — lives in the shared Rust
+``trading-core`` crate (``rust/trading-core/src/indicators/metadata.rs``,
+exposed via PyO3 as ``trading_core.derive_bar_metadata`` /
+``trading_core.minute_of_session`` / ``trading_core.weekday_from_ordinal``), so
+BruteX (this backtest) and TickVault (native Rust, live) derive **bit-identical**
+metadata by construction. THIS module is now a thin **delegating shim**: it does
+the timezone localization + the shared-calendar session-open resolution
+(BruteX-resident DATA), converts to the IST civil components the Rust core
+expects, and lets Rust do the arithmetic.
+
+What stays Python: the timezone localization (the lake stores tz-aware UTC, IST
+is a fixed +05:30), the session-open lookup (the NSE calendar is BruteX data),
+the D13 gap / forced-exit predicates below (calendar-driven set logic, not a
+per-bar numeric kernel), and the bulk pull-time stamping loop (BruteX
+orchestration that CALLS this shim per bar).
 
 ## COMMON · DYNAMIC · SCALABLE · AUTOMATED
 
-- COMMON: one stamper; reuses the shared NSE calendar + the futures-roll
-  resolver (no copy of session-open / expiry logic).
-- DYNAMIC: a new metadata field is one frozen-dataclass attribute + one
-  ``as_audit_payload`` key — no re-architecting.
-- SCALABLE: O(1) per bar (one tz convert + one subtraction + field reads).
+- COMMON: ONE source of truth for the derivation — the Rust ``trading-core``
+  crate, shared with TickVault; this shim adds no second copy of the
+  seconds-of-day / weekday / minute-of-session arithmetic.
+- DYNAMIC: a new metadata field is one Rust struct field + one shim attribute +
+  one ``as_audit_payload`` key — no re-architecting.
+- SCALABLE: O(1) per bar (one tz convert + one Rust FFI call + field reads).
 - AUTOMATED: pure functions, no I/O; the stamp is fully deterministic from the
   bar timestamp + the resolved contract.
 """
@@ -58,6 +71,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
+
+import trading_core
 
 from brutex.calendars.nse import IST, SESSION_OPEN_IST, get_session, is_forced_exit_bar
 from brutex.data.futures_roll import FuturesContract
@@ -119,21 +134,22 @@ def minute_of_session(ts: datetime, *, session_open: time = SESSION_OPEN_IST) ->
     -------
     int
         Whole minutes since ``session_open`` (seconds truncated toward the open,
-        matching the 1-minute bar grid).
+        matching the 1-minute bar grid). The DERIVATION is delegated to the
+        shared Rust ``trading_core.minute_of_session`` (DEC-NIFTY-ROLL-METADATA-001);
+        this function only localizes to IST + computes the seconds-of-day.
     """
     ist = _ist_datetime(ts)
-    bar_seconds = (
-        ist.hour * _MINUTES_PER_HOUR * _SECONDS_PER_MINUTE
-        + ist.minute * _SECONDS_PER_MINUTE
-        + ist.second
-    )
-    open_seconds = (
-        session_open.hour * _MINUTES_PER_HOUR + session_open.minute
-    ) * _SECONDS_PER_MINUTE + session_open.second
-    # Python floor division floors toward negative infinity for either sign, so
-    # a bar at/after the open counts whole elapsed minutes and a (honestly
-    # surfaced) pre-open bar floors to a negative minute — both in one expression.
-    return (bar_seconds - open_seconds) // _SECONDS_PER_MINUTE
+    bar_seconds = _seconds_of_day(ist.hour, ist.minute, ist.second)
+    open_seconds = _seconds_of_day(session_open.hour, session_open.minute, session_open.second)
+    # Shared Rust derivation: floor-division toward the open (a pre-open bar
+    # floors to a negative minute — honest, not clamped), bit-identical to the
+    # TickVault-native path.
+    return int(trading_core.minute_of_session(bar_seconds, open_seconds))
+
+
+def _seconds_of_day(hour: int, minute: int, second: int) -> int:
+    """Seconds-since-IST-midnight for a wall-clock time. One COMMON helper."""
+    return hour * _MINUTES_PER_HOUR * _SECONDS_PER_MINUTE + minute * _SECONDS_PER_MINUTE + second
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,12 +243,26 @@ def stamp_bar(
     trade_date = ist.date()
     session = get_session(trade_date)
     session_open = session.open_time_ist if session is not None else SESSION_OPEN_IST
+    # Delegate the full eval-path derivation (tod_seconds / weekday / minute-of-
+    # session / is-expiry-day) to the shared Rust core so this stamp is
+    # bit-identical to the TickVault-native path (DEC-NIFTY-ROLL-METADATA-001).
+    # The Python side supplies only the IST civil components + the
+    # shared-calendar session open (BruteX-resident data).
+    open_seconds = _seconds_of_day(session_open.hour, session_open.minute, session_open.second)
+    _tod_seconds, weekday, minute, is_expiry_day = trading_core.derive_bar_metadata(
+        trade_date.toordinal(),
+        ist.hour,
+        ist.minute,
+        ist.second,
+        open_seconds,
+        contract.expiry.toordinal(),
+    )
     return BarMetadata(
         trade_date=trade_date,
-        weekday=trade_date.weekday(),
-        minute_of_session=minute_of_session(ts, session_open=session_open),
+        weekday=int(weekday),
+        minute_of_session=int(minute),
         contract_expiry=contract.expiry,
-        is_expiry_day=trade_date == contract.expiry,
+        is_expiry_day=bool(is_expiry_day),
         contract_series_key=contract.series_key,
         circuit_halt=circuit_halt,
     )

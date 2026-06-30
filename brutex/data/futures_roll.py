@@ -34,29 +34,44 @@ applies that shift here via :func:`brutex.indicators.prev_day_ohlc.find_prev_tra
 (the one COMMON prior-trading-day walker), so the resolved expiry is the date the
 contract ACTUALLY last traded.
 
-## Why Python, not Rust
+## Rust-vs-Python split (the near-month DECISION is RUST)
 
-This is **pull / orchestration** logic (a date → contract mapping evaluated once
-per trading session, NOT once per bar in the mask-AND sweep hot loop). It does
-no numeric kernel work, so the COMMON·DYNAMIC·SCALABLE rules are met by a pure,
-deterministic Python function — there is no hot-path justification for the Rust
-``trading-core`` crate (the per-bar stamping in :mod:`brutex.feed.bar_metadata`
-is the O(1) part, and even that is a trivial integer/date stamp, not a kernel).
+Per ``DEC-NIFTY-ROLL-METADATA-001`` TickVault trades the near-month future LIVE,
+so the at-or-after near-month roll **DECISION** must be shared, byte-identical,
+between the backtest and the live engine. That decision —
+"is the candidate (holiday-shifted) expiry at-or-after the entry date (so it is
+the active near month, including on the expiry date itself), or has the holiday
+shift pulled it before the entry (so roll to next month)?" — lives in the shared
+Rust ``trading-core`` crate (``rust/trading-core/src/indicators/metadata.rs``,
+exposed via PyO3 as ``trading_core.resolve_near_month``). THIS module is the
+thin **delegating wrapper**: it computes the CANDIDATE + next-month
+holiday-shifted expiries from the BruteX-resident NSE calendar (the holiday list,
+the prior-trading-day walk, the monthly-expiry rule are DATA, not a kernel) and
+hands their day-ordinals to the Rust decision.
+
+What stays Python: the NSE/BSE holiday list + the prior-trading-day walk
+(:func:`brutex.indicators.prev_day_ohlc.find_prev_trading_day`) + the
+monthly-expiry calendar (:func:`brutex.options.expiry_calendar.next_monthly_expiry`)
+— all BruteX-resident data the Rust decision is parameterised by.
 
 ## COMMON · DYNAMIC · SCALABLE · AUTOMATED
 
-- COMMON: one source of truth for the futures near-month roll; reuses the
-  shared expiry calendar + the shared prior-trading-day walker (no copy).
+- COMMON: ONE source of truth for the near-month DECISION — the Rust
+  ``trading-core`` crate, shared with TickVault; reuses the shared expiry
+  calendar + the shared prior-trading-day walker for the candidate (no copy).
 - DYNAMIC: a new SEBI monthly-expiry regime is one row in
   :mod:`brutex.options.expiry_calendar`; this module inherits it for free.
-- SCALABLE: O(1) per resolution (one expiry lookup + a bounded holiday walk).
+- SCALABLE: O(1) per resolution (one expiry lookup + a bounded holiday walk +
+  one Rust FFI call).
 - AUTOMATED: pure function, no I/O, fully deterministic.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+
+import trading_core
 
 from brutex.indicators.prev_day_ohlc import find_prev_trading_day
 from brutex.options.expiry_calendar import next_monthly_expiry
@@ -174,17 +189,25 @@ def resolve_active_future_expiry(underlying: OptionsUnderlying, on_date: date) -
         ``>= on_date``.
     """
     calendar_expiry = next_monthly_expiry(underlying, on_date)
-    shifted = holiday_shifted_expiry(underlying, calendar_expiry)
-    if shifted >= on_date:
-        return shifted
-    # The holiday shift moved the expiry before on_date: on_date is in the gap
-    # between the shifted expiry and the calendar last-<dow>. The near contract
-    # has already expired — resolve next month from the day after the calendar
-    # expiry (re-evaluates the dow + holiday shift for the rolled month).
-    from datetime import timedelta
-
+    candidate_shifted = holiday_shifted_expiry(underlying, calendar_expiry)
+    # Compute the NEXT month's holiday-shifted expiry eagerly (cheap) so the Rust
+    # decision is a pure function with no callback: it is used only when the
+    # candidate has already expired (the gap-day branch). The next month is
+    # resolved from the day after the calendar expiry (re-evaluates the dow +
+    # holiday shift for the rolled month).
     next_calendar = next_monthly_expiry(underlying, calendar_expiry + timedelta(days=1))
-    return holiday_shifted_expiry(underlying, next_calendar)
+    next_shifted = holiday_shifted_expiry(underlying, next_calendar)
+    # Delegate the at-or-after near-month DECISION to the shared Rust core so it
+    # is byte-identical to the TickVault-native live path
+    # (DEC-NIFTY-ROLL-METADATA-001). Day-ordinals in, day-ordinal out.
+    active_ordinal = int(
+        trading_core.resolve_near_month(
+            on_date.toordinal(),
+            candidate_shifted.toordinal(),
+            next_shifted.toordinal(),
+        )
+    )
+    return date.fromordinal(active_ordinal)
 
 
 def resolve_active_future(underlying: OptionsUnderlying, on_date: date) -> FuturesContract:
