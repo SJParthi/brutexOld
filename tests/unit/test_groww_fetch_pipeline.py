@@ -1130,10 +1130,18 @@ class TestIsPoolIsolatable:
         assert _is_pool_isolatable(QuotaInvariantError("ledger invariant broke")) is False
 
     def test_matches_the_spine_global_stop_set(self) -> None:
-        # Pin the re-listed global-stop classes against the spine's authoritative tuple so the
-        # two can never drift (the cycle-avoidance re-list is verified, not trusted).
+        # Pin the re-listed global-stop classes against BOTH spines' authoritative tuples so the
+        # cycle-avoidance re-list in fetch_pipeline can never drift from EITHER spine. The async
+        # consumer processes BOTH the spot tail (run_ingest) AND the F&O/option tail
+        # (option_ingest), each of which carves out its OWN `_GLOBAL_STOP_ERRORS`; a divergence in
+        # either would silently swallow that spine's pull-wide stop, so both are pinned here.
         from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
-        from brutex.adapters.groww.run_ingest import _GLOBAL_STOP_ERRORS
+        from brutex.adapters.groww.option_ingest import (
+            _GLOBAL_STOP_ERRORS as _OPTION_GLOBAL_STOP_ERRORS,
+        )
+        from brutex.adapters.groww.run_ingest import _GLOBAL_STOP_ERRORS as _SPOT_GLOBAL_STOP_ERRORS
 
-        for cls in _GLOBAL_STOP_ERRORS:
+        for cls in _SPOT_GLOBAL_STOP_ERRORS:
+            assert _is_pool_isolatable(cls("x")) is False, cls
+        for cls in _OPTION_GLOBAL_STOP_ERRORS:
             assert _is_pool_isolatable(cls("x")) is False, cls
