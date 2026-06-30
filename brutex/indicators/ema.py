@@ -3,6 +3,26 @@
 Per `docs/TRACK1_VOCABULARY.md` Indicator Group 2 (Indicator Crossover):
     "EMA 20 close, EMA 200 close"
 
+## ONE indicator, ONE source of truth (shared Rust core)
+
+The EMA **recurrence** is the shared Rust ``trading_core`` crate
+(``DEC-EMA-RUST-PORT-001``, builds on ``DEC-SHARED-CORE-001`` /
+``docs/MIGRATION.md`` #441 + ``DEC-NIFTY-INDICATORS-001``). This module is now a
+**thin delegating shim** (mirroring :mod:`brutex.indicators.pivots` /
+:mod:`brutex.indicators.fib_levels`): the streaming :class:`EMAState` keeps its
+identical public API + checkpoint state, but every arithmetic site —
+``alpha = 2/(N+1)``, the SMA seed, and the per-bar step — runs in Rust, so the
+backtest EMA equals the (future) live TickVault EMA **by construction**. EMA was
+the last shared evaluate-time indicator still computed in Python; porting it
+completes the all-Rust shared indicator core.
+
+The math is **bit-identical** to the previous Python recurrence: it runs entirely
+in IEEE-754 ``f64`` and the result stays ``float`` (the caller —
+:func:`brutex.engine.stage1a._ema_to_paisa` / TickVault — snaps to paisa
+separately). IEEE-754 double arithmetic with the same operation order produces
+byte-identical values across Python and Rust; the Rust crate's ``ema_golden``
+test + this package's golden/parity tests pin it.
+
 ## ONE indicator, TWO interfaces (online/offline parity)
 
 This module exposes the SAME math through two interfaces so that
@@ -20,10 +40,10 @@ backtest (batch) and live TickVault (streaming) produce
 ### 2. Batch / backtest mode (Track 1)
 
     series = compute_ema(closes, period=20)  # list-in -> list-out
-    # internally instantiates an EMAState and feeds it in order
+    # delegates to the shared Rust trading_core.compute_ema
 
-Both paths exercise the same `_step()` helper for the recursive update.
-Same input → same output, regardless of which entry point.
+Both paths exercise the same Rust recurrence. Same input → same output,
+regardless of which entry point.
 
 ## The math (matches TradingView ta.ema())
 
@@ -42,7 +62,7 @@ Verified against operator's TradingView screenshot
 Each `update()` call performs exactly:
 - 1 increment (`bars_seen += 1`)
 - 1 branch (warm-up vs seed vs post-seed)
-- In post-seed: 2 multiplications + 1 addition = 3 ops total
+- In post-seed: one delegated Rust step (2 multiplies + 1 add)
 - L1-resident state: 3 float64s + 1 int = 32 bytes
 
 State serialization (for live → backtest replay): 4 fields, ~40 bytes
@@ -57,15 +77,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import trading_core
+
 
 def alpha(period: int) -> float:
     """Smoothing factor for an N-period EMA: α = 2 / (N + 1).
 
-    Standard TradingView / AmiBroker convention.
+    Standard TradingView / AmiBroker convention. Delegated to the shared Rust
+    ``trading_core.ema_alpha`` (single source of truth); a ``period < 1`` raises
+    ``ValueError`` exactly as before.
     """
     if period < 1:
         raise ValueError(f"EMA period must be >= 1, got {period}")
-    return 2.0 / (period + 1)
+    alpha_value: float = trading_core.ema_alpha(period)
+    return alpha_value
 
 
 @dataclass
@@ -76,6 +101,11 @@ class EMAState:
     - Live TickVault loop (tick → bar close → update)
     - Backtest replay (historical bar close → update)
     - Resumable sweeps (serialize/restore between checkpoints)
+
+    The arithmetic (alpha, the SMA seed, the per-bar step) is delegated to the
+    shared Rust ``trading_core`` crate (``DEC-EMA-RUST-PORT-001``); this object
+    keeps only the branch/state-tracking shell + the checkpoint serialization, so
+    the public API is byte-identical to the prior pure-Python recurrence.
 
     Attributes:
         period: EMA period (e.g., 20 or 200).
@@ -124,18 +154,19 @@ class EMAState:
             return None
 
         if self.bars_seen == self.period:
-            # Seed bar: EMA = SMA of values[0..period-1]
+            # Seed bar: EMA = SMA of values[0..period-1] (delegated to Rust).
             self.seed_sum += close
-            self.value = self.seed_sum / self.period
+            seed: float = trading_core.ema_seed(self.seed_sum, self.period)
+            self.value = seed
             return self.value
 
-        # Post-seed: recursive update (O(1)). Value is guaranteed
-        # non-None here by the above branches; narrow via local copy
+        # Post-seed: recursive update (O(1), delegated to Rust). Value is
+        # guaranteed non-None here by the above branches; narrow via local copy
         # so the type checker sees float, not float | None.
         prior = self.value
         if prior is None:  # pragma: no cover — invariant from branches above
             raise AssertionError("EMA state corrupted: post-seed value is None")
-        self.value = self.alpha * close + (1.0 - self.alpha) * prior
+        self.value = trading_core.ema_step(self.alpha, close, prior)
         return self.value
 
     def reset(self) -> None:
@@ -167,8 +198,9 @@ def compute_ema(
 ) -> list[float | None]:
     """Batch interface: compute the full EMA series.
 
-    Wraps `EMAState` so backtest replay produces bit-identical output to
-    a live `EMAState.update()` loop.
+    Delegates to the shared Rust ``trading_core.compute_ema`` (the single source
+    of the recurrence), so backtest replay is bit-identical to a live
+    ``EMAState.update()`` loop (both run the same Rust math).
 
     Args:
         values: Sequence of float prices (close values).
@@ -177,23 +209,23 @@ def compute_ema(
     Returns:
         List of length len(values), with the first (period − 1) entries
         as None (warm-up) and the rest as float EMA values.
+
+    Raises:
+        ValueError: if period < 1, or if any value is non-finite (NaN / ±∞) —
+            raised by the Rust core, matching the prior Python contract.
     """
     if period < 1:
         raise ValueError(f"EMA period must be >= 1, got {period}")
-    state = EMAState.new(period)
-    return [state.update(v) for v in values]
+    result: list[float | None] = trading_core.compute_ema(list(values), period)
+    return result
 
 
 def latest_ema(values: Sequence[float], period: int) -> float | None:
     """Return only the latest (most recent) EMA value, or None if warm-up
     incomplete.
 
-    Convenience wrapper; uses the streaming EMAState under the hood.
+    Convenience wrapper over :func:`compute_ema` (the shared Rust recurrence).
     """
     if not values:
         return None
-    state = EMAState.new(period)
-    last: float | None = None
-    for v in values:
-        last = state.update(v)
-    return last
+    return compute_ema(values, period)[-1]
