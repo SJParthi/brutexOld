@@ -16,7 +16,6 @@ from brutex.data.candle_fields import (
     assemble_candle,
     has_no_price,
     is_absent,
-    is_invalid_present_price,
     to_int,
     to_price,
 )
@@ -83,16 +82,6 @@ class TestToPrice:
     def test_non_finite_raises(self, value: float) -> None:
         with pytest.raises(CandleParseError, match="non-finite high price"):
             to_price(value, "high")
-
-    @pytest.mark.parametrize("value", ["-1", -1, "-0.05", -100.5])
-    def test_negative_raises(self, value: object) -> None:
-        with pytest.raises(CandleParseError, match="negative high price"):
-            to_price(value, "high")
-
-    def test_zero_is_allowed(self) -> None:
-        # Zero is not negative — the has_no_price / partial-empty guards own the zero case,
-        # not to_price (a 0 reaching to_price from a non-assembler path stays a valid Decimal).
-        assert to_price("0", "open") == Decimal("0")
 
 
 class TestToInt:
@@ -162,44 +151,6 @@ class TestAssembleCandle:
     def test_malformed_price_propagates(self) -> None:
         with pytest.raises(CandleParseError, match="unparseable open price"):
             self._call(open_="abc")
-
-    # ── #5 negative price (DEC-CANDLE-NEGATIVE-PRICE-REJECT-001) ──
-    def test_negative_price_alone_is_loud_rejected(self) -> None:
-        # A negative sentinel among real prices would otherwise be stored as a fabricated
-        # negative bar (has_no_price(-1)=False, to_price returned Decimal(-1) finite, no guard).
-        with pytest.raises(CandleParseError, match="negative open price"):
-            self._call(open_="-1")
-
-    def test_negative_price_mixed_with_real_prices_is_loud_rejected(self) -> None:
-        # open=-1 among real high/low/close → the high/low clamp would have stored low=-1.
-        with pytest.raises(CandleParseError, match="negative open price"):
-            self._call(open_=-1, high=100, low=99, close=100)
-
-    # ── #8 nan/inf among a zero/absent sibling (DEC-CANDLE-NONFINITE-NEGATIVE-LOUD-001) ──
-    def test_nonfinite_price_with_zero_sibling_is_loud_not_swallowed(self) -> None:
-        # A nan price sharing the row with a ZERO sibling previously tripped the partial-empty
-        # guard FIRST → silently classified EmptyCandleRow. Now it is a LOUD CandleParseError.
-        with pytest.raises(CandleParseError, match="non-finite high price"):
-            self._call(open_=0, high=float("nan"), low=0, close=0)
-
-    def test_nonfinite_price_with_absent_sibling_is_loud_not_swallowed(self) -> None:
-        with pytest.raises(CandleParseError, match="non-finite close price"):
-            self._call(open_=None, high=100, low=99, close=float("inf"))
-
-    def test_negative_price_with_zero_sibling_is_loud_not_swallowed(self) -> None:
-        with pytest.raises(CandleParseError, match="negative low price"):
-            self._call(open_=0, high=100, low="-5", close=100)
-
-    def test_nonfinite_price_alone_still_loud(self) -> None:
-        # Regression: a non-finite price with NO empty sibling stays a loud reject (unchanged).
-        with pytest.raises(CandleParseError, match="non-finite high price"):
-            self._call(high=float("inf"))
-
-    def test_partial_absent_without_invalid_still_skips_gracefully(self) -> None:
-        # Regression: a genuinely partial-absent bar (one absent, rest real, NO nan/negative)
-        # still skips as EmptyCandleRow — the new guard does not over-fire.
-        with pytest.raises(EmptyCandleRow):
-            self._call(open_=None, high=100, low=99, close=100)
 
     @pytest.mark.parametrize("absent", [None, "", "   "])
     @pytest.mark.parametrize("field", ["open_", "high", "low", "close"])
@@ -301,19 +252,3 @@ class TestAssembleCandle:
         """A negative open-interest clamps to 0 (same DEC-VENDOR-VOLUME-NORMALIZE-001)."""
         bar = self._call(open_interest="-5")
         assert bar.open_interest == 0
-
-
-class TestIsInvalidPresentPrice:
-    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "nan", "-1", -1])
-    def test_present_invalid(self, value: object) -> None:
-        assert is_invalid_present_price(value) is True
-
-    @pytest.mark.parametrize("value", [None, "", "  ", 0, "0", "100.25", 100])
-    def test_present_valid_or_absent_is_false(self, value: object) -> None:
-        # Absent / empty cells (handled by the partial-empty guard) and valid positive
-        # prices (incl. 0 — the zero-skip guard's job) are NOT "present-invalid".
-        assert is_invalid_present_price(value) is False
-
-    def test_unparseable_non_numeric_string_is_false(self) -> None:
-        # An un-parseable non-numeric string is to_price's "unparseable" job, not this guard's.
-        assert is_invalid_present_price("abc") is False

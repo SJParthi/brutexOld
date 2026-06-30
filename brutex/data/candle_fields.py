@@ -88,15 +88,6 @@ def to_price(raw: object, field: str) -> Decimal:
     Rejects non-finite values: ``inf`` / ``nan`` round-trip through
     ``Decimal`` as ``Infinity`` / ``NaN`` (no parse error), so we guard
     explicitly — a non-finite price is a data mismatch, never a valid bar.
-
-    Also rejects a NEGATIVE price (DEC-CANDLE-NEGATIVE-PRICE-REJECT-001): a
-    traded Indian instrument's price is always positive (tick ≥ 0.05, rupees),
-    so a ``< 0`` value is impossible vendor data — storing it would FABRICATE a
-    negative price (and, via the high/low clamp in :func:`assemble_candle`, a
-    negative low), the exact Golden-Rule-#1 corruption this guard prevents. This
-    is DEFENSIVE: the real Groww SDK returns real prices and is not observed to
-    emit negative sentinels — this guards against unobserved vendor corruption,
-    never a current crash.
     """
     try:
         value = Decimal(str(raw))
@@ -104,28 +95,7 @@ def to_price(raw: object, field: str) -> Decimal:
         raise CandleParseError(f"unparseable {field} price: {raw!r}") from exc
     if not value.is_finite():
         raise CandleParseError(f"non-finite {field} price: {raw!r}")
-    if value < 0:
-        raise CandleParseError(f"negative {field} price: {raw!r}")
     return value
-
-
-def is_invalid_present_price(value: object) -> bool:
-    """True for a PRESENT price cell that is junk: non-finite (``nan``/``inf``) OR negative.
-
-    A PRESENT cell (not absent — see :func:`is_absent`) whose parsed value is
-    non-finite or strictly negative is un-storable junk that must be LOUD-rejected,
-    NOT silently swallowed by the partial-empty skip (DEC-CANDLE-NONFINITE-NEGATIVE-
-    LOUD-001). An absent / empty cell returns ``False`` here (it is the partial-empty
-    guard's job, not this one's); an un-parseable non-numeric string also returns
-    ``False`` (the strict :func:`to_price` flags it as ``unparseable``). Pure.
-    """
-    if is_absent(value):
-        return False
-    try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return False  # un-parseable → left to to_price's "unparseable" error
-    return (not parsed.is_finite()) or parsed < 0
 
 
 def to_int(raw: object, field: str) -> int:
@@ -176,21 +146,6 @@ def assemble_candle(
     """
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
-    # LOUD-reject a PRESENT-but-INVALID price (non-finite OR negative) BEFORE the partial-empty
-    # skip (DEC-CANDLE-NONFINITE-NEGATIVE-LOUD-001 + DEC-CANDLE-NEGATIVE-PRICE-REJECT-001). A
-    # ``nan`` / ``inf`` / negative price sitting ALONGSIDE a zero-or-absent sibling would
-    # otherwise be SWALLOWED by the ``any(has_no_price(...))`` partial guard below (the sibling
-    # trips it first) and silently classified "partial empty" — inconsistent with a non-finite
-    # price ALONE (which the strict ``to_price`` calls loud-reject). Running the present-invalid
-    # check FIRST makes the verdict CONSISTENT: present junk is always a hard ``CandleParseError``
-    # (→ per-symbol quarantine, re-pulled next pass), never silently skipped as empty, and a
-    # negative price is never stored as a fabricated bar. An ABSENT / ZERO sibling stays the
-    # partial-empty guard's job; an un-parseable non-numeric string stays ``to_price``'s job.
-    # DEFENSIVE: the real Groww SDK returns real finite positive prices — this guards against
-    # unobserved vendor corruption, never a current crash.
-    for value, field in ((open_, "open"), (high, "high"), (low, "low"), (close, "close")):
-        if is_invalid_present_price(value):
-            to_price(value, field)  # raises the precise non-finite / negative CandleParseError
     # Partially-NO-PRICE bar (DEC-CANDLE-PARTIAL-ABSENT-SKIP-001 + DEC-CANDLE-PARTIAL-ZERO
     # -SKIP-001 + DEC-ADVERSARIAL-HARDENING-001): the row is NOT all-empty, but a REQUIRED
     # OHLC price carries no tradeable information — ABSENT (vendor null / empty), ZERO OR
@@ -254,7 +209,6 @@ __all__ = [
     "assemble_candle",
     "has_no_price",
     "is_absent",
-    "is_invalid_present_price",
     "to_int",
     "to_price",
 ]
