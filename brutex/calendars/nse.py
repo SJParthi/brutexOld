@@ -21,10 +21,18 @@ must gate on :func:`is_holiday_data_available` or use the strict
 :class:`HolidayDataUnavailableError` rather than guess. The unguarded
 :func:`is_holiday` / :func:`is_trading_day` keep their byte-identical
 back-compat behaviour (an out-of-coverage date reads as not-a-holiday), so this
-is a DETECT-and-opt-in surface, not a behaviour change; wiring the strict
-variants into the spot-anchor consumers is a deferred cross-package follow-up.
+is a DETECT-and-opt-in surface, not a behaviour change.
 Per Golden Rule #1 we do NOT hallucinate the missing-year holiday dates; we
 surface the gap honestly.
+
+The spot-anchor consumers ``indicators/prev_day_ohlc.py`` +
+``indicators/weekly_anchors.py`` are now WIRED to the strict
+:func:`is_trading_day_checked` (DEC-CALENDAR-2020-HONEST-001), so a
+2020-anchored PDH/PDL / weekly-Fib lookup raises
+:class:`HolidayDataUnavailableError` for an out-of-coverage weekday instead of
+silently treating a 2020 holiday as a trading day. Other unguarded
+:func:`is_trading_day` callers (e.g. the dashboard pre-open report) remain a
+deferred opt-in follow-up.
 """
 
 from __future__ import annotations

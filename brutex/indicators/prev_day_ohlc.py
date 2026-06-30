@@ -28,6 +28,21 @@ find the prior trading day. Weekends and holidays are skipped. Example:
     Today is Monday  → prior trading day = Friday  (skip Sat/Sun)
     Today is Tuesday after a Monday holiday → prior = previous Friday
 
+## Holiday-coverage honesty (DEC-CALENDAR-2020-HONEST-001)
+
+The Track-1 data-pull floor is 2020-01-01 (``GROWW_HISTORY_FLOOR``;
+CLAUDE.md §3) but the hardcoded NSE/BSE holiday + Muhurat lists only span
+``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (2021-2026).
+The UNGUARDED ``is_trading_day`` reads an out-of-coverage weekday holiday
+(e.g. Holi 2020-03-10) as a *trading day* — a SILENT wrong answer — so a
+2020-anchored PDH/PDL lookup could fetch the holiday's daily candle as the
+"prior trading day". Per Golden Rule #1 we do NOT fabricate the missing
+2020 holiday dates; instead every trading-day verdict on this anchor path
+goes through the STRICT ``is_trading_day_checked``, which raises
+``HolidayDataUnavailableError`` for an out-of-coverage weekday rather than
+guess. In-coverage (2021-2026) dates are byte-identical to the unguarded
+path; only the previously-silent-wrong 2020 case becomes loud.
+
 ## No look-ahead
 
 PDH/PDL/PDO/PDC are computed from the COMPLETED daily candle of the
@@ -44,7 +59,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from brutex.calendars.nse import is_trading_day
+from brutex.calendars.nse import is_trading_day_checked
 
 
 @dataclass(frozen=True)
@@ -85,12 +100,20 @@ def find_prev_trading_day(today: date, lookback_max: int = 14) -> date | None:
     Examples:
         find_prev_trading_day(Mon) -> previous Fri
         find_prev_trading_day(Tue after long weekend) -> previous Fri
+
+    Raises:
+        HolidayDataUnavailableError: if the backward walk reaches an
+            out-of-coverage weekday whose holiday status is unknown
+            (DEC-CALENDAR-2020-HONEST-001). The strict
+            ``is_trading_day_checked`` refuses to guess "trading day" for a
+            date outside the published holiday span (e.g. a 2020 weekday)
+            rather than silently return it as the prior trading day.
     """
     from datetime import timedelta
 
     d = today - timedelta(days=1)
     for _ in range(lookback_max):
-        if is_trading_day(d):
+        if is_trading_day_checked(d):
             return d
         d -= timedelta(days=1)
     return None
@@ -116,8 +139,11 @@ def lookup_prev_day_ohlc(
         ValueError: if `today` itself is not a trading day (likely
             programmer error — should not be asking for PDH on a
             holiday).
+        HolidayDataUnavailableError: if `today` (or a date the backward
+            walk visits) lies outside the published holiday span so its
+            trading-day verdict is unknown (DEC-CALENDAR-2020-HONEST-001).
     """
-    if not is_trading_day(today):
+    if not is_trading_day_checked(today):
         raise ValueError(f"today ({today}) is not a trading day — PDH/PDL lookup invalid")
 
     prev_day = find_prev_trading_day(today)
