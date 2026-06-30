@@ -12,6 +12,12 @@ wheel is built by maturin and installed in every CI job that imports
 * ``evaluate_with_levels`` — BruteX's production per-bar evaluator (pre-built
   levels, no recompute).
 * ``evaluate_from_raw`` — the parity path (recomputes pivots/fib from pdh/pdl/pdc).
+* ``evaluate_spec`` — strategy-as-DATA (``DEC-STRATEGYSPEC-CORE-001``): a required-
+  bits hex mask + direction over the same pre-built-levels ABI, returning
+  ``(bar_bits, fires, direction)`` where ``fires = (bar_bits & mask) == mask`` —
+  the backtest==live deploy contract (thin wrapper over ``evaluate_with_levels``,
+  the frozen kernel untouched). ``SPEC_SCHEMA_VERSION`` / ``IMPLEMENTED_MASK`` are
+  the companion constants.
 * ``compute_pivot_levels`` / ``compute_fib_levels`` — the single-source indicator
   math BruteX's ``brutex.indicators`` wrappers pack into their dataclasses.
 * ``compute_ema`` / ``ema_alpha`` / ``ema_seed`` / ``ema_step`` — the single-source
@@ -28,7 +34,9 @@ from __future__ import annotations
 
 from ._trading_core import (  # type: ignore[import-not-found]
     FIB_LEVELS_LEN,
+    IMPLEMENTED_MASK,
     PIVOT_LEVELS_LEN,
+    SPEC_SCHEMA_VERSION,
     TOTAL_CONDITIONS,
     MarketStructureState,
     VwapState,
@@ -41,6 +49,7 @@ from ._trading_core import (  # type: ignore[import-not-found]
     ema_seed,
     ema_step,
     evaluate_from_raw,
+    evaluate_spec,
     evaluate_with_levels,
     minute_of_session,
     resolve_near_month,
@@ -51,7 +60,9 @@ from ._trading_core import (  # type: ignore[import-not-found]
 
 __all__ = [
     "FIB_LEVELS_LEN",
+    "IMPLEMENTED_MASK",
     "PIVOT_LEVELS_LEN",
+    "SPEC_SCHEMA_VERSION",
     "TOTAL_CONDITIONS",
     "MarketStructureState",
     "VwapState",
@@ -64,6 +75,7 @@ __all__ = [
     "ema_seed",
     "ema_step",
     "evaluate_from_raw",
+    "evaluate_spec",
     "evaluate_with_levels",
     "minute_of_session",
     "resolve_near_month",
