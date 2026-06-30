@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1169,6 +1170,187 @@ def test_make_cli_rate_bridge_on_window_reraises_lake_write_halt(
     with pytest.raises(LakeWriteHalt) as excinfo:
         wrapped()
     assert excinfo.value.reason == "disk_full"
+
+
+# ── Pull-health monitor on the CLI fetch path (DEC-PULL-HEALTH-CLI-WIRING-001) ──
+
+
+class _RecordingMonitor:
+    """A best-effort ``PullHealthMonitor`` stand-in capturing every observe call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
+
+    def observe(
+        self,
+        controller_snap: Mapping[str, object],
+        meter_snap: Mapping[str, object],
+    ) -> None:
+        self.calls.append((controller_snap, meter_snap))
+
+
+def _live_controller() -> Any:
+    """A real, live ``RateController`` at the production ceiling (its snapshot is real)."""
+    from brutex.adapters.groww.constants import (
+        GROWW_RATE_LIMIT_PER_MIN,
+        GROWW_RATE_LIMIT_RPS_CEILING,
+    )
+    from brutex.adapters.rate_common import RateController
+
+    return RateController(
+        ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
+        ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+    )
+
+
+def test_make_cli_rate_bridge_on_window_feeds_monitor(tmp_path: Path) -> None:
+    """With a monitor wired, firing the wrapped hook ALSO feeds it the SAME snapshot pair.
+
+    DEC-PULL-HEALTH-CLI-WIRING-001 — the CLI ``brutex fetch`` pull self-instruments its
+    health by reusing the existing per-window rate-bridge seam: the monitor receives the
+    SAME controller + call-meter snapshot the bridge publishes (no separate read).
+    """
+    controller = _live_controller()
+    monitor = _RecordingMonitor()
+    inner_calls = {"n": 0}
+
+    def _inner() -> None:
+        inner_calls["n"] += 1
+
+    wrapped = cli._make_cli_rate_bridge_on_window(_inner, tmp_path, controller, object(), monitor)
+    wrapped()
+
+    assert inner_calls["n"] == 1  # inner ran first (byte-unchanged)
+    assert len(monitor.calls) == 1  # the monitor was fed exactly once per window
+    controller_snap, meter_snap = monitor.calls[0]
+    # The monitor sees the REAL controller snapshot the bridge built (not a fresh re-read).
+    assert controller_snap["current_rps"] == controller.snapshot()["current_rps"]
+    # A bare object() adapter has no client.meter → an empty meter snapshot.
+    assert meter_snap == {}
+
+
+def test_make_cli_rate_bridge_on_window_none_monitor_is_noop(tmp_path: Path) -> None:
+    """A ``None`` monitor (dry-run / build failure) feeds nothing — the bridge still publishes.
+
+    The publish still happens (a live controller is present), but with no monitor wired the
+    health-watch branch is a pure no-op.
+    """
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    controller = _live_controller()
+    wrapped = cli._make_cli_rate_bridge_on_window(
+        lambda: None, tmp_path, controller, object(), None
+    )
+    wrapped()
+    # The bridge still published (the publish path is independent of the monitor).
+    assert read_rate_snapshot(tmp_path) is not None
+
+
+def test_make_cli_rate_bridge_on_window_monitor_resnapshots_after_publish_failure(
+    tmp_path: Path,
+) -> None:
+    """If the publish failed BEFORE the controller snapshot, the monitor re-snapshots it.
+
+    The controller snapshot is taken INSIDE the publish ``try`` (just before the bridge
+    write); a transient controller-snapshot failure there leaves ``controller_snap`` ``None``,
+    so the monitor branch must re-snapshot it under its OWN guard rather than starve the watch.
+    A controller that fails its FIRST snapshot then succeeds proves the re-snapshot path.
+    """
+
+    class _FlakyController:
+        def __init__(self) -> None:
+            self._n = 0
+
+        def snapshot(self) -> dict[str, object]:
+            self._n += 1
+            if self._n == 1:  # the publish-side snapshot fails (controller_snap stays None)
+                raise RuntimeError("transient snapshot failure")
+            return {"current_rps": 5.0}  # the monitor-side re-snapshot succeeds
+
+    monitor = _RecordingMonitor()
+    wrapped = cli._make_cli_rate_bridge_on_window(
+        lambda: None, tmp_path, _FlakyController(), object(), monitor
+    )
+    wrapped()  # must NOT raise — both the publish error and the re-snapshot are guarded
+    assert len(monitor.calls) == 1
+    assert monitor.calls[0][0] == {"current_rps": 5.0}  # the re-snapshot value reached observe
+    # The publish itself failed before its write, so no bridge file was produced.
+    assert not (tmp_path / ".rate" / "pull_rate.json").exists()
+
+
+def test_make_cli_rate_bridge_on_window_swallows_monitor_error(tmp_path: Path) -> None:
+    """A monitor whose ``observe`` raises must NEVER crash the operator's multi-hour pull.
+
+    Pull-health is observe-only — a buggy monitor is swallowed + logged, and ``inner`` (the
+    ledger checkpoint) must STILL have run.
+    """
+
+    class _BoomMonitor:
+        def observe(self, _c: Mapping[str, object], _m: Mapping[str, object]) -> None:
+            raise RuntimeError("monitor blew up")
+
+    controller = _live_controller()
+    inner_calls = {"n": 0}
+
+    def _inner() -> None:
+        inner_calls["n"] += 1
+
+    wrapped = cli._make_cli_rate_bridge_on_window(
+        _inner, tmp_path, controller, object(), _BoomMonitor()
+    )
+    wrapped()  # must NOT raise even though observe() blows up
+    assert inner_calls["n"] == 1  # inner STILL ran
+
+
+def test_make_cli_rate_bridge_on_window_breach_pushes_one_pull_degraded(
+    tmp_path: Path,
+) -> None:
+    """END-TO-END: a degraded snapshot through the wired seam pushes ONE ``pull_degraded`` edge.
+
+    DEC-PULL-HEALTH-CLI-WIRING-001 — wires the REAL ``PullHealthMonitor`` (the dashboard's
+    builder rails: a fresh ``MetricRegistry`` + a capturing ``on_degraded``) into the CLI
+    per-window seam and feeds it a snapshot pair whose achieved r/s is far below the allowed
+    ceiling, so the hysteresis-gated ``pull.achieved_below_allowed`` rule fires exactly once.
+    """
+    from brutex.observability.metrics import MetricRegistry
+    from brutex.observability.pull_health import PullHealthMonitor
+
+    degraded: list[tuple[str, float, float, str]] = []
+
+    def _on_degraded(rule: str, achieved: float, allowed: float, detail: str) -> None:
+        degraded.append((rule, achieved, allowed, detail))
+
+    monitor = PullHealthMonitor(
+        registry=MetricRegistry(),
+        on_degraded=_on_degraded,
+        pool_size=4,
+    )
+
+    # A meter advertising effective_rps far below the controller's allowed current_rps trips
+    # pull.achieved_below_allowed (0.5 / 5.0 = 0.1 < the 0.6 ratio threshold).
+    class _DegradedMeter:
+        @staticmethod
+        def snapshot() -> dict[str, object]:
+            return {"effective_rps": 0.5, "latency_ms_p95": 10.0, "in_flight": 4}
+
+    class _DegradedClient:
+        meter = _DegradedMeter()
+
+    class _DegradedAdapter:
+        client = _DegradedClient()
+
+    controller = _live_controller()
+    wrapped = cli._make_cli_rate_bridge_on_window(
+        lambda: None, tmp_path, controller, _DegradedAdapter(), monitor
+    )
+    # One observe is not enough for the hysteresis edge to settle on every rule, but the
+    # WARN rule fires on the first breaching sample; fire a few windows to be deterministic.
+    for _ in range(3):
+        wrapped()
+
+    breaches = [d for d in degraded if d[0] == "pull.achieved_below_allowed"]
+    assert len(breaches) == 1  # the breach edge fired exactly once (hysteresis dedupe)
+    assert breaches[0][3].startswith("OUR pipeline is the limiter")
 
 
 def test_cmd_fetch_live_pull_publishes_rate_bridge(
