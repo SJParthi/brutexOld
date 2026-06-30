@@ -63,9 +63,14 @@ __all__ = [
 
 #: The default maximum number of distinct snapshot coordinates kept resident.
 #: A markets-screen session realistically revisits a handful of dates × a few
-#: timeframes × the four/seven pills; 64 covers that with headroom while keeping
-#: the resident set tiny and bounded (Golden Rule #10 — O(capacity) space).
-DEFAULT_MOVERS_CACHE_CAPACITY: Final[int] = 64
+#: timeframes × the four/seven pills, AND the post-pull warmer now pre-warms the
+#: whole default-day grid (DEC-MOVERS-WARM-GRID-001): options
+#: {NSE,BSE,all}×{near,next,far}×{all,weekly,monthly} = 27 keys, futures
+#: {NSE,BSE,all}×{near,next,far} = 9, spot {NSE,BSE,all} = 3 → 39 warmed keys for
+#: ONE day. 256 holds that whole grid PLUS the operator's live interactive coordinates
+#: (other dates / timeframes / exchanges) without evicting the just-warmed entries,
+#: while keeping the resident set tiny + bounded (Golden Rule #10 — O(capacity) space).
+DEFAULT_MOVERS_CACHE_CAPACITY: Final[int] = 256
 
 #: The candidate-key field separator. ``|`` cannot appear in any of the keyed
 #: coordinates (an interval label, an ISO date, an ``HH:MM`` time, a lower-cased

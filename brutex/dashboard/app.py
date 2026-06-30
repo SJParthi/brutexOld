@@ -112,6 +112,7 @@ from brutex.dashboard.movers_futures import (
 from brutex.dashboard.movers_options import (
     build_options_payload,
     compute_options_candidates,
+    load_registry_expiries,
     normalize_options_selectors,
 )
 from brutex.dashboard.movers_snapshot import (
@@ -122,7 +123,13 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
-from brutex.dashboard.movers_warm import latest_movers_date, warm_movers_snapshots
+from brutex.dashboard.movers_warm import (
+    futures_warm_grid,
+    latest_movers_date,
+    options_warm_grid,
+    spot_warm_grid,
+    warm_movers_snapshots,
+)
 from brutex.dashboard.pipeline_pull import run_full_pipeline
 from brutex.dashboard.preopen_report import (
     ReportBasis,
@@ -1115,6 +1122,14 @@ def build_app(
     # generation as the caches above (a pull bumps it → re-resolve; otherwise a default
     # poll is an O(1) handoff). REUSES the COMMON `MoversSnapshotCache` (one date key).
     _latest_movers_date_cache = MoversSnapshotCache()
+    # The Options-tab AUTHORITATIVE expiry-calendar cache (DEC-MOVERS-CALENDAR-TIERS-001):
+    # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL vendor expiry
+    # calendar from `registry.duckdb` (`load_registry_expiries`), an O(expiries) DuckDB
+    # read — re-run on EVERY options poll. The calendar is invariant between metadata
+    # pulls, so it is memoised behind the SAME write generation as the caches above
+    # (a metadata pull bumps it → re-read; otherwise an options poll is an O(1) handoff),
+    # keyed per exchange. REUSES the COMMON `MoversSnapshotCache` (one calendar key).
+    _options_calendar_cache = MoversSnapshotCache()
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -2641,7 +2656,8 @@ def build_app(
             def _warm_spot_movers() -> int:
                 """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
 
-                Reuses the EXACT candidate_key + compute the /api/v1/movers route uses (no
+                Pre-warms the whole spot grid (every exchange scope — DEC-MOVERS-WARM-GRID-001)
+                reusing the EXACT candidate_key + compute the /api/v1/movers route uses (no
                 drift, CLAUDE.md §11 COMMON). Best-effort via ``warm_movers_snapshots`` — a
                 warmer that raises is logged + counted 0, never failing the successful pull.
                 """
@@ -2650,93 +2666,136 @@ def build_app(
                     return 0
                 warm_date, gen = resolved
 
-                def _spot_job() -> int:
-                    cands = _movers_cache.get_or_compute(
-                        candidate_key(
-                            asset="spot",
-                            exchange=None,
-                            interval=DEFAULT_INTERVAL,
-                            date=warm_date,
-                            time=None,
-                        ),
-                        generation=gen,
-                        compute=lambda: compute_spot_candidates(
-                            lake_root=lake_root,
-                            interval=DEFAULT_INTERVAL,
-                            date=warm_date,
-                            time=None,
-                            exchange=None,
-                        ),
-                    )
-                    return len(cands.snapshots)
+                def _make_spot_job(exch: str | None) -> Callable[[], int]:
+                    def _spot_job() -> int:
+                        cands = _movers_cache.get_or_compute(
+                            candidate_key(
+                                asset="spot",
+                                exchange=exch,
+                                interval=DEFAULT_INTERVAL,
+                                date=warm_date,
+                                time=None,
+                            ),
+                            generation=gen,
+                            compute=lambda: compute_spot_candidates(
+                                lake_root=lake_root,
+                                interval=DEFAULT_INTERVAL,
+                                date=warm_date,
+                                time=None,
+                                exchange=exch,
+                            ),
+                        )
+                        return len(cands.snapshots)
 
-                return warm_movers_snapshots([_spot_job])
+                    return _spot_job
+
+                return warm_movers_snapshots(
+                    [_make_spot_job(coord["exchange"]) for coord in spot_warm_grid()]
+                )
 
             def _warm_futures_movers() -> int:
-                """Per-segment FUTURES warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds."""
+                """Per-segment FUTURES warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds.
+
+                Pre-warms the whole futures grid (exchange × Near/Next/Far —
+                DEC-MOVERS-WARM-GRID-001) so any tier at any exchange is an O(1) cache hit.
+                """
                 resolved = _warm_for_date()
                 if resolved is None:
                     return 0
                 warm_date, gen = resolved
-                tier = normalize_futures_tier(None)  # near
 
-                def _fut_job() -> int:
-                    cands = _movers_cache.get_or_compute(
-                        candidate_key(
-                            asset="futures",
-                            exchange=None,
-                            interval=DEFAULT_INTERVAL,
-                            date=warm_date,
-                            time=None,
-                            expiry_tier=tier,
-                        ),
-                        generation=gen,
-                        compute=lambda: compute_futures_candidates(
-                            lake_root=lake_root,
-                            interval=DEFAULT_INTERVAL,
-                            date=warm_date,
-                            time=None,
-                            exchange=None,
-                            expiry_tier=tier,
-                        ),
-                    )
-                    return len(cands.movers)
+                def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
+                    tier = normalize_futures_tier(raw_tier)
 
-                return warm_movers_snapshots([_fut_job])
+                    def _fut_job() -> int:
+                        cands = _movers_cache.get_or_compute(
+                            candidate_key(
+                                asset="futures",
+                                exchange=exch,
+                                interval=DEFAULT_INTERVAL,
+                                date=warm_date,
+                                time=None,
+                                expiry_tier=tier,
+                            ),
+                            generation=gen,
+                            compute=lambda: compute_futures_candidates(
+                                lake_root=lake_root,
+                                interval=DEFAULT_INTERVAL,
+                                date=warm_date,
+                                time=None,
+                                exchange=exch,
+                                expiry_tier=tier,
+                            ),
+                        )
+                        return len(cands.movers)
+
+                    return _fut_job
+
+                return warm_movers_snapshots(
+                    [
+                        _make_fut_job(coord["exchange"], coord["expiry_tier"])
+                        for coord in futures_warm_grid()
+                    ]
+                )
 
             def _warm_options_movers() -> int:
-                """Per-segment OPTIONS warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds."""
+                """Per-segment OPTIONS warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds.
+
+                Pre-warms the whole options grid (exchange × Near/Next/Far × All/Monthly/Weekly
+                — DEC-MOVERS-WARM-GRID-001) so any of the operator's 27 default-day options
+                coordinates is an O(1) cache hit (the "movers is slow" fix), reusing the
+                AUTHORITATIVE vendor calendar (DEC-MOVERS-CALENDAR-TIERS-001) for the tiers.
+                """
                 resolved = _warm_for_date()
                 if resolved is None:
                     return 0
                 warm_date, gen = resolved
-                tier, trk = normalize_options_selectors(None, None)  # near / all
 
-                def _opt_job() -> int:
-                    cands = _movers_cache.get_or_compute(
-                        candidate_key(
-                            asset="options",
-                            exchange=None,
-                            interval=DEFAULT_INTERVAL,
-                            date=warm_date,
-                            time=None,
-                            expiry_tier=tier,
-                            expiry_track=trk,
-                        ),
+                def _make_opt_job(
+                    exch: str | None, raw_tier: str | None, raw_track: str | None
+                ) -> Callable[[], int]:
+                    tier, trk = normalize_options_selectors(raw_tier, raw_track)
+                    calendar_expiries = _options_calendar_cache.get_or_compute(
+                        f"options_calendar|{exch or ''}",
                         generation=gen,
-                        compute=lambda: compute_options_candidates(
-                            lake_root=lake_root,
-                            interval=DEFAULT_INTERVAL,
-                            date=warm_date,
-                            time=None,
-                            expiry_tier=tier,
-                            expiry_track=trk,
-                            exchange=None,
-                        ),
+                        compute=lambda: load_registry_expiries(registry_path, exchange=exch),
                     )
-                    return len(cands.movers)
 
-                return warm_movers_snapshots([_opt_job])
+                    def _opt_job() -> int:
+                        cands = _movers_cache.get_or_compute(
+                            candidate_key(
+                                asset="options",
+                                exchange=exch,
+                                interval=DEFAULT_INTERVAL,
+                                date=warm_date,
+                                time=None,
+                                expiry_tier=tier,
+                                expiry_track=trk,
+                            ),
+                            generation=gen,
+                            compute=lambda: compute_options_candidates(
+                                lake_root=lake_root,
+                                interval=DEFAULT_INTERVAL,
+                                date=warm_date,
+                                time=None,
+                                expiry_tier=tier,
+                                expiry_track=trk,
+                                exchange=exch,
+                                calendar_expiries=calendar_expiries,
+                            ),
+                        )
+                        return len(cands.movers)
+
+                    return _opt_job
+
+                return warm_movers_snapshots(
+                    [
+                        _make_opt_job(
+                            coord["exchange"], coord["expiry_tier"], coord["expiry_track"]
+                        )
+                        for coord in options_warm_grid()
+                    ]
+                )
 
             def _prebuild_timeframes() -> int:
                 """Gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build derived TFs.
@@ -3763,6 +3822,7 @@ def build_app(
         expiry: str | None = Query(default=None),
         track: str | None = Query(default=None),
         exchange: str | None = Query(default=None),
+        min_volume: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -3857,6 +3917,7 @@ def build_app(
                             time=time,
                             top_n=top_n,
                             skipped=0,
+                            min_volume=min_volume,
                         )
                     )
                 if asset == "options":
@@ -3868,6 +3929,7 @@ def build_app(
                             time=time,
                             top_n=top_n,
                             skipped=0,
+                            min_volume=min_volume,
                         )
                     )
                 return JSONResponse(
@@ -3878,6 +3940,7 @@ def build_app(
                         time=time,
                         top_n=top_n,
                         skipped=0,
+                        min_volume=min_volume,
                     )
                 )
             lake_root = store_path.parent
@@ -3933,6 +3996,19 @@ def build_app(
                     # near) + the All/Monthly/Weekly cadence track (blank ⇒ all),
                     # normalised so the key and the computed set agree.
                     tier, trk = normalize_options_selectors(expiry, track)
+                    # The AUTHORITATIVE vendor expiry calendar (DEC-MOVERS-CALENDAR-TIERS-001):
+                    # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL
+                    # calendar from registry.duckdb (not the sparse lake-partition set), so a
+                    # sparsely-pulled lake no longer mislabels a tier. Memoised once per write
+                    # generation (a metadata pull bumps it → re-read); `None` when the registry
+                    # is absent/empty → the lake-partition fallback (a CLI-only lake stays correct).
+                    calendar_expiries = _options_calendar_cache.get_or_compute(
+                        f"options_calendar|{exch or ''}",
+                        generation=generation,
+                        compute=lambda: load_registry_expiries(
+                            registry_path_for(store_path), exchange=exch
+                        ),
+                    )
                     key = candidate_key(
                         asset="options",
                         exchange=exch,
@@ -3954,6 +4030,7 @@ def build_app(
                             expiry_track=trk,
                             exchange=exch,
                             datasets=movers_datasets,
+                            calendar_expiries=calendar_expiries,
                         ),
                     )
                     return build_options_payload(
@@ -3965,6 +4042,8 @@ def build_app(
                         skipped=opt_cands.skipped,
                         expiry_tier=opt_cands.expiry_tier,
                         expiry_track=opt_cands.expiry_track,
+                        min_volume=min_volume,
+                        calendar_only_expiry=opt_cands.calendar_only_expiry,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -4002,6 +4081,7 @@ def build_app(
                         top_n=top_n,
                         skipped=fut_cands.skipped,
                         expiry_tier=fut_cands.expiry_tier,
+                        min_volume=min_volume,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -4029,6 +4109,7 @@ def build_app(
                     time=time,
                     top_n=top_n,
                     skipped=spot_cands.skipped,
+                    min_volume=min_volume,
                 )
 
             payload = await run_in_threadpool(_resolve)

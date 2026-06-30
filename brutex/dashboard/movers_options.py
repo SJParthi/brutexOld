@@ -107,6 +107,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+import structlog
+
 from brutex.dashboard.movers_futures import (
     _prev_day_oi,
     _read_future_session,
@@ -119,13 +121,18 @@ from brutex.dashboard.movers_snapshot import (
     _cutoff_minute,
     _prev_day_close,
     interval_minutes,
+    normalize_min_volume,
     parse_snapshot_date,
     resolve_candle_datasets,
+    value_meets_volume_floor,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
+from brutex.data.registry_store import RegistryError, RegistryStore
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
+
+_LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "DEFAULT_OPTIONS_INTERVAL",
@@ -135,6 +142,7 @@ __all__ = [
     "build_options_payload",
     "compute_option_mover",
     "compute_options_candidates",
+    "load_registry_expiries",
     "normalize_options_selectors",
     "parse_option_symbol",
     "rank_highest_oi",
@@ -344,9 +352,17 @@ def rank_oi_losers(movers: Sequence[OptionMover], top_n: int) -> list[OptionMove
     return pool[:top_n]
 
 
-def rank_volume(movers: Sequence[OptionMover], top_n: int) -> list[OptionMover]:
-    """Top-``n`` contracts by cumulative fresh-session volume, descending."""
-    pool = [m for m in movers if m.volume > 0]
+def rank_volume(
+    movers: Sequence[OptionMover], top_n: int, *, min_volume: int = 0
+) -> list[OptionMover]:
+    """Top-``n`` contracts by cumulative fresh-session volume, descending.
+
+    With the default ``min_volume == 0`` the pool is byte-identical to the prior
+    ``volume > 0`` filter; a positive OPT-IN floor (DEC-MOVERS-MIN-VOLUME-001) drops
+    contracts below it, via the COMMON
+    :func:`~brutex.dashboard.movers_snapshot.value_meets_volume_floor` predicate.
+    """
+    pool = [m for m in movers if value_meets_volume_floor(m.volume, min_volume)]
     pool.sort(key=lambda m: (-m.volume, _sort_key(m)))
     return pool[:top_n]
 
@@ -509,6 +525,8 @@ def build_options_payload(
     skipped: int,
     expiry_tier: str = "near",
     expiry_track: str = "all",
+    min_volume: int | None = None,
+    calendar_only_expiry: bool = False,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -537,6 +555,16 @@ def build_options_payload(
     expiry_track
         The selected ``all`` / ``monthly`` / ``weekly`` cadence track, echoed in the
         note (appended to the tier label, e.g. ``Near Monthly``) unless ``all``.
+    min_volume
+        The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001) applied at RANK
+        time to the ``volume`` ranking only; ``None`` / ``0`` ⇒ the byte-identical
+        no-floor default.
+    calendar_only_expiry
+        When ``True`` (from :attr:`OptionsCandidates.calendar_only_expiry`,
+        DEC-MOVERS-CALENDAR-TIERS-001) the AUTHORITATIVE vendor calendar positioned a
+        valid tier expiry but NO contract candles were pulled for it, so the note
+        honestly says "no data pulled for this expiry" instead of implying the expiry
+        does not exist.
 
     Returns
     -------
@@ -544,8 +572,16 @@ def build_options_payload(
         The Options-tab payload: the seven ranked category lists + the echo +
         ``instrument_count`` / ``skipped_count`` / ``note``.
     """
+    floor = normalize_min_volume(min_volume)
     ranked: dict[str, list[dict[str, Any]]] = {
-        category: [_option_row(m) for m in rank_fn(movers, top_n)]
+        category: [
+            _option_row(m)
+            for m in (
+                rank_volume(movers, top_n, min_volume=floor)
+                if category == "volume"
+                else rank_fn(movers, top_n)
+            )
+        ]
         for category, rank_fn in _OPTIONS_CATEGORIES.items()
     }
     # The tier label, with the cadence track appended (``Near Monthly``) unless the
@@ -553,7 +589,17 @@ def build_options_payload(
     track_suffix = "" if expiry_track == "all" else f" {expiry_track.capitalize()}"
     tier_label = f"{expiry_tier.capitalize()}{track_suffix}"
     instrument_count = len(movers) + skipped
-    if instrument_count == 0:
+    floor_note = f" Min volume ≥ {floor:,}." if floor > 0 else ""
+    if instrument_count == 0 and calendar_only_expiry:
+        # HONEST NO-DATA (DEC-MOVERS-CALENDAR-TIERS-001): the vendor calendar KNOWS the
+        # tier expiry but no contract candles were pulled for it — say so, never imply
+        # the expiry does not exist (the tier was positioned correctly from the calendar).
+        note = (
+            f"The {tier_label} expiry is on the vendor calendar for {date}, but NO option "
+            "contract candles have been pulled for it yet — pull the F&O options for this "
+            "expiry on the Coverage page. (Reference-only lake view, CLAUDE.md §3.)"
+        )
+    elif instrument_count == 0:
         note = (
             f"No {tier_label}-expiry option contracts in the lake for {date} — pull the F&O "
             "options first on the Coverage page, or pick another expiry/date. "
@@ -563,6 +609,7 @@ def build_options_payload(
         note = (
             f"{instrument_count} {tier_label}-expiry option contract(s) in the lake, but none "
             f"had a bar at {date} {time or '(daily)'} on {interval} — pick another time/day."
+            + floor_note
         )
     else:
         note = (
@@ -570,13 +617,14 @@ def build_options_payload(
             "reference-only lake view "
             "(CLAUDE.md §3); the contract's expiry nearest the selected date "
             "(Near/Next/Far) on the chosen cadence track (All/Monthly/Weekly); "
-            "% is vs the contract's previous close, OI change is vs its prior day."
+            "% is vs the contract's previous close, OI change is vs its prior day." + floor_note
         )
     return {
         "interval": interval,
         "date": date,
         "time": time,
         "top_n": top_n,
+        "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "note": note,
@@ -637,6 +685,63 @@ def _discover_options(
     return contracts
 
 
+def load_registry_expiries(
+    registry_path: Path, *, exchange: str | None = None
+) -> dict[str, set[date_cls]] | None:
+    """Read the FULL vendor expiry calendar per underlying from ``registry.duckdb``, or ``None``.
+
+    The Near/Next/Far + Weekly/Monthly tier classification is only correct when fed
+    the COMPLETE vendor expiry calendar — a sparsely-pulled lake (only some expiries
+    have contract candles on disk) mislabels the tiers, because a missing 21-Jul /
+    28-Jul makes the lake-partition set jump straight to 04-Aug for "Far"
+    (DEC-MOVERS-CALENDAR-TIERS-001). The full calendar already lives at read time in
+    the metadata-pull registry (:meth:`RegistryStore.list_expiries`, populated by
+    :func:`~brutex.dashboard.metadata_pull.pull_expiries_contracts` from the vendor
+    ``get_expiries`` list), so this resolves the AUTHORITATIVE expiry set per
+    underlying from there.
+
+    GRACEFUL FALLBACK (never break a CLI-only-pulled lake — Golden Rule #1): a
+    registry that is ABSENT (no file — a lake pulled only with ``brutex fetch``,
+    which seeds no registry), EMPTY (the metadata phase never ran), or UNREADABLE
+    (a stale / version-incompatible cache) yields ``None``, so the caller falls back
+    to the CURRENT lake-partition tier derivation. Best-effort: a
+    :class:`RegistryError` is logged + swallowed → ``None`` (the page never 500s on
+    a bad cache; it degrades to the lake-partition set).
+
+    Parameters
+    ----------
+    registry_path
+        The ``<lake_root>/registry.duckdb`` path
+        (:func:`~brutex.dashboard.db_view.registry_path_for`).
+    exchange
+        Restrict to one exchange (``NSE`` / ``BSE``) to mirror the screened-contract
+        scope, or ``None`` for every exchange.
+
+    Returns
+    -------
+    dict[str, set[datetime.date]] | None
+        ``underlying → its full set of vendor expiry dates`` (every expiry, NOT
+        date-filtered — the tier resolver applies the as-of-date cut), or ``None``
+        when the registry is absent / empty / unreadable.
+    """
+    if not registry_path.exists():
+        return None
+    try:
+        with RegistryStore.open(registry_path) as registry:
+            rows = registry.list_expiries(exch=exchange)
+    except RegistryError as exc:
+        # A stale / version-incompatible / locked registry must never 500 the page —
+        # degrade to the lake-partition derivation (Golden Rule #1 / #10).
+        _LOG.warning("movers.options.registry_unreadable", error=str(exc))
+        return None
+    if not rows:
+        return None
+    calendar: dict[str, set[date_cls]] = {}
+    for row in rows:
+        calendar.setdefault(row.underlying, set()).add(row.expiry_date)
+    return calendar
+
+
 def _monthly_expiries(expiries: set[date_cls]) -> set[date_cls]:
     """The subset of *expiries* that are a monthly settlement (last-in-calendar-month).
 
@@ -688,6 +793,7 @@ def _tier_expiry_by_underlying(
     on_date: date_cls,
     tier: str,
     track: str = "all",
+    calendar_expiries: Mapping[str, set[date_cls]] | None = None,
 ) -> dict[str, date_cls]:
     """Map each underlying → its Near/Next/Far expiry on/after *on_date*, within *track*.
 
@@ -702,6 +808,20 @@ def _tier_expiry_by_underlying(
     it contributes nothing (honest, never faked — Golden Rule #1). Already-expired
     contracts (``expiry < on_date``) are excluded.
 
+    AUTHORITATIVE CALENDAR (DEC-MOVERS-CALENDAR-TIERS-001): when *calendar_expiries*
+    supplies an underlying's FULL vendor expiry calendar (from
+    :func:`load_registry_expiries`), THAT set — not the on-disk lake-partition set —
+    is the expiry universe the tier/track classify over. This fixes the
+    sparsely-pulled-lake mislabel: with the full July ``{07,14,21,28-Jul}`` calendar,
+    ``_monthly_expiries`` correctly settles ``28-Jul`` as the monthly + ``07/14/21``
+    as weeklies, so Weekly + Near/Next/Far = ``07/14/21-Jul`` even when only some of
+    those expiries have contract candles on disk. An underlying ABSENT from the
+    calendar (or a ``None`` calendar — a registry-less lake) falls back to its
+    lake-partition set, so a CLI-only lake is never broken. The returned tier expiry
+    can be a calendar date with ZERO pulled contracts; the caller surfaces that
+    honestly (an empty tier with a "no data pulled for this expiry" note) rather than
+    skipping to a wrong serial expiry.
+
     Parameters
     ----------
     contracts
@@ -714,12 +834,16 @@ def _tier_expiry_by_underlying(
     track
         The ``?track=`` selector, lower-cased (``all`` / ``monthly`` / ``weekly``;
         an unknown value behaves as ``all`` via :func:`_track_pool`).
+    calendar_expiries
+        The AUTHORITATIVE per-underlying vendor expiry calendar (every expiry, not
+        date-filtered) from :func:`load_registry_expiries`, or ``None`` to derive the
+        tiers from the lake-partition contract set (the graceful fallback).
 
     Returns
     -------
     dict[str, datetime.date]
         ``underlying → the tier's expiry on the track`` for every underlying that
-        has one.
+        has one (a calendar tier may name an expiry with no pulled contracts).
     """
     idx = _EXPIRY_TIERS.get(tier, 0)
     live: dict[str, set[date_cls]] = {}
@@ -727,11 +851,37 @@ def _tier_expiry_by_underlying(
         if expiry >= on_date:
             live.setdefault(underlying, set()).add(expiry)
     target: dict[str, date_cls] = {}
-    for underlying, expiries in live.items():
-        ordered = sorted(_track_pool(expiries, track))
+    for underlying, lake_expiries in live.items():
+        # AUTHORITATIVE: the full vendor calendar (>= on_date) for this underlying when
+        # supplied; else the on-disk lake set — the graceful registry-less fallback.
+        universe = _tier_universe(
+            underlying, lake_expiries, on_date=on_date, calendar_expiries=calendar_expiries
+        )
+        ordered = sorted(_track_pool(universe, track))
         if idx < len(ordered):
             target[underlying] = ordered[idx]
     return target
+
+
+def _tier_universe(
+    underlying: str,
+    lake_expiries: set[date_cls],
+    *,
+    on_date: date_cls,
+    calendar_expiries: Mapping[str, set[date_cls]] | None,
+) -> set[date_cls]:
+    """The expiry universe the tier classifies over — the vendor calendar or the lake set.
+
+    Returns the underlying's FULL vendor calendar restricted to ``>= on_date`` when
+    *calendar_expiries* carries it (the AUTHORITATIVE source — DEC-MOVERS-CALENDAR-
+    TIERS-001), else the *lake_expiries* it was discovered with (the graceful
+    fallback for a registry-less lake or an underlying the registry never enumerated).
+    """
+    if calendar_expiries is not None:
+        calendar = calendar_expiries.get(underlying)
+        if calendar:
+            return {expiry for expiry in calendar if expiry >= on_date}
+    return lake_expiries
 
 
 def normalize_options_selectors(
@@ -779,6 +929,13 @@ class OptionsCandidates:
         The normalised ISO ``YYYY-MM-DD`` snapshot day.
     expiry_tier, expiry_track
         The canonical tier / cadence the set was computed for (echoed to the payload).
+    calendar_only_expiry
+        ``True`` when the AUTHORITATIVE vendor calendar resolved a tier expiry for at
+        least one underlying but NO contract candles were pulled for ANY of the
+        resolved tier expiries (so the screen is honestly empty for a calendar-known
+        expiry — DEC-MOVERS-CALENDAR-TIERS-001 — never silently skipped to a wrong
+        serial expiry). ``False`` when the lake had at least one matching contract, or
+        when no tier expiry resolved at all.
     """
 
     movers: tuple[OptionMover, ...]
@@ -786,6 +943,7 @@ class OptionsCandidates:
     date: str
     expiry_tier: str
     expiry_track: str
+    calendar_only_expiry: bool = False
 
 
 def compute_options_candidates(
@@ -799,6 +957,7 @@ def compute_options_candidates(
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
+    calendar_expiries: Mapping[str, set[date_cls]] | None = None,
 ) -> OptionsCandidates:
     """Scan the lake → the :class:`OptionsCandidates` for one snapshot coordinate.
 
@@ -820,11 +979,18 @@ def compute_options_candidates(
     exchange
         Restrict the screened contracts to one exchange (``NSE`` / ``BSE``) for an
         exact per-exchange ranking; ``None`` screens every exchange.
+    calendar_expiries
+        The AUTHORITATIVE per-underlying vendor expiry calendar from
+        :func:`load_registry_expiries` (DEC-MOVERS-CALENDAR-TIERS-001) — when present
+        the Near/Next/Far + Weekly/Monthly tiers classify over the FULL calendar, so a
+        sparsely-pulled lake no longer mislabels a tier. ``None`` derives the tiers
+        from the lake-partition contract set (the graceful fallback).
 
     Returns
     -------
     OptionsCandidates
-        The contract rows + skipped count + normalised date + canonical tier/track.
+        The contract rows + skipped count + normalised date + canonical tier/track +
+        the ``calendar_only_expiry`` honest-no-data flag.
 
     Raises
     ------
@@ -838,14 +1004,29 @@ def compute_options_candidates(
     resolved_names = names or {}
     tier, track = normalize_options_selectors(expiry_tier, expiry_track)
     contracts = _discover_options(lake_root, exchange=exchange, datasets=datasets)
-    # Keep ONLY the contracts on the selected Near/Next/Far expiry (resolved per
-    # underlying as-of the snapshot day) WITHIN the chosen cadence track; an
-    # underlying without that serial expiry on the track drops out honestly.
-    target_expiry = _tier_expiry_by_underlying(contracts, on_date=day, tier=tier, track=track)
+    # Keep ONLY the contracts on the selected Near/Next/Far expiry — resolved per
+    # underlying as-of the snapshot day over the AUTHORITATIVE vendor calendar (when
+    # supplied) WITHIN the chosen cadence track; an underlying without that serial
+    # expiry on the track drops out honestly. The calendar fixes the sparsely-pulled
+    # lake mislabel (DEC-MOVERS-CALENDAR-TIERS-001).
+    target_expiry = _tier_expiry_by_underlying(
+        contracts, on_date=day, tier=tier, track=track, calendar_expiries=calendar_expiries
+    )
     contracts = [c for c in contracts if target_expiry.get(c[2]) == c[3]]
+    # HONEST NO-DATA: a tier expiry the vendor calendar KNOWS but for which NO contract
+    # candles were pulled yields zero matching contracts — flag it (only when the
+    # interval itself is valid) so the payload says "no data pulled for this expiry"
+    # rather than the screen looking like the expiry does not exist (the calendar
+    # correctly positioned the tier; the data is just absent — Golden Rule #1).
+    calendar_only_expiry = minutes is not None and bool(target_expiry) and not contracts
     if minutes is None or not contracts:
         return OptionsCandidates(
-            movers=(), skipped=0, date=date_str, expiry_tier=tier, expiry_track=track
+            movers=(),
+            skipped=0,
+            date=date_str,
+            expiry_tier=tier,
+            expiry_track=track,
+            calendar_only_expiry=calendar_only_expiry,
         )
 
     # Derive the DYNAMIC strike-grid step ONCE per (underlying, expiry) from the
@@ -938,6 +1119,8 @@ def run_options_snapshot(
     expiry_track: str = "all",
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
+    min_volume: int | None = None,
+    calendar_expiries: Mapping[str, set[date_cls]] | None = None,
 ) -> dict[str, Any]:
     """Compute the options movers snapshot over the lake → the ``/api/v1/movers`` payload.
 
@@ -972,6 +1155,13 @@ def run_options_snapshot(
     names
         Optional ``underlying → display name`` map; defaults to the underlying
         symbol itself when absent (the contract name keeps the strike + type).
+    min_volume
+        The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001); ``None`` / ``0`` ⇒
+        the byte-identical no-floor default.
+    calendar_expiries
+        The AUTHORITATIVE per-underlying vendor expiry calendar from
+        :func:`load_registry_expiries` (DEC-MOVERS-CALENDAR-TIERS-001), or ``None`` to
+        derive the tiers from the lake-partition contract set.
 
     Returns
     -------
@@ -992,6 +1182,7 @@ def run_options_snapshot(
         expiry_track=expiry_track,
         exchange=exchange,
         names=names,
+        calendar_expiries=calendar_expiries,
     )
     return build_options_payload(
         candidates.movers,
@@ -1002,4 +1193,6 @@ def run_options_snapshot(
         skipped=candidates.skipped,
         expiry_tier=candidates.expiry_tier,
         expiry_track=candidates.expiry_track,
+        min_volume=min_volume,
+        calendar_only_expiry=candidates.calendar_only_expiry,
     )

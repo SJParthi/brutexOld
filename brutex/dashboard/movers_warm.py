@@ -33,13 +33,81 @@ from pathlib import Path
 
 import structlog
 
-__all__ = ["latest_movers_date", "warm_movers_snapshots"]
+__all__ = [
+    "WARM_EXCHANGES",
+    "WARM_OPTIONS_TIERS",
+    "WARM_OPTIONS_TRACKS",
+    "futures_warm_grid",
+    "latest_movers_date",
+    "options_warm_grid",
+    "spot_warm_grid",
+    "warm_movers_snapshots",
+]
 
 _LOG = structlog.get_logger(__name__)
 
 #: The spot segments the movers default snapshot reads (INDEX + CASH 1day partitions).
 _SPOT_SEGMENTS: tuple[str, ...] = ("INDEX", "CASH")
 _DAILY_INTERVAL = "1day"
+
+#: The exchange scopes the post-pull warmer pre-warms (DEC-MOVERS-WARM-GRID-001): the
+#: all-exchange population (``None``) PLUS the two per-exchange scopes the operator can
+#: pick, so a per-exchange ``/movers`` open after a pull is an O(1) cache hit not a cold
+#: scan. Mirrors the ``exchange in ("NSE", "BSE")`` normalisation in the ``/movers`` route.
+WARM_EXCHANGES: tuple[str | None, ...] = (None, "NSE", "BSE")
+
+#: The serial-expiry tiers the warmer pre-warms for futures + options (the Near/Next/Far
+#: dropdown — DEC-MOVERS-FUTURES-TIER-001 / DEC-MOVERS-OPTIONS-EXPIRY-001). Lower-cased to
+#: match the canonical tokens the cache key uses.
+WARM_OPTIONS_TIERS: tuple[str, ...] = ("near", "next", "far")
+
+#: The cadence tracks the warmer pre-warms for options (the All/Monthly/Weekly selector —
+#: DEC-MOVERS-OPTIONS-TRACK-001). Lower-cased to match the canonical cache-key tokens.
+WARM_OPTIONS_TRACKS: tuple[str, ...] = ("all", "weekly", "monthly")
+
+
+def spot_warm_grid() -> list[dict[str, str | None]]:
+    """The spot warm grid — one coordinate per exchange scope (DEC-MOVERS-WARM-GRID-001).
+
+    Returns one ``{"exchange": ...}`` dict per :data:`WARM_EXCHANGES` scope (all-exchange
+    + NSE + BSE), so a spot ``/movers`` open at any exchange after a pull is an O(1) cache
+    hit. Pure — the caller turns each coordinate into a warm job that reuses the EXACT
+    ``candidate_key`` + ``compute_spot_candidates`` the route uses (CLAUDE.md §11 COMMON).
+    """
+    return [{"exchange": exch} for exch in WARM_EXCHANGES]
+
+
+def futures_warm_grid() -> list[dict[str, str | None]]:
+    """The futures warm grid — exchange × Near/Next/Far tier (DEC-MOVERS-WARM-GRID-001).
+
+    Returns one ``{"exchange": ..., "expiry_tier": ...}`` dict per
+    :data:`WARM_EXCHANGES` × :data:`WARM_OPTIONS_TIERS` combination (3 × 3 = 9), so any
+    Futures tier at any exchange after a pull is an O(1) cache hit. Pure — the caller
+    builds the warm jobs reusing the EXACT ``candidate_key`` + ``compute_futures_candidates``.
+    """
+    return [
+        {"exchange": exch, "expiry_tier": tier}
+        for exch in WARM_EXCHANGES
+        for tier in WARM_OPTIONS_TIERS
+    ]
+
+
+def options_warm_grid() -> list[dict[str, str | None]]:
+    """The options warm grid — exchange × tier × cadence track (DEC-MOVERS-WARM-GRID-001).
+
+    Returns one ``{"exchange": ..., "expiry_tier": ..., "expiry_track": ...}`` dict per
+    :data:`WARM_EXCHANGES` × :data:`WARM_OPTIONS_TIERS` × :data:`WARM_OPTIONS_TRACKS`
+    combination (3 × 3 × 3 = 27), so any Options Near/Next/Far × All/Monthly/Weekly at any
+    exchange after a pull is an O(1) cache hit (the operator's "movers is slow" fix). Pure
+    — the caller builds the warm jobs reusing the EXACT ``candidate_key`` +
+    ``compute_options_candidates`` the route uses (CLAUDE.md §11 COMMON — no drift).
+    """
+    return [
+        {"exchange": exch, "expiry_tier": tier, "expiry_track": track}
+        for exch in WARM_EXCHANGES
+        for tier in WARM_OPTIONS_TIERS
+        for track in WARM_OPTIONS_TRACKS
+    ]
 
 
 def latest_movers_date(lake_root: Path) -> str | None:

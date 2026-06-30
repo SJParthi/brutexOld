@@ -731,3 +731,60 @@ class TestComputeFuturesCandidatesExchangeFilter:
         )
         # The BSE future is filtered out by the per-exchange discovery ``continue``.
         assert {m.underlying for m in nse.movers} == {"NIFTY"}
+
+
+# ── DEC-MOVERS-MIN-VOLUME-001: the opt-in Top-Volume floor (futures) ──
+
+
+class TestFuturesMinVolume:
+    def test_rank_volume_default_zero_byte_identical(self) -> None:
+        movers = [
+            _mover(symbol="NSE-A-30Sep25-FUT", volume=0),
+            _mover(symbol="NSE-B-30Sep25-FUT", volume=5),
+        ]
+        assert rank_volume(movers, 10) == rank_volume(movers, 10, min_volume=0)
+        assert [m.volume for m in rank_volume(movers, 10)] == [5]
+
+    def test_rank_volume_floor_drops_thin(self) -> None:
+        movers = [
+            _mover(symbol="NSE-A-30Sep25-FUT", volume=100),
+            _mover(symbol="NSE-B-30Sep25-FUT", volume=2000),
+        ]
+        assert [m.volume for m in rank_volume(movers, 10, min_volume=1000)] == [2000]
+
+    def test_payload_floor_applies_to_volume_only(self) -> None:
+        thin = _mover(symbol="NSE-A-30Sep25-FUT", volume=100)
+        thick = _mover(symbol="NSE-B-30Sep25-FUT", volume=9000)
+        payload = build_futures_payload(
+            [thin, thick],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=1000,
+        )
+        assert payload["min_volume"] == 1000
+        assert len(payload["volume"]) == 1
+        assert "Min volume ≥ 1,000." in payload["note"]
+        # The price rankings ignore the volume floor.
+        assert len(payload["price_gainers"]) == 2
+
+    def test_payload_default_floor_no_note(self) -> None:
+        payload = build_futures_payload(
+            [_mover()], interval="1day", date="2025-06-13", time=None, top_n=10, skipped=0
+        )
+        assert payload["min_volume"] == 0
+        assert "Min volume" not in payload["note"]
+
+    def test_negative_floor_normalises(self) -> None:
+        payload = build_futures_payload(
+            [_mover()],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            min_volume=-3,
+        )
+        assert payload["min_volume"] == 0
