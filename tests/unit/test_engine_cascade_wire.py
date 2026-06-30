@@ -28,13 +28,24 @@ import numpy as np
 import pytest
 from brutex.data.models import CandleBar
 from brutex.engine import cascade_wire as cw
+from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.results_store import ResultRow
+from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.sweep_driver import build_equity_curve
 from brutex.engine.sweep_orchestrator import SweepTuple
+from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.cascade import (
     CandidateVerdict,
     CascadeReport,
     FilterStage,
 )
+from brutex.metrics.compute import compute_metrics
+from brutex.metrics.deflated_sharpe import (
+    GAUSSIAN_KURTOSIS,
+    deflated_sharpe_ratio,
+    expected_max_sharpe_ratio,
+)
+from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -98,6 +109,70 @@ def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
         return []
 
     return loader
+
+
+def _fat_tailed_bars() -> list[CandleBar]:
+    """A 40-bar session with a few extreme spikes → fat-tailed realised trade PnL.
+
+    The wide intrabar ranges let an SL/TP exit fill at different prices across
+    trades, and the four spike bars (10/24 up, 16/30 down) inject the heavy
+    tails, so a reconstruction over these bars yields a DEFINED, non-zero
+    (excess) kurtosis — the regime where the excess-vs-non-excess distinction
+    is material to the DSR. The pattern is deterministic (no RNG): a fixed
+    ``±`` swing list plus the spike overrides.
+    """
+    swings = [1.0, 1.2, 0.8, 1.5, -0.9, -1.1, 1.0, 1.2, 0.8, 1.5]
+    seq: list[tuple[str, str, str, str]] = []
+    price = 100.0
+    for i in range(40):
+        o = price
+        if i in (10, 24):  # fat UPSIDE spikes
+            high, low, c = o + 15.0, o - 0.5, o + 12.0
+        elif i in (16, 30):  # fat DOWNSIDE spikes
+            high, low, c = o + 0.5, o - 15.0, o - 12.0
+        else:
+            delta = swings[i % len(swings)]
+            c = o + delta
+            high, low = max(o, c) + 1.5, min(o, c) - 1.5
+        seq.append((f"{o:.2f}", f"{high:.2f}", f"{low:.2f}", f"{c:.2f}"))
+        price = c
+
+    def _fbar(i: int, row: tuple[str, str, str, str]) -> CandleBar:
+        ts = datetime(2026, 5, 13, 9, 15, tzinfo=_IST) + timedelta(minutes=i)
+        o, h, lo, c = row
+        return CandleBar(
+            timestamp=ts.astimezone(UTC),
+            open=Decimal(o),
+            high=Decimal(h),
+            low=Decimal(lo),
+            close=Decimal(c),
+            volume=100,
+            open_interest=None,
+        )
+
+    return [_fbar(i, row) for i, row in enumerate(seq)]
+
+
+def _fat_tailed_candidate() -> Any:
+    """Reconstruct one fat-tailed :class:`CandidateInput` over :func:`_fat_tailed_bars`.
+
+    ``sl=500 / tp=200`` over the spike session produces 15 trades with a
+    defined, non-zero excess kurtosis (≈1.73) — the fixture the
+    DSR-kurtosis-convention regression tests share.
+    """
+    bars = _fat_tailed_bars()
+    bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+    return cw.build_candidate_input(
+        run_id=_rid(1),
+        mask=0,
+        bars=bars,
+        bar_bits=bar_bits,
+        direction_label="bull",
+        tf_minutes=1,
+        sl_paisa=500,
+        tp_paisa=200,
+        start_equity_paisa=10_000_000,
+    )
 
 
 # ── CascadeTupleSpec validation ──────────────────────────────────────────────
@@ -283,6 +358,124 @@ class TestBuildCandidateInput:
         # A single entry → at most one trade → undefined per-trade Sharpe → nan.
         one = cand.mc_evaluate(np.array([0], dtype=np.intp))
         assert np.isnan(one)
+
+    def test_kurtosis_is_nonexcess_matching_compute_sibling(self) -> None:
+        """The wire fills ``CandidateInput.kurtosis`` as NON-excess (DEC-DSR-KURTOSIS-FIX-001).
+
+        Regression for the DSR-kurtosis convention bug: the cascade
+        :class:`~brutex.metrics.cascade.CandidateInput` (and the DSR PSR
+        radicand it feeds) wants the NON-excess (Pearson) kurtosis — Gaussian
+        ``3`` — but :func:`compute_metrics` stores EXCESS kurtosis (Gaussian
+        ``0``). The wire must therefore add :data:`GAUSSIAN_KURTOSIS` back,
+        exactly as the sibling :func:`with_stage4_statistics` does. The OLD
+        code passed the raw excess value (no ``+3``), so this asserts the
+        candidate's kurtosis equals the independently-recomputed
+        ``compute_metrics(...).kurtosis + GAUSSIAN_KURTOSIS`` over the SAME
+        reconstructed trades.
+        """
+        bars = _fat_tailed_bars()
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        cand = _fat_tailed_candidate()
+
+        # Independently re-run the exact reconstruction pipeline the wire uses,
+        # then take compute_metrics' EXCESS kurtosis as the sibling's input.
+        signals = mask_to_entry_signals(bar_bits, 0)
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=500,
+            take_profit_paisa=200,
+        )
+        equity = build_equity_curve(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        metrics = compute_metrics(trades, equity, total_bars=len(bars))
+
+        assert metrics.kurtosis is not None  # fixture sanity: a DEFINED excess kurtosis
+        assert metrics.kurtosis != 0.0  # … that is genuinely fat-tailed (not a Gaussian no-op)
+        # The smoking gun: wire kurtosis is the NON-excess form, +3 above the
+        # excess value compute_metrics stores. The old buggy wire returned
+        # `metrics.kurtosis` directly (== excess), which this would catch.
+        assert cand.kurtosis == metrics.kurtosis + GAUSSIAN_KURTOSIS
+        assert cand.kurtosis != metrics.kurtosis  # the +3 actually moved the value
+
+    def test_kurtosis_none_defaults_to_gaussian_nonexcess(self) -> None:
+        """An undefined-shape (constant-PnL) reconstruction yields the Gaussian baseline.
+
+        When the trades are all identical (zero variance), ``compute_metrics``
+        returns ``kurtosis=None``; the wire maps ``None`` → ``0.0`` via
+        :func:`cw._finite` and THEN adds :data:`GAUSSIAN_KURTOSIS`, so the
+        candidate carries the honest non-excess Gaussian value ``3.0`` (NOT
+        the old ``0.0``, which the DSR would have mis-read as a non-excess
+        kurtosis of zero).
+        """
+        bars = _session_bars()
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        # Tight identical SL hits → constant per-trade PnL → kurtosis undefined.
+        cand = cw.build_candidate_input(
+            run_id=_rid(1),
+            mask=0,
+            bars=bars,
+            bar_bits=bar_bits,
+            direction_label="bull",
+            tf_minutes=1,
+            sl_paisa=20,
+            tp_paisa=20,
+            start_equity_paisa=10_000_000,
+        )
+        signals = mask_to_entry_signals(bar_bits, 0)
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=20,
+            take_profit_paisa=20,
+        )
+        equity = build_equity_curve(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        metrics = compute_metrics(trades, equity, total_bars=len(bars))
+        assert metrics.kurtosis is None  # fixture sanity: shape moment undefined
+        assert cand.kurtosis == GAUSSIAN_KURTOSIS  # 0.0 (from _finite(None)) + 3.0
+
+    def test_nonexcess_kurtosis_lowers_overstated_dsr_for_passing_combo(self) -> None:
+        """The corrected kurtosis de-biases the DSR kill-gate toward REJECT (the fix's point).
+
+        Feeding the candidate's now-non-excess kurtosis through
+        :func:`deflated_sharpe_ratio` exactly as the cascade kill-gate does
+        (``brutex/metrics/cascade.py`` filter #2) yields a LOWER DSR than the
+        OLD excess value — for a combo whose observed Sharpe BEATS the
+        deflation benchmark ``SR_0`` (the gate-relevant PASS regime). That is
+        precisely the over-statement DEC-DSR-KURTOSIS-FIX-001 removes: under
+        the old bug a luckier-than-real combo's DSR was inflated, biasing the
+        gate toward PASS.
+
+        (Honest envelope: the PSR's monotonicity in kurtosis flips sign with
+        ``SR_hat - SR_0``; for a would-FAIL combo whose Sharpe is already
+        below ``SR_0`` the corrected DSR can be marginally higher, but it
+        stays below the gate. The bias that matters — surviving combos —
+        is the PASS regime tested here.)
+        """
+        cand = _fat_tailed_candidate()
+        excess_kurtosis = cand.kurtosis - GAUSSIAN_KURTOSIS
+
+        # PASS regime: a small leaderboard so SR_0 < the observed Sharpe.
+        n_trials, trial_var = 5, 0.03
+        sr_0 = expected_max_sharpe_ratio(n_trials, trial_var)
+        assert cand.sharpe_ratio > sr_0  # gate-relevant: this combo would PASS
+
+        def _dsr(kurtosis: float) -> float:
+            return deflated_sharpe_ratio(
+                cand.sharpe_ratio,
+                n_trials=n_trials,
+                trial_sharpe_variance=trial_var,
+                sample_length=max(cand.total_trades, 2),
+                skew=cand.skew,
+                kurtosis=kurtosis,
+            ).deflated_sharpe_ratio
+
+        old_overstated = _dsr(excess_kurtosis)  # the buggy excess-kurtosis DSR
+        new_corrected = _dsr(cand.kurtosis)  # the fixed non-excess-kurtosis DSR
+        assert new_corrected < old_overstated
 
 
 # ── The shared pure core ──────────────────────────────────────────────────────
