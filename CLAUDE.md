@@ -230,7 +230,34 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fetch-completeness-honesty` (**DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 /
+- **Active branch:** `claude/movers-calendar-tiers` (**DEC-MOVERS-CALENDAR-TIERS-001, MIGRATION.md #1034** —
+  the `/movers` Options Near/Next/Far + Weekly/Monthly tiers are now driven by the AUTHORITATIVE vendor expiry calendar
+  (`registry.duckdb`) instead of the SPARSE lake-partition set, so a sparsely-pulled lake no longer mislabels a tier (the
+  operator REPORTED a wrong Far expiry on a lake missing intermediate July weeklies). FIX 1 (PRIMARY · correctness): NEW
+  `movers_options.load_registry_expiries` reads the FULL per-underlying calendar via `RegistryStore.list_expiries`
+  (populated by the metadata phase from the vendor `get_expiries`); `_tier_expiry_by_underlying` gains a `calendar_expiries`
+  map + a pure `_tier_universe` that classifies tier+track over the calendar's `>= on_date` set when present (`_monthly_expiries`
+  max-per-month is correct once fed the full July {07,14,21,28-Jul} → 28-Jul monthly, 07/14/21 weekly). GRACEFUL FALLBACK
+  (Golden Rule #1): an absent/empty/unreadable `registry.duckdb` (a CLI-only lake, or a `RegistryError`) → the current
+  lake-partition derivation, so those lakes are never broken. HONEST NO-DATA: a calendar tier with ZERO pulled candles sets
+  `OptionsCandidates.calendar_only_expiry` + an honest "on the vendor calendar … but NO option contract candles pulled" note,
+  never a wrong serial expiry. The route memoises the calendar per write-generation (`_options_calendar_cache`, REUSES
+  `MoversSnapshotCache`) keyed per exchange. FIX 2 (DEC-MOVERS-SORT-RESET-001 · frontend): the metric-pill onclick now resets
+  `state.sort` + `renderHead()` so a manual VOLUME sort + the stale ▼ arrow reset on a metric-tab switch (the asset-tab handler
+  already did). FIX 3 (DEC-MOVERS-MIN-VOLUME-001 · opt-in floor): a NEW `?min_volume=` floor (route default 0 = byte-identical)
+  filters the "Top Volume" ranking `volume >= min_volume` via ONE COMMON `normalize_min_volume` + `value_meets_volume_floor`
+  shared by all three `rank_volume`s (spot/futures/options), threaded route → `build_*_payload` at RANK time (re-ranks the SAME
+  cached candidate set, never a re-scan), echoed in the payload + note + a `movers.html` input. FIX 4 (DEC-MOVERS-WARM-GRID-001
+  · the slowness fix): the post-pull warmer pre-warms the WHOLE default-day grid (NEW pure `spot_warm_grid`/`futures_warm_grid`/
+  `options_warm_grid` = 3 + 9 + 27 = 39 keys, {NSE,BSE,all}×{near,next,far}×{all,weekly,monthly}) REUSING the EXACT
+  `candidate_key` + `compute_*_candidates` + the FIX-1 calendar, so any default-day options coordinate is an O(1) cache hit;
+  `DEFAULT_MOVERS_CACHE_CAPACITY` raised 64 → 256 so the grid PLUS live coordinates fit. HONEST envelope: calendar tiers are
+  AUTHORITATIVE only when the metadata phase ran (graceful lake fallback proven); `min_volume=0` byte-identical; the warmer is
+  best-effort + O(1)-cached per generation (the FIRST open per coordinate still pays one real scan). READ-ONLY dashboard +
+  pull-PLANNING warm — no engine/lake-schema/stored-bar/scope/vocab/rate-cap change, F&O lake stays REFERENCE_ONLY. The five
+  touched movers modules ALL 100% line+branch (389 movers tests green); ruff/ruff-format/`mypy --strict`/`pyright brutex tests`
+  clean. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX).
+  Prior merged: **DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 /
   DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1031** — PR-A of the triaged fetch-path edge-case sweep: a SUCCESS spot window
   with a CONFIRMED interior multi-session hole OR a trailing truncation is DEMOTED to a re-pullable ledger status
   (BOUNDED — it settles SKIPPED after `EMPTY_TERMINAL_THRESHOLD` flagged pulls so the universe pull still converges, and

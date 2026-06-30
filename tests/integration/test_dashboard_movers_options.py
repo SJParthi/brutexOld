@@ -606,6 +606,90 @@ class TestOptionsApi:
         assert body["instrument_count"] == 0
         assert "pull the F&O options first" in body["note"]
 
+    def test_min_volume_floor_drops_thin_contracts(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-MIN-VOLUME-001: the OPT-IN ?min_volume= floor filters the Top Volume
+        # ranking. The seeded CE has volume 500, the PE 200 → a floor of 300 keeps only CE.
+        _seed_options_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "options",
+                "interval": "1day",
+                "date": "2024-06-13",
+                "min_volume": 300,
+            },
+        ).json()
+        assert body["min_volume"] == 300
+        assert [r["volume"] for r in body["volume"]] == [500]
+        assert "Min volume ≥ 300." in body["note"]
+
+    def test_min_volume_default_zero_is_byte_identical(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # No ?min_volume= (route default 0) → both contracts rank, no floor note.
+        _seed_options_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13"},
+        ).json()
+        assert body["min_volume"] == 0
+        assert len(body["volume"]) == 2
+        assert "Min volume" not in body["note"]
+
+    def test_negative_min_volume_is_422(self, store: InstrumentStore) -> None:
+        # The route caps min_volume >= 0 — a negative value is rejected at validation.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/movers", params={"asset": "options", "min_volume": -1})
+        assert resp.status_code == 422
+
+    def test_calendar_tier_uses_registry_over_sparse_lake(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-CALENDAR-TIERS-001 end-to-end through the route: a sparse July lake
+        # (07-Jul candles only) + a registry calendar with the full July weeklies → the
+        # Far weekly tier resolves to the calendar's 21-Jul (honest no-data), NOT a wrong
+        # serial expiry from the sparse lake.
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        from brutex.data.registry_store import RegistryStore
+
+        for opt in ("CE", "PE"):
+            sym = f"NSE-NIFTY-07Jul25-24000-{opt}"
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=sym,
+                interval="1minute",
+                bars=[
+                    _min_bar(
+                        hour=9, minute=15, close="150", volume=100, oi=10, day=date(2025, 7, 7)
+                    )
+                ],
+            )
+        now = _dt(2025, 7, 1, tzinfo=_UTC)
+        with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+            for exp in (date(2025, 7, 7), date(2025, 7, 14), date(2025, 7, 21), date(2025, 7, 28)):
+                reg.upsert_expiry("NSE", "NIFTY", exp, run_id="r1", fetched_at=now)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "options",
+                "interval": "1day",
+                "date": "2025-07-07",
+                "expiry": "Far",
+                "track": "Weekly",
+            },
+        ).json()
+        # 21-Jul is the calendar Far weekly with no pulled candles → honest no-data note.
+        assert body["instrument_count"] == 0
+        assert "vendor calendar" in body["note"]
+
 
 # ── compute_options_candidates discovery + resilience branches ────────────
 # These exercise the per-file gate branches the broad dashboard suite covered
@@ -717,3 +801,137 @@ class TestComputeOptionsCandidatesBranches:
         )
         # The BSE option is filtered out by the per-exchange discovery ``continue``.
         assert {m.underlying for m in nse.movers} == {"NIFTY"}
+
+
+# ── DEC-MOVERS-CALENDAR-TIERS-001: calendar-driven tiers over a sparse lake ──
+
+
+class TestCalendarDrivenTiersEndToEnd:
+    """End-to-end: a REPRESENTATIVE sparsely-pulled lake + the full vendor calendar.
+
+    Proves the calendar (registry) drives the tier over a sparse lake and surfaces an
+    honest no-data tier — a representative config that exercises the behaviour, NOT a
+    reconstruction of the operator's exact reported lake (Golden Rule #1).
+    """
+
+    @staticmethod
+    def _seed_sparse_july_lake(tmp_path: Path) -> None:
+        # Only the 07-Jul + 04-Aug NIFTY options have candles on disk (21/28-Jul were never
+        # pulled) — so the lake-only "Far weekly" would wrongly jump past them.
+        for exp_tag, exp in (("07Jul25", date(2025, 7, 7)), ("04Aug25", date(2025, 8, 4))):
+            for opt in ("CE", "PE"):
+                sym = f"NSE-NIFTY-{exp_tag}-24000-{opt}"
+                _write(
+                    tmp_path,
+                    segment="FNO",
+                    symbol=sym,
+                    interval="1minute",
+                    bars=[_min_bar(hour=9, minute=15, close="150", volume=100, oi=10, day=exp)],
+                )
+
+    @staticmethod
+    def _full_calendar() -> dict[str, set[date]]:
+        return {
+            "NIFTY": {
+                date(2025, 7, 7),
+                date(2025, 7, 14),
+                date(2025, 7, 21),
+                date(2025, 7, 28),
+                date(2025, 8, 4),
+            }
+        }
+
+    def test_far_weekly_resolves_to_calendar_21jul_with_honest_no_data(
+        self, tmp_path: Path
+    ) -> None:
+        # As-of 2025-07-07: Weekly track = {07,14,21-Jul} (28-Jul is the monthly), so
+        # Far = 21-Jul — a calendar expiry with NO pulled contracts → calendar_only_expiry.
+        self._seed_sparse_july_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2025-07-07",
+            time=None,
+            expiry_tier="far",
+            expiry_track="weekly",
+            calendar_expiries=self._full_calendar(),
+        )
+        assert cands.movers == ()  # no 21-Jul candles pulled
+        assert cands.calendar_only_expiry is True
+
+    def test_near_weekly_resolves_to_07jul_with_real_data(self, tmp_path: Path) -> None:
+        # Near weekly = 07-Jul, which HAS pulled candles → real movers, not calendar-only.
+        self._seed_sparse_july_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2025-07-07",
+            time=None,
+            expiry_tier="near",
+            expiry_track="weekly",
+            calendar_expiries=self._full_calendar(),
+        )
+        assert {m.expiry for m in cands.movers} == {date(2025, 7, 7)}
+        assert cands.calendar_only_expiry is False
+
+    def test_without_calendar_far_weekly_is_empty_no_honest_flag(self, tmp_path: Path) -> None:
+        # WITHOUT the calendar (registry-less fallback): the lake weeklies are {07-Jul,
+        # 04-Aug} (each the sole expiry of its month → both "monthly"), so the weekly
+        # track is empty and no Far weekly resolves — and the honest flag is NOT set
+        # (there is no calendar-known tier expiry to surface).
+        self._seed_sparse_july_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2025-07-07",
+            time=None,
+            expiry_tier="far",
+            expiry_track="weekly",
+            calendar_expiries=None,
+        )
+        assert cands.movers == ()
+        assert cands.calendar_only_expiry is False
+
+    def test_run_snapshot_threads_calendar_into_payload_note(self, tmp_path: Path) -> None:
+        # The thin compose surfaces the honest no-data note end-to-end.
+        self._seed_sparse_july_lake(tmp_path)
+        payload = run_options_snapshot(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2025-07-07",
+            time=None,
+            top_n=10,
+            expiry_tier="far",
+            expiry_track="weekly",
+            calendar_expiries=self._full_calendar(),
+        )
+        assert "vendor calendar" in payload["note"]
+        assert "NO option contract candles" in payload["note"]
+
+    def test_registry_round_trip_drives_calendar_tiers(self, tmp_path: Path) -> None:
+        # The FULL chain: persist the July calendar into a real RegistryStore, read it
+        # back via load_registry_expiries, and prove the Far weekly tier is 21-Jul.
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        from brutex.dashboard.movers_options import load_registry_expiries
+        from brutex.data.registry_store import RegistryStore
+
+        self._seed_sparse_july_lake(tmp_path)
+        registry_path = tmp_path / "registry.duckdb"
+        now = _dt(2025, 7, 1, tzinfo=_UTC)
+        with RegistryStore.open(registry_path) as reg:
+            for exp in (date(2025, 7, 7), date(2025, 7, 14), date(2025, 7, 21), date(2025, 7, 28)):
+                reg.upsert_expiry("NSE", "NIFTY", exp, run_id="r1", fetched_at=now)
+        calendar = load_registry_expiries(registry_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2025-07-07",
+            time=None,
+            expiry_tier="far",
+            expiry_track="weekly",
+            calendar_expiries=calendar,
+        )
+        # 21-Jul is the calendar Far weekly, but no candles → honest empty.
+        assert cands.calendar_only_expiry is True

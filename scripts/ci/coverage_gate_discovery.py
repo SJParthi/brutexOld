@@ -146,6 +146,30 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # excluding it here keeps that complement honest instead of blocking
         # EVERY stage1a-touching PR (DEC-COVERAGE-DISCOVERY-STAGE1A-001).
         "brutex/engine/stage1a.py",
+        # The /movers spot-snapshot module. Its 100% line+branch is reached by
+        # the WHOLE movers test FAMILY collectively — the spot-CANDIDATE readers
+        # (_read_daily_partition / _prev_day_close / compute_spot_candidates /
+        # run_movers_snapshot) only execute against a REAL seeded lake partition,
+        # which lives in the integration suite (test_dashboard_movers.py +
+        # test_movers_discovery_memo.py + test_movers_exchange_cache.py +
+        # test_movers_fno_columns_from_minute.py), while the pure helpers it now
+        # also hosts (session_traded_value_paisa / normalize_min_volume /
+        # value_meets_volume_floor — the COMMON ranking primitives shared by
+        # movers_options + movers_futures) are exercised from their callers'
+        # tests. The discovery gate maps a module ONLY to its stem-matching
+        # tests (test_*movers_snapshot*.py — there is no
+        # test_dashboard_movers_snapshot.py), so it sees just the unit file and
+        # tops out at ~55% STANDALONE — the SAME multi-file-suite structural
+        # mismatch as app.py / pull_controller.py / db_view.py / stage1a.py.
+        # Duplicating the lake-fixture integration coverage into the unit stem
+        # file to satisfy the discovery gate would be a Golden-Rule-#11 COMMON
+        # (no copy-paste) violation. movers_snapshot.py's real 100% gate is the
+        # whole-package --cov-fail-under=100 floor (verified 100.00% line+branch
+        # over the movers unit+integration suites); the discovery gate is a
+        # COMPLEMENT, and excluding it here keeps that complement honest
+        # (Golden Rule #10) instead of blocking EVERY movers_snapshot-touching
+        # PR on an unreachable single-file 100% (DEC-COVERAGE-DISCOVERY-MOVERS-SNAPSHOT-001).
+        "brutex/dashboard/movers_snapshot.py",
     }
 )
 

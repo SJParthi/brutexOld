@@ -16,7 +16,16 @@ import pytest
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 
-from brutex.dashboard.movers_warm import latest_movers_date, warm_movers_snapshots
+from brutex.dashboard.movers_warm import (
+    WARM_EXCHANGES,
+    WARM_OPTIONS_TIERS,
+    WARM_OPTIONS_TRACKS,
+    futures_warm_grid,
+    latest_movers_date,
+    options_warm_grid,
+    spot_warm_grid,
+    warm_movers_snapshots,
+)
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 
@@ -111,3 +120,37 @@ def test_warm_swallows_a_raising_job_counts_it_zero() -> None:
         raise RuntimeError("transient lake read race")
 
     assert warm_movers_snapshots([lambda: 3, _boom, lambda: 1]) == 2
+
+
+# ── DEC-MOVERS-WARM-GRID-001: the post-pull warm grids (pure, exhaustive) ──
+
+
+def test_spot_warm_grid_one_coord_per_exchange() -> None:
+    grid = spot_warm_grid()
+    assert [c["exchange"] for c in grid] == list(WARM_EXCHANGES)
+    assert len(grid) == 3  # None + NSE + BSE
+
+
+def test_futures_warm_grid_is_exchange_times_tier() -> None:
+    grid = futures_warm_grid()
+    assert len(grid) == len(WARM_EXCHANGES) * len(WARM_OPTIONS_TIERS)  # 3 × 3 = 9
+    # every (exchange, tier) pair appears exactly once
+    pairs = {(c["exchange"], c["expiry_tier"]) for c in grid}
+    assert pairs == {(e, t) for e in WARM_EXCHANGES for t in WARM_OPTIONS_TIERS}
+
+
+def test_options_warm_grid_is_exchange_times_tier_times_track() -> None:
+    grid = options_warm_grid()
+    assert len(grid) == len(WARM_EXCHANGES) * len(WARM_OPTIONS_TIERS) * len(WARM_OPTIONS_TRACKS)
+    assert len(grid) == 27
+    triples = {(c["exchange"], c["expiry_tier"], c["expiry_track"]) for c in grid}
+    assert triples == {
+        (e, t, k) for e in WARM_EXCHANGES for t in WARM_OPTIONS_TIERS for k in WARM_OPTIONS_TRACKS
+    }
+
+
+def test_grid_tokens_are_lowercase_canonical() -> None:
+    # The cache key uses lower-cased tier/track tokens; the grid must match.
+    assert WARM_OPTIONS_TIERS == ("near", "next", "far")
+    assert WARM_OPTIONS_TRACKS == ("all", "weekly", "monthly")
+    assert WARM_EXCHANGES == (None, "NSE", "BSE")
