@@ -89,6 +89,7 @@ from brutex.adapters.groww.option_ingest import (
     GrowwOptionIngestReport,
     ProgressHook,
     contract_exchange,
+    emit_underlying_all_empty,
     run_groww_option_ingest,
 )
 from brutex.adapters.ingest_common import (
@@ -1186,6 +1187,21 @@ def pull_contract_candles(
     minute = _reconcile_phase_with_pipeline(
         minute, fetch_pipeline, selected_symbols=selected_symbols
     )
+
+    # Observe-only whole-underlying silent-empty detector (DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001
+    # — completing DEC-SUSPICIOUS-EMPTY-FLAG-001 #919): surface a whole F&O underlying whose every
+    # cleanly-fetched contract came back EMPTY (the BAJAJ-AUTO/M&M silent-vanish case) as ONE
+    # ``pull.underlying_all_empty`` WARNING for human triage. The in-driver scan inside
+    # ``run_groww_option_ingest`` SKIPS when a ``fetch_pipeline`` is wired (the producer reports 0
+    # bars before the background consumer folds the real counts), and the PRODUCTION F&O pull ALWAYS
+    # wires one — so the detector was DEAD in every real pull. Running it HERE, after the pipeline
+    # drain + ``_reconcile_phase_with_pipeline`` has folded the REAL per-pair ``bars_appended`` back
+    # into ``minute.merged_pairs``, is the only point those durable counts exist. Pipeline-only (the
+    # ``fetch_pipeline is None`` synchronous path already emitted in-driver — a second emit here would
+    # double-warn). Reuses the SAME COMMON ``emit_underlying_all_empty`` (fully guarded — can NEVER
+    # break the pull). Observe-only: no return/ledger/engine change; ENGINE stays NIFTY/BANKNIFTY/SENSEX.
+    if fetch_pipeline is not None:
+        emit_underlying_all_empty(minute.merged_pairs, [contract for _row, contract in rebuilt])
 
     # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
     # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the
