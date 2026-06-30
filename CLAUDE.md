@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/empty-detector-production-wiring` (**DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001, MIGRATION.md #1013** —
+- **Active branch:** `claude/empty-detector-production-wiring` (**DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001, MIGRATION.md #1014** —
   the whole-underlying "silent-empty / silent-vanish" detector (DEC-SUSPICIOUS-EMPTY-FLAG-001 #919) is WAKED in the real
   production F&O pull. It was DEAD in every live pull: its only call site in `run_groww_option_ingest` is gated
   `if fetch_pipeline is None:` (the correct in-async-mode skip — a producer-resolved per-pair `IngestReport` reads
