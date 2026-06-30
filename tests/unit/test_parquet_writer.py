@@ -132,6 +132,83 @@ class TestWriterRoundTrip:
         assert first.raw_hash == second.raw_hash  # byte-identical → idempotent
 
 
+class TestBarsAddedDedup:
+    """DEC-SINK-DEDUP-COUNT-001: ``WriteResult.bars_added`` is the DEDUPED count of bars
+    this write actually contributed — distinct from the partition's total ``row_count``."""
+
+    def _one(self, minute: int) -> CandleBar:
+        return _bar(minute, open_="100.0", high="110.0", low="90.0", close="105.0")
+
+    def test_fresh_write_adds_every_bar(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        result = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[self._one(0), self._one(1)],
+        )
+        assert result.bars_added == 2  # a fresh partition adds all incoming bars
+        assert result.row_count == 2
+
+    def test_full_repull_adds_zero(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [self._one(0), self._one(1)]
+        writer.write(
+            exchange="NSE", segment="CASH", symbol="NSE-NIFTY", interval="1minute", bars=bars
+        )
+        # Re-pull the SAME two bars — all already stored → ZERO added (the dedup-count fix).
+        second = writer.write(
+            exchange="NSE", segment="CASH", symbol="NSE-NIFTY", interval="1minute", bars=bars
+        )
+        assert second.bars_added == 0  # NOT len(bars)=2 — the honest deduped count
+        assert second.row_count == 2  # the partition still holds both
+
+    def test_partial_overlap_adds_only_the_new_bars(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[self._one(0), self._one(1)],
+        )
+        # Re-pull minute 1 (already stored) + minute 2 (new) → only ONE bar is added.
+        second = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[self._one(1), self._one(2)],
+        )
+        assert second.bars_added == 1
+        assert second.row_count == 3
+
+    def test_keep_first_conflict_adds_zero(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(0, open_="100.0", high="110.0", low="90.0", close="105.0")],
+        )
+        # Re-pull the SAME timestamp with a DIFFERENT (in-range) close → keep-first conflict.
+        second = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(0, open_="100.0", high="110.0", low="90.0", close="101.0")],
+        )
+        assert second.bars_added == 0  # the stored bar is kept; the vendor restate adds nothing
+        assert len(second.conflicts) == 1
+
+
 class TestWriterErrors:
     """Empty-bars and multi-partition guard paths in ParquetWriter.write."""
 
