@@ -130,14 +130,18 @@ def _snap_price_expr(column: str) -> pl.Expr:
     ``Decimal(str(float))`` — ``ROUND_HALF_UP`` (away from zero), never truncation
     (DEC-MONEY-2DP-001 / DEC-SPOT-PRICE-2DP-001) — entirely inside the polars C engine:
 
-    1. ``cast(String)`` materialises the float's shortest round-trip decimal repr
-       (the same digit string Python's ``str(float)`` yields for in-range prices —
-       the seed the legacy ``Decimal(str(op))`` parsed). It is then cast to a
-       high-scale ``Decimal(scale=10)`` so the parsed value equals ``Decimal(str(op))``
-       exactly with no binary-float drift (a direct ``Float64 -> Decimal`` cast would
-       carry the binary representation, e.g. ``100.005`` -> ``100.00499…`` -> the WRONG
-       half-up answer — the ``str`` round-trip is what makes the half boundary land
-       on the same side as the legacy path).
+    1. ``cast(String)`` materialises the float's shortest round-trip decimal repr,
+       which carries the same NUMERIC VALUE Python's ``str(float)`` yields for the
+       realistic price range — the seed the legacy ``Decimal(str(op))`` parsed.
+       (The two are not always the same DIGIT STRING — polars emits ``"0.00001"``
+       where Python emits ``"1e-05"`` — but ``Decimal("0.00001") == Decimal("1e-05")``,
+       so the parsed value is identical; no realistic price is in scientific notation
+       anyway.) It is then cast to a high-scale ``Decimal(scale=10)`` so the parsed
+       value equals ``Decimal(str(op))`` with no binary-float drift (a direct
+       ``Float64 -> Decimal`` cast would carry the binary representation, e.g.
+       ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer — the ``str``
+       round-trip is what makes the half boundary land on the same side as the
+       legacy path).
     2. Half-away-from-zero to 2dp via integer arithmetic on the Decimal column:
        ``floor(d*100 + 0.5)/100`` for ``d >= 0`` and ``ceil(d*100 - 0.5)/100`` for
        ``d < 0``. ``floor``/``ceil`` (not a ``cast(Int64)``, which ROUNDS) give exact
@@ -148,9 +152,13 @@ def _snap_price_expr(column: str) -> pl.Expr:
     numerically EQUAL to the legacy ``round_money(Decimal(str(op)))`` (so
     :meth:`ParquetWriter._bar_values_equal` sees no false conflict) and whose
     ``float(...)`` (the value :meth:`ParquetWriter._render_bytes` writes) is the SAME
-    float (so the stored Parquet bytes are byte-identical). Proven across 178k+ cases
-    incl. exact ``.005`` half-boundaries, negatives, zeros, and 4dp vendor noise in
-    ``tests/golden/test_writer_vectorized_snap_parity.py``.
+    float (so the stored Parquet bytes are byte-identical). Proven across the realistic
+    price range (``|price|`` up to ~10^6) incl. exact ``.005`` half-boundaries,
+    negatives, zeros, large strikes, and 4dp vendor noise in
+    ``tests/golden/test_writer_vectorized_snap_parity.py``. (Float-rerender ULP drift
+    appears only at magnitudes ``≳ 4e14`` — far above any tradable price — and a hard
+    ``Decimal`` overflow only at ``≳ 1e27``; neither is reachable by a real bar, so the
+    property test bounds its fuzz to the price range.)
     """
     import polars as pl
 
