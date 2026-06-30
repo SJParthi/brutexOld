@@ -1,11 +1,11 @@
-"""NSE/BSE trading calendar for Indian spot indices, 2021-2026.
+"""NSE/BSE trading calendar for Indian spot indices, 2020-2026.
 
 Per `docs/TRACK1_BACKTEST_SPEC.md` Phase 1 Validation Gate 1:
-- Full holiday list 2021 through 2026
+- Full holiday list 2020 through 2026
 - Muhurat sessions (Diwali ~1 hour; EXCLUDE from Sharpe denominator)
 - Pre-open auction 09:00-09:15 (EXCLUDE; first usable bar 09:16-09:17)
 - Forced exit time: 15:20 IST
-- Tick size: paisa 5 (Rs 0.05) throughout 2021-2026
+- Tick size: paisa 5 (Rs 0.05) throughout 2020-2026
 
 Source-of-truth: NSE/BSE published calendars + India PIB notifications.
 Holidays verified against the published NSE FAOP circulars for each year.
@@ -15,8 +15,8 @@ Coverage honesty (DEC-CALENDAR-HARDEN-001): the hardcoded holiday list spans
 (inclusive). For a date outside that span :func:`is_holiday` returns ``False``
 because the date is simply not in the (incomplete) set — that is an ABSENCE of
 information, not a verified "trading day". Callers that need the distinction
-(e.g. the 2020-anchored data pull whose floor predates the 2021 list start)
-must gate on :func:`is_holiday_data_available` or use the strict
+(e.g. a pre-2020 date that predates the published list start) must gate on
+:func:`is_holiday_data_available` or use the strict
 :func:`is_holiday_checked` / :func:`is_trading_day_checked`, which raise
 :class:`HolidayDataUnavailableError` rather than guess. The unguarded
 :func:`is_holiday` / :func:`is_trading_day` keep their byte-identical
@@ -26,13 +26,15 @@ Per Golden Rule #1 we do NOT hallucinate the missing-year holiday dates; we
 surface the gap honestly.
 
 The spot-anchor consumers ``indicators/prev_day_ohlc.py`` +
-``indicators/weekly_anchors.py`` are now WIRED to the strict
-:func:`is_trading_day_checked` (DEC-CALENDAR-2020-HONEST-001), so a
-2020-anchored PDH/PDL / weekly-Fib lookup raises
+``indicators/weekly_anchors.py`` are WIRED to the strict
+:func:`is_trading_day_checked` (DEC-CALENDAR-2020-HONEST-001), so an
+out-of-coverage-anchored PDH/PDL / weekly-Fib lookup raises
 :class:`HolidayDataUnavailableError` for an out-of-coverage weekday instead of
-silently treating a 2020 holiday as a trading day. Other unguarded
-:func:`is_trading_day` callers (e.g. the dashboard pre-open report) remain a
-deferred opt-in follow-up.
+silently treating an unknown holiday as a trading day. The 2020 holiday list is
+now ADDED (DEC-CALENDAR-2020-DATA-001) so 2020 — the data-pull floor year — is
+fully covered and the loud-guard now applies to pre-2020 (2019 and earlier)
+weekdays. Other unguarded :func:`is_trading_day` callers (e.g. the dashboard
+pre-open report) remain a deferred opt-in follow-up.
 """
 
 from __future__ import annotations
@@ -109,9 +111,37 @@ class TradingSession:
         return int(delta.total_seconds() // 60)
 
 
-# NSE/BSE holiday list 2021-2026.
+# NSE/BSE holiday list 2020-2026.
 # Source: NSE official trading-holiday circulars + BSE annual calendars.
 # Verified against pib.gov.in for gazette holidays.
+#
+# 2020 list added per DEC-CALENDAR-2020-DATA-001 to close the 2020 loud-guard
+# gap (the data-pull floor is 2020-01-01 — ``GROWW_HISTORY_FLOOR``; CLAUDE.md §3
+# — so a 2020 weekday previously hit ``HolidayDataUnavailableError`` and any
+# sweep over 2020 refused to run). The 10 CONFIRMED dates are cross-checked
+# across ≥2 public NSE/BSE holiday sources + weekday arithmetic; the 2 dates
+# tagged ``# UNVERIFIED`` are standing annual NSE holidays observed every year
+# with weekday-correct 2020 dates that could NOT be pinned to the raw 2020 NSE
+# circular (it 403-blocked at verification time) — mirrors the 2026 UNVERIFIED
+# precedent below; per Golden Rule #1 we tag the gap honestly rather than fake
+# confirmation.
+HOLIDAYS_2020 = frozenset(
+    [
+        date(2020, 2, 21),  # Fri  Mahashivratri
+        date(2020, 3, 10),  # Tue  Holi
+        date(2020, 4, 2),  # Thu  Ram Navami
+        date(2020, 4, 6),  # Mon  Mahavir Jayanti
+        date(2020, 4, 10),  # Fri  Good Friday
+        date(2020, 4, 14),  # Tue  Dr. Baba Saheb Ambedkar Jayanti
+        date(2020, 5, 1),  # Fri  Maharashtra Day
+        date(2020, 5, 25),  # Mon  Id-Ul-Fitr (Ramzan Id)
+        date(2020, 10, 2),  # Fri  Mahatma Gandhi Jayanti
+        date(2020, 12, 25),  # Fri  Christmas
+        date(2020, 11, 16),  # Mon  Diwali Balipratipada (UNVERIFIED — raw 2020 circular 403'd)
+        date(2020, 11, 30),  # Mon  Guru Nanak Jayanti (UNVERIFIED — raw 2020 circular 403'd)
+    ]
+)
+
 HOLIDAYS_2021 = frozenset(
     [
         date(2021, 1, 26),  # Republic Day
@@ -227,12 +257,19 @@ HOLIDAYS_2026 = frozenset(
 )
 
 ALL_HOLIDAYS: frozenset[date] = (
-    HOLIDAYS_2021 | HOLIDAYS_2022 | HOLIDAYS_2023 | HOLIDAYS_2024 | HOLIDAYS_2025 | HOLIDAYS_2026
+    HOLIDAYS_2020
+    | HOLIDAYS_2021
+    | HOLIDAYS_2022
+    | HOLIDAYS_2023
+    | HOLIDAYS_2024
+    | HOLIDAYS_2025
+    | HOLIDAYS_2026
 )
 
 # Diwali Muhurat sessions (one trading hour, evening, separate from regular hours).
 # Source: NSE special-session circulars per year.
 MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
+    date(2020, 11, 14): (time(18, 15), time(19, 15)),  # Sat — Diwali (DEC-CALENDAR-2020-DATA-001)
     date(2021, 11, 4): (time(18, 15), time(19, 15)),
     date(2022, 10, 24): (time(18, 15), time(19, 15)),
     date(2023, 11, 12): (time(18, 0), time(19, 0)),
@@ -246,23 +283,25 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 #: silently drift: the first/last keys ARE the smallest/largest holiday year.
 #:
 #: Why this matters (DEC-CALENDAR-HARDEN-001): the Track-1 data pull floor is
-#: 2020-01-01 (``GROWW_HISTORY_FLOOR``; CLAUDE.md §3, MIGRATION.md #722) but the
-#: holiday list starts in 2021, and it ends in 2026. For ANY date outside this
+#: 2020-01-01 (``GROWW_HISTORY_FLOOR``; CLAUDE.md §3, MIGRATION.md #722). The
+#: holiday list now starts in 2020 (DEC-CALENDAR-2020-DATA-001) and ends in
+#: 2026, so the entire pull range is covered; the loud-guard now bites only for
+#: PRE-2020 (2019 and earlier) and post-2026 dates. For ANY date outside this
 #: span :func:`is_holiday` returns ``False`` — which is the HONEST answer for
 #: "is this date IN the published list" but, if a caller treats it as "is this a
-#: trading day", an out-of-coverage 2020 weekday holiday (e.g. Holi 2020-03-10)
-#: reads as a trading day via the UNGUARDED :func:`is_trading_day`. That
-#: unguarded behaviour is UNCHANGED by this module (back-compat); what is NEW is
-#: an OPT-IN detection surface — the coverage range +
-#: :func:`is_holiday_data_available` / :func:`is_holiday_checked` /
-#: :func:`is_trading_day_checked` let a caller DETECT the out-of-coverage case
-#: and refuse to guess, instead of trusting a silent ``False``. Actually WIRING
-#: those strict variants into the spot-anchor consumers
-#: (``indicators/prev_day_ohlc.py``, ``dashboard/preopen_report.py``) is a
-#: deliberately-DEFERRED cross-package follow-up, NOT done here. The 2020 holiday
-#: list itself is likewise a deliberately-deferred, never-invented follow-up
-#: (MIGRATION.md #722): per Golden Rule #1 we do NOT hallucinate holiday dates —
-#: we surface the gap honestly rather than guess at it.
+#: trading day", an out-of-coverage weekday holiday reads as a trading day via
+#: the UNGUARDED :func:`is_trading_day`. That unguarded behaviour is UNCHANGED
+#: by this module (back-compat); the OPT-IN detection surface — the coverage
+#: range + :func:`is_holiday_data_available` / :func:`is_holiday_checked` /
+#: :func:`is_trading_day_checked` — lets a caller DETECT the out-of-coverage
+#: case and refuse to guess, instead of trusting a silent ``False``. The
+#: spot-anchor consumers (``indicators/prev_day_ohlc.py``,
+#: ``indicators/weekly_anchors.py``) are WIRED to the strict variants
+#: (DEC-CALENDAR-2020-HONEST-001); other unguarded callers
+#: (``dashboard/preopen_report.py``) remain a deferred opt-in follow-up. Per
+#: Golden Rule #1 we do NOT hallucinate holiday dates — the 2 standing-annual
+#: 2020 November dates that could not be pinned to the raw circular are tagged
+#: ``# UNVERIFIED`` rather than presented as confirmed.
 HOLIDAY_COVERAGE_FIRST_YEAR: Final[int] = min(h.year for h in ALL_HOLIDAYS)
 HOLIDAY_COVERAGE_LAST_YEAR: Final[int] = max(h.year for h in ALL_HOLIDAYS)
 
@@ -272,7 +311,7 @@ class HolidayDataUnavailableError(LookupError):
 
     The hardcoded NSE/BSE holiday list covers
     ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` inclusive
-    (currently 2021-2026). A date outside that span has NO published-holiday
+    (currently 2020-2026). A date outside that span has NO published-holiday
     information, so :func:`is_holiday` would silently return ``False`` — which
     a strict caller can refuse via :func:`is_holiday_checked` to avoid treating
     an unknown date as a guaranteed non-holiday (Golden Rule #1).
@@ -294,7 +333,7 @@ def is_holiday(d: date) -> bool:
     """Return True if ``d`` is in the NSE/BSE published holiday list.
 
     The list covers ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``
-    inclusive (currently 2021-2026). For a date OUTSIDE that span this returns
+    inclusive (currently 2020-2026). For a date OUTSIDE that span this returns
     ``False`` because the date is not in the (incomplete) set — that ``False``
     means "not a known holiday", NOT "verified trading day". A caller that
     needs the distinction must gate on :func:`is_holiday_data_available` or use
@@ -756,7 +795,7 @@ def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
 # These are NOT "half-day" sessions (the regular 09:15-15:30 hours apply);
 # they are SPECIAL full-day sessions on otherwise-weekend dates. The
 # `SessionType.HALF_DAY` enum is kept for forward-compat (no qualifying
-# half-day session exists in 2021-2026 outside Muhurat — see honest
+# half-day session exists in 2020-2026 outside Muhurat — see honest
 # envelope below).
 #
 # Honest envelope (Golden Rule #10):
@@ -765,7 +804,11 @@ def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
 #     evening, since 2025 ~1 hr afternoon) is the only short session
 #     and is handled by :data:`MUHURAT_SESSIONS` above.
 #   • Special weekend trading sessions for Budget Day on Feb-1-Saturday
-#     last occurred 2020-02-01 (out of Track 1 scope) + 2025-02-01.
+#     occurred 2020-02-01 + 2025-02-01. The 2025/2026 sessions are
+#     modelled below; the 2020-02-01 Budget Saturday session is NOT added
+#     by DEC-CALENDAR-2020-DATA-001 (that scoped change adds only the 2020
+#     full-day holiday list + the 2020 Diwali Muhurat session — adding the
+#     2020 Budget session is a separate, deliberately-not-invented item).
 #     The 2026-02-01 (Sunday) session is announced but is the future-
 #     facing edge case; included with verified=True.
 #

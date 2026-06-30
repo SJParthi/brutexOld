@@ -31,17 +31,17 @@ find the prior trading day. Weekends and holidays are skipped. Example:
 ## Holiday-coverage honesty (DEC-CALENDAR-2020-HONEST-001)
 
 The Track-1 data-pull floor is 2020-01-01 (``GROWW_HISTORY_FLOOR``;
-CLAUDE.md §3) but the hardcoded NSE/BSE holiday + Muhurat lists only span
-``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (2021-2026).
-The UNGUARDED ``is_trading_day`` reads an out-of-coverage weekday holiday
-(e.g. Holi 2020-03-10) as a *trading day* — a SILENT wrong answer — so a
-2020-anchored PDH/PDL lookup could fetch the holiday's daily candle as the
-"prior trading day". Per Golden Rule #1 we do NOT fabricate the missing
-2020 holiday dates; instead every trading-day verdict on this anchor path
-goes through the STRICT ``is_trading_day_checked``, which raises
+CLAUDE.md §3); the hardcoded NSE/BSE holiday + Muhurat lists span
+``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (now 2020-2026
+after DEC-CALENDAR-2020-DATA-001). The UNGUARDED ``is_trading_day`` reads an
+out-of-coverage weekday holiday (e.g. a 2019 holiday) as a *trading day* — a
+SILENT wrong answer — so an out-of-coverage-anchored PDH/PDL lookup could fetch
+the holiday's daily candle as the "prior trading day". Per Golden Rule #1 we do
+NOT fabricate missing holiday dates; instead every trading-day verdict on this
+anchor path goes through the STRICT ``is_trading_day_checked``, which raises
 ``HolidayDataUnavailableError`` for an out-of-coverage weekday rather than
-guess. In-coverage (2021-2026) dates are byte-identical to the unguarded
-path; only the previously-silent-wrong 2020 case becomes loud.
+guess. In-coverage (2020-2026) dates are byte-identical to the unguarded path;
+only the previously-silent-wrong out-of-coverage case (now pre-2020) becomes loud.
 
 ## No look-ahead
 
