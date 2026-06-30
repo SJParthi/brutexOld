@@ -5131,6 +5131,8 @@ def build_app(
                     descending=desc,
                     limit=limit,
                     offset=offset,
+                    count_cache=_candle_count_cache,
+                    generation=_summary_cache.generation,
                 )
             )
         except ValueError as exc:
