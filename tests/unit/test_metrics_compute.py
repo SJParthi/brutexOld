@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from brutex.metrics import (
@@ -149,6 +150,91 @@ def test_closed_trade_win_loss_flags() -> None:
     assert not _trade(-100).is_win
     assert not _trade(0).is_win
     assert not _trade(0).is_loss
+
+
+# ── ClosedTrade VIX reference stamp (DEC-VIX-TRADE-STAMP-001) ────────
+
+
+def test_closed_trade_vix_defaults_to_none() -> None:
+    """A trade built without VIX carries ``None`` for both VIX fields."""
+    trade = _trade(100)
+    assert trade.vix_at_entry is None
+    assert trade.vix_at_exit is None
+
+
+def test_closed_trade_accepts_decimal_vix_levels() -> None:
+    """A finite Decimal VIX level at entry + exit is preserved at full precision."""
+    trade = ClosedTrade(
+        pnl_paisa=1,
+        mfe_paisa=0,
+        mae_paisa=0,
+        holding_bars=1,
+        entry_ts=_T0,
+        exit_ts=_T0 + timedelta(minutes=1),
+        direction=Side.BUY,
+        vix_at_entry=Decimal("14.123456789"),
+        vix_at_exit=Decimal("15.987654321"),
+    )
+    # Full precision — VIX is a metric, never money-rounded (CLAUDE.md §4).
+    assert trade.vix_at_entry == Decimal("14.123456789")
+    assert trade.vix_at_exit == Decimal("15.987654321")
+
+
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+def test_closed_trade_rejects_non_finite_vix_entry(bad: Decimal) -> None:
+    """A NaN / inf ``vix_at_entry`` is rejected (a metric must stay finite)."""
+    with pytest.raises(ValueError, match="vix_at_entry must be a finite Decimal"):
+        ClosedTrade(
+            pnl_paisa=1,
+            mfe_paisa=0,
+            mae_paisa=0,
+            holding_bars=1,
+            entry_ts=_T0,
+            exit_ts=_T0 + timedelta(minutes=1),
+            direction=Side.BUY,
+            vix_at_entry=bad,
+        )
+
+
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("Infinity")])
+def test_closed_trade_rejects_non_finite_vix_exit(bad: Decimal) -> None:
+    """A NaN / inf ``vix_at_exit`` is rejected (a metric must stay finite)."""
+    with pytest.raises(ValueError, match="vix_at_exit must be a finite Decimal"):
+        ClosedTrade(
+            pnl_paisa=1,
+            mfe_paisa=0,
+            mae_paisa=0,
+            holding_bars=1,
+            entry_ts=_T0,
+            exit_ts=_T0 + timedelta(minutes=1),
+            direction=Side.BUY,
+            vix_at_exit=bad,
+        )
+
+
+def test_closed_trade_vix_survives_dataclass_serialization_round_trip() -> None:
+    """The VIX stamp round-trips through ``dataclasses.asdict`` / reconstruction.
+
+    ``ClosedTrade`` is not persisted to Parquet directly (the per-combo
+    ``ResultRow`` aggregate is), so its serialization contract is the frozen
+    dataclass surface: a field-dict round-trip must preserve the VIX levels
+    exactly (Decimal, full precision).
+    """
+    original = ClosedTrade(
+        pnl_paisa=42,
+        mfe_paisa=7,
+        mae_paisa=3,
+        holding_bars=4,
+        entry_ts=_T0,
+        exit_ts=_T0 + timedelta(minutes=4),
+        direction=Side.SELL,
+        vix_at_entry=Decimal("13.25"),
+        vix_at_exit=Decimal("13.40"),
+    )
+    rebuilt = ClosedTrade(**dataclasses.asdict(original))
+    assert rebuilt == original
+    assert rebuilt.vix_at_entry == Decimal("13.25")
+    assert rebuilt.vix_at_exit == Decimal("13.40")
 
 
 # ── EquityCurve validation ──────────────────────────────────────────

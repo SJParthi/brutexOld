@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from brutex.strategies.types import Side
 
@@ -72,13 +73,27 @@ class ClosedTrade:
     direction
         ``Side.BUY`` (long) or ``Side.SELL`` (short). ``HOLD`` is not a
         trade and is rejected.
+    vix_at_entry, vix_at_exit
+        The **India VIX** index level (a :class:`~decimal.Decimal`) at the
+        trade's entry / exit instant, or ``None`` when no VIX bar exists at that
+        timestamp. India VIX is **REFERENCE ONLY** (CLAUDE.md §1/§3): it is
+        stamped on every trade for downstream filter analysis but is **NEVER**
+        part of the brute-force pattern combinations or the 60-condition
+        vocabulary (DEC-VIX-TRADE-STAMP-001). It is a volatility index level,
+        **not money**, so it keeps full Decimal precision and is never routed
+        through paisa rounding (CLAUDE.md §4). ``None`` is the no-hallucination
+        sentinel — a missing VIX bar is never replaced by a fabricated number
+        (Golden Rule #1). Both default to ``None`` for callers that do not
+        stamp.
 
     Raises
     ------
     ValueError
         If ``mfe_paisa`` or ``mae_paisa`` is negative, ``holding_bars``
         is not strictly positive, timestamps are naive, ``exit_ts`` is
-        before ``entry_ts``, or ``direction`` is ``HOLD``.
+        before ``entry_ts``, ``direction`` is ``HOLD``, or a supplied
+        ``vix_at_entry`` / ``vix_at_exit`` is a non-finite (NaN / inf)
+        Decimal.
     """
 
     pnl_paisa: int
@@ -88,6 +103,8 @@ class ClosedTrade:
     entry_ts: datetime
     exit_ts: datetime
     direction: Side
+    vix_at_entry: Decimal | None = None
+    vix_at_exit: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.mfe_paisa < 0:
@@ -106,6 +123,19 @@ class ClosedTrade:
             )
         if self.direction is Side.HOLD:
             raise ValueError("ClosedTrade.direction must be BUY or SELL, not HOLD")
+        # VIX is a metric, not money: never rounded — but a non-finite Decimal
+        # (NaN / inf) would silently corrupt any downstream filter, so reject it
+        # here (the int paisa fields can never be non-finite; only these can).
+        if self.vix_at_entry is not None and not self.vix_at_entry.is_finite():
+            raise ValueError(
+                f"ClosedTrade.vix_at_entry must be a finite Decimal or None, "
+                f"got {self.vix_at_entry!r}"
+            )
+        if self.vix_at_exit is not None and not self.vix_at_exit.is_finite():
+            raise ValueError(
+                f"ClosedTrade.vix_at_exit must be a finite Decimal or None, "
+                f"got {self.vix_at_exit!r}"
+            )
 
     @property
     def is_win(self) -> bool:

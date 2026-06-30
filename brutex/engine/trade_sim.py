@@ -97,6 +97,7 @@ from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
 
     # ``ClosedTrade`` is imported lazily at its single construction site (``_close``)
     # rather than at module top: importing ``brutex.metrics.types`` runs the
@@ -232,6 +233,16 @@ class TradeSimWalker:
         disable the target leg (Mode B).
     policy
         The :class:`FillPolicy`. Defaults to :data:`DEFAULT_FILL_POLICY`.
+    reference_stamper
+        Optional :class:`~brutex.engine.reference_series.TradeReferenceStamper`.
+        When supplied, every emitted :class:`ClosedTrade` is stamped with the
+        India VIX level at its entry + exit instants (``vix_at_entry`` /
+        ``vix_at_exit``) — REFERENCE ONLY, never a signal input (CLAUDE.md
+        §1/§3; DEC-VIX-TRADE-STAMP-001). ``None`` (the default) leaves both VIX
+        fields ``None``. A VIX bar missing at an instant stamps ``None`` there
+        (never a fabricated value) and the stamper warns; the engine output is
+        otherwise byte-identical with or without the stamper, so it is a pure
+        downstream-analysis annotation.
 
     Raises
     ------
@@ -248,6 +259,7 @@ class TradeSimWalker:
         stop_loss_paisa: int | None = None,
         take_profit_paisa: int | None = None,
         policy: FillPolicy = DEFAULT_FILL_POLICY,
+        reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         if direction is Side.HOLD:
             raise ValueError("TradeSimWalker.direction must be BUY or SELL, not HOLD")
@@ -266,6 +278,7 @@ class TradeSimWalker:
         self._sl_paisa = stop_loss_paisa
         self._tp_paisa = take_profit_paisa
         self._policy = policy
+        self._reference_stamper = reference_stamper
         self._position: _OpenPosition | None = None
         self._pending_entry = False
         self._pending_exit: _ExitReason | None = None
@@ -595,6 +608,13 @@ class TradeSimWalker:
             pnl = exit_price_paisa - pos.entry_price_paisa
         else:  # Side.SELL
             pnl = pos.entry_price_paisa - exit_price_paisa
+        # Reference-series stamp (DEC-VIX-TRADE-STAMP-001): stamp the India VIX
+        # level at entry + exit when a stamper is wired, else leave both None. A
+        # missing VIX bar stamps None (no hallucination, Golden Rule #1).
+        if self._reference_stamper is not None:
+            vix_at_entry, vix_at_exit = self._reference_stamper.stamp(pos.entry_ts, exit_ts)
+        else:
+            vix_at_entry, vix_at_exit = None, None
         trade = ClosedTrade(
             pnl_paisa=pnl,
             mfe_paisa=pos.mfe_paisa,
@@ -603,6 +623,8 @@ class TradeSimWalker:
             entry_ts=pos.entry_ts,
             exit_ts=exit_ts,
             direction=self._direction,
+            vix_at_entry=vix_at_entry,
+            vix_at_exit=vix_at_exit,
         )
         self._position = None
         _LOG.debug(
@@ -625,6 +647,7 @@ def simulate_trades(
     take_profit_paisa: int | None = None,
     exit_signals: Sequence[bool] | None = None,
     policy: FillPolicy = DEFAULT_FILL_POLICY,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[ClosedTrade]:
     """Walk a feed into closed trades — the one-call batch wrapper over :class:`TradeSimWalker`.
 
@@ -647,6 +670,11 @@ def simulate_trades(
         as ``bars`` when supplied.
     policy
         The :class:`FillPolicy` (defaults to :data:`DEFAULT_FILL_POLICY`).
+    reference_stamper
+        Optional India VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper` — stamps
+        ``vix_at_entry`` / ``vix_at_exit`` on every trade (REFERENCE ONLY,
+        DEC-VIX-TRADE-STAMP-001). ``None`` leaves both VIX fields ``None``.
 
     Returns
     -------
@@ -659,6 +687,7 @@ def simulate_trades(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         policy=policy,
+        reference_stamper=reference_stamper,
     )
     return walker.run(bars, entry_signals, exit_signals)
 

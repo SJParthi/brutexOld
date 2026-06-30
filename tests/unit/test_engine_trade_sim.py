@@ -762,3 +762,121 @@ class TestSessionAwareForcedExit:
         assert trades[1].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)  # day-2 Muhurat
         assert trades[0].pnl_paisa == 30
         assert trades[1].pnl_paisa == 10
+
+
+# ────────────────────────────────────────────────────────────────────────
+# India VIX reference stamp (DEC-VIX-TRADE-STAMP-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _vix_bar(hh: int, mm: int, close: str, *, day: date = _DAY) -> CandleBar:
+    """A flat VIX reference bar at IST ``hh:mm`` (aligned to the index feed)."""
+    return _bar(hh, mm, close, close, close, close, day=day)
+
+
+class TestVixStamp:
+    """The reference-series stamper wires the India VIX level onto each trade.
+
+    India VIX is REFERENCE ONLY (CLAUDE.md §1/§3): stamped for downstream
+    filter analysis, never a signal input. ``None`` on a missing VIX bar is the
+    no-hallucination contract (Golden Rule #1).
+    """
+
+    def _index_bars(self) -> list[CandleBar]:
+        # signal @09:15 → enter @09:16 OPEN → end-of-data exit @09:17 CLOSE.
+        return [
+            _bar(9, 15, "100", "100", "100", "100"),
+            _bar(9, 16, "101", "101", "101", "101"),
+            _bar(9, 17, "102", "102", "102", "102"),
+        ]
+
+    def test_no_stamper_leaves_vix_none(self) -> None:
+        """Without a stamper, the engine output is byte-identical (both VIX None)."""
+        trades = simulate_trades(
+            self._index_bars(), [True, False, False], direction=Side.BUY, tf_minutes=1
+        )
+        assert len(trades) == 1
+        assert trades[0].vix_at_entry is None
+        assert trades[0].vix_at_exit is None
+
+    def test_stamp_present_at_entry_and_exit(self) -> None:
+        """A VIX bar at both the entry (09:16) and exit (09:17) instant is stamped."""
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 16, "15.20"), _vix_bar(9, 17, "15.30")]
+        trades = simulate_trades(
+            self._index_bars(),
+            [True, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
+        )
+        assert len(trades) == 1
+        # Entry fills at 09:16, exit at 09:17 — the stamp tracks those instants,
+        # NOT the 09:15 signal bar.
+        assert trades[0].vix_at_entry == Decimal("15.20")
+        assert trades[0].vix_at_exit == Decimal("15.30")
+
+    def test_stamp_missing_at_entry_is_none(self) -> None:
+        """No VIX bar at the 09:16 entry instant → ``vix_at_entry`` is None (not faked)."""
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 17, "15.30")]  # no 09:16
+        trades = simulate_trades(
+            self._index_bars(),
+            [True, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
+        )
+        assert trades[0].vix_at_entry is None
+        assert trades[0].vix_at_exit == Decimal("15.30")
+
+    def test_stamp_missing_at_exit_is_none(self) -> None:
+        """No VIX bar at the 09:17 exit instant → ``vix_at_exit`` is None."""
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 16, "15.20")]  # no 09:17
+        trades = simulate_trades(
+            self._index_bars(),
+            [True, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
+        )
+        assert trades[0].vix_at_entry == Decimal("15.20")
+        assert trades[0].vix_at_exit is None
+
+    def test_stamp_missing_at_both_is_none(self) -> None:
+        """A timestamp-misaligned / empty VIX series → both fields None, trade still emitted."""
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        trades = simulate_trades(
+            self._index_bars(),
+            [True, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=TradeReferenceStamper.from_vix_bars([]),
+        )
+        assert len(trades) == 1
+        assert trades[0].vix_at_entry is None
+        assert trades[0].vix_at_exit is None
+
+    def test_stamp_via_streaming_finish_path(self) -> None:
+        """The end-of-data ``finish`` close path is also stamped (it routes via ``_close``)."""
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 16, "15.20"), _vix_bar(9, 17, "15.30")]
+        walker = TradeSimWalker(
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
+        )
+        bars = self._index_bars()
+        signals = [True, False, False]
+        closed = [walker.push(b, entry_signal=s) for b, s in zip(bars, signals, strict=True)]
+        assert all(c is None for c in closed)  # ends open → closes in finish()
+        final = walker.finish()
+        assert final is not None
+        assert final.vix_at_entry == Decimal("15.20")
+        assert final.vix_at_exit == Decimal("15.30")
