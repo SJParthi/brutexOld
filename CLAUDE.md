@@ -230,7 +230,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rate-widget-fno-honest` (**DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1015** —
+- **Active branch:** `claude/rate-widget-fno-honest` (**DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
   the live PULL RATE widget's "achieved r/s" is now HONEST during the metadata + F&O phases, and the stall verdict is no
   longer blind to an issued-but-failing pull. ROOT (confirmed by deep log+code audit): the SPOT phase feeds the widget the
   transport `CallMeter`'s MEASURED completed-rate, but the metadata + F&O phases have no rate-observe seam, so
