@@ -44,7 +44,24 @@ class SinkAppendResult:
     Attributes
     ----------
     bars_appended
-        Total number of bars accepted by the sink.
+        Number of bars ACCEPTED by the sink — the INPUT batch size (``len(bars)``).
+        This is the historical contract and is DELIBERATELY UNCHANGED: several
+        downstream consumers read it as a ``> 0`` "did this call carry data?" gate
+        (`spot_daily_resample` derived/no-minute split, `pull_controller`'s
+        completed/no-data split), so it MUST stay the input count or a clean
+        idempotent re-pull (every bar already stored) would mis-flip those gates to
+        "no data". For the honest DEDUPED count of bars this call actually ADDED to
+        the lake, read :attr:`bars_net_new` (DEC-SINK-DEDUP-COUNT-001).
+    bars_net_new
+        Number of bars actually ADDED to the lake by this call — the DEDUPED count
+        (DEC-SINK-DEDUP-COUNT-001), summed from each partition's
+        :attr:`~brutex.data.parquet_writer.WriteResult.bars_added`. A re-pull of a
+        window whose bars are all already stored reports ``0`` (the idempotent
+        keep-first merge added nothing); a keep-first conflict adds ``0`` (the stored
+        bar wins). This is the HONEST "how many new bars did this write contribute"
+        figure for a ledger / report column, never the inflated "re-counted what was
+        already there". A :class:`NullBarSink` (no dedup state) reports the input
+        count here too — there is nothing stored to dedupe against.
     partitions_written
         Number of distinct ``(year, month)`` partition files touched.
     write_results
@@ -56,6 +73,7 @@ class SinkAppendResult:
     bars_appended: int
     partitions_written: int
     write_results: tuple[WriteResult, ...]
+    bars_net_new: int = 0
 
 
 @runtime_checkable
@@ -106,6 +124,7 @@ class NullBarSink:
             bars_appended=len(bars),
             partitions_written=0,
             write_results=(),
+            bars_net_new=len(bars),  # no dedup state — net-new == input
         )
 
 
@@ -205,10 +224,18 @@ class ParquetBarSink:
                 )
                 self._catalog.upsert(entry)
 
+        # ``bars_appended`` stays the INPUT count (the historical contract that several
+        # ``> 0`` "did this call carry data?" gates depend on — see SinkAppendResult docs).
+        # ``bars_net_new`` (DEC-SINK-DEDUP-COUNT-001) is the HONEST DEDUPED count, summed
+        # across the partitions this call touched: a re-pull whose bars are all already in
+        # the lake merges to ``bars_added == 0`` per partition, so net-new is 0 there. The
+        # on-disk merge already dedups idempotently — this only ADDS an honest count field,
+        # changing NO existing control flow.
         return SinkAppendResult(
             bars_appended=len(bars),
             partitions_written=len(results),
             write_results=tuple(results),
+            bars_net_new=sum(wr.bars_added for wr in results),
         )
 
 

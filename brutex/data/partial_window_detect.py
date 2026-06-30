@@ -388,8 +388,8 @@ def observe_partial_window(
     symbol: str,
     interval: str,
     pull_id: str | None,
-) -> None:
-    """Observe-only: WARN if a SUCCESS window's bars stop materially before its end.
+) -> PartialWindowVerdict | None:
+    """WARN if a SUCCESS window's bars stop materially before its end; return the verdict.
 
     The ONE shared wiring both pull spines call (CLAUDE.md §11 COMMON — no copy):
     runs :func:`classify_partial_window` over the window's last-stored-bar timestamp
@@ -397,8 +397,14 @@ def observe_partial_window(
     :data:`SUSPECTED_PARTIAL_WINDOW_EVENT` WARNING when (and only when) the window is
     a SUSPECTED truncation. Fully wrapped: ANY failure of the diagnostic is swallowed
     + logged (:data:`SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT`), so it can NEVER block /
-    slow / crash the pull. It changes NO status, NO ledger row, NO return value
-    (observe-only, Golden Rule #10).
+    slow / crash the pull.
+
+    Returns the computed :class:`PartialWindowVerdict` (so a caller may, beyond the
+    WARNING, DEMOTE a truncated SUCCESS window to a re-pullable ledger status —
+    DEC-PARTIAL-WINDOW-REPULL-001), or ``None`` when the guarded scan itself raised.
+    Emitting the WARNING is unconditional of what the caller does with the verdict —
+    a caller that ignores the return value gets the byte-identical observe-only
+    behaviour of DEC-PARTIAL-WINDOW-DETECT-001.
 
     *log* is the caller's structlog logger (typed ``object`` so this module need not
     import structlog — it is duck-typed for ``.warning(event, **fields)``). *last_bar_ts*
@@ -430,7 +436,9 @@ def observe_partial_window(
                 missing_sessions=verdict.missing_sessions,
                 expiry=expiry.isoformat() if expiry else None,
             )
+        return verdict
     except Exception as exc:  # observe-only diagnostic must never break the pull
         log.warning(  # type: ignore[attr-defined]
             SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT, pull_id=pull_id, error=str(exc)
         )
+        return None

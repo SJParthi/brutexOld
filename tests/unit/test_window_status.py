@@ -43,6 +43,19 @@ class TestClassify:
     def test_zero_bars_no_error_is_empty(self) -> None:
         assert classify_window_status(0, None) == EMPTY
 
+    def test_degraded_demotes_a_clean_success_to_failed(self) -> None:
+        # DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001: a bars-returning
+        # SUCCESS whose stored bars are incomplete (interior gap / truncation) is demoted to
+        # a re-pullable FAILED so the skip rule revisits it.
+        assert classify_window_status(5, None, degraded=True) == FAILED
+        # Default (degraded=False) is byte-identical to the prior SUCCESS classification.
+        assert classify_window_status(5, None, degraded=False) == SUCCESS
+
+    def test_degraded_is_ignored_for_empty_and_error(self) -> None:
+        # No bars → still EMPTY (nothing to be incomplete); an error → still FAILED.
+        assert classify_window_status(0, None, degraded=True) == EMPTY
+        assert classify_window_status(0, "GrowwTimeoutError", degraded=True) == FAILED
+
 
 class TestWindowStatusLog:
     def test_record_success_stores_fields(self) -> None:

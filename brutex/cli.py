@@ -2465,6 +2465,11 @@ def cmd_fetch(
                     audit=ingest_audit,
                     write_pool=write_consumer,
                     fetch_pipeline=fetch_pipeline,
+                    # A REAL live pull (real Groww adapter) OPTS IN to the data-completeness
+                    # re-pull demotion; a ``--dry-run`` (the synthetic adapter, whose bars all
+                    # land on the window's first day) leaves it OFF so it never false-reds
+                    # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
+                    detect_completeness_gaps=not dry_run,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, or a quota stop)
