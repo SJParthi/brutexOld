@@ -25,10 +25,14 @@ from ._trading_core import (  # type: ignore[import-not-found]
     __version__,
     compute_fib_levels,
     compute_pivot_levels,
+    derive_bar_metadata,
     evaluate_from_raw,
     evaluate_with_levels,
+    minute_of_session,
+    resolve_near_month,
     total_conditions,
     version,
+    weekday_from_ordinal,
 )
 
 __all__ = [
@@ -38,8 +42,12 @@ __all__ = [
     "__version__",
     "compute_fib_levels",
     "compute_pivot_levels",
+    "derive_bar_metadata",
     "evaluate_from_raw",
     "evaluate_with_levels",
+    "minute_of_session",
+    "resolve_near_month",
     "total_conditions",
     "version",
+    "weekday_from_ordinal",
 ]
