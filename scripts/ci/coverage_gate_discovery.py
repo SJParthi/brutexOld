@@ -126,6 +126,26 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # excluding it here keeps that complement honest (Golden Rule #10) instead
         # of blocking EVERY db_view-touching PR on an unreachable single-file 100%.
         "brutex/dashboard/db_view.py",
+        # The Stage-1A bitset-matrix builder. Its 100% line+branch is reached by a
+        # CURATED multi-file suite — test_engine_stage1a.py (the matrix builder +
+        # the resurrected VWAP/BOS bits) + test_engine_walk_forward.py (the
+        # walk-forward schedule helpers trading_day_starts / WalkForwardSchedule /
+        # _day_to_bar / _walk_forward_schedule_hash / build_walk_forward_schedule,
+        # which live in stage1a.py but are exercised by their own walk-forward suite).
+        # The discovery gate maps a module ONLY to its stem-matching tests
+        # (test_engine_stage1a*), so it sees just the builder file and tops out at
+        # ~82% STANDALONE while the walk-forward functions read 0 — the SAME
+        # multi-file-suite structural mismatch as app.py / pull_controller.py /
+        # db_view.py. Duplicating the walk-forward tests into the stage1a stem file
+        # to satisfy the discovery gate would be a Golden-Rule-#11 COMMON (no
+        # copy-paste) violation. stage1a.py's real 100% gate is the STATIC
+        # per-module engine gate in ci.yml (which runs the WHOLE
+        # tests/unit/test_engine_*.py suite together at --cov-fail-under=100,
+        # verified 100.00% incl. the new VWAP/BOS lines) + the whole-package
+        # --cov-fail-under=100 floor; the discovery gate is a COMPLEMENT, and
+        # excluding it here keeps that complement honest instead of blocking
+        # EVERY stage1a-touching PR (DEC-COVERAGE-DISCOVERY-STAGE1A-001).
+        "brutex/engine/stage1a.py",
     }
 )
 
