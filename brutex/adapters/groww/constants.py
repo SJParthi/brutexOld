@@ -242,6 +242,51 @@ GROWW_CLIENT_POOL_MAX: Final[int] = 4
 #: Environment override for the pool size (operator escape hatch, no code change).
 GROWW_POOL_SIZE_ENV: Final[str] = "BRUTEX_GROWW_POOL_SIZE"
 
+#: The IST hour at which the Groww daily access token resets (the session boundary
+#: for the on-disk token cache, DEC-GROWW-TOKEN-DISK-CACHE-001). A token minted BEFORE
+#: this hour belongs to the PREVIOUS trading session; on/after it, the current session.
+#: HONEST (Golden Rule #10): 06:00 IST is asserted in CLAUDE.md §6 / ADR-0009 / the
+#: production logs (the token died at exactly 06:00 IST), NOT in the SDK reference —
+#: which in fact labels the TOTP flow "No Expiry" (docs/groww/api-reference/\
+#: 01-introduction.md:64). It is exposed as a CONSTANT so a future verified probe can
+#: correct it without a code change; a wrong boundary is SELF-CORRECTING on the token's
+#: first real use (the rejected token drives the existing in-pull forced re-mint, which
+#: overwrites the cache) at the cost of at most one extra mint that day, never silently wrong.
+GROWW_TOKEN_RESET_HOUR_IST: Final[int] = 6
+#: Env override for :data:`GROWW_TOKEN_RESET_HOUR_IST` (operator escape hatch, no code change).
+GROWW_TOKEN_RESET_HOUR_ENV: Final[str] = "BRUTEX_GROWW_TOKEN_RESET_HOUR_IST"  # noqa: S105  # env var name, not a secret
+
+#: On-disk path for the cached daily Groww access token (DEC-GROWW-TOKEN-DISK-CACHE-001).
+#: Default ``~/.brutex/cache/groww_access_token.json`` (mode 0600), mirroring the other
+#: per-user cache state (``~/.brutex/cache/ntm_constituents.csv``). Override via
+#: :data:`GROWW_TOKEN_CACHE_PATH_ENV`. The cache lets a pull mint AT MOST once per
+#: session per machine and reuse the token across the 3 pipeline phases + cold starts,
+#: eliminating the self-inflicted 3×-per-run mint storm that tripped the vendor's
+#: token-issuance limit (operator-reported fresh-clone pull, MIGRATION.md entry #1041).
+GROWW_TOKEN_CACHE_PATH_ENV: Final[str] = "BRUTEX_GROWW_TOKEN_CACHE_PATH"  # noqa: S105  # env var name, not a secret
+#: Cache-file basename under ``~/.brutex/cache/`` (kept matched to the ``.gitignore``
+#: ``**/groww_access_token*`` glob so a redirected cache can never be committed).
+GROWW_TOKEN_CACHE_FILENAME: Final[str] = "groww_access_token.json"  # noqa: S105  # filename, not a secret
+#: JSON schema version stamped in the cache file; a mismatch ⇒ cache-miss → re-mint.
+GROWW_TOKEN_CACHE_SCHEMA: Final[int] = 1
+
+#: Bounded exponential-back-off budget for a token-issuance THROTTLE on the COLD-START
+#: mint (DEC-GROWW-TOKEN-DISK-CACHE-001). When the FIRST mint of a fresh clone is itself
+#: issuance-throttled (no cache to fall back to), the cold-start path re-checks the cache
+#: (a racing phase/process may have just written one) then sleeps + retries up to this
+#: many ATTEMPTS before re-raising a RETRYABLE throttle (the pull quarantines the window +
+#: re-pulls across pulls — never a whole-pull crash). The back-off runs OUTSIDE any pool
+#: lock (it is on the cold-start build path, never inside :meth:`SdkRefresher.reauth`'s
+#: locked block), so it can never freeze a pool leaf (hostile-review M2 fold).
+GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS: Final[int] = 3
+#: Base seconds for the cold-start issuance back-off (``base × 2**attempt``, attempt 0-based).
+#: Deliberately SMALL — it rides out the concurrent storm we ourselves caused (already
+#: eliminated in steady state by the cache), NOT a long vendor outage. Capped per attempt
+#: by :data:`GROWW_TOKEN_ISSUANCE_RETRY_CAP_S` so the total stays well under a pull deadline.
+GROWW_TOKEN_ISSUANCE_RETRY_BASE_S: Final[float] = 1.0
+#: Per-attempt cap (seconds) for the cold-start issuance back-off sleep.
+GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
+
 #: Environment toggle for the OPTIONAL anti-burst smooth pacing
 #: (DEC-GROWW-SMOOTH-PACING-001). The token bucket already caps the AVERAGE rate at
 #: ``current_rps``, but its ``1/rate`` cadence still lets sub-second micro-bursts
@@ -314,6 +359,14 @@ __all__ = [
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
     "GROWW_SMOOTH_PACING_ENV",
+    "GROWW_TOKEN_CACHE_FILENAME",
+    "GROWW_TOKEN_CACHE_PATH_ENV",
+    "GROWW_TOKEN_CACHE_SCHEMA",
+    "GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS",
+    "GROWW_TOKEN_ISSUANCE_RETRY_BASE_S",
+    "GROWW_TOKEN_ISSUANCE_RETRY_CAP_S",
+    "GROWW_TOKEN_RESET_HOUR_ENV",
+    "GROWW_TOKEN_RESET_HOUR_IST",
     "GROWW_WRITE_DEADLINE_S",
     "INDIA_VIX_SYMBOL",
     "INSTRUMENT_CSV_COLUMNS",

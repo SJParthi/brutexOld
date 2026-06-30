@@ -8,9 +8,15 @@ All side effects are injected, so no ``pyotp`` / ``growwapi`` is needed.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from brutex.adapters.groww import auth
-from brutex.adapters.groww.errors import GrowwAuthError
+from brutex.adapters.groww.errors import (
+    GrowwAuthError,
+    GrowwTokenIssuanceThrottled,
+    is_retryable,
+)
 from structlog.testing import capture_logs
 
 _ENV = {auth.ENV_API_KEY: "key-123", auth.ENV_TOTP_SECRET: "secret-xyz"}
@@ -177,3 +183,115 @@ def test_sanitize_reason_skips_blank_secret_and_masks_longest_first() -> None:
     assert auth._sanitize_reason("hello world", "") == "hello world"
     # the longer secret ("abc-def") is fully masked even though "abc" is also a secret
     assert auth._sanitize_reason("token abc-def here", "abc", "abc-def") == "token *** here"
+
+
+# --------------------------------------------------------------------------- #
+# DEC-GROWW-TOKEN-DISK-CACHE-001 — issuance-throttle classification (M2 order)
+# --------------------------------------------------------------------------- #
+_THROTTLE_CREDS = auth.GrowwCredentials(api_key="key-123", totp_secret="secret-xyz")
+
+
+def _raise(exc: Exception) -> Callable[[str, str], str]:
+    def _factory(_api_key: str, _totp: str) -> str:
+        raise exc
+
+    return _factory
+
+
+class TestIssuanceThrottle:
+    """A token-issuance RATE-LIMIT becomes the RETRYABLE throttle subclass, ordered
+    BEFORE the generic terminal arm (hostile-review M2)."""
+
+    def test_429_code_classifies_throttle(self) -> None:
+        class _RateExc(RuntimeError):
+            code = 429
+
+        with pytest.raises(GrowwTokenIssuanceThrottled) as ei:
+            auth.get_access_token(
+                _THROTTLE_CREDS,
+                token_factory=_raise(_RateExc("Groww API Error 429: Rate limit exceeded")),
+                totp_minter=lambda _s: "111111",
+            )
+        # subclass of GrowwAuthError AND retryable
+        assert isinstance(ei.value, GrowwAuthError)
+        assert is_retryable(ei.value) is True
+        assert "throttled" in str(ei.value)
+
+    def test_rate_limit_message_on_generic_exc_classifies_throttle(self) -> None:
+        with pytest.raises(GrowwTokenIssuanceThrottled):
+            auth.get_access_token(
+                _THROTTLE_CREDS,
+                token_factory=_raise(RuntimeError("Rate limit has breached for your request")),
+                totp_minter=lambda _s: "111111",
+            )
+
+    def test_sdk_ratelimit_class_name_classifies_throttle(self) -> None:
+        # The SDK's GrowwAPIRateLimitException is matched by CLASS NAME in errors.py.
+        class GrowwAPIRateLimitException(RuntimeError):
+            pass
+
+        with pytest.raises(GrowwTokenIssuanceThrottled):
+            auth.get_access_token(
+                _THROTTLE_CREDS,
+                token_factory=_raise(GrowwAPIRateLimitException("limit")),
+                totp_minter=lambda _s: "111111",
+            )
+
+    def test_non_ratelimit_stays_terminal_auth_error(self) -> None:
+        class _ApiExc(RuntimeError):
+            code = 400
+
+        with pytest.raises(GrowwAuthError) as ei:
+            auth.get_access_token(
+                _THROTTLE_CREDS,
+                token_factory=_raise(_ApiExc("Groww API Error 400: Invalid TOTP")),
+                totp_minter=lambda _s: "111111",
+            )
+        # NOT the throttle subclass, NOT retryable — a wrong TOTP is terminal.
+        assert not isinstance(ei.value, GrowwTokenIssuanceThrottled)
+        assert is_retryable(ei.value) is False
+
+    def test_throttle_emits_distinct_structlog_event_no_secret(self) -> None:
+        class _RateExc(RuntimeError):
+            code = 429
+
+        with capture_logs() as logs, pytest.raises(GrowwTokenIssuanceThrottled):
+            auth.get_access_token(
+                _THROTTLE_CREDS,
+                token_factory=_raise(_RateExc("Rate limit exceeded for key-123 secret-xyz 111111")),
+                totp_minter=lambda _s: "111111",
+            )
+        throttled = [e for e in logs if e["event"] == "groww.token.issuance_throttled"]
+        assert len(throttled) == 1
+        assert throttled[0]["status"] == 429
+        # the terminal-failure event must NOT fire on a throttle
+        assert not [e for e in logs if e["event"] == "groww.token.issuance_failed"]
+        rendered = repr(throttled[0])
+        for secret in ("key-123", "secret-xyz", "111111"):
+            assert secret not in rendered
+
+    def test_throttle_never_leaks_secret_in_message(self) -> None:
+        class _RateExc(RuntimeError):
+            code = 429
+
+        with pytest.raises(GrowwTokenIssuanceThrottled) as ei:
+            auth.get_access_token(
+                _THROTTLE_CREDS,
+                token_factory=_raise(_RateExc("429 for key-123 secret-xyz 111111")),
+                totp_minter=lambda _s: "111111",
+            )
+        surfaced = str(ei.value)
+        assert ei.value.detail is not None
+        for secret in ("key-123", "secret-xyz", "111111"):
+            assert secret not in surfaced
+            assert secret not in ei.value.detail
+
+    def test_is_issuance_throttle_helper(self) -> None:
+        class _Rate(RuntimeError):
+            code = 429
+
+        class _Plain(RuntimeError):
+            code = 400
+
+        assert auth._is_issuance_throttle(_Rate("x")) is True
+        assert auth._is_issuance_throttle(_Plain("x")) is False

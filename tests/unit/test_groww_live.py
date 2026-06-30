@@ -8,14 +8,24 @@ creds → token → SDK → client composition is 100% covered without ``growwap
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
 from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.adapters.groww.errors import GrowwAuthError
 from brutex.adapters.groww.live import build_live_client, build_live_pool
 from brutex.adapters.groww.pool import ClientPool
 
 _CREDS = GrowwCredentials(api_key="fake_key", totp_secret="fake_secret")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_token_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the on-disk daily-token cache (DEC-GROWW-TOKEN-DISK-CACHE-001) at a clean
+    tmp file so the cache-first cold-start mints fresh here (no real ``~/.brutex`` read)."""
+    monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(tmp_path / "tok.json"))
 
 
 class _FakeSDK:

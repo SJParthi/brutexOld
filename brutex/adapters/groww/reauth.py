@@ -50,12 +50,41 @@ already uses — so the whole refresher is unit-tested with fakes, no ``growwapi
 ``pyotp`` install and no network. A mint failure surfaces as a redacting
 :class:`GrowwAuthError` straight from :func:`get_access_token` (the secret never
 reaches a log).
+
+DISK-CACHE (DEC-GROWW-TOKEN-DISK-CACHE-001) — mint ONCE per session per machine:
+
+* **COLD-START (``__init__``) is CACHE-FIRST.** Before any network mint the initial
+  build reads the on-disk daily token (:func:`~brutex.adapters.groww.token_cache.\
+  load_cached_token`); a valid same-session token builds the SDKs with NO network call
+  (so the 2nd/3rd pipeline phase, a restart, and a concurrent process all reuse the
+  one token the first phase wrote). Only a cache MISS mints, then WRITES the cache. If
+  that first mint is itself issuance-THROTTLED (no cache yet), a SMALL bounded back-off
+  re-checks the cache + retries before re-raising a RETRYABLE
+  :class:`~brutex.adapters.groww.errors.GrowwTokenIssuanceThrottled` (the pull quarantines
+  + re-pulls — never a whole-pull crash). The back-off runs on THIS cold-start path,
+  OUTSIDE any lock (hostile-review M2).
+* **IN-PULL ``reauth()`` FORCES a real mint (B1).** It is called ONLY because the current
+  token was REJECTED, so consulting the cache for the very token we just learned is dead
+  would feed the dead token back into the bounded ``max_reauths=1`` loop and STALL the
+  fetch. ``reauth()`` therefore bypasses the cache READ entirely, does a real network
+  mint (still freeze-guarded), and OVERWRITES the cache with the fresh token — so the
+  06:00-IST revoked-token case self-corrects exactly as before AND the new token is
+  shared with the other phases/processes (hostile-review B1 fold).
+
+All cache I/O is injected (``token_cache_load`` / ``token_cache_store`` / ``clock``,
+defaulting to the real :mod:`~brutex.adapters.groww.token_cache` functions), and is
+BEST-EFFORT — a cache miss/failure never blocks a mint, so the refresher is unchanged
+when the cache is unavailable.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
+from datetime import UTC, datetime
+
+import structlog
 
 from brutex.adapters.groww.auth import (
     GrowwCredentials,
@@ -63,10 +92,27 @@ from brutex.adapters.groww.auth import (
     _real_totp,
     get_access_token,
 )
-from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
+from brutex.adapters.groww.constants import (
+    GROWW_PULL_CALL_TIMEOUT_S,
+    GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS,
+    GROWW_TOKEN_ISSUANCE_RETRY_BASE_S,
+    GROWW_TOKEN_ISSUANCE_RETRY_CAP_S,
+)
 from brutex.adapters.groww.deadline import run_with_deadline
-from brutex.adapters.groww.errors import from_groww_exception
+from brutex.adapters.groww.errors import GrowwTokenIssuanceThrottled, from_groww_exception
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
+from brutex.adapters.groww.token_cache import (
+    CachedToken,
+    load_cached_token,
+    store_token,
+)
+
+_LOG = structlog.get_logger("brutex.adapters.groww.reauth")
+
+
+def _now_utc() -> datetime:
+    """The current UTC instant — the token cache's production clock (injectable in tests)."""
+    return datetime.now(tz=UTC)
 
 
 def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
@@ -97,22 +143,39 @@ class SdkRefresher:
     sdk_factory
         Builds one SDK instance from the issued token (default: ``GrowwAPI(token)``);
         called *size* times per mint to fan independent connections off one token.
+    token_cache_load
+        Reads the on-disk daily token (default: :func:`~brutex.adapters.groww.\
+        token_cache.load_cached_token`). Consulted ONLY on the cold-start ``__init__``
+        path (cache-first); ``reauth`` NEVER reads it (B1). Returns ``None`` on a miss.
+    token_cache_store
+        Persists a freshly-minted token (default: :func:`~brutex.adapters.groww.\
+        token_cache.store_token`). Best-effort — a failure never blocks the build.
+    clock
+        UTC-instant source for the cache's session anchoring (default: :func:`_now_utc`);
+        injected in tests for deterministic session-boundary cases.
 
     Raises
     ------
     GrowwAuthError
         If the INITIAL token issuance fails (redacting ``safe_message`` — the secret
         never leaks), straight from :func:`~brutex.adapters.groww.auth.get_access_token`.
+    GrowwTokenIssuanceThrottled
+        If the cold-start mint is issuance-THROTTLED with no cache to fall back to,
+        after the bounded back-off budget is exhausted (a RETRYABLE subclass — the pull
+        quarantines + re-pulls; DEC-GROWW-TOKEN-DISK-CACHE-001).
     """
 
     __slots__ = (
         "_call_timeout_seconds",
+        "_clock",
         "_creds",
         "_generation",
         "_lock",
         "_sdk_factory",
         "_sdks",
         "_size",
+        "_token_cache_load",
+        "_token_cache_store",
         "_token_factory",
         "_totp_minter",
     )
@@ -126,6 +189,9 @@ class SdkRefresher:
         totp_minter: Callable[[str], str] = _real_totp,
         sdk_factory: Callable[[str], GrowwSDK] = _real_sdk_factory,
         call_timeout_seconds: float = GROWW_PULL_CALL_TIMEOUT_S,
+        token_cache_load: Callable[..., CachedToken | None] = load_cached_token,
+        token_cache_store: Callable[..., bool] = store_token,
+        clock: Callable[[], datetime] = _now_utc,
     ) -> None:
         self._creds = creds
         self._size = max(1, size)
@@ -139,20 +205,94 @@ class SdkRefresher:
         #: run_with_deadline` so a stall raises a retryable timeout instead. Injected SHORT
         #: in tests; the live build sites take the default ``GROWW_PULL_CALL_TIMEOUT_S``.
         self._call_timeout_seconds = call_timeout_seconds
+        #: Best-effort on-disk daily-token cache hooks (DEC-GROWW-TOKEN-DISK-CACHE-001).
+        #: Read ONLY on the cold-start path; written after every successful mint.
+        self._token_cache_load = token_cache_load
+        self._token_cache_store = token_cache_store
+        self._clock = clock
         self._lock = threading.Lock()
         #: Monotonically rising re-auth counter — starts at 0 for the INITIAL mint;
         #: each successful :meth:`reauth` bumps it, so a caller can prove single-flight.
         self._generation = 0
-        #: The INITIAL mint — the ONE mint path (``live.py`` no longer mints separately).
-        self._sdks = self._mint_sdks()
+        #: The INITIAL build — CACHE-FIRST (reuse a same-session token if present, else
+        #: mint + write the cache). This is the ONLY cache-READING path; the in-pull
+        #: :meth:`reauth` always FORCES a real mint (B1).
+        self._sdks = self._cold_start_sdks()
 
-    def _mint_sdks(self) -> tuple[GrowwSDK, ...]:
-        """Mint a fresh token then build *size* independent SDK connections off it.
+    def _safe_cache_load(self) -> CachedToken | None:
+        """Read the on-disk token cache, degrading ANY failure to a cache-MISS (``None``).
 
-        NOT lock-guarded — callers hold the lock. Wraps the side effects through
-        :func:`~brutex.adapters.groww.auth.get_access_token`, which raises a redacting
-        :class:`~brutex.adapters.groww.errors.GrowwAuthError` on a mint failure (the
-        secret never reaches a log).
+        :func:`~brutex.adapters.groww.token_cache.load_cached_token` is contractually
+        best-effort ("returns None on ANY failure, NEVER raises"), but the cache-load hook
+        is INJECTED and a future load path could regress (or a test double could raise).
+        This belt-and-suspenders guard restores the "a cache problem must never break the
+        build" invariant unconditionally: ANY unexpected exception out of the load hook is
+        logged + degraded to ``None``, so the cold-start path falls through to a real mint
+        instead of crashing :meth:`__init__` (and the whole pull) at startup. O(1).
+        """
+        try:
+            return self._token_cache_load(self._creds, now_utc=self._clock())
+        except Exception as exc:  # pylint: disable=broad-exception-caught — degrade ANY cache-load failure to a mint
+            _LOG.warning("groww.token.cache_load_failed", error_type=type(exc).__name__)
+            return None
+
+    def _cold_start_sdks(self) -> tuple[GrowwSDK, ...]:
+        """Build the INITIAL SDKs CACHE-FIRST, minting at most once with bounded back-off.
+
+        The cold-start path (DEC-GROWW-TOKEN-DISK-CACHE-001):
+
+        1. Read the on-disk daily token. A VALID same-session token builds the SDKs with
+           NO network mint (the cache hit that collapses the 3-phase storm to one mint).
+        2. On a MISS, mint a fresh token. On success, WRITE the cache (best-effort) so
+           the other phases/processes reuse it, then build the SDKs.
+        3. If the mint is issuance-THROTTLED (no cache), re-check the cache (a racing
+           phase/process may have just written one) and, while the bounded attempt budget
+           remains, sleep a small back-off + retry. When the budget is exhausted with no
+           cache, re-raise the RETRYABLE :class:`~brutex.adapters.groww.errors.\
+           GrowwTokenIssuanceThrottled` (the pull quarantines + re-pulls — never a crash).
+
+        The back-off sleeps run HERE, on the cold-start path, OUTSIDE any lock (hostile-
+        review M2) — ``reauth``'s locked block never sleeps on a throttle.
+        """
+        attempts = max(1, GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS)
+        for attempt in range(attempts):
+            cached = self._safe_cache_load()
+            if cached is not None:
+                _LOG.info("groww.token.cache_hit", session=cached.issued_for_session.isoformat())
+                return tuple(self._sdk_factory(cached.access_token) for _ in range(self._size))
+            try:
+                return self._mint_and_cache_sdks()
+            except GrowwTokenIssuanceThrottled:
+                # On the LAST attempt re-raise the RETRYABLE throttle (the pull quarantines
+                # + re-pulls — never a crash). Otherwise sleep a small back-off OUTSIDE the
+                # lock (hostile-review M2) + retry, re-checking the cache first (a racing
+                # phase/process may have just written one).
+                if attempt == attempts - 1:
+                    raise
+                backoff = min(
+                    GROWW_TOKEN_ISSUANCE_RETRY_BASE_S * (2.0**attempt),
+                    GROWW_TOKEN_ISSUANCE_RETRY_CAP_S,
+                )
+                _LOG.warning(
+                    "groww.token.issuance_throttled_backoff",
+                    attempt=attempt + 1,
+                    backoff_s=backoff,
+                )
+                time.sleep(backoff)
+        # Unreachable: the final iteration either returns or re-raises above (the loop runs
+        # >= 1 time). A bare raise here would have no active exception, so assert the invariant
+        # for the type-checker without an unreachable runtime branch.
+        raise AssertionError(
+            "unreachable: cold-start loop always returns or raises"
+        )  # pragma: no cover
+
+    def _mint_and_cache_sdks(self) -> tuple[GrowwSDK, ...]:
+        """Mint a fresh token (real network call), WRITE the cache, then build the SDKs.
+
+        The cache write is best-effort (a failure logs + is swallowed inside
+        :func:`~brutex.adapters.groww.token_cache.store_token`), so it never blocks the
+        build. Used by BOTH the cold-start miss path and (after the forced mint) by
+        :meth:`reauth`, so the fresh token is always persisted for reuse.
         """
         token_info = get_access_token(
             self._creds,
@@ -160,6 +300,7 @@ class SdkRefresher:
             totp_minter=self._totp_minter,
         )
         token = token_info.access_token
+        self._token_cache_store(self._creds, token, now_utc=self._clock())
         return tuple(self._sdk_factory(token) for _ in range(self._size))
 
     @property
@@ -196,10 +337,17 @@ class SdkRefresher:
 
         Under the lock: if :attr:`generation` already moved past *seen_generation*
         (another thread re-authed since the caller's last read — the 06:00 stampede),
-        return the CURRENT generation WITHOUT a second mint. Otherwise mint a fresh
-        token, rebuild all *size* SDK connections, bump the generation, store, and
+        return the CURRENT generation WITHOUT a second mint. Otherwise FORCE a fresh
+        network mint, rebuild all *size* SDK connections, bump the generation, store, and
         return the new generation. (Callers re-resolve their SDK via :meth:`sdk_at` /
         :meth:`current_sdk` on the retry — so a returned generation alone suffices.)
+
+        FORCED MINT — NEVER cache-first (hostile-review B1): ``reauth`` is called ONLY
+        because the current token was REJECTED, so it does a REAL mint (it would loop on a
+        dead token if it re-read the same-session cache) and OVERWRITES the cache with the
+        fresh token via :meth:`_mint_and_cache_sdks` — so the 06:00-IST revoked-token case
+        self-corrects AND the new token is shared with the other phases/processes. The
+        cache READ lives ONLY on the cold-start path (:meth:`_cold_start_sdks`).
 
         Parameters
         ----------
@@ -237,13 +385,16 @@ class SdkRefresher:
             if self._generation != seen_generation:
                 # Another thread already re-authed — single-flight: no second mint.
                 return self._generation
-            # FREEZE GUARD (MINOR-1): bound ONLY the network mint by the wall-clock
-            # deadline. `_mint_sdks` returns the new SDK tuple WITHOUT writing shared
-            # state, so on a timeout `run_with_deadline` raises, the exception leaves the
-            # `with self._lock` block (lock released — no permanent hold), and NOTHING was
-            # half-published. The publish (store + bump) runs only AFTER a clean return.
+            # FREEZE GUARD (MINOR-1): bound ONLY the FORCED network mint by the wall-clock
+            # deadline. `_mint_and_cache_sdks` returns the new SDK tuple WITHOUT writing the
+            # refresher's shared `_sdks`/`_generation`, so on a timeout `run_with_deadline`
+            # raises, the exception leaves the `with self._lock` block (lock released — no
+            # permanent hold), and NOTHING was half-published. The in-memory publish (store
+            # + bump) runs only AFTER a clean return. The best-effort disk-cache WRITE
+            # happens inside the minted call (the token IS valid once minted; the write
+            # never raises) — NOT a multi-second sleep, so it cannot starve the deadline.
             try:
-                new_sdks = run_with_deadline(self._mint_sdks, self._call_timeout_seconds)
+                new_sdks = run_with_deadline(self._mint_and_cache_sdks, self._call_timeout_seconds)
             except TimeoutError as exc:
                 # Map the deadline TimeoutError to a RETRYABLE GrowwTimeoutError (the
                 # "deadline exceeded" hint is recognised by from_groww_exception) so the

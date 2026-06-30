@@ -32,7 +32,12 @@ from typing import Final
 
 import structlog
 
-from brutex.adapters.groww.errors import GrowwAuthError
+from brutex.adapters.groww.errors import (
+    GrowwAuthError,
+    GrowwRateLimitError,
+    GrowwTokenIssuanceThrottled,
+    from_groww_exception,
+)
 
 _LOG = structlog.get_logger("brutex.adapters.groww.auth")
 
@@ -139,6 +144,20 @@ def _vendor_status(exc: Exception) -> int | None:
     return None
 
 
+def _is_issuance_throttle(exc: Exception) -> bool:
+    """True if *exc* is a token-issuance RATE-LIMIT (a throttle), not a terminal auth fail.
+
+    Reuses the SINGLE source of truth :func:`~brutex.adapters.groww.errors.\
+    from_groww_exception` (CLAUDE.md §11 COMMON) — so the SDK's
+    ``GrowwAPIRateLimitException`` class name, an HTTP ``429`` ``code``, AND the live
+    "Rate limit … exceeded" message-on-a-generic-exception shape are ALL recognised
+    without re-listing the hints here. A throttle classifies to a
+    :class:`~brutex.adapters.groww.errors.GrowwRateLimitError`; a wrong TOTP / expired
+    key / un-whitelisted IP does not, so it stays a terminal :class:`GrowwAuthError`.
+    """
+    return isinstance(from_groww_exception(exc), GrowwRateLimitError)
+
+
 def get_access_token(
     creds: GrowwCredentials,
     *,
@@ -156,14 +175,37 @@ def get_access_token(
     reason is also attached as :attr:`GrowwAuthError.detail` and emitted on a
     ``groww.token.issuance_failed`` structlog event (with the vendor status when
     present).
+
+    A failure that is a token-ISSUANCE RATE-LIMIT (the vendor throttled the mint —
+    :func:`_is_issuance_throttle`) is raised as a RETRYABLE
+    :class:`~brutex.adapters.groww.errors.GrowwTokenIssuanceThrottled` (a
+    :class:`GrowwAuthError` subclass) — classified BEFORE the generic terminal arm
+    (hostile-review M2 fold) — so the cold-start mint can back off + reuse a cached
+    token instead of failing the pull (DEC-GROWW-TOKEN-DISK-CACHE-001). The SAME
+    sanitization + ``.detail`` + structlog contract applies, so no secret leaks through
+    the throttle path either.
     """
     totp = totp_minter(creds.totp_secret)
     try:
         token = token_factory(creds.api_key, totp)
     except Exception as exc:
         reason = _sanitize_reason(str(exc), creds.api_key, creds.totp_secret, totp)
-        safe_message = f"Groww access-token issuance failed: {reason}"
         status = _vendor_status(exc)
+        # ORDER (M2 fold): classify the issuance THROTTLE arm FIRST so a vendor
+        # rate-limit on the mint raises the RETRYABLE subclass, NOT the terminal
+        # GrowwAuthError. Both arms keep the SAME sanitized reason + structlog event.
+        if _is_issuance_throttle(exc):
+            safe_message = f"Groww access-token issuance throttled: {reason}"
+            _LOG.warning(
+                "groww.token.issuance_throttled",
+                reason=reason,
+                status=status,
+                error_type=type(exc).__name__,
+            )
+            throttle = GrowwTokenIssuanceThrottled(safe_message, safe_message=safe_message)
+            throttle.detail = reason
+            raise throttle from exc
+        safe_message = f"Groww access-token issuance failed: {reason}"
         _LOG.error(
             "groww.token.issuance_failed",
             reason=reason,

@@ -70,6 +70,28 @@ class GrowwAuthError(GrowwError):
     detail: str | None = None
 
 
+class GrowwTokenIssuanceThrottled(GrowwAuthError):
+    """The Groww TOKEN-ISSUANCE endpoint throttled the mint — RETRYABLE, NOT terminal.
+
+    Raised by :func:`~brutex.adapters.groww.auth.get_access_token` when the vendor
+    rejects the access-token mint with a rate-limit signal (the SDK's
+    ``GrowwAPIRateLimitException``, an HTTP ``429`` ``code``, or a "rate limit …
+    exceeded" message). Distinct from a TERMINAL :class:`GrowwAuthError` (a wrong
+    TOTP secret / expired key / un-whitelisted IP) so the cold-start mint can back
+    off + retry (and reuse a same-session cached token) instead of failing the pull
+    (DEC-GROWW-TOKEN-DISK-CACHE-001).
+
+    It is a :class:`GrowwAuthError` SUBCLASS so every ``except GrowwAuthError`` site
+    and :func:`is_auth_failure` keep matching it, BUT :func:`is_retryable` returns
+    ``True`` for it (the ONLY auth-family error that is retryable), so the client's
+    bounded retry / quarantine path treats a throttled mint as transient. Whether
+    Groww documents a token-issuance rate limit is UNVERIFIED (the SDK reference's
+    rate table covers only Orders / Live Data / Non-Trading — ``docs/groww/api-\
+    reference/01-introduction.md:128-134``); the observed ``GrowwAPIRateLimitException``
+    raised BY the issuance call is the runtime evidence a limit exists on that path.
+    """
+
+
 class GrowwNotFoundError(GrowwError):
     """Unknown instrument / endpoint (terminal)."""
 
@@ -342,9 +364,12 @@ def is_retryable(exc: GrowwError) -> bool:
     Retryable: rate-limit + timeout + empty/non-JSON body (a transient throttle —
     DEC-GROWW-EMPTY-BODY-RETRY-001) + transient 5xx server error (a momentary
     upstream blip — DEC-GROWW-SERVER-ERROR-RETRY-001) + transient network / DNS
-    failure (a host connectivity blip — DEC-GROWW-NETWORK-ERROR-RETRY-001).
-    Terminal: bad-request, not-found, auth (needs re-auth), feed (out of scope),
-    and any bare :class:`GrowwError`.
+    failure (a host connectivity blip — DEC-GROWW-NETWORK-ERROR-RETRY-001) + a
+    THROTTLED token-issuance mint (a transient issuance rate-limit, NOT a bad
+    credential — DEC-GROWW-TOKEN-DISK-CACHE-001; the ONLY auth-family error that is
+    retryable, so the cold-start mint backs off + reuses the cache instead of dying).
+    Terminal: bad-request, not-found, a NON-throttled auth failure (needs re-auth),
+    feed (out of scope), and any bare :class:`GrowwError`.
     """
     return isinstance(
         exc,
@@ -354,6 +379,7 @@ def is_retryable(exc: GrowwError) -> bool:
             GrowwEmptyResponseError,
             GrowwServerError,
             GrowwNetworkError,
+            GrowwTokenIssuanceThrottled,
         ),
     )
 
@@ -369,6 +395,7 @@ __all__ = [
     "GrowwRateLimitError",
     "GrowwServerError",
     "GrowwTimeoutError",
+    "GrowwTokenIssuanceThrottled",
     "from_groww_exception",
     "is_auth_failure",
     "is_rate_limit",
