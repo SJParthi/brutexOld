@@ -14,6 +14,9 @@ wheel is built by maturin and installed in every CI job that imports
 * ``evaluate_from_raw`` — the parity path (recomputes pivots/fib from pdh/pdl/pdc).
 * ``compute_pivot_levels`` / ``compute_fib_levels`` — the single-source indicator
   math BruteX's ``brutex.indicators`` wrappers pack into their dataclasses.
+* ``compute_ema`` / ``ema_alpha`` / ``ema_seed`` / ``ema_step`` — the single-source
+  EMA 20/200 recurrence BruteX's ``brutex.indicators.ema`` shim delegates to
+  (``DEC-EMA-RUST-PORT-001``).
 """
 
 from __future__ import annotations
@@ -23,9 +26,13 @@ from ._trading_core import (  # type: ignore[import-not-found]
     PIVOT_LEVELS_LEN,
     TOTAL_CONDITIONS,
     __version__,
+    compute_ema,
     compute_fib_levels,
     compute_pivot_levels,
     derive_bar_metadata,
+    ema_alpha,
+    ema_seed,
+    ema_step,
     evaluate_from_raw,
     evaluate_with_levels,
     minute_of_session,
@@ -40,9 +47,13 @@ __all__ = [
     "PIVOT_LEVELS_LEN",
     "TOTAL_CONDITIONS",
     "__version__",
+    "compute_ema",
     "compute_fib_levels",
     "compute_pivot_levels",
     "derive_bar_metadata",
+    "ema_alpha",
+    "ema_seed",
+    "ema_step",
     "evaluate_from_raw",
     "evaluate_with_levels",
     "minute_of_session",

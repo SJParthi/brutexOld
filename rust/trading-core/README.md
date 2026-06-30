@@ -10,9 +10,11 @@ Phase 1 of `DEC-SHARED-CORE-001` (`docs/MIGRATION.md` #441).
 ## What's here
 
 - `src/bits.rs` — the 52 bit-position constants.
-- `src/indicators/{pivots,fib}.rs` — Standard Pivot Points + Static Daily Fib
-  (the two indicators the evaluator recomputes at evaluate-time; EMA is consumed
-  as a precomputed input, so it is not ported here).
+- `src/indicators/{pivots,fib,ema}.rs` — Standard Pivot Points + Static Daily Fib
+  + the EMA 20/200 recurrence (`compute_ema` / `EmaState`; ported in
+  `DEC-EMA-RUST-PORT-001`). EMA still feeds the evaluator as a precomputed
+  `ema20`/`ema200` paisa input (the caller snaps the `f64` rupees to paisa), but
+  the RECURRENCE now lives here — the all-Rust shared indicator core.
 - `src/evaluator.rs` — `evaluate_atoms(snapshot, proximity, prior) -> u64`, a
   bit-for-bit port of `brutex/vocabulary/evaluator.py`.
 - `tests/golden_vectors.rs` — the **cross-language bit-identity proof**: reads the
@@ -30,6 +32,10 @@ Phase 1 of `DEC-SHARED-CORE-001` (`docs/MIGRATION.md` #441).
   order** token-for-token so the rounding is identical.
 - Python `//` floor division (`_is_near` tolerance, the gap threshold) → Rust
   `i64::div_euclid`.
+- The **EMA** recurrence runs entirely in `f64` (no rounding) and the result
+  stays `f64`; the three arithmetic sites (`2.0/(N+1)`, `seed_sum/N`,
+  `α·close+(1−α)·prior`) are mirrored token-for-token so the IEEE-754 doubles are
+  byte-identical. The caller (`_ema_to_paisa`) snaps to paisa separately.
 - Group-8 time-of-day is the **IST wall-clock** HH:MM:SS (the UTC offset is
   ignored), stored as `tod_seconds`.
 
@@ -58,9 +64,17 @@ The pure-Rust core links **no** Python (the PyO3 surface is behind the optional
   pivot/Fib arithmetic was REMOVED, so the math is **single-source (Rust)**, not
   "two copies kept identical". The wrappers keep only the input validation + the
   dataclass packing (verified bit-exact against the TradingView oracle tests).
-- 🚫 **NOT done:** **EMA / day-extremes / prev-day-OHLC are NOT in this crate** —
-  they stay in Python and feed the evaluator as precomputed inputs (EMA is a
-  stateful recurrence). **TickVault adoption (Phase 3) is 0%** — no TickVault code
-  references this crate yet (it needs the TickVault repo). The **strategy / brute-
-  force sweep / SL-TP / fills** are BruteX-only and NOT shared. So "common" today =
-  the 52-condition evaluator + pivots + Fib, nothing more.
+- ✅ **DONE (DEC-EMA-RUST-PORT-001):** the **EMA 20/200 recurrence** is now in this
+  crate (`compute_ema` / `EmaState`; `ema_alpha` / `ema_seed` / `ema_step` exposed
+  to Python). BruteX's `brutex/indicators/ema.py` **delegates** every arithmetic
+  site to Rust (the streaming `EMAState` keeps only its branch/state shell +
+  checkpoint serialization), proven bit-for-bit by the `tests/ema_golden.rs`
+  cross-language proof (the SAME `indicators_golden.json` the Python golden reads)
+  + the Python parity test. EMA still feeds the evaluator as a precomputed paisa
+  input — the RECURRENCE is what moved.
+- 🚫 **NOT done:** **day-extremes / prev-day-OHLC are NOT in this crate** — they
+  stay in Python and feed the evaluator as precomputed inputs. **TickVault
+  adoption (Phase 3) is 0%** — no TickVault code references this crate yet (it
+  needs the TickVault repo). The **strategy / brute-force sweep / SL-TP / fills**
+  are BruteX-only and NOT shared. So "common" today = the 52→60-condition
+  evaluator + pivots + Fib + VWAP + market structure + EMA, nothing more.
