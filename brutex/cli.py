@@ -56,7 +56,7 @@ import argparse
 import contextlib
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1939,6 +1939,7 @@ def _make_cli_rate_bridge_on_window(
     lake_root: Path,
     controller: Any,
     adapter: Any,
+    monitor: Any = None,
 ) -> Any:
     """Wrap the CLI per-window ``on_window`` to ALSO publish the live rate to the bridge file.
 
@@ -1962,6 +1963,20 @@ def _make_cli_rate_bridge_on_window(
     no real account requests) there is nothing real to publish, so *inner* is returned
     unwrapped (zero overhead, no bridge file written).
 
+    Pull-health self-instrumentation (DEC-PULL-HEALTH-CLI-WIRING-001, MIGRATION.md #1013):
+    when a *monitor* (:class:`~brutex.observability.pull_health.PullHealthMonitor`) is wired,
+    the SAME per-window controller + call-meter snapshot pair this hook already builds for the
+    bridge is ALSO fed to :meth:`~brutex.observability.pull_health.PullHealthMonitor.observe`,
+    so a CLI ``brutex fetch`` pull WATCHES its own health (Prometheus gauges + the
+    ``pull_degraded`` Telegram alert on a breach edge) exactly like the dashboard pull (which
+    feeds the monitor through the twin :func:`~brutex.dashboard.pull_controller._observe_rate`
+    seam, DEC-PULL-HEALTH-WIRING-001 / MIGRATION.md #935). REUSING this existing per-window
+    seam means NO new tick / thread / cadence is added; ``observe`` is itself best-effort
+    (never raises) and is fed AFTER the bridge publish under its OWN guard so a publish error
+    never starves the watch and a monitor error never crashes the pull. A ``None`` *monitor*
+    (a dry-run / inspect pull, or a guarded :func:`~brutex.dashboard.pull_controller.\
+_build_pull_health_monitor` build failure) is a no-op.
+
     Parameters
     ----------
     inner
@@ -1970,9 +1985,13 @@ def _make_cli_rate_bridge_on_window(
         The lake root (locates the ``.rate`` sidecar dir).
     controller
         The live pull's :class:`~brutex.adapters.rate_common.RateController` (``None`` for
-        a dry-run / inspect pull — then no bridge is published).
+        a dry-run / inspect pull — then no bridge is published and no monitor is fed).
     adapter
         The market adapter; its ``client.meter`` supplies the achieved-throughput snapshot.
+    monitor
+        The live pull's :class:`~brutex.observability.pull_health.PullHealthMonitor`, or
+        ``None`` (best-effort — a dry-run / inspect pull, or a guarded build failure, leaves
+        it ``None`` and the health watch is simply absent).
 
     Returns
     -------
@@ -2001,12 +2020,16 @@ def _make_cli_rate_bridge_on_window(
         # controller/meter snapshot error — is swallowed + logged best-effort. The publish does
         # one per-window ``fsync`` (no throttle — windows land at ~1 s cadence; an fsync of a
         # tiny JSON file is negligible against the per-window fetch+append already on this path).
+        controller_snap: Mapping[str, Any] | None = None
+        meter_snap: Mapping[str, Any] = {}
         try:
             meter = getattr(getattr(adapter, "client", None), "meter", None)
             meter_snap = meter.snapshot() if meter is not None else {}
+            published_snap: Mapping[str, Any] = controller.snapshot()
+            controller_snap = published_snap
             publish_from_snapshots(
                 lake_root,
-                controller.snapshot(),
+                published_snap,
                 meter_snap,
                 wall_time=time.time(),
                 monotonic=time.monotonic(),
@@ -2018,6 +2041,19 @@ def _make_cli_rate_bridge_on_window(
         except Exception:  # pylint: disable=broad-exception-caught
             # Best-effort visibility — never crash the pull for a rate-monitor side-effect.
             log.warning("cli.rate_bridge.publish_failed", exc_info=True)
+        # Feed the SAME snapshot pair to the pull-health monitor so a CLI pull self-instruments
+        # its health (DEC-PULL-HEALTH-CLI-WIRING-001). ``observe`` is best-effort (never raises),
+        # but the controller snapshot can still be ``None`` here if the publish above failed
+        # BEFORE it was taken — re-snapshot it under THIS guard so the watch never starves and
+        # never crashes the pull. A ``None`` monitor (dry-run / build failure) is a no-op.
+        if monitor is not None:
+            try:
+                if controller_snap is None:
+                    controller_snap = controller.snapshot()
+                monitor.observe(controller_snap, meter_snap)
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Pull-health is observe-only — never crash the pull for a monitor side-effect.
+                log.warning("cli.pull_health.observe_failed", exc_info=True)
 
     return _on_window
 
@@ -2370,8 +2406,25 @@ def cmd_fetch(
         # process. Best-effort cross-process visibility (NOT shared rate accounting; the
         # per-process caps + the single-flight lock are unchanged). A `None` controller
         # (--dry-run / --inspect) returns the checkpoint unwrapped (no bridge written).
+        #
+        # Pull-health self-instrumentation (DEC-PULL-HEALTH-CLI-WIRING-001, MIGRATION.md
+        # #1013): BIND the SAME `PullHealthMonitor` the dashboard pull binds — via the SHARED
+        # COMMON builder `pull_controller._build_pull_health_monitor` (CLAUDE.md §11 COMMON, no
+        # copy-paste of the registry / `SweepAlerter.pull_degraded` / pool-size wiring) — so a
+        # CLI `brutex fetch` pull WATCHES its own health (Prometheus gauges + the `pull_degraded`
+        # Telegram alert) exactly like the dashboard. The monitor is fed the SAME per-window
+        # controller + call-meter snapshot pair the rate bridge already builds, through the
+        # `_make_cli_rate_bridge_on_window` `monitor` seam below (no new tick / thread / cadence).
+        # The builder returns `None` for a dry-run / inspect pull (no `rate_controller`) and
+        # swallows any construction error → `None`, so binding it can NEVER block, slow, or
+        # crash the pull (Golden Rule #10); a `None` monitor makes the observe a no-op.
+        from brutex.dashboard.pull_controller import (
+            _build_pull_health_monitor,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        _pull_health_monitor = _build_pull_health_monitor(rate_controller)
         ledger_checkpoint = _make_cli_rate_bridge_on_window(
-            ledger_checkpoint, resolved, rate_controller, adapter
+            ledger_checkpoint, resolved, rate_controller, adapter, _pull_health_monitor
         )
 
         # Async fetch/write isolation (DEC-CLI-FETCH-ISOLATION-001): wire the SAME async
