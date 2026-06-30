@@ -11,7 +11,7 @@ recording fake sink.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,6 +32,7 @@ from brutex.adapters.groww.ingest import (
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
+from brutex.data.partial_window_detect import last_completed_session_on_or_before
 from brutex.data.sink import SinkAppendResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
@@ -141,6 +142,31 @@ class _Adapter:
         if self._error is not None:
             raise self._error
         return list(self._bars)
+
+
+class _CompleteWindowAdapter:
+    """Fake adapter returning ONE in-session bar at the LAST completed session of each window.
+
+    Unlike :class:`_Adapter` (a fixed Jan-2021 bar for every window), this places the bar at
+    the window's own trailing edge, so the data-completeness scans
+    (DEC-PARTIAL-WINDOW-REPULL-001 / DEC-INTERIOR-GAP-DETECT-001) see a COMPLETE window and
+    never demote it — letting the ledger SKIP-mechanism tests pin the skip path without the
+    fixed-bar fixture spuriously tripping the truncation flag (which a 1-bar-in-January window
+    over a 7-month span legitimately would).
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        del symbol, exchange, interval, start
+        self.calls += 1
+        last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+        # 04:05 UTC = 09:35 IST → inside the [09:15, 15:30) session for that trading date.
+        ts = datetime(last_session.year, last_session.month, last_session.day, 4, 5, tzinfo=UTC)
+        return [_bar(ts)]
 
 
 class _SeqAdapter:
@@ -447,8 +473,11 @@ class TestIngestSpotLedger:
         from brutex.data.window_ledger import SUCCESS, WindowLedger
 
         led = WindowLedger()
+        # Use the COMPLETE-window adapter (a bar at each window's trailing edge) so the
+        # data-completeness demotion (DEC-PARTIAL-WINDOW-REPULL-001) does NOT fire — this test
+        # pins the SUCCESS→skip mechanism, not the truncation re-pull.
         first = ingest_spot(
-            _Adapter(),  # type: ignore[arg-type]
+            _CompleteWindowAdapter(),  # type: ignore[arg-type]
             _Sink(),
             instrument=_INST,
             interval="1minute",
@@ -463,7 +492,7 @@ class TestIngestSpotLedger:
 
         sink2 = _Sink()
         second = ingest_spot(
-            _Adapter(),  # type: ignore[arg-type]
+            _CompleteWindowAdapter(),  # type: ignore[arg-type]
             sink2,
             instrument=_INST,
             interval="1minute",
@@ -478,7 +507,7 @@ class TestIngestSpotLedger:
 
     def test_no_ledger_always_refetches(self) -> None:
         ingest_spot(
-            _Adapter(),  # type: ignore[arg-type]
+            _CompleteWindowAdapter(),  # type: ignore[arg-type]
             _Sink(),
             instrument=_INST,
             interval="1minute",
@@ -486,7 +515,7 @@ class TestIngestSpotLedger:
             end=date(2021, 8, 1),
         )
         second = ingest_spot(
-            _Adapter(),  # type: ignore[arg-type]
+            _CompleteWindowAdapter(),  # type: ignore[arg-type]
             _Sink(),
             instrument=_INST,
             interval="1minute",
@@ -744,6 +773,193 @@ class TestIngestSpotLedger:
         # The transient FAILED row carries the in-pull fetch count too (1 — it 429'd on
         # the first fetch this pull; DEC-WINDOW-INPULL-FETCHES-001).
         assert rec.in_pull_fetches == 1
+
+
+class TestIngestSpotCompletenessRepull:
+    """DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001: a SUCCESS spot window
+    whose stored bars are INCOMPLETE (interior multi-session hole OR trailing truncation) is
+    DEMOTED to a re-pullable ledger status instead of silently settling SKIP-able SUCCESS."""
+
+    def test_interior_gap_window_is_demoted_to_repullable(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        # One 1-minute window [2021-03-01, 2021-03-30) (< the 30-day tile, so ONE window) whose
+        # bars cover the start, then a LONG contiguous interior hole (>5 sessions), then resume
+        # near the end — a real interior completeness hole bookended by data.
+        gappy = [
+            _bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 26, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 29, 4, 5, tzinfo=UTC)),
+        ]
+        led = WindowLedger()
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(bars=gappy),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 3, 30),
+                ledger=led,
+                detect_completeness_gaps=True,
+            )
+        assert report.windows == 1
+        rec = led.records()[0]
+        assert rec.status != SUCCESS  # demoted — NOT silently settled (so NOT skippable)
+        assert rec.status not in {"SUCCESS", "SKIPPED"}  # the skip-authority set
+        assert rec.last_error == "INTERIOR_GAP"
+        assert any(e["event"] == "window.interior_gap" for e in logs)
+
+    def test_truncated_window_is_demoted_to_repullable(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        # Bars stop on day 2 of a 30-day 1-minute window (a trailing truncation), far from the
+        # expected end and from the live edge (the 2026 default clock) → demoted, not SUCCESS.
+        truncated = [
+            _bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC)),
+        ]
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=truncated),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 4, 1),
+                ledger=led,
+                detect_completeness_gaps=True,
+            )
+        rec = led.records()[0]
+        assert rec.status != SUCCESS
+        assert rec.last_error == "SUSPECTED_PARTIAL"
+        assert any(e["event"] == "window.suspected_partial" for e in logs)
+
+    def test_complete_window_settles_success_no_demotion(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        # Bars run continuously to the window's last completed session → COMPLETE, settles
+        # SUCCESS (skippable), with NO completeness warning fired.
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _CompleteWindowAdapter(),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 4, 1),
+                ledger=led,
+                detect_completeness_gaps=True,
+            )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS
+        assert rec.last_error is None
+        assert not any(e["event"] == "window.interior_gap" for e in logs)
+        assert not any(e["event"] == "window.suspected_partial" for e in logs)
+
+    def test_derived_1day_window_is_never_demoted(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        # The derived 1day interval is RESAMPLED from 1-minute, never vendor-fetched, so a
+        # sparse daily window must NOT be demoted (it would re-pull a derived partition).
+        led = WindowLedger()
+        ingest_spot(
+            _Adapter(bars=[_bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC))]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 3, 1),
+            end=date(2021, 4, 1),
+            ledger=led,
+            detect_completeness_gaps=True,
+        )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS  # 1day is exempt from the re-pull demotion
+
+    def test_default_no_detect_does_not_demote_a_dry_run_gappy_window(self) -> None:
+        # The demotion is OPT-IN (detect_completeness_gaps defaults False) so a dry-run /
+        # synthetic / offline pull (whose adapter returns first-day-only bars) is NEVER demoted
+        # — it would otherwise false-red the dry-run. The WARNING still fires (visibility), but
+        # the ledger row stays SUCCESS. This pins the production gate's default-OFF contract.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        gappy = [
+            _bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 26, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 29, 4, 5, tzinfo=UTC)),
+        ]
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=gappy),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,  # an INDEX (is_index True) — only the opt-in flag is missing
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 3, 30),
+                ledger=led,
+                # detect_completeness_gaps defaults False (dry-run / synthetic / test contract)
+            )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS  # NOT demoted — the opt-in gate is off
+        assert rec.last_error is None
+        # The observe-only WARNING STILL fires (visibility is never gated, only the re-pull).
+        assert any(e["event"] == "window.interior_gap" for e in logs)
+
+    def test_non_index_equity_is_warned_but_not_demoted(self) -> None:
+        # A non-index (REFERENCE_ONLY equity) spot symbol can be legitimately sparse
+        # (an illiquid micro-cap / a delisted name), so an interior hole there is NOT a
+        # genuine completeness gap — it is OBSERVE-only WARNed but NEVER demoted (no re-pull
+        # storm). The demotion gate is ``instrument.is_index``.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        equity = _inst("RELIANCE")
+        equity = Instrument(
+            exch_id=equity.exch_id,
+            security_id=equity.security_id,
+            symbol_name=equity.symbol_name,
+            display_name=equity.display_name,
+            instrument=InstrumentType.EQ,  # a non-index equity
+            segment=Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=1,  # EQ requires a positive lot size
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+        assert equity.is_index is False
+        gappy = [
+            _bar(datetime(2021, 3, 1, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 26, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 29, 4, 5, tzinfo=UTC)),
+        ]
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=gappy),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=equity,
+                interval="1minute",
+                start=date(2021, 3, 1),
+                end=date(2021, 3, 30),
+                ledger=led,
+                detect_completeness_gaps=True,
+            )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS  # NOT demoted — the equity stays settled
+        assert rec.last_error is None
+        # The observe-only WARNING STILL fires (visibility unchanged) even though it is not demoted.
+        assert any(e["event"] == "window.interior_gap" for e in logs)
 
 
 class TestIngestSpotInRunRetry:

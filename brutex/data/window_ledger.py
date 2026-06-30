@@ -313,6 +313,8 @@ class WindowLedger:
         now: datetime,
         in_pull_fetches: int = 1,
         settle_empty: bool = False,
+        degraded: bool = False,
+        degraded_reason: str | None = None,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -347,8 +349,33 @@ class WindowLedger:
         the window is empty). The default ``False`` is byte-identical to the prior
         behaviour. It is a TRANSIENT per-call decision — NOT a stored field; the resulting
         ``SKIPPED`` status + ``empty_streak`` persist through the existing columns.
+
+        *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
+        DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars
+        carry a CONFIRMED interior multi-session hole or a trailing truncation is NOT a
+        complete window, so it must NOT be marked terminal/skippable on a ``SUCCESS``.
+        When ``True`` AND the natural classification is ``SUCCESS`` the window is recorded
+        ``FAILED`` (re-pullable — exactly like a transient) with *degraded_reason* (a
+        non-secret tag such as ``"INTERIOR_GAP"`` / ``"TRUNCATED"``) stamped as the
+        ``last_error``, and the ``empty_streak`` is BUMPED so the re-pull is BOUNDED: after
+        :data:`EMPTY_TERMINAL_THRESHOLD` consecutive degraded pulls the window settles
+        ``SKIPPED`` (the gap is accepted after the operator has been warned that many
+        times), exactly as a genuine across-pull EMPTY settles — so the demotion can never
+        loop forever and the universe pull still converges. A re-pull that comes back
+        COMPLETE records a clean ``SUCCESS`` (the streak resets, the window settles). The
+        bars stay durably stored (idempotent keep-first sink) the whole time — the
+        demotion only RE-OPENS the window for completion, never deletes data. ``degraded``
+        is IGNORED for a ``FAILED`` (already re-pullable) or an ``EMPTY`` (no bars to be
+        incomplete); the default ``False`` is byte-identical to the prior behaviour.
         """
-        classified = classify_window_status(raw_bars, error_type)
+        classified = classify_window_status(raw_bars, error_type, degraded=degraded)
+        # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
+        # error) so /coverage/windows shows WHY it re-pulls. Only meaningful when the demotion
+        # actually fired (a clean SUCCESS → FAILED); for any other path the natural
+        # ``error_type`` is preserved unchanged.
+        degraded_success = degraded and error_type is None and raw_bars > 0
+        if degraded_success:
+            error_type = degraded_reason or "DEGRADED"
         wk = self._key(key)
         with self._lock:
             prior = self._by_window.get(wk)
@@ -371,12 +398,22 @@ class WindowLedger:
             prior_streak = prior.empty_streak if prior is not None else 0
             if classified == EMPTY:
                 empty_streak = prior_streak + 1
+            elif degraded_success:
+                # A demoted-SUCCESS (interior gap / truncation) re-pull is BOUNDED: bump the
+                # streak so it settles SKIPPED at the threshold, exactly like a genuine EMPTY,
+                # rather than re-pulling forever on a window the vendor will never complete.
+                empty_streak = prior_streak + 1
             elif classified == FAILED:
                 empty_streak = prior_streak  # rate-limit/timeout — preserve, never reset
             else:  # SUCCESS — the window has real data
                 empty_streak = 0
             status = classified
-            if classified == EMPTY and settle_empty:
+            if degraded_success and empty_streak >= self._threshold:
+                # The window has been flagged incomplete ``_threshold`` consecutive pulls —
+                # accept the gap and settle SKIPPED so the pull converges (the operator has
+                # been warned each time; the stored bars are kept).
+                status = SKIPPED
+            elif classified == EMPTY and settle_empty:
                 # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
                 # empty window OLD enough that vendor data can never appear is a PERMANENT
                 # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold

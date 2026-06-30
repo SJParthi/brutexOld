@@ -62,7 +62,7 @@ EMPTY: str = "EMPTY"
 FAILED: str = "FAILED"
 
 
-def classify_window_status(raw_bars: int, error_type: str | None) -> str:
+def classify_window_status(raw_bars: int, error_type: str | None, *, degraded: bool = False) -> str:
     """Classify a window's fetch outcome into :data:`SUCCESS` / :data:`EMPTY` / :data:`FAILED`.
 
     Pure. Mirrors the ingest mark rule (DEC-LAKE-RECONCILE-001): an *error*
@@ -79,6 +79,16 @@ def classify_window_status(raw_bars: int, error_type: str | None) -> str:
     error_type
         The error class name (e.g. ``"GrowwTimeoutError"``) when the fetch raised
         a retryable/terminal error, else ``None``.
+    degraded
+        A clean DATA-COMPLETENESS demotion signal (DEC-INTERIOR-GAP-DETECT-001 /
+        DEC-PARTIAL-WINDOW-REPULL-001). When ``True`` AND the fetch is a clean
+        bars-returning ``SUCCESS``, the window is demoted to ``FAILED`` so it is NOT
+        skippable and is re-pulled — used when the stored bars carry a confirmed
+        INTERIOR multi-session hole or a TRAILING truncation. The bars are already
+        durably stored (idempotent keep-first sink); the demotion only re-opens the
+        window for completion, never deletes data. ``degraded`` is IGNORED for a
+        genuine error (already ``FAILED``) or an EMPTY (no bars to be incomplete) —
+        only a would-be ``SUCCESS`` is affected.
 
     Returns
     -------
@@ -88,7 +98,7 @@ def classify_window_status(raw_bars: int, error_type: str | None) -> str:
     if error_type is not None:
         return FAILED
     if raw_bars > 0:
-        return SUCCESS
+        return FAILED if degraded else SUCCESS
     return EMPTY
 
 

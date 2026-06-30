@@ -251,7 +251,34 @@ hostile-review pass._
   F&O lake REFERENCE_ONLY, no scope/vocab/rate change; all 5 touched source files at 100% line+branch; ruff/ruff-format/
   `mypy --strict`/`pyright` clean. Also de-flaked the pre-existing main hung-write test (widened the 0.2 s write-deadline +
   1.0 s drain-join proportionally, same fix as PR-A). NEW `TestDropBarsAfter` + future-bar-drop tests (both spines) +
-  `test_merge_loop_oom_halts` + `TestIsPoolIsolatable` + the end-to-end quarantine integration test. Prior merged: **DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026** —
+  `test_merge_loop_oom_halts` + `TestIsPoolIsolatable` + the end-to-end quarantine integration test. Prior merged: **DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 /
+  DEC-SINK-DEDUP-COUNT-001, MIGRATION.md #1031** (PR #992 — the sibling PR-A of this same sweep, now MERGED to main): a SUCCESS spot window
+  with a CONFIRMED interior multi-session hole OR a trailing truncation is DEMOTED to a re-pullable ledger status
+  (BOUNDED — it settles SKIPPED after `EMPTY_TERMINAL_THRESHOLD` flagged pulls so the universe pull still converges, and
+  the stored bars are always KEPT), and the sink reports the DEDUPED bars-added count as a SEPARATE `bars_net_new` field.
+  HONEST SEVERITY: these are MED/LOW data-completeness-honesty fixes — NONE is a crash or a HIGH bug (the adversarial triage
+  DISPROVED the alleged HIGH non-`Mapping`-payload whole-pull-crash against the actually-installed `growwapi` SDK). THREE
+  fixes: (1) interior-gap (#1, MED) — NEW pure `brutex/data/interior_gap_detect.py` flags ONLY a contiguous run of
+  bar-LESS NSE trading sessions `> INTERIOR_GAP_TOLERANCE_SESSIONS` (default 5) strictly INTERIOR to the covered span, so
+  a low-liquidity-but-continuous window is NEVER false-flagged (signal = a long contiguous hole, NOT density;
+  out-of-calendar years ABSTAIN); (2) partial-window promote (#3, MED) — `partial_window_detect.observe_partial_window`
+  now RETURNS its verdict (back-compat) so the spot tail DEMOTES a confirmed truncation, all the prior
+  covered-year/liquidity/live-edge/at-expiry guards preserved; (3) dup-bars accounting (#6, LOW) — NEW
+  `WriteResult.bars_added` (deduped) summed into a NEW `SinkAppendResult.bars_net_new` (`data/sink.py`), while
+  `bars_appended` STAYS the input count — so a re-pull of already-stored bars reports `bars_net_new=0` with NO downstream
+  `>0`-gate change. MECHANISM: a NEW `degraded` flag threaded `classify_window_status` →
+  `WindowLedger.record(degraded=, degraded_reason=)` records a demoted SUCCESS as FAILED+reason and BUMPS the
+  `empty_streak` (REUSING the genuine-EMPTY bounded-terminal machinery); the DEMOTION is OPT-IN (a
+  `detect_completeness_gaps` flag set True ONLY at the real-vendor production sites — the dashboard + CLI live pull;
+  a `--dry-run`/synthetic pull leaves it OFF so it never false-reds) AND gated to a DENSE INDEX
+  (`instrument.is_index`) on the FETCHED `1minute` interval — the ~750 illiquid REFERENCE_ONLY spot underlyings + the
+  derived `1day` are WARNed (observe-only) but never re-pulled. HONEST envelope: SPOT-INDEX spine ONLY (the F&O
+  `option_ingest` partial-window observe stays observe-only — an explicit non-goal); ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change; all 7 touched files at 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/`pyright` clean. TWO hostile-review MAJORs folded (the dedup-gate flip → separate
+  `bars_net_new`; the illiquid-universe demotion → `instrument.is_index` gate). NEW tests: `test_interior_gap_detect.py`
+  (17) + `TestDegradedDemotion` + `TestBarsAddedDedup` + `TestParquetBarSinkDedupCount` + `TestIngestSpotCompletenessRepull`
+  (each fails-before / passes-after, incl. the non-index-not-demoted regression). Prior merged: **DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026** —
   adaptive strike-chain bounding drives the F&O option-pull fetches-per-window from a MEASURED `2.54` toward `~1.2`,
   making the operator's worst-case-`3 r/s` 8-hour pull a MEASURED CI GATE — with NO data lost. THE ARITHMETIC: at the AIMD
   soft-floor `3 r/s`, `3×3600×8h = 86,400` fetches are available in 8h; a production pull spent `2.54` fetches per

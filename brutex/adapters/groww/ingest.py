@@ -85,8 +85,9 @@ from brutex.adapters.ingest_common import (
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
-from brutex.data.partial_window_detect import observe_partial_window
+from brutex.data.partial_window_detect import SUSPECTED_PARTIAL, observe_partial_window
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
@@ -282,6 +283,7 @@ def ingest_spot(
     now_ist: Callable[[], datetime] | None = None,
     on_window: WindowTick | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    detect_completeness_gaps: bool = False,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -410,6 +412,7 @@ def ingest_spot(
                 empty_retry_backoff=empty_backoff,
                 old_cutoff=old_cutoff,
                 fetch_pipeline=fetch_pipeline,
+                detect_completeness_gaps=detect_completeness_gaps,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -540,6 +543,7 @@ def _ingest_one_window(
     empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
     old_cutoff: date | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    detect_completeness_gaps: bool = False,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -592,6 +596,7 @@ def _ingest_one_window(
             on_success=on_success,
             pull_id=pull_id,
             series_fields=series_fields,
+            detect_completeness_gaps=detect_completeness_gaps,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED outcome immediately and re-paces + fetches the next
@@ -614,6 +619,7 @@ def _ingest_one_window(
             on_success=on_success,
             pull_id=pull_id,
             series_fields=series_fields,
+            detect_completeness_gaps=detect_completeness_gaps,
         )
         if result_outcome.transient:
             # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
@@ -836,6 +842,7 @@ def _process_window_tail(
     on_success: Callable[[], None] | None,
     pull_id: str,
     series_fields: dict[str, str],
+    detect_completeness_gaps: bool = False,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -983,23 +990,21 @@ def _process_window_tail(
             settled=settle_empty,
             **series_fields,
         )
-    if ledger is not None:
-        ledger.record(
-            key,
-            raw_bars=len(raw_bars),
-            error_type=None,
-            bars_appended=result.bars_appended,
-            now=datetime.now(UTC),
-            in_pull_fetches=fetch_count,
-            settle_empty=settle_empty,
-        )
-    # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): WARN if this SUCCESS spot window's
-    # SESSION-FILTERED bars stop materially before the expected end — a truncated fetch the
-    # SUCCESS classifier + skip rule would otherwise never revisit. Spot indices trade
-    # densely EVERY session, so a truncated spot window is a genuine, reliably-detectable
-    # completeness gap (the primary concern). Spot has no expiry (``expiry=None``). The
-    # COMMON helper is fully guarded — it can never block / slow / crash the pull.
-    observe_partial_window(
+    # DATA-COMPLETENESS scans (DEC-PARTIAL-WINDOW-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001
+    # + DEC-INTERIOR-GAP-DETECT-001): a SUCCESS spot window whose SESSION-FILTERED bars either
+    # (a) stop materially before the expected end (a TRAILING truncation) or (b) drop out for
+    # a long contiguous run of trading sessions in the MIDDLE (a confirmed INTERIOR hole
+    # bookended by real bars) is NOT complete — yet the bars-returning ``SUCCESS`` classifier
+    # + skip rule would never revisit it. Spot indices trade DENSELY every session, so both
+    # are genuine, reliably-detectable completeness gaps with no false-positive liquidity
+    # noise. Both COMMON helpers WARN (observe) AND return their verdict; a flagged window is
+    # DEMOTED to a re-pullable ledger status (``degraded=True``), so the window re-pulls to
+    # complete next pass — BOUNDED (it settles SKIPPED after EMPTY_TERMINAL_THRESHOLD flagged
+    # pulls, so the universe pull still converges) and DATA-SAFE (the stored bars are kept,
+    # the demotion only re-opens the window). The helpers are fully guarded (a scan error
+    # returns ``None`` ⇒ never demote ⇒ the byte-identical observe-only fallback), so the
+    # diagnostic can never block / slow / crash the pull. Spot has no expiry (``expiry=None``).
+    partial_verdict = observe_partial_window(
         _LOG,
         last_bar_ts=bars[-1].timestamp if bars else None,
         window_end=window_end,
@@ -1009,6 +1014,59 @@ def _process_window_tail(
         interval=interval,
         pull_id=pull_id,
     )
+    interior_verdict = observe_interior_gap(
+        _LOG,
+        bar_timestamps=[bar.timestamp for bar in bars],
+        symbol=instrument.symbol_name,
+        interval=interval,
+        pull_id=pull_id,
+    )
+    truncated = partial_verdict is not None and partial_verdict.is_suspected_partial()
+    interior_gap = interior_verdict is not None and interior_verdict.is_interior_gap()
+    # DEMOTE only a DENSE INDEX on the FETCHED ``1minute`` interval, and only when the caller
+    # OPTED IN via *detect_completeness_gaps*. Three hard gates:
+    #   (1) ``detect_completeness_gaps`` — the demotion is a REAL-VENDOR completeness signal,
+    #       OPT-IN at the production live-pull build sites ONLY. A ``--dry-run`` / synthetic /
+    #       offline pull (``cli._DryRunGrowwSpotAdapter`` → ``synthetic_spot_bars``, which returns
+    #       a few bars on the window's FIRST day regardless of span) would otherwise see every
+    #       wide window as "truncated" and demote it to FAILED — a false-red on the dry-run
+    #       whose whole purpose is to prove the pipe runs GREEN. Defaulting OFF keeps dry-run /
+    #       synthetic / unit-test pulls byte-identical; the production dashboard + CLI-live pull
+    #       set it ``True``. (The observe-only WARNING below still fires regardless — visibility
+    #       is never gated, only the re-pull action.)
+    #   (2) ``instrument.is_index`` — the false-positive-safety rationale (a hole/truncation is a
+    #       GENUINE completeness gap, not liquidity noise) holds ONLY for the densely-traded
+    #       indices (NIFTY/BANKNIFTY/SENSEX), which print every session. The spot pull ALSO fans
+    #       out over the ~750 REFERENCE_ONLY underlyings (illiquid NTM small/mid/micro-caps +
+    #       delisted/suspended names), where a multi-session no-print stretch is legitimately
+    #       sparse-but-complete — demoting those would be a re-pull storm.
+    #   (3) ``interval != _DAILY`` — the derived ``1day`` partition is RESAMPLED from the stored
+    #       1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never vendor-fetched, so a "truncated"
+    #       daily window is meaningless; its completeness follows the 1-minute.
+    demotable = detect_completeness_gaps and instrument.is_index and interval != _DAILY
+    degraded = demotable and (truncated or interior_gap)
+    degraded_reason = (
+        (INTERIOR_GAP if interior_gap else SUSPECTED_PARTIAL if truncated else None)
+        if degraded
+        else None
+    )
+    # Record the window's outcome in the unified ledger: SUCCESS when the vendor returned
+    # COMPLETE bars, EMPTY on a clean 0-bar response, or a DEMOTED re-pullable FAILED when the
+    # bars are incomplete (interior gap / truncation). ``raw_bars`` (NOT
+    # ``result.bars_appended``) is the signal — a re-pull whose bars are all already in the
+    # lake dedups to ``bars_appended == 0`` yet the window IS complete, so it must stay marked.
+    if ledger is not None:
+        ledger.record(
+            key,
+            raw_bars=len(raw_bars),
+            error_type=None,
+            bars_appended=result.bars_appended,
+            now=datetime.now(UTC),
+            in_pull_fetches=fetch_count,
+            settle_empty=settle_empty,
+            degraded=degraded,
+            degraded_reason=degraded_reason,
+        )
     if on_success is not None:
         on_success()
     return _WindowOutcome(bars_appended=result.bars_appended, conflicts=window_conflicts)
