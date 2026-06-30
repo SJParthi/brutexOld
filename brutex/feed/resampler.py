@@ -142,9 +142,11 @@ def resample_bars(
     ResampleError
         If an interval is unknown, up-sampling is requested, target
         is not a multiple of source, any input bar has a naive
-        timestamp, or any bar's timestamp is not strictly greater than
-        the previous bar's (an out-of-order or duplicate bar — bars must
-        be strictly increasing).
+        timestamp, or — on the down-sampling path (``target > source``) —
+        a bar's timestamp is not strictly greater than the previous
+        bar's (an out-of-order or duplicate bar; bars must be strictly
+        increasing). The ``target == source`` identity passthrough
+        returns early and does not run the monotonic guard.
     """
     _validate_interval(source_interval, which="source")
     _validate_interval(target_interval, which="target")
