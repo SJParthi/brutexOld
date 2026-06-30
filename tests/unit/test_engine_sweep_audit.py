@@ -392,11 +392,9 @@ def test_sweep_truncate_io_error_wraps(tmp_path: Path, monkeypatch: pytest.Monke
         log.append(action="A", subject="s0", payload={"i": 0}, ts_utc=1.0)
     _append_raw(path, '{"seq": 1, "prev')
 
-    import brutex.engine.sweep_audit as sweep_audit_mod
-
     def _boom(_src: object, _dst: object) -> None:
         raise OSError("disk gone")
 
-    monkeypatch.setattr(sweep_audit_mod.os, "replace", _boom)
+    monkeypatch.setattr("brutex.engine.sweep_audit.os.replace", _boom)
     with pytest.raises(SweepAuditWriteError):
         _sweep_truncate(path)
