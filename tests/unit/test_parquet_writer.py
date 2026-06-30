@@ -288,12 +288,12 @@ class TestCorruptExistingPartition:
     def test_non_finite_existing_price_quarantines(self, tmp_path: Path) -> None:
         """A readable partition holding a non-finite (inf) price → quarantinable WriterError.
 
-        DEC-LAKE-WRITE-VECTORIZE-001 folds the vectorized 2dp snap INTO the same
-        skip-guarded block as the Parquet decode, so a corrupt non-finite price (which
-        the columnar ``cast(String).cast(Decimal)`` cannot represent) surfaces as a
-        quarantinable ``WriterError`` — a strict improvement on the legacy per-row path,
-        whose ``Decimal(str(inf)).quantize`` raised an UN-caught ``decimal.InvalidOperation``
-        that would have crashed the whole pull.
+        DEC-LAKE-WRITE-VECTORIZE-001: a non-finite price makes the columnar
+        ``cast(String).cast(Decimal)`` snap raise a ``PolarsError``, so the reader falls
+        back to the exact per-row reconstruction, where building a ``CandleBar`` from
+        ``inf`` raises ``ValueError`` (the ``low <= open <= high`` invariant) — re-raised
+        as a quarantinable ``WriterError`` naming the path. A strict improvement on the
+        original per-row path, whose un-caught error would have crashed the whole pull.
         """
         import polars as pl
         from brutex.data.errors import WriterError
@@ -334,6 +334,64 @@ class TestCorruptExistingPartition:
         corrupt.write_parquet(result.path)
         with pytest.raises(WriterError, match="corrupt existing partition"):
             writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
+
+    def test_overflowing_price_falls_back_to_per_row_and_merges(self, tmp_path: Path) -> None:
+        """A finite price whose repr overflows the snap's Decimal → exact per-row fallback.
+
+        DEC-LAKE-WRITE-VECTORIZE-001: a value so large its ``str`` repr exceeds the
+        intermediate ``Decimal(precision=38)`` (``|x| >= 1e22``, unreachable for a real
+        bar price but a valid finite ``CandleBar``) makes the columnar snap raise a
+        ``PolarsError``; the reader must FALL BACK to the exact per-row reconstruction
+        (NOT quarantine it) and still merge a new bar into the partition, with the stored
+        large value preserved on the 2dp grid. This pins the correctness-over-speed
+        fallback branch.
+        """
+        import polars as pl
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        # Seed a normal partition, then overwrite it with a structurally-valid frame whose
+        # price is a finite 1e22 (low <= open <= high holds), forcing the snap to overflow.
+        result = writer.write(
+            bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords
+        )
+        huge = 1e22
+        big_frame = pl.DataFrame(
+            {
+                "timestamp": [datetime(2021, 1, 4, 0, 0, tzinfo=UTC)],
+                "open": [huge],
+                "high": [huge],
+                "low": [huge],
+                "close": [huge],
+                "volume": [0],
+                "open_interest": [None],
+            },
+            schema={
+                "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Int64,
+                "open_interest": pl.Int64,
+            },
+        )
+        big_frame.write_parquet(result.path)
+        # Merging a new bar re-reads the partition → the snap overflows → per-row fallback.
+        merge_res = writer.write(
+            bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords
+        )
+        # Both bars are present (the huge stored bar reconstructed via the fallback +
+        # the merged bar), and the huge value is preserved exactly (already integral).
+        stored = pl.read_parquet(merge_res.path).sort("timestamp")
+        assert merge_res.row_count == 2
+        assert stored["open"].to_list() == [huge, 101.0]
 
     def test_unreadable_existing_partition_bytes_raises_writer_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

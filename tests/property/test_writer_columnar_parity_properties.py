@@ -23,7 +23,7 @@ import pytest
 from brutex.data.atomic_io import lake_write_guard
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter, _tick_round
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 pytest.importorskip("polars")
@@ -154,14 +154,27 @@ def test_random_bar_sets_byte_identical_old_vs_new(
         max_size=64,
     )
 )
+# Long-tail truncation-boundary class (the second-review BLOCKER): an 11-17-digit float
+# JUST below a .xx5 boundary. A lossy intermediate Decimal scale would round these up to
+# the grid first → the WRONG 2dp; pinned here so a regression to a too-small scale fails.
+@example(raw=[0.00499999999])
+@example(raw=[0.12499999999])
+@example(raw=[1.00499999999])
+@example(raw=[-0.00499999999])
+@example(raw=[2.67499999999])
+@example(raw=[99999.99499999999])
+@example(raw=[0.004999999999999, 0.005000000000001])  # 15-digit tails either side
 def test_vectorized_snap_matches_legacy_decimal_contract(raw: list[float]) -> None:
-    """``_snap_price_expr`` reproduces ``round_money(Decimal(str(x)))`` for any finite float.
+    """``_snap_price_expr`` reproduces ``round_money(Decimal(str(x)))`` for any realistic price.
 
-    DEC-LAKE-WRITE-VECTORIZE-001 — fuzz arbitrary finite floats (NOT only the clean 2dp
-    values the bar-set property uses) through the columnar snap and assert BOTH the
-    ``float`` (the stored byte) and the ``Decimal`` (the ``_bar_values_equal`` key) equal
-    the legacy per-row ``round_money(Decimal(str(x)))`` exactly. This is the half-up 2dp
-    byte contract (DEC-MONEY-2DP-001) at the expression level.
+    DEC-LAKE-WRITE-VECTORIZE-001 — fuzz finite floats across the realistic price range
+    (NOT only the clean ≤5dp values the bar-set property uses) through the columnar snap
+    and assert BOTH the ``float`` (the stored byte) and the ``Decimal`` (the
+    ``_bar_values_equal`` key) equal the legacy per-row ``round_money(Decimal(str(x)))``
+    exactly. The ``@example`` cases pin the long-tail truncation-boundary class (the
+    second-review BLOCKER) so a regression to a lossy intermediate Decimal scale is
+    caught. This is the half-up 2dp byte contract (DEC-MONEY-2DP-001) at the expression
+    level.
     """
     import polars as pl
     from brutex.data.parquet_writer import _snap_price_expr

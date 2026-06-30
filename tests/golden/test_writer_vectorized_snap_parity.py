@@ -86,6 +86,22 @@ _EDGE_CASES: list[float] = [
     22000.00,
     0.05,
     0.04,
+    # ── Long-tail truncation-boundary class (the second-review BLOCKER) ──
+    # An 11-17-digit float just BELOW a .xx5 boundary. A lossy intermediate
+    # Decimal(scale=10) would round these UP to the .xx5 grid FIRST, then half-up to
+    # the WRONG 2dp; the full-scale parse keeps them on the legacy (DOWN) side.
+    0.00499999999,  # → 0.00 (a too-small scale gives the wrong 0.01)
+    0.12499999999,  # → 0.12 (wrong: 0.13)
+    1.00499999999,  # → 1.00 (wrong: 1.01)
+    -0.00499999999,  # → -0.00 (wrong: -0.01)
+    2.67499999999,  # → 2.67 (wrong: 2.68)
+    99999.99499999999,  # → 99999.99 (wrong: 100000.00)
+    # And just ABOVE the boundary — must still round UP (both paths agree, a guard
+    # that the fix did not over-correct the below-boundary class into a regression).
+    0.00500000001,  # → 0.01
+    1.00500000001,  # → 1.01
+    0.004999999999999,  # 15-digit tail below half → 0.00
+    0.005000000000001,  # 15-digit tail above half → 0.01
 ]
 
 

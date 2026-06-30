@@ -121,6 +121,22 @@ _PARTITION_LOCKS: BoundedLockRegistry = BoundedLockRegistry()
 _PRICE_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 
 
+#: The intermediate Decimal scale used to parse the float's ``str()`` repr LOSSLESSLY
+#: (DEC-LAKE-WRITE-VECTORIZE-001). A Python ``str(float)`` carries at most 17 SIGNIFICANT
+#: digits, so 17 FRACTIONAL digits can never truncate the repr — whatever the integer
+#: part. With ``precision=38`` that leaves room for up to 21 integer digits (≫ any real
+#: price), and the cast is byte-exact equal to ``Decimal(str(x))`` across the realistic
+#: price range. A *smaller* scale (the original ``scale=10``) silently ROUNDS an 11-17
+#: digit repr to 10 places BEFORE the half-up step — a double-rounding the legacy
+#: ``Decimal(str(x))`` never performs — which flips the 2dp answer for long-tail floats
+#: near a ``.xx5`` boundary (e.g. ``0.00499999999`` → wrong ``0.01`` vs legacy ``0.00``).
+#: That is exactly the class of value a legacy raw-float partition carries, so the full
+#: scale is load-bearing, not cosmetic. A value so large its repr would exceed precision
+#: 38 (``|x| ≳ 1e21``, unreachable for a bar price) raises a polars error, caught by the
+#: per-row fallback in :meth:`ParquetWriter._read_existing_bars` (correctness over speed).
+_SNAP_PARSE_SCALE: Final[int] = 17
+
+
 def _snap_price_expr(column: str) -> pl.Expr:
     """Return a polars expression that snaps *column* to the 2dp tick grid, byte-exact.
 
@@ -136,12 +152,15 @@ def _snap_price_expr(column: str) -> pl.Expr:
        (The two are not always the same DIGIT STRING — polars emits ``"0.00001"``
        where Python emits ``"1e-05"`` — but ``Decimal("0.00001") == Decimal("1e-05")``,
        so the parsed value is identical; no realistic price is in scientific notation
-       anyway.) It is then cast to a high-scale ``Decimal(scale=10)`` so the parsed
-       value equals ``Decimal(str(op))`` with no binary-float drift (a direct
-       ``Float64 -> Decimal`` cast would carry the binary representation, e.g.
-       ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer — the ``str``
-       round-trip is what makes the half boundary land on the same side as the
-       legacy path).
+       anyway.) It is then cast to ``Decimal(scale=_SNAP_PARSE_SCALE)`` — a scale
+       (17) wide enough to hold EVERY fractional digit of a ``str(float)`` (≤ 17
+       significant digits) WITHOUT truncation, so the parsed value equals
+       ``Decimal(str(op))`` EXACTLY with no binary-float drift AND no intermediate
+       rounding (a direct ``Float64 -> Decimal`` cast would carry the binary
+       representation, e.g. ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer;
+       and a too-SMALL scale would round an 11-17-digit repr like ``0.00499999999``
+       up to ``0.005`` BEFORE the half-up step → the WRONG ``0.01`` — the ``str``
+       round-trip at FULL scale is what keeps the half boundary on the legacy side).
     2. Half-away-from-zero to 2dp via integer arithmetic on the Decimal column:
        ``floor(d*100 + 0.5)/100`` for ``d >= 0`` and ``ceil(d*100 - 0.5)/100`` for
        ``d < 0``. ``floor``/``ceil`` (not a ``cast(Int64)``, which ROUNDS) give exact
@@ -152,17 +171,30 @@ def _snap_price_expr(column: str) -> pl.Expr:
     numerically EQUAL to the legacy ``round_money(Decimal(str(op)))`` (so
     :meth:`ParquetWriter._bar_values_equal` sees no false conflict) and whose
     ``float(...)`` (the value :meth:`ParquetWriter._render_bytes` writes) is the SAME
-    float (so the stored Parquet bytes are byte-identical). Proven across the realistic
-    price range (``|price|`` up to ~10^6) incl. exact ``.005`` half-boundaries,
+    float (so the stored Parquet bytes are byte-identical for every NON-NEGATIVE price —
+    the only kind a bar carries). Proven across the realistic price range incl. exact
+    ``.005`` half-boundaries, long-tail floats near a boundary (``0.00499999999`` …),
     negatives, zeros, large strikes, and 4dp vendor noise in
-    ``tests/golden/test_writer_vectorized_snap_parity.py``. (Float-rerender ULP drift
-    appears only at magnitudes ``≳ 4e14`` — far above any tradable price — and a hard
-    ``Decimal`` overflow only at ``≳ 1e27``; neither is reachable by a real bar, so the
-    property test bounds its fuzz to the price range.)
+    ``tests/golden/test_writer_vectorized_snap_parity.py``.
+
+    Known, unreachable edges (honest envelope, Golden Rule #10):
+
+    * **Signed zero.** A NEGATIVE value that rounds to zero yields ``Decimal("0.00")``
+      here vs the legacy ``Decimal("-0.00")`` (polars Decimal has no signed zero), so
+      the re-rendered float is ``+0.0`` vs the legacy ``-0.0`` — a 1-bit sign
+      difference. UNREACHABLE: a stored bar price is never negative (the vendor sends
+      positive OHLC; nothing writes a negative price). The numeric ``Decimal``/``float``
+      values still compare EQUAL.
+    * **Cast overflow.** A value whose repr would exceed ``precision=38``
+      (``|x| ≳ 1e21``) raises a polars error; :meth:`ParquetWriter._read_existing_bars`
+      catches it and falls back to the exact per-row ``Decimal(str(x))`` reconstruction.
+      UNREACHABLE for any tradable price.
     """
     import polars as pl
 
-    decimal_hi = pl.col(column).cast(pl.String).cast(pl.Decimal(precision=38, scale=10))
+    decimal_hi = (
+        pl.col(column).cast(pl.String).cast(pl.Decimal(precision=38, scale=_SNAP_PARSE_SCALE))
+    )
     scaled = decimal_hi * pl.lit(Decimal(100))
     snapped = (
         pl.when(scaled >= pl.lit(Decimal(0)))
@@ -605,18 +637,15 @@ class ParquetWriter:
         (proven in ``tests/golden/test_writer_vectorized_snap_parity.py``,
         CLAUDE.md Golden Rule #7).
 
-        Resilience (GAP #1): the existing-partition parse AND the vectorized snap are
-        wrapped in a narrow ``try`` over :func:`~brutex.data.errors.parquet_read_skip_errors`
-        (a ``polars.exceptions.PolarsError`` on a corrupt / version-incompatible file, or
-        an ``OSError`` fault). A CORRUPT existing partition therefore raises a
-        QUARANTINABLE :class:`~brutex.data.errors.WriterError` naming the bad path
-        instead of crashing the whole pull — the ingest spine quarantines that one
-        symbol's window and proceeds; every other symbol still pulls. Folding the snap
-        into the SAME skip-guarded block is a strict improvement on the prior per-row
-        path: a non-finite (inf/NaN) corrupt price now quarantines via a ``PolarsError``
-        instead of the legacy un-caught ``decimal.InvalidOperation``. ``MemoryError`` /
-        ENOSPC stay mapped to ``LakeWriteHalt`` by the guard (a pull-wide stop, never
-        demoted to a per-symbol quarantine).
+        Resilience (GAP #1): the existing-partition DECODE is wrapped in a narrow ``try``
+        over :func:`~brutex.data.errors.parquet_read_skip_errors` (a
+        ``polars.exceptions.PolarsError`` on a corrupt / version-incompatible file, or an
+        ``OSError`` fault). A CORRUPT existing partition therefore raises a QUARANTINABLE
+        :class:`~brutex.data.errors.WriterError` naming the bad path instead of crashing
+        the whole pull — the ingest spine quarantines that one symbol's window and
+        proceeds; every other symbol still pulls. ``MemoryError`` / ENOSPC stay mapped to
+        ``LakeWriteHalt`` by the guard (a pull-wide stop, never demoted to a per-symbol
+        quarantine).
 
         Performance (DEC-LAKE-WRITE-VECTORIZE-001): the heavy
         ``Decimal(str(float))`` + half-up reconstruction — previously a pure-Python,
@@ -626,8 +655,18 @@ class ParquetWriter:
         ~10x lower on the price columns in isolation. Only the final
         ``{timestamp: CandleBar}`` dict build stays in Python (inherent to the merge
         structure); the double ``CandleBar`` construction + ``_tick_round`` of the old
-        path is gone. The snapped Decimals come straight off the polars
-        ``Decimal(scale=2)`` column, so no per-row ``Decimal`` parse remains.
+        path is gone.
+
+        Correctness fallback: the vectorized snap is BYTE-EXACT for every realistic price
+        (see :func:`_snap_price_expr`), but a value whose ``str`` repr would overflow the
+        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e21``, unreachable for a bar
+        price) raises a ``PolarsError`` from the snap. That is NOT corruption, so it is
+        NOT quarantined — it falls back to the exact per-row ``Decimal(str(x))`` +
+        ``_tick_round`` reconstruction (:meth:`_reconstruct_bars_per_row`), the proven
+        legacy path. A genuinely-corrupt NON-FINITE (inf/NaN) price likewise lands on the
+        per-row path, where it raises a quarantinable ``WriterError`` (it can never be a
+        valid 2dp price). So correctness wins over the micro-optimization, and the
+        change never silently corrupts a long-tail value.
         """
         try:
             import polars as pl
@@ -639,23 +678,31 @@ class ParquetWriter:
 
         import io
 
-        # The parse + vectorized snap is the steady-state re-pull's largest allocation,
-        # so it stays inside `lake_write_guard`: a `MemoryError` here becomes a
-        # `LakeWriteHalt` pull-wide stop (DEC-LAKE-WRITE-HALT-001, unchanged). NESTED
-        # inside it, a corrupt-file `PolarsError` / non-ENOSPC `OSError` (GAP #1) is
-        # caught and re-raised as a quarantinable `WriterError` naming the path —
-        # `MemoryError` is NOT in the skip set, so an OOM still reaches the guard and
-        # halts (never demoted to a quarantine). The snap is INSIDE the skip-guarded
-        # `try` because the columnar 2dp reconstruction now runs in polars too, so a
-        # non-finite corrupt value surfaces as a quarantinable `PolarsError`.
+        # The DECODE is the steady-state re-pull's largest allocation, so it stays inside
+        # `lake_write_guard`: a `MemoryError` here becomes a `LakeWriteHalt` pull-wide
+        # stop (DEC-LAKE-WRITE-HALT-001, unchanged). A corrupt-file `PolarsError` /
+        # non-ENOSPC `OSError` (GAP #1) is caught and re-raised as a quarantinable
+        # `WriterError` naming the path — `MemoryError` is NOT in the skip set, so an OOM
+        # still reaches the guard and halts (never demoted to a quarantine).
         with lake_write_guard():
             try:
                 df = pl.read_parquet(io.BytesIO(existing_bytes))
                 # Snap OHLC to the 2dp tick grid columnarly (byte-exact, GIL-released);
-                # timestamp / volume / open_interest pass through untouched.
-                snapped = df.with_columns(*(_snap_price_expr(c) for c in _PRICE_COLUMNS))
+                # timestamp / volume / open_interest pass through untouched. A value
+                # whose repr overflows precision-38 (unreachable for a price) raises a
+                # PolarsError here → fall back to the exact per-row reconstruction.
+                snapped: pl.DataFrame | None
+                try:
+                    snapped = df.with_columns(*(_snap_price_expr(c) for c in _PRICE_COLUMNS))
+                except pl.exceptions.PolarsError:
+                    snapped = None
             except parquet_read_skip_errors() as exc:
                 raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+
+        if snapped is None:
+            # Overflow / non-finite fallback: exact per-row Decimal(str(x)) path.
+            return ParquetWriter._reconstruct_bars_per_row(dest, df)
+
         # COLUMN-wise extraction (one Series.to_list per column). The OHLC columns are
         # already snapped to `Decimal(scale=2)`, so `to_list` yields Python `Decimal`
         # scalars equal to the legacy `round_money(Decimal(str(op)))` — no per-row
@@ -681,6 +728,55 @@ class ParquetWriter:
                 open_interest=None if oi is None else int(oi),
             )
             out[bar.timestamp] = bar
+        return out
+
+    @staticmethod
+    def _reconstruct_bars_per_row(dest: Path, df: object) -> dict[datetime, CandleBar]:
+        """Exact per-row ``Decimal(str(float))`` + ``_tick_round`` reconstruction.
+
+        The proven legacy 2dp-snap path (DEC-WRITER-COLUMNAR-4A-001), kept as the
+        CORRECTNESS fallback for the vectorized :func:`_snap_price_expr`
+        (DEC-LAKE-WRITE-VECTORIZE-001): it is invoked ONLY when the columnar snap raises
+        (a value whose ``str`` repr overflows the intermediate ``Decimal(precision=38)``,
+        ``|x| ≳ 1e21`` — unreachable for a real price). Column-wise ``Series.to_list``
+        extraction (one list per column, no per-row dict) keeps it allocation-lean.
+
+        A genuinely-corrupt NON-FINITE (inf/NaN) price reaches this path too: building a
+        ``CandleBar`` from it raises ``ValueError`` (the ``low <= open <= high`` invariant
+        fails for ``inf``) — or ``decimal.InvalidOperation`` if the snap raises first — and
+        EITHER is re-raised as a quarantinable :class:`~brutex.data.errors.WriterError`
+        naming the bad path (a non-finite / out-of-order value can never be a valid bar, so
+        it is treated as corruption — the pull quarantines that one symbol's window and
+        proceeds, never crashing the whole pull).
+        """
+        from decimal import InvalidOperation
+
+        timestamps = df["timestamp"].to_list()  # type: ignore[index]
+        opens = df["open"].to_list()  # type: ignore[index]
+        highs = df["high"].to_list()  # type: ignore[index]
+        lows = df["low"].to_list()  # type: ignore[index]
+        closes = df["close"].to_list()  # type: ignore[index]
+        volumes = df["volume"].to_list()  # type: ignore[index]
+        ois = df["open_interest"].to_list()  # type: ignore[index]
+        out: dict[datetime, CandleBar] = {}
+        try:
+            for ts, op, hi, lo, cl, vol, oi in zip(
+                timestamps, opens, highs, lows, closes, volumes, ois, strict=True
+            ):
+                bar = _tick_round(
+                    CandleBar(
+                        timestamp=ts,
+                        open=Decimal(str(op)),
+                        high=Decimal(str(hi)),
+                        low=Decimal(str(lo)),
+                        close=Decimal(str(cl)),
+                        volume=int(vol),
+                        open_interest=None if oi is None else int(oi),
+                    )
+                )
+                out[bar.timestamp] = bar
+        except (InvalidOperation, ValueError) as exc:
+            raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
         return out
 
     @staticmethod
