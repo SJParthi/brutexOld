@@ -807,7 +807,12 @@ class TestComputeOptionsCandidatesBranches:
 
 
 class TestCalendarDrivenTiersEndToEnd:
-    """The operator's case: a sparsely-pulled lake + the full vendor calendar."""
+    """End-to-end: a REPRESENTATIVE sparsely-pulled lake + the full vendor calendar.
+
+    Proves the calendar (registry) drives the tier over a sparse lake and surfaces an
+    honest no-data tier — a representative config that exercises the behaviour, NOT a
+    reconstruction of the operator's exact reported lake (Golden Rule #1).
+    """
 
     @staticmethod
     def _seed_sparse_july_lake(tmp_path: Path) -> None:

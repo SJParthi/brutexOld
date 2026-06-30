@@ -233,7 +233,7 @@ hostile-review pass._
 - **Active branch:** `claude/movers-calendar-tiers` (**DEC-MOVERS-CALENDAR-TIERS-001, MIGRATION.md #1029** —
   the `/movers` Options Near/Next/Far + Weekly/Monthly tiers are now driven by the AUTHORITATIVE vendor expiry calendar
   (`registry.duckdb`) instead of the SPARSE lake-partition set, so a sparsely-pulled lake no longer mislabels a tier (the
-  operator saw Far=04-Aug because 21-Jul/28-Jul were never pulled). FIX 1 (PRIMARY · correctness): NEW
+  operator REPORTED a wrong Far expiry on a lake missing intermediate July weeklies). FIX 1 (PRIMARY · correctness): NEW
   `movers_options.load_registry_expiries` reads the FULL per-underlying calendar via `RegistryStore.list_expiries`
   (populated by the metadata phase from the vendor `get_expiries`); `_tier_expiry_by_underlying` gains a `calendar_expiries`
   map + a pure `_tier_universe` that classifies tier+track over the calendar's `>= on_date` set when present (`_monthly_expiries`
