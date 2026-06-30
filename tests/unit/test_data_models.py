@@ -95,6 +95,21 @@ class TestCandleBarValidation:
                 open_interest=-5,
             )
 
+    def test_rejects_negative_price(self) -> None:
+        # DEC-CANDLE-NEGATIVE-PRICE-REJECT-001: a NEGATIVE OHLC price is impossible vendor
+        # data (a traded Indian price is always positive) — a directly-constructed CandleBar
+        # must reject it too, not just the assembler path.
+        with pytest.raises(ValueError, match="price must be non-negative"):
+            CandleBar(
+                timestamp=_ts(),
+                open=Decimal("-1"),
+                high=Decimal("-1"),
+                low=Decimal("-1"),
+                close=Decimal("-1"),
+                volume=0,
+                open_interest=None,
+            )
+
     def test_rejects_high_less_than_low(self) -> None:
         with pytest.raises(ValueError, match="high.*low"):
             CandleBar(

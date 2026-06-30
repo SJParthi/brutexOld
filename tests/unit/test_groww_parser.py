@@ -146,6 +146,15 @@ def test_missing_candles_key_raises() -> None:
         parser.parse_candle_rows({})
 
 
+@pytest.mark.parametrize("payload", [None, [], "candles", 42, ("a", "b")])
+def test_non_mapping_payload_raises_clean_parse_error(payload: object) -> None:
+    # DEC-CANDLE-PAYLOAD-MAPPING-GUARD-001 (defensive insurance, NOT a current bug — the real
+    # SDK never returns a non-mapping): a non-`Mapping` payload degrades to a clean
+    # CandleParseError (→ per-symbol quarantine) instead of a raw TypeError on `"candles" not in`.
+    with pytest.raises(CandleParseError, match="must be a mapping"):
+        parser.parse_candle_rows(payload)  # type: ignore[arg-type]
+
+
 def test_non_array_candles_raises() -> None:
     with pytest.raises(CandleParseError, match="must be an array"):
         parser.parse_candle_rows({"candles": "nope"})

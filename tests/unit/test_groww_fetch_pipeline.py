@@ -1050,3 +1050,52 @@ class TestSpillOverflow:
         pipeline.drain()
         assert not straggler.path.exists()
         assert area.reserved_bytes == 0
+
+
+class TestIsPoolIsolatable:
+    """DEC-FETCH-CORRUPT-PARTITION-ISOLATE-001: ``_is_pool_isolatable`` mirrors the spine's
+    per-symbol-quarantine carve-out — a non-global-stop ``BruteXError`` isolates (does NOT
+    trip the pool), while a global-stop (LakeWriteHalt / quota) or a genuine code bug trips."""
+
+    def test_writer_error_is_isolatable(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+        from brutex.data.errors import WriterError
+
+        assert _is_pool_isolatable(WriterError("corrupt existing partition")) is True
+
+    def test_generic_bruteX_error_is_isolatable(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+        from brutex.models import BruteXError
+
+        assert _is_pool_isolatable(BruteXError("some per-symbol error")) is True
+
+    def test_non_bruteX_error_trips_the_pool(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+
+        # A genuine code bug (ValueError/KeyError/...) is NEVER isolatable — it trips the pool
+        # so the bug is surfaced, never silently swallowed.
+        assert _is_pool_isolatable(ValueError("a real code bug")) is False
+        assert _is_pool_isolatable(KeyError("missing key")) is False
+
+    def test_lake_write_halt_trips_the_pool(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+        from brutex.data.errors import LakeWriteHalt
+
+        # Disk-full / OOM fails every remaining window identically → pull-wide halt.
+        assert _is_pool_isolatable(LakeWriteHalt("disk_full")) is False
+
+    def test_quota_stop_trips_the_pool(self) -> None:
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+        assert _is_pool_isolatable(DailyQuotaExceeded("quota spent")) is False
+        assert _is_pool_isolatable(QuotaInvariantError("ledger invariant broke")) is False
+
+    def test_matches_the_spine_global_stop_set(self) -> None:
+        # Pin the re-listed global-stop classes against the spine's authoritative tuple so the
+        # two can never drift (the cycle-avoidance re-list is verified, not trusted).
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+        from brutex.adapters.groww.run_ingest import _GLOBAL_STOP_ERRORS
+
+        for cls in _GLOBAL_STOP_ERRORS:
+            assert _is_pool_isolatable(cls("x")) is False, cls

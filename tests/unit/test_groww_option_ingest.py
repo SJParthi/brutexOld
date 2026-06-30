@@ -429,6 +429,43 @@ def test_ingest_intraday_filters_out_of_session() -> None:
     assert sink.appends[0][4] == 0
 
 
+def test_ingest_drops_future_dated_phantom_bar() -> None:
+    # DEC-CANDLE-DROP-FUTURE-BAR-001: an option bar dated AFTER the clamped window end
+    # (a clock-skew / out-of-window phantom) is dropped before the sink, never writing a
+    # future partition. 2024-01-05 09:30 IST is IN-SESSION but PAST the Jan-2 window end.
+    sdk = _FakeSDK(payload=_candles("2024-01-05T09:30:00"))
+    sink = _Sink()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),  # the Jan-5 bar is strictly after the clamped end
+        now_ist=_now,
+    )
+    assert report.bars_appended == 0  # the future phantom is dropped before the sink
+    assert sink.appends[0][4] == 0
+
+
+def test_ingest_keeps_on_boundary_bar() -> None:
+    # Regression for DEC-CANDLE-DROP-FUTURE-BAR-001: a bar ON the window-end date is KEPT
+    # (the drop is STRICTLY-AFTER, so existing boundary behaviour is byte-unchanged).
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))  # 2024-01-02 09:30 IST == the Jan-2 end date
+    sink = _Sink()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1  # the on-boundary bar is KEPT
+    assert sink.appends[0][4] == 1
+
+
 def test_ingest_intraday_keeps_in_session() -> None:
     sdk = _FakeSDK(payload=_candles(_IN_SESSION))
     sink = _Sink()

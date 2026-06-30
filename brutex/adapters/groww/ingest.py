@@ -75,6 +75,7 @@ from brutex.adapters.ingest_common import (
     GROWW_COVERAGE_MARKET,
     OLD_GAP_HORIZON_DAYS,
     clamp_window_end,
+    drop_bars_after,
     summarize_conflicts,
     tile_windows,
 )
@@ -868,6 +869,12 @@ def _process_window_tail(
         bars = filter_intraday_session(raw_bars)
     else:
         bars = raw_bars
+    # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
+    # (DEC-CANDLE-DROP-FUTURE-BAR-001): a vendor bar PAST the clamped bound would write a
+    # PHANTOM FUTURE partition. The window is already clamped (no current-day request), so
+    # this only ever removes an out-of-window / clock-skew phantom — a bar ON the boundary
+    # is KEPT, so the existing behaviour is byte-unchanged for every legitimate in-range bar.
+    bars = drop_bars_after(bars, window_end)
     _LOG.debug(
         "ingest.parse",
         pull_id=pull_id,

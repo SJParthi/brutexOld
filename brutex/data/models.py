@@ -43,8 +43,8 @@ def _validate_price_bar(
     Raises
     ------
     ValueError
-        Naive timestamp, negative volume / open interest, or OHLC that is
-        not ``low <= open, close <= high`` (``high >= low``).
+        Naive timestamp, negative volume / open interest, a NEGATIVE OHLC price,
+        or OHLC that is not ``low <= open, close <= high`` (``high >= low``).
     """
     if timestamp.tzinfo is None:
         raise ValueError(
@@ -54,6 +54,16 @@ def _validate_price_bar(
         raise ValueError(f"{owner}.volume must be non-negative, got {volume}")
     if open_interest is not None and open_interest < 0:
         raise ValueError(f"{owner}.open_interest must be non-negative or None, got {open_interest}")
+    # NEGATIVE-price guard (DEC-CANDLE-NEGATIVE-PRICE-REJECT-001): a traded Indian
+    # instrument's price is always positive (tick ≥ 0.05, rupees), so a ``< 0`` OHLC
+    # value is impossible vendor data — never a valid bar. Checked on the LOW (the
+    # bar's minimum) so a single comparison rejects any negative among the four
+    # prices; the high<low + open/close-in-range checks below then pin the rest.
+    # DEFENSIVE: the assembler path already loud-rejects a negative price upstream
+    # (`candle_fields.to_price`); this is the COMMON `CandleBar`/`OptionBar` invariant
+    # so a directly-constructed bar can never hold a fabricated negative price either.
+    if low < 0:
+        raise ValueError(f"{owner}: price must be non-negative, got low ({low})")
     # Price ordering sanity — allow equal (limit-locked bars).
     if high < low:
         raise ValueError(f"{owner}: high ({high}) must be >= low ({low})")

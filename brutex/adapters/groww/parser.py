@@ -106,9 +106,23 @@ def parse_candle_rows(
     Raises
     ------
     CandleParseError
-        If ``"candles"`` is missing/non-array, a row is neither a 7-element nor a
-        6-element array, or any non-empty field is unparseable.
+        If *payload* is not a mapping, ``"candles"`` is missing/non-array, a row is
+        neither a 7-element nor a 6-element array, or any non-empty field is unparseable.
     """
+    # DEFENSIVE-INSURANCE guard (DEC-CANDLE-PAYLOAD-MAPPING-GUARD-001): this is NOT a
+    # current bug — the installed `growwapi` SDK's `get_historical_candles` returns a
+    # `dict(...)` on success or RAISES, so it can never hand back a non-mapping (`None` /
+    # a scalar / a top-level list). But the param is typed `Mapping[str, object]`, and a
+    # `"candles" not in payload` on a non-mapping would raise a RAW `TypeError` (an
+    # "escaped code bug" the spine crashes the whole pull on) rather than a clean
+    # `CandleParseError` (→ per-symbol quarantine). This one-line isinstance check makes a
+    # future SDK contract change degrade gracefully; the row-array branches below already
+    # cover every malformed-but-dict body. The triage DISPROVED the alleged HIGH that this
+    # path crashes today against the real SDK — this is insurance, not a fix for a live crash.
+    if not isinstance(payload, Mapping):
+        raise CandleParseError(
+            f"Groww candle payload must be a mapping, got {type(payload).__name__}"
+        )
     if "candles" not in payload:
         raise CandleParseError("missing required 'candles' key in Groww payload")
     candles = payload["candles"]

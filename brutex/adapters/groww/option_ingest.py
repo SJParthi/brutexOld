@@ -86,6 +86,7 @@ from brutex.adapters.ingest_common import (
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
     OLD_GAP_HORIZON_DAYS,
     clamp_window_end,
+    drop_bars_after,
     summarize_conflicts,
 )
 from brutex.adapters.ingest_common import (
@@ -599,6 +600,12 @@ def _process_option_window_tail(
     settle_empty = raw.settle_empty
     attempt = raw.attempt
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
+    # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
+    # (DEC-CANDLE-DROP-FUTURE-BAR-001): a vendor bar PAST the clamped bound would write a
+    # PHANTOM FUTURE partition. ``key.end`` is the clamped end (``_clamped_window_key``); a
+    # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
+    # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
+    bars = drop_bars_after(bars, key.end)
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
