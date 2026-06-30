@@ -24,6 +24,7 @@ from decimal import Decimal
 import pytest
 from brutex.calendars.nse import IST, SessionType, TradingSession
 from brutex.data.models import CandleBar
+from brutex.engine import trade_sim as ts_mod
 from brutex.engine.trade_sim import (
     DEFAULT_FILL_POLICY,
     FillPolicy,
@@ -665,7 +666,8 @@ class TestSessionAwareForcedExit:
             close_time_ist=time(12, 30),
         )
         monkeypatch.setattr(
-            "brutex.engine.trade_sim.get_session",
+            ts_mod,
+            "get_session",
             lambda d: session if d == half_day else None,
         )
         bars = [
@@ -698,7 +700,7 @@ class TestSessionAwareForcedExit:
         # A bar dated on a date with NO trading session (get_session → None) must
         # not crash; the resolver returns None and is_forced_exit_bar falls back
         # to the standard 15:20 boundary. A contiguous real feed never hits this.
-        monkeypatch.setattr("brutex.engine.trade_sim.get_session", lambda d: None)
+        monkeypatch.setattr(ts_mod, "get_session", lambda d: None)
         bars = [
             _bar(15, 18, "100", "100", "100", "100"),
             _bar(15, 19, "100", "100", "100", "100"),
@@ -714,8 +716,6 @@ class TestSessionAwareForcedExit:
         # and memoised (1-slot, last-date), so a 3-bar single-day feed calls
         # get_session exactly once.
         calls: list[date] = []
-        import brutex.engine.trade_sim as ts_mod
-
         real_get_session = ts_mod.get_session
 
         def _counting_get_session(d: date) -> TradingSession | None:
