@@ -7,7 +7,29 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+
+@pytest.fixture(autouse=True)
+def _isolate_groww_token_cache(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redirect the on-disk Groww daily-token cache (DEC-GROWW-TOKEN-DISK-CACHE-001) at a
+    per-test tmp file for the WHOLE suite, so no test ever reads/writes the real
+    ``~/.brutex/cache/groww_access_token.json``.
+
+    The cache-first cold-start ``SdkRefresher`` build (and every ``build_live_client`` /
+    ``build_live_pool`` that constructs one) would otherwise touch the operator's home
+    cache — leaking a fake test token to disk and making a token-bearing run order-
+    dependent. A fresh, unwritten tmp path is always a clean cache MISS, so the byte-
+    identical mint-at-construction behaviour the legacy tests pin is preserved. Set via
+    the public ``BRUTEX_GROWW_TOKEN_CACHE_PATH`` env override (a per-test module/file
+    fixture can still re-point it; ``monkeypatch`` auto-restores at teardown).
+    """
+    cache = tmp_path_factory.mktemp("groww-token-cache") / "groww_access_token.json"
+    monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(cache))
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Raw-row fixtures mimicking the shape of a broker's pandas DataFrame

@@ -727,6 +727,51 @@ def test_auth_error_whose_remint_times_out_surfaces_retryable_timeout() -> None:
     assert refresher.reauth_calls == 1  # tried exactly one bounded re-mint, then surfaced
 
 
+def test_auth_error_whose_remint_is_throttled_propagates_retryable_no_recursion() -> None:
+    """DEC-GROWW-TOKEN-DISK-CACHE-001 (B1/step-5): a THROTTLED re-mint surfaces a retryable
+    throttle that propagates OUT of ``_call`` WITHOUT re-entering the reauth branch.
+
+    When the forced re-mint is itself issuance-throttled, ``refresher.reauth`` raises a
+    :class:`GrowwTokenIssuanceThrottled` (a GrowwAuthError subclass). It must NOT recurse
+    into another reauth (that would loop); it propagates as a retryable error the ingest
+    quarantines + re-pulls. Proven: reauth is called EXACTLY once.
+    """
+    from brutex.adapters.groww.errors import GrowwTokenIssuanceThrottled
+
+    auth_sdk = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+
+    class _ThrottlingRefresher:
+        def __init__(self, sdk: _FakeSDK) -> None:
+            self.reauth_calls = 0
+            self.sdk = sdk
+
+        def sdk_at(self, _index: int) -> _FakeSDK:
+            return self.sdk
+
+        def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
+            return self.sdk
+
+        def current_generation(self) -> int:
+            return 0
+
+        def reauth(self, _seen_generation: int) -> int:
+            self.reauth_calls += 1
+            raise GrowwTokenIssuanceThrottled(
+                "Groww access-token issuance throttled: ***", safe_message="throttled"
+            )
+
+    refresher = _ThrottlingRefresher(auth_sdk)
+    client = GrowwClient(
+        sdk=auth_sdk,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_reauths=1,
+    )
+    with pytest.raises(GrowwTokenIssuanceThrottled):
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert refresher.reauth_calls == 1  # exactly ONE forced re-mint — NO infinite recursion
+
+
 def test_with_pace_carries_the_refresher_through() -> None:
     """`with_pace` (dataclasses.replace) preserves the refresher + leaf index unchanged."""
     refresher = _FakeRefresher([_FakeSDK(payload={"candles": []})])
