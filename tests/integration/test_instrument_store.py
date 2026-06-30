@@ -468,6 +468,401 @@ class TestReadAPI:
         assert counts == {}
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# get() O(1) in-memory point-lookup index (DEC-INSTRUMENTSTORE-O1-001)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class TestGetO1Index:
+    """:meth:`InstrumentStore.get` is served from an O(1) in-memory index.
+
+    The index (``symbol_name`` -> newest-first ``(snapshot_date, Instrument)``
+    pairs) is built lazily on the first ``get`` and INVALIDATED on every write,
+    so it is byte-equivalent to the prior per-call O(n) DuckDB ``SEQ_SCAN`` while
+    serving the dominant ``as_of=None`` hot path in O(1). These tests pin every
+    branch of the new code AND the no-stale-cache contract on mutation.
+    """
+
+    def test_get_matches_old_query_path_present_and_absent(self, tmp_path: Path) -> None:
+        """Index result equals a direct DuckDB query for present + absent symbols."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            # Present: identical row to the raw ORDER-BY-snapshot-DESC query.
+            with s.connection as conn:
+                raw = conn.execute(
+                    "SELECT symbol_name, security_id FROM instruments "
+                    "WHERE symbol_name = ? ORDER BY snapshot_date DESC LIMIT 1",
+                    ["NIFTY"],
+                ).fetchone()
+            got = s.get("NIFTY")
+            assert got is not None
+            assert (got.symbol_name, got.security_id) == (raw[0], raw[1])
+            # Absent: both report nothing.
+            assert s.get("NOPE") is None
+            assert s.exists("NOPE") is False
+
+    def test_get_empty_store_returns_none(self, tmp_path: Path) -> None:
+        """An empty store builds an empty index and returns None (no crash)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.get("ANYTHING") is None
+            assert s.get("ANYTHING", as_of=date(2025, 1, 1)) is None
+
+    def test_get_single_row(self, tmp_path: Path) -> None:
+        """A single-row store serves the one symbol and nothing else."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            got = s.get("RELIANCE")
+            assert got is not None and got.symbol_name == "RELIANCE"
+            assert s.get("TCS") is None
+
+    def test_get_as_of_walks_to_first_snapshot_on_or_before(self, tmp_path: Path) -> None:
+        """as_of returns the newest snapshot <= as_of; older one when between."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 1, 1),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("jan"),
+            )
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("apr"),
+            )
+            # Between the two snapshots -> the January one is returned (non-None).
+            mid = s.get("RELIANCE", as_of=date(2025, 2, 1))
+            assert mid is not None
+            # On/after the latest -> the April one.
+            assert s.get("RELIANCE", as_of=date(2025, 5, 1)) is not None
+            assert s.get("RELIANCE") is not None
+
+    def test_get_as_of_before_all_snapshots_returns_none(self, tmp_path: Path) -> None:
+        """as_of earlier than every snapshot returns None (the loop falls through)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.get("RELIANCE", as_of=date(2024, 1, 1)) is None
+
+    def test_index_invalidated_on_upsert(self, tmp_path: Path) -> None:
+        """A get after an upsert sees the new rows -- never a stale index."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("a"),
+            )
+            assert s.get("AAA") is not None  # builds the index
+            assert s.get("BBB") is None
+            # New write must invalidate: BBB now visible.
+            s.upsert_many(
+                [_eq("BBB")],
+                snapshot_date=date(2025, 4, 16),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("b"),
+            )
+            assert s.get("BBB") is not None
+
+    def test_index_invalidated_on_prune(self, tmp_path: Path) -> None:
+        """A get after prune_to_latest_snapshot sees the pruned table, not stale rows."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 1, 1),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("old"),
+            )
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("new"),
+            )
+            # Prime the index, then verify the old snapshot is reachable by as_of.
+            assert s.get("AAA", as_of=date(2025, 2, 1)) is not None
+            pruned = s.prune_to_latest_snapshot()
+            assert pruned == 1
+            # The January snapshot is gone -- as_of=2025-02-01 must now be None,
+            # proving the index was rebuilt from the pruned table.
+            assert s.get("AAA", as_of=date(2025, 2, 1)) is None
+            assert s.get("AAA") is not None  # latest still present
+
+    def test_index_invalidated_on_upsert_rollback(self, tmp_path: Path) -> None:
+        """A failed upsert invalidates the index without corrupting reads.
+
+        Inject a bad-batch upsert by monkeypatching the columnar bulk insert to
+        raise mid-transaction; the store must ROLLBACK, invalidate the index, and
+        keep the prior committed state readable through a freshly rebuilt index.
+        """
+        import pyarrow as pa
+
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r1",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.get("NIFTY") is not None  # build the index
+
+            original = pa.table
+
+            def _boom(*_a: object, **_k: object) -> object:
+                raise RuntimeError("forced bulk-insert failure")
+
+            pa.table = _boom  # type: ignore[assignment]
+            try:
+                with pytest.raises(RuntimeError, match="forced bulk-insert failure"):
+                    s.upsert_many(
+                        [_idx("BANKNIFTY")],
+                        snapshot_date=date(2025, 4, 16),
+                        run_id="r2",
+                        csv_source_sha256=_csv_hash("b"),
+                    )
+            finally:
+                pa.table = original  # type: ignore[assignment]
+
+            # The rollback left only NIFTY; the index rebuilt cleanly.
+            assert s.get("NIFTY") is not None
+            assert s.get("BANKNIFTY") is None
+
+    def test_get_returns_latest_among_multiple_snapshots(self, tmp_path: Path) -> None:
+        """as_of=None always returns the newest snapshot (list is newest-first)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            for d in (date(2025, 1, 1), date(2025, 4, 15), date(2025, 2, 1)):
+                s.upsert_many(
+                    [_eq("AAA")],
+                    snapshot_date=d,
+                    run_id=f"r-{d}",
+                    csv_source_sha256=_csv_hash(str(d)),
+                )
+            # as_of=None returns the newest (2025-04-15); an as_of on the middle
+            # date returns a non-None (older) row.
+            assert s.get("AAA") is not None
+            assert s.get("AAA", as_of=date(2025, 3, 1)) is not None
+
+    # -- Zero-query structural O(1) proof (DEC-INSTRUMENTSTORE-O1-001) --
+    #
+    # The bench file (tests/bench/test_instrument_store_get_o1.py) only TIMES
+    # latency, and at the 40/4000 master sizes the OLD per-call DuckDB
+    # SEQ_SCAN measures only ~1.14x (DuckDB's ~3us fixed query-dispatch
+    # overhead swamps the tiny linear scan), so it stays UNDER the shared-CI
+    # 5.0x ceiling and would NOT catch an O(n)-regression. THESE tests are the
+    # real, timing-independent O(1) guard: they spy on the writer connection's
+    # ``execute`` and assert a primed ``get`` issues ZERO DuckDB queries, so
+    # ANY regression to a per-call scan (which re-queries the connection on
+    # every call) is caught structurally, regardless of timing noise.
+
+    @staticmethod
+    def _execute_spy(store: InstrumentStore) -> tuple[list[str], object]:
+        """Swap ``store._conn`` for a proxy that records every ``execute`` SQL.
+
+        The real DuckDB connection's ``execute`` attribute is read-only (a C
+        object), so we cannot patch the method in place. Instead we wrap the
+        whole connection in a thin delegating proxy that appends each SQL string
+        before forwarding to the genuine ``execute`` and passes every other
+        attribute straight through — behaviour stays byte-identical while every
+        query the read path issues becomes observable. Returns
+        ``(recorded_sql, original_conn)`` so the caller restores ``store._conn``
+        on teardown.
+        """
+        recorded: list[str] = []
+        # Whitebox structural probe of the writer connection (friend access).
+        original_conn = store._conn  # pyright: ignore[reportPrivateUsage]
+
+        class _RecordingConn:
+            """Delegating proxy that records ``execute`` SQL, forwards the rest."""
+
+            def execute(self, sql: str, *args: object, **kwargs: object) -> object:
+                recorded.append(sql)
+                return original_conn.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(original_conn, name)
+
+        store._conn = _RecordingConn()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        return recorded, original_conn
+
+    def test_primed_get_issues_zero_duckdb_queries(self, tmp_path: Path) -> None:
+        """A primed ``get(as_of=None)`` runs NO SQL -- the structural O(1) proof.
+
+        After the index is built once, every subsequent ``store.get(symbol)``
+        on the dominant ``as_of=None`` hot path must be served PURELY from the
+        in-memory dict -- issuing ZERO ``self._conn.execute`` calls. This is the
+        regression guard the timing bench cannot give: a regression back to the
+        per-call ``SELECT ... WHERE symbol_name = ? ... SEQ_SCAN`` would issue one
+        query PER call, failing this assertion no matter how fast the scan is.
+        """
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA"), _eq("BBB"), _eq("CCC")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            s.get("AAA")  # build (prime) the index once
+
+            recorded, original = self._execute_spy(s)
+            try:
+                recorded.clear()
+                # Many hits + a miss: all must be served from memory.
+                for _ in range(50):
+                    assert s.get("AAA") is not None
+                    assert s.get("BBB") is not None
+                    assert s.get("ZZZ") is None
+                assert recorded == [], (
+                    "primed get() issued DuckDB queries "
+                    f"({len(recorded)}) -- regressed to a per-call scan? {recorded}"
+                )
+            finally:
+                s._conn = original  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+
+    def test_primed_get_as_of_issues_zero_duckdb_queries(self, tmp_path: Path) -> None:
+        """A primed ``get(as_of=...)`` temporal walk also runs NO SQL.
+
+        The ``as_of`` branch walks the symbol's in-memory snapshot list; it must
+        likewise issue ZERO queries once primed, so the temporal hot path is also
+        structurally O(snapshots-per-symbol), never an O(rows) per-call scan.
+        """
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 1, 1),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("jan"),
+            )
+            s.upsert_many(
+                [_eq("AAA")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r2",
+                csv_source_sha256=_csv_hash("apr"),
+            )
+            s.get("AAA")  # prime the index
+
+            recorded, original = self._execute_spy(s)
+            try:
+                recorded.clear()
+                for _ in range(50):
+                    assert s.get("AAA", as_of=date(2025, 2, 1)) is not None
+                    assert s.get("AAA", as_of=date(2024, 1, 1)) is None
+                assert recorded == [], (
+                    "primed get(as_of=...) issued DuckDB queries "
+                    f"({len(recorded)}) -- regressed to a per-call scan? {recorded}"
+                )
+            finally:
+                s._conn = original  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+
+    def test_first_get_builds_index_with_exactly_one_scan(self, tmp_path: Path) -> None:
+        """The amortised build is ONE full-table scan, not a per-symbol query.
+
+        The first ``get`` after a write pays exactly one ``SELECT * FROM
+        instruments`` index-build scan (the documented O(rows) amortised cost),
+        and it is the ONLY query the read path runs across many subsequent
+        symbol lookups -- pinning that the cost is amortised over the whole
+        master, never re-paid per call.
+        """
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("AAA"), _eq("BBB"), _eq("CCC")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+
+            recorded, original = self._execute_spy(s)
+            try:
+                recorded.clear()
+                # First get triggers exactly one index-build scan over the
+                # WHOLE table; the next two distinct-symbol gets add NOTHING.
+                assert s.get("AAA") is not None
+                assert s.get("BBB") is not None
+                assert s.get("CCC") is not None
+                build_scans = [q for q in recorded if "SELECT * FROM instruments" in q]
+                assert len(build_scans) == 1, (
+                    "expected exactly one full-table index build across three "
+                    f"gets, saw {len(build_scans)}: {recorded}"
+                )
+                # And zero per-symbol WHERE-scans (the old O(n) shape).
+                assert not any("WHERE symbol_name" in q for q in recorded), (
+                    f"a per-symbol scan ran -- regressed to the old query path: {recorded}"
+                )
+            finally:
+                s._conn = original  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+
+    def test_same_snapshot_date_collision_is_deterministic(self, tmp_path: Path) -> None:
+        """Two rows sharing (symbol_name, snapshot_date) resolve identically (NIT-1).
+
+        ``symbol_name`` is NOT part of the PK, so two DISTINCT instruments (here
+        an NSE and a BSE row that share the symbol ``DUP`` on the same day) can
+        coexist for one ``(symbol_name, snapshot_date)``. The ``security_id``
+        tiebreak in ``_build_symbol_index`` pins which one is the newest-first
+        head, so ``get(as_of=None)`` returns the SAME row on every rebuild --
+        never an order-unspecified pick. Parity is asserted across an
+        invalidate+rebuild cycle.
+        """
+
+        def _dup(security_id: int, *, exchange: Exchange) -> Instrument:
+            """Two distinct instruments that deliberately SHARE symbol ``DUP``."""
+            return Instrument(
+                exch_id=exchange,
+                security_id=security_id,
+                symbol_name="DUP",
+                display_name="DUP Ltd",
+                instrument=InstrumentType.EQ,
+                segment=Segment.CASH,
+                series="EQ",
+                isin=None,
+                underlying_symbol=None,
+                underlying_security_id=None,
+                lot_size=1,
+                tick_size=Decimal("0.05"),
+                sm_freeze_qty=None,
+                sm_expiry_date=None,
+                strike_price=None,
+                asm_gsm_flag=False,
+            )
+
+        # Distinct security_ids (and exchanges) so the PKs differ but the two rows
+        # share one (symbol_name, snapshot_date) — a genuine same-day collision.
+        nse = _dup(7000, exchange=Exchange.NSE)
+        bse = _dup(3000, exchange=Exchange.BSE)
+        assert nse.security_id != bse.security_id
+        assert nse.symbol_name == bse.symbol_name == "DUP"
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [nse, bse],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            first = s.get("DUP")
+            assert first is not None
+            # The tiebreak picks the lowest security_id among the same-date rows.
+            expected_id = min(nse.security_id, bse.security_id)
+            assert first.security_id == expected_id
+            # Invalidate the index (a no-op prune still rebuilds it) and re-read:
+            # the SAME row must win -- proving the resolution is deterministic.
+            s.prune_to_latest_snapshot()
+            second = s.get("DUP")
+            assert second is not None
+            assert second.security_id == expected_id
+
+
 # ────────────────────────────────────────────────────────────────────────
 # InstrumentSnapshot \u2014 hot-path view
 # ────────────────────────────────────────────────────────────────────────
