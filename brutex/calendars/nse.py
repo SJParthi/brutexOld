@@ -472,21 +472,27 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     return SESSION_DURATION_MINUTES // tf_minutes
 
 
-def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
-    """Return True if a bar opening at IST time ``t`` reaches the 15:20 forced exit.
+def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None = None) -> bool:
+    """Return True if a bar opening at IST time ``t`` reaches the forced exit.
 
-    Per `docs/TRACK1_BACKTEST_SPEC.md` rule §8 the forced 15:20 IST exit
-    overrides everything. A bar covers the half-open window
-    ``[t, t + tf_minutes)``; it is a forced-exit bar when that window **reaches
-    or passes** 15:20 IST — i.e. its close ``t + tf_minutes`` is strictly after
-    15:20.
+    Per `docs/TRACK1_BACKTEST_SPEC.md` rule §8 the forced IST exit overrides
+    everything. A bar covers the half-open window ``[t, t + tf_minutes)``; it is
+    a forced-exit bar when that window **reaches or passes** the forced-exit
+    instant — i.e. its close ``t + tf_minutes`` is strictly after it.
 
-    For 1-minute bars this is identical to the old tf-blind ``t >= 15:20``
+    For 1-minute bars this is identical to the old tf-blind ``t >= boundary``
     test, but for coarser timeframes it additionally catches the bar whose
-    *span* straddles 15:20 (e.g. a 15-minute bar opening at 15:15 IST runs to
-    15:30 and must force-exit) — which the previous implementation silently
-    missed because it ignored ``tf_minutes`` (DEC-TRADESIM-001; open question
-    Q4 from `docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md` §5).
+    *span* straddles the boundary (e.g. a 15-minute bar opening at 15:15 IST
+    runs to 15:30 and must force-exit) — which the previous implementation
+    silently missed because it ignored ``tf_minutes`` (DEC-TRADESIM-001; open
+    question Q4 from `docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md` §5).
+
+    The boundary defaults to the standard 15:20 IST (regular 09:15-15:30
+    session). A SESSION-AWARE caller passes ``forced_exit_seconds`` — the
+    session's own close − 10min (e.g. an evening Diwali Muhurat or an early
+    half-day close) via :func:`forced_exit_seconds_for_session` — so a
+    non-regular session force-exits at its real close − 10min rather than the
+    wrong, hardcoded 15:20 (DEC-SESSION-FORCED-EXIT-001).
 
     Parameters
     ----------
@@ -495,11 +501,14 @@ def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
     tf_minutes
         The bar's timeframe in whole minutes (``>= 1``): 1 for the 1-minute
         base, 5/15/25/60/... for the resampled intraday timeframes.
+    forced_exit_seconds
+        The forced-exit boundary as seconds-since-midnight IST, or ``None`` to
+        use the standard 15:20 IST boundary (:data:`_FORCED_EXIT_SECONDS`).
 
     Returns
     -------
     bool
-        True iff the bar's ``[open, open + tf)`` window reaches 15:20 IST.
+        True iff the bar's ``[open, open + tf)`` window reaches the boundary.
 
     Raises
     ------
@@ -508,9 +517,10 @@ def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
     """
     if tf_minutes < 1:
         raise ValueError(f"is_forced_exit_bar.tf_minutes must be >= 1, got {tf_minutes}")
+    boundary = _FORCED_EXIT_SECONDS if forced_exit_seconds is None else forced_exit_seconds
     open_seconds = t.hour * _SECONDS_PER_HOUR + t.minute * _SECONDS_PER_MINUTE + t.second
     close_seconds = open_seconds + tf_minutes * _SECONDS_PER_MINUTE
-    return close_seconds > _FORCED_EXIT_SECONDS
+    return close_seconds > boundary
 
 
 def forced_exit_time_for_session(session: TradingSession) -> time:
@@ -529,6 +539,23 @@ def forced_exit_time_for_session(session: TradingSession) -> time:
     """
     close_dt = datetime.combine(session.date, session.close_time_ist)
     return (close_dt - _FORCED_EXIT_MARGIN).time()
+
+
+def forced_exit_seconds_for_session(session: TradingSession) -> int:
+    """Return ``session``'s forced-exit time-of-day as seconds-since-midnight IST.
+
+    The integer twin of :func:`forced_exit_time_for_session`, in the same
+    seconds-since-midnight unit :func:`is_forced_exit_bar` compares against, so
+    a session-aware caller resolves the boundary once and feeds it straight to
+    the tf-aware forced-exit test without any time→seconds re-derivation at the
+    call site (one COMMON conversion; DEC-SESSION-FORCED-EXIT-001).
+
+    For the standard 09:15-15:30 session this equals :data:`_FORCED_EXIT_SECONDS`
+    (15:20 IST); for a short / half-day / Muhurat session it scales with the
+    actual close − 10min.
+    """
+    forced = forced_exit_time_for_session(session)
+    return forced.hour * _SECONDS_PER_HOUR + forced.minute * _SECONDS_PER_MINUTE + forced.second
 
 
 def is_pre_open(t: time) -> bool:
