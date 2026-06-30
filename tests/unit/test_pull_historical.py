@@ -77,7 +77,7 @@ _TO = date(2024, 1, 20)
 
 def _candle_payload() -> dict[str, object]:
     """One 1-day bar (row-of-arrays Groww shape: ts, o, h, l, c, v, oi)."""
-    return {"candles": [["2024-01-25T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
+    return {"candles": [["2024-01-15T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
 
 
 class _FakeSDK:

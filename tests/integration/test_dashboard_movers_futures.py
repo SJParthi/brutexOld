@@ -541,6 +541,42 @@ class TestFuturesApi:
         assert resp.status_code == 400
         assert "malformed date" in resp.json()["detail"]
 
+    def test_min_volume_floor_filters_futures_volume_ranking(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-MIN-VOLUME-001: the single near future has cumulative session volume
+        # 500; a floor of 1000 drops it from the Top Volume ranking but the price ranking
+        # (its only mover) is unaffected — the floor applies to the volume category only.
+        _seed_futures_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "futures",
+                "interval": "1day",
+                "date": "2024-06-13",
+                "min_volume": 1000,
+            },
+        ).json()
+        assert body["min_volume"] == 1000
+        assert body["volume"] == []  # the 500-volume future is below the floor
+        assert "Min volume ≥ 1,000." in body["note"]
+        # The future still appears in the price ranking (the floor is volume-only).
+        assert len(body["price_gainers"]) == 1
+
+    def test_min_volume_default_zero_byte_identical_futures(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _seed_futures_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "futures", "interval": "1day", "date": "2024-06-13"},
+        ).json()
+        assert body["min_volume"] == 0
+        assert len(body["volume"]) == 1
+        assert "Min volume" not in body["note"]
+
 
 class TestFuturesExpiryTier:
     """The Near / Next / Far serial-expiry selector (DEC-MOVERS-FUTURES-TIER-001).

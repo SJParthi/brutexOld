@@ -157,6 +157,10 @@
         </label>
         <label class="ctl">Time<select id="time"><option value="">(daily)</option></select></label>
         <label class="ctl">Top N<input type="number" id="topn" min="1" max="500" value="100" /></label>
+        <!-- OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001): blank / 0 = no floor
+             (byte-identical to today); a positive value drops thin contracts from the
+             Top Volume ranking. Applied server-side at rank time, so it never re-scans. -->
+        <label class="ctl">Min vol<input type="number" id="minvol" min="0" step="1" value="0" title="Minimum cumulative session volume (Top Volume ranking)" /></label>
         <button class="go" id="refresh">↻ Refresh</button>
         <span id="asof"></span>
       </div>
@@ -256,7 +260,14 @@ function applyCategory() {
 }
 function renderPills() {
   $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
-  $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => { state.category = p.dataset.cat; renderPills(); applyCategory(); });
+  $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => {
+    /* A metric-pill switch resets the client-side column sort to the new tab's
+       server ranking (DEC-MOVERS-SORT-RESET-001) — otherwise a manual VOLUME sort
+       persisted across pill switches (the asset-tab handler already resets it).
+       renderHead() clears the stale ▼ arrow + the `sorted` highlight. */
+    state.category = p.dataset.cat; state.sort = {idx:null,dir:1};
+    renderPills(); renderHead(); applyCategory();
+  });
   /* Expiry applies to futures/options only — hidden for spot. */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
   $("expiry").style.display = derivAsset ? "" : "none";
@@ -335,6 +346,9 @@ async function load() {
   if ($("date").value) p.set("date", $("date").value);
   if (state.time) p.set("time", state.time);
   if ($("exchange").value) p.set("exchange", $("exchange").value);
+  /* OPT-IN Top Volume floor (DEC-MOVERS-MIN-VOLUME-001): only send a POSITIVE value, so
+     blank / 0 stays byte-identical to the no-floor default (the route default is 0). */
+  if (parseInt($("minvol").value, 10) > 0) p.set("min_volume", $("minvol").value);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
@@ -361,7 +375,7 @@ $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
 });
 $("interval").onchange = () => { fillTimes(); load(); };
 $("time").onchange = () => { state.time = $("time").value; load(); };
-["exchange","expiry","track","topn","date"].forEach(id => $(id).onchange = load);
+["exchange","expiry","track","topn","date","minvol"].forEach(id => $(id).onchange = load);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();
 </script>

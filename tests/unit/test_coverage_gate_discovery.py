@@ -192,7 +192,12 @@ class TestDiscoverTouchedModules:
         #     test_engine_stage1a.py (builder + VWAP/BOS bits) + test_engine_walk_forward.py
         #     (the walk-forward helpers that live in stage1a.py); the static engine gate
         #     runs the whole tests/unit/test_engine_*.py suite at 100%
-        #     (DEC-COVERAGE-DISCOVERY-STAGE1A-001).
+        #     (DEC-COVERAGE-DISCOVERY-STAGE1A-001);
+        #   * brutex/dashboard/movers_snapshot.py — the /movers spot-snapshot module
+        #     whose spot-candidate readers only execute against a real seeded lake
+        #     partition (the integration suite), with no test_dashboard_movers_snapshot.py
+        #     stem match; gated by the whole-package floor at 100.00% over the movers
+        #     unit+integration suites (DEC-COVERAGE-DISCOVERY-MOVERS-SNAPSHOT-001).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -201,6 +206,7 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/pull_controller.py",
                     "brutex/dashboard/db_view.py",
                     "brutex/engine/stage1a.py",
+                    "brutex/dashboard/movers_snapshot.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
@@ -219,6 +225,20 @@ class TestDiscoverTouchedModules:
         # rides the whole-package floor instead of failing the discovery gate).
         assert gate.discover_touched_modules(
             [("M", "brutex/dashboard/app.py"), ("M", "brutex/dashboard/nav.py")]
+        ) == [("brutex/dashboard/nav.py", "M")]
+
+    def test_excluded_movers_snapshot_module_is_dropped_from_discovery(
+        self, gate: ModuleType
+    ) -> None:
+        # The shipped exclude really removes movers_snapshot.py from the gated set (its
+        # spot-candidate readers only execute against a real seeded lake partition in
+        # the integration suite, so it rides the whole-package floor instead of failing
+        # the discovery gate on an unreachable single-file 100%).
+        assert gate.discover_touched_modules(
+            [
+                ("M", "brutex/dashboard/movers_snapshot.py"),
+                ("M", "brutex/dashboard/nav.py"),
+            ]
         ) == [("brutex/dashboard/nav.py", "M")]
 
 
