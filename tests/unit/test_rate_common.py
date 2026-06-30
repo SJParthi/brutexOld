@@ -1271,6 +1271,40 @@ class TestTrailingWindowIssueLog:
         snap = ctl.snapshot()
         assert snap["recent_60s"] == snap["recent_minute"] == 3
 
+    def test_recent_60s_cross_checks_recent_minute_at_fractional_boundary(self) -> None:
+        # DEC-ADAPTER-ROBUSTNESS-001 (H10) regression: the issue-ring ``recent_60s`` and the
+        # governor's ``recent_minute`` must still AGREE when an issue sits in the boundary second
+        # (within ``now - 60`` of a FRACTIONAL ``now``). The old ``ceil(now - window)`` oldest-sec
+        # binning dropped that boundary bucket, so the ring undercounted (recent_60s = 0) while the
+        # float-instant deque kept it (recent_minute = 1) — the documented cross-check then read
+        # falsely UNEQUAL. With ``floor(now - window)`` the ring keeps the boundary second, so the
+        # two windows agree (to within one boundary second). FAILS under the old ``ceil``.
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_per_min=500)
+        now = 5000.5  # FRACTIONAL ``now`` ⇒ ``now - 60 == 4940.5`` is non-integer
+        boundary_ts = 4940.7  # in (4940.5, 5000.5] ⇒ kept by the deque; bucket = floor = 4940
+        ctl._record_issue_locked(boundary_ts)  # into the per-second issue ring
+        ctl._issues.append(boundary_ts)  # into the governor deque (same exact instant)
+        clock.t = now
+        snap = ctl.snapshot()
+        # The boundary-second issue is counted by BOTH sources, so the cross-check holds.
+        assert snap["recent_60s"] == 1
+        assert snap["recent_minute"] == 1
+        assert snap["recent_60s"] == snap["recent_minute"]
+
+    def test_count_in_window_keeps_the_boundary_second_bucket(self) -> None:
+        # DEC-ADAPTER-ROBUSTNESS-001 (H10): the trailing-window count includes the bucket that
+        # HOLDS ``now - window`` (the boundary second), because that bucket's sub-range
+        # ``(now - window, floor(now - window) + 1)`` IS inside the trailing window. Probes the
+        # primitive directly at a fractional ``now``: an issue at second 4940 is inside the
+        # trailing 60 s of ``now = 5000.5`` (4940 ≥ floor(4940.5)) and must be counted as 1.
+        # Under the old ``ceil(4940.5) = 4941`` oldest-sec it was DROPPED (counted 0).
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl._record_issue_locked(4940.0)  # the boundary-second bucket (second 4940)
+        clock.t = 5000.5
+        assert ctl._count_in_window_locked(5000.5, LOG_WINDOW_60S) == 1
+
     def test_pace_records_an_issue_without_a_governor(self) -> None:
         # Governor OFF: _issues stays empty (recent_minute 0), but the OBSERVE-ONLY issue
         # ring STILL counts every admitted issue, so req/sec·min·10min·hour are real even

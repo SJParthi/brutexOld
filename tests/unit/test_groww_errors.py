@@ -126,6 +126,60 @@ def test_from_groww_exception_classifies_generic_by_code_and_message(
     assert type(e.from_groww_exception(exc)) is expected
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        # An unrelated error code / id / timestamp that merely CONTAINS "429" as a
+        # substring — NONE of these is a rate-limit and none must be retried.
+        "Contract NSE-FOO24JUL18500CE error code STK-429-DELISTED, not tradable",
+        "order id 1442904291 rejected",  # "429" sits inside the order id
+        "no candles at 2024-04-29T09:15:00",  # "429" sits inside the date
+        "instrument 4290 is not on Groww",
+    ],
+)
+def test_bare_429_substring_is_not_a_rate_limit(message: str) -> None:
+    """DEC-ADAPTER-ROBUSTNESS-001 (H8) regression: a message merely CONTAINING ``429``
+    (an error code, an order id, a timestamp) must NOT be classified as a retryable
+    rate-limit.
+
+    The old ``_RATE_LIMIT_HINTS`` carried a bare ``"429"`` substring, so any such
+    message false-matched → mapped to ``GrowwRateLimitError`` → re-pulled forever,
+    needlessly stepping the rate ladder down + escaping per-symbol quarantine. With the
+    bare substring dropped these stay the TERMINAL base :class:`GrowwError` (no ``code``,
+    no genuine phrase), so they are neither retryable nor a ladder-stepping rate-limit.
+    """
+    mapped = e.from_groww_exception(_GenericGrowwAPIException(message))
+    assert type(mapped) is e.GrowwError
+    assert e.is_retryable(mapped) is False
+    assert e.is_rate_limit(mapped) is False
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # Genuine rate-limit — STRUCTURED status code (int + digit-string), the path that
+        # survives dropping the bare "429" substring (DEC-ADAPTER-ROBUSTNESS-001 H8).
+        _GenericGrowwAPIException("Service throttled", code=429),
+        _GenericGrowwAPIException("Service throttled", code="429"),
+        # Genuine rate-limit — the live phrase shapes.
+        _GenericGrowwAPIException("Rate limit has breached for your request."),
+        _GenericGrowwAPIException("HTTP 429: Too Many Requests, slow down"),
+    ],
+)
+def test_genuine_rate_limit_still_retryable_without_bare_substring(
+    exc: _GenericGrowwAPIException,
+) -> None:
+    """DEC-ADAPTER-ROBUSTNESS-001 (H8): dropping the bare ``"429"`` substring loses NO
+    genuine rate-limit detection — a real 429 is caught STRUCTURALLY (``code == 429``,
+    int or digit-string) or by a genuine phrase hint, so it still maps to a retryable
+    :class:`GrowwRateLimitError` that DOES step the rate ladder.
+    """
+    mapped = e.from_groww_exception(exc)
+    assert type(mapped) is e.GrowwRateLimitError
+    assert e.is_retryable(mapped) is True
+    assert e.is_rate_limit(mapped) is True
+
+
 def _empty_body_decode_error() -> json.JSONDecodeError:
     """The EXACT error the SDK's ``response.json()`` raises on an empty vendor body.
 
