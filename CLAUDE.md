@@ -230,7 +230,73 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rate-widget-fno-honest` (**DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
+- **Active branch:** `claude/fetch-per-window-guarantee` (**DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026** —
+  adaptive strike-chain bounding drives the F&O option-pull fetches-per-window from a MEASURED `2.54` toward `~1.2`,
+  making the operator's worst-case-`3 r/s` 8-hour pull a MEASURED CI GATE — with NO data lost. THE ARITHMETIC: at the AIMD
+  soft-floor `3 r/s`, `3×3600×8h = 86,400` fetches are available in 8h; a production pull spent `2.54` fetches per
+  `(contract, interval)` window (122,243/48,145), so the target fit only if fetches-per-window dropped toward ~1.2.
+  MEASURED ROOT (re-derived in the bench): modelling `avg = (1−E)·1 + E·3` against 2.54 gives an empty-window fraction
+  `E ≈ 0.77` — the **3× in-pull EMPTY-retry** firing on every clean-but-empty deep-OTM strike that never traded is the
+  DOMINANT amplifier (NOT just a "15.8% deep-OTM" subset). FIX (pull-PLANNING / per-contract retry-budget only — NO
+  lake-schema/stored-bar/rate-cap/vocab change; F&O lake stays REFERENCE_ONLY): NEW pure
+  `brutex/adapters/groww/strike_chain_bound.py` `build_empty_retry_budget` groups the CE/PE chain by
+  `(underlying_symbol, expiry)` (NOT expiry alone — so a mixed all-cached pull never pools two underlyings sharing one
+  monthly expiry into a bogus median; hostile-review MAJOR folded), finds each chain's MEDIAN strike (a robust
+  ATM/liquidity-center proxy needing NO live spot fetch), and gives a strike OUTSIDE a `±band`-STRIKES envelope
+  (grid-rank, default `±12`, env `BRUTEX_FNO_STRIKE_BAND`) a REDUCED empty-retry budget (default `1`, env
+  `BRUTEX_FNO_DEEP_EMPTY_RETRY`, clamped `[1, full]`) — so a confirmed-DEAD far-OTM strike costs ONE fetch to confirm
+  empty instead of three. A too-small chain, every FUT, and every in-band option keep the FULL budget; the map is SPARSE
+  so a `None` map is byte-identical to today. Threaded an optional `empty_retry_by_symbol` through
+  `run_groww_option_ingest` → `ingest_option_contract`'s EXISTING `empty_retry_attempts`, built in `historical_pull`
+  over the whole chain. CORRECTNESS — NO DATA LOST (Golden Rule #1): the reduction keys ONLY off a CLEAN 200-zero-candles
+  return, NEVER off a raised retryable error — by construction the empty-retry loop re-iterates only when the fetch
+  RETURNS empty bars, while a transient (429/timeout/5xx `GrowwServerError` #883/empty-body-throttle `GrowwEmptyResponseError`
+  #854/network) is RAISED into the SEPARATE, UNTOUCHED `max_attempts` ladder and never decrements the empty budget; the
+  first non-empty fetch always wins, so a deep strike that DOES return data is stored exactly as before; a near-money
+  strike is never reduced; "if uncertain, fetch" (`< 1` clamps UP to 1). RE-PULL NET: a reduced-budget empty makes
+  `fetch_count == 1 < CONFIRMED_EMPTY_MIN_FETCHES(2)` so the OLD-gap fast-settle does NOT fire — the window stays
+  re-fetchable on a later idempotent pull (keep-first sink + durable ledger), so even a vendor-bug 200-empty is
+  recoverable; the #919 all-empty + #974 partial-window detectors stay ACTIVE. THE GUARANTEE = a MEASURED CI BENCH GATE
+  (`tests/bench/test_fetch_per_window_guarantee.py`): replays a representative NIFTY chain end-to-end through the REAL
+  spine against a fetch-COUNTING SDK and ASSERTS fetches-per-window ≤ 1.2 AND `86,400/fpw` ≥ the chain's windows (a
+  regression FAILS CI), plus a teeth test that the SAME chain WITHOUT bounding is ABOVE the ceiling and stores the SAME
+  bars. MEASURED before/after: baseline `2.580` fpw (8h covers 33,485 windows) → bounded `1.198` fpw (8h covers 72,148
+  windows), `0.46×` the fetches, 34→34 bars (no data lost). 8h-FEASIBILITY VERDICT: FITS at 3 r/s for the measured scope
+  (~72k window coverage ≥ ~48k target; the liquid-only universe ~42k < 86,400). HONEST (Golden Rule #10): a HEURISTIC
+  band not an oracle (a live strike outside the band loses 2 glitch-recovery attempts but is STILL fetched once + stored
+  if it returns data); the 8h projection is `total_fetches/3 r/s`, a wall-clock LOWER bound assuming the controller
+  sustains 3 r/s (Rule 6 — provable), NOT a claim every real pull finishes in 8h; the empty-RETRY is bounded, NOT a
+  plan-time strike SKIP (a walk-outward short-circuit is incompatible with the parallel fan-out + would slow the pull,
+  so the dominant measured lever was chosen). `strike_chain_bound.py` (88/24) + `option_ingest.py` (310/82) +
+  `historical_pull.py` (257/54) ALL 100% line+branch; NEW unit/property + a per-permutation correctness suite
+  (clean-empty→bounded · 429/timeout/5xx/empty-body-throttle→retried+NOT counted · near-money→never reduced ·
+  transient-empty-then-data→strike not skipped + data captured · re-pull→re-fetches · #919 detector still fires) + the
+  bench gate; ruff/ruff-format/`mypy --strict`/`pyright` clean on every touched file. ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior merged: **DEC-LAKE-READ-O1-AUDIT-001, MIGRATION.md #1025** —
+  a full audit of every BruteX DB-FETCH / lake-READ entry point for O(1)/O(page) latency. The verdict: the prior
+  O(1)/O(page) PRs (#860/#863/#864/#867/#893/#895/#896/#933) have ALREADY bounded essentially every hot read — the
+  engine bar stream is O(1)/bar (catalog-window-indexed `Catalog.get_bars`), `LakeOptionBarSource.load_pair` is O(1)/leg
+  after two read-through caches, the spot 1m→1d resample read is pulled-window-month-bounded (`ist_span_partition_files`),
+  every movers per-symbol read is month/day-glob-bounded (`lake_day_glob`) + the candidate scan is split-and-cached
+  (`MoversSnapshotCache`), the completeness SPOT scan rides `_summary_cache`, the `/universe` reads are O(1) behind
+  `master_revision`, and the `/db` candle/window/discovery/registry reads are all cached or `LIMIT`-pushdown-bounded.
+  The ONE gap found + fixed: `db_view.query_option_candles` (the `/db` expired-options tab) computed its page `total`
+  via `SELECT COUNT(*) FROM read_parquet(<series-glob>)` on EVERY paging click with NO count cache — the EXACT O(files)
+  footer-scan `query_candles` fixed in #867 but the options pager never got. FIX (READ-ONLY `/db` viewer accelerator —
+  ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX, NO store/schema/scope/vocab/rate/write-path change): a NEW pure
+  `db_view.option_candle_count_key(series, start, end)` (the options twin of `candle_count_key`; excludes
+  `limit`/`offset`/`descending`/`columns` — the paging-invariance — with an `opt|` prefix so it NEVER collides with a
+  spot key) + `query_option_candles` gains the OPTIONAL `count_cache`/`generation` (REUSING the #867 `CandleCountCache`
+  Protocol, NO new class); the `/api/v1/db/options` route passes the SAME COMMON `_candle_count_cache` (`MoversSnapshotCache`)
+  the spot pager uses + `_summary_cache.generation`, so a prev/next click is an O(1) hit + a pull bumps the generation →
+  recount (never stale, Golden Rule #1). MEASURED: a deep 72-month series 19.02 ms/click → 13.76 ms/click (1.38×, the win
+  grows with depth). HONEST envelope (identical to #867): a cached-total HIT is O(1) in series depth (bench-pinned FLAT,
+  COUNT-once proven); the FIRST view per generation + the page DATA query stay O(files) (true O(page) needs a write-time
+  lake manifest, NOT claimed); the empty series early-returns `total:0` without caching. `db_view.py` 100% line+branch
+  (718/0 + 232/0); NEW `test_dashboard_db_option_count_cache.py` (11) + bench `test_db_option_count_cache_o1.py` + a
+  `/db/options` route integration test; mypy --strict / pyright / ruff clean.
+  Prior merged: **DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
   the live PULL RATE widget's "achieved r/s" is now HONEST during the metadata + F&O phases, and the stall verdict is no
   longer blind to an issued-but-failing pull. ROOT (confirmed by deep log+code audit): the SPOT phase feeds the widget the
   transport `CallMeter`'s MEASURED completed-rate, but the metadata + F&O phases have no rate-observe seam, so

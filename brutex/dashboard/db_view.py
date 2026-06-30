@@ -2232,6 +2232,26 @@ def _fno_derived_rows(
     return rows
 
 
+def option_candle_count_key(series: str, start: str | None, end: str | None) -> str:
+    """Build the stable cache key for an option-page **total** (DEC-LAKE-READ-O1-AUDIT-001).
+
+    The expired-options twin of :func:`candle_count_key`: the total ``COUNT(*)``
+    depends ONLY on the validated series segment + the inclusive date bounds — NOT
+    on ``limit`` / ``offset`` / ``descending`` / the projected ``columns`` (paging,
+    sort, and column subsetting never change how many rows match). So every page of
+    the same ``(series, start, end)`` shares ONE cached total: a prev/next click is
+    an O(1) hit instead of re-reading every Parquet footer in the series. ``|`` is
+    rejected from a validated series segment (``_OPTION_SEGMENT_RE``) and cannot
+    appear in an ISO date, so the join is unambiguous; ``None`` bounds render as an
+    empty segment. The ``opt|`` prefix namespaces the key away from the spot
+    :func:`candle_count_key` so the two may share one injected cache instance —
+    collision-free because a spot key opens with the partition ``exchange`` token,
+    which ``_validate_candle_coords`` restricts to ``VALID_EXCHANGES`` (``NSE`` /
+    ``BSE``) before any key is built, so a spot key can never begin ``opt|``.
+    """
+    return f"opt|{series}|{start or ''}|{end or ''}"
+
+
 def query_option_candles(
     conn: Any,
     lake_root: Path,
@@ -2243,6 +2263,8 @@ def query_option_candles(
     descending: bool = False,
     limit: int,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """Read one page of expired-option bars for a series (DEC-DB-QUERY-001).
 
@@ -2277,6 +2299,13 @@ def query_option_candles(
         ``None`` for all. An empty tuple is rejected.
     descending, limit, offset
         Sort direction on ``timestamp`` + page bounds (clamped).
+    count_cache, generation
+        Optional generation-stamped cache for the page ``total``
+        (DEC-LAKE-READ-O1-AUDIT-001) + the current write-generation it is keyed
+        on. When supplied, the ``COUNT(*)`` over the whole series glob is memoised
+        per ``(series, start, end)`` (paging-invariant) so a prev/next click is an
+        O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        The expired-options twin of the spot :func:`query_candles` count cache.
 
     Returns
     -------
@@ -2320,11 +2349,27 @@ def query_option_candles(
     # bound parameter and every date/page value is parameter-bound.
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
-    total_row = conn.execute(
-        f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-        [glob, *where_params],
-    ).fetchone()
-    total = int(total_row[0]) if total_row else 0
+
+    def _count_total() -> int:
+        """Run the O(files) ``COUNT(*)`` footer-scan over the whole series glob."""
+        total_row = conn.execute(
+            f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+            [glob, *where_params],
+        ).fetchone()
+        return int(total_row[0]) if total_row else 0
+
+    # The page total is paging-invariant, so memoise it per (series, start, end)
+    # behind the injected generation-stamped cache (DEC-LAKE-READ-O1-AUDIT-001) —
+    # a prev/next click is then an O(1) hit instead of re-reading every Parquet
+    # footer in the series. A missing cache keeps the byte-identical direct count.
+    if count_cache is None:
+        total = _count_total()
+    else:
+        total = count_cache.get_or_compute(
+            option_candle_count_key(series, start, end),
+            generation=generation,
+            compute=_count_total,
+        )
     cursor = conn.execute(
         f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
         [glob, *where_params, safe_limit, safe_offset],
