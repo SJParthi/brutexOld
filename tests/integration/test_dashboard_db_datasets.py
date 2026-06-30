@@ -223,3 +223,69 @@ class TestDbCandleDatasetsApi:
             "time_value",
             "days_to_expiry",
         ]
+
+
+class TestDbOptionsRouteCountCache:
+    """``/api/v1/db/options`` shares the generation-stamped count cache (DEC-LAKE-READ-O1-AUDIT-001).
+
+    The route now passes ``count_cache=_candle_count_cache`` +
+    ``generation=_summary_cache.generation`` into :func:`query_option_candles`, so the
+    O(files) ``COUNT(*)`` over the series glob runs ONCE per (series, generation) instead
+    of on every paging click, and a pull (a ``mark_dirty`` generation bump) busts it.
+    """
+
+    def test_count_runs_once_across_paging_then_busts_on_generation(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A series whose page total is paging-invariant — two CE+PE bars (total 2).
+        _write_option_series(tmp_path, "NSE_FNO|25|MONTH|1|ATM-10|CALL")
+        series = "NSE_FNO__25__MONTH__1__ATM-10__CALL"
+
+        # Spy on the COUNT(*) the option reader issues, installed by DOTTED-PATH string
+        # so the real (db_view-sourced) helper is wrapped exactly once (CodeQL
+        # py/import-and-import-from: db_view is already imported via `from … import`).
+        from brutex.dashboard.db_view import query_option_candles as _real
+
+        execs = {"count": 0}
+
+        class _CountingConn:
+            def __init__(self, real: object) -> None:
+                self._real = real
+
+            def execute(self, sql: str, parameters: object = None) -> object:
+                if "COUNT(*)" in sql:
+                    execs["count"] += 1
+                return (
+                    self._real.execute(sql)  # type: ignore[attr-defined]
+                    if parameters is None
+                    else self._real.execute(sql, parameters)  # type: ignore[attr-defined]
+                )
+
+        def _wrapped(conn: object, *args: object, **kwargs: object) -> object:
+            return _real(_CountingConn(conn), *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.dashboard.app.query_option_candles", _wrapped)
+
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        summary_cache = SummaryCache()
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
+        )
+
+        # Three paging clicks of the SAME series + generation → ONE COUNT, stable total.
+        p1 = client.get("/api/v1/db/options", params={"series": series, "limit": 1}).json()
+        p2 = client.get(
+            "/api/v1/db/options", params={"series": series, "limit": 1, "offset": 1}
+        ).json()
+        p3 = client.get(
+            "/api/v1/db/options", params={"series": series, "limit": 1, "desc": "true"}
+        ).json()
+        assert p1["total"] == p2["total"] == p3["total"] == 2
+        assert execs["count"] == 1, "the O(files) COUNT must run once, then serve cached"
+
+        # A pull bumps the generation → the next click rediscovers the total (no stale).
+        summary_cache.mark_dirty()
+        after = client.get("/api/v1/db/options", params={"series": series, "limit": 1}).json()
+        assert after["total"] == 2
+        assert execs["count"] == 2, "the bumped generation must force exactly one recount"

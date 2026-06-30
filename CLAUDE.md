@@ -273,7 +273,30 @@ hostile-review pass._
   transient-empty-then-data→strike not skipped + data captured · re-pull→re-fetches · #919 detector still fires) + the
   bench gate; ruff/ruff-format/`mypy --strict`/`pyright` clean on every touched file. ENGINE UNCHANGED
   (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
-  Prior: **DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
+  Prior merged: **DEC-LAKE-READ-O1-AUDIT-001, MIGRATION.md #1025** —
+  a full audit of every BruteX DB-FETCH / lake-READ entry point for O(1)/O(page) latency. The verdict: the prior
+  O(1)/O(page) PRs (#860/#863/#864/#867/#893/#895/#896/#933) have ALREADY bounded essentially every hot read — the
+  engine bar stream is O(1)/bar (catalog-window-indexed `Catalog.get_bars`), `LakeOptionBarSource.load_pair` is O(1)/leg
+  after two read-through caches, the spot 1m→1d resample read is pulled-window-month-bounded (`ist_span_partition_files`),
+  every movers per-symbol read is month/day-glob-bounded (`lake_day_glob`) + the candidate scan is split-and-cached
+  (`MoversSnapshotCache`), the completeness SPOT scan rides `_summary_cache`, the `/universe` reads are O(1) behind
+  `master_revision`, and the `/db` candle/window/discovery/registry reads are all cached or `LIMIT`-pushdown-bounded.
+  The ONE gap found + fixed: `db_view.query_option_candles` (the `/db` expired-options tab) computed its page `total`
+  via `SELECT COUNT(*) FROM read_parquet(<series-glob>)` on EVERY paging click with NO count cache — the EXACT O(files)
+  footer-scan `query_candles` fixed in #867 but the options pager never got. FIX (READ-ONLY `/db` viewer accelerator —
+  ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX, NO store/schema/scope/vocab/rate/write-path change): a NEW pure
+  `db_view.option_candle_count_key(series, start, end)` (the options twin of `candle_count_key`; excludes
+  `limit`/`offset`/`descending`/`columns` — the paging-invariance — with an `opt|` prefix so it NEVER collides with a
+  spot key) + `query_option_candles` gains the OPTIONAL `count_cache`/`generation` (REUSING the #867 `CandleCountCache`
+  Protocol, NO new class); the `/api/v1/db/options` route passes the SAME COMMON `_candle_count_cache` (`MoversSnapshotCache`)
+  the spot pager uses + `_summary_cache.generation`, so a prev/next click is an O(1) hit + a pull bumps the generation →
+  recount (never stale, Golden Rule #1). MEASURED: a deep 72-month series 19.02 ms/click → 13.76 ms/click (1.38×, the win
+  grows with depth). HONEST envelope (identical to #867): a cached-total HIT is O(1) in series depth (bench-pinned FLAT,
+  COUNT-once proven); the FIRST view per generation + the page DATA query stay O(files) (true O(page) needs a write-time
+  lake manifest, NOT claimed); the empty series early-returns `total:0` without caching. `db_view.py` 100% line+branch
+  (718/0 + 232/0); NEW `test_dashboard_db_option_count_cache.py` (11) + bench `test_db_option_count_cache_o1.py` + a
+  `/db/options` route integration test; mypy --strict / pyright / ruff clean.
+  Prior merged: **DEC-RATE-WIDGET-FNO-HONEST-001, MIGRATION.md #1022** —
   the live PULL RATE widget's "achieved r/s" is now HONEST during the metadata + F&O phases, and the stall verdict is no
   longer blind to an issued-but-failing pull. ROOT (confirmed by deep log+code audit): the SPOT phase feeds the widget the
   transport `CallMeter`'s MEASURED completed-rate, but the metadata + F&O phases have no rate-observe seam, so
