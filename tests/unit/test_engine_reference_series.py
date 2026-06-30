@@ -25,6 +25,7 @@ from brutex.engine.reference_series import (
     ReferenceSeries,
     TradeReferenceStamper,
 )
+from structlog.typing import EventDict
 
 _T0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)  # 09:15 IST
 
@@ -140,7 +141,7 @@ class _capture_logs:
         self._cap = structlog.testing.LogCapture()
         self._saved: dict[str, object] | None = None
 
-    def __enter__(self) -> list[dict[str, object]]:
+    def __enter__(self) -> list[EventDict]:
         self._saved = structlog.get_config()
         structlog.configure(processors=[self._cap])
         return self._cap.entries
