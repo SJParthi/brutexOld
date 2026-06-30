@@ -69,7 +69,9 @@ def test_build_live_client_token_issuance_failure_is_redacted() -> None:
     """A failed token issuance surfaces as a redacting GrowwAuthError (no secret leak)."""
 
     def token_factory(_api_key: str, _totp: str) -> str:
-        raise RuntimeError("issuance down")
+        # the vendor message embeds the secret verbatim, so the scrub is
+        # genuinely exercised through the build_live_client path (not a tautology)
+        raise RuntimeError("issuance down for fake_secret")
 
     with pytest.raises(GrowwAuthError) as exc:
         build_live_client(
@@ -78,9 +80,13 @@ def test_build_live_client_token_issuance_failure_is_redacted() -> None:
             totp_minter=lambda _s: "000000",
             sdk_factory=_FakeSDK,
         )
-    # The auth layer wraps the failure with a redacting safe_message.
-    assert str(exc.value) == "Groww access-token issuance failed"
+    # The auth layer wraps the failure with a redacting safe_message that now
+    # surfaces the (sanitized) vendor reason — the operator sees WHY.
+    assert str(exc.value).startswith("Groww access-token issuance failed: ")
+    assert "issuance down" in str(exc.value)
+    # the secret embedded in the vendor message is provably scrubbed end-to-end
     assert "fake_secret" not in str(exc.value)
+    assert "***" in str(exc.value)
 
 
 def test_build_live_pool_builds_k_connections_sharing_one_meter() -> None:

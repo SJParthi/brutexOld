@@ -58,7 +58,16 @@ class GrowwBadRequestError(GrowwError):
 
 
 class GrowwAuthError(GrowwError):
-    """Authentication / authorisation failure (triggers re-auth, not blind retry)."""
+    """Authentication / authorisation failure (triggers re-auth, not blind retry).
+
+    Carries an optional :attr:`detail` — the SANITIZED vendor reason (the SDK
+    exception's text with every secret scrubbed to ``***``) so a caller can read
+    WHY auth failed beyond the user-facing summary, without ever exposing the
+    api_key / TOTP secret / minted code (DEC-GROWW-AUTH-ERROR-DETAIL-001). It is
+    ``None`` unless explicitly set by the auth layer.
+    """
+
+    detail: str | None = None
 
 
 class GrowwNotFoundError(GrowwError):
