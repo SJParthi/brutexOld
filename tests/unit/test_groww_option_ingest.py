@@ -40,6 +40,7 @@ from brutex.adapters.groww.option_ingest import (
     UnderlyingEmptyReport,
     _default_backoff,
     contract_exchange,
+    emit_underlying_all_empty,
     fetch_option_candles,
     ingest_option_contract,
     ingest_underlying_futures,
@@ -2265,6 +2266,51 @@ class TestSuspiciousEmptyFlag:
             )
         assert report.bars_appended == 1  # the pull itself is unaffected
         assert any(r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT for r in logs)
+
+    # ── emit_underlying_all_empty: the COMMON guarded scan→log helper ─────────
+    # (DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001) reused by the in-driver path AND
+    # the production post-drain call site in dashboard.historical_pull.
+
+    def test_emit_helper_warns_on_silent_vanish(self) -> None:
+        # A whole-underlying empty chain → ONE pull.underlying_all_empty WARNING.
+        contracts, pairs = _empty_chain("M&M", 3)
+        with capture_logs() as logs:
+            emit_underlying_all_empty(pairs, contracts, pull_id="pid-9")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("M&M")
+        assert warns[0]["pull_id"] == "pid-9"
+
+    def test_emit_helper_silent_when_clean(self) -> None:
+        contracts, pairs = _empty_chain("TCS", 3)
+        pairs = {k: _ireport(windows=1, bars=7) for k in pairs}
+        with capture_logs() as logs:
+            emit_underlying_all_empty(pairs, contracts, pull_id="pid-9")
+        assert [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT] == []
+        assert [r for r in logs if r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT] == []
+
+    def test_emit_helper_guards_scan_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A scan-internal error is swallowed + logged — NEVER propagates.
+        def _boom(*_a: object, **_k: object) -> AllEmptyScan:
+            raise RuntimeError("scan blew up")
+
+        monkeypatch.setattr(_oi, "scan_underlying_all_empty", _boom)
+        contracts, pairs = _empty_chain("INFY", 3)
+        with capture_logs() as logs:
+            emit_underlying_all_empty(pairs, contracts, pull_id="pid-9")
+        errs = [r for r in logs if r["event"] == _oi.UNDERLYING_ALL_EMPTY_ERROR_EVENT]
+        assert len(errs) == 1
+        assert errs[0]["pull_id"] == "pid-9"
+
+    def test_emit_helper_defaults_pull_id_from_scope(self) -> None:
+        # No explicit pull_id → resolves the current pull-scope id (current_pull_id()).
+        from brutex.observability.correlation import pull_id_scope
+
+        contracts, pairs = _empty_chain("WIPRO", 3)
+        with pull_id_scope("scoped-pid"), capture_logs() as logs:
+            emit_underlying_all_empty(pairs, contracts)
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1 and warns[0]["pull_id"] == "scoped-pid"
 
 
 def _partial_bar(d: date) -> CandleBar:

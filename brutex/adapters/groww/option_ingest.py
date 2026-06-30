@@ -901,6 +901,41 @@ def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> Non
         )
 
 
+def emit_underlying_all_empty(
+    pairs: Mapping[tuple[str, str], IngestReport],
+    contract_list: Sequence[DerivativeContract],
+    *,
+    pull_id: str | None = None,
+) -> None:
+    """Scan one pull's *pairs* for whole-underlying empties + WARN — fully guarded, observe-only.
+
+    The ONE source of truth (CLAUDE.md §11 COMMON) for the
+    DEC-SUSPICIOUS-EMPTY-FLAG-001 diagnostic's guarded scan→log: it runs
+    :func:`scan_underlying_all_empty` over *pairs* / *contract_list* and hands the
+    result to :func:`_log_underlying_all_empty`, the whole thing wrapped so the
+    observe-only diagnostic can NEVER break the pull (a scan-internal error logs
+    :data:`UNDERLYING_ALL_EMPTY_ERROR_EVENT` and returns). Reused by BOTH the
+    synchronous in-driver call (:func:`run_groww_option_ingest`) AND the async
+    POST-DRAIN production call site (DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001 — the
+    F&O pull always wires a ``fetch_pipeline``, so the in-driver scan is SKIPPED and
+    the real per-pair bar counts are only known after the pipeline drain + reconcile;
+    the post-drain call over the RECONCILED pairs catches the exact BAJAJ-AUTO/M&M
+    silent-vanish case the in-driver skip would otherwise leave uncatchable).
+
+    Changes NO return value, NO ledger row, NO engine input — the brute-force ENGINE
+    stays NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §3). *pull_id* defaults to the current
+    pull-scope id (:func:`~brutex.observability.correlation.current_pull_id`) so an
+    out-of-scope caller need not thread it; pass it explicitly to override.
+    """
+    resolved_pull_id = pull_id if pull_id is not None else current_pull_id()
+    try:
+        _log_underlying_all_empty(
+            scan_underlying_all_empty(pairs, contract_list), pull_id=resolved_pull_id
+        )
+    except Exception as exc:  # observe-only diagnostic must never break the pull
+        _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=resolved_pull_id, error=str(exc))
+
+
 #: F&O contract types the partial-window truncation detector WATCHES. Only FUTURES
 #: (``FUT``) — futures trade densely every session, so a truncated futures window is a
 #: genuine, reliably-detectable fetch gap. OPTIONS (``CE`` / ``PE``) are EXCLUDED by
@@ -1362,15 +1397,12 @@ def run_groww_option_ingest(
     # totals by the BACKGROUND consumer, NOT known synchronously here — the drain has not run
     # yet). Scanning now would see EVERY pair as 0-bars and flood a false
     # ``pull.underlying_all_empty`` for the whole universe. The honest "all empty" signal needs
-    # the per-pair durable counts, which only exist after the drain — a post-drain scan is a
-    # flagged FUTURE follow-up (the option path is not wired to the pipeline in production yet).
+    # the per-pair durable counts, which only exist after the drain — the PRODUCTION F&O pull
+    # (always pipeline-wired) runs the scan POST-DRAIN over the reconciled pairs via the SAME
+    # COMMON :func:`emit_underlying_all_empty` helper (DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001,
+    # in ``dashboard/historical_pull.py``), so this skip no longer leaves the detector dead.
     if fetch_pipeline is None:
-        try:
-            _log_underlying_all_empty(
-                scan_underlying_all_empty(pairs, contract_list), pull_id=pull_id
-            )
-        except Exception as exc:  # observe-only diagnostic must never break the pull
-            _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=pull_id, error=str(exc))
+        emit_underlying_all_empty(pairs, contract_list, pull_id=pull_id)
     return GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
 
 
@@ -1531,6 +1563,7 @@ __all__ = [
     "ProgressHook",
     "UnderlyingEmptyReport",
     "contract_exchange",
+    "emit_underlying_all_empty",
     "fetch_option_candles",
     "ingest_option_contract",
     "ingest_underlying_futures",
