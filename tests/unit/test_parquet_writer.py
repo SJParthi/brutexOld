@@ -285,6 +285,56 @@ class TestCorruptExistingPartition:
         with pytest.raises(WriterError, match="corrupt existing partition"):
             writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
 
+    def test_non_finite_existing_price_quarantines(self, tmp_path: Path) -> None:
+        """A readable partition holding a non-finite (inf) price → quarantinable WriterError.
+
+        DEC-LAKE-WRITE-VECTORIZE-001 folds the vectorized 2dp snap INTO the same
+        skip-guarded block as the Parquet decode, so a corrupt non-finite price (which
+        the columnar ``cast(String).cast(Decimal)`` cannot represent) surfaces as a
+        quarantinable ``WriterError`` — a strict improvement on the legacy per-row path,
+        whose ``Decimal(str(inf)).quantize`` raised an UN-caught ``decimal.InvalidOperation``
+        that would have crashed the whole pull.
+        """
+        import polars as pl
+        from brutex.data.errors import WriterError
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        result = writer.write(
+            bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords
+        )
+        # Overwrite the partition with a structurally-valid Parquet whose `open` is +inf —
+        # readable by `pl.read_parquet` but un-snappable by the columnar Decimal cast.
+        corrupt = pl.DataFrame(
+            {
+                "timestamp": [datetime(2021, 1, 4, tzinfo=UTC)],
+                "open": [float("inf")],
+                "high": [110.0],
+                "low": [90.0],
+                "close": [105.0],
+                "volume": [0],
+                "open_interest": [None],
+            },
+            schema={
+                "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Int64,
+                "open_interest": pl.Int64,
+            },
+        )
+        corrupt.write_parquet(result.path)
+        with pytest.raises(WriterError, match="corrupt existing partition"):
+            writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
+
     def test_unreadable_existing_partition_bytes_raises_writer_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

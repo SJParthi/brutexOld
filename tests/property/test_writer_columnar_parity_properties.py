@@ -139,3 +139,41 @@ def test_random_bar_sets_byte_identical_old_vs_new(
     assert new_res.raw_hash == legacy_res.raw_hash
     assert new_res.row_count == legacy_res.row_count
     assert new_res.conflicts == legacy_res.conflicts
+
+
+@settings(max_examples=400, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    raw=st.lists(
+        st.floats(
+            min_value=-1_000_000.0,
+            max_value=1_000_000.0,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+        min_size=1,
+        max_size=64,
+    )
+)
+def test_vectorized_snap_matches_legacy_decimal_contract(raw: list[float]) -> None:
+    """``_snap_price_expr`` reproduces ``round_money(Decimal(str(x)))`` for any finite float.
+
+    DEC-LAKE-WRITE-VECTORIZE-001 — fuzz arbitrary finite floats (NOT only the clean 2dp
+    values the bar-set property uses) through the columnar snap and assert BOTH the
+    ``float`` (the stored byte) and the ``Decimal`` (the ``_bar_values_equal`` key) equal
+    the legacy per-row ``round_money(Decimal(str(x)))`` exactly. This is the half-up 2dp
+    byte contract (DEC-MONEY-2DP-001) at the expression level.
+    """
+    import polars as pl
+    from brutex.data.parquet_writer import _snap_price_expr
+    from brutex.money import round_money
+
+    frame = pl.DataFrame({"open": raw}, schema={"open": pl.Float64})
+    snapped = frame.select(_snap_price_expr("open"))
+    got_decimals: list[Decimal] = snapped.to_series().to_list()
+    got_floats: list[float] = snapped.select(pl.col("open").cast(pl.Float64)).to_series().to_list()
+    for value, gd, gf in zip(raw, got_decimals, got_floats, strict=True):
+        legacy_decimal = round_money(Decimal(str(value)))
+        assert gd == legacy_decimal, f"Decimal mismatch for {value!r}: {gd} != {legacy_decimal}"
+        assert gf == float(legacy_decimal), (
+            f"float mismatch for {value!r}: {gf!r} != {float(legacy_decimal)!r}"
+        )
