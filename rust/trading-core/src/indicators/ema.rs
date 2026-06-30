@@ -186,14 +186,35 @@ impl EmaState {
 
         if self.bars_seen == self.period {
             // Seed bar: EMA = SMA of values[0..period-1] (delegated to `ema_seed`).
+            // Each `close` is finite (guarded above), but a run of finite-but-huge
+            // closes can OVERFLOW `seed_sum` to ±∞; re-check the computed seed so an
+            // overflowed seed raises a clean `Err` (mapped to `ValueError` at the
+            // FFI) instead of returning ±∞ and poisoning every subsequent bar —
+            // symmetric with the per-`close` finiteness guard. Real-magnitude inputs
+            // sum far below `f64::MAX`, so the golden seed is byte-unchanged.
             self.seed_sum += close;
-            self.value = Some(ema_seed(self.seed_sum, self.period)?);
+            let seed = ema_seed(self.seed_sum, self.period)?;
+            if !is_finite(seed) {
+                return Err(format!(
+                    "EMA seed overflowed to a non-finite value ({seed}); \
+                     the warm-up close sum is too large"
+                ));
+            }
+            self.value = Some(seed);
             return Ok(self.value);
         }
 
         // Post-seed recursive update. The branches above guarantee `value` is
         // `Some`; mirror Python's narrowing AssertionError as an `Err` for the
         // (unreachable) corrupted-state case so no faith is required.
+        //
+        // No finiteness re-check is needed here: `prior` is finite (the seed branch
+        // rejected a non-finite seed) and `close` is finite (the input guard), and
+        // the step `α·close + (1−α)·prior` is a CONVEX combination — `α ∈ (0, 2/3]`
+        // and `(1−α) ∈ [1/3, 1)` sum to exactly 1 for any `N ≥ 2` (the `N == 1`
+        // identity returned earlier) — so the result is bounded by the larger
+        // finite operand and can never overflow to ±∞. The ONLY f64 overflow site
+        // is the warm-up `seed_sum` accumulation, guarded above.
         let prior = self
             .value
             .ok_or_else(|| "EMA state corrupted: post-seed value is None".to_string())?;
@@ -341,6 +362,45 @@ mod tests {
     fn compute_ema_propagates_non_finite_and_bad_period() {
         assert!(compute_ema(&[100.0, f64::NAN, 102.0], 2).is_err());
         assert!(compute_ema(&[1.0, 2.0, 3.0], 0).is_err());
+    }
+
+    #[test]
+    fn finite_but_huge_seed_overflow_is_rejected_not_inf() {
+        // DEC-ADVERSARIAL-HARDENING-001 FIX 4: each close is finite (passes the
+        // input guard), but their SMA seed sum overflows f64 → +inf. The seed
+        // re-check must REJECT it (Err) instead of returning +inf and poisoning
+        // every subsequent bar. Reproduces the adversarial-sweep finding.
+        let res = compute_ema(&[1e308, 1e308], 2);
+        assert!(res.is_err(), "expected an Err, got {res:?}");
+        assert!(res.unwrap_err().contains("seed overflowed"));
+        // Streaming path identical.
+        let mut state = EmaState::new(2).unwrap();
+        state.update(1e308).unwrap();
+        assert!(state.update(1e308).is_err());
+    }
+
+    #[test]
+    fn post_seed_step_stays_finite_for_extreme_finite_inputs() {
+        // The post-seed recurrence is a CONVEX combination, so once the seed is
+        // finite (guarded) every subsequent EMA stays finite even for max-magnitude
+        // closes — it can never overflow to ±∞ (the rationale for having NO step
+        // re-check). seed = mean(1e308, -1e308) = 0, then huge closes stay bounded.
+        let res = compute_ema(&[1e308, -1e308, 1e308, 1e308], 2).unwrap();
+        assert!(
+            res.iter().flatten().all(|v| v.is_finite()),
+            "post-seed EMA went non-finite: {res:?}"
+        );
+    }
+
+    #[test]
+    fn real_magnitude_series_unaffected_by_overflow_guards() {
+        // The new finiteness re-checks NEVER fire for real-magnitude inputs, so the
+        // output stays byte-identical to the documented oracle.
+        let values = [10.0, 20.0, 30.0, 40.0, 50.0];
+        assert_eq!(
+            compute_ema(&values, 3).unwrap(),
+            vec![None, None, Some(20.0), Some(30.0), Some(40.0)]
+        );
     }
 
     #[test]

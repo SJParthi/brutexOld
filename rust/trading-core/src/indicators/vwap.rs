@@ -142,6 +142,23 @@ mod tests {
     const DAY: i64 = 100;
 
     #[test]
+    #[should_panic(expected = "overflow")]
+    fn native_accumulator_overflows_on_huge_unbounded_inputs() {
+        // DEC-ADVERSARIAL-HARDENING-001 FIX 1 — the DEFECT this documents: the native
+        // `cum_pv += typical_paisa·volume` has NO magnitude guard, so a few near-`i64::MAX`
+        // products overflow the `i128` accumulator. Under the RELEASE profile (`panic =
+        // "abort"`) this aborts the interpreter (SIGABRT) — uncatchable by try/except. The
+        // PyO3 boundary (`PyVwapState::update`) now validates the inputs against
+        // `MAX_BAR_PAISA` FIRST and raises a catchable `ValueError`, so this native overflow
+        // is unreachable from Python. (Dev profile unwinds, so we can assert the panic.)
+        let mut v = VwapState::new();
+        let huge = i64::MAX;
+        for i in 0..3 {
+            v.update(huge, huge, false, KEY, DAY, 9 * 3600 + 16 * 60 + i);
+        }
+    }
+
+    #[test]
     fn warmup_returns_none_until_first_volume() {
         let mut v = VwapState::new();
         // First bar is pre-open auction → excluded → still None.

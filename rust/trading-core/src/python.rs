@@ -1016,6 +1016,18 @@ impl PyVwapState {
     /// Delegates verbatim to the native [`CoreVwapState::update`] — the
     /// `cum(price·vol)/cum(vol)` math, the 09:15 reset, the auction exclusion and
     /// the contract-roll reset all execute in Rust. O(1) per bar.
+    ///
+    /// The two i64s that feed the native `i128` accumulators (`cum_pv +=
+    /// typical_paisa·volume`, `cum_vol += volume`) are validated against the
+    /// SAME `MAX_BAR_PAISA` magnitude every sibling FFI entry reuses, BEFORE
+    /// delegating — so a garbage `typical_paisa·volume` product raises a
+    /// catchable `ValueError` instead of overflowing `cum_pv` and tripping the
+    /// native add's `overflow-checks` panic → `abort` (SIGABRT) under
+    /// `panic = "abort"`. With both operands bounded by `MAX_BAR_PAISA`
+    /// (≈ 1.4·10¹⁴), one product is ≤ ≈ 2·10²⁸ and even billions of bars stay
+    /// far inside `i128::MAX` (≈ 1.7·10³⁸). Valid futures bars (paisa + lot
+    /// volume) sit orders of magnitude below the ceiling, so the golden
+    /// VWAP output is byte-unchanged.
     #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
     fn update(
         &mut self,
@@ -1025,15 +1037,23 @@ impl PyVwapState {
         session_key: u64,
         session_day: i64,
         tod_seconds: u32,
-    ) -> Option<i64> {
-        self.inner.update(
+    ) -> PyResult<Option<i64>> {
+        for (name, value) in [("typical_paisa", typical_paisa), ("volume", volume)] {
+            if !bar_in_range(value) {
+                return Err(PyValueError::new_err(format!(
+                    "{name} ({value}) out of the overflow-safe range \
+                     [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+                )));
+            }
+        }
+        Ok(self.inner.update(
             typical_paisa,
             volume,
             is_pre_open,
             session_key,
             session_day,
             tod_seconds,
-        )
+        ))
     }
 
     /// The current session VWAP (paisa), or `None` if no volume has been counted.

@@ -64,17 +64,20 @@ def is_absent(value: object) -> bool:
 
 
 def has_no_price(value: object) -> bool:
-    """True when a price cell carries no tradeable information: absent OR zero.
+    """True when a price cell carries no tradeable information: absent, zero OR negative.
 
-    A traded Indian instrument's price is never 0 (tick ≥ 0.05, rupees), so
-    an absent / empty / 0 OHLC value means "no trade in this bar". An
-    unparseable non-zero value returns ``False`` so the strict
-    :func:`to_price` flags it (malformed, not empty).
+    A traded Indian instrument's price is never ``<= 0`` (tick ≥ 0.05, rupees), so
+    an absent / empty / 0 / negative OHLC value means "no trade in this bar". A
+    negative price is treated EXACTLY like zero — un-storable junk: storing it (and
+    letting the ``high = max`` / ``low = min`` clamp hide it) would FABRICATE a
+    negative price + range, the Golden-Rule-#1 corruption this guard exists to
+    prevent (symmetric with the zero guard). An unparseable positive value returns
+    ``False`` so the strict :func:`to_price` flags it (malformed, not empty).
     """
     if is_absent(value):
         return True
     try:
-        return Decimal(str(value)) == 0
+        return Decimal(str(value)) <= 0
     except (InvalidOperation, ValueError):
         return False
 
@@ -144,24 +147,25 @@ def assemble_candle(
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
     # Partially-NO-PRICE bar (DEC-CANDLE-PARTIAL-ABSENT-SKIP-001 + DEC-CANDLE-PARTIAL-ZERO
-    # -SKIP-001): the row is NOT all-empty, but a REQUIRED OHLC price carries no tradeable
-    # information — ABSENT (vendor null / empty) OR ZERO. The production crash was Groww
-    # returning ``open: None`` alongside a real high / low / close, which `to_price(None)`
-    # raised as `unparseable open price: None`, crashing the whole 779-symbol pull. The
-    # ZERO twin is the SAME un-storable junk: a traded Indian price is never 0 (tick ≥ 0.05,
-    # see :func:`has_no_price`), so a lone ``open: 0`` among real prices is a vendor glitch —
-    # storing it (and clamping ``low`` to 0 below) would FABRICATE a zero price + a zero
-    # range, the exact Golden-Rule-#1 corruption the all-empty check already guards against.
-    # We cannot fabricate the missing price, so SKIP the un-storable bar gracefully (the
-    # parser's `except EmptyCandleRow: continue`), mirroring the negative-volume + OHLC
+    # -SKIP-001 + DEC-ADVERSARIAL-HARDENING-001): the row is NOT all-empty, but a REQUIRED
+    # OHLC price carries no tradeable information — ABSENT (vendor null / empty), ZERO OR
+    # NEGATIVE. The production crash was Groww returning ``open: None`` alongside a real high /
+    # low / close, which `to_price(None)` raised as `unparseable open price: None`, crashing
+    # the whole 779-symbol pull. The ZERO and NEGATIVE twins are the SAME un-storable junk: a
+    # traded Indian price is never <= 0 (tick ≥ 0.05, see :func:`has_no_price`), so a lone
+    # ``open: 0`` or ``open: -5`` among real prices is a vendor glitch — storing it (and
+    # letting the ``low`` clamp below pull the bar to 0 / negative) would FABRICATE a junk
+    # price + range, the exact Golden-Rule-#1 corruption the all-empty check already guards
+    # against. We cannot fabricate the missing price, so SKIP the un-storable bar gracefully
+    # (the parser's `except EmptyCandleRow: continue`), mirroring the negative-volume + OHLC
     # clamps below — never crash a pull, never store junk, on one vendor quirk. This uses the
-    # SAME `has_no_price` predicate as the all-empty check above (absent OR zero), so the two
-    # guards are symmetric. A price that is PRESENT but unparseable / non-finite (e.g.
-    # ``"abc"`` — `has_no_price` is False) is left to the strict `to_price` calls below (a
-    # hard error — a genuine malformation worth surfacing, never silently skipped).
+    # SAME `has_no_price` predicate as the all-empty check above (absent OR zero OR negative),
+    # so the two guards are symmetric. A price that is PRESENT but unparseable / non-finite
+    # (e.g. ``"abc"`` — `has_no_price` is False) is left to the strict `to_price` calls below
+    # (a hard error — a genuine malformation worth surfacing, never silently skipped).
     if any(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow(
-            "candle has an absent or zero OHLC price (partial vendor bar — skipped)"
+            "candle has an absent, zero or negative OHLC price (partial vendor bar — skipped)"
         )
     # Vendor count-field normalization (DEC-VENDOR-VOLUME-NORMALIZE-001, sibling
     # of the OHLC clamp below): an IMPOSSIBLE negative volume / open-interest

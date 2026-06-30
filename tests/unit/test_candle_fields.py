@@ -39,7 +39,24 @@ class TestIsAbsent:
 
 
 class TestHasNoPrice:
-    @pytest.mark.parametrize("value", [None, "", "0", 0, 0.0, "0.0", Decimal("0")])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            "0",
+            0,
+            0.0,
+            "0.0",
+            Decimal("0"),
+            # DEC-ADVERSARIAL-HARDENING-001 FIX 3: a NEGATIVE price is un-storable
+            # junk too (a traded Indian price is never <= 0), treated like zero.
+            -5,
+            -0.05,
+            "-100.5",
+            Decimal("-1"),
+        ],
+    )
     def test_no_price(self, value: object) -> None:
         assert has_no_price(value) is True
 
@@ -168,6 +185,29 @@ class TestAssembleCandle:
         # be a graceful skip, never a stored bar with a fabricated zero price + zero range.
         with pytest.raises(EmptyCandleRow):
             self._call(open_=0, high="100", low="50", close="75")
+
+    @pytest.mark.parametrize("neg", [-5, -0.05, "-100.5", Decimal("-1")])
+    @pytest.mark.parametrize("field", ["open_", "high", "low", "close"])
+    def test_partial_negative_price_is_skipped(self, field: str, neg: object) -> None:
+        # DEC-ADVERSARIAL-HARDENING-001 FIX 3: a NEGATIVE OHLC price among real prices is
+        # un-storable junk, the symmetric twin of the partial-ZERO / partial-ABSENT skip (a
+        # traded Indian price is never <= 0). Pre-fix, ``has_no_price`` rejected absent/zero
+        # but NOT negative, so a ``-5`` open was silently STORED (and the high=max/low=min
+        # clamp HID it). It must now be a graceful skip, never a stored negative bar.
+        with pytest.raises(EmptyCandleRow, match="partial vendor bar"):
+            self._call(**{field: neg})
+
+    def test_negative_open_does_not_clobber_low_negative(self) -> None:
+        # The clamp-hides-the-junk corruption for the negative case: pre-fix ``open=-5`` with
+        # real high/low/close was STORED with ``open=-5`` and ``low`` clamped to ``-5`` (the
+        # min pulled the bar negative). Must be a graceful skip, never a stored negative bar.
+        with pytest.raises(EmptyCandleRow):
+            self._call(open_="-5", high="100", low="50", close="75")
+
+    def test_all_negative_prices_is_empty_candle_row(self) -> None:
+        # Every OHLC price negative → the all-empty guard treats them as no-price → skip.
+        with pytest.raises(EmptyCandleRow, match="no OHLC data"):
+            self._call(open_="-1", high="-1", low="-1", close="-1")
 
     def test_present_but_unparseable_still_hard_errors(self) -> None:
         # The partial-absent skip must NOT mask a genuine malformation: a price that is
