@@ -44,6 +44,26 @@ def test_p06_access_beyond_current_always_raises(current: int, delta: int) -> No
             barrier.access(current + delta)
 
 
+@given(
+    current=st.integers(min_value=0, max_value=10_000),
+    delta=st.integers(min_value=1, max_value=10_000),
+)
+def test_p06_rejected_index_never_enters_trail(current: int, delta: int) -> None:
+    """DEC-LOOKAHEAD-HONESTY-001: a rejected future index never poisons the trail.
+
+    After a permitted read then a forbidden ``access(> N)``, the recorded trail
+    contains only the permitted index and ``max_touched`` never exceeds ``N``.
+    """
+    barrier = LookAheadBarrier(record=True)
+    barrier.advance_to(current)
+    barrier.access(current)  # permitted — recorded
+    with pytest.raises(LookAheadError):
+        barrier.access(current + delta)  # forbidden — NOT recorded
+    assert barrier.touched_indices == (current,)
+    assert barrier.max_touched == current
+    assert all(i <= barrier.current_index for i in barrier.touched_indices)
+
+
 @given(data=st.data(), current=st.integers(min_value=0, max_value=10_000))
 def test_p06_access_within_window_never_raises(data: st.DataObject, current: int) -> None:
     """Never-false-positive: any access index in [0, N] is allowed and returned."""

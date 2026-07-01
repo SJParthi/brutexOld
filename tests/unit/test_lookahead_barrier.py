@@ -74,14 +74,20 @@ def test_access_one_past_current_raises() -> None:
         barrier.access(8)  # N+1
 
 
-def test_violating_index_is_recorded_before_raising() -> None:
-    """The audit trail captures the attempted look-ahead index."""
+def test_rejected_index_is_not_recorded_and_does_not_poison_trail() -> None:
+    """A rejected look-ahead index is appended AFTER the bounds check.
+
+    Regression for DEC-LOOKAHEAD-HONESTY-001: the append moved to after the
+    ``index > cursor`` guard, so a FAIL never poisons ``touched_indices`` /
+    ``max_touched`` with the forbidden future index.
+    """
     barrier = LookAheadBarrier(record=True)
     barrier.advance_to(2)
+    barrier.access(1)  # a permitted read that SHOULD be recorded
     with pytest.raises(LookAheadError):
-        barrier.access(9)
-    assert barrier.touched_indices == (9,)
-    assert barrier.max_touched == 9
+        barrier.access(9)  # forbidden — must NOT be recorded
+    assert barrier.touched_indices == (1,)  # 9 is absent
+    assert barrier.max_touched == 1  # not poisoned to 9
 
 
 def test_record_false_does_not_retain_violating_index() -> None:
@@ -213,9 +219,11 @@ def test_verify_detects_lookahead_run() -> None:
     assert report.passed is False
     assert report.violation is not None
     assert "look-ahead" in report.violation
-    # the trail still captured the good read + the violating index
-    assert report.indices_checked == 2
-    assert report.max_index_touched == 3
+    # DEC-LOOKAHEAD-HONESTY-001: the trail captures ONLY the permitted read
+    # (index 0); the rejected future index 3 is not recorded, so the report's
+    # stats are not poisoned by the forbidden access.
+    assert report.indices_checked == 1
+    assert report.max_index_touched == 0
     assert report.final_cursor == 0
 
 

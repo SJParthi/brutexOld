@@ -1368,15 +1368,25 @@ hostile-review pass._
   integration-tested) — a *timestamp*-based check on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
-  `LookAheadBarrier`): an *index*-based accessor that records every bar
-  index `evaluate(N)` touches and raises `LookAheadError` the moment an
-  access reaches index > N. It is active automatically on every sweep eval
-  (the runner/driver build a default `record=False` O(1)-memory barrier) and
-  rechecked by hand via `brutex verify-lookahead`. This is the **Phase-2
-  strengthening** of the feed-boundary guard — belt-and-suspenders, NOT a
-  perf path; the accessor is O(1) per bar access (NOT an O(1)-total claim).
-  Promoted from the prior `pytest.skip` ROADMAP stub (was corrected per
-  DEC-WORKSPACE-VERIFY-001 entry #398 D2 / DEC-DOC-DRIFT-RECONCILE-001).
+  `LookAheadBarrier`): an *index*-based accessor that raises `LookAheadError`
+  the moment an `access(i)` reaches index `i > N`. Guard (1) is the real
+  strategy-look-ahead defence — it catches a future *signal*. Guard (2), as
+  wired into the runner/driver event loop (a default `record=False`
+  O(1)-memory barrier on every sweep eval), asserts the **advance/access
+  cursor invariant**: both sites `advance_to(step)` then `guard(step, …)` at
+  the SAME `step`, so it fires on a feed/barrier desync or a wiring regression
+  — it does NOT interpose on the arbitrary bar reads a strategy makes off its
+  own state, so it is NOT a second strategy-look-ahead guard at that site
+  (DEC-LOOKAHEAD-HONESTY-001). The barrier's index-`> N` teeth are genuinely
+  exercised by an `access` at a future index — done by the property tests and
+  the manual `brutex verify-lookahead` recheck (which re-confirms forward feed
+  ordering + the cursor invariant over a lake slice, not strategy consumption).
+  So the two guards are **complementary** (a Phase-2 strengthening of the
+  feed-boundary guard), NOT literally redundant coverage of the same failure at
+  the same site, and NOT a perf path; the accessor is O(1) per bar access (NOT
+  an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
+  corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
+  DEC-DOC-DRIFT-RECONCILE-001).
 - **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
   paisa→rupee display goes through `brutex.money` (`format_inr` /
   `round_money` / `paisa_to_rupees`). NEVER round statistical metrics (Sharpe,
