@@ -5,6 +5,13 @@ the spot phase — by periodically pushing the SHARED rate controller's snapshot
 panel via the existing ``make_rate_observer`` callback. These tests drive every branch of
 :class:`~brutex.dashboard.rate_sampler.RatePanelSampler` deterministically (no real
 threads, no real clock) with fakes for the session controller + observer + spawner.
+
+DEC-RATE-WIDGET-FNO-MEASURED-001 extends the sampler: when the pull build sites have
+REGISTERED the live client pool's shared transport ``CallMeter`` into the session
+controller, ``sample_once`` reads it via ``peek_meter`` and pushes the meter's REAL
+measured ``snapshot`` (``meter_present`` defaults ``True`` in the observer); when no meter
+is registered it falls back to the honest ``{"meter_present": False}`` sentinel of
+DEC-RATE-WIDGET-FNO-HONEST-001 (no fabricated ``effective_rps``).
 """
 
 from __future__ import annotations
@@ -35,16 +42,44 @@ class _FakeController:
         return dict(self._snapshot)
 
 
-class _FakeSession:
-    """A stand-in :class:`SessionRateController` whose ``peek`` returns a fixed controller."""
+class _FakeMeter:
+    """A stand-in transport :class:`CallMeter` returning a fixed measured snapshot."""
 
-    def __init__(self, controller: _FakeController | None) -> None:
+    def __init__(self, snapshot: Mapping[str, object]) -> None:
+        self._snapshot = dict(snapshot)
+        self.snapshot_calls = 0
+
+    def snapshot(self) -> dict[str, object]:
+        self.snapshot_calls += 1
+        return dict(self._snapshot)
+
+
+class _FakeSession:
+    """A stand-in :class:`SessionRateController` whose ``peek``/``peek_meter`` are fixed.
+
+    ``peek`` returns a fixed controller (or ``None``); ``peek_meter`` returns a fixed
+    meter (or ``None`` — the honest no-meter path). Both count their calls so a test can
+    assert the sampler observed without building anything (DEC-RATE-WIDGET-FNO-MEASURED-001).
+    """
+
+    def __init__(
+        self,
+        controller: _FakeController | None,
+        *,
+        meter: _FakeMeter | None = None,
+    ) -> None:
         self._controller = controller
+        self._meter = meter
         self.peek_calls = 0
+        self.peek_meter_calls = 0
 
     def peek(self) -> _FakeController | None:
         self.peek_calls += 1
         return self._controller
+
+    def peek_meter(self) -> _FakeMeter | None:
+        self.peek_meter_calls += 1
+        return self._meter
 
 
 class _CapturingObserver:
@@ -74,19 +109,20 @@ def _sampler(
 
 
 class TestSampleOnce:
-    def test_pushes_controller_snapshot_with_meter_absent_sentinel(self) -> None:
-        """A built controller → one observer push with NO fabricated effective_rps.
+    def test_no_meter_registered_pushes_honest_absent_sentinel(self) -> None:
+        """A built controller but NO registered meter → NO fabricated effective_rps.
 
-        DEC-RATE-WIDGET-FNO-HONEST-001: the sampler must NOT synthesize an achieved
-        completed-rate from the controller's admission count (the old ``recent_minute / 60``
-        bug that over-reported + blinded the stall verdict). It pushes the controller snapshot
-        VERBATIM + a meter snapshot carrying ONLY a ``meter_present=False`` sentinel (no
-        ``effective_rps`` key), so the view keeps "achieved" an honest 0 this phase.
+        DEC-RATE-WIDGET-FNO-HONEST-001 (the fallback path preserved by
+        DEC-RATE-WIDGET-FNO-MEASURED-001): when no meter has been registered (a dry-run / a
+        phase before the client pool exists), the sampler must NOT synthesize an achieved
+        completed-rate from the controller's admission count. It pushes the controller
+        snapshot VERBATIM + a meter snapshot carrying ONLY a ``meter_present=False`` sentinel
+        (no ``effective_rps`` key), so the view keeps "achieved" an honest 0 this phase.
         """
         controller = _FakeController(
             {"current_rps": 6.0, "recent_hits": 2, "recent_minute": 300, "ceiling_per_min": 500}
         )
-        session = _FakeSession(controller)
+        session = _FakeSession(controller, meter=None)  # NO meter registered
         observer = _CapturingObserver()
         sampler = _sampler(session, observer)
 
@@ -102,6 +138,38 @@ class TestSampleOnce:
         # and never an ``effective_rps`` admission-derived figure.
         assert meter == {"meter_present": False}
         assert "effective_rps" not in meter
+        assert session.peek_meter_calls == 1  # it looked for a meter, found none
+
+    def test_registered_meter_pushes_measured_snapshot(self) -> None:
+        """A REGISTERED meter → the sampler pushes the meter's REAL measured snapshot.
+
+        DEC-RATE-WIDGET-FNO-MEASURED-001: once the pull build sites register the pool's
+        shared ``CallMeter`` into the session controller, the sampler reads it via
+        ``peek_meter`` and pushes its MEASURED ``snapshot`` (``effective_rps`` is the true
+        completed rate, NOT the admission average). A genuine ``CallMeter`` snapshot carries
+        no ``meter_present`` key, so the observer defaults it ``True`` downstream — this test
+        asserts the sampler forwards the measured snapshot verbatim without a ``False`` sentinel.
+        """
+        controller = _FakeController({"current_rps": 8.0, "recent_minute": 204})
+        meter = _FakeMeter(
+            {"effective_rps": 2.82, "rps_1s": 3, "rps_1s_max": 5, "latency_ms_p95": 190.0}
+        )
+        session = _FakeSession(controller, meter=meter)
+        observer = _CapturingObserver()
+        sampler = _sampler(session, observer)
+
+        fired = sampler.sample_once()
+
+        assert fired is True
+        rate, pushed_meter = observer.calls[0]
+        assert rate["current_rps"] == 8.0
+        # The MEASURED completed-rate is forwarded (2.82), NOT the admission avg (204/60 = 3.4).
+        assert pushed_meter["effective_rps"] == 2.82
+        assert pushed_meter["rps_1s"] == 3
+        # No honest-absence sentinel — a real meter snapshot lets the observer default
+        # ``meter_present=True`` (measured completed-rate present this phase).
+        assert "meter_present" not in pushed_meter
+        assert meter.snapshot_calls == 1
 
     def test_no_controller_built_pushes_nothing(self) -> None:
         """A session with no built controller (dry-run / pre-pull) → no push, returns False."""
@@ -114,16 +182,18 @@ class TestSampleOnce:
         assert fired is False
         assert observer.calls == []
         assert session.peek_calls == 1  # it peeked, found nothing, pushed nothing
+        assert session.peek_meter_calls == 0  # short-circuited before looking for a meter
 
-    def test_meter_absent_sentinel_independent_of_recent_minute(self) -> None:
-        """The sentinel is pushed regardless of recent_minute (no admission-derived rate at all).
+    def test_absent_sentinel_independent_of_recent_minute(self) -> None:
+        """With no meter, the sentinel is pushed regardless of recent_minute (no admission rate).
 
         DEC-RATE-WIDGET-FNO-HONEST-001: even a snapshot WITH a large ``recent_minute`` yields
-        no ``effective_rps`` — the sampler never derives a completed-rate from admissions.
+        no ``effective_rps`` when no meter is registered — the sampler never derives a
+        completed-rate from admissions.
         """
         controller = _FakeController({"current_rps": 4.0, "recent_minute": 240})
         observer = _CapturingObserver()
-        sampler = _sampler(_FakeSession(controller), observer)
+        sampler = _sampler(_FakeSession(controller, meter=None), observer)
 
         assert sampler.sample_once() is True
         _rate, meter = observer.calls[0]

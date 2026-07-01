@@ -192,6 +192,13 @@ class TestPullRateRoute:
         assert "req_per_sec_count" in js.text
         # Idempotent guard preserved (only one widget ever built).
         assert "document.getElementById(WIDGET_ID)" in js.text
+        # DEC-RATE-WIDGET-FNO-MEASURED-001: the widget's own help text must now describe
+        # "achieved" as the measured completed rate across spot AND metadata/F&O once the pool
+        # is built (not "wired only on the spot phase"), so it never tells the operator the
+        # non-zero F&O achieved figure is impossible.
+        assert "spot AND metadata/F&O once the pool is built" in js.text
+        assert "wired only on the spot phase" not in js.text
+        assert "the meter is unreachable" not in js.text
         assert uni.status_code == 200
         assert "/static/bx-rate-monitor.js" in uni.text
 
@@ -268,16 +275,18 @@ class TestFnoPhaseLiveness:
         assert body["active"] is False
         assert body["req_per_min"] == 0  # zeroed — the blank widget
 
-    def test_sampler_keeps_route_live_during_fno_phase(self) -> None:
-        """THE FIX: the sampler ticks the shared controller → the route stays live in F&O.
+    def test_sampler_keeps_route_live_during_fno_phase_without_meter(self) -> None:
+        """THE #1000 FIX: the sampler ticks the shared controller → the route stays live in F&O.
 
-        Simulates the F&O phase: the SHARED session controller has been paced (its
-        rolling-minute ADMISSION count reflects real fetches) but NO spot per-window observe is
-        running. The sampler — wrapped around the pipeline — pushes that controller to the
-        panel, so ``/api/v1/pull/rate`` returns FLOWING (non-idle) DURING the F&O phase.
+        Simulates the F&O phase BEFORE the client pool's meter is registered (or a phase with
+        no reachable meter): the SHARED session controller has been paced (its rolling-minute
+        ADMISSION count reflects real fetches) but NO meter is registered and NO spot per-window
+        observe is running. The sampler — wrapped around the pipeline — pushes that controller
+        to the panel, so ``/api/v1/pull/rate`` returns FLOWING (non-idle) DURING the F&O phase.
 
-        DEC-RATE-WIDGET-FNO-HONEST-001: the widget stays LIVE, but ``req_per_sec_achieved`` is
-        now an HONEST 0 this phase (no reachable completed-rate meter — never the old
+        DEC-RATE-WIDGET-FNO-HONEST-001 (the meter-absent fallback preserved by
+        DEC-RATE-WIDGET-FNO-MEASURED-001): the widget stays LIVE, but ``req_per_sec_achieved``
+        is an HONEST 0 this phase (no reachable completed-rate meter — never the old
         ``recent_minute / 60`` over-report poured into the achieved slot); the admission
         per-minute average is surfaced separately in ``req_per_min_rate``.
         """
@@ -292,6 +301,8 @@ class TestFnoPhaseLiveness:
             controller._issues.append(controller._clock())
         session = SessionRateController(factory=lambda: controller)
         session.get()  # the F&O phase built the controller (peek now returns it)
+        # NO meter registered → the sampler falls back to the honest meter_present=False path.
+        assert session.peek_meter() is None
 
         state = DashboardState()
         sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
@@ -310,6 +321,85 @@ class TestFnoPhaseLiveness:
         assert body["req_per_min_rate"] == pytest.approx(6.0)
         assert body["req_per_min"] == 360
         assert body["req_per_hour_observed"] == 360 * 60
+
+    def test_sampler_reports_measured_rate_when_meter_registered(self) -> None:
+        """DEC-RATE-WIDGET-FNO-MEASURED-001: a registered pool meter → the F&O route reports MEASURED.
+
+        THE FOLLOW-UP FIX (this PR). Once the F&O pull build site has REGISTERED the client
+        pool's shared transport :class:`~brutex.adapters.call_meter.CallMeter` into the session
+        controller, the sampler reads it via ``peek_meter`` and pushes the meter's REAL measured
+        ``snapshot`` — so ``/api/v1/pull/rate``'s ``req_per_sec_achieved`` is the TRUE completed
+        rate during the F&O phase (2.82 r/s here), NOT the honest-0 fallback and NOT the
+        admission average (360/60 = 6.0). The admission avg is still surfaced separately in
+        ``req_per_min_rate``. This is the whole point of the PR: the F&O achieved slot now shows
+        a measured completed rate, end to end through the real route.
+        """
+        from brutex.adapters.call_meter import CallMeter
+        from brutex.adapters.rate_common import RateController
+        from brutex.dashboard.pull_controller import SessionRateController
+        from brutex.dashboard.rate_sampler import RatePanelSampler
+
+        controller = RateController(ceiling_per_min=500)
+        for _ in range(360):  # 360 ADMITTED/min — the admission average would be 6.0 r/s
+            controller._issues.append(controller._clock())
+        session = SessionRateController(factory=lambda: controller)
+        session.get()
+
+        # The build site registered the pool's meter; make it report a MEASURED 2.82 r/s
+        # completed rate (28 completions in the 10 s achieved window: 28 / 10 = 2.8, rounded).
+        meter = CallMeter()
+        for _ in range(28):
+            meter.start()
+            meter.stop(elapsed_ms=180.0, completed=True)
+        session.register_meter(meter)
+        assert session.peek_meter() is meter
+
+        state = DashboardState()
+        sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
+        assert sampler.sample_once() is True
+
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "flowing"
+        assert body["active"] is True
+        # THE MEASURED completed rate reaches the route — NOT the honest-0 fallback (0.0) and
+        # NOT the admission average (6.0). The meter measured 28 completions / 10 s = 2.8 r/s.
+        assert body["req_per_sec_achieved"] == pytest.approx(2.8)
+        # The admission avg is STILL its own separate field, never the achieved slot.
+        assert body["req_per_min_rate"] == pytest.approx(6.0)
+        assert body["req_per_min"] == 360
+
+    def test_measured_meter_below_floor_reads_stalled_in_fno(self) -> None:
+        """A registered meter with a completed-rate at/below the floor → STALLED in F&O.
+
+        DEC-RATE-WIDGET-FNO-MEASURED-001 closes the #1022 gap: with a real meter the F&O phase
+        can now detect an issued-but-ALL-FAILING pull (the controller busily ADMITTING — 300/min
+        — but the meter measuring ~0 COMPLETIONS). ``meter_present=True`` makes the verdict read
+        the MEASURED ``effective_rps``, so a completed-rate at/below the stall floor reads
+        STALLED — the fake-alive case #1022 could not catch in F&O is now caught end to end.
+        """
+        from brutex.adapters.call_meter import CallMeter
+        from brutex.adapters.rate_common import RateController
+        from brutex.dashboard.pull_controller import SessionRateController
+        from brutex.dashboard.rate_sampler import RatePanelSampler
+
+        controller = RateController(ceiling_per_min=500)
+        for _ in range(300):  # busily admitting…
+            controller._issues.append(controller._clock())
+        session = SessionRateController(factory=lambda: controller)
+        session.get()
+        # …but the meter measured NOTHING completing (a fresh meter reads effective_rps 0.0).
+        session.register_meter(CallMeter())
+
+        state = DashboardState()
+        sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
+        assert sampler.sample_once() is True
+
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["active"] is True  # a tick landed → the pull is "active"
+        assert body["flow_state"] == "stalled"  # measured completed-rate at floor → STALLED
+        assert body["req_per_sec_achieved"] == 0.0
 
     def test_route_reads_idle_when_no_admissions_in_fno_phase(self) -> None:
         """DEC-RATE-WIDGET-FNO-HONEST-001 (test iii): zero admissions in F&O → stalled, not fake.

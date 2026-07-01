@@ -34,17 +34,23 @@ covering everything the spot per-window seam does not.
   :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek` (which returns
   ``None`` until a real pull has built one), so a dry-run / pre-pull tick pushes NOTHING
   and the panel stays honestly idle — never a fabricated "live" reading.
-* **NO fabricated "achieved" completed-rate** (DEC-RATE-WIDGET-FNO-HONEST-001). The
-  transport call-meter's MEASURED completed-rate (``effective_rps``) lives in the F&O client
-  pool, built inside the candle factory + NOT reachable from this seam. So the sampler does
-  NOT synthesize an ``effective_rps`` from the controller's admission count — the old
-  ``recent_minute / 60`` fabrication both OVER-reported the achieved rate (admissions ≥
-  completions) and BLINDED the ``stalled`` verdict to an issued-but-all-failing stall. The
-  sampler now pushes an explicit ``meter_present=False`` sentinel, so the view keeps the
-  "achieved" slot an HONEST 0 (no measured completed-rate this phase), bases the stall verdict
-  on the controller's ADMISSION signal (``recent_minute == 0`` ⇒ idle/stalled), and surfaces
-  the admission per-minute average in its OWN labelled ``req/min rate`` field. The ``req/min``
-  + ``req/hour`` gauges read the same ``recent_minute`` the spot path does.
+* **MEASURED "achieved" completed-rate when the meter is reachable, else an HONEST 0**
+  (DEC-RATE-WIDGET-FNO-MEASURED-001, the follow-up to DEC-RATE-WIDGET-FNO-HONEST-001). The
+  transport call-meter's MEASURED completed-rate (``effective_rps``) lives in the F&O / spot /
+  metadata client pool, built deep in the fetch spine. #1022 could not reach it from this seam
+  and so pushed a bare ``meter_present=False`` sentinel; NOW the pull build sites REGISTER the
+  pool's shared meter into the session controller
+  (:meth:`~brutex.dashboard.pull_controller.SessionRateController.register_meter`), so the
+  sampler reads it via
+  :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek_meter` and pushes the
+  meter's REAL ``snapshot`` — the true MEASURED completed rate — during the metadata + F&O
+  phases too. When no meter has been registered (a dry-run / a phase before the client pool is
+  built) it falls back to the honest ``meter_present=False`` sentinel, so "achieved" stays an
+  HONEST 0 (never the old ``recent_minute / 60`` fabrication, which both OVER-reported —
+  admissions ≥ completions — and BLINDED the ``stalled`` verdict to an issued-but-all-failing
+  stall). The admission per-minute average is still surfaced in its OWN labelled ``req/min
+  rate`` field; the ``req/min`` + ``req/hour`` gauges read the same ``recent_minute`` the spot
+  path does.
 * **O(1) per tick + bounded.** Each tick is one ``snapshot`` (a small O(1) lock) + one
   panel write; the loop sleeps :data:`DEFAULT_SAMPLE_INTERVAL_S` between ticks. No
   unbounded growth, no look-ahead (it reads only the controller's current state).
@@ -142,20 +148,33 @@ class RatePanelSampler:
         self._running = False
 
     def sample_once(self) -> bool:
-        """Push ONE controller snapshot to the panel — returns whether a tick fired.
+        """Push ONE controller (+ meter, when live) snapshot to the panel — returns if a tick fired.
 
         Reads the shared controller via
         :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek`. When no
         controller is built yet (a dry-run / a pull that has not paced anything) it
         returns ``False`` and pushes nothing — the panel stays honestly idle. Otherwise it
         snapshots the controller and feeds the *observer* the
-        ``(controller_snapshot, meter_snapshot)`` pair, returning ``True``. The meter snapshot
-        carries an explicit ``meter_present=False`` sentinel and NO fabricated ``effective_rps``
-        (DEC-RATE-WIDGET-FNO-HONEST-001) — the achieved completed-rate is honestly absent this
-        phase; the view bases its stall verdict on the controller's admission signal instead.
+        ``(controller_snapshot, meter_snapshot)`` pair, returning ``True``.
+
+        The meter snapshot is now HONEST-and-MEASURED when a meter is reachable
+        (DEC-RATE-WIDGET-FNO-MEASURED-001): the pull build sites REGISTER the live client
+        pool's shared transport :class:`~brutex.adapters.call_meter.CallMeter` into the
+        session controller, so this reads it via
+        :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek_meter` and, when
+        present, pushes the meter's REAL :meth:`~brutex.adapters.call_meter.CallMeter.snapshot`
+        (the MEASURED completed ``effective_rps`` — ``meter_present`` then defaults ``True`` in
+        the observer, since a real snapshot carries no such key). When NO meter has been
+        registered (a dry-run / a phase before the client pool is built), it falls back to the
+        honest ``{"meter_present": False}`` sentinel of DEC-RATE-WIDGET-FNO-HONEST-001 — NO
+        fabricated ``effective_rps`` (never the old ``recent_minute / 60`` admission-derived
+        figure the removed sampler poured into the "achieved" slot, which over-reported AND
+        blinded the stall verdict), so the view keeps "achieved" an HONEST 0 and bases the
+        stall verdict on the controller's admission signal.
 
         Best-effort: a snapshot / observer error is swallowed + logged (the sampler can
-        never crash the pull it watches) and reported as ``False``. O(1) per call.
+        never crash the pull it watches) and reported as ``False``. O(1) per call (one
+        controller snapshot + one meter snapshot, each a small bounded lock).
         """
         controller = self._session_rate.peek()
         if controller is None:
@@ -163,20 +182,22 @@ class RatePanelSampler:
         try:
             snap = controller.snapshot()
             # The controller snapshot carries the ALLOWED rate + the MEASURED rolling-60s
-            # ADMISSION count, but NOT the transport call-meter's achieved ``effective_rps``
-            # (the MEASURED COMPLETED rate, which lives in the F&O client pool, unreachable
-            # here — DEC-RATE-WIDGET-FNO-HONEST-001). The OLD sampler fabricated
-            # ``effective_rps = recent_minute / 60`` (an admission-derived per-minute average)
-            # and poured it into the "achieved" slot, which (a) OVER-reported vs the true
-            # completed rate (admissions ≥ completions) and (b) made the ``stalled`` verdict
-            # BLIND to an issued-but-all-failing stall (it would read "flowing" even if every
-            # fetch were failing). Push a meter snapshot that carries NO fabricated
-            # ``effective_rps`` and an explicit ``meter_present=False`` sentinel: the view then
-            # keeps "achieved" an HONEST 0 (no measured completed-rate this phase), bases the
-            # stall verdict on the controller's ADMISSION signal (no admissions ⇒ idle), and
-            # surfaces the admission per-minute average in its OWN labelled field, never the
-            # measured-completed slot.
-            meter_snapshot: dict[str, object] = {"meter_present": False}
+            # ADMISSION count. The transport call-meter's MEASURED COMPLETED rate
+            # (``effective_rps``) is now REACHABLE via the session controller's registered
+            # meter (DEC-RATE-WIDGET-FNO-MEASURED-001 — the pull build sites publish the pool's
+            # shared meter there). When a meter is registered, push its REAL snapshot (a
+            # measured completed-rate; the observer defaults ``meter_present=True`` because a
+            # genuine CallMeter snapshot has no such key). When none is registered yet (a
+            # dry-run / a phase before the client pool exists), fall back to the honest
+            # ``meter_present=False`` sentinel — NO fabricated ``effective_rps`` — so the view
+            # keeps "achieved" an HONEST 0 and bases the stall verdict on the admission signal
+            # (DEC-RATE-WIDGET-FNO-HONEST-001), never a made-up completed rate.
+            meter = self._session_rate.peek_meter()
+            meter_snapshot: dict[str, object]
+            if meter is not None:
+                meter_snapshot = dict(meter.snapshot())
+            else:
+                meter_snapshot = {"meter_present": False}
             self._observer(snap, meter_snapshot)
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
             _LOG.exception("rate_sampler.tick_failed")
