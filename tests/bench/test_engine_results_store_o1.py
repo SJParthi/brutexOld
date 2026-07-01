@@ -8,9 +8,16 @@ Enforces the O(1) decree (CLAUDE.md §2 r5 / §12) for the store's two hot paths
   (dict membership + insert), independent of the current row count.
 
 Mirrors ``tests/bench/test_lmdb_membership_o1.py``: empirical ratio at 10k vs 1k
-with CI-jitter headroom, routed through the single-source-of-truth
-:func:`tests.bench._o1_tiers.ratio_ceiling` (5× on shared CI, the strict 1.1×
-tier on the M4-Pro runner). A scan regression would blow the ratio and fail.
+with CI-jitter headroom (5× on shared CI). ``get`` (a dict probe on an
+already-resident store) keeps the raw strict 1.1× via :func:`ratio_ceiling`.
+``append`` routes its M4-Pro strict ceiling through
+:func:`tests.bench._o1_tiers.cache_tier_ceiling` (the DEC-O1-CACHE-TIER-001
+measured 3× cache allowance): inserting fresh rows into a 10k-deep store touches
+a larger allocated working set than a 1k-deep one, so the amortised insert
+crosses a CPU cache tier into DRAM (~1.3–2.5× measured, a cache-cliff not an
+O(n) regression) — the same allowance the throughput canary routes its 1M-elem
+paths through (DEC-O1-BENCH-GATE-COMPLETE-001). A scan regression would blow the
+ratio well past 3× and fail.
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from pathlib import Path
 
 from brutex.engine.results_store import ResultRow, ResultsStore
 
-from tests.bench._o1_tiers import ratio_ceiling
+from tests.bench._o1_tiers import cache_tier_ceiling, ratio_ceiling
 
 _SMALL = 1_000
 _LARGE = 10_000
@@ -130,7 +137,7 @@ class TestAppendIsO1:
         t_small = _time(_SMALL)
         t_large = _time(_LARGE)
         ratio = t_large / max(t_small, 1.0)
-        assert ratio < ratio_ceiling(5.0), (
+        assert ratio < cache_tier_ceiling(5.0), (
             f"ResultsStore.append ratio {ratio:.2f}× (10k vs 1k base) exceeds 5× — "
             f"insert may have regressed from amortised O(1). "
             f"t_1k={t_small:.0f}ns, t_10k={t_large:.0f}ns."

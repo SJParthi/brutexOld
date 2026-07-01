@@ -16,10 +16,19 @@ super-constant.
   or 10k bars long; the total is O(n) bars, the per-bar amortised cost is O(1)).
 
 Mirrors ``tests/bench/test_engine_results_store_o1.py``: an empirical ratio at
-10× scale with CI-jitter headroom, routed through the single-source-of-truth
-:func:`tests.bench._o1_tiers.ratio_ceiling` (5× on shared CI, the strict 1.1×
-tier on the M4-Pro runner). A regression to a super-constant per-mask cost would
-blow the ratio and fail.
+10× scale with CI-jitter headroom (5× on shared CI). Both ratios route their
+M4-Pro strict ceiling through :func:`tests.bench._o1_tiers.cache_tier_ceiling`
+(the DEC-O1-CACHE-TIER-001 measured 3× cache allowance) rather than the raw
+1.1×: the AND/CMP op itself is a constant two-instruction sequence, but the
+MEASURED ratio is dominated by iterating the ``N_LARGE`` (10k) mask / bar list
+vs the ``N_SMALL`` (1k) one — a larger working set that crosses a CPU cache
+tier into DRAM (~1.0–1.12× measured, hovering AT the 1.1× boundary under
+shared-VM jitter — a cache-cliff, not an algorithmic regression). This is the
+SAME allowance the throughput canary routes its 1M-elem vectorised mask-AND
+through (``cache_tier_ceiling(8.0)``; DEC-O1-BENCH-GATE-COMPLETE-001). A genuine
+super-constant per-mask cost (an O(n) wrapper) still blows well past 3× and
+fails. Shared CI is byte-unchanged (``cache_tier_ceiling`` returns the caller's
+5× default when the strict env is unset).
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ import time
 
 from brutex.engine.combo_mask import evaluate_mask, mask_to_entry_signals
 
-from tests.bench._o1_tiers import ratio_ceiling
+from tests.bench._o1_tiers import cache_tier_ceiling
 
 _SMALL = 1_000
 _LARGE = 10_000
@@ -65,9 +74,9 @@ class TestEvaluateMaskIsO1:
         t_small = _time(_SMALL)
         t_large = _time(_LARGE)
         ratio = t_large / max(t_small, 1.0)
-        assert ratio < ratio_ceiling(5.0), (
+        assert ratio < cache_tier_ceiling(5.0), (
             f"evaluate_mask per-mask ratio {ratio:.2f}× (10k vs 1k masks) exceeds "
-            f"5× — the AND/CMP hot path may have regressed from O(1). "
+            f"the ceiling — the AND/CMP hot path may have regressed from O(1). "
             f"t_1k={t_small:.1f}ns, t_10k={t_large:.1f}ns."
         )
 
@@ -93,8 +102,8 @@ class TestMaskProjectionIsO1:
         t_small = _time(_SMALL)
         t_large = _time(_LARGE)
         ratio = t_large / max(t_small, 1.0)
-        assert ratio < ratio_ceiling(5.0), (
+        assert ratio < cache_tier_ceiling(5.0), (
             f"mask_to_entry_signals per-bar ratio {ratio:.2f}× (10k vs 1k bars) "
-            f"exceeds 5× — the per-bar projection may have regressed from O(1). "
-            f"t_1k={t_small:.1f}ns, t_10k={t_large:.1f}ns."
+            f"exceeds the ceiling — the per-bar projection may have regressed "
+            f"from O(1). t_1k={t_small:.1f}ns, t_10k={t_large:.1f}ns."
         )
