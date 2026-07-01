@@ -83,6 +83,18 @@ groww = [
     "growwapi>=1.0,<2.0",
     "pyotp>=2.9,<3.0",
 ]
+# DEC-TOKEN-BROKER-AWS-001 (2026-07-01): the SHARED AWS token broker — BruteX READS
+# the Groww creds (api_key + TOTP secret) AND the daily minted access token from AWS
+# Systems Manager Parameter Store (region ap-south-1); a dedicated Lambda is the only
+# writer/minter (BruteX is read-only). The SSM reads need boto3, kept behind an
+# OPTIONAL extra — exactly like `groww` — so a purely-LOCAL run (the default, with
+# `BRUTEX_TOKEN_BROKER_READONLY` unset) and unit-test runners never install it;
+# `bootstrap.sh` deliberately does NOT install it. The real boto3 client build is
+# `# pragma: no cover`; a pure-Python `FakeAwsClient` drives the broker to 100%
+# coverage with no install and no network.
+token-broker = [
+    "boto3>=1.34,<2.0",
+]
 dev = [
     "pytest>=8.0,<10.0",            # was <9.0; PyPI latest 9.0.3 (DEC-P0-012)
     "pytest-cov>=5.0,<8.0",         # was <6.0; PyPI latest 7.1.0 (DEC-P0-012)
@@ -285,6 +297,8 @@ module = [
     "trading_core", "trading_core.*",  # DEC-SHARED-CORE-001 #441: PyO3 shared 52-vocab core — no Python stubs published (mirrors fno_math_py / fastbloom_rs)
     "structlog", "structlog.*",  # DEC-P0-038: structlog runtime dep — type stubs not yet packaged
     "fastbloom_rs", "fastbloom_rs.*",  # DEC-P0-047: PyO3-backed Rust Bloom — no Python stubs published
+    "boto3", "boto3.*",  # DEC-TOKEN-BROKER-AWS-001: OPTIONAL `token-broker` extra — real client build is `# pragma: no cover`
+    "botocore", "botocore.*",  # DEC-TOKEN-BROKER-AWS-001: boto3's transitive dep — same optional extra
     # DEC-P0-055 (PR-N+2): `fno_math` removed — wheel now ships bundled
     # `__init__.pyi` + `py.typed` via maturin's mixed Python+Rust layout.
 ]

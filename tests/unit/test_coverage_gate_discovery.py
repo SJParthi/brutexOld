@@ -198,6 +198,12 @@ class TestDiscoverTouchedModules:
         #     partition (the integration suite), with no test_dashboard_movers_snapshot.py
         #     stem match; gated by the whole-package floor at 100.00% over the movers
         #     unit+integration suites (DEC-COVERAGE-DISCOVERY-MOVERS-SNAPSHOT-001).
+        #   * brutex/config/credentials.py — the Groww/token/AWS credentials module
+        #     whose 100% is a curated two-file property (test_credentials.py +
+        #     test_groww_credentials.py); the discovery stem-map (test_credentials*)
+        #     misses the differently-stemmed test_groww_credentials.py, so it tops
+        #     out at ~88% standalone. Gated by the dedicated static per-module gate
+        #     (that exact two-file pair) + the whole-package floor (DEC-TOKEN-BROKER-AWS-001).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -207,6 +213,7 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/db_view.py",
                     "brutex/engine/stage1a.py",
                     "brutex/dashboard/movers_snapshot.py",
+                    "brutex/config/credentials.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
