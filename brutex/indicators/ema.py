@@ -155,8 +155,24 @@ class EMAState:
 
         if self.bars_seen == self.period:
             # Seed bar: EMA = SMA of values[0..period-1] (delegated to Rust).
+            # Each ``close`` is finite (guarded above), but a run of finite-but-huge
+            # closes can OVERFLOW ``seed_sum`` to ±∞; re-check the computed seed so an
+            # overflowed seed raises a clean ``ValueError`` instead of returning ±∞ and
+            # poisoning every subsequent bar — mirroring the Rust core's
+            # ``EmaState::update`` guard (``rust/trading-core/src/indicators/ema.rs``)
+            # AND the Python batch path (``compute_ema`` → ``trading_core.compute_ema``,
+            # which delegates to that same Rust ``update``), so streaming == batch ==
+            # Rust. Real-magnitude inputs sum far below ``f64::MAX``, so the golden seed
+            # is byte-unchanged. The bare ``trading_core.ema_seed`` FFI only guards
+            # ``period < 1`` (it is a pure division), so the finiteness re-check lives
+            # HERE — the streaming twin of the Rust seed guard.
             self.seed_sum += close
             seed: float = trading_core.ema_seed(self.seed_sum, self.period)
+            if not math.isfinite(seed):
+                raise ValueError(
+                    f"EMA seed overflowed to a non-finite value ({seed}); "
+                    "the warm-up close sum is too large"
+                )
             self.value = seed
             return self.value
 

@@ -35,6 +35,7 @@ from typing import Any
 
 import pytest
 import trading_core
+from brutex.indicators.ema import EMAState, compute_ema
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.vocabulary import bits as B
@@ -363,3 +364,52 @@ class TestFfiOverflowGuards:
             25.0,
             35.0,
         ]
+
+
+class TestEmaStreamingSeedParity:
+    """DEC-EMA-PARITY-001 — the Python STREAMING EMA path (``EMAState.update``,
+    the LIVE ``engine.stage1a`` hot path) must behave IDENTICALLY to the Python
+    batch path and the Rust core on a seed that overflows to a non-finite value.
+
+    Before this fix the streaming ``update`` returned a poisoning ``+inf`` on an
+    overflowed SMA seed (the bare ``trading_core.ema_seed`` FFI is a pure
+    division that only guards ``period < 1``), while BOTH the Rust
+    ``EmaState::update`` seed guard and the Python batch ``compute_ema`` (which
+    delegates to that same Rust ``update``) RAISED. This pins streaming == batch
+    == Rust so the divergence can never silently regress.
+    """
+
+    @staticmethod
+    def _stream(values: list[float], period: int) -> list[float | None]:
+        state = EMAState.new(period)
+        return [state.update(v) for v in values]
+
+    @staticmethod
+    def _value_error_message(fn: Any) -> str:
+        try:
+            fn()
+        except ValueError as exc:
+            return str(exc)
+        raise AssertionError("expected a ValueError but none was raised")  # pragma: no cover
+
+    def test_streaming_seed_overflow_raises_like_batch_and_rust(self) -> None:
+        """Streaming, batch, and Rust all raise the byte-identical ValueError."""
+        values = [1e308, 1e308]
+
+        def _stream_raise() -> None:
+            self._stream(values, 2)
+
+        streaming_msg = self._value_error_message(_stream_raise)
+        batch_msg = self._value_error_message(lambda: compute_ema(values, 2))
+        rust_msg = self._value_error_message(lambda: trading_core.compute_ema(values, 2))
+
+        assert streaming_msg == batch_msg == rust_msg
+        assert "seed overflowed to a non-finite value" in streaming_msg
+
+    def test_streaming_finite_series_bit_identical_to_batch_and_rust(self) -> None:
+        """A real-magnitude series streams == batch == Rust bit-for-bit (the
+        guard never fires on normal inputs)."""
+        values = [10.0, 20.0, 30.0, 40.0, 50.0]
+        streamed = self._stream(values, 3)
+        assert streamed == compute_ema(values, 3)
+        assert streamed == trading_core.compute_ema(values, 3)
