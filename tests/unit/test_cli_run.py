@@ -191,6 +191,12 @@ def _stub_dashboard_runtime(
     # network-bound ``load_instrument_master`` is never reached here because
     # ``should_reload_instrument_master`` is stubbed above (False / raising).
     monkeypatch.setattr(cli, "_start_instrument_autoload", cli._autoload_instrument_master)
+    # HERMETIC (DEC-AUTO-RESUME-ON-BOOT-001): stub the boot-time auto-resume launcher
+    # to a no-op so the dashboard-boot tests never read the real ``BRUTEX_AUTO_RESUME_ON_BOOT``
+    # env flag NOR spawn a daemon thread / subprocess — the launcher's own behaviour is
+    # tested in isolation (test_cli_auto_resume + test_orchestrator_auto_resume). Mirrors the
+    # ``_start_instrument_autoload`` stub above (both are live-side-effect boot seams).
+    monkeypatch.setattr(cli, "_start_auto_resume_on_boot", lambda *args, **kwargs: None)
 
 
 def test_dashboard_missing_uvicorn_is_user_error(
@@ -276,6 +282,35 @@ def test_dashboard_autoload_failure_never_blocks_serving(
     assert probes["port"] == 9082
     out = capsys.readouterr().out
     assert "[brutex] dashboard → http://127.0.0.1:9082  (Ctrl-C to stop)" in out
+
+
+def test_dashboard_auto_resume_launch_failure_never_blocks_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failing boot-time auto-resume LAUNCH is swallowed; the dashboard still serves.
+
+    DEC-AUTO-RESUME-ON-BOOT-001 (hostile-review NIT): the launch of the boot-time
+    auto-resume is best-effort on the bind path — even a thread-spawn failure must
+    NOT stop the dashboard, so the guard logs a warning and the launch continues to
+    ``uvicorn.run`` (the "never crashes boot" contract).
+    """
+    pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes, probe_stream=False)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("boot resume launch failed")
+
+    # Override the harness no-op stub with a RAISING launcher to exercise the guard.
+    monkeypatch.setattr(cli, "_start_auto_resume_on_boot", boom)
+
+    rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9083)
+    assert rc == cli.EXIT_OK
+    assert probes["port"] == 9083
+    out = capsys.readouterr().out
+    assert "[brutex] dashboard → http://127.0.0.1:9083  (Ctrl-C to stop)" in out
 
 
 def test_dashboard_without_file_handler_keeps_plain_stdout(
