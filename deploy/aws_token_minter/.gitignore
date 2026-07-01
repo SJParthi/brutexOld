@@ -1,0 +1,12 @@
+# Terraform local state + provider cache + build artifacts — never committed.
+.terraform/
+.terraform.lock.hcl
+.build/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
