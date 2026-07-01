@@ -39,19 +39,28 @@ TokenCacheStore = Callable[..., bool]
 def _resolve_token_cache_hooks(
     token_cache_load: TokenCacheLoad | None,
     token_cache_store: TokenCacheStore | None,
-) -> tuple[TokenCacheLoad, TokenCacheStore]:
-    """Return the ``(load, store)`` hooks to thread into :class:`SdkRefresher`.
+) -> tuple[TokenCacheLoad, TokenCacheStore, TokenCacheLoad | None]:
+    """Return ``(load, store, readonly_reread)`` hooks to thread into :class:`SdkRefresher`.
 
-    An explicit hook wins (tests / a caller wiring a specific backend); otherwise BOTH
-    come from :func:`~brutex.adapters.groww.token_store.resolve_token_store` — the shared
-    read-only AWS Parameter-Store token, the SOLE source (DEC-AWS-ONLY-CREDS-001). Resolving
-    the store ONCE here (not per hook) keeps the load + store from the SAME backend instance
-    (no split-brain).
+    An explicit ``load`` AND ``store`` win (tests / a caller wiring a specific backend), and
+    then ``readonly_reread`` is ``None`` (the explicit-hook path does NOT resolve the store,
+    so the caller wires the read-only re-read itself when needed); otherwise BOTH come from
+    :func:`~brutex.adapters.groww.token_store.resolve_token_store` — the shared read-only AWS
+    Parameter-Store token, the SOLE source (DEC-AWS-ONLY-CREDS-001). Resolving the store ONCE
+    here (not per hook) keeps the load + store from the SAME backend instance (no split-brain).
+
+    ``readonly_reread`` (DEC-BROKER-READONLY-REAUTH-REREAD-001) is the resolved store's
+    ``load`` IFF that store reports :attr:`~brutex.adapters.groww.token_store.TokenStore.\
+    readonly` — so a mid-run reauth on the read-only broker RE-READS the Lambda-minted token
+    instead of hitting the fail-loud ``store`` (which would need a manual restart); a
+    non-read-only backend (or the explicit-hook path) leaves it ``None`` (the byte-identical
+    local-mint reauth).
     """
     if token_cache_load is not None and token_cache_store is not None:
-        return (token_cache_load, token_cache_store)
+        return (token_cache_load, token_cache_store, None)
     store = resolve_token_store()
-    return (token_cache_load or store.load, token_cache_store or store.store)
+    readonly_reread = store.load if store.readonly else None
+    return (token_cache_load or store.load, token_cache_store or store.store, readonly_reread)
 
 
 def build_live_client(
@@ -65,6 +74,7 @@ def build_live_client(
     on_success: Callable[[], None] | None = None,
     token_cache_load: TokenCacheLoad | None = None,
     token_cache_store: TokenCacheStore | None = None,
+    readonly_reread: TokenCacheLoad | None = None,
 ) -> GrowwClient:
     """Build a live :class:`GrowwClient` from *creds*, wired to the rate controller.
 
@@ -97,6 +107,12 @@ def build_live_client(
         :meth:`~brutex.adapters.rate_common.RateController`). ``None`` leaves the
         client's no-op defaults (offline / unpaced); the live pull paths inject the
         session controller so the chain pull can never bypass the limiter.
+    readonly_reread
+        OPTIONAL explicit read-only-broker RE-READ hook (DEC-BROKER-READONLY-REAUTH-REREAD-001).
+        ``None`` (the default) resolves it automatically from the token store (the read-only
+        AWS store's ``load`` when the resolved backend reports ``readonly``); a caller (tests)
+        may pass one explicitly, which wins. Threaded into :class:`SdkRefresher` so a mid-run
+        reauth RE-READS the Lambda-minted token instead of hitting the fail-loud ``store``.
 
     Returns
     -------
@@ -108,8 +124,12 @@ def build_live_client(
     # daily token reset so the overnight pull self-heals without a manual restart. The daily-
     # token cache hooks default to the shared read-only AWS Parameter-Store token — the SOLE
     # source (DEC-AWS-ONLY-CREDS-001); an absent token / unreachable AWS surfaces as a
-    # redacting GrowwAuthError straight from the store (no local mint).
-    load_hook, store_hook = _resolve_token_cache_hooks(token_cache_load, token_cache_store)
+    # redacting GrowwAuthError straight from the store (no local mint). On that read-only
+    # backend the reauth RE-READS the Lambda-minted token via `readonly_reread` instead of
+    # minting (DEC-BROKER-READONLY-REAUTH-REREAD-001) — a self-heal, not a fail-loud restart.
+    load_hook, store_hook, resolved_reread = _resolve_token_cache_hooks(
+        token_cache_load, token_cache_store
+    )
     refresher = SdkRefresher(
         creds,
         token_factory=token_factory,
@@ -117,6 +137,7 @@ def build_live_client(
         sdk_factory=sdk_factory,
         token_cache_load=load_hook,
         token_cache_store=store_hook,
+        readonly_reread=readonly_reread or resolved_reread,
     )
     # A truthy callable wins; ``None`` falls back to the client's no-op default
     # (offline / unpaced) — every key is a ``Callable[[], None]`` (mypy-clean).
@@ -146,6 +167,7 @@ def build_live_pool(
     on_success: Callable[[], None] | None = None,
     token_cache_load: TokenCacheLoad | None = None,
     token_cache_store: TokenCacheStore | None = None,
+    readonly_reread: TokenCacheLoad | None = None,
 ) -> ClientPool:
     """Build a live multi-connection :class:`ClientPool` of *size* leaves from *creds*.
 
@@ -181,7 +203,9 @@ def build_live_pool(
     # EVERY leaf's connection at once (each leaf binds its own SDK index via `sdk_at`), so
     # the overnight pull self-heals without a manual restart, WITHOUT a token stampede
     # (single-flight), AND the pool keeps its K-way concurrency (K distinct sockets).
-    load_hook, store_hook = _resolve_token_cache_hooks(token_cache_load, token_cache_store)
+    load_hook, store_hook, resolved_reread = _resolve_token_cache_hooks(
+        token_cache_load, token_cache_store
+    )
     refresher = SdkRefresher(
         creds,
         size=safe_size,
@@ -190,6 +214,7 @@ def build_live_pool(
         sdk_factory=sdk_factory,
         token_cache_load=load_hook,
         token_cache_store=store_hook,
+        readonly_reread=readonly_reread or resolved_reread,
     )
     # ONE shared meter across all leaves → the dashboard's achieved-rate gauge aggregates
     # across every connection (in_flight rises toward `size`, not split per-connection).

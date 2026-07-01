@@ -100,6 +100,14 @@ class TestParameterStoreTokenStoreLoad:
 class TestParameterStoreTokenStoreReadOnly:
     """store fails LOUD — BruteX must never mint / write the shared token."""
 
+    def test_readonly_property_is_true(self) -> None:
+        """The AWS backend reports ``readonly=True`` so the reauth RE-READS, never mints.
+
+        DEC-BROKER-READONLY-REAUTH-REREAD-001: the ``readonly`` capability is what
+        ``build_live_client`` reads to wire the read-only re-read hook into the refresher.
+        """
+        assert _store(FakeAwsClient()).readonly is True
+
     def test_store_raises_readonly_error(self) -> None:
         fake = FakeAwsClient()
         with pytest.raises(TokenBrokerReadOnlyError):

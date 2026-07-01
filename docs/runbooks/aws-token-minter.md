@@ -17,8 +17,12 @@ the single-writer Groww access-token minter. Design rationale is in
 ONE AWS Lambda is the SOLE writer of the shared Groww daily access token. On an
 EventBridge schedule (~06:05 IST, just after the 06:00 IST daily reset) and on an
 on-demand manual invoke, it reads the api-key + totp-secret from Parameter Store,
-computes the TOTP, mints a token via `GrowwAPI.get_access_token(...)`, and writes it
-to a SecureString token param. TickVault (live) and BruteX (backtest) read that ONE
+computes the TOTP (`pyotp`), mints a token via a pure-stdlib HTTPS POST to the Groww
+token endpoint (`handler.py::get_groww_access_token`, reimplementing the request +
+token-extraction contract of `growwapi` 1.5.0 `GrowwAPI.get_access_token` with simpler
+structural error handling — no `growwapi` dependency, no
+Docker), and writes it to a SecureString token param. TickVault (live) and BruteX
+(backtest) read that ONE
 token READ-ONLY, so no application ever mints — the multi-app "minting storm" that
 made the 06:00 IST reset flaky is eliminated by construction. Single-writer ⇒ NO
 DynamoDB / no compare-and-swap.
@@ -45,32 +49,37 @@ DynamoDB / no compare-and-swap.
 3. Terraform ≥ 1.5 + AWS credentials for the target account with permission to
    create the Lambda, IAM roles, EventBridge rule, CloudWatch alarms, SNS topic,
    and the ONE new token param.
-4. The Lambda's runtime deps are **bundled automatically, cross-compiled for the
-   Lambda's x86_64 Linux / cpython-3.12 runtime**: `boto3` is on the AWS Lambda
-   Python runtime already; `growwapi` + `pyotp` are `pip install`ed INTO the deploy
-   zip by `build_lambda_package.sh` (run by the Terraform
-   `null_resource.build_lambda_package` build step, and by `./deploy.sh` before
-   apply), so the deployed Lambda actually imports them at runtime. The install pins
-   the Lambda's platform (`--platform manylinux2014_x86_64 --only-binary=:all:
-   --python-version 3.12 --implementation cp --abi cp312`), so the bundle carries
-   Linux-x86_64 wheels for the whole transitive tree **even when you build on an
-   Apple-silicon / macOS ARM64 machine** (project rules §8) — no host-native binaries
-   leak into the zip, so `from growwapi import GrowwAPI` cannot ImportError in the
-   real Lambda. The build runs on YOUR deploy machine during `terraform apply` /
-   `deploy.sh`, so `pip` + PyPI network access are needed there (a Python interpreter
-   is used only as the pip driver — because the flags cross-target x86_64/cp312, the
-   host interpreter's own arch does NOT have to be x86_64, but `python3.12` is still
-   the default driver so it matches `var.lambda_runtime`). `--only-binary=:all:` means
-   the build FAILS LOUDLY if a required manylinux x86_64 cp312 wheel is missing from
-   PyPI, rather than silently shipping a broken zip. Pin exact versions with
-   `-var 'growwapi_version=growwapi==X.Y.Z' -var 'pyotp_version=pyotp==A.B.C'` if
-   desired (the defaults install the latest of each).
+4. The Lambda's runtime dep is **bundled automatically — pure Python, NO Docker**
+   (DEC-MINTER-PURE-PYTHON-001): `boto3` is on the AWS Lambda Python runtime already;
+   `pyotp` (the ONLY bundled dep) is `pip install`ed INTO the deploy zip by
+   `build_lambda_package.sh` (run by the Terraform `null_resource.build_lambda_package`
+   build step, and by `./deploy.sh` before apply), so the deployed Lambda actually
+   imports it at runtime. The Groww token is minted by a **pure-stdlib HTTPS POST** in
+   the handler (`get_groww_access_token`, reimplementing the request +
+   token-extraction contract of `growwapi` 1.5.0 `GrowwAPI.get_access_token`,
+   `client.py:1540-1580`, with simpler structural error handling), so `growwapi`
+   — and its heavy native-extension transitive tree (`pynacl`, `pydantic-core`,
+   `pandas`, the sdist-only `clint`) — is NOT bundled.
+
+   **No Docker, no cross-compile flags, no two-path build.** `pyotp==2.10.0` is a
+   pure-Python **universal** wheel (`py3-none-any`, zero runtime deps), so the bundle
+   has ZERO platform-specific artifacts and builds identically on macOS/ARM64 (project
+   rules §8) and Linux with one deterministic `pip install --target`. This SUPERSEDES
+   the two-path Docker/cross-pip build of DEC-MINTER-BUILD-ROBUST-001 — with `growwapi`
+   (and thus `clint`) gone, the operator's `ResolutionImpossible` cannot recur. `pyotp`
+   is **PINNED** by default (`pyotp==2.10.0`, the latest within BruteX's own
+   `pyproject.toml` `pyotp>=2.9,<3.0`); re-pin with `-var 'pyotp_version=pyotp==A.B.C'`
+   (or pass a bare `pyotp` to float). `deploy/aws_token_minter/requirements.txt`
+   declares the one dep.
+
+   The build runs on YOUR deploy machine during `terraform apply` / `deploy.sh`, so
+   only `pip` + PyPI network access is needed there — **no Docker daemon**.
 
 ## 4. One-command deploy
 
-The single command is **`./deploy.sh`** — it builds the bundle (handler + growwapi +
-pyotp), runs `terraform init`, then `terraform apply`, which SHOWS the plan and
-requires you to type `yes` (it never auto-approves):
+The single command is **`./deploy.sh`** — it builds the bundle (handler + pyotp, pure
+Python, no Docker), runs `terraform init`, then `terraform apply`, which SHOWS the
+plan and requires you to type `yes` (it never auto-approves):
 
 ```bash
 cd deploy/aws_token_minter
@@ -94,7 +103,7 @@ To run the steps by hand (or to schema-validate offline first):
 
 ```bash
 cd deploy/aws_token_minter
-bash build_lambda_package.sh  # bundle handler + growwapi + pyotp into the zip
+bash build_lambda_package.sh  # bundle handler + pyotp into the zip (pure Python, no Docker)
 terraform fmt -check          # formatting gate
 terraform init                # fetch the aws + archive + null providers
 terraform validate            # schema-level validation (needs the providers)

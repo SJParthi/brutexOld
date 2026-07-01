@@ -39,9 +39,14 @@ def _str_sdk(token: str) -> GrowwSDK:
 class _FakeStore:
     """An in-memory :class:`~brutex.adapters.groww.token_store.TokenStore` for the resolver."""
 
-    def __init__(self, *, token: str | None = None) -> None:
+    def __init__(self, *, token: str | None = None, readonly: bool = True) -> None:
         self.token = token
         self.stored: str | None = None
+        self._readonly = readonly
+
+    @property
+    def readonly(self) -> bool:
+        return self._readonly
 
     def load(self, creds: object, *, now_utc: datetime) -> CachedToken | None:
         if self.token is None:
@@ -104,10 +109,13 @@ class TestResolvedBackendThreadedIn:
             return real
 
         monkeypatch.setattr("brutex.adapters.groww.live.resolve_token_store", spy)
-        load, store = _resolve_token_cache_hooks(None, None)
+        load, store, reread = _resolve_token_cache_hooks(None, None)
         assert seen["n"] == 1  # resolved exactly ONCE (no split-brain)
         assert load.__self__ is real  # type: ignore[attr-defined]
         assert store.__self__ is real  # type: ignore[attr-defined]
+        # A read-only store also yields the read-only re-read hook (same backend instance).
+        assert reread is not None
+        assert reread.__self__ is real  # type: ignore[attr-defined]
 
 
 class TestExplicitHooksWin:
@@ -145,6 +153,10 @@ class TestExplicitHooksWin:
         def my_load(creds: object, *, now_utc: object) -> None:
             return None
 
-        load, store = _resolve_token_cache_hooks(my_load, None)
+        load, store, reread = _resolve_token_cache_hooks(my_load, None)
         assert load is my_load  # explicit load kept
         assert store.__self__ is real  # type: ignore[attr-defined]  # default store from resolver
+        # The resolved store is read-only, so the read-only re-read hook is its `load`
+        # (DEC-BROKER-READONLY-REAUTH-REREAD-001) — the mid-run reauth re-reads, never mints.
+        assert reread is not None
+        assert reread.__self__ is real  # type: ignore[attr-defined]

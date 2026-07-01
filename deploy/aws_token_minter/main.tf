@@ -80,18 +80,22 @@ resource "aws_ssm_parameter" "access_token" {
 }
 
 # --------------------------------------------------------------------------- #
-# Lambda package — the handler PLUS its third-party runtime deps (growwapi +
-# pyotp), bundled so the deployed Lambda actually IMPORTS at runtime.
+# Lambda package — the handler PLUS its ONE third-party runtime dep (pyotp),
+# bundled so the deployed Lambda actually IMPORTS at runtime.
 #
-# boto3 is already on the AWS-provided Lambda Python runtime, but growwapi +
-# pyotp are NOT — without them the handler's lazy `import pyotp` / `from growwapi
-# import GrowwAPI` would ImportError on the first real mint. So a build step
-# `pip install`s the two into a staging dir, copies the handler source alongside,
-# and `archive_file` zips the whole staging tree into the deploy zip.
+# boto3 is already on the AWS-provided Lambda Python runtime, but pyotp is NOT —
+# without it the handler's lazy `import pyotp` (TOTP computation) would
+# ImportError on the first real mint. So a build step `pip install`s pyotp into a
+# staging dir, copies the handler source alongside, and `archive_file` zips the
+# whole staging tree into the deploy zip. pyotp is a pure-Python UNIVERSAL wheel
+# (py3-none-any, zero deps), so the bundle has ZERO platform-specific artifacts
+# and builds with NO Docker (DEC-MINTER-PURE-PYTHON-001, MIGRATION.md #1069). The
+# token mint is a pure-stdlib HTTPS POST in handler.py, so growwapi (and its
+# heavy native-extension transitive tree) is NOT bundled.
 #
 # `build_lambda_package.sh` is the ONE source of the packaging steps (also run
 # by `deploy.sh` before apply). The `null_resource` re-runs it whenever the
-# handler source or the pinned dep versions change (the `triggers` hashes), and
+# handler source or the pinned pyotp version changes (the `triggers` hashes), and
 # the `archive_file` depends on it so the zip always contains a fresh build.
 # --------------------------------------------------------------------------- #
 
@@ -104,17 +108,16 @@ resource "null_resource" "build_lambda_package" {
     handler_sha  = filesha256("${path.module}/handler.py")
     init_sha     = filesha256("${path.module}/__init__.py")
     build_sha    = filesha256("${path.module}/build_lambda_package.sh")
-    dep_versions = "${var.growwapi_version}|${var.pyotp_version}"
+    dep_versions = var.pyotp_version
   }
 
   provisioner "local-exec" {
     command     = "bash build_lambda_package.sh"
     working_dir = path.module
     environment = {
-      BUILD_DIR        = local.lambda_build_dir
-      GROWWAPI_VERSION = var.growwapi_version
-      PYOTP_VERSION    = var.pyotp_version
-      LAMBDA_RUNTIME   = var.lambda_runtime
+      BUILD_DIR      = local.lambda_build_dir
+      PYOTP_VERSION  = var.pyotp_version
+      LAMBDA_RUNTIME = var.lambda_runtime
     }
   }
 }

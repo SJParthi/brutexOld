@@ -1,10 +1,13 @@
 """Unit tests for the centralized Groww token-minter Lambda handler.
 
-DEC-TOKEN-MINTER-CENTRAL-001 (docs/MIGRATION.md #1060). These drive the pure
-decision logic of :mod:`deploy.aws_token_minter.handler` to 100% line+branch
-with a fake SSM client + fake CloudWatch client + fake TOTP/mint callables —
-no ``boto3`` / ``growwapi`` / ``pyotp`` / AWS is touched. The real AWS + Groww
-shims are ``# pragma: no cover`` (only runnable in AWS against the live vendor).
+DEC-TOKEN-MINTER-CENTRAL-001 (docs/MIGRATION.md #1060) +
+DEC-MINTER-PURE-PYTHON-001 (docs/MIGRATION.md #1069). These drive the pure
+decision logic of :mod:`deploy.aws_token_minter.handler` — including the
+stdlib token mint :func:`~deploy.aws_token_minter.handler.get_groww_access_token`
+— to 100% line+branch with a fake SSM client + fake CloudWatch client + fake
+TOTP/mint callables + an injected fake URL opener. No ``boto3`` / ``growwapi`` /
+``pyotp`` / AWS / network is touched. The real AWS + Groww shims are
+``# pragma: no cover`` (only runnable in AWS against the live vendor).
 """
 
 # Whitebox tests deliberately exercise the handler's private helpers
@@ -14,7 +17,12 @@ shims are ``# pragma: no cover`` (only runnable in AWS against the live vendor).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import ast
+import json
+import urllib.error
+from collections.abc import Callable, Mapping
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -100,6 +108,39 @@ class _CodedError(Exception):
     def __init__(self, message: str, code: object) -> None:
         super().__init__(message)
         self.code = code
+
+
+class _FakeResponse:
+    """A minimal fake of a ``urllib`` HTTP response usable as a context manager.
+
+    ``read()`` returns the seeded body bytes; the ``with`` protocol mirrors
+    ``urllib.request.urlopen``'s returned object (which is a context manager).
+    """
+
+    def __init__(self, body: bytes) -> None:
+        self._body = BytesIO(body)
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body.read()
+
+
+def _json_opener(
+    payload: Mapping[str, Any], sink: dict[str, Any] | None = None
+) -> Callable[[Any], _FakeResponse]:
+    """Return a fake opener that records the request and yields ``payload`` as JSON."""
+
+    def _open(request: Any) -> _FakeResponse:
+        if sink is not None:
+            sink["request"] = request
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    return _open
 
 
 def _full_env(**overrides: str) -> dict[str, str]:
@@ -239,6 +280,107 @@ class TestSanitize:
 
     def test_no_secrets_is_identity(self) -> None:
         assert h._sanitize("plain message") == "plain message"
+
+
+# --------------------------------------------------------------------------- #
+# get_groww_access_token — the pure-stdlib mint (DEC-MINTER-PURE-PYTHON-001)
+# --------------------------------------------------------------------------- #
+
+
+class TestGetGrowwAccessToken:
+    def test_success_returns_token_and_builds_correct_request(self) -> None:
+        # The request must match growwapi 1.5.0 client.py:1540-1580 exactly: POST
+        # to the token URL, JSON body {"key_type":"totp","totp":<stripped>}, and
+        # the seven vendor headers. Assert the request the opener received.
+        sink: dict[str, Any] = {}
+        token = h.get_groww_access_token(
+            "my-api-key",
+            "  123456  ",  # stripped per client.py:1525-1529
+            opener=_json_opener({"token": "minted-token"}, sink),
+        )
+        assert token == "minted-token"
+        request = sink["request"]
+        assert request.full_url == "https://api.groww.in/v1/token/api/access"  # client.py:1557
+        assert request.method == "POST"  # client.py:1560
+        body = json.loads(request.data.decode("utf-8"))  # client.py:1525-1529
+        assert body == {"key_type": "totp", "totp": "123456"}
+        # client.py:1370-1378 headers (urllib title-cases header keys).
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        assert headers["authorization"] == "Bearer my-api-key"
+        assert headers["content-type"] == "application/json"
+        assert headers["x-client-id"] == "growwapi"
+        assert headers["x-client-platform"] == "growwapi-python-client"
+        assert headers["x-client-platform-version"] == "1.5.0"
+        assert headers["x-api-version"] == "1.0"
+        assert headers["x-request-id"]  # a uuid4 is present
+
+    def test_http_error_propagates_vendor_detail(self) -> None:
+        # A non-2xx response (client.py:1561-1579) raises GrowwMintHTTPError with
+        # the vendor message preserved AND the status code STRUCTURALLY (.code) so
+        # _is_rate_limit can classify a 429 with no textual phrase. No secret is in
+        # the detail here (it is the vendor body). __cause__ is None (from None).
+        def _raise(request: Any) -> Any:
+            raise urllib.error.HTTPError(
+                url="https://api.groww.in/v1/token/api/access",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=BytesIO(b'{"error":"bad totp"}'),
+            )
+
+        with pytest.raises(h.GrowwMintHTTPError) as excinfo:
+            h.get_groww_access_token("k", "222222", opener=_raise)
+        exc = excinfo.value
+        assert isinstance(exc, RuntimeError)  # a RuntimeError subclass
+        assert exc.code == 401  # status preserved STRUCTURALLY
+        message = str(exc)
+        assert "HTTP 401" in message
+        assert "bad totp" in message  # vendor detail preserved
+        assert exc.__cause__ is None  # from None — no raw vendor exc chained
+
+    def test_http_429_is_rate_limit_via_structural_code(self) -> None:
+        # A genuine Groww issuance 429 whose vendor body has NO textual rate-limit
+        # phrase must still be classified retryable by the STRUCTURAL .code == 429
+        # path — the MAJOR fix (a plain RuntimeError would be misread as terminal).
+        def _raise(request: Any) -> Any:
+            raise urllib.error.HTTPError(
+                url="https://api.groww.in/v1/token/api/access",
+                code=429,
+                msg="Too Many Requests",
+                hdrs=None,  # type: ignore[arg-type]
+                # Phrase-free vendor body (mimics {"status":"FAILURE",...}); it does
+                # NOT contain "rate limit"/"too many request", so ONLY the structural
+                # .code == 429 can classify it retryable.
+                fp=BytesIO(b'{"status":"FAILURE","error":{"code":"GA0009"}}'),
+            )
+
+        with pytest.raises(h.GrowwMintHTTPError) as excinfo:
+            h.get_groww_access_token("k", "555555", opener=_raise)
+        exc = excinfo.value
+        assert exc.code == 429
+        # The body carries no phrase, yet _is_rate_limit is True via .code == 429.
+        assert "rate limit" not in str(exc).lower()
+        assert "too many request" not in str(exc).lower()
+        assert h._is_rate_limit(exc) is True
+
+    def test_blank_totp_raises_before_any_request(self) -> None:
+        # NIT-1: an empty/whitespace totp is rejected loudly (client.py:1526-1527)
+        # BEFORE any network call — the opener must NEVER be invoked.
+        def _must_not_open(request: Any) -> Any:  # pragma: no cover - asserted never called
+            raise AssertionError("opener must not be called for a blank totp")
+
+        with pytest.raises(ValueError, match="non-empty totp"):
+            h.get_groww_access_token("k", "   ", opener=_must_not_open)
+
+    def test_missing_token_field_raises(self) -> None:
+        # A clean 200 with no "token" (client.py:1580) is a failure, not a blank.
+        with pytest.raises(RuntimeError, match="no token"):
+            h.get_groww_access_token("k", "333333", opener=_json_opener({"status": "ok"}))
+
+    def test_empty_token_value_raises(self) -> None:
+        # A present-but-falsy token is also a failure (never return "").
+        with pytest.raises(RuntimeError, match="no token"):
+            h.get_groww_access_token("k", "444444", opener=_json_opener({"token": ""}))
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +530,40 @@ class TestMintToken:
         )
         assert attempts == 2
         assert slept == [1.0 * (2**0)]  # backoff on first retry
+        assert ssm.puts[0]["Value"] == "recovered-token"
+
+    def test_phrase_free_http_429_retries_then_succeeds(self) -> None:
+        # The MAJOR fix, end-to-end through mint_token: a genuine GrowwMintHTTPError
+        # 429 whose message carries NO textual rate-limit phrase must STILL be
+        # retried (classified via the structural .code == 429), not treated as
+        # terminal. Before the fix (a plain RuntimeError, no .code) this raised.
+        env = _full_env(**{h.ENV_MAX_RETRIES: "2", h.ENV_RETRY_BACKOFF_SECONDS: "1"})
+        cfg = h.resolve_config(env)
+        ssm = _seeded_ssm(env)
+        calls = {"n": 0}
+        slept: list[float] = []
+
+        def _factory(api_key: str, totp: str) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Phrase-free body — no "rate limit"/"too many request" substring, so
+                # ONLY the structural .code == 429 can classify it retryable.
+                raise h.GrowwMintHTTPError(
+                    'Groww token mint failed: HTTP 429: {"status":"FAILURE",'
+                    '"error":{"code":"GA0009"}}',
+                    code=429,
+                )
+            return "recovered-token"
+
+        attempts = h.mint_token(
+            cfg,
+            ssm,
+            totp_minter=lambda secret: "444444",
+            token_factory=_factory,
+            sleep=slept.append,
+        )
+        assert attempts == 2  # RETRIED, not terminal
+        assert slept == [1.0 * (2**0)]  # one backoff before the successful retry
         assert ssm.puts[0]["Value"] == "recovered-token"
 
     def test_retry_budget_exhausted_raises(self) -> None:
@@ -728,3 +904,24 @@ class TestRun:
 def test_all_exports_present() -> None:
     for name in h.__all__:
         assert hasattr(h, name), name
+
+
+def test_handler_does_not_import_growwapi() -> None:
+    """The handler must NOT import ``growwapi`` — the mint is pure-stdlib now.
+
+    DEC-MINTER-PURE-PYTHON-001: dropping the ``growwapi`` import (and its heavy
+    native-extension transitive tree) is what lets the Lambda bundle carry zero
+    platform-specific wheels and build with no Docker. We parse the handler
+    source's AST so a lazy/nested ``import growwapi`` cannot slip past a plain
+    substring grep (the header VALUES ``"growwapi"`` / ``"growwapi-python-client"``
+    and the citation comments legitimately contain the word).
+    """
+    source = Path(h.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] != "growwapi", "handler must not import growwapi"
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            assert root != "growwapi", "handler must not import from growwapi"

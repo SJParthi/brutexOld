@@ -52,8 +52,13 @@ stored in AWS Systems Manager (SSM) Parameter Store as a SecureString.**
    1. reads `/tickvault/prod/groww/api-key` + `/tickvault/prod/groww/totp-secret`
       from Parameter Store via `GetParameter(WithDecryption=True)` (SSM KMS-decrypts
       the SecureStrings) [1];
-   2. computes the current TOTP code from the secret;
-   3. calls `GrowwAPI.get_access_token(api_key, totp)` to mint a fresh token;
+   2. computes the current TOTP code from the secret (`pyotp`);
+   3. mints a fresh token with a pure-stdlib HTTPS POST to the Groww token
+      endpoint (`handler.py::get_groww_access_token`, reimplementing the
+      request + token-extraction contract of `growwapi` 1.5.0
+      `GrowwAPI.get_access_token`, `client.py:1540-1580`, with simpler
+      structural error handling — NO `growwapi` dependency, NO Docker; see
+      §"Lambda runtime dep is BUNDLED" + DEC-MINTER-PURE-PYTHON-001);
    4. writes the token to `/tickvault/prod/groww/access-token` via
       `PutParameter(Overwrite=True, Type='SecureString', KeyId=<kms key>)` [2].
 2. A small **in-handler retry/backoff** absorbs a transient Groww issuance 429
@@ -154,33 +159,65 @@ PRESERVED (real 0.0 → fire; silence → fire) and the healthy-day flapping is 
 sparse/daily metric — §"AWS API references" [3]). The separate `lambda_errors` alarm
 on `AWS/Lambda Errors` is unchanged (a hard invocation failure pages immediately).
 
-### Lambda runtime deps are BUNDLED (real import at runtime) — CROSS-COMPILED for x86_64 Linux
+### Lambda runtime dep is BUNDLED (real import at runtime) — pure Python, NO Docker
 
-`boto3` is on the AWS Lambda Python runtime, but `growwapi` + `pyotp` are NOT — the
-handler's lazy `import pyotp` / `from growwapi import GrowwAPI` would ImportError on
-the first real mint if they were missing. The build step `build_lambda_package.sh`
-(run by the `null_resource.build_lambda_package` before `archive_file` zips, and by
-`deploy.sh` before `terraform apply`) `pip install`s the two pinned deps
-(`var.growwapi_version` / `var.pyotp_version`) INTO the deploy bundle staging dir
-alongside the handler, so the deployed Lambda actually imports at runtime. This is
-REAL packaging, not a documented manual step.
+`boto3` is on the AWS Lambda Python runtime, but `pyotp` is NOT — the handler's lazy
+`import pyotp` (TOTP computation) would ImportError on the first real mint if it were
+missing. The build step `build_lambda_package.sh` (run by the
+`null_resource.build_lambda_package` before `archive_file` zips, and by `deploy.sh`
+before `terraform apply`) `pip install`s the one pinned dep (`var.pyotp_version`)
+INTO the deploy bundle staging dir alongside the handler, so the deployed Lambda
+actually imports at runtime. This is REAL packaging, not a documented manual step.
 
-**The bundle is CROSS-COMPILED for the Lambda's runtime (x86_64 Linux / cpython
-3.12), NOT the build host.** The operator's build machine is macOS/ARM64 (project
-rules §8: Apple M4 Pro), so a plain `pip install --target` would vendor macOS/ARM
-wheels — and `growwapi` drags in native-extension transitive deps (pynacl,
-pydantic-core, pandas, aiohttp, protobuf) whose macOS/ARM binaries would `ImportError`
-in the x86_64 Linux Lambda runtime on the first real mint (a `terraform apply` that
-SUCCEEDS but a mint that silently fails). To make the bundle host-independent, the
-pip install pins the Lambda's platform explicitly:
-`--platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12
---implementation cp --abi cp312`. `--only-binary=:all:` forces pip to resolve
-prebuilt manylinux x86_64 cp312 wheels for the WHOLE transitive tree (forbidding any
-from-source build, which would emit host-native binaries), so a dep with no matching
-wheel FAILS the build loudly rather than shipping a broken zip. The bundle is
-therefore Linux-x86_64 regardless of whether it is built on macOS/ARM, Linux, or in
-CI. A `tests/deploy` content-assertion pins these flags so a regression cannot
-silently drop them.
+**The token mint is a pure-stdlib HTTPS POST — `growwapi` is NOT bundled
+(DEC-MINTER-PURE-PYTHON-001, docs/MIGRATION.md #1069).** The handler's
+`get_groww_access_token` reimplements the REQUEST + token-extraction CONTRACT of
+`growwapi` 1.5.0 `GrowwAPI.get_access_token` (`client.py:1540-1580`): the Groww TOTP
+flow is exactly ONE unsigned HTTPS POST to `https://api.groww.in/v1/token/api/access`
+with seven plain headers and a `{"key_type":"totp","totp":...}` body — no request
+signing, no crypto, no pynacl — so `urllib` alone replicates it exactly. The ERROR
+handling is deliberately SIMPLER than the SDK's (rather than a line-for-line copy of
+its exception tree): a non-2xx raises a single `GrowwMintHTTPError` that carries the
+HTTP status `code` STRUCTURALLY (so `_is_rate_limit`'s `code == 429` retries a
+phrase-free 429 body), and a blank TOTP raises `ValueError` before any network call
+(matching the SDK's `_build_request_data` guard, `client.py:1526-1527`). Dropping the
+`growwapi` import removes its heavy native-extension transitive tree (`pynacl`,
+`pydantic-core`, `pandas`, `aiohttp`, `protobuf`, and the sdist-only `clint`) from the
+bundle. The Groww HTTP contract is cited inline in the handler to the exact `client.py`
+line, so no external claim is invented (Golden Rule #1).
+
+**Because the ONLY bundled dep is now `pyotp` — a pure-Python UNIVERSAL wheel
+(`py3-none-any`, zero runtime deps) — the bundle carries ZERO platform-specific
+wheels**, so `pip install --target` produces only pure `.py` (no `.so`/`.dylib`/
+`.pyd`) and the artifact runs unchanged on the Lambda's x86_64 Linux / cpython 3.12
+runtime regardless of the build host. The operator builds on macOS/ARM64 (project
+rules §8: Apple M4 Pro) and the SAME bundle deploys — with **no Docker**, no
+`--platform`/`--only-binary`/`--abi` cross-compile flags, and no two-path branching.
+This SUPERSEDES the two-path Docker/cross-pip build of DEC-MINTER-BUILD-ROBUST-001
+(the prior revision of PR #1027), which existed only to work around `growwapi`'s
+native tree + `clint`'s missing wheel — both now gone with `growwapi` itself.
+
+**`pyotp` IS PINNED.** The default is `pyotp==2.10.0` (latest within BruteX's
+`pyproject.toml` `pyotp>=2.9,<3.0`) — the same range BruteX itself pins, so the
+Lambda and the app share one dependency truth. `deploy/aws_token_minter/requirements.txt`
+declares it once; the `build_lambda_package.sh` `PYOTP_VERSION` default and the
+Terraform `var.pyotp_version` default carry the same pin.
+
+A `tests/deploy` content-assertion pins the single-dep pure-Python build (pyotp
+pinned; no Docker/growwapi/boto3 in the build; no cross-compile flags; no two-path
+branching) so a regression cannot silently reintroduce them.
+
+**No Docker step remains.** On a fresh macOS machine with `pip` + PyPI access,
+`./deploy.sh` (or `terraform apply`) builds the bundle in one deterministic
+`pip install` and succeeds — the operator's original `ResolutionImpossible` cannot
+recur because there is no cross-platform native resolve to fail.
+
+**HONEST LIMITS (Golden Rule #10).** The endpoint, headers, request body, and token
+extraction are PINNED to `growwapi` 1.5.0's behavior (cited to `client.py:1540-1580`).
+If Groww changes its auth contract, `handler.py::get_groww_access_token` must be
+updated — the SAME version-coupling the SDK itself has (the previous design was
+coupled to the pinned `growwapi==1.5.0` wheel; this design is coupled to the same
+1.5.0 HTTP contract, now visible and testable in-repo instead of vendored opaquely).
 
 ## 5. Least-privilege IAM matrix
 
@@ -230,27 +267,60 @@ API forbids resource-level scoping — noted). ARNs are derived from the `param_
 - **AWS behavioural claims are CITED, not invented** (§"AWS API references" below).
 - **The read-side is OUT OF SCOPE** of this PR (a separate PR wires BruteX to read
   the centralized token; TickVault is a separate repo).
-- **The exact Groww issuance encoding of a 429 is UNVERIFIED** — the handler mirrors
-  the repo's existing `_RATE_LIMIT_HINTS` classification (`brutex/adapters/groww/
-  errors.py`), which is itself a best-effort match, not a probe-confirmed contract.
+- **A 429 is now caught STRUCTURALLY** — an HTTP-429 mint failure raises
+  `GrowwMintHTTPError` carrying `.code == 429`, so `_is_rate_limit` classifies it
+  retryable REGARDLESS of the vendor body's wording (the structural check does not
+  depend on the body encoding). The phrase-based `_RATE_LIMIT_HINTS` fallback
+  (mirroring `brutex/adapters/groww/errors.py`) remains a best-effort secondary for a
+  non-HTTPError throttle; the exact textual encoding of a Groww 429 body stays
+  UNVERIFIED but the retry no longer relies on it.
 - **Groww's single-active-token session model is UNVERIFIED** (no citable source;
   see §3). The design does not depend on it — `reserved_concurrent_executions = 1`
   serializes the single writer so no concurrent mint can clobber a newer token.
-- **Lambda deps ARE bundled (not a manual step), and CROSS-COMPILED for x86_64
-  Linux.** `growwapi` + `pyotp` are pip-installed into the deploy zip by
-  `build_lambda_package.sh` (run by the `null_resource` build step + `deploy.sh`),
-  so the deployed Lambda imports at runtime. The install pins the Lambda's platform
-  (`--platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12
-  --implementation cp --abi cp312`), so the bundle carries Linux-x86_64 cp312 wheels
-  for the whole transitive tree even when built on the operator's macOS/ARM64 machine
-  — no host-native binaries can leak into the zip (see §"Lambda runtime deps are
-  BUNDLED"). The `pip install` itself runs during `terraform apply` / `deploy.sh` on
-  the operator's machine (needs network + a matching Python) — that step is an
-  operator-run build, but the packaging is REAL, not a documented TODO. HONEST
-  (Golden Rule #10): the resulting bundle is NOT installed/imported in a real x86_64
-  Lambda in this session (no AWS access); the cross-compile flags are the AWS-
-  documented mechanism for a host-independent bundle, and a content-assertion test
-  pins them, but end-to-end import in the deployed runtime is an operator step.
+- **The Lambda dep is bundled (not a manual step) — pure Python, NO Docker
+  (DEC-MINTER-PURE-PYTHON-001).** The token mint is a pure-stdlib HTTPS POST
+  (`handler.py::get_groww_access_token`, reimplementing the request +
+  token-extraction contract of `growwapi` 1.5.0 `GrowwAPI.get_access_token`,
+  `client.py:1540-1580`, with simpler structural error handling), so
+  `growwapi` — and its heavy native-extension transitive tree (`pynacl`,
+  `pydantic-core`, `pandas`, `aiohttp`, the sdist-only `clint`) — is NOT bundled.
+  The ONLY bundled dep is `pyotp==2.10.0`, a pure-Python UNIVERSAL wheel
+  (`py3-none-any`, zero runtime deps), so the bundle has ZERO platform-specific
+  wheels and `build_lambda_package.sh` builds identically on macOS/ARM64 and Linux
+  with no Docker, no cross-compile flags, and no two-path branching. This
+  SUPERSEDES the two-path Docker/cross-pip build of DEC-MINTER-BUILD-ROBUST-001
+  (#1063), which existed only to work around `growwapi`'s native tree; with
+  `growwapi` gone the operator's `ResolutionImpossible` cannot recur (no
+  cross-platform native resolve to fail). A content-assertion test pins the
+  single-dep pure-Python build (pyotp pinned; no Docker/growwapi/boto3; no
+  cross-compile flags). HONEST (Golden Rule #10): VERIFIED IN THE SANDBOX —
+  `pip install --target --no-compile pyotp==2.10.0` succeeds and the bundle contains
+  ZERO `.so`/`.dylib`/`.pyd` files (`Tag: py3-none-any`, `Root-Is-Purelib: true`);
+  `build_lambda_package.sh` runs end-to-end (exit 0) producing a clean handler+pyotp
+  bundle with no platform binaries. The pure request/parse/error branches of
+  `get_groww_access_token` are covered by an injected fake opener (no network). NOT
+  PROVEN IN THE SANDBOX (no AWS/live-vendor access): the real mint against the live
+  Groww endpoint and end-to-end import in the deployed x86_64 Lambda remain operator
+  steps. The Groww HTTP contract is PINNED to `growwapi` 1.5.0 (cited to
+  `client.py:1540-1580`); if Groww changes its auth contract, `handler.py` must be
+  updated — the same version-coupling the SDK itself has.
+
+## Groww token-mint HTTP contract (Golden Rule #1 — no hallucination)
+
+The handler's pure-stdlib `get_groww_access_token` replicates the Groww TOTP
+token flow exactly as `growwapi` 1.5.0 implements it — verified from the SDK
+source, not invented:
+
+- URL — `https://api.groww.in/v1/token/api/access` (`client.py:1557`)
+- Method — `POST`, JSON body, `timeout=15` (`client.py:1560`)
+- Headers — `x-request-id` = `str(uuid.uuid4())`, `Authorization` =
+  `"Bearer " + api_key`, `Content-Type: application/json`, `x-client-id: growwapi`,
+  `x-client-platform: growwapi-python-client`, `x-client-platform-version: 1.5.0`,
+  `x-api-version: 1.0` (`client.py:1370-1378`, `_build_headers`)
+- Body — `{"key_type": "totp", "totp": totp.strip()}` (`client.py:1525-1529`,
+  `_build_request_data`)
+- Token extraction — `response.json()["token"]` (`client.py:1580`)
+- Errors — non-2xx raises with the vendor message preserved (`client.py:1561-1579`)
 
 ## AWS API references (Golden Rule #1 — no hallucination)
 
