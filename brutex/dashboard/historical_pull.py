@@ -90,6 +90,7 @@ from brutex.adapters.groww.option_ingest import (
     ProgressHook,
     contract_exchange,
     emit_underlying_all_empty,
+    reconcile_fno_ledger_windows,
     run_groww_option_ingest,
 )
 from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
@@ -100,6 +101,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.nse import IST
+from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
     CANDLE_STATUS_COMPLETE,
@@ -673,6 +675,32 @@ def _run_phase(
     selected contract landed clean with no quarantine / still-failing / auth death.
     """
     ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
+    # Cold-start seed (DEC-FNO-LEDGER-LAKE-RECONCILE-001): on a fresh clone / lost /
+    # orphaned ledger the F&O candle lake may already hold this contract chain's bars
+    # while the ledger is empty, so once the ledger drives the skip a re-pull would
+    # re-fetch the ENTIRE options chain (every strike × CE/PE × expiry). Seed SUCCESS for
+    # every (contract, interval) window the lake already ENCLOSES — only ABSENT rows, so a
+    # FAILED / settled / genuinely-missing / partially-covered window is left re-pullable —
+    # BEFORE ``plan_contract_windows`` seeds PLANNED, so the upcoming ``is_skippable`` flip
+    # will NOT re-pull windows already durable in the lake (the F&O twin of the spot spine's
+    # ``reconcile_ledger_with_lake``). The lake span scan is O(datasets) and runs ONCE per
+    # phase (loaded here, reused across every market bucket); then a pure per-market seed lands
+    # each contract's window in the SAME namespace the fetch records under (``groww-future`` /
+    # ``groww-option``). A ``None`` ledger (dry-run) skips this entirely — the span read is
+    # spent only on a real pull.
+    if ledger is not None:
+        spans = load_lake_spans(lake_root)
+        for reconcile_market, reconcile_bucket in by_market.items():
+            reconcile_fno_ledger_windows(
+                ledger,
+                spans,
+                contracts=[contract for _row, contract in reconcile_bucket],
+                intervals=(interval,),
+                start=start,
+                end=end,
+                market=reconcile_market,
+                contract_windows=contract_windows,
+            )
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
     # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-contract
     # capture-hook factory to the lake root on the LIVE path so every F&O window

@@ -596,6 +596,184 @@ class TestBloomIntegration:
             assert s.exists_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("z")) is False
 
 
+class TestBloomCapacityUniqueAccounting:
+    """DEC-DEDUP-CAPACITY-UNIQUE-001 — Bloom capacity counts UNIQUE keys.
+
+    A combo is ``put`` multiple times as it moves PENDING→IN_FLIGHT→SUCCESS.
+    Before the fix, ``store.put`` Bloom-added on EVERY put, so
+    ``insertions_attempted`` counted the re-adds and the FAIL_CLOSED capacity
+    gate could raise ``BloomCapacityExceeded`` at a fraction of the intended
+    UNIQUE-combo capacity — halting a heavy sweep prematurely. The fix adds a
+    key to the Bloom only on its FIRST LMDB insertion (LMDB is the ground truth
+    for newness), so ``insertions_attempted`` == the count of distinct keys.
+    """
+
+    def _transition_key_three_times(self, store: WorkItemStore, hash_seed: str) -> None:
+        """Put ONE content_hash through PENDING → IN_FLIGHT → SUCCESS (3 puts)."""
+        from brutex.orchestrator.state import Outcome, WorkItem, dispatch, transition
+
+        pending = WorkItem.new(
+            phase=IngestPhase.A_INSTRUMENTS,
+            content_hash=_make_hash(hash_seed),
+            params={"exchange": "NSE", "underlying": "NIFTY"},
+        )
+        store.put(pending)  # PENDING
+        in_flight = dispatch(pending)
+        store.put(in_flight)  # IN_FLIGHT — same key, re-put
+        success = transition(in_flight, Outcome.OK_WITH_DATA)
+        store.put(success)  # SUCCESS — same key, re-put
+
+    def test_three_transitions_increment_bloom_exactly_once(self, store_path: Path) -> None:
+        """One key put 3× (state transitions) adds to Bloom EXACTLY once.
+
+        Fail-before/pass-after regression: before the fix this asserted 3.
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            self._transition_key_three_times(s, hash_seed="combo")
+            assert bloom.insertions_attempted == 1
+
+    def test_transitions_still_update_lmdb_row(self, store_path: Path) -> None:
+        """Skipping the Bloom re-add does NOT skip the LMDB state update.
+
+        The row must still transition to its terminal state — the
+        overwrite=True re-put after the newness probe keeps the value fresh.
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+        from brutex.orchestrator.state import WorkItemState
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            self._transition_key_three_times(s, hash_seed="combo")
+            fetched = s.get(IngestPhase.A_INSTRUMENTS, _make_hash("combo"))
+            assert fetched is not None
+            assert fetched.state == WorkItemState.SUCCESS
+
+    def test_new_key_always_added_to_bloom(self, store_path: Path) -> None:
+        """Invariant (a): a genuinely NEW key is ALWAYS added to the Bloom.
+
+        A later dedup lookup must be able to find it (Bloom-hit → LMDB confirm).
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            s.put(_make_item(hash_seed="fresh"))
+            assert bloom.insertions_attempted == 1
+            assert bloom.might_contain(bytes.fromhex(_make_hash("fresh"))) is True
+
+    def test_bloom_miss_returns_false_without_lmdb(self, store_path: Path) -> None:
+        """Invariant (b): a Bloom MISS returns False (re-run), no LMDB touch."""
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            # Never inserted → definite Bloom miss → False (fail-open-to-rerun).
+            assert s.maybe_seen_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("absent")) is False
+
+    def test_bloom_hit_confirms_against_lmdb_ground_truth(self, store_path: Path) -> None:
+        """Invariant (c): a Bloom HIT still confirms terminal state in LMDB.
+
+        A non-terminal (IN_FLIGHT) key is a Bloom-hit but maybe_seen_terminal
+        must return False (LMDB ground truth), never a silent skip.
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+        from brutex.orchestrator.state import WorkItem, dispatch
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            pending = WorkItem.new(
+                phase=IngestPhase.A_INSTRUMENTS,
+                content_hash=_make_hash("live"),
+                params={"exchange": "NSE", "underlying": "NIFTY"},
+            )
+            s.put(pending)
+            s.put(dispatch(pending))  # IN_FLIGHT — non-terminal, re-put
+            # Bloom-hit (added on first put) but LMDB state is non-terminal.
+            assert s.maybe_seen_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("live")) is False
+            # Only one unique key ⇒ one insertion.
+            assert bloom.insertions_attempted == 1
+
+    def test_insertions_equals_unique_key_count(self, store_path: Path) -> None:
+        """Invariant (d): insertions_attempted == number of UNIQUE keys.
+
+        Three distinct combos each transitioned 3× (9 puts total) ⇒ exactly 3
+        Bloom insertions, so the capacity gate reflects unique keys honestly.
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            for seed in ("c0", "c1", "c2"):
+                self._transition_key_three_times(s, hash_seed=seed)
+            assert bloom.insertions_attempted == 3
+
+    def test_n_unique_keys_transitioned_do_not_trip_capacity(self, store_path: Path) -> None:
+        """N unique keys each put 3× do NOT trip BloomCapacityExceeded at cap==N.
+
+        Before the fix, 3·N puts would trip the gate at ~N/3 unique keys. After
+        the fix, all N unique keys fit exactly at capacity == N.
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+
+        n = 8
+        bloom = BloomFilter(capacity=n, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            for i in range(n):
+                self._transition_key_three_times(s, hash_seed=f"u{i}")
+            # Exactly N unique keys inserted — capacity exactly filled, no raise.
+            assert bloom.insertions_attempted == n
+
+    def test_capacity_still_fails_closed_on_real_overflow(self, store_path: Path) -> None:
+        """FAIL_CLOSED preserved: the (N+1)th UNIQUE key still raises.
+
+        The fix must NOT weaken the capacity guard — a genuine overflow of
+        UNIQUE keys must still raise BloomCapacityExceeded.
+        """
+        from brutex.orchestrator.bloom import BloomCapacityExceeded, BloomFilter
+
+        n = 3
+        bloom = BloomFilter(capacity=n, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            for i in range(n):
+                # Each transitioned 3× — still only fills to N unique.
+                self._transition_key_three_times(s, hash_seed=f"k{i}")
+            assert bloom.insertions_attempted == n
+            # The (N+1)th genuinely-new key overflows and fails closed.
+            with pytest.raises(BloomCapacityExceeded):
+                s.put(_make_item(hash_seed="overflow"))
+
+    def test_reput_of_full_capacity_key_does_not_raise(self, store_path: Path) -> None:
+        """A re-put of an EXISTING key at full capacity must NOT raise.
+
+        Once capacity is exactly filled with N unique keys, transitioning any of
+        those N keys (a re-put, not a new key) must be admitted — the Bloom-add
+        is skipped, so no spurious BloomCapacityExceeded is raised.
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+        from brutex.orchestrator.state import Outcome, WorkItem, dispatch, transition
+
+        n = 2
+        bloom = BloomFilter(capacity=n, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            keys = []
+            for i in range(n):
+                pending = WorkItem.new(
+                    phase=IngestPhase.A_INSTRUMENTS,
+                    content_hash=_make_hash(f"f{i}"),
+                    params={"exchange": "NSE", "underlying": "NIFTY"},
+                )
+                s.put(pending)  # first insertion — fills capacity
+                keys.append(pending)
+            assert bloom.insertions_attempted == n
+            # Re-put (transition) an existing key at full capacity — no raise.
+            for pending in keys:
+                s.put(transition(dispatch(pending), Outcome.OK_WITH_DATA))
+            assert bloom.insertions_attempted == n
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Mutation-kill pins (DEC-MUTATION-RUNTIME-001)
 # ────────────────────────────────────────────────────────────────────────
