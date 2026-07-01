@@ -47,12 +47,13 @@ _LOG = structlog.get_logger("brutex.adapters.groww.token_store_aws")
 class TokenBrokerReadOnlyError(GrowwAuthError):
     """A mint was attempted while the read-only Parameter-Store token broker is active.
 
-    BruteX is a READ-ONLY consumer of the shared daily token (a dedicated Lambda mints it).
-    A ``store`` call means the mint spine reached a fresh-mint — which must NOT happen on a
+    BruteX is a READ-ONLY consumer of the shared daily token (a dedicated Lambda mints it) —
+    AWS is the SOLE token source (DEC-AWS-ONLY-CREDS-001), there is NO local-mint fallback.
+    A ``store`` call means the mint spine reached a fresh-mint (typically because the shared
+    token is ABSENT — the Lambda has not minted it yet), which must NOT happen on a
     read-only host — so this fails LOUD (a terminal :class:`~brutex.adapters.groww.errors.\
-    GrowwAuthError`, redacting) instead of silently writing a local token that would fork
-    the shared state. The operator's fix: ensure the Lambda has minted the shared token, or
-    unset ``BRUTEX_TOKEN_BROKER_READONLY`` to mint locally.
+    GrowwAuthError`, redacting) instead of silently writing a local token that would fork the
+    shared state. The operator's fix: deploy the minter so the Lambda mints the shared token.
     """
 
 
@@ -109,21 +110,24 @@ class ParameterStoreTokenStore:
         _ = (creds, token, now_utc)
         _LOG.error("groww.token.aws_readonly_mint_blocked")
         raise TokenBrokerReadOnlyError(
-            "BRUTEX_TOKEN_BROKER_READONLY is set: BruteX is a read-only consumer of the "
-            "shared Groww access token (a dedicated Lambda mints it). A fresh mint was "
-            "attempted — ensure the Lambda has minted the shared token, or unset "
-            "BRUTEX_TOKEN_BROKER_READONLY to mint locally."
+            "No Groww token in AWS Parameter Store "
+            "(/tickvault/prod/groww/access-token) — deploy the minter "
+            "(deploy/aws_token_minter/deploy.sh) first. BruteX is a read-only consumer of "
+            "the shared Groww access token (a dedicated Lambda mints it); it reads the token "
+            "ONLY from AWS and never mints locally (DEC-AWS-ONLY-CREDS-001)."
         )
 
 
-def build_readonly_token_store() -> ParameterStoreTokenStore | None:
-    """Build the read-only Parameter-Store token store from the environment, or ``None``.
+def build_readonly_token_store() -> ParameterStoreTokenStore:
+    """Build the read-only Parameter-Store token store from the environment.
 
-    Returns ``None`` (→ resolver falls back to local) when boto3 is missing or the SSM
-    client cannot be built, so ``BRUTEX_TOKEN_BROKER_READONLY=true`` on a host without the
-    extra is a safe fail-safe rather than a crash. The real boto3 client build
-    (:func:`~brutex.adapters.groww.aws_client.build_real_aws_client`) is ``# pragma: no
-    cover``; a test injects a fake via :func:`build_readonly_token_store_with`.
+    A missing boto3 extra / SSM-client build failure raises (from
+    :func:`~brutex.adapters.groww.aws_client.build_real_aws_client`); the caller
+    (:func:`~brutex.adapters.groww.token_store.resolve_token_store`) maps ANY such failure to
+    a clear fail-fast :class:`~brutex.adapters.groww.errors.GrowwAuthError` — AWS is the SOLE
+    token source, there is NO local fallback (DEC-AWS-ONLY-CREDS-001). The real boto3 client
+    build is ``# pragma: no cover``; a test injects a fake via
+    :func:`build_readonly_token_store_with`.
     """
     client = build_real_aws_client(
         resolve_token_broker_region()

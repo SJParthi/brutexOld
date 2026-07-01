@@ -317,29 +317,19 @@ GROWW_TOKEN_ISSUANCE_RETRY_BASE_S: Final[float] = 1.0
 #: Per-attempt cap (seconds) for the cold-start issuance back-off sleep.
 GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
 
-# ── Shared token broker (DEC-TOKEN-BROKER-AWS-001) ───────────────────────────
-# The operator's FINAL design (2026-07-01): the Groww api_key, TOTP secret AND the
-# daily minted access token ALL live in ONE shared place — AWS Systems Manager
-# Parameter Store (region ``ap-south-1``) — read by BOTH TickVault (live) and BruteX
-# (backtesting). A SINGLE dedicated Lambda is the ONLY writer/minter of the shared
-# access token; BruteX and TickVault are strictly READ-ONLY consumers. Because there
-# is exactly ONE writer, there is NO compare-and-swap / DynamoDB need — a plain
-# SecureString parameter suffices (a read is a ``GetParameter WithDecryption=True``
-# that KMS-decrypts the SecureString; AWS SSM docs "Working with SecureString
-# parameters", ``GetParameter`` API reference).
+# ── Shared token broker (DEC-TOKEN-BROKER-AWS-001 / DEC-AWS-ONLY-CREDS-001) ───
+# The operator's FINAL design: the Groww api_key, TOTP secret AND the daily minted
+# access token ALL live in ONE shared place — AWS Systems Manager Parameter Store
+# (region ``ap-south-1``) — read by BOTH TickVault (live) and BruteX (backtesting).
+# A SINGLE dedicated Lambda is the ONLY writer/minter of the shared access token;
+# BruteX and TickVault are strictly READ-ONLY consumers. Because there is exactly ONE
+# writer, there is NO compare-and-swap / DynamoDB need — a plain SecureString parameter
+# suffices (a read is a ``GetParameter WithDecryption=True`` that KMS-decrypts the
+# SecureString; AWS SSM docs "Working with SecureString parameters", ``GetParameter`` API
+# reference). AWS is now the DEFAULT AND ONLY credential/token source
+# (DEC-AWS-ONLY-CREDS-001): the ``BRUTEX_TOKEN_BROKER_READONLY`` opt-in toggle + the
+# local-mint fallback were REMOVED, so the broker read is unconditional + fail-fast.
 #
-#: Read-only broker toggle. When TRUE (``1``/``true``/``yes``/``on``,
-#: case-insensitive) BruteX RESOLVES the shared daily token from Parameter Store and
-#: NEVER mints it (the Lambda owns minting) — a mint attempt is a loud fail-fast, never
-#: a silent local mint. Unset / blank / any other value ⇒ FALSE ⇒ the LOCAL on-disk
-#: cache + local TOTP mint (byte-identical to #1041; local dev + CI need NO AWS). A bad
-#: value can never crash a pull (fail-safe to local, mirroring :func:`resolve_pool_size`).
-GROWW_TOKEN_BROKER_READONLY_ENV: Final[str] = "BRUTEX_TOKEN_BROKER_READONLY"  # noqa: S105  # env var name, not a secret
-
-#: The two recognised backend kinds (the resolved store label).
-GROWW_TOKEN_BACKEND_LOCAL: Final[str] = "local"  # noqa: S105  # backend label, not a secret
-GROWW_TOKEN_BACKEND_AWS: Final[str] = "aws"  # noqa: S105  # backend label, not a secret
-
 #: AWS region for the token-broker SSM client. Unset/blank ⇒ the operator default
 #: :data:`GROWW_TOKEN_AWS_REGION_DEFAULT` (``ap-south-1`` — where the SecureStrings
 #: already live). ``AWS_REGION`` is honoured as a secondary override before the default.
@@ -359,24 +349,6 @@ GROWW_TOKEN_PARAM_API_KEY_DEFAULT: Final[str] = "/tickvault/prod/groww/api-key" 
 #: Full Parameter-Store path of the shared Groww TOTP-secret SecureString. Env-overridable.
 GROWW_TOKEN_PARAM_TOTP_SECRET_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_TOTP_SECRET"  # noqa: S105  # env var name, not a secret
 GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT: Final[str] = "/tickvault/prod/groww/totp-secret"  # noqa: S105  # parameter path, not a secret
-
-
-def resolve_token_broker_readonly() -> bool:
-    """Return ``True`` iff the read-only Parameter-Store token broker is enabled.
-
-    Reads ``BRUTEX_TOKEN_BROKER_READONLY``: an explicit case-insensitive
-    ``1``/``true``/``yes``/``on`` enables it; ANY other value — unset, blank, ``0``,
-    ``false`` or an unrecognised token — returns ``False`` so a typo or a stale env can
-    never silently switch BruteX to the shared broker or crash a pull (fail-safe to the
-    LOCAL disk cache + local mint, mirroring :func:`resolve_pool_size` /
-    :func:`resolve_smooth_pacing`, CLAUDE.md §2 Rule 1). O(1).
-    """
-    raw = os.environ.get(GROWW_TOKEN_BROKER_READONLY_ENV)
-    return raw is not None and raw.strip().lower() in _TRUTHY_TOKENS
-
-
-#: The set of case-insensitive values that enable the read-only broker toggle.
-_TRUTHY_TOKENS: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
 
 def resolve_token_broker_region() -> str:
@@ -485,9 +457,6 @@ __all__ = [
     "GROWW_SMOOTH_PACING_ENV",
     "GROWW_TOKEN_AWS_REGION_DEFAULT",
     "GROWW_TOKEN_AWS_REGION_ENV",
-    "GROWW_TOKEN_BACKEND_AWS",
-    "GROWW_TOKEN_BACKEND_LOCAL",
-    "GROWW_TOKEN_BROKER_READONLY_ENV",
     "GROWW_TOKEN_CACHE_FILENAME",
     "GROWW_TOKEN_CACHE_PATH_ENV",
     "GROWW_TOKEN_CACHE_SCHEMA",
@@ -515,7 +484,6 @@ __all__ = [
     "WINDOW_DAYS_180",
     "resolve_pool_size",
     "resolve_smooth_pacing",
-    "resolve_token_broker_readonly",
     "resolve_token_broker_region",
     "resolve_token_param_path",
 ]

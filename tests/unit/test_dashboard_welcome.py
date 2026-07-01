@@ -38,11 +38,13 @@ def test_welcome_links_into_every_app_page() -> None:
         'href="/coverage"',
         'href="/reports"',
         'href="/db"',
-        'href="/groww-credentials"',
     ):
         assert href in html, f"welcome page missing nav link {href}"
     # The /logs webpage was removed (DEC-DASHBOARD-LOGS-REMOVE-001).
     assert 'href="/logs"' not in html
+    # The in-app Groww credentials page was removed (DEC-AWS-ONLY-CREDS-001) — credentials
+    # now live ONLY in AWS Parameter Store, so the welcome page no longer links it.
+    assert 'href="/groww-credentials"' not in html
 
 
 def test_welcome_has_accessibility_polish() -> None:

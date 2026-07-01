@@ -395,7 +395,7 @@ def _fake_build_leaves(
     def _pool_size() -> int:
         return 2
 
-    monkeypatch.setattr("brutex.config.credentials.resolve_groww_file_credentials", _creds)
+    monkeypatch.setattr("brutex.config.credentials.resolve_groww_aws_credentials", _creds)
     monkeypatch.setattr("brutex.adapters.groww.live.build_live_client", _client_from_sdk)
     monkeypatch.setattr("brutex.adapters.groww.live.build_live_pool", _pool_from_sdk)
     monkeypatch.setattr("brutex.adapters.groww.instrument_loader.load_index", _load_index)

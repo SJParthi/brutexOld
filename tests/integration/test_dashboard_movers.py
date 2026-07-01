@@ -688,7 +688,9 @@ class TestMoversPage:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         # The v29 main dashboard ("/") uses its own live-sweep layout (no standard
         # top nav); the standard-nav pages all carry the Movers link.
-        for path in ("/welcome", "/coverage", "/reports", "/db", "/universe", "/groww-credentials"):
+        # (The /groww-credentials page was removed — DEC-AWS-ONLY-CREDS-001 — credentials
+        # now live ONLY in AWS Parameter Store, so it is no longer a served page.)
+        for path in ("/welcome", "/coverage", "/reports", "/db", "/universe"):
             resp = client.get(path)
             assert resp.status_code == 200, path
             assert 'href="/movers"' in resp.text, f"{path} is missing the Movers nav link"

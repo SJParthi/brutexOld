@@ -133,6 +133,67 @@ class TestSave:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# read-merge-write READ path (_read_raw_sections error branches)
+#
+# A save is a read-merge-write: it reads the EXISTING file first via
+# ``_read_raw_sections`` so a coexisting section is preserved. That read carries
+# the same security refusals as ``load_token_credentials`` (symlink / insecure
+# perms / corrupt / wrong-shape). These tests drive those refusal branches
+# through ``save_token_credentials`` over a bad existing file.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestReadMergeWriteReadPath:
+    def test_resave_over_valid_file_preserves_other_sections(self, tmp_path: Path) -> None:
+        """A re-save reads the VALID existing object (the read-merge happy path) + keeps others."""
+        path = tmp_path / "credentials.json"
+        path.write_text('{"other": {"k": "v"}}', encoding="utf-8")
+        path.chmod(0o600)
+        save_token_credentials(_creds(), path=path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        # the read-merge preserved the pre-existing unrelated section AND added the token one
+        assert payload["other"] == {"k": "v"}
+        assert payload["token"] == {"access_token": FAKE_TOKEN, "client_id": FAKE_CLIENT_ID}
+
+    def test_save_over_symlinked_file_refuses(self, tmp_path: Path) -> None:
+        """A symlinked existing file is refused on the read-merge read (O_NOFOLLOW OSError)."""
+        real = tmp_path / "real.json"
+        real.write_text("{}", encoding="utf-8")
+        link = tmp_path / "credentials.json"
+        link.symlink_to(real)
+        with pytest.raises(CredentialsError) as exc:
+            save_token_credentials(_creds(), path=link)
+        assert "opened securely" in str(exc.value)
+
+    def test_save_over_insecure_perms_file_refuses(self, tmp_path: Path) -> None:
+        """A group/world-accessible existing file is refused (chmod 600)."""
+        path = tmp_path / "credentials.json"
+        path.write_text("{}", encoding="utf-8")
+        path.chmod(0o644)
+        with pytest.raises(CredentialsError) as exc:
+            save_token_credentials(_creds(), path=path)
+        assert "insecure permissions" in str(exc.value)
+
+    def test_save_over_corrupt_file_refuses(self, tmp_path: Path) -> None:
+        """A corrupt (non-JSON) existing file is refused rather than silently overwritten."""
+        path = tmp_path / "credentials.json"
+        path.write_text("{not json", encoding="utf-8")
+        path.chmod(0o600)
+        with pytest.raises(CredentialsError) as exc:
+            save_token_credentials(_creds(), path=path)
+        assert "corrupt or unreadable" in str(exc.value)
+
+    def test_save_over_non_object_file_refuses(self, tmp_path: Path) -> None:
+        """An existing JSON file that is not an object (e.g. a list) is refused."""
+        path = tmp_path / "credentials.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        path.chmod(0o600)
+        with pytest.raises(CredentialsError) as exc:
+            save_token_credentials(_creds(), path=path)
+        assert "invalid shape" in str(exc.value)
+
+
+# ────────────────────────────────────────────────────────────────────────
 # load_token_credentials
 # ────────────────────────────────────────────────────────────────────────
 

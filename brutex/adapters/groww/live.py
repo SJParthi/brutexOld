@@ -43,10 +43,10 @@ def _resolve_token_cache_hooks(
     """Return the ``(load, store)`` hooks to thread into :class:`SdkRefresher`.
 
     An explicit hook wins (tests / a caller wiring a specific backend); otherwise BOTH
-    come from :func:`~brutex.adapters.groww.token_store.resolve_token_store` (the local
-    disk cache by default — byte-identical to #1041 — or the shared read-only Parameter-
-    Store token when ``BRUTEX_TOKEN_BROKER_READONLY`` is set). Resolving the store ONCE here
-    (not per hook) keeps the load + store from the SAME backend instance (no split-brain).
+    come from :func:`~brutex.adapters.groww.token_store.resolve_token_store` — the shared
+    read-only AWS Parameter-Store token, the SOLE source (DEC-AWS-ONLY-CREDS-001). Resolving
+    the store ONCE here (not per hook) keeps the load + store from the SAME backend instance
+    (no split-brain).
     """
     if token_cache_load is not None and token_cache_store is not None:
         return (token_cache_load, token_cache_store)
@@ -103,13 +103,12 @@ def build_live_client(
     GrowwClient
         A neutral client wrapping the freshly built SDK + the limiter hooks.
     """
-    # The refresher is the ONE mint path (DEC-GROWW-TOKEN-REAUTH-001): it mints the
-    # INITIAL token + SDK at construction, AND auto-RE-MINTS on the 06:00 IST daily
-    # token reset so the overnight pull self-heals without a manual restart. A failed
-    # INITIAL issuance surfaces as a redacting GrowwAuthError straight from it. The daily-
-    # token cache hooks default to the resolved backend (local disk, or the shared read-only
-    # Parameter-Store token when BRUTEX_TOKEN_BROKER_READONLY is set —
-    # DEC-TOKEN-BROKER-AWS-001); default is byte-identical to #1041.
+    # The refresher is the ONE mint path (DEC-GROWW-TOKEN-REAUTH-001): it reads the
+    # INITIAL token + builds the SDK at construction, AND auto-refreshes on the 06:00 IST
+    # daily token reset so the overnight pull self-heals without a manual restart. The daily-
+    # token cache hooks default to the shared read-only AWS Parameter-Store token — the SOLE
+    # source (DEC-AWS-ONLY-CREDS-001); an absent token / unreachable AWS surfaces as a
+    # redacting GrowwAuthError straight from the store (no local mint).
     load_hook, store_hook = _resolve_token_cache_hooks(token_cache_load, token_cache_store)
     refresher = SdkRefresher(
         creds,
