@@ -231,6 +231,15 @@ ignore = [
 "scripts/**" = ["T201", "SLF001", "PLR2004", "S101", "PLR0915"]
 # Placeholder shims need to mirror an eventual external module surface.
 "brutex/math/__init__.py" = ["A005"]  # shadows stdlib 'math' — deliberate re-export point
+# AWS token-minter Lambda (DEC-TOKEN-MINTER-CENTRAL-001, deploy/aws_token_minter/):
+# a self-contained infra handler outside the brutex package. The boto3 SSM /
+# CloudWatch client API mandates PascalCase keyword arguments (N803), and the two
+# env-var-NAME string constants (GROWW_TOTP_SECRET_PARAM / GROWW_TOKEN_PARAM) trip
+# the hardcoded-password heuristic (S105) — both are false positives forced by the
+# AWS SDK contract, not real violations.
+"deploy/aws_token_minter/**" = ["N803", "S105"]
+# The minter's tests mirror the same boto3 PascalCase fake-client kwargs (N803).
+"tests/deploy/**" = ["N803"]
 
 [tool.ruff.format]
 quote-style = "double"
