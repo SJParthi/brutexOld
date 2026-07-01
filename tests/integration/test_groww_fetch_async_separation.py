@@ -723,16 +723,39 @@ class TestHungWriteDoesNotBlockFetchLane:
         symbols (so they hash to — and this test asserts — DIFFERENT shards): one symbol's writes
         HANG, the other's write normally. The healthy symbol's windows must land DURABLY on disk
         while the hung symbol's defer — proving one bad partition can't freeze the whole pool.
+
+        DE-FLAKE (DEC-DEFLAKE-HUNG-WRITE-TEST-001): the healthy shard's success is now proven off
+        an EXPLICIT completion signal (``healthy_written`` Event), NOT a race against a tight
+        wall-clock deadline. See the ``BRUTEX_GROWW_WRITE_DEADLINE_S`` note below for the removed
+        timer race.
         """
         # Deadline ordering (the invariant this test needs): healthy single-bar write (~tens of ms)
         # < write-deadline < drain-join < hung-write wait (30 s). The HUNG symbol's write blocks on
         # ``gate.wait(timeout=30.0)`` so any deadline ≪ 30 s trips + defers it; the HEALTHY write must
         # reliably finish UNDER the deadline AND the deadline must fire BEFORE the drain-join so the
-        # defer is counted by ``tail_transients``. The original 0.2 s / 1.0 s pair was too tight on a
-        # contended CI runner (the wedged-write daemon thread + a full parallel suite) — a healthy
-        # write occasionally exceeded 0.2 s, flaking ``healthy_statuses == {"SUCCESS"}``. Widen BOTH
-        # proportionally (0.5 s deadline < 4.0 s drain-join) to keep the same ordering with margin.
-        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "0.5")
+        # defer is counted by ``tail_transients``.
+        #
+        # THE FLAKE (removed here): the healthy write runs INSIDE ``append_with_deadline`` →
+        # ``run_with_deadline`` (a daemon worker + ``done.wait(deadline)``). Under a contended CI
+        # runner (the wedged-write daemon thread + the full parallel suite) the OS occasionally did
+        # not schedule the healthy write's worker within the earlier tight 0.2 s / 0.5 s bound, so
+        # ``done.wait(deadline)`` timed out on a write that was merely SLOW-TO-SCHEDULE (not hung) →
+        # ``WriteDeadlineExceeded`` → the healthy partition was deferred, flaking
+        # ``healthy_statuses == {"SUCCESS"}``. That is a TIMER race, never a real isolation failure.
+        #
+        # THE FIX (deterministic, intent preserved): (1) the healthy write signals a
+        # ``healthy_written`` Event the moment it COMPLETES, and the test WAITS on that Event before
+        # asserting the healthy shard — so the healthy path's success is observed by EXPLICIT
+        # synchronization, not by beating a timer; (2) the deadline is raised to a GENEROUS 5.0 s —
+        # a fast in-memory Parquet write cannot miss a 5 s bound unless the machine cannot schedule
+        # ANY thread for 5 full seconds (a genuinely wedged box, not a merely busy runner), while
+        # 5.0 s ≪ 30 s keeps the HUNG shard's deadline firing + deferring deterministically. The
+        # deadline MECHANISM is STILL exercised (the hung shard trips ``WriteDeadlineExceeded``); we
+        # only remove the healthy-shard false-negative. The hung shard's TWO windows route to ONE
+        # consumer + deadline-fire SEQUENTIALLY (~5 s each = ~10 s), so the drain-join is set to
+        # 12.0 s (> 2 × 5.0 s) so BOTH hung windows are deterministically recorded FAILED before
+        # drain returns — no race — while staying ≪ the 30 s hung wait + the 20 s producer watchdog.
+        monkeypatch.setenv("BRUTEX_GROWW_WRITE_DEADLINE_S", "5.0")
         # Pick two symbols that hash to DIFFERENT shards under the pipeline's blake2b router so the
         # wedged one and the healthy one are genuinely on different consumers. Use the PRODUCTION
         # shard-key builder (`_series_shard_key`) — no copy of the key format (CLAUDE.md §11 COMMON).
@@ -750,21 +773,27 @@ class TestHungWriteDoesNotBlockFetchLane:
         )
 
         gate = threading.Event()
+        # DE-FLAKE: an EXPLICIT completion signal for the healthy write, set the instant its durable
+        # append RETURNS. The test waits on this (not a timer) before asserting the healthy shard, so
+        # the healthy-path success is deterministic — never a race against the write-deadline.
+        healthy_written = threading.Event()
 
         class _PerSymbolSink(ParquetBarSink):
-            """Hang every write for *hung_symbol*; write *healthy_symbol* normally."""
+            """Hang every write for *hung_symbol*; write *healthy_symbol* normally + SIGNAL done."""
 
             def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
                 if kw.get("symbol") == hung_symbol:
                     gate.wait(timeout=30.0)
                     return super().append(**kw)  # type: ignore[arg-type]
-                return super().append(**kw)  # type: ignore[arg-type]
+                result = super().append(**kw)  # type: ignore[arg-type]
+                healthy_written.set()  # the healthy durable write COMPLETED (deterministic signal)
+                return result
 
         lake = tmp_path / "lake"
         ledger = WindowLedger()
-        # drain-join 4.0 s > the 0.5 s write-deadline so the hung write's deadline ALWAYS fires
-        # (and the defer is counted) before drain gives up; still ≪ the 30 s hung wait + 20 s budget.
-        pipeline = FetchPipeline(workers=workers, queue_maxsize=2, drain_join_timeout_seconds=4.0)
+        # drain-join 12.0 s > 2 × the 5.0 s write-deadline so BOTH hung windows' deadlines ALWAYS
+        # fire (and both defers are counted) before drain gives up; still ≪ the 30 s hung wait.
+        pipeline = FetchPipeline(workers=workers, queue_maxsize=2, drain_join_timeout_seconds=12.0)
         sink = _PerSymbolSink(writer=ParquetWriter(lake_root=lake), catalog=None)
 
         done = threading.Event()
@@ -796,6 +825,14 @@ class TestHungWriteDoesNotBlockFetchLane:
                 "ingest_spot did NOT return — the healthy shard was frozen by the wedged shard"
             )
             assert not error, f"producer raised unexpectedly: {error[0]!r}"
+            # DE-FLAKE: wait for the healthy shard's durable write to COMPLETE via its explicit
+            # signal (never a race against the deadline). If the healthy shard were genuinely frozen
+            # by the wedged one, this would time out here — the real isolation failure the test
+            # guards. A generous 15 s bound (≪ the 30 s hung wait) proves the healthy shard made
+            # progress WITHOUT depending on beating the write-deadline.
+            assert healthy_written.wait(timeout=15.0), (
+                "the healthy shard's write never completed — it was frozen by the wedged shard"
+            )
             pipeline.drain()
             # The HEALTHY symbol's data landed durably on disk (its shard kept working through the
             # wedge on the OTHER shard) AND its ledger window(s) are SUCCESS.
