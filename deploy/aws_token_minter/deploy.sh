@@ -52,7 +52,7 @@ fi
 EXTRA_ARGS=("$@")
 if [[ -n "${ALERT_EMAIL:-}" ]]; then
   ALREADY_SET=false
-  for arg in "${EXTRA_ARGS[@]}"; do
+  for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do
     case "$arg" in
     *alert_email=*) ALREADY_SET=true ;;
     esac
@@ -74,4 +74,4 @@ terraform init -input=false
 
 # 3) Apply — Terraform SHOWS the plan and prompts for `yes`. NO -auto-approve.
 echo "== 3/3  terraform apply (review the plan, then type 'yes' to confirm) =="
-terraform apply "${EXTRA_ARGS[@]}"
+terraform apply "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
