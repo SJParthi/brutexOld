@@ -3,9 +3,15 @@
 # deploy.sh — one-command deploy of the centralized Groww token-minter stack.
 #
 # DEC-TOKEN-MINTER-CENTRAL-001 (docs/adr/0014-centralized-token-minter.md,
-# docs/runbooks/aws-token-minter.md). Runs, in order:
-#   1. build_lambda_package.sh  — bundle the handler + growwapi + pyotp into the
-#      deploy zip (the Lambda must actually import them at runtime).
+# docs/runbooks/aws-token-minter.md) + DEC-MINTER-PURE-PYTHON-001
+# (docs/MIGRATION.md #1069). Runs, in order:
+#   1. build_lambda_package.sh  — bundle the handler + pyotp into the deploy zip
+#      (the Lambda must actually import pyotp at runtime). The build is a SINGLE
+#      deterministic pip install with NO DOCKER: pyotp is a pure-Python universal
+#      wheel (`py3-none-any`, zero deps) so the bundle has zero platform-specific
+#      artifacts and builds identically on macOS/ARM64 and Linux. The token mint
+#      is a pure-stdlib HTTPS POST in handler.py, so no growwapi (and its heavy
+#      native-extension tree) is bundled — that is what removed the Docker need.
 #   2. terraform init           — fetch the aws + archive + null providers.
 #   3. terraform apply          — SHOWS the plan and requires the operator to
 #      type `yes` at Terraform's built-in confirmation prompt. This script NEVER
@@ -56,8 +62,10 @@ if [[ -n "${ALERT_EMAIL:-}" ]]; then
   fi
 fi
 
-# 1) Bundle the handler + its runtime deps into the deploy zip.
-echo "== 1/3  building Lambda deploy bundle (handler + growwapi + pyotp) =="
+# 1) Bundle the handler + pyotp into the deploy zip. ONE deterministic pip
+#    install, no Docker: pyotp is a pure-Python universal wheel so the bundle has
+#    zero platform-specific artifacts and builds the same on any host.
+echo "== 1/3  building Lambda deploy bundle (handler + pyotp — pure Python, no Docker) =="
 bash build_lambda_package.sh
 
 # 2) Initialise Terraform (idempotent; fetches providers).

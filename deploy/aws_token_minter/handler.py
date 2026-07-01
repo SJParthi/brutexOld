@@ -7,8 +7,11 @@ daily access token. On an EventBridge schedule (~06:05 IST, shortly after the
 
 1. reads the Groww ``api-key`` + ``totp-secret`` from AWS Systems Manager
    Parameter Store (SecureString, KMS-decrypted);
-2. computes the current TOTP code from the secret;
-3. calls ``GrowwAPI.get_access_token(api_key, totp)`` to mint a fresh token;
+2. computes the current TOTP code from the secret (``pyotp``);
+3. mints a fresh token with a pure-stdlib HTTPS POST to the Groww token
+   endpoint (:func:`get_groww_access_token`), reimplementing the request +
+   token-extraction contract of ``growwapi`` 1.5.0 ``GrowwAPI.get_access_token``
+   (client.py:1540-1580) with simpler structural error handling;
 4. ``PutParameter``s the token to the shared token param
    (``/tickvault/prod/groww/access-token``, SecureString, KMS-encrypted,
    ``Overwrite=True``).
@@ -26,30 +29,42 @@ the same rule by default, and the manual invoke is operator-driven).
 Design constraints honoured here (Golden Rule #11 COMMON · Golden Rule #1
 no-hallucination):
 
-* **Self-contained** — the deployed Lambda bundle is ONLY
-  ``deploy/aws_token_minter/`` plus its vendored runtime deps (``boto3`` is on
-  the AWS-provided Lambda runtime; ``growwapi`` + ``pyotp`` are bundled by the
-  operator's build). It does NOT import the ``brutex`` package, so it can be
-  packaged and deployed independently of the backtest engine. The TOTP + mint
-  logic mirrors ``brutex/adapters/groww/auth.py`` CONCEPTUALLY, re-implemented
-  here rather than imported.
+* **Self-contained + Docker-free bundle** — the deployed Lambda bundle is ONLY
+  ``deploy/aws_token_minter/`` plus ONE pure-Python universal wheel,
+  ``pyotp==2.10.0`` (``py3-none-any``, zero runtime deps). ``boto3`` is on the
+  AWS-provided Lambda runtime, so it is NOT bundled. The token mint is a
+  stdlib-only HTTPS POST (``urllib``), so the bundle carries **no**
+  ``growwapi`` / ``pandas`` / ``pynacl`` / ``pydantic-core`` — i.e. **zero
+  platform-specific wheels** — and ``build_lambda_package.sh`` builds identically
+  on macOS/ARM64 and Linux with **no Docker** (DEC-MINTER-PURE-PYTHON-001). The
+  handler does NOT import the ``brutex`` package, so it can be packaged and
+  deployed independently of the backtest engine. The TOTP + mint logic mirrors
+  ``brutex/adapters/groww/auth.py`` CONCEPTUALLY, re-implemented here rather than
+  imported.
 * **Injectable side effects** — every real AWS / Groww call is an injected
   callable with a real default shim marked ``# pragma: no cover`` (the real
-  ``boto3``/``growwapi``/``pyotp`` calls can only run in AWS against the live
+  ``boto3``/``pyotp``/network calls can only run in AWS against the live
   vendor). The PURE decision logic — parse config, decide mint-or-skip, retry
-  a transient issuance throttle, emit a CloudWatch metric — is driven to 100%
-  line+branch by a fake SSM client + fake mint in ``tests/deploy/``.
+  a transient issuance throttle, emit a CloudWatch metric, and the stdlib mint's
+  own success/error/no-token branches — is driven to 100% line+branch by a fake
+  SSM client + fake mint (and a monkeypatched ``urllib.request.urlopen``) in
+  ``tests/deploy/``.
 
 AWS behavioural claims cited in the docstrings below are sourced to the AWS
 documentation in ``docs/adr/0014-centralized-token-minter.md`` §"AWS API
-references"; none is invented.
+references"; the Groww HTTP contract is sourced to ``growwapi`` 1.5.0
+``client.py`` (cited inline in :func:`get_groww_access_token`); none is invented.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
@@ -117,6 +132,25 @@ class TokenMintError(RuntimeError):
     Carries the SANITIZED reason (secrets scrubbed) as ``str(exc)`` so a
     CloudWatch log line never leaks the api-key or TOTP secret.
     """
+
+
+class GrowwMintHTTPError(RuntimeError):
+    """A non-2xx HTTP response from the Groww token-mint endpoint.
+
+    Carries the HTTP status *code* STRUCTURALLY (an ``int`` attribute) — NOT
+    only inside the message string — so :func:`_is_rate_limit`'s
+    ``getattr(exc, "code", None) == 429`` structural check fires on a genuine
+    Groww issuance 429 whose vendor body carries NO textual rate-limit phrase
+    (e.g. ``{"status":"FAILURE","error":{"code":"GA0009"}}``). Without the
+    attribute a real 429 at the 06:05 IST post-reset mint — exactly when
+    throttling is likeliest — would be misread as terminal and never retried.
+    Mirrors the ``code``-carrying error contract in
+    ``brutex/adapters/groww/errors.py``.
+    """
+
+    def __init__(self, message: str, *, code: int) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,17 +275,128 @@ def _real_cloudwatch_client() -> CloudWatchClient:  # pragma: no cover - needs b
 
 
 def _real_totp(secret: str) -> str:  # pragma: no cover - needs pyotp + real secret
-    """Default TOTP minter: ``pyotp.TOTP(secret).now()`` (lazy import)."""
+    """Default TOTP minter: ``pyotp.TOTP(secret).now()`` (lazy import).
+
+    ``pyotp==2.10.0`` is a pure-Python universal wheel (``py3-none-any``, zero
+    runtime deps), so it is the ONLY third-party dep bundled into the Lambda zip
+    and it installs identically on macOS/Linux (no Docker). We keep the TOTP
+    crypto on ``pyotp`` — we do NOT reimplement it.
+    """
     import pyotp  # type: ignore[import-not-found, import-untyped, unused-ignore]
 
     return str(pyotp.TOTP(secret).now())
 
 
-def _real_token_factory(api_key: str, totp: str) -> str:  # pragma: no cover - needs growwapi
-    """Default token factory: ``GrowwAPI.get_access_token(...)`` (lazy import)."""
-    from growwapi import GrowwAPI  # type: ignore[import-not-found, import-untyped, unused-ignore]
+# Groww token-mint HTTP contract, verified from ``growwapi`` 1.5.0 ``client.py``
+# (``GrowwAPI.get_access_token`` staticmethod, lines 1540-1580). The TOTP flow is
+# exactly ONE unsigned HTTPS POST — no request signing, no crypto, no pynacl — so
+# a pure-stdlib reimplementation reproduces the request + token-extraction contract
+# exactly (error handling deliberately simplified) and lets the Lambda bundle drop
+# ``growwapi`` (and its heavy native-extension transitive tree) and therefore Docker
+# entirely (DEC-MINTER-PURE-PYTHON-001, docs/MIGRATION.md #1069).
+_GROWW_TOKEN_URL: Final[str] = "https://api.groww.in/v1/token/api/access"  # client.py:1557
+_GROWW_CLIENT_VERSION: Final[str] = "1.5.0"
 
-    return str(GrowwAPI.get_access_token(api_key=api_key, totp=totp))
+
+def get_groww_access_token(
+    api_key: str,
+    totp: str,
+    *,
+    opener: Callable[[urllib.request.Request], Any] = urllib.request.urlopen,
+) -> str:
+    """Mint a Groww access token via TOTP with a pure-stdlib HTTPS POST.
+
+    Pure-stdlib reimplementation of the REQUEST + token-extraction contract of
+    ``growwapi`` 1.5.0 ``GrowwAPI.get_access_token`` (client.py:1540-1580), so the
+    Lambda needs no ``growwapi`` / ``pandas`` / ``pynacl`` and builds with no
+    Docker. The request contract (URL, method, headers, body, token extraction) is
+    cited inline to the exact ``client.py`` line so no external claim is invented
+    (Golden Rule #1). Error handling is deliberately simpler than the SDK's — a
+    non-2xx raises :class:`GrowwMintHTTPError` carrying the HTTP status ``code``
+    structurally (so a 429 is retryable), and a blank TOTP raises ``ValueError``
+    before any network call.
+
+    Parameters
+    ----------
+    api_key
+        The Groww API key (sent as the ``Authorization: Bearer`` credential).
+    totp
+        The current 6-digit TOTP code (stripped before send, per the SDK).
+    opener
+        The URL opener (defaults to ``urllib.request.urlopen``); injected so the
+        pure request-building + response-parsing logic is testable without a
+        network call.
+
+    Returns
+    -------
+    str
+        The freshly-minted Groww access token.
+
+    Raises
+    ------
+    ValueError
+        If *totp* is blank/whitespace (matching the SDK's
+        ``_build_request_data`` guard, client.py:1526-1527) — a blank code can
+        never mint a token, so it fails loudly before any network call.
+    GrowwMintHTTPError
+        On a non-2xx HTTP response — a :class:`RuntimeError` subclass carrying
+        the HTTP status *code* structurally (so a 429 is retryable) with the
+        vendor message preserved.
+    RuntimeError
+        When the response carries no ``token`` field.
+    """
+    totp = totp.strip()  # client.py:1525-1529 (the SDK strips before send)
+    if not totp:  # client.py:1526-1527 (the SDK rejects a blank totp)
+        raise ValueError("Groww token mint requires a non-empty totp")
+    headers = {  # client.py:1370-1378 (``_build_headers``)
+        "x-request-id": str(uuid.uuid4()),
+        "Authorization": "Bearer " + api_key,
+        "Content-Type": "application/json",
+        "x-client-id": "growwapi",
+        "x-client-platform": "growwapi-python-client",
+        "x-client-platform-version": _GROWW_CLIENT_VERSION,
+        "x-api-version": "1.0",
+    }
+    body = {"key_type": "totp", "totp": totp}  # client.py:1525-1529
+    request = urllib.request.Request(  # client.py:1560  # noqa: S310 - fixed https URL constant
+        _GROWW_TOKEN_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with opener(request) as response:  # client.py:1560 (POST, timeout=15)
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:  # client.py:1561-1579 (non-2xx preserved)
+        detail = exc.read().decode("utf-8", "replace")
+        # Preserve the status code STRUCTURALLY (``GrowwMintHTTPError.code``), not
+        # only in the message, so ``_is_rate_limit`` retries a genuine 429 whose
+        # vendor body carries no textual "rate limit" phrase. ``from None`` breaks
+        # the ``__cause__`` chain so a vendor body that echoed a secret cannot be
+        # re-logged raw by the Lambda runtime (the same hygiene ``mint_token`` uses).
+        raise GrowwMintHTTPError(
+            f"Groww token mint failed: HTTP {exc.code}: {detail}", code=exc.code
+        ) from None
+    token = payload.get("token")  # client.py:1580
+    if not token:
+        raise RuntimeError("Groww token mint returned no token")
+    return str(token)
+
+
+def _real_token_factory(api_key: str, totp: str) -> str:  # pragma: no cover - needs live vendor
+    """Default token factory: the pure-stdlib :func:`get_groww_access_token`.
+
+    Uses the real ``urllib.request.urlopen`` opener with a 15 s timeout (matching
+    ``growwapi`` 1.5.0 ``client.py:1560``); only reachable against the live Groww
+    endpoint, so it is ``# pragma: no cover`` — the pure request/parse logic of
+    :func:`get_groww_access_token` is covered via an injected fake opener in
+    ``tests/deploy/``.
+    """
+    return get_groww_access_token(
+        api_key,
+        totp,
+        opener=lambda request: urllib.request.urlopen(request, timeout=15),  # noqa: S310
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -636,11 +781,13 @@ __all__ = [
     "DEFAULT_RETRY_BACKOFF_SECONDS",
     "METRIC_NAME",
     "CloudWatchClient",
+    "GrowwMintHTTPError",
     "MintOutcome",
     "MinterConfig",
     "MinterConfigError",
     "SsmClient",
     "TokenMintError",
+    "get_groww_access_token",
     "lambda_handler",
     "mint_token",
     "resolve_config",

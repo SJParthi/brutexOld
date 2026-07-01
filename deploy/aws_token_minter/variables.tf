@@ -90,25 +90,20 @@ variable "lambda_runtime" {
   default     = "python3.12"
 }
 
-variable "growwapi_version" {
-  description = <<-EOT
-    Pinned growwapi version bundled INTO the Lambda deploy zip by the build step
-    (build_lambda_package.sh). growwapi is NOT on the AWS Lambda runtime, so it is
-    vendored here — the handler's lazy `from growwapi import GrowwAPI` needs it.
-    Use `growwapi` for the latest, or `growwapi==X.Y.Z` to pin exactly.
-  EOT
-  type        = string
-  default     = "growwapi"
-}
-
 variable "pyotp_version" {
   description = <<-EOT
     Pinned pyotp version bundled INTO the Lambda deploy zip by the build step.
     pyotp is NOT on the AWS Lambda runtime; the handler's lazy `import pyotp`
-    (TOTP computation) needs it. Use `pyotp` for the latest, or `pyotp==X.Y.Z`.
+    (TOTP computation) needs it. It is the ONLY bundled third-party dep — a
+    pure-Python UNIVERSAL wheel (py3-none-any, zero runtime deps), so the bundle
+    has ZERO platform-specific artifacts and builds with no Docker
+    (DEC-MINTER-PURE-PYTHON-001). The token mint is a pure-stdlib HTTPS POST in
+    handler.py, so growwapi is NOT bundled. PINNED by default: 2.10.0 is the
+    latest within BruteX's pyproject.toml `pyotp>=2.9,<3.0`. Use `pyotp` to float
+    or `pyotp==X.Y.Z` to re-pin.
   EOT
   type        = string
-  default     = "pyotp"
+  default     = "pyotp==2.10.0"
 }
 
 variable "lambda_timeout_seconds" {
