@@ -206,12 +206,15 @@ class TestIdentity:
             top_k=10,
             min_hits=30,
         )
+        # Re-locked for DEC-NIFTY-FIB-AXIS-001: the grid descriptor gains the
+        # ``fib_anchors`` axis and the tuple-cache params gain the ``fib_anchor``
+        # key, so both digests moved by design (the anchor is part of the identity).
         assert (
             grid_identity(grid)
-            == "456d0d52896a984f7b1737fea8bc9429b68d738f9db062bb9d386b8f66ef2e2e"
+            == "e55de617a85d93ce83416ba68624c24b2eaaf2d63c482457a84837c09d11bf1a"
         )
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
-        assert key.hex() == "f862ca7c495df7be6126e76aea04e6718e8f2f8bcfb278e1e682737e895b1494"
+        assert key.hex() == "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
 
     @given(
         top_k_a=st.integers(min_value=1, max_value=5),

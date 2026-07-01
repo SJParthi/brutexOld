@@ -94,7 +94,7 @@ from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
-from brutex.strategies.types import Side
+from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -327,6 +327,14 @@ class SweepRunConfig:
     proximity
         Proximity tolerances for the ``near_*`` conditions, or ``None`` for the
         Stage-1A default (10 bps).
+    fib_anchor
+        The swept Fibonacci-anchor family
+        (:class:`~brutex.strategies.types.FibAnchorKind`) the Group-4 Fib levels are
+        evaluated against (DEC-NIFTY-FIB-AXIS-001). Defaults to
+        :attr:`FibAnchorKind.PREV_DAY` so a legacy caller is byte-identical. It is
+        folded into the run-identity via :func:`canonical_trade_params`, so a
+        different anchor is a distinct, reproducible combo (Golden Rule #4), and
+        into the Stage-1A build so the sweep evaluates that anchor's Fib levels.
     start_equity_paisa
         Notional capital base (paisa) for the percentage-metric denominator.
     max_combos
@@ -368,6 +376,7 @@ class SweepRunConfig:
     tp_paisa: int | None = None
     prior_n: int = 3
     proximity: ProximityParams | None = None
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA
     max_combos: int = DEFAULT_MAX_COMBOS
     top_k: int | None = None
@@ -485,22 +494,32 @@ def canonical_trade_params(
     prior_n: int,
     proximity: ProximityParams | None,
     start_equity_paisa: int,
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
 
     Bundles the trade-sim knobs into one JSON-canonicalisable dict (no floats,
-    no objects — only ints / ``None``) so
+    no objects — only ints / strings / ``None``) so
     :func:`brutex.strategies.combo.canonicalise_params` can hash it stably. The
     proximity tolerances are flattened to their three integer bps values (or
     ``None`` when defaulted) so two configs with the same effective proximity
     hash identically.
 
+    The swept Fib anchor is folded in as ``"fib_anchor"`` (its string enum value —
+    DEC-NIFTY-FIB-AXIS-001): the anchor genuinely changes the Group-4 Fib levels a
+    combo evaluates against, so a run under a different anchor is a DIFFERENT
+    computation and MUST get a distinct run-identity (Golden Rule #4 / #7 — else
+    two anchors' results would collide in one store and one silently overwrite the
+    other). The key is emitted UNCONDITIONALLY (never omitted for the prev-day
+    default), so the honest run-identity carries the anchor for every family; there
+    is no production sweep tree yet, so this is a zero-cost identity choice.
+
     This is the ONE source of the params layout inside every persisted mask
     run-identity (CLAUDE.md §11 COMMON): the sweep hashes through it via
     :func:`_canonical_params`, and the Stage-3 wiring re-derives survivor
-    identities through it to recover each survivor's grid cell + proximity by
-    ``run_id`` match (DEC-STAGE3-WIRE-001, hostile-review condition F4 — never
-    guessed, always re-derived).
+    identities through it (over the ``sl × tp × proximity × fib_anchor`` grid) to
+    recover each survivor's grid cell by ``run_id`` match (DEC-STAGE3-WIRE-001,
+    hostile-review condition F4 — never guessed, always re-derived).
     """
     if proximity is None:
         proximity_bps: list[int] | None = None
@@ -515,6 +534,7 @@ def canonical_trade_params(
         "tp_paisa": tp_paisa,
         "prior_n": prior_n,
         "proximity_bps": proximity_bps,
+        "fib_anchor": fib_anchor.value,
         "start_equity_paisa": start_equity_paisa,
     }
 
@@ -527,6 +547,7 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         prior_n=cfg.prior_n,
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
+        fib_anchor=cfg.fib_anchor,
     )
 
 
@@ -859,12 +880,24 @@ def run_persisted_sweep(
     )
 
     if kernel is None:
-        bar_bits = build_bar_bits(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        bar_bits = build_bar_bits(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, fib_anchor=cfg.fib_anchor
+        )
     else:
         if kernel.n_bars != len(bars):
             raise ValueError(
                 f"run_persisted_sweep: kernel has {kernel.n_bars} bars but {len(bars)} "
                 f"bars were supplied — the kernel must be built from this tuple's bars"
+            )
+        # R-1 (DEC-NIFTY-FIB-AXIS-001): the pre-built ``bar_bits`` matrix is
+        # anchor-SPECIFIC, so a kernel built for a different Fib anchor would make
+        # the sweep silently evaluate the WRONG Group-4 levels. Fail-fast on a
+        # mismatch, exactly like the ``n_bars`` guard above.
+        if kernel.fib_anchor is not cfg.fib_anchor:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for Fib anchor "
+                f"{kernel.fib_anchor.value!r} but the tuple sweeps "
+                f"{cfg.fib_anchor.value!r} — the kernel must match this tuple's anchor"
             )
         bar_bits = kernel.bar_bits
 

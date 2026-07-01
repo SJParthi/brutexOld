@@ -90,6 +90,7 @@ import structlog
 
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.models import BruteXError
+from brutex.strategies.types import FibAnchorKind
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -167,6 +168,13 @@ class CascadeTupleSpec:
     winners
         The tuple's finalists as ``(run_id, mask)`` pairs; each ``run_id`` is
         64-char lowercase hex, each ``mask`` in ``[0, _MASK_BITS_MAX]``.
+    fib_anchor
+        The swept Fib-anchor family the tuple was evaluated against
+        (DEC-NIFTY-FIB-AXIS-001). Threaded into :func:`candidates_for_spec`'s
+        ``build_bar_bits`` so the Stage-4 cascade re-scores a non-prev-day
+        survivor against its OWN Fib levels, not the prev-day default. An
+        additive field (default prev-day) so a pre-axis manifest round-trips
+        byte-compatibly; the default keeps the prev-day path byte-identical.
 
     Raises
     ------
@@ -185,6 +193,7 @@ class CascadeTupleSpec:
     proximity_bps: tuple[int, int, int] | None
     start_equity_paisa: int
     winners: tuple[tuple[str, int], ...]
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -296,6 +305,12 @@ class Stage3CellRecord:
     tp_paisa: int
     proximity_bps: tuple[int, int, int] | None
     rel_path: str | None = None
+    #: The swept Fib-anchor family this refined cell was evaluated against
+    #: (DEC-NIFTY-FIB-AXIS-001). An additive field (default prev-day) so a
+    #: pre-axis manifest parses byte-compatibly (the ``rel_path`` precedent); it
+    #: must round-trip so a non-prev-day refined cell's ``run_id`` re-derives on
+    #: verification. Stored as the string enum value.
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label"):
@@ -710,7 +725,9 @@ def candidates_for_spec(spec: CascadeTupleSpec, bars: Sequence[CandleBar]) -> li
             fib_proximity_bps=spec.proximity_bps[2],
         )
     )
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=spec.prior_n)
+    bar_bits = build_bar_bits(
+        bars, proximity=proximity, prior_n=spec.prior_n, fib_anchor=spec.fib_anchor
+    )
     return [
         build_candidate_input(
             run_id=run_id,
@@ -1122,6 +1139,7 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         "proximity_bps": None if spec.proximity_bps is None else list(spec.proximity_bps),
         "start_equity_paisa": spec.start_equity_paisa,
         "winners": [[run_id, mask] for run_id, mask in spec.winners],
+        "fib_anchor": spec.fib_anchor.value,
     }
 
 
@@ -1148,6 +1166,13 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
             proximity_bps=proximity_bps,
             start_equity_paisa=int(raw["start_equity_paisa"]),
             winners=winners,
+            # Absent on pre-DEC-NIFTY-FIB-AXIS-001 manifests (additive parse):
+            # default to prev-day, the only anchor those sweeps ran.
+            fib_anchor=(
+                FibAnchorKind.PREV_DAY
+                if raw.get("fib_anchor") is None
+                else FibAnchorKind(str(raw["fib_anchor"]))
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
@@ -1168,6 +1193,7 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
                 "tp_paisa": cell.tp_paisa,
                 "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
                 "rel_path": cell.rel_path,
+                "fib_anchor": cell.fib_anchor.value,
             }
             for cell in record.refined_cells
         ],
@@ -1196,6 +1222,13 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
                     ),
                     # Absent on pre-DEC-ROW-PROVENANCE-001 manifests (additive parse).
                     rel_path=(None if cell.get("rel_path") is None else str(cell["rel_path"])),
+                    # Absent on pre-DEC-NIFTY-FIB-AXIS-001 manifests (additive
+                    # parse): default to prev-day, the only anchor those sweeps ran.
+                    fib_anchor=(
+                        FibAnchorKind.PREV_DAY
+                        if cell.get("fib_anchor") is None
+                        else FibAnchorKind(str(cell["fib_anchor"]))
+                    ),
                 )
             )
         hash_raw = raw["train_snapshot_hash"]
@@ -1328,6 +1361,7 @@ def spec_from_store_rows(
     start_equity_paisa: int,
     rows: Sequence[ResultRow],
     top_k: int | None = None,
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
@@ -1343,6 +1377,11 @@ def spec_from_store_rows(
         The tuple's persisted :class:`~brutex.engine.results_store.ResultRow`\\s.
     top_k
         Keep only the top-``top_k`` by Sharpe, or ``None`` for all.
+    fib_anchor
+        The swept Fib-anchor family the tuple was evaluated against
+        (DEC-NIFTY-FIB-AXIS-001); carried onto the spec so the Stage-4 cascade
+        re-scores against the tuple's OWN Fib levels. Default prev-day keeps the
+        prev-day path byte-identical.
 
     Returns
     -------
@@ -1366,7 +1405,81 @@ def spec_from_store_rows(
         proximity_bps=proximity_bps,
         start_equity_paisa=start_equity_paisa,
         winners=winners,
+        fib_anchor=fib_anchor,
     )
+
+
+def build_stage2_cascade_specs(
+    results_root: Path,
+    grid: SweepGridConfig,
+    *,
+    top_k: int | None,
+) -> list[CascadeTupleSpec]:
+    """Build the Stage-2 grid-winner cascade specs for a completed sweep.
+
+    Iterates every :func:`~brutex.engine.sweep_orchestrator.iter_sweep_tuples`
+    tuple, loads its persisted store (skipping a tuple that never ran — no bars),
+    and turns its top-``top_k`` finalists into a :class:`CascadeTupleSpec` via
+    :func:`spec_from_store_rows`. Each tuple's OWN swept ``fib_anchor`` is
+    threaded onto its spec (DEC-NIFTY-FIB-AXIS-001) so the Stage-4 cascade
+    re-scores a non-prev-day survivor against its OWN Fib levels — the
+    grid-winner twin of :func:`~brutex.engine.stage3_wire.cascade_specs_for_refined_cells`.
+
+    This is the pragma-free extraction of the Stage-2 assembly loop that used to
+    live inline in the ``cmd_sweep_all`` orchestration shim, so the anchor thread
+    is unit-testable (review MAJOR 2, DEC-NIFTY-FIB-AXIS-001).
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root the grid persisted its per-tuple stores under.
+    grid
+        The completed sweep's grid config (drives the tuple enumeration + the
+        store-path resolution).
+    top_k
+        Keep only the top-``top_k`` finalists per tuple by Sharpe, or ``None``
+        for all — matching the ``top`` the sweep launcher passes.
+
+    Returns
+    -------
+    list[CascadeTupleSpec]
+        One spec per non-empty grid tuple, in ``iter_sweep_tuples`` order.
+    """
+    from brutex.engine.results_store import ResultsStore
+    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+    from brutex.engine.sweep_run import _direction_label
+
+    specs: list[CascadeTupleSpec] = []
+    for sweep_tuple in iter_sweep_tuples(grid):
+        store_path = tuple_store_path(results_root, sweep_tuple, grid)
+        if not store_path.exists():
+            continue
+        proximity_bps = (
+            None
+            if sweep_tuple.proximity is None
+            else (
+                sweep_tuple.proximity.pivot_proximity_bps,
+                sweep_tuple.proximity.pdh_pdl_proximity_bps,
+                sweep_tuple.proximity.fib_proximity_bps,
+            )
+        )
+        spec = spec_from_store_rows(
+            instrument=sweep_tuple.instrument,
+            tf_label=sweep_tuple.tf.label,
+            tf_minutes=sweep_tuple.tf.minutes,
+            direction_label=_direction_label(sweep_tuple.direction),
+            sl_paisa=sweep_tuple.sl_paisa,
+            tp_paisa=sweep_tuple.tp_paisa,
+            prior_n=grid.prior_n,
+            proximity_bps=proximity_bps,
+            start_equity_paisa=grid.start_equity_paisa,
+            rows=ResultsStore.load(store_path).rows(),
+            top_k=top_k,
+            fib_anchor=sweep_tuple.fib_anchor,
+        )
+        if spec is not None:
+            specs.append(spec)
+    return specs
 
 
 # ── Output paths + IO ─────────────────────────────────────────────────────────

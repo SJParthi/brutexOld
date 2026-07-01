@@ -213,6 +213,17 @@ def _add_sweep_grid_args(
         "--k", default="1,2", help="Comma-separated conditions-per-combo values (default 1,2)"
     )
     parser.add_argument(
+        "--fib-anchors",
+        default="prev_day",
+        dest="fib_anchors",
+        help=(
+            "Comma-separated Fibonacci-anchor families to sweep — "
+            "prev_day / rolling_weekly / weekly_static (DEC-NIFTY-FIB-AXIS-001). "
+            "Default prev_day (byte-identical to the pre-axis sweep); pass "
+            "'prev_day,rolling_weekly,weekly_static' to test all three (×3 grid)"
+        ),
+    )
+    parser.add_argument(
         "--conditions",
         default=None,
         help=(
@@ -2948,6 +2959,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_tuples: int | None,
     max_combos: int | None,
     data_snapshot_hash: str | None,
+    fib_anchors: str = "prev_day",
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
     options_sim: bool = True,
@@ -3019,6 +3031,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         for d in directions.split(",")
         if d.strip()
     ]
+    # Fib-anchor axis (DEC-NIFTY-FIB-AXIS-001): parse the CSV of family tokens
+    # (prev_day / rolling_weekly / weekly_static) into FibAnchorKind, mirroring the
+    # --directions parse. An unknown token is a clean user-config error.
+    from brutex.strategies.types import FibAnchorKind
+
+    try:
+        fib_anchor_list = [
+            FibAnchorKind(tok.strip()) for tok in fib_anchors.split(",") if tok.strip()
+        ]
+    except ValueError:
+        valid = ", ".join(a.value for a in FibAnchorKind)
+        print(
+            f"[brutex] unknown --fib-anchors value in {fib_anchors!r}; choose from {valid}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = [int(tok) for tok in k.split(",") if tok.strip()]
     condition_bits = (
         [int(tok) for tok in conditions.split(",") if tok.strip()]
@@ -3116,6 +3144,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         "stop_losses": _parse_paisa_list(sl),
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
+        "fib_anchors": fib_anchor_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": _indicator_version(),
@@ -3309,44 +3338,17 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # behaviour is UNCHANGED (it ran per-leaderboard inside the sweep above).
     from brutex.engine.cascade_wire import (
         BarsContext,
+        build_stage2_cascade_specs,
         cascade_config_for_sweep,
         run_and_write_from_specs,
-        spec_from_store_rows,
     )
-    from brutex.engine.results_store import ResultsStore
     from brutex.engine.stage3_wire import cascade_specs_for_refined_cells, stage3_manifest_record
-    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
-    from brutex.engine.sweep_run import _direction_label
 
-    cascade_specs = []
-    for sweep_tuple in iter_sweep_tuples(grid):
-        store_path = tuple_store_path(out_root, sweep_tuple, grid)
-        if not store_path.exists():
-            continue
-        proximity_bps = (
-            None
-            if sweep_tuple.proximity is None
-            else (
-                sweep_tuple.proximity.pivot_proximity_bps,
-                sweep_tuple.proximity.pdh_pdl_proximity_bps,
-                sweep_tuple.proximity.fib_proximity_bps,
-            )
-        )
-        spec = spec_from_store_rows(
-            instrument=sweep_tuple.instrument,
-            tf_label=sweep_tuple.tf.label,
-            tf_minutes=sweep_tuple.tf.minutes,
-            direction_label=_direction_label(sweep_tuple.direction),
-            sl_paisa=sweep_tuple.sl_paisa,
-            tp_paisa=sweep_tuple.tp_paisa,
-            prior_n=grid.prior_n,
-            proximity_bps=proximity_bps,
-            start_equity_paisa=grid.start_equity_paisa,
-            rows=ResultsStore.load(store_path).rows(),
-            top_k=top,
-        )
-        if spec is not None:
-            cascade_specs.append(spec)
+    # Stage-2 grid winners — each carries its OWN swept fib_anchor so Stage-4
+    # re-scores a non-prev-day survivor against its own Fib levels
+    # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
+    # pragma-free, unit-tested helper (review MAJOR 2).
+    cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
 
     # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
     # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
@@ -3854,6 +3856,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     recount: bool,
     scratch_root: Path | None,
     allow_context_mismatch: bool,
+    fib_anchors: str = "prev_day",
     emit_heal_plan: bool = False,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
@@ -3909,7 +3912,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
 
     from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
     from brutex.feed.resampler import INTERVAL_SECONDS
-    from brutex.strategies.types import Side
+    from brutex.strategies.types import FibAnchorKind, Side
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
@@ -3926,6 +3929,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         for d in directions.split(",")
         if d.strip()
     ]
+    # The verify grid MUST reproduce the SAME Fib-anchor axis the sweep ran under
+    # (DEC-NIFTY-FIB-AXIS-001) — else the reconstructed grid identity + row run_ids
+    # would not re-derive.
+    try:
+        fib_anchor_list = [
+            FibAnchorKind(tok.strip()) for tok in fib_anchors.split(",") if tok.strip()
+        ]
+    except ValueError:
+        valid = ", ".join(a.value for a in FibAnchorKind)
+        print(
+            f"[brutex] unknown --fib-anchors value in {fib_anchors!r}; choose from {valid}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = [int(tok) for tok in k.split(",") if tok.strip()]
     condition_bits = (
         [int(tok) for tok in conditions.split(",") if tok.strip()]
@@ -3950,6 +3967,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "stop_losses": _parse_paisa_list(sl),
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
+        "fib_anchors": fib_anchor_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": indicator,
@@ -4845,6 +4863,7 @@ def main(argv: list[str] | None = None) -> int:
             end=args.end,
             directions=args.directions,
             k=args.k,
+            fib_anchors=args.fib_anchors,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -4883,6 +4902,7 @@ def main(argv: list[str] | None = None) -> int:
             end=args.end,
             directions=args.directions,
             k=args.k,
+            fib_anchors=args.fib_anchors,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -4969,6 +4989,7 @@ def main(argv: list[str] | None = None) -> int:
             end=args.end,
             directions=args.directions,
             k=args.k,
+            fib_anchors=args.fib_anchors,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,

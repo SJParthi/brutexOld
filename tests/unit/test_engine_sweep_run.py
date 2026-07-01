@@ -453,6 +453,8 @@ class TestRankedComboToResultRow:
 
 class TestCanonicalTradeParams:
     def test_layout_matches_the_run_identity_contract(self) -> None:
+        # The Fib anchor defaults to prev_day and is emitted UNCONDITIONALLY
+        # (DEC-NIFTY-FIB-AXIS-001) so every family's run-identity carries it.
         params = canonical_trade_params(
             sl_paisa=80,
             tp_paisa=50,
@@ -465,8 +467,35 @@ class TestCanonicalTradeParams:
             "tp_paisa": 50,
             "prior_n": 3,
             "proximity_bps": None,
+            "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
         }
+
+    def test_fib_anchor_enters_the_params_layout(self) -> None:
+        # DEC-NIFTY-FIB-AXIS-001: a non-prev-day anchor changes the run-identity —
+        # the anchor's string enum value is the ``fib_anchor`` key and two anchors
+        # therefore hash to distinct combo identities (Golden Rule #4).
+        from brutex.strategies.types import FibAnchorKind
+
+        prev = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            fib_anchor=FibAnchorKind.PREV_DAY,
+        )
+        rolling = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+        )
+        assert prev["fib_anchor"] == "prev_day"
+        assert rolling["fib_anchor"] == "rolling_weekly"
+        assert prev != rolling
 
     def test_proximity_flattens_to_three_bps_ints(self) -> None:
         params = canonical_trade_params(
@@ -1103,12 +1132,15 @@ class TestRunPersistedSweep:
         bars = _trending_bars()
         cfg = _make_config()
         dedup = _dedup()
-        # Pre-mark every enumerated identity → every mask is skipped.
+        # Pre-mark every enumerated identity → every mask is skipped. The params
+        # layout carries the default ``fib_anchor`` (prev_day) so these hand-built
+        # run-ids match the sweep's (DEC-NIFTY-FIB-AXIS-001).
         params = {
             "sl_paisa": 80,
             "tp_paisa": 50,
             "prior_n": 3,
             "proximity_bps": None,
+            "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
         }
         for mask in (1, 2, 4, 8, 16):
@@ -1723,3 +1755,74 @@ class TestResidentKernelBarMismatch:
                 kernel=kernel,
             )
         assert summary.enumerated >= 1
+
+    def test_kernel_built_for_other_fib_anchor_raises(self, tmp_path: Path) -> None:
+        """A kernel whose Fib anchor disagrees with the tuple's is rejected (R-1).
+
+        DEC-NIFTY-FIB-AXIS-001: the pre-built ``bar_bits`` matrix is anchor-SPECIFIC,
+        so a kernel built for a DIFFERENT Fib anchor would silently score the WRONG
+        Group-4 levels; ``run_persisted_sweep`` fails-fast, exactly like the
+        ``n_bars`` guard.
+        """
+        from datetime import date
+
+        from brutex.calendars.nse import IST, is_trading_day
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import FibAnchorKind
+
+        def _session_bar(ts_ist: datetime, o: float, c: float) -> CandleBar:
+            hi = max(o, c) + 0.5
+            lo = min(o, c) - 0.5
+            return CandleBar(
+                timestamp=ts_ist.astimezone(UTC),
+                open=Decimal(str(round(o, 2))),
+                high=Decimal(str(round(hi, 2))),
+                low=Decimal(str(round(lo, 2))),
+                close=Decimal(str(round(c, 2))),
+                volume=100,
+                open_interest=None,
+            )
+
+        # A rolling-weekly kernel resolves its anchor against REAL NSE trading days,
+        # so build the bars over in-coverage 2021 sessions (one bar per session).
+        trading_days: list[date] = []
+        cursor = date(2021, 1, 4)
+        while len(trading_days) < 12:
+            if is_trading_day(cursor):
+                trading_days.append(cursor)
+            cursor += timedelta(days=1)
+        bars: list[CandleBar] = []
+        price = 10000.0
+        for i, d in enumerate(trading_days):
+            base = datetime(d.year, d.month, d.day, 9, 15, tzinfo=IST)
+            for m in range(3):
+                o = price + m
+                bars.append(_session_bar(base + timedelta(minutes=m), o, o + 1.0))
+            price += 25.0 + (i % 3) * 5.0
+        # The tuple sweeps the DEFAULT prev-day anchor …
+        cfg = _make_config(condition_bits=[19, 20, 21, 22, 23], k=1)
+        assert cfg.fib_anchor is FibAnchorKind.PREV_DAY
+        # … but the kernel was built for a rolling-weekly anchor over the SAME bars
+        # (so the n_bars guard passes and the anchor guard is the one that trips).
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+        )
+        assert kernel.n_bars == len(bars)
+        assert kernel.fib_anchor is FibAnchorKind.ROLLING_WEEKLY
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for Fib anchor"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )

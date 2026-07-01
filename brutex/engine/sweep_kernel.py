@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final
 
 from brutex.engine.combo_mask import ResidentBarBuffer
 from brutex.engine.stage1a import build_bar_bits
+from brutex.strategies.types import FibAnchorKind
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     # Annotation-only — keep CandleBar / ProximityParams out of this module's
@@ -91,6 +92,12 @@ class ResidentSweepKernel:
         Stage-1A default (10 bps).
     prior_n
         Prior-bar pattern look-back ∈ {1, 2, 3, 4}.
+    fib_anchor
+        The swept Fibonacci-anchor family
+        (:class:`~brutex.strategies.types.FibAnchorKind`) the ``bar_bits`` were
+        built against (DEC-NIFTY-FIB-AXIS-001). Recorded so the sweep can fail-fast
+        when a kernel is reused under a DIFFERENT anchor (the ``bar_bits`` matrix is
+        anchor-specific — R-1). Defaults to :attr:`FibAnchorKind.PREV_DAY`.
 
     Raises
     ------
@@ -98,7 +105,7 @@ class ResidentSweepKernel:
         If ``bars`` is empty.
     """
 
-    __slots__ = ("_bar_bits", "_bars", "_resident")
+    __slots__ = ("_bar_bits", "_bars", "_fib_anchor", "_resident")
 
     def __init__(
         self,
@@ -106,11 +113,13 @@ class ResidentSweepKernel:
         *,
         proximity: ProximityParams | None = None,
         prior_n: int = 3,
+        fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     ) -> None:
         if not bars:
             raise ValueError("ResidentSweepKernel: bars must be non-empty")
         self._bars: tuple[CandleBar, ...] = tuple(bars)
-        self._bar_bits: list[int] = build_bar_bits(self._bars, proximity, prior_n)
+        self._fib_anchor: FibAnchorKind = fib_anchor
+        self._bar_bits: list[int] = build_bar_bits(self._bars, proximity, prior_n, fib_anchor)
         self._resident: ResidentBarBuffer = ResidentBarBuffer(self._bar_bits)
 
     @property
@@ -119,8 +128,13 @@ class ResidentSweepKernel:
         return self._bars
 
     @property
+    def fib_anchor(self) -> FibAnchorKind:
+        """The Fib anchor this kernel's ``bar_bits`` were built against (R-1 guard)."""
+        return self._fib_anchor
+
+    @property
     def bar_bits(self) -> list[int]:
-        """The pre-built Stage-1A per-bar u64 truth-vectors (reused, never rebuilt)."""
+        """The pre-built Stage-1A per-bar u128 truth-vectors (reused, never rebuilt)."""
         return self._bar_bits
 
     @property
@@ -224,7 +238,7 @@ class ResidentKernelCache:
         self._capacity: int = capacity
         self._builder: Callable[..., ResidentSweepKernel] = builder
         self._cache: OrderedDict[
-            tuple[str, str, ProximityParams | None, int], ResidentSweepKernel
+            tuple[str, str, ProximityParams | None, int, FibAnchorKind], ResidentSweepKernel
         ] = OrderedDict()
         self._builds: int = 0
         self._hits: int = 0
@@ -251,8 +265,9 @@ class ResidentKernelCache:
         tf_label: str,
         proximity: ProximityParams | None,
         prior_n: int,
+        fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     ) -> ResidentSweepKernel:
-        """Return the kernel for ``(instrument, tf_label, proximity, prior_n)``, building on miss.
+        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor)``, building on miss.
 
         On a hit the resident kernel is returned (and marked most-recently-used)
         WITHOUT rebuilding ``bar_bits`` or re-marshalling the bar window. On a miss
@@ -271,19 +286,25 @@ class ResidentKernelCache:
         prior_n
             The prior-bar look-back — part of the key, since ``bar_bits`` depends
             on it.
+        fib_anchor
+            The swept Fib anchor — part of the key, since the Group-4 Fib bits in
+            ``bar_bits`` depend on it (DEC-NIFTY-FIB-AXIS-001 R-1): a Near/Next/…
+            anchor sharing one ``(instrument, tf, proximity, prior_n)`` must get its
+            OWN kernel, never a stale prev-day one. Defaults to
+            :attr:`FibAnchorKind.PREV_DAY`.
 
         Returns
         -------
         ResidentSweepKernel
             The (cached or freshly built) kernel for this bar window.
         """
-        key = (instrument, tf_label, proximity, prior_n)
+        key = (instrument, tf_label, proximity, prior_n, fib_anchor)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             self._hits += 1
             return cached
-        kernel = self._builder(bars, proximity=proximity, prior_n=prior_n)
+        kernel = self._builder(bars, proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor)
         self._builds += 1
         self._cache[key] = kernel
         if len(self._cache) > self._capacity:

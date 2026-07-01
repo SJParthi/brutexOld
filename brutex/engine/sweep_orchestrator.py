@@ -81,7 +81,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
-from brutex.strategies.types import Side
+from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -176,6 +176,16 @@ class SweepGridConfig:
     proximities
         Proximity tolerances for the ``near_*`` conditions, or ``None`` for the
         Stage-1A default; non-empty.
+    fib_anchors
+        The swept Fibonacci-anchor families
+        (:class:`~brutex.strategies.types.FibAnchorKind`) — prev-day /
+        rolling-weekly / weekly-static (DEC-NIFTY-FIB-AXIS-001); non-empty.
+        Defaults to ``(FibAnchorKind.PREV_DAY,)`` so an unset grid is
+        byte-identical to the pre-axis prev-day-only sweep (DEFAULT-PRESERVATION).
+        The anchor is a swept STRATEGY parameter (ADR-0012 D4), not a vocabulary
+        bit — it moves ONLY the Group-4 Fib levels the sweep evaluates against, and
+        enters both the store address (:func:`_tuple_digest`) AND every mask's
+        run-identity (``canonical_trade_params``) so two anchors never collide.
     mode, data_snapshot_hash, indicator_version, code_commit_sha
         The shared run context + the three reproducibility identity fields; each
         non-empty.
@@ -226,6 +236,9 @@ class SweepGridConfig:
     data_snapshot_hash: str
     indicator_version: str
     code_commit_sha: str
+    #: The swept Fib-anchor axis (DEC-NIFTY-FIB-AXIS-001). Defaults to prev-day
+    #: only so an unset grid is byte-identical to the pre-axis sweep.
+    fib_anchors: Sequence[FibAnchorKind] = (FibAnchorKind.PREV_DAY,)
     prior_n: int = 3
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA
     max_combos: int = DEFAULT_MAX_COMBOS
@@ -255,6 +268,7 @@ class SweepGridConfig:
         object.__setattr__(self, "stop_losses", _dedup_seq(self.stop_losses))
         object.__setattr__(self, "take_profits", _dedup_seq(self.take_profits))
         object.__setattr__(self, "proximities", _dedup_seq(self.proximities))
+        object.__setattr__(self, "fib_anchors", _dedup_seq(self.fib_anchors))
 
         for name in (
             "instruments",
@@ -265,6 +279,7 @@ class SweepGridConfig:
             "stop_losses",
             "take_profits",
             "proximities",
+            "fib_anchors",
         ):
             if not getattr(self, name):
                 raise ValueError(f"SweepGridConfig.{name} must be a non-empty axis")
@@ -375,7 +390,7 @@ class SweepGridConfig:
 
 @dataclass(frozen=True, slots=True)
 class SweepTuple:
-    """One point of the sweep grid — a single ``(instrument, tf, direction, K, sl, tp, proximity)``.
+    """One point of the sweep grid — a single ``(instrument, tf, direction, K, sl, tp, proximity, fib_anchor)``.
 
     Attributes
     ----------
@@ -391,6 +406,12 @@ class SweepTuple:
         Stop-loss / take-profit distances in paisa, or ``None``.
     proximity
         Proximity tolerances, or ``None`` for the Stage-1A default.
+    fib_anchor
+        The swept Fib-anchor family
+        (:class:`~brutex.strategies.types.FibAnchorKind`) this tuple evaluates the
+        Group-4 Fib levels against (DEC-NIFTY-FIB-AXIS-001). Defaults to
+        ``FibAnchorKind.PREV_DAY`` so a tuple built without the axis keeps the
+        pre-axis behaviour + store address.
     """
 
     instrument: str
@@ -400,6 +421,7 @@ class SweepTuple:
     sl_paisa: int | None
     tp_paisa: int | None
     proximity: ProximityParams | None
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
     def to_run_config(self, grid: SweepGridConfig) -> SweepRunConfig:
         """Build the single-slice :class:`SweepRunConfig` for this tuple under *grid*.
@@ -436,6 +458,7 @@ class SweepTuple:
             tp_paisa=self.tp_paisa,
             prior_n=grid.prior_n,
             proximity=self.proximity,
+            fib_anchor=self.fib_anchor,
             start_equity_paisa=grid.start_equity_paisa,
             max_combos=grid.max_combos,
             top_k=grid.top_k,
@@ -505,7 +528,7 @@ def count_sweep_tuples(grid: SweepGridConfig) -> int:
     -------
     int
         ``|instruments| · |timeframes| · |directions| · |k_values| ·
-        |stop_losses| · |take_profits| · |proximities|``.
+        |stop_losses| · |take_profits| · |proximities| · |fib_anchors|``.
     """
     return prod(
         (
@@ -516,6 +539,7 @@ def count_sweep_tuples(grid: SweepGridConfig) -> int:
             len(grid.stop_losses),
             len(grid.take_profits),
             len(grid.proximities),
+            len(grid.fib_anchors),
         )
     )
 
@@ -524,9 +548,9 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
     """Yield every :class:`SweepTuple` of *grid*'s outer product, deterministically.
 
     Streams the product in a fixed nested order (instrument → timeframe →
-    direction → k → stop-loss → take-profit → proximity) so the enumeration is
-    reproducible. Each ``next`` is O(1) (an :func:`itertools.product` step) with
-    O(1) memory; the generator never materialises the full product.
+    direction → k → stop-loss → take-profit → proximity → fib-anchor) so the
+    enumeration is reproducible. Each ``next`` is O(1) (an :func:`itertools.product`
+    step) with O(1) memory; the generator never materialises the full product.
 
     Parameters
     ----------
@@ -538,7 +562,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
     SweepTuple
         One grid point per step.
     """
-    for instrument, tf, direction, k, sl, tp, proximity in itertools.product(
+    for instrument, tf, direction, k, sl, tp, proximity, fib_anchor in itertools.product(
         grid.instruments,
         grid.timeframes,
         grid.directions,
@@ -546,6 +570,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
         grid.stop_losses,
         grid.take_profits,
         grid.proximities,
+        grid.fib_anchors,
     ):
         yield SweepTuple(
             instrument=instrument,
@@ -555,6 +580,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
             sl_paisa=sl,
             tp_paisa=tp,
             proximity=proximity,
+            fib_anchor=fib_anchor,
         )
 
 
@@ -590,6 +616,7 @@ def bloom_capacity_hint(grid: SweepGridConfig) -> int:
             len(grid.stop_losses),
             len(grid.take_profits),
             len(grid.proximities),
+            len(grid.fib_anchors),
         )
     )
     return max(1, masks_per_tuple * other_axes)
@@ -624,6 +651,11 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
         "tp_paisa": tuple_.tp_paisa,
         "prior_n": grid.prior_n,
         "proximity_bps": proximity_bps,
+        # The swept Fib anchor distinguishes the store address (DEC-NIFTY-FIB-AXIS-001):
+        # two tuples differing ONLY by anchor evaluate DIFFERENT Fib levels, so they
+        # MUST map to different Parquet files (Golden Rule #4 — else one silently
+        # overwrites the other).
+        "fib_anchor": tuple_.fib_anchor.value,
         "start_equity_paisa": grid.start_equity_paisa,
         "mode": grid.mode,
         "data_snapshot_hash": grid.data_snapshot_hash,
@@ -789,6 +821,7 @@ def run_one_tuple(
             tf_label=tuple_.tf.label,
             proximity=tuple_.proximity,
             prior_n=grid.prior_n,
+            fib_anchor=tuple_.fib_anchor,
         )
         if kernel_cache is not None
         else None
@@ -900,6 +933,7 @@ def run_sweep_grid(
             "timeframes": [tf.label for tf in grid.timeframes],
             "directions": [d.value for d in grid.directions],
             "k_values": list(grid.k_values),
+            "fib_anchors": [a.value for a in grid.fib_anchors],
             "mode": grid.mode,
             "data_snapshot_hash": grid.data_snapshot_hash,
             "indicator_version": grid.indicator_version,
@@ -918,10 +952,16 @@ def run_sweep_grid(
     persisted = 0
 
     # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): one bar window
-    # per distinct (instrument, tf, proximity, prior_n). Sized to the proximity
-    # fan-out so a fixed (instrument, tf) reuses every kernel across its
-    # direction/K/sl/tp tuples. `None` when reuse is disabled (legacy rebuild path).
-    kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
+    # per distinct (instrument, tf, proximity, prior_n, fib_anchor). Sized to the
+    # proximity × fib-anchor fan-out (DEC-NIFTY-FIB-AXIS-001 — the kernel's bar_bits
+    # is anchor-SPECIFIC, so each anchor needs its own resident kernel) so a fixed
+    # (instrument, tf) reuses every kernel across its direction/K/sl/tp tuples.
+    # `None` when reuse is disabled (legacy rebuild path).
+    kernel_cache = (
+        ResidentKernelCache(capacity=len(grid.proximities) * len(grid.fib_anchors))
+        if reuse_bar_bits
+        else None
+    )
 
     for tuple_ in iter_sweep_tuples(grid):
         # "Resilient: skip + continue" — a combo that raises mid-evaluation
@@ -948,6 +988,7 @@ def run_sweep_grid(
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
                 f"/k={tuple_.k}/sl={tuple_.sl_paisa}/tp={tuple_.tp_paisa}"
+                f"/fib={tuple_.fib_anchor.value}"
             )
             error = f"{type(exc).__name__}: {exc}"
             audit.append(
