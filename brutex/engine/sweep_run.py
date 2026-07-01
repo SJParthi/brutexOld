@@ -55,7 +55,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 import structlog
 
@@ -105,10 +105,12 @@ if TYPE_CHECKING:
     # coverage gates for the other brutex.engine.* modules otherwise (the same
     # constraint recorded in DEC-COV-BACKFILL-LIMIT-001). ``ComboDedup`` only
     # *receives* an already-built OptionDedupIndex; the runner only *receives*
-    # an already-open AuditWriter — neither is constructed here.
+    # an already-open ``AuditSink`` (the real ``AuditWriter`` on the sequential
+    # path, a ``BufferedAuditCollector`` in a parallel-sweep worker,
+    # DEC-MULTICORE-SWEEP-PHASE1-001) — neither is constructed here.
     from brutex.data.option_dedup import OptionDedupIndex
     from brutex.engine.sweep_kernel import ResidentSweepKernel
-    from brutex.orchestrator.audit import AuditWriter
+    from brutex.orchestrator.audit import AuditSink
 
 _LOG = structlog.get_logger("brutex.engine.sweep_run")
 
@@ -156,6 +158,38 @@ def _direction_label(direction: Side) -> str:
     if direction is Side.SELL:
         return "bear"
     raise ValueError(f"sweep direction must be Side.BUY or Side.SELL, not {direction!r}")
+
+
+def direction_label(direction: Side) -> str:
+    """PUBLIC re-export of :func:`_direction_label` for the parallel driver — O(1).
+
+    ONE source of truth (CLAUDE.md §11 COMMON): the parallel driver
+    (:mod:`brutex.engine.sweep_parallel`, DEC-MULTICORE-SWEEP-PHASE1-001) uses this
+    to build the BYTE-IDENTICAL cache key + labels without importing the private
+    ``_direction_label``.
+    """
+    return _direction_label(direction)
+
+
+@runtime_checkable
+class DedupSink(Protocol):
+    """The dedup contract :func:`run_persisted_sweep` consults — ``seen`` + ``mark_many``.
+
+    A structural seam (DEC-MULTICORE-SWEEP-PHASE1-001) so the runner accepts EITHER
+    the real :class:`ComboDedup` (the legacy no-digest path, where the probes are
+    load-bearing) OR a stand-in whose methods are never called on the DIGEST path
+    (``bypass_dedup`` skips both). :class:`ComboDedup` satisfies this Protocol
+    structurally, so widening the runner's annotation from ``ComboDedup`` to
+    ``DedupSink`` is a pure widening that changes NO existing call.
+    """
+
+    def seen(self, run_id_hex: str) -> bool:
+        """Return ``True`` iff *run_id_hex* was already marked seen."""
+        ...
+
+    def mark_many(self, run_id_hexes: Iterable[str]) -> int:
+        """Mark every identity as seen; return how many were marked."""
+        ...
 
 
 class ComboDedup:
@@ -731,8 +765,8 @@ def run_persisted_sweep(
     cfg: SweepRunConfig,
     *,
     store: ResultsStore,
-    dedup: ComboDedup,
-    audit: AuditWriter,
+    dedup: DedupSink,
+    audit: AuditSink,
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
 ) -> SweepRunSummary:
@@ -783,7 +817,11 @@ def run_persisted_sweep(
     dedup
         The :class:`ComboDedup` carrying the run's cross-run dedup state.
     audit
-        An open :class:`~brutex.orchestrator.audit.AuditWriter`.
+        An open :class:`~brutex.orchestrator.audit.AuditSink` — the real
+        :class:`~brutex.orchestrator.audit.AuditWriter` on the sequential path
+        (byte-unchanged), or a
+        :class:`~brutex.orchestrator.audit.BufferedAuditCollector` in a
+        parallel-sweep worker (DEC-MULTICORE-SWEEP-PHASE1-001).
     kernel
         Optional pre-built :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`
         for this tuple's ``(instrument, tf, proximity, prior_n)`` bar window

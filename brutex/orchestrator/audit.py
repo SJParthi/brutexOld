@@ -75,7 +75,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from types import TracebackType
-from typing import Any, ClassVar, Final, Self
+from typing import Any, ClassVar, Final, Protocol, Self, runtime_checkable
 
 from brutex.models import BruteXError
 
@@ -571,6 +571,128 @@ class AuditWriter:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# AuditSink — the write-target seam (DEC-MULTICORE-SWEEP-PHASE1-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class BufferedAuditRecord:
+    """One buffered ``append`` call — the *data* of an audit line, un-hashed.
+
+    Collected by :class:`BufferedAuditCollector` inside a parallel-sweep worker
+    process, returned to the parent (this is a plain, picklable dataclass), and
+    replayed into the REAL hash-chained :class:`AuditWriter` on the parent's
+    single writer-actor thread in canonical enumeration order — so the chain is
+    produced on ONE thread, byte-identically to a sequential run
+    (DEC-MULTICORE-SWEEP-PHASE1-001). It carries NO ``seq`` / ``prev_hash`` /
+    ``entry_hash``: the ordering and the hash are the parent's authority, never a
+    worker's (a worker has no view of the global chain position).
+
+    Attributes
+    ----------
+    action
+        The audit action label (e.g. ``SWEEP_START``).
+    subject
+        The audit subject.
+    payload
+        The JSON-serialisable action payload (already a plain ``dict``).
+    """
+
+    action: str
+    subject: str
+    payload: dict[str, Any]
+
+
+@runtime_checkable
+class AuditSink(Protocol):
+    """The append-only write target :func:`run_persisted_sweep` writes through.
+
+    A structural seam (DEC-MULTICORE-SWEEP-PHASE1-001) so the golden-locked
+    per-tuple runner can write EITHER to the real hash-chained
+    :class:`AuditWriter` (the sequential path, byte-unchanged) OR to a
+    :class:`BufferedAuditCollector` (a parallel-sweep worker, which collects the
+    line as plain data instead of hashing it). :class:`AuditWriter` and
+    :class:`~brutex.engine.sweep_audit.SweepAuditWriter` both satisfy this Protocol
+    structurally — their ``append`` signatures are identical — so widening the
+    runner's annotation from ``AuditWriter`` to ``AuditSink`` is a pure widening
+    that changes NO existing call.
+
+    The return value is deliberately ``object`` (not ``AuditEntry``): the runner
+    ignores it, and the collector has no entry to return. The Protocol therefore
+    imposes the minimum contract both impls share.
+    """
+
+    def append(
+        self,
+        *,
+        action: str,
+        subject: str,
+        payload: dict[str, Any] | None = None,
+        ts_utc: float | None = None,
+    ) -> object:
+        """Append one audit line (or buffer it); return value is ignored by callers."""
+        ...
+
+
+class BufferedAuditCollector:
+    """An :class:`AuditSink` that BUFFERS append calls as plain data — no hashing.
+
+    Used inside a parallel-sweep worker process (DEC-MULTICORE-SWEEP-PHASE1-001):
+    the worker runs the UNCHANGED per-tuple body
+    (:func:`brutex.engine.sweep_run.run_persisted_sweep`) but hands it this
+    collector as its ``audit`` sink, so every ``SWEEP_START`` / ``SWEEP_FLUSH`` /
+    ``SWEEP_COMPLETE`` / ``SWEEP_RESUMED`` line is appended to an in-memory list
+    of :class:`BufferedAuditRecord` instead of the durable hash chain. The parent
+    then replays :attr:`records` into the real :class:`AuditWriter` in canonical
+    enumeration order.
+
+    **Why no hashing here.** A worker has no view of the global chain position
+    (``seq`` / ``prev_hash``), so it CANNOT compute a chain-correct
+    ``entry_hash``. Buffering the raw line data + replaying it on the parent's
+    single writer-actor is the ONE design that keeps the chain byte-identical to
+    a sequential run (the parent owns the ``seq`` / ``prev_hash`` / ``ts`` and
+    appends in enumeration order).
+
+    **Thread-safety.** Not thread-safe — one collector is used by exactly one
+    worker running exactly one tuple's body (a strictly sequential caller inside
+    that worker), mirroring the single-writer contract of :class:`AuditWriter`.
+    """
+
+    __slots__ = ("_records",)
+
+    def __init__(self) -> None:
+        self._records: list[BufferedAuditRecord] = []
+
+    def append(
+        self,
+        *,
+        action: str,
+        subject: str,
+        payload: dict[str, Any] | None = None,
+        ts_utc: float | None = None,
+    ) -> BufferedAuditRecord:
+        """Buffer one audit line as plain data (the ``ts_utc`` override is ignored).
+
+        The ``ts_utc`` parameter exists only for :class:`AuditSink` signature
+        parity; a worker cannot stamp a chain-correct timestamp, so the parent's
+        real :class:`AuditWriter` supplies it at replay time. Returns the buffered
+        record (the runner ignores it, matching :meth:`AuditWriter.append`).
+        """
+        record = BufferedAuditRecord(
+            action=action,
+            subject=subject,
+            payload=dict(payload) if payload else {},
+        )
+        self._records.append(record)
+        return record
+
+    @property
+    def records(self) -> tuple[BufferedAuditRecord, ...]:
+        """The buffered records in append order (immutable snapshot)."""
+        return tuple(self._records)
+
+
+# ────────────────────────────────────────────────────────────────────────
 # verify_chain — standalone function called by brutex audit verify
 # ────────────────────────────────────────────────────────────────────────
 
@@ -899,8 +1021,11 @@ __all__ = [
     "AuditError",
     "AuditFieldError",
     "AuditPayloadError",
+    "AuditSink",
     "AuditWriteError",
     "AuditWriter",
+    "BufferedAuditCollector",
+    "BufferedAuditRecord",
     "read_entries",
     "verify_chain",
 ]
