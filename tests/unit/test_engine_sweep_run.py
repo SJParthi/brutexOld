@@ -453,6 +453,8 @@ class TestRankedComboToResultRow:
 
 class TestCanonicalTradeParams:
     def test_layout_matches_the_run_identity_contract(self) -> None:
+        # The Fib anchor defaults to prev_day and is emitted UNCONDITIONALLY
+        # (DEC-NIFTY-FIB-AXIS-001) so every family's run-identity carries it.
         params = canonical_trade_params(
             sl_paisa=80,
             tp_paisa=50,
@@ -465,8 +467,35 @@ class TestCanonicalTradeParams:
             "tp_paisa": 50,
             "prior_n": 3,
             "proximity_bps": None,
+            "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
         }
+
+    def test_fib_anchor_enters_the_params_layout(self) -> None:
+        # DEC-NIFTY-FIB-AXIS-001: a non-prev-day anchor changes the run-identity —
+        # the anchor's string enum value is the ``fib_anchor`` key and two anchors
+        # therefore hash to distinct combo identities (Golden Rule #4).
+        from brutex.strategies.types import FibAnchorKind
+
+        prev = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            fib_anchor=FibAnchorKind.PREV_DAY,
+        )
+        rolling = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+        )
+        assert prev["fib_anchor"] == "prev_day"
+        assert rolling["fib_anchor"] == "rolling_weekly"
+        assert prev != rolling
 
     def test_proximity_flattens_to_three_bps_ints(self) -> None:
         params = canonical_trade_params(
@@ -1103,12 +1132,15 @@ class TestRunPersistedSweep:
         bars = _trending_bars()
         cfg = _make_config()
         dedup = _dedup()
-        # Pre-mark every enumerated identity → every mask is skipped.
+        # Pre-mark every enumerated identity → every mask is skipped. The params
+        # layout carries the default ``fib_anchor`` (prev_day) so these hand-built
+        # run-ids match the sweep's (DEC-NIFTY-FIB-AXIS-001).
         params = {
             "sl_paisa": 80,
             "tp_paisa": 50,
             "prior_n": 3,
             "proximity_bps": None,
+            "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
         }
         for mask in (1, 2, 4, 8, 16):

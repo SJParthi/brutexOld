@@ -84,6 +84,14 @@ from brutex.indicators.weekly_anchors import (
     weekly_static_anchor,
 )
 from brutex.strategies.errors import StrategyRegistrationError
+
+# ``FibAnchorKind`` lives in the pure leaf ``strategies.types`` (already imported
+# by ``brutex.engine.*``) so the engine can thread it as a grid axis WITHOUT
+# pulling this module's ``dashboard.combo_decoder`` import into the engine's
+# runtime import graph (DEC-NIFTY-FIB-AXIS-001). It is re-exported here (COMMON —
+# one enum, CLAUDE.md §11) so every existing ``fib_definitions.FibAnchorKind``
+# reference is unchanged.
+from brutex.strategies.types import FibAnchorKind
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, NAME_TO_BIT
 
 #: NSE/BSE intraday forced-exit clock (ADR-0012 D5; CLAUDE.md §7 "15:20 IST").
@@ -91,22 +99,6 @@ FORCED_EXIT_IST: Final[time] = time(15, 20)
 
 #: The trailing-session window for the rolling-weekly anchor (one trading week).
 ROLLING_WEEKLY_SESSIONS: Final[int] = 5
-
-
-class FibAnchorKind(Enum):
-    """The Fibonacci anchor that distinguishes the three families (ADR-0012 D2).
-
-    The anchor is a SWEPT STRATEGY PARAMETER (D4), never a vocabulary bit — the
-    three are mutually exclusive per strategy, so modelling them as bits would
-    triple the Fib group for zero analytical gain.
-    """
-
-    #: Prev-day High/Low range (``prev_day_ohlc.lookup_prev_day_ohlc``).
-    PREV_DAY = "prev_day"
-    #: Trailing 5-session High/Low range (``weekly_anchors.rolling_weekly_anchor``).
-    ROLLING_WEEKLY = "rolling_weekly"
-    #: Last completed ISO week's High/Low (``weekly_anchors.weekly_static_anchor``).
-    WEEKLY_STATIC = "weekly_static"
 
 
 class Direction(Enum):
@@ -490,18 +482,25 @@ WEEKLY_STATIC = register(
 )
 
 
-def resolve_fib_levels(
-    definition: StrategyDefinition,
+def resolve_fib_anchor_levels(
+    anchor: FibAnchorKind,
     today: date,
     daily_candles_by_date: Mapping[date, DailyCandle],
 ) -> FibLevels | None:
-    """Resolve *definition*'s anchor → Fib levels for *today* (runnable, not a stub).
+    """Resolve *anchor* → Fib levels for *today* (the ONE anchor dispatcher).
 
-    Dispatches on :attr:`StrategyDefinition.anchor` to the REAL anchor primitive,
-    then feeds the resolved ``(high, low)`` into the SAME
-    :func:`compute_fib_levels`. Direction does NOT affect the anchor — the Fib
-    LEVELS are direction-agnostic (direction is a swept dimension, ADR-0012 D2/D4),
-    so one strategy's Long and Short sweeps share one set of levels per day.
+    The COMMON single source of the anchor → ``(high, low)`` → Fib dispatch
+    (CLAUDE.md §11): dispatches on the :class:`FibAnchorKind` directly to the REAL
+    anchor primitive (``lookup_prev_day_ohlc`` / ``rolling_weekly_anchor`` /
+    ``weekly_static_anchor``) then feeds the resolved ``(high, low)`` into the SAME
+    :func:`compute_fib_levels`. Consumed by BOTH :func:`resolve_fib_levels` (the
+    strategy-definition entry point) AND the brute-force engine's Stage-1A builder
+    (:mod:`brutex.engine.stage1a`, DEC-NIFTY-FIB-AXIS-001) — so the sweep evaluates
+    the SAME anchor levels the strategy declaration would, never a re-implementation.
+
+    This takes the enum directly (not a whole :class:`StrategyDefinition`) so the
+    engine can dispatch on the swept ``fib_anchor`` axis without constructing a
+    definition per bar.
 
     Returns
     -------
@@ -518,20 +517,48 @@ def resolve_fib_levels(
         anchor produces a corrupt ``high < low`` range.
     """
     daily = dict(daily_candles_by_date)
-    if definition.anchor is FibAnchorKind.PREV_DAY:
+    if anchor is FibAnchorKind.PREV_DAY:
         prev = lookup_prev_day_ohlc(today, daily)
         if prev is None:
             return None
         return compute_fib_levels(today, prev.pdh_paisa, prev.pdl_paisa)
 
-    anchor: FibAnchor | None
-    if definition.anchor is FibAnchorKind.ROLLING_WEEKLY:
-        anchor = rolling_weekly_anchor(today, daily, sessions=ROLLING_WEEKLY_SESSIONS)
+    resolved: FibAnchor | None
+    if anchor is FibAnchorKind.ROLLING_WEEKLY:
+        resolved = rolling_weekly_anchor(today, daily, sessions=ROLLING_WEEKLY_SESSIONS)
     else:  # FibAnchorKind.WEEKLY_STATIC — the enum is exhaustive (3 members).
-        anchor = weekly_static_anchor(today, daily)
-    if anchor is None:
+        resolved = weekly_static_anchor(today, daily)
+    if resolved is None:
         return None
-    return compute_fib_levels(today, anchor.high_paisa, anchor.low_paisa)
+    return compute_fib_levels(today, resolved.high_paisa, resolved.low_paisa)
+
+
+def resolve_fib_levels(
+    definition: StrategyDefinition,
+    today: date,
+    daily_candles_by_date: Mapping[date, DailyCandle],
+) -> FibLevels | None:
+    """Resolve *definition*'s anchor → Fib levels for *today* (runnable, not a stub).
+
+    Thin wrapper over :func:`resolve_fib_anchor_levels` that reads the anchor off
+    the strategy :attr:`StrategyDefinition.anchor`. Direction does NOT affect the
+    anchor — the Fib LEVELS are direction-agnostic (direction is a swept dimension,
+    ADR-0012 D2/D4), so one strategy's Long and Short sweeps share one set of levels
+    per day.
+
+    Returns
+    -------
+    FibLevels | None
+        The 17 Fib levels for *today*, or ``None`` on a cold-start (delegated to
+        :func:`resolve_fib_anchor_levels`).
+
+    Raises
+    ------
+    ValueError
+        If *today* is not a trading day (propagated from the primitive) or the
+        anchor produces a corrupt ``high < low`` range.
+    """
+    return resolve_fib_anchor_levels(definition.anchor, today, daily_candles_by_date)
 
 
 def render_definition(
@@ -589,5 +616,6 @@ __all__ = [
     "for_symbols",
     "register",
     "render_definition",
+    "resolve_fib_anchor_levels",
     "resolve_fib_levels",
 ]

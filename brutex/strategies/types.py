@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import Any
 
 
@@ -26,6 +26,29 @@ class Side(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
+
+
+class FibAnchorKind(Enum):
+    """The Fibonacci anchor distinguishing the three Fib strategy families (ADR-0012 D2).
+
+    The anchor is a SWEPT STRATEGY PARAMETER (D4), never a vocabulary bit — the
+    three are mutually exclusive per strategy, so modelling them as bits would
+    triple the 11-bit Fib group for zero analytical gain (the D4/D66 leanness
+    anti-pattern). It lives HERE (the pure leaf ``strategies.types`` module,
+    already imported by ``brutex.engine.*``) rather than in
+    ``strategies.fib_definitions`` so the brute-force engine can thread it as a
+    grid axis without pulling ``fib_definitions``' ``dashboard.combo_decoder``
+    import into the engine's runtime graph (the strict per-module
+    ``--cov=brutex.engine`` gate keeps that wheel out). ``fib_definitions``
+    re-exports this same enum (COMMON — one source of truth; CLAUDE.md §11).
+    """
+
+    #: Prev-day High/Low range (``prev_day_ohlc.lookup_prev_day_ohlc``).
+    PREV_DAY = "prev_day"
+    #: Trailing 5-session High/Low range (``weekly_anchors.rolling_weekly_anchor``).
+    ROLLING_WEEKLY = "rolling_weekly"
+    #: Last completed ISO week's High/Low (``weekly_anchors.weekly_static_anchor``).
+    WEEKLY_STATIC = "weekly_static"
 
 
 @dataclass(frozen=True, slots=True)

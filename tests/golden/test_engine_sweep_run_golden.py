@@ -62,6 +62,10 @@ _PARAMS: dict[str, object] = {
     "tp_paisa": 50,
     "prior_n": 3,
     "proximity_bps": None,
+    # DEC-NIFTY-FIB-AXIS-001: the swept Fib anchor is now folded into the params
+    # layout (its string enum value); the default prev-day sweep carries this key
+    # UNCONDITIONALLY, so the persisted run-identity matches this oracle dict.
+    "fib_anchor": "prev_day",
     "start_equity_paisa": 10_000_000,
 }
 
@@ -128,8 +132,10 @@ def _run(tmp_path: Path, tag: str) -> SweepRunSummary:
 #: The hand-pinned BLAKE3 run-identity of mask 0b101 under the fixed context.
 #: Re-locked for DEC-VOCAB-U128-CODEGEN-001: the run-id encodes the mask as
 #: ``mask:%032x`` (u128, 32 hex) instead of ``%016x`` (u64, 16 hex), so the
-#: BLAKE3 input — and thus the digest — moved by design.
-_GOLDEN_RUN_ID = "1e0a9b9856cd756e2462ff7d6676116cebc39a22c4c31fed9c2bcaccf6e1c617"
+#: BLAKE3 input — and thus the digest — moved by design. Re-locked AGAIN for
+#: DEC-NIFTY-FIB-AXIS-001: the params layout gained the ``fib_anchor`` key (its
+#: string enum value), so the digest moved by design.
+_GOLDEN_RUN_ID = "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
 
 
 def test_golden_run_id_is_byte_stable() -> None:
@@ -147,7 +153,9 @@ def test_golden_run_id_is_byte_stable() -> None:
 # for DEC-VOCAB-U128-CODEGEN-001: the u128 mask is persisted as two Int64 limb
 # columns (mask_bits_lo/mask_bits_hi) replacing the single mask_bits Int64 column,
 # and the run-id encoding widened to %032x — both move the deterministic hash.
-_GOLDEN_CONTENT_HASH = "6fc0fda6782bc921ca054e0ff26f9286cdd2df31f59463ae331c83394391b270"
+# Re-locked AGAIN for DEC-NIFTY-FIB-AXIS-001: the ``fib_anchor`` key entered the
+# params layout, so each persisted row's run_id (and thus the store bytes) moved.
+_GOLDEN_CONTENT_HASH = "b21c8e8709feed280555eb88da74d7fc116fad9434a980ec3850e140f09abb47"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

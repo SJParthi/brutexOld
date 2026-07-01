@@ -501,6 +501,10 @@ def plan_expected_stores(
                     fib_proximity_bps=cell.proximity_bps[2],
                 )
             ),
+            # The refined cell's Fib anchor (DEC-NIFTY-FIB-AXIS-001) — round-tripped
+            # from the manifest so the reconstructed tuple's run_id re-derives at
+            # its ORIGINATING anchor (a non-prev-day cell would otherwise mismatch).
+            fib_anchor=cell.fib_anchor,
         )
         plan[tuple_store_path(root, cell_tuple, train_grid)] = (cell_tuple, train_grid, False)
     return plan
@@ -542,6 +546,7 @@ def _verify_store_rows(
         prior_n=cfg.prior_n,
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
+        fib_anchor=cfg.fib_anchor,
     )
     expected_label = _direction_label(tuple_.direction)
     bits_mask = 0

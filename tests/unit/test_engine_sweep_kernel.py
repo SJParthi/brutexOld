@@ -47,7 +47,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import Side
+from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -200,19 +200,22 @@ class TestResidentSweepKernel:
 class _FakeKernel:
     """A stand-in kernel so cache tests assert build-once without a real build."""
 
-    def __init__(self, bars: object, *, proximity: object, prior_n: int) -> None:
+    def __init__(
+        self, bars: object, *, proximity: object, prior_n: int, fib_anchor: object
+    ) -> None:
         self.bars = bars
         self.proximity = proximity
         self.prior_n = prior_n
+        self.fib_anchor = fib_anchor
 
 
 def _fake_builder() -> tuple[list[int], object]:
     """Return ``(call_log, builder)`` — the builder appends 1 per build call."""
     calls: list[int] = []
 
-    def build(bars: object, *, proximity: object, prior_n: int) -> _FakeKernel:
+    def build(bars: object, *, proximity: object, prior_n: int, fib_anchor: object) -> _FakeKernel:
         calls.append(1)
-        return _FakeKernel(bars, proximity=proximity, prior_n=prior_n)
+        return _FakeKernel(bars, proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor)
 
     return calls, build
 
@@ -244,12 +247,22 @@ class TestResidentKernelCache:
             {"tf_label": "5m"},
             {"proximity": ProximityParams(5, 5, 5)},
             {"prior_n": 4},
+            # DEC-NIFTY-FIB-AXIS-001: the Fib anchor is part of the key — the
+            # bar_bits matrix is anchor-specific, so a different anchor must build
+            # its own kernel, never reuse a stale one (R-1).
+            {"fib_anchor": FibAnchorKind.ROLLING_WEEKLY},
         ],
     )
     def test_each_key_field_distinguishes_kernels(self, differing: dict[str, object]) -> None:
         calls, build = _fake_builder()
         cache = ResidentKernelCache(builder=build)  # type: ignore[arg-type]
-        base = {"instrument": "NIFTY", "tf_label": "1m", "proximity": None, "prior_n": 3}
+        base = {
+            "instrument": "NIFTY",
+            "tf_label": "1m",
+            "proximity": None,
+            "prior_n": 3,
+            "fib_anchor": FibAnchorKind.PREV_DAY,
+        }
         a = cache.get([], **base)  # type: ignore[arg-type]
         b = cache.get([], **{**base, **differing})  # type: ignore[arg-type]
         assert a is not b

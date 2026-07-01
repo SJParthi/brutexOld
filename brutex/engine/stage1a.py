@@ -67,6 +67,7 @@ calendar lives in exactly one place). A new IST date always starts a new day.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -82,7 +83,13 @@ from brutex.indicators.ema import EMAState
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
 from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
+from brutex.indicators.prev_day_ohlc import DailyCandle
 from brutex.money import round_money
+from brutex.strategies.fib_definitions import (
+    ROLLING_WEEKLY_SESSIONS,
+    FibAnchorKind,
+    resolve_fib_anchor_levels,
+)
 from brutex.vocabulary import bits as B  # noqa: N812 — B = bit-position namespace
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
@@ -125,20 +132,54 @@ _HLC3_DIVISOR: Final[Decimal] = Decimal(3)
 _DEFAULT_SESSION_KEY: Final[int] = 0
 
 
-def _anchor_dependent_bits() -> int:
-    """Build the u64 mask of bits that require a prior trading day.
+def _fib_dependent_bits() -> int:
+    """Build the u128 mask of the Group-4 Fib-proximity bits (19-29).
 
-    Groups 2 (pivot proximity), 3 (PDH/PDL), 4 (Fib proximity) and 9 (day
-    type — gap / inside / outside, all relative to the prior day's
-    close/high/low) are undefined until a prior day has completed. These bits
-    are cleared on the first IST day of a stream.
+    These bits depend on the SWEPT Fib anchor (DEC-NIFTY-FIB-AXIS-001). They are
+    cleared on a day whose Fib anchor is cold (no prior daily candle for prev-day;
+    < 5 prior sessions for rolling-weekly; no completed prior ISO week for
+    weekly-static) EVEN WHEN the prev-day pivot/PDH anchor is warm — so a cold
+    rolling-weekly week never fabricates a Fib level (Golden Rule #1) yet keeps its
+    (warm) pivots (R-2).
 
     Returns
     -------
     int
-        u64 bitmask with every anchor-dependent bit set.
+        u128 bitmask with every Group-4 Fib-proximity bit set.
     """
-    anchor_bits = (
+    fib_bits = (
+        B.BIT_NEAR_FIB_0,
+        B.BIT_NEAR_FIB_236,
+        B.BIT_NEAR_FIB_382,
+        B.BIT_NEAR_FIB_50,
+        B.BIT_NEAR_FIB_618,
+        B.BIT_NEAR_FIB_786,
+        B.BIT_NEAR_FIB_100,
+        B.BIT_NEAR_FIB_1272,
+        B.BIT_NEAR_FIB_1618,
+        B.BIT_NEAR_FIB_200,
+        B.BIT_NEAR_FIB_2618,
+    )
+    mask = 0
+    for bit in fib_bits:
+        mask |= 1 << bit
+    return mask
+
+
+def _pivot_dependent_bits() -> int:
+    """Build the u128 mask of the prev-day pivot/PDH/day-type bits.
+
+    Groups 2 (pivot proximity, 6-12), 3 (PDH/PDL, 13-18) and 9 (day type, 48-51)
+    are anchored to the PRIOR completed IST day and are INDEPENDENT of the swept
+    Fib anchor (the Fib axis moves ONLY the Group-4 levels, R-2). They are cleared
+    only when there is no prior day at all (the first day of the stream).
+
+    Returns
+    -------
+    int
+        u128 bitmask with every prev-day pivot/PDH/day-type bit set.
+    """
+    pivot_bits = (
         # Group 2 — pivot proximity (bits 6-12).
         B.BIT_NEAR_PIVOT_P,
         B.BIT_NEAR_PIVOT_R1,
@@ -154,18 +195,6 @@ def _anchor_dependent_bits() -> int:
         B.BIT_CLOSE_BELOW_PDL,
         B.BIT_NEAR_PDH,
         B.BIT_NEAR_PDL,
-        # Group 4 — Fib proximity (bits 19-29).
-        B.BIT_NEAR_FIB_0,
-        B.BIT_NEAR_FIB_236,
-        B.BIT_NEAR_FIB_382,
-        B.BIT_NEAR_FIB_50,
-        B.BIT_NEAR_FIB_618,
-        B.BIT_NEAR_FIB_786,
-        B.BIT_NEAR_FIB_100,
-        B.BIT_NEAR_FIB_1272,
-        B.BIT_NEAR_FIB_1618,
-        B.BIT_NEAR_FIB_200,
-        B.BIT_NEAR_FIB_2618,
         # Group 9 — day type (bits 48-51).
         B.BIT_GAP_UP_DAY,
         B.BIT_GAP_DOWN_DAY,
@@ -173,16 +202,39 @@ def _anchor_dependent_bits() -> int:
         B.BIT_OUTSIDE_DAY,
     )
     mask = 0
-    for bit in anchor_bits:
+    for bit in pivot_bits:
         mask |= 1 << bit
     return mask
 
 
-#: u64 mask of every bit cleared on the first (no-prior-day) IST day.
-ANCHOR_DEPENDENT_MASK: Final[int] = _anchor_dependent_bits()
+#: u128 mask of the Group-4 Fib-proximity bits (cleared on a Fib-cold day).
+FIB_DEPENDENT_MASK: Final[int] = _fib_dependent_bits()
+
+#: u128 mask of the prev-day pivot/PDH/day-type bits (cleared on the first day).
+PIVOT_DEPENDENT_MASK: Final[int] = _pivot_dependent_bits()
+
+#: u128 mask of every bit cleared on the first (no-prior-day) IST day — the union
+#: of the prev-day pivot/PDH/day-type bits AND the Fib-proximity bits. Preserved
+#: (same name + value) so the first-day clear is byte-identical to pre-axis and
+#: the golden fixtures (:mod:`tests.golden.test_engine_nifty_day_golden`) still
+#: pin the exact same matrix.
+ANCHOR_DEPENDENT_MASK: Final[int] = PIVOT_DEPENDENT_MASK | FIB_DEPENDENT_MASK
 
 #: Complement used to keep only the defined bits on the first day.
 _NON_ANCHOR_MASK: Final[int] = ~ANCHOR_DEPENDENT_MASK
+
+#: Complement used to clear ONLY the Fib-proximity bits (a Fib-cold, pivot-warm
+#: day — a cold rolling-weekly / weekly-static week whose prev-day pivots ARE
+#: warm; DEC-NIFTY-FIB-AXIS-001 R-2).
+_NON_FIB_MASK: Final[int] = ~FIB_DEPENDENT_MASK
+
+#: Bounded rolling daily-candle history kept for the two multi-day Fib anchors.
+#: Rolling-weekly needs the trailing 5 completed sessions; weekly-static needs the
+#: last COMPLETED ISO week (up to ~5 sessions in a week strictly before today's).
+#: Keeping the last ``_DAILY_HISTORY_MAX`` completed days covers both with slack
+#: for holiday-dense spans, preserving the O(1)-per-bar SCALABLE property
+#: (Golden Rule #5 / R-4 — never the full O(days) history).
+_DAILY_HISTORY_MAX: Final[int] = ROLLING_WEEKLY_SESSIONS * 3
 
 #: Neutral placeholder anchors used ONLY so :func:`evaluate_atoms` can run on
 #: the first day; every bit they could influence is cleared via
@@ -262,16 +314,35 @@ class _DayOHLC:
         self.close_paisa = close_paisa
 
 
+def _day_ohlc_to_candle(day: date, ohlc: _DayOHLC) -> DailyCandle:
+    """Project a completed :class:`_DayOHLC` into the :class:`DailyCandle` the
+    multi-day Fib anchor primitives consume (one COMMON daily type — the same
+    ``prev_day_ohlc.DailyCandle`` ``rolling_weekly_anchor`` / ``weekly_static_anchor``
+    read; CLAUDE.md §11)."""
+    return DailyCandle(
+        day=day,
+        open_paisa=ohlc.open_paisa,
+        high_paisa=ohlc.high_paisa,
+        low_paisa=ohlc.low_paisa,
+        close_paisa=ohlc.close_paisa,
+    )
+
+
 @dataclass
 class _DayAnchors:
     """The daily-anchor bundle broadcast across one IST day's intraday bars.
 
     ``None`` on the first day of a stream (no prior day yet); otherwise the
-    pivots / Fib derived from the prior completed day.
+    prev-day pivots plus the SWEPT-anchor Fib levels for the day. The pivots are
+    always prev-day (they never move with the Fib axis, R-2); ``fib`` is ``None``
+    when the swept Fib anchor is COLD (a cold rolling-weekly / weekly-static week
+    whose prev-day pivots are nonetheless warm), in which case the builder clears
+    ONLY the Group-4 Fib bits and keeps the (warm) pivots
+    (DEC-NIFTY-FIB-AXIS-001 R-2).
     """
 
     pivots: PivotLevels
-    fib: FibLevels
+    fib: FibLevels | None
 
 
 class Stage1AMatrixBuilder:
@@ -294,6 +365,15 @@ class Stage1AMatrixBuilder:
     prior_n
         Look-back for the prior-bar pattern group (Group 6), ∈ {1, 2, 3, 4}.
         Defaults to 3 (matches :class:`PriorBarHistory`).
+    fib_anchor
+        The SWEPT Fibonacci anchor (DEC-NIFTY-FIB-AXIS-001) the Group-4 Fib
+        proximity bits (19-29) are evaluated against — one of the three families
+        (prev-day / rolling-weekly / weekly-static). Defaults to
+        :attr:`FibAnchorKind.PREV_DAY`, so a builder constructed without this
+        argument is byte-identical to the pre-axis prev-day-only builder
+        (DEFAULT-PRESERVATION — the goldens still pin the same matrix). Only the
+        Group-4 Fib levels move with this anchor; the pivot / PDH / day-type
+        groups stay prev-day-anchored regardless (R-2).
 
     Notes
     -----
@@ -308,9 +388,11 @@ class Stage1AMatrixBuilder:
         self,
         proximity: ProximityParams | None = None,
         prior_n: int = _DEFAULT_PRIOR_N,
+        fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     ) -> None:
         self._proximity = proximity if proximity is not None else ProximityParams()
         self._prior_history = PriorBarHistory(prior_n=prior_n)
+        self._fib_anchor = fib_anchor
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._day_extremes = DayExtremesState()
@@ -328,8 +410,15 @@ class Stage1AMatrixBuilder:
         self._current_day: date | None = None
         # OHLC of the IST day currently being walked (None before the 1st bar).
         self._today_ohlc: _DayOHLC | None = None
-        # OHLC of the most-recently-completed IST day → source of today's anchors.
+        # OHLC of the most-recently-completed IST day → source of today's prev-day
+        # pivot / PDH anchors (unchanged; never moves with the Fib axis).
         self._prev_day_ohlc: _DayOHLC | None = None
+        # Bounded rolling history of completed IST days → source of the multi-day
+        # rolling-weekly / weekly-static Fib anchors (DEC-NIFTY-FIB-AXIS-001). Only
+        # populated for a non-prev-day anchor (prev-day needs only `_prev_day_ohlc`,
+        # so the prev-day path stays byte-identical + allocation-free). Bounded to
+        # `_DAILY_HISTORY_MAX` completed days (LRU-by-insertion, O(1) per bar — R-4).
+        self._daily_history: OrderedDict[date, DailyCandle] = OrderedDict()
         # Anchors broadcast across the current day, or None on the first day.
         self._anchors: _DayAnchors | None = None
 
@@ -453,9 +542,18 @@ class Stage1AMatrixBuilder:
             choch_bearish=choch_bear,
         )
 
-        has_anchors = self._anchors is not None
+        # Two INDEPENDENT warm flags (DEC-NIFTY-FIB-AXIS-001 R-2): the prev-day
+        # pivot/PDH/day-type groups are warm once a prior day exists; the Group-4
+        # Fib group is warm only when the SWEPT Fib anchor also resolved (a cold
+        # rolling-weekly / weekly-static week has warm pivots but a `None` Fib).
+        has_pivot_anchor = self._anchors is not None
+        has_fib_anchor = self._anchors is not None and self._anchors.fib is not None
         pivots = self._anchors.pivots if self._anchors is not None else _PLACEHOLDER_PIVOTS
-        fib = self._anchors.fib if self._anchors is not None else _PLACEHOLDER_FIB
+        fib = (
+            self._anchors.fib
+            if self._anchors is not None and self._anchors.fib is not None
+            else _PLACEHOLDER_FIB
+        )
 
         snapshot = IndicatorSnapshot(
             timestamp_ist=ts_ist,
@@ -475,9 +573,17 @@ class Stage1AMatrixBuilder:
         )
 
         mask = evaluate_atoms(snapshot, self._proximity, self._prior_history)
-        if not has_anchors:
-            # First IST day: anchor-dependent groups are undefined → clear them.
+        if not has_pivot_anchor:
+            # First IST day: EVERY anchor-dependent group (pivots + Fib + PDH +
+            # day-type) is undefined → clear them all (byte-identical to pre-axis).
             mask &= _NON_ANCHOR_MASK
+        elif not has_fib_anchor:
+            # Pivots warm but the swept Fib anchor is COLD (< 5 sessions for
+            # rolling-weekly, no completed prior week for weekly-static): clear
+            # ONLY the Group-4 Fib bits, keeping the (warm) pivots (R-2). Never
+            # reached for a warm prev-day anchor (its Fib is warm whenever pivots
+            # are — both derive from the same single prior day).
+            mask &= _NON_FIB_MASK
 
         # Record this bar's flag AFTER evaluation (close == open → bearish).
         self._prior_history.update(close_paisa > open_paisa)
@@ -513,6 +619,17 @@ class Stage1AMatrixBuilder:
         # The day we were accumulating is now complete → it is the prior day.
         if self._today_ohlc is not None:
             self._prev_day_ohlc = self._today_ohlc
+            # Record the just-completed day into the bounded rolling history — the
+            # source of the multi-day rolling-weekly / weekly-static Fib anchors.
+            # Only needed (and paid) for a non-prev-day anchor; the prev-day path
+            # keeps `_daily_history` empty (byte-identical + allocation-free).
+            if self._fib_anchor is not FibAnchorKind.PREV_DAY and self._current_day is not None:
+                self._daily_history[self._current_day] = _day_ohlc_to_candle(
+                    self._current_day, self._today_ohlc
+                )
+                # Evict the oldest completed day past the bound (O(1) — R-4).
+                while len(self._daily_history) > _DAILY_HISTORY_MAX:
+                    self._daily_history.popitem(last=False)
 
         self._current_day = bar_day
         new_ohlc = _DayOHLC(
@@ -525,9 +642,17 @@ class Stage1AMatrixBuilder:
         self._anchors = self._compute_anchors(bar_day, self._prev_day_ohlc)
         return new_ohlc
 
-    @staticmethod
-    def _compute_anchors(today: date, prev_ohlc: _DayOHLC | None) -> _DayAnchors | None:
-        """Compute pivot / Fib anchors for ``today`` from the prior day's OHLC.
+    def _compute_anchors(self, today: date, prev_ohlc: _DayOHLC | None) -> _DayAnchors | None:
+        """Compute the prev-day pivots + the SWEPT-anchor Fib levels for ``today``.
+
+        The pivots (Groups 2/3/9) are ALWAYS derived from the prior completed day —
+        the Fib axis never moves them (R-2). The Group-4 Fib levels are resolved
+        against the builder's :attr:`_fib_anchor` via the COMMON
+        :func:`~brutex.strategies.fib_definitions.resolve_fib_anchor_levels`
+        dispatcher (never re-implemented here; CLAUDE.md §11 COMMON) — prev-day
+        reads :attr:`_prev_day_ohlc` directly (calendar-free, byte-identical to
+        pre-axis), while rolling-weekly / weekly-static read the bounded
+        :attr:`_daily_history`.
 
         Parameters
         ----------
@@ -540,8 +665,10 @@ class Stage1AMatrixBuilder:
         Returns
         -------
         _DayAnchors | None
-            The pivots + Fib for ``today``, or ``None`` when there is no prior
-            day (the caller then clears the anchor-dependent bits).
+            The pivots + (possibly ``None``) Fib for ``today``, or ``None`` when
+            there is no prior day at all (the caller then clears every
+            anchor-dependent bit). A non-``None`` bundle with ``fib is None`` means
+            the pivots are warm but the swept Fib anchor is cold (R-2).
         """
         if prev_ohlc is None:
             return None
@@ -551,11 +678,20 @@ class Stage1AMatrixBuilder:
             pdl_paisa=prev_ohlc.low_paisa,
             pdc_paisa=prev_ohlc.close_paisa,
         )
-        fib = compute_fib_levels(
-            today,
-            pdh_paisa=prev_ohlc.high_paisa,
-            pdl_paisa=prev_ohlc.low_paisa,
-        )
+        if self._fib_anchor is FibAnchorKind.PREV_DAY:
+            # Calendar-free prev-day Fib straight off the completed prior day —
+            # byte-identical to the pre-axis builder (the goldens still pin it).
+            fib: FibLevels | None = compute_fib_levels(
+                today,
+                pdh_paisa=prev_ohlc.high_paisa,
+                pdl_paisa=prev_ohlc.low_paisa,
+            )
+        else:
+            # Multi-day anchor: dispatch through the COMMON resolver over the
+            # bounded rolling history. Returns None on a cold week (< 5 sessions
+            # for rolling-weekly / no completed prior week for weekly-static) — the
+            # caller then clears ONLY the Group-4 Fib bits, keeping the warm pivots.
+            fib = resolve_fib_anchor_levels(self._fib_anchor, today, self._daily_history)
         return _DayAnchors(pivots=pivots, fib=fib)
 
 
@@ -563,6 +699,7 @@ def build_bar_bits(
     bars: Iterable[CandleBar],
     proximity: ProximityParams | None = None,
     prior_n: int = _DEFAULT_PRIOR_N,
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
 ) -> list[int]:
     """Build the Stage-1A ``bar_bits`` matrix for one ``(instrument, interval)``.
 
@@ -577,13 +714,19 @@ def build_bar_bits(
         Proximity tolerances for the ``near_*`` conditions (defaults to 10 bps).
     prior_n
         Prior-bar pattern look-back ∈ {1, 2, 3, 4} (defaults to 3).
+    fib_anchor
+        The SWEPT Fibonacci anchor (DEC-NIFTY-FIB-AXIS-001). Defaults to
+        :attr:`FibAnchorKind.PREV_DAY` so an unset call is byte-identical to the
+        pre-axis prev-day-only build.
 
     Returns
     -------
     list[int]
-        One u64 condition mask per input bar, in input order (1:1).
+        One u128 condition mask per input bar, in input order (1:1).
     """
-    return Stage1AMatrixBuilder(proximity=proximity, prior_n=prior_n).build(bars)
+    return Stage1AMatrixBuilder(proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor).build(
+        bars
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -897,6 +1040,9 @@ __all__ = [
     "DEFAULT_WF_STEP_DAYS",
     "DEFAULT_WF_TEST_DAYS",
     "DEFAULT_WF_TRAIN_DAYS",
+    "FIB_DEPENDENT_MASK",
+    "PIVOT_DEPENDENT_MASK",
+    "FibAnchorKind",
     "Stage1AMatrixBuilder",
     "WalkForwardFold",
     "WalkForwardSchedule",

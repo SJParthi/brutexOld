@@ -67,7 +67,7 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
-from brutex.strategies.types import Side
+from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -316,7 +316,14 @@ def _row_for(run_id: str, mask: int = 0, direction: str = "bull") -> ResultRow:
     )
 
 
-def _run_id_for(grid: SweepGridConfig, *, sl: int | None, tp: int | None, mask: int = 0) -> str:
+def _run_id_for(
+    grid: SweepGridConfig,
+    *,
+    sl: int | None,
+    tp: int | None,
+    mask: int = 0,
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+) -> str:
     return mask_run_id(
         mask=mask,
         direction="bull",
@@ -329,6 +336,7 @@ def _run_id_for(grid: SweepGridConfig, *, sl: int | None, tp: int | None, mask: 
             prior_n=grid.prior_n,
             proximity=None,
             start_equity_paisa=grid.start_equity_paisa,
+            fib_anchor=fib_anchor,
         ),
         data_snapshot_hash=grid.data_snapshot_hash,
         indicator_version=grid.indicator_version,
@@ -340,10 +348,29 @@ class TestRecoverSurvivorCell:
     def test_recovers_a_non_first_cell_by_identity_match(self) -> None:
         grid = _grid(stop_losses=[80, 100], take_profits=[50, 120])
         run_id = _run_id_for(grid, sl=100, tp=120)
-        assert recover_survivor_cell(_row_for(run_id), grid) == (100, 120, None)
+        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001);
+        # the default prev-day grid recovers PREV_DAY.
+        assert recover_survivor_cell(_row_for(run_id), grid) == (
+            100,
+            120,
+            None,
+            FibAnchorKind.PREV_DAY,
+        )
+
+    def test_recovers_a_non_prev_day_anchor_cell(self) -> None:
+        # A survivor swept under a NON-prev-day anchor recovers THAT anchor —
+        # proving the anchor is part of the identity re-derivation (Golden Rule #4).
+        grid = _grid(fib_anchors=[FibAnchorKind.PREV_DAY, FibAnchorKind.ROLLING_WEEKLY])
+        run_id = _run_id_for(grid, sl=80, tp=50, fib_anchor=FibAnchorKind.ROLLING_WEEKLY)
+        assert recover_survivor_cell(_row_for(run_id), grid) == (
+            80,
+            50,
+            None,
+            FibAnchorKind.ROLLING_WEEKLY,
+        )
 
     def test_unmatchable_row_raises(self) -> None:
-        with pytest.raises(Stage3WireError, match="no \\(sl × tp × proximity\\) cell"):
+        with pytest.raises(Stage3WireError, match="no \\(sl × tp × proximity × fib_anchor\\) cell"):
             recover_survivor_cell(_row_for("ab" * 32), _grid())
 
     def test_matched_cell_with_disabled_sl_leg_raises(self) -> None:

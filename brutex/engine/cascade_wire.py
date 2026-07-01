@@ -90,6 +90,7 @@ import structlog
 
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.models import BruteXError
+from brutex.strategies.types import FibAnchorKind
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -296,6 +297,12 @@ class Stage3CellRecord:
     tp_paisa: int
     proximity_bps: tuple[int, int, int] | None
     rel_path: str | None = None
+    #: The swept Fib-anchor family this refined cell was evaluated against
+    #: (DEC-NIFTY-FIB-AXIS-001). An additive field (default prev-day) so a
+    #: pre-axis manifest parses byte-compatibly (the ``rel_path`` precedent); it
+    #: must round-trip so a non-prev-day refined cell's ``run_id`` re-derives on
+    #: verification. Stored as the string enum value.
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label"):
@@ -1168,6 +1175,7 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
                 "tp_paisa": cell.tp_paisa,
                 "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
                 "rel_path": cell.rel_path,
+                "fib_anchor": cell.fib_anchor.value,
             }
             for cell in record.refined_cells
         ],
@@ -1196,6 +1204,13 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
                     ),
                     # Absent on pre-DEC-ROW-PROVENANCE-001 manifests (additive parse).
                     rel_path=(None if cell.get("rel_path") is None else str(cell["rel_path"])),
+                    # Absent on pre-DEC-NIFTY-FIB-AXIS-001 manifests (additive
+                    # parse): default to prev-day, the only anchor those sweeps ran.
+                    fib_anchor=(
+                        FibAnchorKind.PREV_DAY
+                        if cell.get("fib_anchor") is None
+                        else FibAnchorKind(str(cell["fib_anchor"]))
+                    ),
                 )
             )
         hash_raw = raw["train_snapshot_hash"]

@@ -106,7 +106,7 @@ from brutex.engine.trial_stats import (
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 from brutex.models import BruteXError
 from brutex.ranking import RankedCombo
-from brutex.strategies.types import Side
+from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -276,16 +276,20 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
 
 def recover_survivor_cell(
     row: ResultRow, grid: SweepGridConfig
-) -> tuple[int, int, ProximityParams | None]:
-    """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity)`` by identity match.
+) -> tuple[int, int, ProximityParams | None, FibAnchorKind]:
+    """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` by identity match.
 
     A persisted row folds its trade-sim params into the BLAKE3 ``run_id`` but
     does not store them as columns, so the survivor's refinement start cell is
     re-derived (review F4): for each point of the grid's ``stop_losses ×
-    take_profits × proximities`` product, the 9-field
+    take_profits × proximities × fib_anchors`` product, the 9-field
     :func:`~brutex.engine.sweep_run.mask_run_id` is recomputed from the row's
     own labels + the grid's shared context and compared to ``row.run_id``. The
-    first (cryptographically unique) match is the cell — never guessed.
+    first (cryptographically unique) match is the cell — never guessed. The Fib
+    anchor is part of the product (DEC-NIFTY-FIB-AXIS-001) because it now enters
+    the run-identity via ``canonical_trade_params``, so the row's ``run_id`` only
+    reproduces at the ORIGINATING anchor — and Stage-3 must refine that survivor
+    against ITS OWN anchor's Fib levels (never a stale prev-day one).
 
     Parameters
     ----------
@@ -296,8 +300,8 @@ def recover_survivor_cell(
 
     Returns
     -------
-    tuple[int, int, ProximityParams | None]
-        The survivor's ``(sl_paisa, tp_paisa, proximity)`` start cell.
+    tuple[int, int, ProximityParams | None, FibAnchorKind]
+        The survivor's ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` start cell.
 
     Raises
     ------
@@ -307,8 +311,8 @@ def recover_survivor_cell(
         Stage-3 refinement needs an on-grid numeric start point (the enabled
         config forbids ``None`` axes up front; this guards direct callers).
     """
-    for sl, tp, proximity in itertools.product(
-        grid.stop_losses, grid.take_profits, grid.proximities
+    for sl, tp, proximity, fib_anchor in itertools.product(
+        grid.stop_losses, grid.take_profits, grid.proximities, grid.fib_anchors
     ):
         params = canonical_trade_params(
             sl_paisa=sl,
@@ -316,6 +320,7 @@ def recover_survivor_cell(
             prior_n=grid.prior_n,
             proximity=proximity,
             start_equity_paisa=grid.start_equity_paisa,
+            fib_anchor=fib_anchor,
         )
         candidate = mask_run_id(
             mask=row.mask_bits,
@@ -334,11 +339,11 @@ def recover_survivor_cell(
                     f"recover_survivor_cell: run {row.run_id[:16]} matched a cell with a "
                     f"disabled leg (sl={sl}, tp={tp}) — Stage-3 needs numeric on-grid legs"
                 )
-            return sl, tp, proximity
+            return sl, tp, proximity, fib_anchor
     raise Stage3WireError(
-        f"recover_survivor_cell: no (sl × tp × proximity) cell of this grid reproduces "
-        f"run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row does not belong "
-        f"to this grid's identity context"
+        f"recover_survivor_cell: no (sl × tp × proximity × fib_anchor) cell of this grid "
+        f"reproduces run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row does not "
+        f"belong to this grid's identity context"
     )
 
 
@@ -625,7 +630,7 @@ def run_stage3_pass(
     skipped_empty_train = 0
     cell_rows: dict[SweepTuple, list[ResultRow]] = {}
     cell_sharpes: dict[SweepTuple, dict[str, float | None]] = {}
-    bits_memo: dict[tuple[str, str, ProximityParams | None], Sequence[int]] = {}
+    bits_memo: dict[tuple[str, str, ProximityParams | None, FibAnchorKind], Sequence[int]] = {}
     for key, survivors in leaderboards.items():
         train_bars = train_slices.get((key.instrument, key.tf), ())
         if not train_bars:
@@ -634,11 +639,16 @@ def run_stage3_pass(
         tf = _timeframe_for_label(key.tf, grid)
         for row in survivors:
             side = _side_for_direction(row.direction)
-            start_sl, start_tp, proximity = recover_survivor_cell(row, grid)
-            memo_key = (key.instrument, key.tf, proximity)
+            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(row, grid)
+            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001),
+            # so the memo key + the build carry the recovered anchor — a survivor is
+            # refined against ITS OWN anchor's Group-4 Fib levels, never a stale one.
+            memo_key = (key.instrument, key.tf, proximity, fib_anchor)
             bar_bits = bits_memo.get(memo_key)
             if bar_bits is None:
-                bar_bits = build_bar_bits(train_bars, proximity=proximity, prior_n=grid.prior_n)
+                bar_bits = build_bar_bits(
+                    train_bars, proximity=proximity, prior_n=grid.prior_n, fib_anchor=fib_anchor
+                )
                 bits_memo[memo_key] = bar_bits
             report = refine_mask(
                 mask_run_id=row.run_id,
@@ -671,6 +681,7 @@ def run_stage3_pass(
                         prior_n=grid.prior_n,
                         proximity=proximity,
                         start_equity_paisa=grid.start_equity_paisa,
+                        fib_anchor=fib_anchor,
                     ),
                     data_snapshot_hash=train_hash,
                     indicator_version=grid.indicator_version,
@@ -705,6 +716,7 @@ def run_stage3_pass(
                     sl_paisa=refined_eval.sl_paisa,
                     tp_paisa=refined_eval.tp_paisa,
                     proximity=proximity,
+                    fib_anchor=fib_anchor,
                 )
                 cell_rows.setdefault(cell, []).append(refined_row)
                 # Raw float|None Sharpe keyed by refined_id — the V-moment
@@ -910,6 +922,7 @@ def stage3_manifest_record(
                     )
                 ),
                 rel_path=rel_path,
+                fib_anchor=tuple_.fib_anchor,
             )
         )
     return Stage3ManifestRecord(

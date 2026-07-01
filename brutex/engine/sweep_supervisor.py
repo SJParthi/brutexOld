@@ -279,6 +279,10 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
             else [p.pivot_proximity_bps, p.pdh_pdl_proximity_bps, p.fib_proximity_bps]
             for p in grid.proximities
         ],
+        # The swept Fib-anchor axis distinguishes one grid from another
+        # (DEC-NIFTY-FIB-AXIS-001): a grid that adds/removes an anchor is a
+        # different sweep, so its checkpoint must not silently resume the old work.
+        "fib_anchors": [a.value for a in grid.fib_anchors],
         "mode": grid.mode,
         "data_snapshot_hash": grid.data_snapshot_hash,
         "indicator_version": grid.indicator_version,
@@ -343,6 +347,12 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
         "sl_paisa": tuple_.sl_paisa,
         "tp_paisa": tuple_.tp_paisa,
         "proximity_bps": proximity_bps,
+        # The swept Fib anchor is part of the tuple identity (DEC-NIFTY-FIB-AXIS-001):
+        # two tuples differing ONLY by anchor evaluate DIFFERENT Fib levels, so a
+        # cache-skip keyed without it would FALSELY skip the second anchor as
+        # already-done (a correctness break — the cache-skip path has no
+        # preload-and-reflush safety net; P0-1 of the §9 hostile review).
+        "fib_anchor": tuple_.fib_anchor.value,
         "prior_n": grid.prior_n,
         "start_equity_paisa": grid.start_equity_paisa,
         "mode": grid.mode,
