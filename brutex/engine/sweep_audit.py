@@ -584,9 +584,6 @@ def _read_tail_entry(path: Path) -> tuple[SweepAuditEntry | None, bool]:
         else:
             last_committed_line = _last_nonblank_committed_line(buf)
 
-        if last_committed_line is None and pos == 0:
-            last_committed_line = _last_nonblank_committed_line(buf)
-
         if last_committed_line is None:
             return None, torn_tail
 

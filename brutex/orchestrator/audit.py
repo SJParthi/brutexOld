@@ -742,11 +742,6 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
             # file: the first fragment is a complete line too.
             last_committed_line = _last_nonblank_committed_line(buf)
 
-        if last_committed_line is None and pos == 0:
-            # We broke on a newline but found no non-blank line after it; the
-            # first fragment (bytes before that newline) is still a candidate.
-            last_committed_line = _last_nonblank_committed_line(buf)
-
         if last_committed_line is None:
             return None, torn_tail
 
