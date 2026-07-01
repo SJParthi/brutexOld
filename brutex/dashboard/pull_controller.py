@@ -613,8 +613,9 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     dashboard live spot pull now runs on Groww — the J2-equivalent the dashboard
     never got (J3 only swapped the credentials gate). Mirrors the CLI's
     :func:`~brutex.cli._build_live_groww_spot` exactly (CLAUDE.md §11 COMMON):
-    resolve the Groww TOTP credentials (env-first, file-fallback) via
-    :func:`~brutex.config.credentials.resolve_groww_file_credentials`, build a
+    resolve the Groww TOTP credentials from AWS Parameter Store (the SOLE source,
+    DEC-AWS-ONLY-CREDS-001) via
+    :func:`~brutex.config.credentials.resolve_groww_aws_credentials`, build a
     live SDK-backed client through the
     :func:`~brutex.adapters.groww.live.build_live_client` composition seam, load
     the Groww instrument master into the O(1)
@@ -635,14 +636,14 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     from brutex.adapters.groww.constants import resolve_pool_size
     from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
     from brutex.adapters.groww.live import build_live_pool
-    from brutex.config.credentials import resolve_groww_file_credentials
+    from brutex.config.credentials import resolve_groww_aws_credentials
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.raw_integrity_store import make_capture_hook_factory
     from brutex.data.sink import ParquetBarSink
 
     del instruments  # the Groww adapter carries the whole master index (O(1) resolve)
-    file_creds = resolve_groww_file_credentials()
-    creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
+    aws_creds = resolve_groww_aws_credentials()
+    creds = GrowwCredentials(api_key=aws_creds.api_key, totp_secret=aws_creds.totp_secret)
     # Multi-connection pool (DEC-GROWW-CLIENT-POOL-001): K independent SDK connections so the
     # fan-out worker threads stop serialising on ONE socket (the measured avg-0.49-in-flight
     # → ~3.4 r/s starve). The SHARED session RateController still caps the AGGREGATE rate; the

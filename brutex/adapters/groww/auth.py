@@ -25,8 +25,7 @@ is emitted on a ``groww.token.issuance_failed`` structlog event so it lands in
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -74,37 +73,6 @@ def _real_token_factory(api_key: str, totp: str) -> str:  # pragma: no cover —
     from growwapi import GrowwAPI  # type: ignore[import-not-found]
 
     return str(GrowwAPI.get_access_token(api_key=api_key, totp=totp))
-
-
-def resolve_groww_credentials(env: Mapping[str, str] | None = None) -> GrowwCredentials:
-    """Read Groww TOTP credentials from the environment.
-
-    Raises :class:`GrowwAuthError` (naming the missing var(s), never their values)
-    if either is absent/blank.
-    """
-    source = os.environ if env is None else env
-    api_key = (source.get(ENV_API_KEY) or "").strip()
-    totp_secret = (source.get(ENV_TOTP_SECRET) or "").strip()
-    missing = [
-        name
-        for name, value in ((ENV_API_KEY, api_key), (ENV_TOTP_SECRET, totp_secret))
-        if not value
-    ]
-    if missing:
-        raise GrowwAuthError(
-            f"missing Groww credentials: {missing}",
-            safe_message=f"missing Groww credentials: {missing}",
-        )
-    return GrowwCredentials(api_key=api_key, totp_secret=totp_secret)
-
-
-def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
-    """True if both Groww credentials are present (dry-run gate; never raises)."""
-    try:
-        resolve_groww_credentials(env)
-    except GrowwAuthError:
-        return False
-    return True
 
 
 def _sanitize_reason(text: str, *secrets: str) -> str:
@@ -224,6 +192,4 @@ __all__ = [
     "GrowwCredentials",
     "TokenInfo",
     "get_access_token",
-    "groww_creds_present",
-    "resolve_groww_credentials",
 ]

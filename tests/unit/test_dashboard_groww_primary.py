@@ -1,15 +1,12 @@
-"""Dashboard Groww-PRIMARY spot-pull gate (PR-J3, DEC-DHAN-GROWW-REMIGRATE-001).
+"""Dashboard Groww-PRIMARY spot-pull gate (DEC-AWS-ONLY-CREDS-001).
 
-PR-J3 of the Dhan → Groww cutover (ADR-0009) flipped the dashboard DEFAULT to
-Groww: the live SPOT-pull readiness gate keys on
-:func:`brutex.config.credentials.groww_credentials_present`. PR-J4c then darkened
-the vestigial Dhan surface (the options pull, the Dhan credentials routes, and
-the ``/credentials`` redirect were removed), so this file now covers only the
-surviving Groww spot-pull gate.
-
-These route tests prove the gate end-to-end against the REAL credential
-resolution — credentials are saved to an isolated tmp file (never the function
-monkeypatched), so the test exercises the production resolution path.
+The live SPOT-pull readiness gate keys on
+:func:`brutex.config.credentials.groww_credentials_present`, which now resolves the Groww
+credentials from AWS Parameter Store — the SOLE source (the in-app credentials webpage +
+the env-var / local-file paths were removed). These route tests prove the gate end-to-end
+against the REAL ``groww_credentials_present`` → ``resolve_groww_aws_credentials`` path, with
+the AWS reader (``load_groww_aws_credentials``) monkeypatched to an in-memory fake so the
+test needs NO real AWS and NO network — present ⇒ live, absent (fail-fast) ⇒ dry-run.
 
 The injected ``pull_all_spot`` is an offline fake — NEVER a real network call —
 so the live (``dry_run=False``) branch is exercised without touching Groww.
@@ -31,13 +28,7 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store pull routes need duckdb")
 
-from brutex.config.credentials import (
-    ENV_ACCESS_TOKEN,
-    ENV_CLIENT_ID,
-    ENV_CREDENTIALS_FILE,
-    ENV_GROWW_API_KEY,
-    ENV_GROWW_TOTP_SECRET,
-)
+from brutex.config.credentials import CredentialsError, GrowwFileCredentials
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -114,31 +105,40 @@ def store(tmp_path: Path) -> Iterator[InstrumentStore]:
     instrument_store.close()
 
 
+#: Module-level toggle the fake AWS reader consults so a test can flip creds present/absent
+#: WITHOUT rebuilding the app (the reader is monkeypatched once in the fixture).
+_AWS_CREDS_PRESENT = {"on": False}
+
+
+def _fake_aws_loader() -> GrowwFileCredentials:
+    """Stand-in for ``load_groww_aws_credentials`` — present ⇒ creds, absent ⇒ fail-fast."""
+    if not _AWS_CREDS_PRESENT["on"]:
+        raise CredentialsError("no Groww credentials in AWS Parameter Store (test)")
+    return GrowwFileCredentials(api_key=_GROWW_API_KEY, totp_secret=_GROWW_TOTP)
+
+
 @pytest.fixture
 def client(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Iterator[TestClient]:
-    """A wired TestClient with an isolated, empty credentials file + offline pulls.
+    """A wired TestClient with the AWS creds reader faked (absent by default) + offline pulls.
 
-    Both vendors' env vars are cleared so the gate resolves ONLY from the
-    isolated tmp file the routes write — making every assertion deterministic
-    regardless of the ambient CI environment.
+    ``load_groww_aws_credentials`` is monkeypatched to :func:`_fake_aws_loader`, so the
+    ``groww_credentials_present`` gate resolves ONLY from the in-memory toggle — making every
+    assertion deterministic regardless of the ambient CI environment and needing NO real AWS.
     """
-    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
-    for var in (ENV_GROWW_API_KEY, ENV_GROWW_TOTP_SECRET, ENV_ACCESS_TOKEN, ENV_CLIENT_ID):
-        monkeypatch.delenv(var, raising=False)
+    _AWS_CREDS_PRESENT["on"] = False
+    monkeypatch.setattr(
+        "brutex.config.credentials_aws.load_groww_aws_credentials", _fake_aws_loader
+    )
     monkeypatch.setattr(app_module, "pull_all_spot", _fake_pull_all_spot)
     with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
         yield c
 
 
 def _save_groww(client: TestClient) -> None:
-    """Persist the fake Groww credentials to the isolated tmp file."""
-    resp = client.post(
-        "/api/v1/groww/credentials",
-        json={"api_key": _GROWW_API_KEY, "totp_secret": _GROWW_TOTP},
-    )
-    assert resp.status_code == 200
+    """Flip the fake AWS reader to report the Groww credentials PRESENT (Lambda-seeded)."""
+    _AWS_CREDS_PRESENT["on"] = True
 
 
 def _drain_job(client: TestClient, *, timeout: float = 10.0) -> None:
@@ -208,21 +208,31 @@ def test_spot_interval_param_is_ignored_always_one_minute(client: TestClient) ->
 
 
 def test_no_secret_leaks_across_the_groww_spot_flow(client: TestClient) -> None:
-    """Save the Groww creds + run a spot pull — no secret leaks into any response body."""
+    """AWS creds present + run a spot pull — no secret leaks into any response body."""
     secrets = (_GROWW_API_KEY, _GROWW_TOTP)
+    _save_groww(client)  # AWS reports the creds present (no in-app credential surface exists)
     bodies: list[str] = []
-    bodies.append(
-        client.post(
-            "/api/v1/groww/credentials",
-            json={"api_key": _GROWW_API_KEY, "totp_secret": _GROWW_TOTP},
-        ).text
-    )
-    bodies.append(client.get("/api/v1/groww/credentials/status").text)
 
     spot = client.post("/api/v1/universe/pull-all", params={"kind": "index"})
+    assert spot.json()["dry_run"] is False
     bodies.append(spot.text)
     _drain_job(client)
+    # The pull-progress snapshot must not echo a credential value either.
+    bodies.append(client.get("/api/v1/universe/pull-progress").text)
 
     for body in bodies:
         for secret in secrets:
             assert secret not in body, "a credential value leaked into a response body"
+
+
+def test_credentials_routes_are_gone(client: TestClient) -> None:
+    """The in-app credentials webpage + its routes were removed (DEC-AWS-ONLY-CREDS-001)."""
+    assert client.get("/groww-credentials").status_code == 404
+    assert client.get("/api/v1/groww/credentials/status").status_code == 404
+    assert (
+        client.post(
+            "/api/v1/groww/credentials",
+            json={"api_key": _GROWW_API_KEY, "totp_secret": _GROWW_TOTP},
+        ).status_code
+        == 404
+    )

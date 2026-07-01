@@ -25,9 +25,11 @@ from brutex.dashboard import app as dashboard_app
 from brutex.dashboard.nav import NAV_LINKS, render_topnav
 
 #: Every page that carries the canonical top-nav → its pure render helper.
+#: The ``/groww-credentials`` page was REMOVED with the whole credentials webpage
+#: (DEC-AWS-ONLY-CREDS-001 — Groww creds now live ONLY in AWS Parameter Store), so
+#: it is neither guarded here nor exempt: its render helper no longer exists.
 _TOPNAV_PAGES = {
     "/universe": dashboard_app._render_universe_html,
-    "/groww-credentials": dashboard_app._render_groww_credentials_html,
     "/db": dashboard_app._render_db_html,
     "/coverage": dashboard_app._render_coverage_html,
     "/movers": dashboard_app._render_movers_html,
@@ -43,8 +45,8 @@ _TOPNAV_PAGES = {
 #: explicitly (not silently skipped) so the meta-guard stays exhaustive:
 #:  - ``_render_index_html`` — the operator dashboard uses in-page tabs, not topnav.
 #:  - ``_render_welcome_html`` — the marketing landing page has its own nav + footer.
-#: (The orphaned Dhan-era ``credentials.html`` + its loaders were deleted in
-#: DEC-DASHBOARD-CREDS-ORPHAN-DELETE-001 — the live page is ``/groww-credentials``.)
+#: (The in-app Groww credentials page + its render helper were deleted in
+#: DEC-AWS-ONLY-CREDS-001 — credentials now live ONLY in AWS Parameter Store.)
 _EXEMPT_HELPERS = {
     "_render_index_html",
     "_render_welcome_html",

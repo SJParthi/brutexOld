@@ -103,9 +103,17 @@ def _spot_headline(client: TestClient) -> dict[str, int]:
     return r.json()["headline"]
 
 
-def test_single_symbol_pull_invalidates_coverage_cache(store: InstrumentStore) -> None:
+def test_single_symbol_pull_invalidates_coverage_cache(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A one-off /universe/pull must refresh /coverage/spot (the stale-empty bug)."""
     lake_root = Path(store.path).parent
+    # Pin the readiness gate to "no creds" so the pull runs OFFLINE (dry-run) — the Groww
+    # credentials now resolve ONLY from AWS Parameter Store (DEC-AWS-ONLY-CREDS-001), and
+    # this test must never touch AWS / the network (it writes the bars directly below).
+    import brutex.dashboard.app as app_module
+
+    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
     # ttl_floor_s=0.0 → no throttle, so the post-pull re-read is deterministic.
     cache = SummaryCache(ttl_floor_s=0.0)
     app = build_app(DashboardState(), instrument_store=store, summary_cache=cache)

@@ -676,11 +676,12 @@ jobs:
           # DEC-CREDS-JWT-SHAPE-001: the secure Dhan credentials store —
           # save/load/resolve/preview + the new token_shape_problem JWT-shape
           # guard that rejects a truncated paste (the DH-906 root cause) at the
-          # web-form save boundary. 100% line+branch. DEC-GROWW-DASHBOARD-CREDS-PROBE-001
-          # added the parallel "groww" section (read-merge-write coexistence), so the
-          # gate now also runs test_groww_credentials.py to keep the module at 100%.
+          # web-form save boundary. 100% line+branch. DEC-AWS-ONLY-CREDS-001
+          # removed the Groww file/env credential path (creds now live ONLY in AWS
+          # Parameter Store), so the "groww" section test is gone; the gate now runs
+          # test_credentials_aws.py (the AWS-only reader) to keep the module at 100%.
           if compgen -G "tests/unit/test_credentials.py" > /dev/null; then
-            pytest --cov=brutex.config.credentials --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials.py tests/unit/test_groww_credentials.py
+            pytest --cov=brutex.config.credentials --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials.py tests/unit/test_credentials_aws.py
           else
             echo "(brutex.config.credentials test file not present yet — gate inactive)"
           fi

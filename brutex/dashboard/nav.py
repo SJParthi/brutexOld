@@ -1,13 +1,15 @@
 """Single source of truth for the dashboard top navigation.
 
 DEC-DASHBOARD-NAV-UNIFY-001 — every served dashboard page exposes the SAME
-top navigation: Operator · Universe · Credentials · Database · Coverage ·
-Movers · Results · Reports. The leading ``Operator`` link points at the live
-``/`` route (the rich operator dashboard rendering ``v29.html``), making it
-reachable from every page (DEC-MOVERS-FULL-CONTRACT-NAME-001 bundle, #986).
-Historically each template hand-coded its own ``<nav>``, which let the
-``/groww-credentials`` page silently drift (a dead ``/credentials`` link, a
-missing ``Reports`` link, a renamed "Groww" tab — DEC-DASHBOARD-NAV-CREDS-
+top navigation: Operator · Universe · Database · Coverage · Movers · Results ·
+Reports. The leading ``Operator`` link points at the live ``/`` route (the rich
+operator dashboard rendering ``v29.html``), making it reachable from every page
+(DEC-MOVERS-FULL-CONTRACT-NAME-001 bundle, #986). The in-app "Credentials" link
+(``/groww-credentials``) was REMOVED with the whole credentials webpage — Groww
+credentials now live ONLY in AWS Parameter Store (DEC-AWS-ONLY-CREDS-001), so
+there is no in-app credential surface to link. Historically each template
+hand-coded its own ``<nav>``, which let pages silently drift (a dead
+``/credentials`` link, a missing ``Reports`` link — DEC-DASHBOARD-NAV-CREDS-
 RECONCILE-001). This module makes the link set CANONICAL in exactly one place;
 ``tests/unit/test_dashboard_nav_consistency.py`` renders every page and fails CI
 the moment a nav diverges from :data:`NAV_LINKS`, so the drift class cannot
@@ -33,7 +35,6 @@ class NavLink(NamedTuple):
 NAV_LINKS: tuple[NavLink, ...] = (
     NavLink("/", "Operator"),
     NavLink("/universe", "Universe"),
-    NavLink("/groww-credentials", "Credentials"),
     NavLink("/db", "Database"),
     NavLink("/coverage", "Coverage"),
     NavLink("/movers", "Movers"),

@@ -19,33 +19,6 @@ from brutex.adapters.groww.errors import (
 )
 from structlog.testing import capture_logs
 
-_ENV = {auth.ENV_API_KEY: "key-123", auth.ENV_TOTP_SECRET: "secret-xyz"}
-
-
-def test_resolve_credentials_from_env() -> None:
-    creds = auth.resolve_groww_credentials(_ENV)
-    assert creds.api_key == "key-123"
-    assert creds.totp_secret == "secret-xyz"
-
-
-@pytest.mark.parametrize(
-    "env",
-    [
-        {},
-        {auth.ENV_API_KEY: "k"},  # missing secret
-        {auth.ENV_TOTP_SECRET: "s"},  # missing key
-        {auth.ENV_API_KEY: "  ", auth.ENV_TOTP_SECRET: "s"},  # blank key
-    ],
-)
-def test_resolve_credentials_missing_raises(env: dict[str, str]) -> None:
-    with pytest.raises(GrowwAuthError, match="missing Groww credentials"):
-        auth.resolve_groww_credentials(env)
-
-
-def test_creds_present_true_and_false() -> None:
-    assert auth.groww_creds_present(_ENV) is True
-    assert auth.groww_creds_present({}) is False
-
 
 def test_get_access_token_happy_path() -> None:
     creds = auth.GrowwCredentials(api_key="key-123", totp_secret="secret-xyz")

@@ -49,7 +49,6 @@ from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import structlog
-from pydantic import BaseModel
 
 from brutex.config.credentials import groww_credentials_present
 from brutex.dashboard.completeness import (
@@ -221,24 +220,6 @@ _LOG = structlog.get_logger("brutex.dashboard")
 #: A structured-query filter is the 3-token form ``column:op:value`` (the
 #: value may itself contain ``:``). Named to avoid a PLR2004 magic number.
 _FILTER_TOKEN_COUNT = 3
-
-
-# pydantic v2 BaseModel trips pyright strict `reportUntypedBaseClass` — a known
-# false positive (the base IS typed); silence per-site so the gate stays honest
-# everywhere else (DEC-PYRIGHT-UNMASK-001).
-class GrowwCredentialsIn(BaseModel):  # pyright: ignore[reportUntypedBaseClass]
-    """Request body for ``POST /api/v1/groww/credentials``.
-
-    Defined at **module scope** (not inside :func:`build_app`) so FastAPI
-    correctly resolves it as a request-BODY model: a function-local Pydantic
-    model is mis-classified by FastAPI as a query parameter (the 422 bug,
-    DEC-CREDS-422-FIX-001). The api key + TOTP secret are accepted in the BODY
-    (never query params, which leak into access logs) and passed straight to
-    :func:`brutex.config.credentials.save_groww_credentials` — never logged.
-    """
-
-    api_key: str
-    totp_secret: str
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -4676,108 +4657,6 @@ def build_app(
 
         return JSONResponse(await run_in_threadpool(_resolve))
 
-    # ── Groww credentials store + live probe (DEC-DHAN-GROWW-REMIGRATE-001) ──
-    # GrowwCredentialsIn is module-scope (see top of file) so FastAPI resolves
-    # it as a request body, not a query param (DEC-CREDS-422-FIX-001).
-
-    @app.post("/api/v1/groww/credentials")
-    async def api_groww_credentials_set(body: GrowwCredentialsIn) -> JSONResponse:
-        """POST /api/v1/groww/credentials — save the Groww TOTP credentials (mode 0600).
-
-        Accepts the api key + TOTP secret in the request BODY (never query
-        params, which leak into access logs). The body is NOT logged. The save is
-        a read-merge-write (:func:`save_groww_credentials`) so a stored token-style
-        section is preserved. A blank field raises :class:`CredentialsError`,
-        mapped to HTTP 400 naming the field but NEVER its value. Returns only the
-        masked preview — never echoes a value back.
-        """
-        from brutex.config.credentials import (
-            CredentialsError,
-            GrowwFileCredentials,
-            groww_credentials_preview,
-            save_groww_credentials,
-        )
-
-        try:
-            save_groww_credentials(
-                GrowwFileCredentials(api_key=body.api_key, totp_secret=body.totp_secret)
-            )
-        except CredentialsError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(groww_credentials_preview())
-
-    @app.get("/api/v1/groww/credentials/status")
-    async def api_groww_credentials_status() -> JSONResponse:
-        """GET /api/v1/groww/credentials/status — presence + a masked, non-secret preview."""
-        from brutex.config.credentials import groww_credentials_preview
-
-        return JSONResponse(groww_credentials_preview())
-
-    @app.post("/api/v1/groww/credentials/test")
-    async def api_groww_credentials_test() -> JSONResponse:
-        """POST /api/v1/groww/credentials/test — run the live Phase-0 Groww probe.
-
-        Resolves the STORED Groww credentials (env-first, file-fallback), builds
-        a live client via the lazily-imported (monkeypatchable)
-        :func:`brutex.adapters.groww.live.build_live_client`, and runs
-        :func:`brutex.adapters.groww.probe.run_probe`. Returns
-        ``{"results": [...]}`` — each :class:`ProbeResult` as a dict. Missing
-        credentials → 400; the optional ``.[groww]`` extra (growwapi + pyotp)
-        not installed → 400 with an actionable install hint (``ImportError``,
-        DEC-GROWW-CREDS-TEST-IMPORT-400-001); a :class:`GrowwAuthError` → 400 with
-        the redacting ``safe_message``; any other :class:`GrowwError` → 502. No
-        secret value is ever surfaced (every message goes through ``str(exc)``,
-        which is the redacted form for the auth/groww errors).
-        """
-        from dataclasses import asdict
-
-        from brutex.adapters.groww.auth import GrowwCredentials
-        from brutex.adapters.groww.errors import GrowwAuthError, GrowwError
-        from brutex.adapters.groww.live import build_live_client
-        from brutex.adapters.groww.probe import run_probe
-        from brutex.config.credentials import (
-            CredentialsError,
-            resolve_groww_file_credentials,
-        )
-
-        def _run() -> tuple[int, dict[str, object]]:
-            """Resolve the stored Groww creds + run the live probe → ``(status, payload)``."""
-            try:
-                file_creds = resolve_groww_file_credentials()
-            except CredentialsError as exc:
-                return 400, {"detail": str(exc)}
-            creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
-            try:
-                client = build_live_client(creds)
-                results = run_probe(client)
-            except ImportError as exc:
-                # The live probe lazily imports the optional `.[groww]` extra
-                # (growwapi + pyotp). When it is not installed, the raw
-                # ModuleNotFoundError used to escape as a 500 the frontend
-                # mis-rendered as "not valid JSON" — return a clean, actionable
-                # 400 instead (DEC-GROWW-CREDS-TEST-IMPORT-400-001). `str(exc)` is
-                # just "No module named '…'" — no secret value.
-                return 400, {
-                    "detail": (
-                        "Groww live probe needs the optional dependencies — install "
-                        "them with `pip install -e '.[groww]'` (growwapi + pyotp). "
-                        f"({exc})"
-                    )
-                }
-            except GrowwAuthError as exc:
-                return 400, {"detail": str(exc)}
-            except GrowwError as exc:
-                return 502, {"detail": str(exc)}
-            return 200, {"results": [asdict(r) for r in results]}
-
-        status_code, payload = await run_in_threadpool(_run)
-        return JSONResponse(payload, status_code=status_code)
-
-    @app.get("/groww-credentials", response_class=HTMLResponse)
-    async def groww_credentials_page() -> str:
-        """GET /groww-credentials — the Groww Credentials page (DEC-DHAN-GROWW-REMIGRATE-001)."""
-        return _render_groww_credentials_html()
-
     @app.get("/api/v1/logs")
     async def api_logs(
         lines: int = Query(default=200),
@@ -6121,35 +6000,6 @@ def _resolve_historical_contracts(
     if all_cached:
         return registry.list_contracts()
     return []
-
-
-_GROWW_CREDENTIALS_TEMPLATE_PATH = (
-    Path(__file__).resolve().parent / "templates" / "groww_credentials.html"
-)
-_GROWW_CREDENTIALS_TEMPLATE_CACHE: str | None = None
-
-
-def _load_groww_credentials_template() -> str:
-    """Load + cache the Groww Credentials page template (DEC-DHAN-GROWW-REMIGRATE-001).
-
-    Ships as a package-relative resource at
-    ``brutex/dashboard/templates/groww_credentials.html``. The page POSTs the
-    api key + TOTP secret to ``/api/v1/groww/credentials`` (body, never query),
-    GETs ``/api/v1/groww/credentials/status`` for the masked status line, and
-    POSTs ``/api/v1/groww/credentials/test`` to run the live probe — it never
-    displays a secret value. Loaded once, then served verbatim.
-    """
-    global _GROWW_CREDENTIALS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
-    if _GROWW_CREDENTIALS_TEMPLATE_CACHE is None:
-        _GROWW_CREDENTIALS_TEMPLATE_CACHE = _GROWW_CREDENTIALS_TEMPLATE_PATH.read_text(
-            encoding="utf-8"
-        )
-    return _GROWW_CREDENTIALS_TEMPLATE_CACHE
-
-
-def _render_groww_credentials_html() -> str:
-    """Return the Groww Credentials page HTML (DEC-DHAN-GROWW-REMIGRATE-001)."""
-    return _load_groww_credentials_template()
 
 
 _DB_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "db.html"

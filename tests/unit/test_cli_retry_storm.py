@@ -771,8 +771,8 @@ def test_cmd_fetch_live_missing_groww_creds_is_user_error(
     )
     assert rc == cli.EXIT_USER_ERROR
     captured = capsys.readouterr()
-    assert "[brutex] no Groww credentials" in captured.err
-    assert "BRUTEX_GROWW_API_KEY / BRUTEX_GROWW_TOTP_SECRET" in captured.err
+    assert "[brutex] no Groww credentials in AWS Parameter Store" in captured.err
+    assert "deploy/aws_token_minter/deploy.sh" in captured.err
 
 
 # ── cmd_fetch --until-clean (bounded rounds, DEC-TOKEN-PREFLIGHT-001) ───

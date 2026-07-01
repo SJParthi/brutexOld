@@ -200,10 +200,11 @@ class TestDiscoverTouchedModules:
         #     unit+integration suites (DEC-COVERAGE-DISCOVERY-MOVERS-SNAPSHOT-001).
         #   * brutex/config/credentials.py — the Groww/token/AWS credentials module
         #     whose 100% is a curated two-file property (test_credentials.py +
-        #     test_groww_credentials.py); the discovery stem-map (test_credentials*)
-        #     misses the differently-stemmed test_groww_credentials.py, so it tops
-        #     out at ~88% standalone. Gated by the dedicated static per-module gate
-        #     (that exact two-file pair) + the whole-package floor (DEC-TOKEN-BROKER-AWS-001).
+        #     test_credentials_aws.py — DEC-AWS-ONLY-CREDS-001 removed the Groww file/env
+        #     path, so the old test_groww_credentials.py is gone). Both stem-match
+        #     test_credentials*, so it CAN reach 100% standalone; kept excluded as a
+        #     COMPLEMENT, gated by the dedicated static per-module gate (that exact pair)
+        #     + the whole-package floor (DEC-AWS-ONLY-CREDS-001).
         # Keep it tiny + justified.
         assert (
             frozenset(

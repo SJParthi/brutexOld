@@ -1,4 +1,4 @@
-"""The DEC-TOKEN-BROKER-AWS-001 permutation matrix — every failure/success scenario.
+"""The DEC-AWS-ONLY-CREDS-001 permutation matrix — every failure/success scenario.
 
 Each test drives one scenario end-to-end through the REAL read-only broker
 (:class:`ParameterStoreTokenStore`) + the REAL mint spine
@@ -8,7 +8,8 @@ boto3, no network.
 The spine wiring (a refresher taking the store's ``load``/``store`` hooks) is exactly what
 ``build_live_client`` threads in production, so these prove the broker behaves under the
 true cold-start-cache-first + forced-reauth semantics — and that BruteX, being READ-ONLY,
-NEVER mints the shared token (a mint attempt fails LOUD).
+NEVER mints the shared token (a mint attempt fails LOUD). AWS is the SOLE token source; the
+local disk backend was removed, so there is no local-mint path to test.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.groww.reauth import SdkRefresher
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
-from brutex.adapters.groww.token_store import DiskTokenStore
 from brutex.adapters.groww.token_store_aws import (
     ParameterStoreTokenStore,
     TokenBrokerReadOnlyError,
@@ -189,32 +189,3 @@ class TestReadDegradesNeverRaises:
     )
     def test_load_returns_none_for_every_failure(self, fake: FakeAwsClient) -> None:
         assert _store(fake).load(_CREDS, now_utc=_NOW) is None
-
-
-class TestPurelyLocalNoAws:
-    """A purely-local run (disk store) is byte-identical to #1041 + imports no boto3."""
-
-    def test_disk_store_round_trip(self) -> None:
-        disk = DiskTokenStore()
-        assert disk.load(_CREDS, now_utc=_NOW) is None
-        assert disk.store(_CREDS, "LOCAL-ONLY", now_utc=_NOW) is True
-        cached = disk.load(_CREDS, now_utc=_NOW)
-        assert cached is not None and cached.access_token == "LOCAL-ONLY"
-
-    def test_local_refresher_mints_and_no_boto3(self) -> None:
-        import sys
-
-        minter = _CountingMinter()
-        refresher = SdkRefresher(
-            _CREDS,
-            token_factory=minter,
-            totp_minter=lambda _s: "000000",
-            sdk_factory=_str_sdk,
-            token_cache_load=DiskTokenStore().load,
-            token_cache_store=DiskTokenStore().store,
-            clock=lambda: _NOW,
-        )
-        # The LOCAL path DOES mint (BruteX is the minter when not read-only).
-        assert refresher.current_sdk() == "MINT-1"
-        assert minter.mints == 1
-        assert "boto3" not in sys.modules
