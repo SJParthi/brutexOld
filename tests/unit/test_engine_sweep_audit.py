@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex.engine import sweep_audit as _sweep_mod
 from brutex.engine.sweep_audit import (
     GENESIS_PREV_HASH,
     SweepAuditChainCorruption,
@@ -35,6 +36,9 @@ from brutex.engine.sweep_audit import (
 )
 from brutex.engine.sweep_audit import (
     _read_entries_with_torn_tail as _sweep_read_with_tail,
+)
+from brutex.engine.sweep_audit import (
+    _read_tail_entry as _sweep_read_tail,
 )
 from brutex.engine.sweep_audit import (
     _truncate_torn_tail as _sweep_truncate,
@@ -398,3 +402,119 @@ def test_sweep_truncate_io_error_wraps(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr("brutex.engine.sweep_audit.os.replace", _boom)
     with pytest.raises(SweepAuditWriteError):
         _sweep_truncate(path)
+
+
+# ── _read_tail_entry — O(1) reverse tail-read on resume ──────────────────────
+# DEC-AUDIT-RESUME-TAILREAD-001: resume no longer materialises the whole log —
+# it seeks to the end and parses only the last committed line. These pin the
+# sweep-side (BLAKE3) tail reader at 100% line+branch under the engine gate; the
+# cross-chain parity + O(1)-teeth matrix lives in test_audit_torn_tail.py.
+
+
+def _sweep_clean_chain(path: Path, n: int) -> None:
+    with SweepAuditWriter.open(path) as log:
+        for i in range(n):
+            log.append(action="COMBO_DONE", subject=f"s:{i}", payload={"i": i}, ts_utc=float(i))
+
+
+def test_sweep_tailread_empty_file(tmp_path: Path) -> None:
+    path = tmp_path / "st_empty.jsonl"
+    path.write_text("", encoding="utf-8")
+    assert _sweep_read_tail(path) == (None, False)
+
+
+def test_sweep_tailread_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(SweepAuditError):
+        _sweep_read_tail(tmp_path / "st_missing.jsonl")
+
+
+def test_sweep_tailread_single_and_many(tmp_path: Path) -> None:
+    p1 = tmp_path / "st_one.jsonl"
+    _sweep_clean_chain(p1, 1)
+    e1, torn1 = _sweep_read_tail(p1)
+    assert torn1 is False and e1 is not None and e1.seq == 0
+
+    pn = tmp_path / "st_many.jsonl"
+    _sweep_clean_chain(pn, 40)
+    en, tornn = _sweep_read_tail(pn)
+    assert tornn is False and en is not None and en.seq == 39
+    # Parity with the full read's tail entry.
+    entries, _ = _sweep_read_with_tail(pn)
+    assert en == entries[-1]
+
+
+def test_sweep_tailread_torn_partial_recovers_last(tmp_path: Path) -> None:
+    path = tmp_path / "st_partial.jsonl"
+    _sweep_clean_chain(path, 3)
+    _append_raw(path, '{"seq": 3, "prev_hash": "abc", "ts')
+    entry, torn = _sweep_read_tail(path)
+    assert torn is True and entry is not None and entry.seq == 2
+
+
+def test_sweep_tailread_ends_on_newline_vs_midline(tmp_path: Path) -> None:
+    path = tmp_path / "st_boundary.jsonl"
+    _sweep_clean_chain(path, 3)
+    assert path.read_bytes().endswith(b"\n")
+    e, torn = _sweep_read_tail(path)
+    assert torn is False and e is not None and e.seq == 2
+    # Strip the final newline → the last line is now a torn tail.
+    path.write_bytes(path.read_bytes()[:-1])
+    e2, torn2 = _sweep_read_tail(path)
+    assert torn2 is True and e2 is not None and e2.seq == 1
+
+
+def test_sweep_tailread_only_torn_line_is_none(tmp_path: Path) -> None:
+    path = tmp_path / "st_only_torn.jsonl"
+    _append_raw(path, '{"seq": 0, "prev')
+    assert _sweep_read_tail(path) == (None, True)
+
+
+def test_sweep_tailread_blank_lines_skipped(tmp_path: Path) -> None:
+    path = tmp_path / "st_blanks.jsonl"
+    _sweep_clean_chain(path, 2)
+    _append_raw(path, "\n\n\n")  # blank committed filler after seq 1
+    entry, torn = _sweep_read_tail(path)
+    assert torn is False and entry is not None and entry.seq == 1
+
+
+def test_sweep_tailread_only_blank_lines_is_none(tmp_path: Path) -> None:
+    path = tmp_path / "st_only_blanks.jsonl"
+    path.write_text("\n\n", encoding="utf-8")
+    assert _sweep_read_tail(path) == (None, False)
+
+
+def test_sweep_tailread_last_committed_corrupt_raises(tmp_path: Path) -> None:
+    path = tmp_path / "st_corrupt_last.jsonl"
+    _sweep_clean_chain(path, 1)
+    _append_raw(path, "not json at all\n")
+    with pytest.raises(SweepAuditError):
+        _sweep_read_tail(path)
+
+
+def test_sweep_tailread_multichunk_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tiny chunk forces the reverse walk to loop across many reads."""
+    monkeypatch.setattr(_sweep_mod, "_TAIL_CHUNK_BYTES", 4)
+    path = tmp_path / "st_chunks.jsonl"
+    _sweep_clean_chain(path, 6)
+    entry, torn = _sweep_read_tail(path)
+    assert torn is False and entry is not None and entry.seq == 5
+
+
+def test_sweep_tailread_single_line_exceeds_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One entry longer than the chunk drives the for/else exhaustion arm."""
+    monkeypatch.setattr(_sweep_mod, "_TAIL_CHUNK_BYTES", 4)
+    path = tmp_path / "st_giant.jsonl"
+    _sweep_clean_chain(path, 1)
+    entry, torn = _sweep_read_tail(path)
+    assert torn is False and entry is not None and entry.seq == 0
+
+
+def test_sweep_tailread_resume_continues_valid_chain(tmp_path: Path) -> None:
+    path = tmp_path / "st_resume.jsonl"
+    _sweep_clean_chain(path, 5)
+    with SweepAuditWriter.open(path, resume=True) as log:
+        rec = log.append(action="COMBO_DONE", subject="s:5", payload={"i": 5})
+    assert rec.seq == 5
+    assert verify_chain(path) == 6

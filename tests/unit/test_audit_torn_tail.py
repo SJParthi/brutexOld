@@ -27,6 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from brutex.engine import sweep_audit as sweep_audit_mod
 from brutex.engine.sweep_audit import (
     SweepAuditChainCorruption,
     SweepAuditError,
@@ -40,11 +41,15 @@ from brutex.engine.sweep_audit import (
     _read_entries_with_torn_tail as sweep_read_with_tail,
 )
 from brutex.engine.sweep_audit import (
+    _read_tail_entry as sweep_read_tail,
+)
+from brutex.engine.sweep_audit import (
     _truncate_torn_tail as sweep_truncate,
 )
 from brutex.engine.sweep_audit import (
     verify_chain as sweep_verify,
 )
+from brutex.orchestrator import audit as audit_mod
 from brutex.orchestrator.audit import (
     AuditChainCorruption,
     AuditError,
@@ -56,6 +61,9 @@ from brutex.orchestrator.audit import (
 )
 from brutex.orchestrator.audit import (
     _read_entries_with_torn_tail as audit_read_with_tail,
+)
+from brutex.orchestrator.audit import (
+    _read_tail_entry as audit_read_tail,
 )
 from brutex.orchestrator.audit import (
     _truncate_torn_tail as audit_truncate,
@@ -78,8 +86,10 @@ class _Backend:
         writer_cls: type,
         read_with_tail,  # type: ignore[no-untyped-def]
         read_entries,  # type: ignore[no-untyped-def]
+        read_tail,  # type: ignore[no-untyped-def]
         truncate,  # type: ignore[no-untyped-def]
         verify,  # type: ignore[no-untyped-def]
+        module,  # type: ignore[no-untyped-def]
         read_error: type[Exception],
         write_error: type[Exception],
         corruption_error: type[Exception],
@@ -88,8 +98,10 @@ class _Backend:
         self.writer_cls = writer_cls
         self.read_with_tail = read_with_tail
         self.read_entries = read_entries
+        self.read_tail = read_tail
         self.truncate = truncate
         self.verify = verify
+        self.module = module
         self.read_error = read_error
         self.write_error = write_error
         self.corruption_error = corruption_error
@@ -100,8 +112,10 @@ _AUDIT = _Backend(
     AuditWriter,
     audit_read_with_tail,
     audit_read_entries,
+    audit_read_tail,
     audit_truncate,
     audit_verify,
+    audit_mod,
     AuditError,
     AuditWriteError,
     AuditChainCorruption,
@@ -111,8 +125,10 @@ _SWEEP = _Backend(
     SweepAuditWriter,
     sweep_read_with_tail,
     sweep_read_entries,
+    sweep_read_tail,
     sweep_truncate,
     sweep_verify,
+    sweep_audit_mod,
     SweepAuditError,
     SweepAuditWriteError,
     SweepAuditChainCorruption,
@@ -459,3 +475,280 @@ def test_truncate_io_error_wraps(
     monkeypatch.setattr(_os, "replace", _boom)
     with pytest.raises(backend.write_error):
         backend.truncate(path)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-AUDIT-RESUME-TAILREAD-001 — O(1) reverse tail-read on resume
+#
+# `open(resume=True)` no longer materialises the WHOLE log to recover the
+# tail; it seeks to the end and parses only the final committed line via
+# `_read_tail_entry`. These tests pin, for BOTH chains:
+#   * the recovered (seq, prev_hash/entry_hash, torn_tail) EQUALS what the
+#     old full-read (`_read_entries_with_torn_tail`) produced (parity),
+#   * every torn-tail / empty / boundary edge behaves identically,
+#   * resume continues a valid, verifiable chain, and
+#   * the tail-read parses O(1) lines, NOT O(n) (the teeth test).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _full_read_tail(backend: _Backend, path: Path):  # type: ignore[no-untyped-def]
+    """The OLD behaviour: full read, then ``(entries[-1] if entries else None, torn)``."""
+    entries, torn = backend.read_with_tail(path)
+    return (entries[-1] if entries else None), torn
+
+
+def _assert_tail_parity(backend: _Backend, path: Path) -> None:
+    """The reverse tail-read yields the SAME tail entry + torn flag as the full read."""
+    want_entry, want_torn = _full_read_tail(backend, path)
+    got_entry, got_torn = backend.read_tail(path)
+    assert got_torn == want_torn
+    if want_entry is None:
+        assert got_entry is None
+    else:
+        assert got_entry is not None
+        assert got_entry.seq == want_entry.seq
+        assert got_entry.prev_hash == want_entry.prev_hash
+        assert got_entry.entry_hash == want_entry.entry_hash
+        # Full structural equality — the frozen dataclasses compare by value.
+        assert got_entry == want_entry
+
+
+def test_tailread_empty_file(backend: _Backend, tmp_path: Path) -> None:
+    """An empty (zero-byte) file → ``(None, False)``, matching the full read."""
+    path = tmp_path / "tail_empty.jsonl"
+    path.write_text("", encoding="utf-8")
+    assert backend.read_tail(path) == (None, False)
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_missing_file_raises(backend: _Backend, tmp_path: Path) -> None:
+    """A missing file raises the chain's read error (line 699 / 556)."""
+    path = tmp_path / "tail_missing.jsonl"
+    with pytest.raises(backend.read_error):
+        backend.read_tail(path)
+
+
+def test_tailread_single_entry(backend: _Backend, tmp_path: Path) -> None:
+    """A one-entry log recovers seq 0 with no torn flag — parity with full read."""
+    path = tmp_path / "tail_single.jsonl"
+    _write_clean_chain(backend, path, 1)
+    entry, torn = backend.read_tail(path)
+    assert torn is False
+    assert entry is not None and entry.seq == 0
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_many_entries_recovers_last(backend: _Backend, tmp_path: Path) -> None:
+    """A many-entry log recovers exactly the LAST entry (seq n-1), parity-checked."""
+    path = tmp_path / "tail_many.jsonl"
+    _write_clean_chain(backend, path, 50)
+    entry, torn = backend.read_tail(path)
+    assert torn is False
+    assert entry is not None and entry.seq == 49
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_ends_on_newline_vs_midline(backend: _Backend, tmp_path: Path) -> None:
+    """A log ending exactly on a newline (clean) vs mid-line (torn) — both parity."""
+    path = tmp_path / "tail_boundary.jsonl"
+    _write_clean_chain(backend, path, 4)
+
+    # Ends exactly on a newline → clean, no torn tail.
+    assert path.read_bytes().endswith(b"\n")
+    entry, torn = backend.read_tail(path)
+    assert torn is False
+    assert entry is not None and entry.seq == 3
+    _assert_tail_parity(backend, path)
+
+    # Now strip the final newline → the last line is mid-line (torn tail).
+    path.write_bytes(path.read_bytes()[:-1])
+    entry2, torn2 = backend.read_tail(path)
+    assert torn2 is True
+    # The last COMMITTED line is now seq 2 (seq 3 lost its newline).
+    assert entry2 is not None and entry2.seq == 2
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_partial_json_torn_recovers_last_complete(
+    backend: _Backend, tmp_path: Path
+) -> None:
+    """A partial newline-less final line is skipped; the last complete entry wins."""
+    path = tmp_path / "tail_partial.jsonl"
+    _write_clean_chain(backend, path, 3)
+    _append_raw(path, '{"seq": 3, "prev_hash": "abc", "ts_utc": 1.0, "act')  # cut off
+
+    entry, torn = backend.read_tail(path)
+    assert torn is True
+    assert entry is not None and entry.seq == 2
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_only_torn_line_is_none(backend: _Backend, tmp_path: Path) -> None:
+    """A file that is ONLY a torn line → ``(None, True)`` — parity with full read."""
+    path = tmp_path / "tail_only_torn.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _append_raw(path, '{"seq": 0, "prev_hash": "00", "ts')
+    entry, torn = backend.read_tail(path)
+    assert entry is None
+    assert torn is True
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_blank_lines_skipped(backend: _Backend, tmp_path: Path) -> None:
+    """Trailing blank committed lines are skipped to find the real last entry.
+
+    Drives the multi-blank-line reverse scan (``end = start`` loop / line
+    773 / 614) in ``_last_nonblank_committed_line``.
+    """
+    path = tmp_path / "tail_blanks.jsonl"
+    _write_clean_chain(backend, path, 2)
+    _append_raw(path, "\n\n\n")  # three blank committed lines after seq 1
+
+    entry, torn = backend.read_tail(path)
+    assert torn is False  # file ends in "\n"
+    assert entry is not None and entry.seq == 1
+    # Full read agrees (blank committed lines are benign filler on both paths).
+    entries, full_torn = backend.read_with_tail(path)
+    assert full_torn is False
+    assert [e.seq for e in entries] == [0, 1]
+
+
+def test_tailread_only_blank_lines_is_none(backend: _Backend, tmp_path: Path) -> None:
+    """A file of only blank newline-terminated lines → ``(None, False)``."""
+    path = tmp_path / "tail_only_blanks.jsonl"
+    path.write_text("\n\n\n", encoding="utf-8")
+    entry, torn = backend.read_tail(path)
+    assert entry is None
+    assert torn is False
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_last_committed_line_corrupt_raises(backend: _Backend, tmp_path: Path) -> None:
+    """A committed (newline-terminated) garbage FINAL line is real corruption → raises.
+
+    The tail-read parses the last committed line strictly, exactly as the full
+    read did — a fully-flushed garbage record is a flipped byte, not a torn tail.
+    """
+    path = tmp_path / "tail_corrupt_last.jsonl"
+    _write_clean_chain(backend, path, 1)
+    _append_raw(path, "not json at all\n")  # committed (terminated) garbage
+    with pytest.raises(backend.read_error):
+        backend.read_tail(path)
+
+
+def test_tailread_spans_multiple_chunks(
+    backend: _Backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tiny reverse-read chunk forces the backwards walk to loop — parity holds.
+
+    Shrinking ``_TAIL_CHUNK_BYTES`` to a few bytes makes the reader step back
+    through many chunks (the ``newline_idx == -1: continue`` arm and the loop
+    that isolates the last committed line), proving the multi-chunk walk is
+    correct, not just the single-read fast case.
+    """
+    monkeypatch.setattr(backend.module, "_TAIL_CHUNK_BYTES", 4)
+    path = tmp_path / "tail_chunks.jsonl"
+    _write_clean_chain(backend, path, 6)
+    entry, torn = backend.read_tail(path)
+    assert torn is False
+    assert entry is not None and entry.seq == 5
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_single_giant_line_smaller_than_chunk(
+    backend: _Backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One entry whose line exceeds the chunk size still recovers via the walk.
+
+    With a 4-byte chunk over a single long committed line, the reader loops to
+    ``pos == 0`` (the ``for/else`` exhaustion arm) before it ever sees a
+    newline-preceded region, then recovers the whole first line.
+    """
+    monkeypatch.setattr(backend.module, "_TAIL_CHUNK_BYTES", 4)
+    path = tmp_path / "tail_giant.jsonl"
+    _write_clean_chain(backend, path, 1)
+    entry, torn = backend.read_tail(path)
+    assert torn is False
+    assert entry is not None and entry.seq == 0
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_resume_continues_valid_chain(backend: _Backend, tmp_path: Path) -> None:
+    """Resume via the tail-read continues an unbroken, fully-verifiable chain."""
+    path = tmp_path / "tail_resume.jsonl"
+    _write_clean_chain(backend, path, 5)
+
+    with backend.writer_cls.open(path, resume=True) as log:
+        recovered = log.append(action="COMBO_DONE", subject="s:5", payload={"i": 5})
+
+    assert recovered.seq == 5
+    assert backend.verify(path) == 6
+
+
+def test_tailread_resume_after_torn_recovers_and_truncates(
+    backend: _Backend, tmp_path: Path
+) -> None:
+    """Resume over a torn tail truncates it then continues from the last entry."""
+    path = tmp_path / "tail_resume_torn.jsonl"
+    _write_clean_chain(backend, path, 3)
+    _append_raw(path, '{"seq": 3, "prev_hash": "abc", "ts_utc": 1.0, "act')
+
+    with backend.writer_cls.open(path, resume=True) as log:
+        recovered = log.append(action="COMBO_DONE", subject="s:3", payload={"i": 3})
+
+    assert recovered.seq == 3  # continues from the last COMPLETE entry (seq 2)
+    assert backend.verify(path) == 4
+    assert list(path.parent.glob("*.torn-tail-*.tmp")) == []
+
+
+@pytest.mark.parametrize("n", [1, 2, 10, 137])
+def test_tailread_parity_across_sizes(backend: _Backend, tmp_path: Path, n: int) -> None:
+    """Across many log sizes, the tail-read's (seq, prev_hash, hash) match the full read."""
+    path = tmp_path / f"tail_parity_{n}.jsonl"
+    _write_clean_chain(backend, path, n)
+    _assert_tail_parity(backend, path)
+
+
+def test_tailread_parses_o1_lines_not_all(
+    backend: _Backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TEETH: the reverse tail-read parses O(1) lines, NOT O(n).
+
+    Spy on ``AuditEntry.from_json_line`` / ``SweepAuditEntry.from_json_line`` and
+    prove a 500-entry log's tail-read invokes it exactly ONCE (only the final
+    committed line), whereas the OLD full read parses all 500. This is the
+    load-bearing proof that the fix is genuinely O(1)-tail, not merely faster.
+    """
+    # The entry class lives on the module as AuditEntry / SweepAuditEntry.
+    entry_type = (
+        backend.module.AuditEntry if backend.name == "audit" else backend.module.SweepAuditEntry
+    )
+    real_parser = entry_type.from_json_line
+
+    counter = {"n": 0}
+
+    def _counting(line: str):  # type: ignore[no-untyped-def]
+        counter["n"] += 1
+        return real_parser(line)
+
+    monkeypatch.setattr(entry_type, "from_json_line", staticmethod(_counting))
+
+    path = tmp_path / "tail_teeth.jsonl"
+    _write_clean_chain(backend, path, 500)
+
+    counter["n"] = 0
+    tail_entry, _torn = backend.read_tail(path)
+    tail_parses = counter["n"]
+
+    counter["n"] = 0
+    full_entries, _torn2 = backend.read_with_tail(path)
+    full_parses = counter["n"]
+
+    # The tail-read parses exactly ONE line (the final committed entry)…
+    assert tail_parses == 1
+    # …while the old full read parses every one of the 500.
+    assert full_parses == 500
+    # …and both agree on the recovered tail entry (correctness alongside the teeth).
+    assert tail_entry is not None
+    assert tail_entry.seq == full_entries[-1].seq == 499
+    assert tail_entry.entry_hash == full_entries[-1].entry_hash

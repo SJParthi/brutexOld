@@ -409,18 +409,23 @@ class AuditWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if resume and path.exists():
-            # Read-replay to catch up to the tail. A torn final line (an
-            # interrupted append from a crash / SIGKILL mid-write) is tolerated
-            # and skipped; if one is present we truncate the file to its last
-            # committed (newline-terminated) byte BEFORE re-opening for append,
-            # so the resumed chain continues from the last complete hash-valid
-            # entry on pristine bytes (DEC-AUDIT-TORN-TAIL-001). Real corruption
-            # of a committed line still raises out of _read_entries_with_torn_tail.
-            entries, torn_tail = _read_entries_with_torn_tail(path)
+            # Recover the tail with an O(1) reverse read instead of loading the
+            # WHOLE log into memory (DEC-AUDIT-RESUME-TAILREAD-001): the resume
+            # path only ever needed the LAST committed entry's seq + entry_hash,
+            # so `_read_tail_entry` seeks to the end and parses just that final
+            # committed line. A torn final line (an interrupted append from a
+            # crash / SIGKILL mid-write) is tolerated + skipped; if present we
+            # truncate the file to its last committed (newline-terminated) byte
+            # BEFORE re-opening for append, so the resumed chain continues from
+            # the last complete hash-valid entry on pristine bytes
+            # (DEC-AUDIT-TORN-TAIL-001). Real corruption of the last committed
+            # line still raises out of `_read_tail_entry`. Full-chain integrity
+            # verification remains the SEPARATE `verify_chain` contract, which
+            # resume never performed.
+            last, torn_tail = _read_tail_entry(path)
             if torn_tail:
                 _truncate_torn_tail(path)
-            if entries:
-                last = entries[-1]
+            if last is not None:
                 writer = cls(
                     path=path,
                     actor=actor,
@@ -640,6 +645,133 @@ def _read_entries(path: Path) -> list[AuditEntry]:
     """
     entries, _torn_tail = _read_entries_with_torn_tail(path)
     return entries
+
+
+#: Reverse-read chunk size (bytes) for :func:`_read_tail_entry`. Read the file
+#: end backwards this many bytes at a time until the last committed line is
+#: isolated — so a resume touches O(1) tail bytes, never the whole log.
+_TAIL_CHUNK_BYTES: Final[int] = 8192
+
+
+def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
+    """Recover only the LAST committed entry + the torn-tail flag from *path*.
+
+    This is the O(1)-tail-read fast path for :meth:`AuditWriter.open` on
+    ``resume=True`` (DEC-AUDIT-RESUME-TAILREAD-001). It reads the file from the
+    END backwards in :data:`_TAIL_CHUNK_BYTES` chunks to isolate the final
+    committed (newline-terminated, non-blank) line, parses ONLY that one line,
+    and returns it together with the SAME ``torn_tail`` flag
+    :func:`_read_entries_with_torn_tail` computes — WITHOUT materialising every
+    prior entry into memory.
+
+    It is byte-for-byte equivalent to
+    ``(_read_entries_with_torn_tail(path)[0][-1] if entries else None,
+    torn_tail)`` for a clean or torn-tailed log: the resume path only ever used
+    ``entries[-1]`` (its ``seq`` + ``entry_hash``), so recovering exactly that
+    tail entry preserves the resumed chain identity, the torn-tail truncation
+    (the flag is unchanged), and hash-chain integrity (the recovered
+    ``entry_hash`` seeds ``prev_hash`` for the next append). Full-chain
+    verification is a SEPARATE contract (:func:`verify_chain`) that was never
+    part of ``resume`` and is unaffected.
+
+    Torn-tail discriminator (identical to :func:`_read_entries_with_torn_tail`)
+    ---------------------------------------------------------------------------
+    The writer always appends ``line + "\\n"`` in one :py:meth:`write`, so a
+    committed record is a line terminated by ``"\\n"``. The file's final line is
+    a torn tail iff the file is non-empty AND does not end in ``"\\n"`` — an
+    interrupted append. Everything up to and including the last ``"\\n"`` is the
+    committed prefix; the last non-blank committed line is the tail entry.
+
+    Raises
+    ------
+    AuditError
+        If the file is missing, or the last committed line is malformed /
+        missing required fields (real corruption of a committed record).
+
+    Returns
+    -------
+    tuple[AuditEntry | None, bool]
+        ``(last_committed_entry_or_None, torn_tail)``. The entry is ``None``
+        when the file has no committed non-blank line (empty, blank-only, or a
+        torn-tail-only file).
+    """
+    if not path.exists():
+        raise AuditError(f"Audit log not found: {path}")
+
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return None, False
+
+        # torn_tail == the file does not end in "\n" (an unterminated final
+        # line == an interrupted append). Read the final byte to decide.
+        f.seek(size - 1)
+        torn_tail = f.read(1) != b"\n"
+
+        # Walk backwards in chunks, accumulating the tail bytes, until we have
+        # isolated the last committed (newline-terminated) NON-BLANK line. The
+        # committed prefix ends at the last "\n"; the tail line we want is the
+        # last non-blank line ending in (or terminated by) that "\n".
+        buf = b""
+        pos = size
+        last_committed_line: bytes | None = None
+        while pos > 0:
+            read_size = min(_TAIL_CHUNK_BYTES, pos)
+            pos -= read_size
+            f.seek(pos)
+            buf = f.read(read_size) + buf
+            # Split into physical lines. Because we always prepend, only the
+            # FIRST fragment can be incomplete (more bytes may precede it), so
+            # we only consider lines AFTER the first newline as fully-known.
+            newline_idx = buf.find(b"\n")
+            if newline_idx == -1:
+                # No newline yet in the accumulated buffer — keep reading back.
+                continue
+            # Everything after the first newline is complete; scan its lines
+            # from the end for the last non-blank committed line.
+            candidate = _last_nonblank_committed_line(buf[newline_idx + 1 :])
+            if candidate is not None:
+                last_committed_line = candidate
+                break
+            # No non-blank committed line in the known-complete region yet;
+            # if we have already reached the file start, the first fragment is
+            # itself the only remaining candidate — handled after the loop.
+        else:
+            # Loop exhausted the file (pos reached 0) with buf holding the whole
+            # file: the first fragment is a complete line too.
+            last_committed_line = _last_nonblank_committed_line(buf)
+
+        if last_committed_line is None and pos == 0:
+            # We broke on a newline but found no non-blank line after it; the
+            # first fragment (bytes before that newline) is still a candidate.
+            last_committed_line = _last_nonblank_committed_line(buf)
+
+        if last_committed_line is None:
+            return None, torn_tail
+
+    line = last_committed_line.decode("utf-8").rstrip("\n")
+    if not line:  # pragma: no cover - _last_nonblank_committed_line excludes blanks
+        return None, torn_tail
+    return AuditEntry.from_json_line(line), torn_tail
+
+
+def _last_nonblank_committed_line(chunk: bytes) -> bytes | None:
+    """Return the last newline-terminated non-blank line in *chunk*, or ``None``.
+
+    A committed line is one terminated by ``"\\n"``; a blank line (only the
+    newline) is benign filler and skipped. Any trailing bytes NOT terminated by
+    ``"\\n"`` are the (already-flagged) torn tail and ignored here. Mirrors the
+    per-line handling of :func:`_read_entries_with_torn_tail`.
+    """
+    end = chunk.rfind(b"\n")
+    while end != -1:
+        start = chunk.rfind(b"\n", 0, end)
+        candidate = chunk[start + 1 : end]  # start == -1 → from 0
+        if candidate:
+            return candidate + b"\n"
+        end = start
+    return None
 
 
 def _truncate_torn_tail(path: Path) -> None:
