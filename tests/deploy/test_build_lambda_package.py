@@ -215,3 +215,25 @@ def test_deploy_states_no_docker_build(deploy_script_text: str) -> None:
     lowered = deploy_script_text.lower()
     assert "no docker" in lowered
     assert "pure python" in lowered
+
+
+def test_deploy_expands_extra_args_safely_under_set_u(deploy_script_text: str) -> None:
+    """deploy.sh expands EXTRA_ARGS with the empty-safe idiom (bash 3.2 + ``set -u``).
+
+    Under ``set -euo pipefail``, bash 3.2 — the macOS system ``/bin/bash`` on the
+    project's reference host (project rules §8) — treats a bare
+    ``"${EXTRA_ARGS[@]}"`` on an EMPTY array as an "unbound variable" and aborts
+    the deploy when the operator passes no extra ``-var`` args. The
+    ``"${arr[@]+"${arr[@]}"}"`` alternate-value idiom expands to nothing on an
+    empty array and to the quoted elements otherwise, on bash 3.2 AND 4.4+. This
+    pins the fix (DEC-MINTER-PURE-PYTHON-001 #1069 hostile-review MINOR).
+    """
+    safe = '"${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"'
+    # Both expansion sites (the ALERT_EMAIL scan loop + the terraform apply) use
+    # the empty-safe idiom.
+    assert deploy_script_text.count(safe) == 2, (
+        f"both EXTRA_ARGS expansions must use the empty-safe {safe} idiom"
+    )
+    # The bare, empty-unsafe forms must be gone.
+    assert 'in "${EXTRA_ARGS[@]}"; do' not in deploy_script_text
+    assert 'apply "${EXTRA_ARGS[@]}"' not in deploy_script_text
