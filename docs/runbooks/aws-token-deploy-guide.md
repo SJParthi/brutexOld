@@ -212,8 +212,15 @@ cd deploy/aws_token_minter
    which is what removed the old cross-compile/Docker requirement
    (DEC-MINTER-PURE-PYTHON-001). This step needs `pip` + PyPI network access on your
    machine.
-2. **`terraform init`** — downloads the AWS/archive/null providers.
-3. **`terraform apply`** — Terraform **shows you the full plan and stops, waiting for
+2. **Bootstraps the remote state backend** — idempotently creates (if missing)
+   an **S3 bucket** `tickvault-tfstate-<ACCOUNT_ID>` (versioning + AES256 SSE +
+   public-access-block) and a **DynamoDB lock table** `tickvault-tfstate-lock`
+   (`LockID`, PAY_PER_REQUEST) via the AWS CLI. Terraform's state lives in AWS,
+   not on your disk, so a fresh clone on any machine reads the SAME state. Re-runs
+   are no-ops (it guards with `head-bucket` / `describe-table`). See §2b.
+3. **`terraform init`** — downloads the AWS/archive/null providers and wires the
+   S3 + DynamoDB backend (via `-backend-config`).
+4. **`terraform apply`** — Terraform **shows you the full plan and stops, waiting for
    you to type `yes`.** Nothing is created until you confirm. This script **never**
    passes `-auto-approve` — a human confirms every apply.
 
@@ -257,6 +264,72 @@ parameter, one EventBridge rule, two alarms, one SNS topic, and three IAM roles 
 > unlikely and harmless (both write a valid fresh token). **If your account has
 > concurrency headroom** (a raised limit) and you want the strict single-writer
 > hardening, opt in with `./deploy.sh -var 'lambda_reserved_concurrency=1'`.
+
+---
+
+## 2b. Fresh clones + repeat deploys (remote state — `DEC-DEPLOY-REMOTE-STATE-001`)
+
+**Why this matters.** Terraform records what it created in a *state file*. If that
+state lives on your laptop (`terraform.tfstate`, gitignored), a **fresh clone on
+another machine has no state** — so `terraform apply` there thinks nothing exists
+and tries to **re-create** the Lambda / SSM param / IAM roles, which errors with
+`EntityAlreadyExists` / `ResourceInUse`. The deploy would not be repeatable.
+
+**The fix: state lives in AWS.** `deploy.sh` keeps Terraform state in an **S3
+bucket** with a **DynamoDB lock table**, so every clone on every machine reads the
+SAME state and `apply` is **idempotent** — run it any number of times, from any
+fresh clone, and it converges to a no-op once the stack exists (no "already exists"
+errors). `deploy.sh` bootstraps the bucket + table itself (check-then-create) before
+`terraform init`, so there is nothing extra for you to run on a fresh account.
+
+**The fresh-clone flow (any machine, any number of times):**
+
+```bash
+git clone <this-repo> && cd bruteX     # or: cd bruteX && git pull
+cd deploy/aws_token_minter
+./deploy.sh -var 'alert_email=you@example.com'
+#   deploy.sh:
+#     - creates the S3 state bucket + DynamoDB lock table if they are missing
+#       (idempotent — a re-run just reuses them);
+#     - runs `terraform init` pointed at that remote backend (reads the SHARED
+#       state — so it SEES the already-deployed stack);
+#     - runs `terraform apply` — on an already-deployed stack the plan is
+#       "0 to add, 0 to change, 0 to destroy". Type `yes`; it is a no-op.
+```
+
+That is the whole point: **fresh clone → `./deploy.sh` → idempotent**, from any
+machine, any number of times.
+
+### One-time migration if you ALREADY deployed with local state
+
+If you deployed *before* this change, your existing state is a local
+`terraform.tfstate` file. Move it into S3 **once** (Terraform copies it for you):
+
+```bash
+cd deploy/aws_token_minter
+
+# The bucket/table are created by a first ./deploy.sh run (or create them by hand
+# with the same names). Then migrate your existing local state into S3:
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+terraform init -migrate-state \
+  -backend-config="bucket=tickvault-tfstate-${ACCOUNT_ID}" \
+  -backend-config="dynamodb_table=tickvault-tfstate-lock" \
+  -backend-config="region=ap-south-1"
+#   Terraform prints:
+#     "Do you want to copy existing state to the new backend?"
+#   Answer  yes  — it copies your local terraform.tfstate up to S3.
+```
+
+After that one-time migration, delete/ignore the local `terraform.tfstate`
+(already gitignored) and use `./deploy.sh` from then on — every fresh clone reads
+the remote state. `deploy.sh` itself always runs a plain `terraform init` (never
+`-migrate-state`), so it never silently moves your state; the migration above is a
+deliberate, one-time, confirm-`yes` step.
+
+> **Before / after.** *Before:* local state → a fresh clone loses it → `apply`
+> tries to re-create existing resources → `EntityAlreadyExists` conflicts. *After:*
+> state in S3 (+ DynamoDB lock) → any clone on any machine reads the same state →
+> `apply` is idempotent, converging to a no-op, no conflicts.
 
 ---
 
