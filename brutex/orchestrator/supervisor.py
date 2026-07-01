@@ -62,7 +62,7 @@ Per child life-cycle iteration:
 * This is the CROSS-PLATFORM, cloud-testable layer. The REAL hard-reboot
   survival (relaunch after the *machine* reboots / the operator logs out) is the
   OS service manager's job — the shipped ``launchd`` (macOS ``KeepAlive``) +
-  ``systemd`` (``Restart=always``) templates. This supervisor survives a child
+  ``systemd`` (``Restart=on-failure``) templates. This supervisor survives a child
   CRASH while the supervisor itself is alive; the OS templates survive a
   supervisor / machine death. They are complementary, not redundant.
 * The supervisor is single-threaded; it is NOT a scheduler and does NOT itself
