@@ -927,10 +927,12 @@ jobs:
           # indicator modules below strict-100% up to the gate). Each
           # got surgical tests for reset() / to_dict() / from_dict() /
           # validate-period / find-prev-trading-day exhaustion paths.
-          # 18a · brutex.indicators.ema (55 stmts, 14 branches, 22 tests)
+          # 18a · brutex.indicators.ema (59 stmts, 16 branches, 37 tests)
           #       Streaming EMA state — close 89.86 → 100% by covering
           #       reset, serialize/restore round-trip, zero/neg-period
-          #       ValueError in compute_ema.
+          #       ValueError in compute_ema, and (DEC-EMA-PARITY-001) the
+          #       streaming seed-overflow guard raising a ValueError (not inf)
+          #       to match the Rust core + the batch path.
           if compgen -G "tests/unit/test_ema.py" > /dev/null; then
             pytest --cov=brutex.indicators.ema --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ema.py
           else

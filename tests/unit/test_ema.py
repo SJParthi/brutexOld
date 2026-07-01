@@ -263,6 +263,91 @@ class TestNonFiniteGuard:
         assert compute_ema(values, period=3) == [None, None, 20.0, 30.0, 40.0]
 
 
+class TestStreamingSeedOverflowGuard:
+    """`EMAState.update` (the LIVE streaming path in `engine.stage1a`) must RAISE
+    on a seed that overflows to a non-finite value — never return `inf` and
+    poison every subsequent bar.
+
+    DEC-EMA-PARITY-001: before this fix the streaming `update` returned `+inf`
+    from an overflowed SMA seed (`trading_core.ema_seed` is a bare division that
+    only guards `period < 1`), diverging from BOTH the Rust core's
+    `EmaState::update` seed guard AND the Python batch path (`compute_ema`, which
+    delegates to that same Rust `update`). The streaming path now re-checks
+    `math.isfinite(seed)` — the streaming twin of the Rust seed guard — so
+    streaming == batch == Rust.
+    """
+
+    def test_update_overflowing_finite_seed_raises_not_inf(self) -> None:
+        # Two finite-but-huge closes overflow `seed_sum` to +inf; the SEED bar
+        # (bars_seen == period) must RAISE, not return inf.
+        state = EMAState.new(period=2)
+        assert state.update(1e308) is None  # warm-up bar (bars_seen 1 < 2)
+        with pytest.raises(ValueError, match="seed overflowed to a non-finite value"):
+            state.update(1e308)  # seed bar (bars_seen == 2) — overflows
+
+    def test_update_overflowing_seed_never_returns_non_finite(self) -> None:
+        # Belt-and-suspenders: prove the streaming path can NEVER emit a
+        # non-finite EMA on the seed bar (the poisoning the guard prevents) —
+        # collect every emitted value and assert the seed bar raised instead of
+        # slipping an ``inf`` through.
+        state = EMAState.new(period=3)
+        emitted: list[float | None] = [state.update(1e308), state.update(1e308)]
+        with pytest.raises(ValueError, match="the warm-up close sum is too large"):
+            emitted.append(state.update(1e308))  # seed bar — must RAISE, never inf
+        # No non-finite value ever reached the caller (all warm-up ``None``s).
+        assert all(v is None or math.isfinite(v) for v in emitted)
+
+    def test_streaming_seed_overflow_matches_batch_and_rust(self) -> None:
+        # Parity: for the SAME overflowing inputs the streaming update, the
+        # Python batch path, and the Rust FFI all raise the byte-identical
+        # ValueError message (streaming == batch == Rust).
+        import trading_core
+
+        values = [1e308, 1e308]
+
+        def _streaming_error() -> str:
+            state = EMAState.new(period=2)
+            for value in values:
+                state.update(value)
+            raise AssertionError("streaming did not raise")  # pragma: no cover
+
+        streaming_msg = _capture_value_error(_streaming_error)
+        batch_msg = _capture_value_error(lambda: (compute_ema(values, period=2), None)[1])
+        rust_msg = _capture_value_error(lambda: (trading_core.compute_ema(values, 2), None)[1])
+
+        assert streaming_msg == batch_msg == rust_msg
+        assert "seed overflowed to a non-finite value" in streaming_msg
+
+    def test_update_guard_runs_before_seed_state_mutation(self) -> None:
+        # The overflow guard fires on the SEED bar; `value` must stay `None`
+        # (never a stored inf) so a caught error leaves no poisoned state.
+        state = EMAState.new(period=2)
+        state.update(1e308)  # warm-up
+        with pytest.raises(ValueError, match="seed overflowed"):
+            state.update(1e308)  # seed bar overflows
+        assert state.to_dict()["value"] is None
+
+    def test_finite_seed_streaming_unchanged(self) -> None:
+        # Regression: a normal finite series streams exactly as before the seed
+        # guard was added (the hand-computed period=3 oracle), and streaming ==
+        # batch bit-for-bit.
+        values = [10.0, 20.0, 30.0, 40.0, 50.0]
+        state = EMAState.new(period=3)
+        streamed = [state.update(v) for v in values]
+        assert streamed == [None, None, 20.0, 30.0, 40.0]
+        assert streamed == compute_ema(values, period=3)
+
+
+def _capture_value_error(fn: object) -> str:
+    """Run a zero-arg callable expected to raise ``ValueError`` and return its
+    message. Fails the test if it does not raise."""
+    try:
+        fn()  # type: ignore[operator]
+    except ValueError as exc:
+        return str(exc)
+    raise AssertionError("expected a ValueError but none was raised")  # pragma: no cover
+
+
 class TestNoLookAhead:
     def test_ema_at_bar_n_only_uses_bars_0_to_n(self) -> None:
         """Property P-06 (instrumented bar accessor): EMA at bar N must
