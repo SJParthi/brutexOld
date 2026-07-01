@@ -529,6 +529,71 @@ def plan_windows(
     return planned
 
 
+#: The shape a lake-span index maps: ``(exchange, segment, symbol, interval) -> span``.
+#: The span dict carries ``bars`` / ``first_date`` / ``last_date`` (the WHAT-is-stored
+#: aggregate from :func:`~brutex.dashboard.db_view.summarize_spot_datasets`, which lists
+#: the WHOLE ``bars/`` tree — spot AND ``segment="FNO"`` contract partitions alike).
+_SpanIndex = dict[tuple[str, str, str, str], dict[str, Any]]
+
+#: One reconcile candidate: the ledger window to seed + the span-index lookup key whose
+#: stored ``(first_date, last_date)`` must ENCLOSE the window for the seed to fire.
+SeedCandidate = tuple[WindowKey, tuple[str, str, str, str]]
+
+
+def index_lake_spans(spans: Sequence[dict[str, Any]]) -> _SpanIndex:
+    """Build the ``(exchange, segment, symbol, interval) -> span`` lookup — the COMMON index.
+
+    Shared by BOTH the spot (:func:`reconcile_ledger_windows`) and the F&O
+    (:func:`~brutex.adapters.groww.option_ingest.reconcile_fno_ledger_with_lake`)
+    cold-start seeds so the two never drift on how a lake span is keyed (CLAUDE.md §11
+    COMMON). *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
+    shape — one aggregate row per ``bars/`` partition set (spot AND ``segment="FNO"``
+    contract partitions alike), so ONE span read feeds both reconciles.
+    """
+    return {
+        (str(s["exchange"]), str(s["segment"]), str(s["symbol"]), str(s["interval"])): s
+        for s in spans
+    }
+
+
+def seed_enclosed_windows(
+    ledger: WindowLedger,
+    span_index: _SpanIndex,
+    candidates: Iterable[SeedCandidate],
+    *,
+    now: datetime,
+) -> int:
+    """Seed ``SUCCESS`` (only-if-absent) for each candidate window the lake ENCLOSES — the COMMON core.
+
+    The single reconcile engine shared by the spot + F&O cold-starts (CLAUDE.md §11
+    COMMON). For each ``(window_key, span_key)`` candidate it looks up the lake span,
+    and — iff the span has ≥ 1 bar and its stored ``[first_date, last_date]`` FULLY
+    encloses the window (``first_date <= window.start AND window.end <= last_date``, the
+    conservative DEC-LAKE-RECONCILE-001 rule) — seeds the window ``SUCCESS`` via
+    :meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success` (which NEVER
+    overwrites an existing ``FAILED`` / ``PLANNED`` / settled row, so a genuinely-missing
+    or partially-covered window is left re-pullable). Returns the number of windows newly
+    seeded. Pure over *span_index* + *candidates*; O(candidates) with O(1) lookups.
+    """
+    seeded = 0
+    for window_key, span_key in candidates:
+        entry = span_index.get(span_key)
+        if (
+            entry is None
+            or int(entry["bars"]) <= 0
+            or entry["first_date"] is None
+            or entry["last_date"] is None
+        ):
+            continue
+        first_date = date.fromisoformat(str(entry["first_date"]))
+        last_date = date.fromisoformat(str(entry["last_date"]))
+        if not (first_date <= window_key.start and window_key.end <= last_date):
+            continue
+        if ledger.seed_lake_success(window_key, bars=int(entry["bars"]), now=now):
+            seeded += 1
+    return seeded
+
+
 def reconcile_ledger_windows(
     ledger: WindowLedger,
     spans: Sequence[dict[str, Any]],
@@ -583,10 +648,7 @@ def reconcile_ledger_windows(
     coverage_market = market if market is not None else COVERAGE_MARKET
     width_for = window_days_for if window_days_for is not None else _window_days_for
     stamp = now if now is not None else datetime.now(UTC)
-    span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {
-        (str(s["exchange"]), str(s["segment"]), str(s["symbol"]), str(s["interval"])): s
-        for s in spans
-    }
+    span_index = index_lake_spans(spans)
 
     def _reconcile_tiles(symbol: str, interval: str) -> list[tuple[date, date]]:
         """Tile one (symbol, interval) — bounded to the symbol's 1-day-first window.
@@ -601,42 +663,28 @@ def reconcile_ledger_windows(
             return tile_windows(interval, sym_start, sym_end, window_days_for=width_for)
         return tile_windows(interval, start, end, window_days_for=width_for)
 
-    seeded = 0
-    for instrument in instruments:
-        for interval in intervals:
-            entry = span_by_key.get(
-                (
+    def _candidates() -> Iterable[SeedCandidate]:
+        for instrument in instruments:
+            for interval in intervals:
+                span_key = (
                     instrument.exch_id.value,
                     instrument.segment.value,
                     instrument.symbol_name,
                     interval,
                 )
-            )
-            if (
-                entry is None
-                or int(entry["bars"]) <= 0
-                or entry["first_date"] is None
-                or entry["last_date"] is None
-            ):
-                continue
-            first_date = date.fromisoformat(str(entry["first_date"]))
-            last_date = date.fromisoformat(str(entry["last_date"]))
-            for window_start, window_end in _reconcile_tiles(instrument.symbol_name, interval):
-                if not (first_date <= window_start and window_end <= last_date):
-                    continue
-                if ledger.seed_lake_success(
-                    WindowKey(
-                        market=coverage_market,
-                        security_id=instrument.symbol_name,
-                        interval=interval,
-                        start=window_start,
-                        end=window_end,
-                    ),
-                    bars=int(entry["bars"]),
-                    now=stamp,
-                ):
-                    seeded += 1
-    return seeded
+                for window_start, window_end in _reconcile_tiles(instrument.symbol_name, interval):
+                    yield (
+                        WindowKey(
+                            market=coverage_market,
+                            security_id=instrument.symbol_name,
+                            interval=interval,
+                            start=window_start,
+                            end=window_end,
+                        ),
+                        span_key,
+                    )
+
+    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp)
 
 
 def reconcile_ledger_with_lake(
@@ -782,6 +830,7 @@ __all__ = [
     "LIVE_FLUSH_MIN_INTERVAL_S",
     "begin_pull_ledger",
     "end_pull_ledger",
+    "index_lake_spans",
     "ledger_dir",
     "ledger_path",
     "load_or_migrate_window_ledger",
@@ -791,4 +840,5 @@ __all__ = [
     "reconcile_ledger_windows",
     "reconcile_ledger_with_lake",
     "save_window_ledger",
+    "seed_enclosed_windows",
 ]

@@ -60,6 +60,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from time import sleep as _time_sleep
 
 import structlog
@@ -105,6 +106,11 @@ from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.window_ledger_store import (
+    SeedCandidate,
+    index_lake_spans,
+    seed_enclosed_windows,
+)
 from brutex.data.write_consumer import WriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id, pull_id_scope
@@ -1112,6 +1118,151 @@ def plan_contract_windows(
     return planned
 
 
+def _fno_reconcile_candidates(
+    *,
+    contracts: Sequence[DerivativeContract],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    market: str,
+    contract_windows: ContractWindows | None,
+    now_for_clamp: datetime,
+) -> Iterable[SeedCandidate]:
+    """Yield ``(window_key, span_key)`` cold-start seed candidates for the F&O chain.
+
+    The F&O twin of the spot spine's candidate generator inside
+    :func:`brutex.data.window_ledger_store.reconcile_ledger_windows`. For each
+    ``(contract, interval)`` pair it derives the SAME ledger key the fetch + the
+    pre-plan record (:func:`_clamped_window_key` over the :func:`_resolve_window`-resolved
+    range), so a seeded ``SUCCESS`` key is BYTE-IDENTICAL to the ``PLANNED`` key
+    :func:`plan_contract_windows` upserts (the "reconcile == plan == fetch" invariant that
+    lets the cold-start flip a would-be-PLANNED window to skippable ``SUCCESS`` — the F&O
+    equivalent of the spot rescue). The lake span lookup key is the CONTRACT's F&O
+    partition ``(exchange, "FNO", groww_symbol, interval)`` — the exact directory
+    :func:`ingest_option_contract` writes to via ``sink.append(segment="FNO", …)`` and
+    :func:`~brutex.dashboard.db_view.summarize_spot_datasets` (which walks the whole
+    ``bars/`` tree, spot AND FNO) reports the stored span for. A pair whose clamped range
+    is empty (``key is None``) is skipped — the fetch/plan touch nothing there either.
+    """
+    for contract in contracts:
+        exchange = contract_exchange(contract)
+        for interval in intervals:
+            window_start, window_end = _resolve_window(
+                contract_windows,
+                symbol=contract.symbol,
+                interval=interval,
+                start=start,
+                end=end,
+            )
+            key = _clamped_window_key(
+                contract.symbol,
+                interval=interval,
+                start=window_start,
+                end=window_end,
+                market=market,
+                now_for_clamp=now_for_clamp,
+            )
+            if key is None:
+                continue
+            yield key, (exchange, OPTION_SEGMENT, contract.symbol, interval)
+
+
+def reconcile_fno_ledger_windows(
+    ledger: WindowLedger,
+    spans: Sequence[dict[str, object]],
+    *,
+    contracts: Sequence[DerivativeContract],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    market: str,
+    contract_windows: ContractWindows | None = None,
+    now: datetime | None = None,
+    now_ist: Callable[[], datetime] | None = None,
+) -> int:
+    """Seed ``SUCCESS`` (only-if-absent) for every F&O window the lake already ENCLOSES — **pure** cold-start.
+
+    The F&O twin of the spot spine's
+    :func:`brutex.data.window_ledger_store.reconcile_ledger_windows`
+    (DEC-FNO-LEDGER-LAKE-RECONCILE-001). On a fresh clone / lost / orphaned ledger the F&O
+    candle lake (``bars/<exch>/FNO/<groww_symbol>/<interval>/…``) may already hold years of
+    contract bars while the ledger is empty, so once the ledger drives the skip a re-pull
+    would re-fetch the ENTIRE options chain (every strike × CE/PE × expiry). The SPOT phase
+    has had this rescue (:func:`reconcile_ledger_with_lake`) since DEC-WINDOW-LEDGER-001; the
+    F&O phase never did — the gap this closes.
+
+    For each ``(contract, interval)`` whose stored F&O-partition span ENCLOSES the pair's
+    clamped window (``first_date <= window_start AND window_end <= last_date``, span with
+    ≥ 1 bar — the SAME conservative DEC-LAKE-RECONCILE-001 rule the spot reconcile uses),
+    seed that window ``SUCCESS`` — but ONLY if ABSENT
+    (:meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success` NEVER overwrites a
+    ``FAILED`` / ``PLANNED`` / settled row, so it can never mask a re-pull). A
+    genuinely-missing window (no span, or the span does not fully enclose it — a
+    PARTIALLY-covered window) is left with NO seeded row, so it stays re-pullable. Reuses
+    the COMMON seed engine :func:`~brutex.data.window_ledger_store.seed_enclosed_windows`
+    over :func:`~brutex.data.window_ledger_store.index_lake_spans` (CLAUDE.md §11 COMMON —
+    the spot + F&O reconciles share ONE engine, parameterised only by the key convention).
+    O(contracts × intervals) with O(1) span lookups. Returns the number of windows seeded.
+
+    *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans` shape (spot
+    AND FNO partitions in one read). *now* stamps the seeded rows; *now_ist* injects the
+    current-day clamp clock so the reconcile key equals the plan/fetch key deterministically.
+    """
+    stamp = now if now is not None else datetime.now(UTC)
+    now_for_clamp = (now_ist or _now_ist)()
+    span_index = index_lake_spans(spans)
+    candidates = _fno_reconcile_candidates(
+        contracts=contracts,
+        intervals=intervals,
+        start=start,
+        end=end,
+        market=market,
+        contract_windows=contract_windows,
+        now_for_clamp=now_for_clamp,
+    )
+    return seed_enclosed_windows(ledger, span_index, candidates, now=stamp)
+
+
+def reconcile_fno_ledger_with_lake(
+    ledger: WindowLedger,
+    lake_root: Path,
+    *,
+    contracts: Sequence[DerivativeContract],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    market: str,
+    contract_windows: ContractWindows | None = None,
+    now: datetime | None = None,
+    now_ist: Callable[[], datetime] | None = None,
+) -> int:
+    """Load the lake spans + seed the F&O ledger cold-start (the wired entry point).
+
+    Thin composition of :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans` (the
+    DuckDB span read — ONE O(datasets) aggregate scan covering spot AND FNO partitions) +
+    :func:`reconcile_fno_ledger_windows` (pure). Called once per F&O phase at pull start —
+    right after ``begin_pull_ledger``, BEFORE ``plan_contract_windows`` seeds ``PLANNED`` —
+    so a fresh-clone / orphaned ledger inherits the lake's already-stored F&O windows as
+    ``SUCCESS`` and the pull SKIPS them instead of re-fetching the whole chain
+    (DEC-FNO-LEDGER-LAKE-RECONCILE-001). O(datasets) aggregate reads, never per-window.
+    """
+    from brutex.dashboard.coverage_reconcile import load_lake_spans
+
+    spans = load_lake_spans(lake_root)
+    return reconcile_fno_ledger_windows(
+        ledger,
+        spans,
+        contracts=contracts,
+        intervals=intervals,
+        start=start,
+        end=end,
+        market=market,
+        contract_windows=contract_windows,
+        now=now,
+        now_ist=now_ist,
+    )
+
+
 def run_groww_option_ingest(
     client: GrowwClientProtocol,
     sink: BarSink,
@@ -1576,6 +1727,8 @@ __all__ = [
     "ingest_underlying_futures",
     "ingest_underlying_options",
     "plan_contract_windows",
+    "reconcile_fno_ledger_windows",
+    "reconcile_fno_ledger_with_lake",
     "run_groww_option_ingest",
     "scan_underlying_all_empty",
 ]
