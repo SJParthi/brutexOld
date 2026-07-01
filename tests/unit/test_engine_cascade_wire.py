@@ -17,7 +17,7 @@ and runs the nine-filter cascade per ``(instrument, tf)`` pool. Covers:
 
 from __future__ import annotations
 
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -1094,6 +1094,118 @@ def _swept_tree(root: Path) -> cw.SweepGridConfig:  # type: ignore[name-defined]
             audit=audit,
         )
     return grid
+
+
+def _two_anchor_grid() -> cw.SweepGridConfig:  # type: ignore[name-defined]
+    """A minimal grid sweeping BOTH prev-day AND rolling-weekly anchors.
+
+    One instrument/tf/direction/K/sl/tp/proximity + two ``fib_anchors`` → exactly
+    two grid tuples, one per anchor, differing ONLY in their swept anchor.
+    """
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.strategies.types import Side
+
+    return SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        fib_anchors=[FibAnchorKind.PREV_DAY, FibAnchorKind.ROLLING_WEEKLY],
+        mode="A",
+        data_snapshot_hash="snap0001",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+    )
+
+
+def _seed_tuple_store(
+    root: Path,
+    tuple_: SweepTuple,
+    grid: cw.SweepGridConfig,  # type: ignore[name-defined]
+    *,
+    rows: Sequence[ResultRow],
+) -> None:
+    """Persist *rows* at *tuple_*'s deterministic store path under *root*."""
+    from brutex.engine.results_store import ResultsStore
+    from brutex.engine.sweep_orchestrator import tuple_store_path
+
+    store = ResultsStore(path=tuple_store_path(root, tuple_, grid))
+    for row in rows:
+        store.append(row)
+    store.flush()
+
+
+class TestBuildStage2CascadeSpecs:
+    """DEC-NIFTY-FIB-AXIS-001 review MAJOR 2 — the pragma-free Stage-2 helper.
+
+    The Stage-2 grid-winner cascade assembly used to live inline in the pragma'd
+    ``cmd_sweep_all`` shim, so the missing ``fib_anchor`` thread was invisible.
+    These tests exercise the factored helper directly.
+    """
+
+    def test_each_grid_winner_spec_carries_its_swept_fib_anchor(self, tmp_path: Path) -> None:
+        # Two grid tuples (prev-day + rolling-weekly), each with a persisted
+        # winner. Each Stage-2 spec must carry its OWN anchor (fails-before:
+        # without the ``fib_anchor=sweep_tuple.fib_anchor`` thread the
+        # rolling-weekly tuple's spec would default PREV_DAY, mis-scoring it in
+        # Stage-4). Mirrors the anchor-sensitivity of
+        # ``test_candidates_for_spec_uses_the_swept_fib_anchor``.
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples
+
+        grid = _two_anchor_grid()
+        for tuple_ in iter_sweep_tuples(grid):
+            _seed_tuple_store(tmp_path, tuple_, grid, rows=[_result_row(1, mask=1, sharpe=0.5)])
+
+        specs = cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None)
+        assert {spec.fib_anchor for spec in specs} == {
+            FibAnchorKind.PREV_DAY,
+            FibAnchorKind.ROLLING_WEEKLY,
+        }
+        assert all(spec.instrument == "NIFTY" and spec.tf_label == "1minute" for spec in specs)
+
+    def test_skips_tuples_whose_store_is_absent(self, tmp_path: Path) -> None:
+        # Only the prev-day tuple has a store; the rolling-weekly tuple never ran
+        # (no bars) → the helper's ``not store_path.exists()`` branch skips it.
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples
+
+        grid = _two_anchor_grid()
+        prev_day = next(
+            t for t in iter_sweep_tuples(grid) if t.fib_anchor is FibAnchorKind.PREV_DAY
+        )
+        _seed_tuple_store(tmp_path, prev_day, grid, rows=[_result_row(1, mask=1, sharpe=0.5)])
+
+        specs = cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None)
+        assert {spec.fib_anchor for spec in specs} == {FibAnchorKind.PREV_DAY}
+
+    def test_empty_store_yields_no_spec(self, tmp_path: Path) -> None:
+        # A store that exists but holds ZERO rows → ``spec_from_store_rows``
+        # returns ``None`` (the ``if spec is not None`` branch drops it).
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples
+
+        grid = _two_anchor_grid()
+        for tuple_ in iter_sweep_tuples(grid):
+            _seed_tuple_store(tmp_path, tuple_, grid, rows=[])
+
+        assert cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None) == []
+
+    def test_top_k_is_threaded_into_the_spec_winners(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples
+
+        grid = _two_anchor_grid()
+        rows = [
+            _result_row(1, mask=1, sharpe=0.5),
+            _result_row(2, mask=2, sharpe=1.5),
+        ]
+        for tuple_ in iter_sweep_tuples(grid):
+            _seed_tuple_store(tmp_path, tuple_, grid, rows=rows)
+
+        specs = cw.build_stage2_cascade_specs(tmp_path, grid, top_k=1)
+        assert specs
+        assert all(len(spec.winners) == 1 for spec in specs)
 
 
 @dataclass(frozen=True)

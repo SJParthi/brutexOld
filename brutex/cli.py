@@ -3338,44 +3338,17 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # behaviour is UNCHANGED (it ran per-leaderboard inside the sweep above).
     from brutex.engine.cascade_wire import (
         BarsContext,
+        build_stage2_cascade_specs,
         cascade_config_for_sweep,
         run_and_write_from_specs,
-        spec_from_store_rows,
     )
-    from brutex.engine.results_store import ResultsStore
     from brutex.engine.stage3_wire import cascade_specs_for_refined_cells, stage3_manifest_record
-    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
-    from brutex.engine.sweep_run import _direction_label
 
-    cascade_specs = []
-    for sweep_tuple in iter_sweep_tuples(grid):
-        store_path = tuple_store_path(out_root, sweep_tuple, grid)
-        if not store_path.exists():
-            continue
-        proximity_bps = (
-            None
-            if sweep_tuple.proximity is None
-            else (
-                sweep_tuple.proximity.pivot_proximity_bps,
-                sweep_tuple.proximity.pdh_pdl_proximity_bps,
-                sweep_tuple.proximity.fib_proximity_bps,
-            )
-        )
-        spec = spec_from_store_rows(
-            instrument=sweep_tuple.instrument,
-            tf_label=sweep_tuple.tf.label,
-            tf_minutes=sweep_tuple.tf.minutes,
-            direction_label=_direction_label(sweep_tuple.direction),
-            sl_paisa=sweep_tuple.sl_paisa,
-            tp_paisa=sweep_tuple.tp_paisa,
-            prior_n=grid.prior_n,
-            proximity_bps=proximity_bps,
-            start_equity_paisa=grid.start_equity_paisa,
-            rows=ResultsStore.load(store_path).rows(),
-            top_k=top,
-        )
-        if spec is not None:
-            cascade_specs.append(spec)
+    # Stage-2 grid winners — each carries its OWN swept fib_anchor so Stage-4
+    # re-scores a non-prev-day survivor against its own Fib levels
+    # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
+    # pragma-free, unit-tested helper (review MAJOR 2).
+    cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
 
     # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
     # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the

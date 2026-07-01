@@ -1409,6 +1409,79 @@ def spec_from_store_rows(
     )
 
 
+def build_stage2_cascade_specs(
+    results_root: Path,
+    grid: SweepGridConfig,
+    *,
+    top_k: int | None,
+) -> list[CascadeTupleSpec]:
+    """Build the Stage-2 grid-winner cascade specs for a completed sweep.
+
+    Iterates every :func:`~brutex.engine.sweep_orchestrator.iter_sweep_tuples`
+    tuple, loads its persisted store (skipping a tuple that never ran — no bars),
+    and turns its top-``top_k`` finalists into a :class:`CascadeTupleSpec` via
+    :func:`spec_from_store_rows`. Each tuple's OWN swept ``fib_anchor`` is
+    threaded onto its spec (DEC-NIFTY-FIB-AXIS-001) so the Stage-4 cascade
+    re-scores a non-prev-day survivor against its OWN Fib levels — the
+    grid-winner twin of :func:`~brutex.engine.stage3_wire.cascade_specs_for_refined_cells`.
+
+    This is the pragma-free extraction of the Stage-2 assembly loop that used to
+    live inline in the ``cmd_sweep_all`` orchestration shim, so the anchor thread
+    is unit-testable (review MAJOR 2, DEC-NIFTY-FIB-AXIS-001).
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root the grid persisted its per-tuple stores under.
+    grid
+        The completed sweep's grid config (drives the tuple enumeration + the
+        store-path resolution).
+    top_k
+        Keep only the top-``top_k`` finalists per tuple by Sharpe, or ``None``
+        for all — matching the ``top`` the sweep launcher passes.
+
+    Returns
+    -------
+    list[CascadeTupleSpec]
+        One spec per non-empty grid tuple, in ``iter_sweep_tuples`` order.
+    """
+    from brutex.engine.results_store import ResultsStore
+    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+    from brutex.engine.sweep_run import _direction_label
+
+    specs: list[CascadeTupleSpec] = []
+    for sweep_tuple in iter_sweep_tuples(grid):
+        store_path = tuple_store_path(results_root, sweep_tuple, grid)
+        if not store_path.exists():
+            continue
+        proximity_bps = (
+            None
+            if sweep_tuple.proximity is None
+            else (
+                sweep_tuple.proximity.pivot_proximity_bps,
+                sweep_tuple.proximity.pdh_pdl_proximity_bps,
+                sweep_tuple.proximity.fib_proximity_bps,
+            )
+        )
+        spec = spec_from_store_rows(
+            instrument=sweep_tuple.instrument,
+            tf_label=sweep_tuple.tf.label,
+            tf_minutes=sweep_tuple.tf.minutes,
+            direction_label=_direction_label(sweep_tuple.direction),
+            sl_paisa=sweep_tuple.sl_paisa,
+            tp_paisa=sweep_tuple.tp_paisa,
+            prior_n=grid.prior_n,
+            proximity_bps=proximity_bps,
+            start_equity_paisa=grid.start_equity_paisa,
+            rows=ResultsStore.load(store_path).rows(),
+            top_k=top_k,
+            fib_anchor=sweep_tuple.fib_anchor,
+        )
+        if spec is not None:
+            specs.append(spec)
+    return specs
+
+
 # ── Output paths + IO ─────────────────────────────────────────────────────────
 
 
