@@ -1549,6 +1549,119 @@ def _start_instrument_autoload(
     ).start()
 
 
+def _auto_resume_child_argv(lake_root: Path) -> list[str]:
+    """Return the argv that resumes an in-progress universe pull for *lake_root*.
+
+    Runs ``brutex fetch --universe --until-clean --lake-root <lake_root>`` via the
+    SAME Python interpreter (``sys.executable -m brutex``) so the resumed pull
+    inherits this exact venv + install — robust whether or not the ``brutex``
+    console script is on ``PATH`` (mirrors :func:`_supervisor_child_argv`).
+
+    The explicit ``--lake-root`` is LOAD-BEARING (hostile-review MAJOR): the
+    dashboard resolved the ledger from *lake_root* (which may be an explicit
+    ``--lake-root /data/lake`` with ``$BRUTEX_LAKE_ROOT`` unset), but a child with
+    NO ``--lake-root`` would fall back to ``~/.brutex/lake`` in :func:`cmd_fetch`
+    — re-pulling into the WRONG lake AND missing the single-flight lock (which is
+    KEYED by lake root), so it would not contend with a real pull on the operator's
+    lake (the very double-pull this feature exists to prevent). Passing the
+    resolved root keeps the child on the SAME lake the ledger was read from, so the
+    resume re-pulls the right windows AND shares the account-wide lock.
+
+    ``--until-clean`` re-runs bounded rounds over the SHARED window ledger —
+    re-fetching ONLY the unsettled windows (the keep-first sink no-ops the settled
+    ones) — until the ledger is clean, the token dies, or the round budget is spent
+    (DEC-TOKEN-PREFLIGHT-001).
+    """
+    return [
+        sys.executable,
+        "-m",
+        "brutex",
+        "fetch",
+        "--universe",
+        "--until-clean",
+        "--lake-root",
+        str(lake_root),
+    ]
+
+
+def _spawn_auto_resume_pull(
+    incomplete: Any, lake_root: Path, log: Any
+) -> None:  # pragma: no cover — live subprocess spawn (the fetch spine is tested separately)
+    """Spawn a detached ``brutex fetch --universe --until-clean`` on *lake_root* to resume.
+
+    The injected resume ACTION for
+    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`. A SEPARATE
+    process (not an in-server job) is deliberate: the CLI fetch spine is already
+    fully tested + honours the account-wide cross-process single-flight lock
+    (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so a concurrent dashboard click can never
+    double the Groww request rate — the second pull is simply refused. The child is
+    launched with ``start_new_session=True`` (its own process group) so it is
+    DELIBERATELY un-reaped + re-parented to init on dashboard exit — a
+    fire-and-forget resume, NOT the supervisor's supervised child (which DOES
+    reap via ``child.wait()``); the child manages its OWN lifetime (it exits when
+    the ledger is clean / the token dies / the round budget is spent). Any spawn
+    error is caught by the ``maybe_resume_on_boot`` guard, so it can never crash
+    the boot.
+    """
+    import subprocess  # nosec B404 — stdlib subprocess, list-argv launch, no shell (see B603 below)
+
+    argv = _auto_resume_child_argv(lake_root)
+    log.info(
+        "auto_resume.spawn",
+        outstanding=incomplete.outstanding,
+        planned=incomplete.planned,
+        failed=incomplete.failed,
+        lake_root=str(lake_root),
+    )
+    # nosec B603: `argv` is a fixed list built from `sys.executable` + literal
+    # subcommand tokens + the operator-resolved lake root (see _auto_resume_child_argv)
+    # — NOT a shell string and NOT untrusted network input; `shell=` is never set, so
+    # there is no shell-injection surface. `start_new_session=True` isolates the child's
+    # process group so the resumed pull outlives a dashboard restart (re-parented to init,
+    # deliberately un-reaped — a fire-and-forget resume, unlike the supervised child).
+    subprocess.Popen(  # nosec B603  # noqa: S603 — list argv, no shell, trusted CLI
+        argv,
+        start_new_session=True,
+    )
+
+
+def _start_auto_resume_on_boot(
+    lake_root: Path, log: Any
+) -> None:  # pragma: no cover — daemon thread + live ledger read / subprocess spawn
+    """Run the opt-in boot-time auto-resume for *lake_root* in a background daemon thread.
+
+    Wires :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot` (the
+    gated, best-effort decision) to (a) the durable window-ledger read of
+    *lake_root* and (b) the subprocess resume action THAT RE-PULLS THE SAME
+    *lake_root* (the explicit ``--lake-root`` on the child — the hostile-review
+    MAJOR fix, so the ledger read and the resumed pull can never diverge to two
+    different lakes). Run in a daemon thread so the ledger read / spawn never
+    blocks the uvicorn port bind — the SAME instant-launch seam
+    :func:`_start_instrument_autoload` uses (DEC-DASHBOARD-INSTANT-LAUNCH-001). The
+    whole decision is a no-op unless ``BRUTEX_AUTO_RESUME_ON_BOOT`` is truthy
+    (default OFF — DEC-AUTO-RESUME-ON-BOOT-001), so a dev / CI boot is never
+    surprised by a spontaneous pull. ``maybe_resume_on_boot`` never raises, so a
+    failed resume trigger only logs — the boot is unaffected (Golden Rule #10).
+    """
+    import threading
+
+    from brutex.data.window_ledger_store import load_window_ledger
+    from brutex.orchestrator.auto_resume import maybe_resume_on_boot
+
+    def _run() -> None:
+        verdict = maybe_resume_on_boot(
+            load_ledger=lambda: load_window_ledger(lake_root),
+            resume=lambda incomplete: _spawn_auto_resume_pull(incomplete, lake_root, log),
+        )
+        log.info("auto_resume.verdict", verdict=verdict.value, lake_root=str(lake_root))
+
+    threading.Thread(
+        target=_run,
+        name="brutex-auto-resume-on-boot",
+        daemon=True,
+    ).start()
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -1662,6 +1775,21 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
         _start_instrument_autoload(store, _log)
     app = build_app(state, instrument_store=store)
+    # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
+    # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an
+    # in-progress pull (PLANNED / FAILED windows), auto-continue it by spawning
+    # `brutex fetch --universe --until-clean --lake-root <resolved>` — so a fresh
+    # container / redeploy / restart picks up an unfinished pull with ZERO clicks
+    # (§11 AUTOMATED). Runs in a daemon thread so the ledger read / spawn never blocks
+    # the uvicorn bind, and is a no-op unless the flag is set (default OFF — a dev / CI
+    # boot is never surprised). Best-effort on the BIND path: the launcher itself only
+    # spawns a daemon thread (the resume DECISION never raises), but wrapping the launch
+    # in a guard so even a thread-spawn failure logs + the dashboard still binds honours
+    # the "never crashes boot" contract (Golden Rule #10).
+    try:
+        _start_auto_resume_on_boot(_resolve_lake_root(lake_root), _log)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
+        _log.warning("auto_resume.launch_failed", error=str(exc))
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     # The /logs WEBPAGE was removed (DEC-DASHBOARD-LOGS-REMOVE-001); point at the
     # rotating file + the kept JSON data endpoint, not the dead page.
