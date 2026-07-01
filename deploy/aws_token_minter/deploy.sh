@@ -48,8 +48,75 @@ if ! command -v terraform >/dev/null 2>&1; then
   exit 1
 fi
 
+# Pre-flight: the custom KMS key is a Terraform DATA source (referenced, never
+# created — the operator directive in ADR-0014 §5 keeps the key OUT of this stack's
+# lifecycle so `terraform destroy` can NEVER delete the key guarding the real Groww
+# creds). The stack encrypts the access-token param it CREATES under this key, so the
+# key must exist BEFORE apply regardless of where the two creds live — else
+# `terraform apply` dies deep in the plan with the opaque
+#   Error: reading KMS Key (alias/tickvault-groww): couldn't find resource
+# so we probe it here FIRST and print the exact one-time create commands instead.
+# Best-effort: only runs when the aws CLI is present, respects an operator
+# `-var 'kms_key_alias=…'` / `-var 'region=…'` override, and NEVER blocks on any
+# other outcome (a describe-key error that is NOT "not found" — an auth/network
+# hiccup — is left for Terraform to surface authoritatively).
+#
+# NOTE: the two Groww creds do NOT need to live under this key — by default the
+# stack also grants the minter Decrypt on the AWS-managed alias/aws/ssm key scoped
+# to SSM-only (var allow_ssm_default_key_decrypt=true), so creds under the default
+# SSM key are read fine with no re-put.
+KMS_KEY_ALIAS_DEFAULT="alias/tickvault-groww"
+KMS_KEY_ALIAS="$KMS_KEY_ALIAS_DEFAULT"
+REGION="$REGION_DEFAULT"
+for arg in "$@"; do
+  case "$arg" in
+  kms_key_alias=*) KMS_KEY_ALIAS="${arg#kms_key_alias=}" ;;
+  region=*) REGION="${arg#region=}" ;;
+  esac
+done
+
+if command -v aws >/dev/null 2>&1; then
+  if ! aws kms describe-key --region "$REGION" --key-id "$KMS_KEY_ALIAS" \
+    >/dev/null 2>&1; then
+    {
+      echo "deploy.sh: the KMS key ${KMS_KEY_ALIAS} was not found in ${REGION}."
+      echo
+      echo "This stack REFERENCES that key (it never creates it — ADR-0014 §5) and"
+      echo "encrypts the access-token it writes under it, so the key must exist BEFORE"
+      echo "apply. Create it once:"
+      echo
+      echo "  aws kms create-key --region ${REGION} \\"
+      echo "    --description 'Groww token-minter SecureString key (tickvault)' \\"
+      echo "    --query KeyMetadata.KeyId --output text"
+      echo "  # then, using the KeyId printed above:"
+      echo "  aws kms create-alias --region ${REGION} \\"
+      echo "    --alias-name ${KMS_KEY_ALIAS} --target-key-id <KeyId-from-above>"
+      echo
+      echo "You do NOT need to move your two Groww creds under this key — the minter"
+      echo "is granted SSM-scoped Decrypt on the default alias/aws/ssm key too (var"
+      echo "allow_ssm_default_key_decrypt, default true). The access-token param is"
+      echo "created + encrypted under this key BY the stack — you do NOT pre-create it."
+      echo
+      echo "Then re-run ./deploy.sh. See docs/runbooks/aws-token-deploy-guide.md §1d."
+    } >&2
+    exit 1
+  fi
+fi
+
 # Fold an ALERT_EMAIL env var into a -var if the operator did not pass one.
-EXTRA_ARGS=("$@")
+#
+# EXTRA_ARGS is initialised as an empty array, then filled from "$@". Every
+# expansion of it below uses the portable `${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}`
+# guard: on macOS's default bash 3.2, `set -u` (nounset) treats an EMPTY array's
+# `"${arr[@]}"` as an unbound variable and ABORTS the script — so a plain
+# `"${EXTRA_ARGS[@]}"` dies with `EXTRA_ARGS[@]: unbound variable` right before
+# `terraform apply` when no extra args are passed. The `+`-alternate form expands
+# to NOTHING when the array is unset/empty and to the quoted elements otherwise,
+# and works identically on bash 3.2 and bash 4+.
+EXTRA_ARGS=()
+if [[ "$#" -gt 0 ]]; then
+  EXTRA_ARGS=("$@")
+fi
 if [[ -n "${ALERT_EMAIL:-}" ]]; then
   ALREADY_SET=false
   for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do
