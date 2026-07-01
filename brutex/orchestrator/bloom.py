@@ -415,13 +415,28 @@ class BloomFilter:
 
     @property
     def insertions_attempted(self) -> int:
-        """Total :meth:`add` invocations (includes duplicates).
+        """Total :meth:`add` invocations — the UNIQUE-key count.
 
-        Used as the conservative FAIL_CLOSED gate. Duplicates count
-        toward the cap, which means re-adding the same hash 10⁹ times
-        will trip :class:`BloomCapacityExceeded`. In practice the
-        callers feed unique sha256 / blake3 digests so duplicates are
-        statistically zero (Hostile lens §2 noted the trade-off).
+        Used as the FAIL_CLOSED capacity gate. Each :meth:`add` still
+        increments this counter unconditionally (this class does not
+        dedup — a repeated :meth:`add` of the same hash WOULD count
+        twice), so the honesty of the gate depends on the caller adding
+        each key AT MOST ONCE.
+
+        The production caller (:meth:`brutex.orchestrator.store.WorkItemStore.put`)
+        honours that contract: it Bloom-adds a key ONLY on its FIRST
+        LMDB insertion, never on a subsequent state-transition put of an
+        already-stored key (DEC-DEDUP-CAPACITY-UNIQUE-001). LMDB is the
+        ground truth for newness. Before that fix, every combo — put
+        multiple times as it moves PENDING→RUNNING→SUCCESS — inflated
+        this counter, so the gate could raise
+        :class:`BloomCapacityExceeded` at a small FRACTION of ``capacity``
+        distinct combos and halt a heavy sweep prematurely. With the fix
+        ``insertions_attempted`` equals the number of DISTINCT keys ever
+        inserted, so the capacity gate is honest: it trips only when
+        ``capacity`` genuinely-unique combos exist. Re-adding the same
+        hash 10⁹ times through :meth:`add` directly would still trip the
+        gate — dedup is the caller's responsibility, not this filter's.
         """
         with self._lock:
             return self._insertions_attempted
