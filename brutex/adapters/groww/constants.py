@@ -317,6 +317,97 @@ GROWW_TOKEN_ISSUANCE_RETRY_BASE_S: Final[float] = 1.0
 #: Per-attempt cap (seconds) for the cold-start issuance back-off sleep.
 GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
 
+# ── Shared token broker (DEC-TOKEN-BROKER-AWS-001) ───────────────────────────
+# The operator's FINAL design (2026-07-01): the Groww api_key, TOTP secret AND the
+# daily minted access token ALL live in ONE shared place — AWS Systems Manager
+# Parameter Store (region ``ap-south-1``) — read by BOTH TickVault (live) and BruteX
+# (backtesting). A SINGLE dedicated Lambda is the ONLY writer/minter of the shared
+# access token; BruteX and TickVault are strictly READ-ONLY consumers. Because there
+# is exactly ONE writer, there is NO compare-and-swap / DynamoDB need — a plain
+# SecureString parameter suffices (a read is a ``GetParameter WithDecryption=True``
+# that KMS-decrypts the SecureString; AWS SSM docs "Working with SecureString
+# parameters", ``GetParameter`` API reference).
+#
+#: Read-only broker toggle. When TRUE (``1``/``true``/``yes``/``on``,
+#: case-insensitive) BruteX RESOLVES the shared daily token from Parameter Store and
+#: NEVER mints it (the Lambda owns minting) — a mint attempt is a loud fail-fast, never
+#: a silent local mint. Unset / blank / any other value ⇒ FALSE ⇒ the LOCAL on-disk
+#: cache + local TOTP mint (byte-identical to #1041; local dev + CI need NO AWS). A bad
+#: value can never crash a pull (fail-safe to local, mirroring :func:`resolve_pool_size`).
+GROWW_TOKEN_BROKER_READONLY_ENV: Final[str] = "BRUTEX_TOKEN_BROKER_READONLY"  # noqa: S105  # env var name, not a secret
+
+#: The two recognised backend kinds (the resolved store label).
+GROWW_TOKEN_BACKEND_LOCAL: Final[str] = "local"  # noqa: S105  # backend label, not a secret
+GROWW_TOKEN_BACKEND_AWS: Final[str] = "aws"  # noqa: S105  # backend label, not a secret
+
+#: AWS region for the token-broker SSM client. Unset/blank ⇒ the operator default
+#: :data:`GROWW_TOKEN_AWS_REGION_DEFAULT` (``ap-south-1`` — where the SecureStrings
+#: already live). ``AWS_REGION`` is honoured as a secondary override before the default.
+GROWW_TOKEN_AWS_REGION_ENV: Final[str] = "BRUTEX_TOKEN_AWS_REGION"  # noqa: S105  # env var name, not a secret
+#: Standard AWS SDK region env var, honoured as a secondary override.
+AWS_REGION_ENV: Final[str] = "AWS_REGION"
+#: The operator-confirmed default region (the SecureStrings live in ap-south-1).
+GROWW_TOKEN_AWS_REGION_DEFAULT: Final[str] = "ap-south-1"  # noqa: S105  # AWS region, not a secret
+
+#: Full Parameter-Store path of the SHARED daily access token (the Lambda writes it;
+#: BruteX reads it). Env-overridable; default is the operator's fixed path.
+GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_ACCESS_TOKEN"  # noqa: S105  # env var name, not a secret
+GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT: Final[str] = "/tickvault/prod/groww/access-token"  # noqa: S105  # parameter path, not a secret
+#: Full Parameter-Store path of the shared Groww api_key SecureString. Env-overridable.
+GROWW_TOKEN_PARAM_API_KEY_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_API_KEY"  # noqa: S105  # env var name, not a secret
+GROWW_TOKEN_PARAM_API_KEY_DEFAULT: Final[str] = "/tickvault/prod/groww/api-key"  # noqa: S105  # parameter path, not a secret
+#: Full Parameter-Store path of the shared Groww TOTP-secret SecureString. Env-overridable.
+GROWW_TOKEN_PARAM_TOTP_SECRET_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_TOTP_SECRET"  # noqa: S105  # env var name, not a secret
+GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT: Final[str] = "/tickvault/prod/groww/totp-secret"  # noqa: S105  # parameter path, not a secret
+
+
+def resolve_token_broker_readonly() -> bool:
+    """Return ``True`` iff the read-only Parameter-Store token broker is enabled.
+
+    Reads ``BRUTEX_TOKEN_BROKER_READONLY``: an explicit case-insensitive
+    ``1``/``true``/``yes``/``on`` enables it; ANY other value — unset, blank, ``0``,
+    ``false`` or an unrecognised token — returns ``False`` so a typo or a stale env can
+    never silently switch BruteX to the shared broker or crash a pull (fail-safe to the
+    LOCAL disk cache + local mint, mirroring :func:`resolve_pool_size` /
+    :func:`resolve_smooth_pacing`, CLAUDE.md §2 Rule 1). O(1).
+    """
+    raw = os.environ.get(GROWW_TOKEN_BROKER_READONLY_ENV)
+    return raw is not None and raw.strip().lower() in _TRUTHY_TOKENS
+
+
+#: The set of case-insensitive values that enable the read-only broker toggle.
+_TRUTHY_TOKENS: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+
+def resolve_token_broker_region() -> str:
+    """Resolve the token-broker SSM region: ``BRUTEX_TOKEN_AWS_REGION`` → ``AWS_REGION`` → default.
+
+    The operator's SecureStrings live in :data:`GROWW_TOKEN_AWS_REGION_DEFAULT`
+    (``ap-south-1``). A non-blank ``BRUTEX_TOKEN_AWS_REGION`` wins; else a non-blank
+    ``AWS_REGION``; else the ap-south-1 default (never ``None`` — BruteX always targets a
+    concrete region so a mis-set profile default cannot silently read the wrong region).
+    O(1).
+    """
+    for env_name in (GROWW_TOKEN_AWS_REGION_ENV, AWS_REGION_ENV):
+        raw = os.environ.get(env_name)
+        if raw is not None and raw.strip():
+            return raw.strip()
+    return GROWW_TOKEN_AWS_REGION_DEFAULT
+
+
+def resolve_token_param_path(env_name: str, default: str) -> str:
+    """Return the Parameter-Store path from *env_name*, or *default* when unset/blank.
+
+    A thin COMMON resolver shared by the three shared-secret paths (access-token /
+    api_key / totp-secret) so each honours its own env override with the operator's
+    fixed ``/tickvault/prod/groww/…`` default. O(1).
+    """
+    raw = os.environ.get(env_name)
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return default
+
+
 #: Environment toggle for the OPTIONAL anti-burst smooth pacing
 #: (DEC-GROWW-SMOOTH-PACING-001). The token bucket already caps the AVERAGE rate at
 #: ``current_rps``, but its ``1/rate`` cadence still lets sub-second micro-bursts
@@ -366,6 +457,7 @@ def resolve_pool_size() -> int:
 
 
 __all__ = [
+    "AWS_REGION_ENV",
     "BRUTE_FORCE_INDEX_SYMBOLS",
     "CHUNK_WINDOW_30D_INTERVALS",
     "CHUNK_WINDOW_90D_INTERVALS",
@@ -391,12 +483,23 @@ __all__ = [
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
     "GROWW_SMOOTH_PACING_ENV",
+    "GROWW_TOKEN_AWS_REGION_DEFAULT",
+    "GROWW_TOKEN_AWS_REGION_ENV",
+    "GROWW_TOKEN_BACKEND_AWS",
+    "GROWW_TOKEN_BACKEND_LOCAL",
+    "GROWW_TOKEN_BROKER_READONLY_ENV",
     "GROWW_TOKEN_CACHE_FILENAME",
     "GROWW_TOKEN_CACHE_PATH_ENV",
     "GROWW_TOKEN_CACHE_SCHEMA",
     "GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS",
     "GROWW_TOKEN_ISSUANCE_RETRY_BASE_S",
     "GROWW_TOKEN_ISSUANCE_RETRY_CAP_S",
+    "GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT",
+    "GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV",
+    "GROWW_TOKEN_PARAM_API_KEY_DEFAULT",
+    "GROWW_TOKEN_PARAM_API_KEY_ENV",
+    "GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT",
+    "GROWW_TOKEN_PARAM_TOTP_SECRET_ENV",
     "GROWW_TOKEN_RESET_HOUR_ENV",
     "GROWW_TOKEN_RESET_HOUR_IST",
     "GROWW_WRITE_DEADLINE_S",
@@ -412,4 +515,7 @@ __all__ = [
     "WINDOW_DAYS_180",
     "resolve_pool_size",
     "resolve_smooth_pacing",
+    "resolve_token_broker_readonly",
+    "resolve_token_broker_region",
+    "resolve_token_param_path",
 ]

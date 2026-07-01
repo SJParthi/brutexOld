@@ -170,6 +170,28 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # (Golden Rule #10) instead of blocking EVERY movers_snapshot-touching
         # PR on an unreachable single-file 100% (DEC-COVERAGE-DISCOVERY-MOVERS-SNAPSHOT-001).
         "brutex/dashboard/movers_snapshot.py",
+        # The Groww/token/AWS credentials module. Its 100% line+branch is reached
+        # by a CURATED two-file suite — test_credentials.py (the generic token creds +
+        # the SHARED secure-file reader: symlink / insecure-perms / corrupt-JSON
+        # branches) + test_groww_credentials.py (the groww section: save / load /
+        # resolve / present / preview + the read-merge-write coexistence) — the
+        # exact pair the dedicated STATIC per-module gate in ci.yml runs together
+        # at --cov-fail-under=100. The discovery gate maps a module ONLY to its
+        # stem-matching tests (test_credentials* — so test_credentials.py +
+        # test_credentials_aws.py, but NOT the differently-stemmed
+        # test_groww_credentials.py), so it sees the token + AWS files but misses
+        # the groww-section file and tops out at ~88% STANDALONE — the SAME
+        # multi-file-suite structural mismatch as app.py / pull_controller.py /
+        # db_view.py / stage1a.py / movers_snapshot.py. Folding the groww-section
+        # tests into a test_credentials-stemmed file to satisfy the discovery gate
+        # would be a Golden-Rule-#11 COMMON (no copy-paste) violation.
+        # credentials.py's real 100% gate is the dedicated STATIC per-module gate
+        # (test_credentials.py + test_groww_credentials.py at 100.00% line+branch)
+        # + the whole-package --cov-fail-under=100 floor; the discovery gate is a
+        # COMPLEMENT, and excluding it here keeps that complement honest instead of
+        # blocking EVERY credentials.py-touching PR on an unreachable single-stem
+        # 100% (DEC-TOKEN-BROKER-AWS-001).
+        "brutex/config/credentials.py",
     }
 )
 

@@ -217,3 +217,67 @@ def test_token_disk_cache_constants() -> None:
     assert c.GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS >= 1
     assert c.GROWW_TOKEN_ISSUANCE_RETRY_BASE_S > 0.0
     assert c.GROWW_TOKEN_ISSUANCE_RETRY_CAP_S >= c.GROWW_TOKEN_ISSUANCE_RETRY_BASE_S
+
+
+# ── token-broker resolvers — env toggle / region / param-path (DEC-TOKEN-BROKER-AWS-001) ──
+
+
+def test_resolve_token_broker_readonly_truthy_values_enable(monkeypatch) -> None:
+    """Each accepted truthy spelling (case-insensitive, whitespace-trimmed) → True."""
+    for raw in ("1", "true", "TRUE", "Yes", " on ", "On"):
+        monkeypatch.setenv(c.GROWW_TOKEN_BROKER_READONLY_ENV, raw)
+        assert c.resolve_token_broker_readonly() is True
+
+
+def test_resolve_token_broker_readonly_falsy_and_unset_stay_off(monkeypatch) -> None:
+    """Blank / "0" / "false" / any unrecognised value / unset → False (fail-safe local)."""
+    for raw in ("", "  ", "0", "false", "no", "off", "maybe", "2"):
+        monkeypatch.setenv(c.GROWW_TOKEN_BROKER_READONLY_ENV, raw)
+        assert c.resolve_token_broker_readonly() is False
+    monkeypatch.delenv(c.GROWW_TOKEN_BROKER_READONLY_ENV, raising=False)
+    assert c.resolve_token_broker_readonly() is False
+
+
+def test_resolve_token_broker_region_prefers_brutex_env(monkeypatch) -> None:
+    """A non-blank BRUTEX_TOKEN_AWS_REGION wins over AWS_REGION + the default."""
+    monkeypatch.setenv(c.GROWW_TOKEN_AWS_REGION_ENV, " us-east-1 ")
+    monkeypatch.setenv(c.AWS_REGION_ENV, "eu-west-1")
+    assert c.resolve_token_broker_region() == "us-east-1"
+
+
+def test_resolve_token_broker_region_falls_back_to_aws_region(monkeypatch) -> None:
+    """A blank/unset BRUTEX var → the non-blank AWS_REGION is used."""
+    monkeypatch.setenv(c.GROWW_TOKEN_AWS_REGION_ENV, "  ")
+    monkeypatch.setenv(c.AWS_REGION_ENV, " eu-west-1 ")
+    assert c.resolve_token_broker_region() == "eu-west-1"
+
+
+def test_resolve_token_broker_region_default_when_both_unset(monkeypatch) -> None:
+    """Both unset/blank → the ap-south-1 default (never None — a concrete region)."""
+    monkeypatch.delenv(c.GROWW_TOKEN_AWS_REGION_ENV, raising=False)
+    monkeypatch.delenv(c.AWS_REGION_ENV, raising=False)
+    assert c.resolve_token_broker_region() == c.GROWW_TOKEN_AWS_REGION_DEFAULT == "ap-south-1"
+
+
+def test_resolve_token_param_path_env_override_wins(monkeypatch) -> None:
+    """A non-blank env value (whitespace-trimmed) overrides the default path."""
+    monkeypatch.setenv(c.GROWW_TOKEN_PARAM_API_KEY_ENV, "  /custom/api-key  ")
+    assert (
+        c.resolve_token_param_path(
+            c.GROWW_TOKEN_PARAM_API_KEY_ENV, c.GROWW_TOKEN_PARAM_API_KEY_DEFAULT
+        )
+        == "/custom/api-key"
+    )
+
+
+def test_resolve_token_param_path_default_when_unset_or_blank(monkeypatch) -> None:
+    """Unset OR blank env → the operator default path (each of the three secrets)."""
+    for env_name, default in (
+        (c.GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV, c.GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT),
+        (c.GROWW_TOKEN_PARAM_API_KEY_ENV, c.GROWW_TOKEN_PARAM_API_KEY_DEFAULT),
+        (c.GROWW_TOKEN_PARAM_TOTP_SECRET_ENV, c.GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT),
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+        assert c.resolve_token_param_path(env_name, default) == default
+        monkeypatch.setenv(env_name, "   ")
+        assert c.resolve_token_param_path(env_name, default) == default

@@ -75,6 +75,41 @@ def test_build_live_client_with_all_injections() -> None:
     assert captured == ["ACCESS-TOKEN"]
 
 
+def test_build_live_client_both_cache_hooks_injected_skip_resolve() -> None:
+    """When BOTH token-cache hooks are injected, ``_resolve_token_cache_hooks``
+    returns them verbatim WITHOUT resolving a token store (DEC-TOKEN-BROKER-AWS-001).
+
+    Covers the both-hooks-provided early-return: a caller wiring a specific backend
+    (e.g. a test double or a preconfigured broker) must have its exact ``(load, store)``
+    threaded straight into the refresher, never overridden by ``resolve_token_store``.
+    """
+    from brutex.adapters.groww.token_cache import CachedToken
+
+    load_calls: list[object] = []
+    store_calls: list[object] = []
+
+    def fake_load(*_a: object, **_k: object) -> CachedToken | None:
+        load_calls.append(True)
+        return None
+
+    def fake_store(*_a: object, **_k: object) -> bool:
+        store_calls.append(True)
+        return True
+
+    client = build_live_client(
+        _CREDS,
+        token_factory=lambda _k, _t: "ACCESS-TOKEN",
+        totp_minter=lambda _s: "123456",
+        sdk_factory=_FakeSDK,
+        token_cache_load=fake_load,
+        token_cache_store=fake_store,
+    )
+    assert isinstance(client, GrowwClient)
+    # the injected load hook is the one the refresher consulted (proves the
+    # explicit pair was threaded, not a resolved-store default)
+    assert load_calls == [True]
+
+
 def test_build_live_client_token_issuance_failure_is_redacted() -> None:
     """A failed token issuance surfaces as a redacting GrowwAuthError (no secret leak)."""
 

@@ -45,7 +45,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -658,15 +658,38 @@ def load_groww_credentials(*, path: Path | None = None) -> GrowwFileCredentials 
     return GrowwFileCredentials(api_key=api_key, totp_secret=totp_secret)
 
 
+def _resolve_aws_credentials(
+    aws_loader: Callable[[], GrowwFileCredentials | None] | None,
+) -> GrowwFileCredentials | None:
+    """Resolve the AWS Parameter-Store creds tier, or ``None`` when unconfigured.
+
+    Uses *aws_loader* when injected (tests), else the real lazy-boto3 loader
+    :func:`~brutex.config.credentials_aws.load_groww_aws_credentials`, imported HERE (not
+    at module top) so a purely-local resolve never imports the AWS module. The loader
+    itself never raises + returns ``None`` when unconfigured, so this is a thin wrapper.
+    """
+    if aws_loader is not None:
+        return aws_loader()
+    from brutex.config.credentials_aws import load_groww_aws_credentials
+
+    return load_groww_aws_credentials()
+
+
 def resolve_groww_file_credentials(
-    env: Mapping[str, str] | None = None, *, path: Path | None = None
+    env: Mapping[str, str] | None = None,
+    *,
+    path: Path | None = None,
+    aws_loader: Callable[[], GrowwFileCredentials | None] | None = None,
 ) -> GrowwFileCredentials:
-    """Resolve Groww credentials per-field: env-first, saved-file fallback.
+    """Resolve Groww credentials per-field: ``env → AWS → file``.
 
     Each field is taken from its env var (:data:`ENV_GROWW_API_KEY` /
-    :data:`ENV_GROWW_TOTP_SECRET`) when non-blank, otherwise from the saved
-    file. This lets an operator override one field from the environment without
-    rewriting the file.
+    :data:`ENV_GROWW_TOTP_SECRET`) when non-blank, else from the SHARED AWS
+    Parameter-Store creds (DEC-TOKEN-BROKER-AWS-001 — so a key rotation
+    propagates to both BruteX and TickVault), else from the saved file. The AWS
+    tier returns ``None`` when the read-only broker is not enabled (no
+    ``BRUTEX_TOKEN_BROKER_READONLY`` / boto3 absent / unreachable), so the existing
+    env→file path is byte-identical whenever AWS is not in use.
 
     Parameters
     ----------
@@ -674,6 +697,10 @@ def resolve_groww_file_credentials(
         Environment mapping. Defaults to :data:`os.environ`.
     path
         Credentials file. Defaults to :func:`credentials_path`.
+    aws_loader
+        Injectable AWS-creds reader (default:
+        :func:`~brutex.config.credentials_aws.load_groww_aws_credentials`). Tests
+        pass a fake; production takes the real lazy-boto3 loader.
 
     Returns
     -------
@@ -683,24 +710,35 @@ def resolve_groww_file_credentials(
     Raises
     ------
     CredentialsError
-        If either field cannot be resolved from env or file. The message names
-        WHICH field(s) are missing and how to set them — never a value.
+        If either field cannot be resolved from env, AWS, or file. The message
+        names WHICH field(s) are missing and how to set them — never a value.
     """
     source = os.environ if env is None else env
-    stored = load_groww_credentials(path=path)
 
     env_api_key = source.get(ENV_GROWW_API_KEY)
     env_totp = source.get(ENV_GROWW_TOTP_SECRET)
+    env_has_api_key = env_api_key is not None and bool(env_api_key.strip())
+    env_has_totp = env_totp is not None and bool(env_totp.strip())
+
+    stored = load_groww_credentials(path=path)
+    # Short-circuit the AWS tier (a hostile-review MINOR fold): when env already
+    # satisfies BOTH fields, skip the SSM round-trips entirely — the AWS values would be
+    # discarded anyway (env wins). Only consult AWS when a field is still open.
+    aws = None if env_has_api_key and env_has_totp else _resolve_aws_credentials(aws_loader)
 
     api_key: str | None = None
-    if env_api_key is not None and env_api_key.strip():
+    if env_has_api_key:
         api_key = env_api_key
+    elif aws is not None:
+        api_key = aws.api_key
     elif stored is not None:
         api_key = stored.api_key
 
     totp_secret: str | None = None
-    if env_totp is not None and env_totp.strip():
+    if env_has_totp:
         totp_secret = env_totp
+    elif aws is not None:
+        totp_secret = aws.totp_secret
     elif stored is not None:
         totp_secret = stored.totp_secret
 

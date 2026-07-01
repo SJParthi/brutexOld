@@ -28,6 +28,30 @@ from brutex.adapters.groww.client import GrowwClient, GrowwSDK, _noop_hook, _noo
 from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
 from brutex.adapters.groww.pool import ClientPool
 from brutex.adapters.groww.reauth import SdkRefresher, _real_sdk_factory
+from brutex.adapters.groww.token_cache import CachedToken
+from brutex.adapters.groww.token_store import resolve_token_store
+
+#: Type aliases for the injected daily-token cache hooks (DEC-TOKEN-BROKER-AWS-001).
+TokenCacheLoad = Callable[..., CachedToken | None]
+TokenCacheStore = Callable[..., bool]
+
+
+def _resolve_token_cache_hooks(
+    token_cache_load: TokenCacheLoad | None,
+    token_cache_store: TokenCacheStore | None,
+) -> tuple[TokenCacheLoad, TokenCacheStore]:
+    """Return the ``(load, store)`` hooks to thread into :class:`SdkRefresher`.
+
+    An explicit hook wins (tests / a caller wiring a specific backend); otherwise BOTH
+    come from :func:`~brutex.adapters.groww.token_store.resolve_token_store` (the local
+    disk cache by default — byte-identical to #1041 — or the shared read-only Parameter-
+    Store token when ``BRUTEX_TOKEN_BROKER_READONLY`` is set). Resolving the store ONCE here
+    (not per hook) keeps the load + store from the SAME backend instance (no split-brain).
+    """
+    if token_cache_load is not None and token_cache_store is not None:
+        return (token_cache_load, token_cache_store)
+    store = resolve_token_store()
+    return (token_cache_load or store.load, token_cache_store or store.store)
 
 
 def build_live_client(
@@ -39,6 +63,8 @@ def build_live_client(
     pace: Callable[[], None] | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
+    token_cache_load: TokenCacheLoad | None = None,
+    token_cache_store: TokenCacheStore | None = None,
 ) -> GrowwClient:
     """Build a live :class:`GrowwClient` from *creds*, wired to the rate controller.
 
@@ -80,12 +106,18 @@ def build_live_client(
     # The refresher is the ONE mint path (DEC-GROWW-TOKEN-REAUTH-001): it mints the
     # INITIAL token + SDK at construction, AND auto-RE-MINTS on the 06:00 IST daily
     # token reset so the overnight pull self-heals without a manual restart. A failed
-    # INITIAL issuance surfaces as a redacting GrowwAuthError straight from it.
+    # INITIAL issuance surfaces as a redacting GrowwAuthError straight from it. The daily-
+    # token cache hooks default to the resolved backend (local disk, or the shared read-only
+    # Parameter-Store token when BRUTEX_TOKEN_BROKER_READONLY is set —
+    # DEC-TOKEN-BROKER-AWS-001); default is byte-identical to #1041.
+    load_hook, store_hook = _resolve_token_cache_hooks(token_cache_load, token_cache_store)
     refresher = SdkRefresher(
         creds,
         token_factory=token_factory,
         totp_minter=totp_minter,
         sdk_factory=sdk_factory,
+        token_cache_load=load_hook,
+        token_cache_store=store_hook,
     )
     # A truthy callable wins; ``None`` falls back to the client's no-op default
     # (offline / unpaced) — every key is a ``Callable[[], None]`` (mypy-clean).
@@ -113,6 +145,8 @@ def build_live_pool(
     pace: Callable[[], None] | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
+    token_cache_load: TokenCacheLoad | None = None,
+    token_cache_store: TokenCacheStore | None = None,
 ) -> ClientPool:
     """Build a live multi-connection :class:`ClientPool` of *size* leaves from *creds*.
 
@@ -148,12 +182,15 @@ def build_live_pool(
     # EVERY leaf's connection at once (each leaf binds its own SDK index via `sdk_at`), so
     # the overnight pull self-heals without a manual restart, WITHOUT a token stampede
     # (single-flight), AND the pool keeps its K-way concurrency (K distinct sockets).
+    load_hook, store_hook = _resolve_token_cache_hooks(token_cache_load, token_cache_store)
     refresher = SdkRefresher(
         creds,
         size=safe_size,
         token_factory=token_factory,
         totp_minter=totp_minter,
         sdk_factory=sdk_factory,
+        token_cache_load=load_hook,
+        token_cache_store=store_hook,
     )
     # ONE shared meter across all leaves → the dashboard's achieved-rate gauge aggregates
     # across every connection (in_flight rises toward `size`, not split per-connection).
@@ -174,4 +211,9 @@ def build_live_pool(
     return ClientPool(leaves)
 
 
-__all__ = ["build_live_client", "build_live_pool"]
+__all__ = [
+    "TokenCacheLoad",
+    "TokenCacheStore",
+    "build_live_client",
+    "build_live_pool",
+]
