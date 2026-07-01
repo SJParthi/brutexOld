@@ -57,6 +57,31 @@ variable "kms_key_alias" {
   }
 }
 
+variable "allow_ssm_default_key_decrypt" {
+  description = <<-EOT
+    When true (default), ALSO grant the minter Lambda `kms:Decrypt` on the AWS-managed
+    `alias/aws/ssm` key — TIGHTLY scoped with a `kms:ViaService = ssm.<region>.amazonaws.com`
+    condition so the key can be used ONLY through Systems Manager, never via a direct
+    KMS call. This lets the Lambda read Groww api-key/totp-secret SecureStrings that were
+    created under the DEFAULT SSM key (the common case: the creds were seeded before the
+    custom `alias/tickvault-groww` key existed) with NO re-put required by the operator.
+
+    Least-privilege note: this is safe because the `aws/ssm` key's own AWS-managed key
+    policy ALREADY delegates decrypt to any in-account IAM principal *via SSM* (the
+    `kms:CallerAccount` + `kms:ViaService` pattern), so this IAM statement grants nothing
+    the account could not already do through SSM — it just scopes the minter to that exact
+    path. The custom-key grant (for the token write + reading creds already under the
+    custom key) is UNCONDITIONAL and always present.
+
+    Set to false ONLY if BOTH creds are already under `alias/tickvault-groww` and you want
+    the minter's KMS reach limited to that one key. A false value with creds still under
+    `aws/ssm` makes the mint fail with KMSAccessDeniedException — re-put them under the
+    custom key first (runbook §1c/§1d).
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "schedule_expression" {
   description = <<-EOT
     EventBridge schedule expression for the daily mint. Default fires at
@@ -116,6 +141,27 @@ variable "lambda_memory_mb" {
   description = "Lambda memory size (MB). The mint is tiny; the floor is plenty."
   type        = number
   default     = 128
+}
+
+variable "lambda_reserved_concurrency" {
+  description = <<-EOT
+    Reserved concurrent executions for the minter Lambda. Default -1 = UNRESERVED
+    (AWS's sentinel; the setting is omitted), so the stack applies cleanly on a
+    fresh account with the DEFAULT total Lambda concurrency of 10 — reserving any
+    would leave < 10 unreserved and AWS rejects it with
+    `InvalidParameterValueException: … decreases account's UnreservedConcurrentExecution
+    below its minimum value of [10]`.
+
+    Set to 1 (single-writer hardening) ONLY if the account has concurrency headroom
+    (a raised limit): reserving 1 strictly serializes overlapping invocations so a
+    scheduled + a manual mint cannot race the token PutParameter. It is SAFE to leave
+    at -1 for this stack: the minter is the SOLE token writer, runs as a daily
+    single-shot cron (+ rare on-demand invoke), and its SSM write is idempotent
+    last-writer-wins (`PutParameter Overwrite=True`) — a concurrent double-mint is
+    vanishingly unlikely and, if it ever happened, both write a valid fresh token.
+  EOT
+  type        = number
+  default     = -1
 }
 
 variable "mint_max_retries" {
