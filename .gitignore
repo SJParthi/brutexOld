@@ -110,6 +110,8 @@ Cargo.lock
 # glob must match the DIRECTORY — the old `**/*.proptest-regressions` (a trailing
 # `.proptest-regressions` suffix) never matched the real dir and left it untracked.
 **/proptest-regressions/
+# Retained (below) for back-compat: still ignores any dot-suffixed
+# `*.proptest-regressions` path; the directory glob above is the effective rule.
 **/*.proptest-regressions
 # ...but the fno-math extension crate IS an application artifact: track its
 # lockfile for reproducibility (Golden Rule #4) + the security-audit
