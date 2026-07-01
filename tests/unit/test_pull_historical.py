@@ -1703,3 +1703,172 @@ def test_derive_daily_from_minute_quarantines_per_target_error(
     )
     # No 1-day partition was written (the derive errored), but the pull completed cleanly.
     assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
+
+
+# ── DEC-FNO-LEDGER-LAKE-RECONCILE-001: F&O ledger↔lake cold-start reconcile ───────────
+
+
+#: The WIDE seed window — deliberately a few days PAST the (narrower) second-pull window so
+#: the stored lake span's ``last_date`` FULLY ENCLOSES the second pull's exclusive window end
+#: (a window ``[start, end)`` is enclosed iff ``last_date >= end``, the SAME conservative
+#: rule the spot reconcile uses — the last stored bar must prove coverage through the end).
+_SEED_TO = date(2024, 1, 25)
+
+
+def _full_window_payload() -> dict[str, object]:
+    """1-day bars spanning the WIDE seed window ``[2024-01-01, 2024-01-25]`` (both edges + past).
+
+    The single-bar ``_candle_payload`` sits mid-window (2024-01-15) so its stored span does
+    NOT enclose a fetch window; this payload's bars span from the window START to a date PAST
+    the second pull's exclusive end (2024-01-21), so the seeded lake span fully encloses the
+    second pull's ``[2024-01-01, 2024-01-21)`` window and the cold-start reconcile seeds it.
+    """
+    return {
+        "candles": [
+            ["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7],
+            ["2024-01-23T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7],
+            ["2024-01-25T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7],
+        ]
+    }
+
+
+class _FullWindowSDK(_FakeSDK):
+    """A ``_FakeSDK`` whose candle payload spans the full window (for lake seeding)."""
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        symbol = str(kw["groww_symbol"])
+        self.candle_symbols.append(symbol)
+        self.candle_intervals.append(str(kw["candle_interval"]))
+        self.starts.append((symbol, str(kw["start_time"])))
+        exc = self._raise_for.get(symbol)
+        if exc is not None:
+            raise exc
+        return _full_window_payload()
+
+
+def _real_sink_factory(sdk: _FakeSDK, lake_root: Path) -> tuple[GrowwClient, BarSink]:
+    """A ``client_factory`` handing back a real ``ParquetBarSink`` writing to *lake_root*."""
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    return _client(sdk), ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+
+
+def _delete_ledger(lake_root: Path) -> None:
+    """Simulate a LOST / orphaned ledger (fresh clone / deleted file / new lake root)."""
+    from brutex.data.window_ledger_store import ledger_path
+
+    path = ledger_path(lake_root)
+    assert path.exists(), "the first pull must have persisted a ledger to delete"
+    path.unlink()
+
+
+def _seed_lake_and_orphan_ledger(registry: RegistryStore, tmp_lake: Path) -> _FakeSDK:
+    """First pull → real F&O bars + a settled ledger; then delete the ledger (orphaned).
+
+    Seeds over the WIDE ``[_FROM, _SEED_TO]`` window so the stored lake span reaches past the
+    narrower second-pull window end and can fully enclose it (see :data:`_SEED_TO`).
+    """
+    seed_sdk = _FullWindowSDK()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_SEED_TO,
+        client_factory=lambda root: _real_sink_factory(seed_sdk, root),
+        now=_NOW,
+    )
+    # The lake now holds F&O bars for every NIFTY contract; the first pull fetched them all.
+    assert set(seed_sdk.candle_symbols) == {r.contract_symbol for r in selected}
+    _delete_ledger(tmp_lake)
+    return seed_sdk
+
+
+def test_fno_reconcile_skips_lake_present_windows_on_orphaned_ledger(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """PASSES-AFTER: a lake with F&O bars + an EMPTY ledger → the pull SKIPS every window.
+
+    The cold-start reconcile seeds SUCCESS from the lake spans BEFORE planning, so the
+    second pull re-fetches NOTHING (``get_historical_candles`` is never called). Without the
+    fix those windows would re-plan PLANNED (not skippable) → re-fetch the whole chain.
+    """
+    _seed_lake_and_orphan_ledger(registry, tmp_lake)
+    # Second pull against the SAME lake with a FRESH (empty) ledger + a spy SDK.
+    spy_sdk = _FullWindowSDK()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda root: _real_sink_factory(spy_sdk, root),
+        now=_NOW,
+    )
+    # EVERY window was skipped by the reconcile — ZERO vendor candle fetches.
+    assert spy_sdk.candle_symbols == []
+    assert report.bars_appended == 0
+
+
+def test_fno_orphaned_ledger_refetches_without_reconcile(
+    registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILS-BEFORE: with the reconcile DISABLED, the same orphaned ledger re-fetches everything.
+
+    Monkeypatching ``reconcile_fno_ledger_windows`` to a no-op reproduces the pre-fix
+    behaviour: no SUCCESS is seeded, every window re-plans PLANNED (not skippable), and the
+    whole NIFTY chain is re-fetched from Groww — the exact redundant multi-day re-pull the
+    fix prevents.
+    """
+    _seed_lake_and_orphan_ledger(registry, tmp_lake)
+    monkeypatch.setattr(hp, "reconcile_fno_ledger_windows", lambda *a, **k: 0)
+    spy_sdk = _FullWindowSDK()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda root: _real_sink_factory(spy_sdk, root),
+        now=_NOW,
+    )
+    # WITHOUT the reconcile every NIFTY contract is re-fetched (the bug this PR fixes).
+    assert set(spy_sdk.candle_symbols) == {r.contract_symbol for r in selected}
+
+
+def test_fno_reconcile_dry_run_does_not_scan_lake(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry-run pull (ledger=None) never scans the lake for the F&O reconcile."""
+    scanned = False
+
+    def _spy_spans(_root: Path) -> list[dict[str, object]]:
+        nonlocal scanned
+        scanned = True
+        return []
+
+    monkeypatch.setattr(hp, "load_lake_spans", _spy_spans)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    pull_contract_candles(
+        registry.list_contracts(underlying="NIFTY"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert scanned is False, "a dry-run must not spend the O(datasets) span scan"
