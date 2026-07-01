@@ -551,3 +551,15 @@ def test_beat_is_a_noop_when_no_watchdog_wired() -> None:
     job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
     assert job._watchdog is None  # pyright: ignore[reportPrivateUsage]
     job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the None guard
+
+
+def test_set_phase_passthrough_reaches_the_snapshot() -> None:
+    """``BackgroundPullJob.set_phase`` delegates to the tracker so the phase reaches the
+    snapshot the /pull-progress route serializes (DEC-UNIVERSE-PER-PHASE-PROGRESS-001)."""
+    job = _job()
+    assert job.snapshot().phase == ""  # idle default
+    job.set_phase("spot")
+    assert job.snapshot().phase == "spot"
+    assert job.snapshot().to_dict()["phase"] == "spot"
+    job.set_phase("historical")  # a later transition overwrites it
+    assert job.snapshot().phase == "historical"

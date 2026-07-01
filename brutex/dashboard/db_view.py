@@ -2708,6 +2708,156 @@ def _window_counts_total(conn: Any, ledger_glob: str) -> tuple[dict[str, dict[st
     return counts, total
 
 
+#: The three window-phase buckets, in pull order (spot → futures → options), the
+#: SAME namespaces :func:`_window_counts_total` folds via :func:`_window_market_bucket`.
+#: The historical F&O phase pulls FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001),
+#: so this order matches the wire order the ledger fills.
+WINDOW_PHASES: Final[tuple[str, ...]] = ("spot", "futures", "options")
+
+
+def phase_window_progress(counts_for_bucket: Mapping[str, int]) -> dict[str, int]:
+    """Project ONE segment's status counts into the live per-phase progress shape.
+
+    *counts_for_bucket* is a single bucket of :func:`_window_counts_total`'s output —
+    ``counts["spot"]`` / ``counts["futures"]`` / ``counts["options"]`` — a
+    ``{STATUS: n}`` map (STATUS in PLANNED / SUCCESS / EMPTY / FAILED / SKIPPED). It
+    returns the display tallies the Universe pull's per-phase rows read:
+
+    * ``done`` — settled windows (``SUCCESS + SKIPPED``, the completeness authority,
+      the SAME SUCCESS+SKIPPED set :data:`brutex.data.window_ledger.SETTLED_STATUSES`
+      defines; re-declared inline as string literals so this pure display projection
+      needs no window_ledger import).
+    * ``total`` — every recorded window in the bucket (all five statuses summed), so
+      a phase with NO windows honestly reads ``total == 0`` (never a fake value).
+    * ``success`` / ``empty`` / ``failed`` — the honest per-status breakdown; a
+      ``FAILED`` phase surfaces its ``failed`` count instead of being masked.
+    * ``pending`` — ``PLANNED`` windows not yet fetched (the options flush-lag reads
+      here as "pending", never a fabricated 0).
+
+    O(1) — a handful of ``dict.get`` over at most five status keys, no scan. A missing
+    status defaults to ``0`` (an all-zero / empty bucket → all-zero tallies).
+    """
+    success = counts_for_bucket.get("SUCCESS", 0)
+    skipped = counts_for_bucket.get("SKIPPED", 0)
+    empty = counts_for_bucket.get("EMPTY", 0)
+    failed = counts_for_bucket.get("FAILED", 0)
+    pending = counts_for_bucket.get("PLANNED", 0)
+    done = success + skipped
+    total = done + empty + failed + pending
+    return {
+        "done": done,
+        "total": total,
+        "success": success,
+        "empty": empty,
+        "failed": failed,
+        "pending": pending,
+    }
+
+
+def fno_current_phase_from_counts(counts: Mapping[str, Mapping[str, int]]) -> str:
+    """Refine the historical F&O phase's LIVE sub-phase (``futures`` vs ``options``) from counts.
+
+    The pipeline sequencer knows only the COARSE phase (spot → metadata → historical);
+    the historical phase fills FUTURES windows before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001).
+    Rather than thread a segment tag through the F&O spine's in-flight hook, derive the
+    live sub-phase from the SAME cached ledger counts the rows already read (the mapping
+    doc's lower-touch path): futures is "current" while it still has ``pending`` (PLANNED)
+    work OR no windows have been planned yet, otherwise options has taken over. O(1) —
+    two :func:`phase_window_progress` projections.
+    """
+    futures = phase_window_progress(counts.get("futures", {}))
+    if futures["pending"] > 0 or futures["total"] == 0:
+        return "futures"
+    return "options"
+
+
+def build_phase_progress(
+    counts: Mapping[str, Mapping[str, int]], *, current_phase: str
+) -> list[dict[str, Any]]:
+    """Assemble the Universe pull's live per-phase progress rows — pure, O(1), COMMON.
+
+    Builds ONE row per :data:`WINDOW_PHASES` segment (spot / futures / options, pull
+    order) from *counts* (:func:`_window_counts_total`'s bucketed output) via
+    :func:`phase_window_progress`, and flags the row that is currently in flight:
+
+    * during the SPOT phase (*current_phase* ``== "spot"``) the spot row is current;
+    * during the historical F&O phase (*current_phase* ``in {"futures", "options",
+      "historical"}``) the current sub-phase is REFINED from the counts via
+      :func:`fno_current_phase_from_counts` (futures until it drains, then options);
+    * during the METADATA phase (or any other / idle / empty label) NO window row is
+      current — metadata writes no windows, so the three rows stay honestly "pending"
+      rather than fabricating a metadata phase row.
+
+    Extracted here (not inlined in the route) so the whole assembly is unit-testable
+    with plain dicts and ZERO network (CLAUDE.md §11 COMMON + the 100% gate). Returns
+    a JSON-friendly list; each row carries ``phase``, ``current``, and the
+    :func:`phase_window_progress` tallies.
+    """
+    if current_phase in ("futures", "options", "historical"):
+        highlighted = fno_current_phase_from_counts(counts)
+    elif current_phase == "spot":
+        highlighted = "spot"
+    else:
+        # metadata / idle / unknown label — no window phase is in flight.
+        highlighted = ""
+    rows: list[dict[str, Any]] = []
+    for phase in WINDOW_PHASES:
+        row: dict[str, Any] = {"phase": phase, "current": phase == highlighted}
+        row.update(phase_window_progress(counts.get(phase, {})))
+        rows.append(row)
+    return rows
+
+
+def phase_progress_payload(
+    conn: Any,
+    ledger_file: Path,
+    *,
+    current_phase: str,
+    count_cache: WindowCountsCache | None = None,
+    generation: int = 0,
+) -> list[dict[str, Any]]:
+    """The Universe pull's LIVE per-phase progress rows — REUSES the cached window counts.
+
+    DEC-UNIVERSE-PER-PHASE-PROGRESS-001. Reads the per-segment window status counts
+    through the SAME generation-stamped ``_window_counts_total`` cache the
+    ``/coverage/windows`` page uses (NO new scan — a repeat poll within one
+    ``(generation, ledger-mtime)`` is an O(1) hit; two routes now share one cached
+    entry), then projects them into the spot/futures/options phase rows via
+    :func:`build_phase_progress` (highlighting the *current_phase*).
+
+    *ledger_file* is the RESOLVED window-ledger Parquet path (the caller resolves it
+    via :func:`brutex.data.window_ledger_store.ledger_path` — the SAME resolver the
+    ``/coverage/windows`` route uses). Taking the resolved path (rather than importing
+    the store's ``ledger_path`` here) keeps this module free of a
+    ``db_view → window_ledger_store`` import edge (CodeQL ``py/cyclic-import``; the
+    same reason :func:`_build_window_payload_duckdb` defers legacy derivation).
+
+    None-safe by construction: a lake with NO ledger Parquet yet (a dry-run / a
+    pull that has planned nothing) returns ``[]`` — the caller then serves an honest
+    empty ``phases`` list, never a fabricated window count. When *count_cache* is
+    ``None`` the counts are computed directly (used by the pure-fast-path tests); the
+    production route always injects the cache. O(1) on a cache hit; on a miss it runs
+    ONE ``GROUP BY market, status`` (:func:`_window_counts_total`).
+    """
+    if not ledger_file.is_file():
+        return []
+    ledger_glob = ledger_file.as_posix()
+    if count_cache is None:
+        counts, _total = _window_counts_total(conn, ledger_glob)
+    else:
+        # Key the cache on the ledger mtime AS WELL as the generation so a
+        # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
+        # invalidates the cached counts — the SAME (generation, mtime) key
+        # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
+        mtime_ns = ledger_file.stat().st_mtime_ns
+        counts, _total = count_cache.get_or_compute(
+            f"window-counts|{ledger_glob}|{mtime_ns}",
+            generation=generation,
+            compute=lambda: _window_counts_total(conn, ledger_glob),
+        )
+    return build_phase_progress(counts, current_phase=current_phase)
+
+
 def _build_window_payload_duckdb(
     conn: Any,
     ledger_file: Path,
@@ -3274,10 +3424,13 @@ __all__ = [
     "REGISTRY_DB_NAME",
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
+    "WINDOW_PHASES",
+    "build_phase_progress",
     "build_window_payload",
     "clamp_limit",
     "clamp_offset",
     "fno_candle_lake_schema",
+    "fno_current_phase_from_counts",
     "list_candle_datasets",
     "list_columns",
     "list_fno_candle_datasets",
@@ -3285,6 +3438,8 @@ __all__ = [
     "list_option_series",
     "list_registry_contracts",
     "list_registry_expiries",
+    "phase_progress_payload",
+    "phase_window_progress",
     "query_candles",
     "query_option_candles",
     "query_table",

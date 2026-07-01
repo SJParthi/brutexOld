@@ -302,6 +302,31 @@
     background:linear-gradient(90deg,transparent,var(--yellow),transparent);
     animation: beam 1.1s linear infinite; display:none; }
   #pullpanel.running .beam { display:block; }
+  /* ── Live per-phase progress (DEC-UNIVERSE-PER-PHASE-PROGRESS-001) ──
+     ONE row per window phase (spot / futures / options) — each reads identically:
+     name · done/total windows · a progress bar · the status breakdown. The current
+     phase is highlighted with a left accent + brighter surface. Built with
+     createElement/textContent (never innerHTML) — the CodeQL XSS guard. */
+  #phaseProgress { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  .phase-row { display:grid; grid-template-columns:88px 150px 1fr; align-items:center;
+    gap:10px; padding:8px 10px; border-radius:var(--r-md); background:var(--surface-2);
+    border:1px solid var(--border-strong); border-left:3px solid transparent;
+    font-size:12px; transition:.3s var(--ease); }
+  .phase-row.phase-current { border-left-color:var(--yellow); background:var(--surface-3);
+    box-shadow:0 0 10px rgba(255,183,77,.12); }
+  .phase-name { font-weight:700; color:var(--text); }
+  .phase-row.phase-current .phase-name { color:var(--yellow); }
+  .phase-count { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .phase-bar { position:relative; height:8px; border-radius:var(--r-pill);
+    background:var(--surface); border:1px solid var(--border-strong); overflow:hidden; }
+  .phase-bar-fill { position:absolute; top:0; left:0; height:100%; width:0%;
+    background:linear-gradient(90deg,var(--green-dim),var(--green));
+    border-radius:var(--r-pill); transition:width .4s var(--ease); }
+  .phase-status { grid-column:1 / -1; color:var(--muted);
+    font-variant-numeric:tabular-nums; padding-top:2px; }
+  .phase-status.has-failed { color:var(--red); }
+  @media (max-width:720px){ .phase-row { grid-template-columns:74px 1fr; }
+    .phase-bar { grid-column:1 / -1; } }
   .tfgrid { display:grid; grid-template-columns:repeat(6,1fr); gap:var(--s-2); }
   @media (max-width:720px){ .tfgrid { grid-template-columns:repeat(3,1fr); } }
   .tf { padding:11px 6px; min-height:var(--tap); display:flex; align-items:center;
@@ -587,6 +612,13 @@
          (all recorded windows for spot/options), not per-pull — said here
          plainly. -->
     <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
+    <!-- DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the LIVE per-phase progress block —
+         spot / futures / options each read identically (done/total windows + a
+         progress bar + the status breakdown), with the current phase highlighted.
+         Fed by the SAME /pull-progress poll (renderPhases), so it updates live with
+         ZERO extra button/poll. Rows are built once via createElement/textContent
+         (never innerHTML — CodeQL XSS guard) then updated in place. -->
+    <div id="phaseProgress" aria-live="polite"></div>
   </div>
 
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
@@ -1700,6 +1732,76 @@ function terminalPullHeader(label, s) {
   return `<span style="color:var(--yellow)">⚠</span> ${L} partial — ` + parts.join(' · ');
 }
 
+/* ── Live per-phase progress (DEC-UNIVERSE-PER-PHASE-PROGRESS-001) ──
+   Renders ONE row per window phase (spot / futures / options) from the /pull-progress
+   `phases` array — each reads identically (name · done/total windows · progress bar ·
+   status breakdown), with the current phase highlighted. Built with createElement +
+   textContent (NEVER innerHTML — the CodeQL XSS guard); rows are created once, then
+   text/width/class updated in place on every poll. A phase with ZERO windows honestly
+   reads "0 / 0 windows · not started", never a fake value. */
+const PHASE_ORDER = ['spot', 'futures', 'options'];
+const PHASE_LABEL = { spot: 'Spot', futures: 'Futures', options: 'Options' };
+const PHASE_EMPTY = { done: 0, total: 0, success: 0, empty: 0, failed: 0, pending: 0 };
+
+function buildPhaseRow(host, seg) {
+  const row = document.createElement('div');
+  row.className = 'phase-row';
+  row.dataset.phase = seg;
+
+  const name = document.createElement('span');
+  name.className = 'phase-name';
+  name.textContent = PHASE_LABEL[seg];   // textContent, never innerHTML
+
+  const count = document.createElement('span');
+  count.className = 'phase-count';
+
+  const barWrap = document.createElement('div');
+  barWrap.className = 'phase-bar';
+  const barFill = document.createElement('div');
+  barFill.className = 'phase-bar-fill';
+  barWrap.appendChild(barFill);
+
+  const status = document.createElement('span');
+  status.className = 'phase-status';
+
+  row.append(name, count, barWrap, status);
+  host.appendChild(row);
+  return row;
+}
+
+function updatePhaseRow(row, p, isCurrent) {
+  row.classList.toggle('phase-current', isCurrent);
+  const done = p.done || 0, total = p.total || 0;
+  const pct = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+  row.querySelector('.phase-count').textContent =
+    total > 0
+      ? (done.toLocaleString('en-IN') + ' / ' + total.toLocaleString('en-IN') + ' windows')
+      : 'not started';
+  row.querySelector('.phase-bar-fill').style.width = pct + '%';
+  // Status breakdown: success / empty / failed / pending — plain text, no markup.
+  const parts = [];
+  if (p.success) parts.push(p.success.toLocaleString('en-IN') + ' ok');
+  if (p.empty)   parts.push(p.empty.toLocaleString('en-IN') + ' empty');
+  if (p.failed)  parts.push(p.failed.toLocaleString('en-IN') + ' failed');
+  if (p.pending) parts.push(p.pending.toLocaleString('en-IN') + ' pending');
+  const status = row.querySelector('.phase-status');
+  status.textContent = parts.length ? parts.join(' · ') : '—';
+  status.classList.toggle('has-failed', (p.failed || 0) > 0);   // CSS colours it red
+}
+
+function renderPhases(phases, currentPhase) {
+  const host = document.getElementById('phaseProgress');
+  if (!host) return;
+  const byPhase = {};
+  (phases || []).forEach(p => { if (p && p.phase) byPhase[p.phase] = p; });
+  PHASE_ORDER.forEach(seg => {
+    const p = byPhase[seg] || PHASE_EMPTY;
+    let row = host.querySelector('[data-phase="' + seg + '"]');
+    if (!row) row = buildPhaseRow(host, seg);   // create once, then update in place
+    updatePhaseRow(row, p, currentPhase === seg);
+  });
+}
+
 /* Poll the O(1) progress snapshot and tick the panel until the job ends. A
    transient poll-fetch failure (a momentary network blip, NOT a terminal state)
    is RETRIED a bounded number of times instead of clobbering the header with the
@@ -1715,6 +1817,7 @@ async function pollProgress(label) {
     document.getElementById('counter').textContent =
       (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
     renderLiveStats(s);
+    renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
     if (s.state === 'running') {
       document.getElementById('pulltitle').textContent =
         `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}`;
