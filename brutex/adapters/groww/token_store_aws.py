@@ -74,6 +74,16 @@ class ParameterStoreTokenStore:
         self._client = client
         self._token_param = token_param
 
+    @property
+    def readonly(self) -> bool:
+        """Always ``True`` — this backend NEVER mints (the Lambda owns minting).
+
+        Drives the mid-run reauth to RE-READ the shared token from SSM instead of minting
+        (DEC-BROKER-READONLY-REAUTH-REREAD-001), so the read-only host self-heals the
+        06:00-IST rotation without the fail-loud :meth:`store` + a manual restart.
+        """
+        return True
+
     def load(self, creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
         """Return the shared daily token for the current session, else ``None`` (NEVER raises).
 

@@ -491,14 +491,30 @@ def test_is_auth_failure() -> None:
     # DEC-GROWW-TOKEN-DISK-CACHE-001: the throttle is a GrowwAuthError subclass, so it
     # STILL reads as an auth failure (every `except GrowwAuthError` site keeps matching).
     assert e.is_auth_failure(e.GrowwTokenIssuanceThrottled("x")) is True
+    # DEC-BROKER-READONLY-REAUTH-REREAD-001: the still-stale read-only re-read is likewise
+    # a GrowwAuthError subclass, so `except GrowwAuthError` sites keep matching it too.
+    assert e.is_auth_failure(e.GrowwTokenStillStaleError("x")) is True
 
 
 def test_token_issuance_throttle_is_retryable_auth_subclass() -> None:
-    """DEC-GROWW-TOKEN-DISK-CACHE-001: the issuance throttle is the ONE retryable auth error."""
+    """DEC-GROWW-TOKEN-DISK-CACHE-001: the issuance throttle is a retryable auth error."""
     throttle = e.GrowwTokenIssuanceThrottled("x")
     assert isinstance(throttle, e.GrowwAuthError)  # subclass — every auth site matches
     assert e.is_retryable(throttle) is True  # but it IS retryable (backs off / re-pulls)
     assert e.is_rate_limit(throttle) is False  # NOT a data-fetch rate-limit (no ladder step)
+
+
+def test_token_still_stale_is_retryable_auth_subclass() -> None:
+    """DEC-BROKER-READONLY-REAUTH-REREAD-001: the still-stale re-read is a retryable auth error.
+
+    The read-only broker RE-READ that returns the SAME dead token (the Lambda has not minted
+    the fresh one yet) is a GrowwAuthError subclass so every `except GrowwAuthError` keeps
+    matching it, but IS retryable so the window quarantines + re-pulls later — never a restart.
+    """
+    stale = e.GrowwTokenStillStaleError("x")
+    assert isinstance(stale, e.GrowwAuthError)  # subclass — every auth site matches
+    assert e.is_retryable(stale) is True  # retryable → re-pull later, never a crash-restart
+    assert e.is_rate_limit(stale) is False  # NOT a rate-limit (no ladder step)
 
 
 @pytest.mark.parametrize(
@@ -510,6 +526,7 @@ def test_token_issuance_throttle_is_retryable_auth_subclass() -> None:
         (e.GrowwServerError("x"), True),
         (e.GrowwNetworkError("x"), True),
         (e.GrowwTokenIssuanceThrottled("x"), True),
+        (e.GrowwTokenStillStaleError("x"), True),
         (e.GrowwBadRequestError("x"), False),
         (e.GrowwAuthError("x"), False),
         (e.GrowwNotFoundError("x"), False),

@@ -75,6 +75,27 @@ All cache I/O is injected (``token_cache_load`` / ``token_cache_store`` / ``cloc
 defaulting to the real :mod:`~brutex.adapters.groww.token_cache` functions), and is
 BEST-EFFORT — a cache miss/failure never blocks a mint, so the refresher is unchanged
 when the cache is unavailable.
+
+READ-ONLY BROKER RE-READ (DEC-BROKER-READONLY-REAUTH-REREAD-001) — a read-only host
+NEVER mints, it RE-READS the shared token:
+
+* On the shared-AWS read-only broker (``BRUTEX_TOKEN_BROKER_READONLY``) a dedicated Lambda
+  is the SOLE minter; BruteX is a strictly read-only consumer. Without this seam an in-pull
+  :meth:`reauth` would FORCE a real mint (B1) and hit the read-only token store's fail-loud
+  ``store``, halting the pull and needing a manual RESTART. With the ``readonly_reread``
+  hook wired (only in read-only mode — ``build_live_client`` passes it iff the resolved
+  store is read-only), :meth:`reauth` RE-READS the shared Parameter-Store SecureString and
+  ADOPTS the Lambda's freshly-minted token instead of minting locally — self-healing the
+  06:00-IST rotation with NO restart. The re-read reuses the EXACT single-flight + lock +
+  generation machinery (only ONE re-read per generation; concurrent callers wait + adopt
+  the same result) and the SAME freeze-guard deadline (a hung SSM read raises a retryable
+  timeout, never freezes the pool). A read that returns a NEW token is adopted immediately;
+  a read that returns the SAME dead token (the Lambda has not minted yet — reauth fired
+  just before the ~06:05 mint) or an SSM miss raises the RETRYABLE
+  :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` (mirroring the
+  reauth-deadline transient, DEC-GROWW-REAUTH-DEADLINE-001) so the window quarantines +
+  re-pulls LATER — never an infinite loop, never a crash. The reauth cap
+  (``max_reauths`` at the call site) still bounds it.
 """
 
 from __future__ import annotations
@@ -83,6 +104,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 
 import structlog
 
@@ -99,7 +121,11 @@ from brutex.adapters.groww.constants import (
     GROWW_TOKEN_ISSUANCE_RETRY_CAP_S,
 )
 from brutex.adapters.groww.deadline import run_with_deadline
-from brutex.adapters.groww.errors import GrowwTokenIssuanceThrottled, from_groww_exception
+from brutex.adapters.groww.errors import (
+    GrowwTokenIssuanceThrottled,
+    GrowwTokenStillStaleError,
+    from_groww_exception,
+)
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
 from brutex.adapters.groww.token_cache import (
     CachedToken,
@@ -165,6 +191,16 @@ class SdkRefresher:
     clock
         UTC-instant source for the cache's session anchoring (default: :func:`_now_utc`);
         injected in tests for deterministic session-boundary cases.
+    readonly_reread
+        OPTIONAL read-only-broker RE-READ hook (DEC-BROKER-READONLY-REAUTH-REREAD-001).
+        ``None`` (the default) keeps the byte-identical LOCAL-mint reauth behaviour. When
+        wired (``build_live_client`` passes the read-only Parameter-Store store's ``load``
+        iff the resolved backend is read-only), :meth:`reauth` RE-READS the shared token via
+        this hook and ADOPTS the Lambda's fresh token INSTEAD of minting locally, so the
+        read-only host self-heals the 06:00-IST rotation with no restart. Same signature as
+        ``token_cache_load`` (best-effort — it NEVER raises, returning ``None`` on a miss);
+        a re-read that returns a NEW token is adopted, a SAME / ``None`` result raises the
+        retryable :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError`.
 
     Raises
     ------
@@ -181,8 +217,10 @@ class SdkRefresher:
         "_call_timeout_seconds",
         "_clock",
         "_creds",
+        "_current_token",
         "_generation",
         "_lock",
+        "_readonly_reread",
         "_sdk_factory",
         "_sdks",
         "_size",
@@ -204,6 +242,7 @@ class SdkRefresher:
         token_cache_load: Callable[..., CachedToken | None] = load_cached_token,
         token_cache_store: Callable[..., bool] = store_token,
         clock: Callable[[], datetime] = _now_utc,
+        readonly_reread: Callable[..., CachedToken | None] | None = None,
     ) -> None:
         self._creds = creds
         self._size = max(1, size)
@@ -222,13 +261,24 @@ class SdkRefresher:
         self._token_cache_load = token_cache_load
         self._token_cache_store = token_cache_store
         self._clock = clock
+        #: OPTIONAL read-only-broker RE-READ hook (DEC-BROKER-READONLY-REAUTH-REREAD-001).
+        #: ``None`` ⇒ the byte-identical LOCAL-mint reauth; a callable ⇒ :meth:`reauth`
+        #: RE-READS the shared token + adopts the Lambda's fresh one instead of minting.
+        self._readonly_reread = readonly_reread
         self._lock = threading.Lock()
         #: Monotonically rising re-auth counter — starts at 0 for the INITIAL mint;
         #: each successful :meth:`reauth` bumps it, so a caller can prove single-flight.
         self._generation = 0
+        #: The token the live :attr:`_sdks` were built from — tracked so a read-only
+        #: RE-READ (:meth:`reauth`) can tell a Lambda-rotated NEW token (adopt) from the
+        #: SAME dead token still in SSM (retryable). ``""`` until the cold-start builds.
+        #: The empty-string init is an EMPTY SENTINEL, not a credential — bandit's B105
+        #: name-heuristic false-positives on the ``token`` name (ruff's S105 does not fire
+        #: on an EMPTY literal, so only the bandit ``# nosec B105`` is needed here).
+        self._current_token = ""  # nosec B105
         #: The INITIAL build — CACHE-FIRST (reuse a same-session token if present, else
         #: mint + write the cache). This is the ONLY cache-READING path; the in-pull
-        #: :meth:`reauth` always FORCES a real mint (B1).
+        #: :meth:`reauth` FORCES a real mint locally, or RE-READS on a read-only host.
         self._sdks = self._cold_start_sdks()
 
     def _safe_cache_load(self) -> CachedToken | None:
@@ -264,16 +314,21 @@ class SdkRefresher:
            GrowwTokenIssuanceThrottled` (the pull quarantines + re-pulls — never a crash).
 
         The back-off sleeps run HERE, on the cold-start path, OUTSIDE any lock (hostile-
-        review M2) — ``reauth``'s locked block never sleeps on a throttle.
+        review M2) — ``reauth``'s locked block never sleeps on a throttle. Cold-start runs
+        on the CONSTRUCTING thread with NO freeze-guard deadline, so it records
+        :attr:`_current_token` directly (safe — no abandoned-daemon hazard here; MAJOR-1).
         """
         attempts = max(1, GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS)
         for attempt in range(attempts):
             cached = self._safe_cache_load()
             if cached is not None:
                 _LOG.info("groww.token.cache_hit", session=cached.issued_for_session.isoformat())
-                return tuple(self._sdk_factory(cached.access_token) for _ in range(self._size))
+                self._current_token = cached.access_token
+                return self._build_sdks(cached.access_token)
             try:
-                return self._mint_and_cache_sdks()
+                sdks, token = self._mint_and_cache_sdks()
+                self._current_token = token
+                return sdks
             except GrowwTokenIssuanceThrottled:
                 # On the LAST attempt re-raise the RETRYABLE throttle (the pull quarantines
                 # + re-pulls — never a crash). Otherwise sleep a small back-off OUTSIDE the
@@ -298,13 +353,17 @@ class SdkRefresher:
             "unreachable: cold-start loop always returns or raises"
         )  # pragma: no cover
 
-    def _mint_and_cache_sdks(self) -> tuple[GrowwSDK, ...]:
+    def _mint_and_cache_sdks(self) -> tuple[tuple[GrowwSDK, ...], str]:
         """Mint a fresh token (real network call), WRITE the cache, then build the SDKs.
 
         The cache write is best-effort (a failure logs + is swallowed inside
         :func:`~brutex.adapters.groww.token_cache.store_token`), so it never blocks the
         build. Used by BOTH the cold-start miss path and (after the forced mint) by
         :meth:`reauth`, so the fresh token is always persisted for reuse.
+
+        Returns ``(sdks, token)`` so the CALLER records :attr:`_current_token` — under the
+        reauth lock, on the caller thread, only after a clean :func:`run_with_deadline`
+        return (MAJOR-1: an abandoned freeze-guard daemon must never write shared state).
         """
         token_info = get_access_token(
             self._creds,
@@ -313,6 +372,20 @@ class SdkRefresher:
         )
         token = token_info.access_token
         self._token_cache_store(self._creds, token, now_utc=self._clock())
+        return (self._build_sdks(token), token)
+
+    def _build_sdks(self, token: str) -> tuple[GrowwSDK, ...]:
+        """Fan *size* SDK connections off *token* (a PURE builder — no shared-state write).
+
+        Deliberately does NOT write :attr:`_current_token`: this runs on the freeze-guard
+        DAEMON thread inside :func:`run_with_deadline` (via :meth:`_mint_and_cache_sdks` /
+        :meth:`_reread_and_adopt_sdks`), and an ABANDONED daemon of a HUNG re-auth must
+        never write shared state after the caller already raised + released the lock
+        (MAJOR-1 of DEC-BROKER-READONLY-REAUTH-REREAD-001). The caller-thread publish block
+        in :meth:`reauth` records :attr:`_current_token` ONLY after a clean
+        :func:`run_with_deadline` return; the cold-start (:meth:`_cold_start_sdks`, on the
+        constructing thread, no deadline) sets it directly. O(size).
+        """
         return tuple(self._sdk_factory(token) for _ in range(self._size))
 
     @property
@@ -345,21 +418,32 @@ class SdkRefresher:
             return self._generation
 
     def reauth(self, seen_generation: int) -> int:
-        """Re-mint the token + SDK connections, SINGLE-FLIGHT against *seen_generation*.
+        """Re-auth the token + SDK connections, SINGLE-FLIGHT against *seen_generation*.
 
         Under the lock: if :attr:`generation` already moved past *seen_generation*
         (another thread re-authed since the caller's last read — the 06:00 stampede),
-        return the CURRENT generation WITHOUT a second mint. Otherwise FORCE a fresh
-        network mint, rebuild all *size* SDK connections, bump the generation, store, and
-        return the new generation. (Callers re-resolve their SDK via :meth:`sdk_at` /
-        :meth:`current_sdk` on the retry — so a returned generation alone suffices.)
+        return the CURRENT generation WITHOUT a second re-auth. Otherwise refresh all
+        *size* SDK connections, bump the generation, and return the new generation.
+        (Callers re-resolve their SDK via :meth:`sdk_at` / :meth:`current_sdk` on the
+        retry — so a returned generation alone suffices.) The refresh is one of two paths,
+        chosen ONCE at construction by :attr:`_readonly_reread`:
 
-        FORCED MINT — NEVER cache-first (hostile-review B1): ``reauth`` is called ONLY
-        because the current token was REJECTED, so it does a REAL mint (it would loop on a
-        dead token if it re-read the same-session cache) and OVERWRITES the cache with the
-        fresh token via :meth:`_mint_and_cache_sdks` — so the 06:00-IST revoked-token case
-        self-corrects AND the new token is shared with the other phases/processes. The
-        cache READ lives ONLY on the cold-start path (:meth:`_cold_start_sdks`).
+        LOCAL MINT (default — :attr:`_readonly_reread` is ``None``) — FORCED, NEVER
+        cache-first (hostile-review B1): ``reauth`` is called ONLY because the current token
+        was REJECTED, so it does a REAL mint (it would loop on a dead token if it re-read the
+        same-session cache) and OVERWRITES the cache with the fresh token via
+        :meth:`_mint_and_cache_sdks` — so the 06:00-IST revoked-token case self-corrects AND
+        the new token is shared with the other phases/processes. The cache READ lives ONLY on
+        the cold-start path (:meth:`_cold_start_sdks`).
+
+        READ-ONLY RE-READ (:attr:`_readonly_reread` wired — the shared-AWS broker,
+        DEC-BROKER-READONLY-REAUTH-REREAD-001) — BruteX NEVER mints: it RE-READS the shared
+        Parameter-Store token (:meth:`_reread_and_adopt_sdks`) and adopts the Lambda's fresh
+        token. A NEW token rebuilds the SDKs + bumps the generation exactly like a mint; the
+        SAME dead token still in SSM (or an SSM miss) raises the RETRYABLE
+        :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` so the window
+        quarantines + re-pulls LATER (when the Lambda's fresh token lands) — never an
+        infinite loop, never a fail-loud restart.
 
         Parameters
         ----------
@@ -377,44 +461,120 @@ class SdkRefresher:
         Raises
         ------
         GrowwAuthError
-            If the re-mint itself fails (redacting ``safe_message``) — propagated so
+            If a LOCAL re-mint itself fails (redacting ``safe_message``) — propagated so
             the client's bounded budget eventually raises terminally for a genuinely
             bad credential (never an infinite loop).
+        GrowwTokenStillStaleError
+            If a READ-ONLY re-read returns the SAME dead token or an SSM miss (the Lambda
+            has not minted the fresh token yet) — a RETRYABLE :class:`GrowwAuthError`
+            subclass so the window quarantines + re-pulls later, never a restart.
         GrowwTimeoutError
-            If the re-mint network call HANGS past :attr:`_call_timeout_seconds` (a
-            half-open socket at the 06:00 IST reset) — the FREEZE GUARD (MINOR-1 of
-            DEC-GROWW-TOKEN-REAUTH-001). The bounded mint raises a :class:`TimeoutError`
-            which is mapped to a RETRYABLE :class:`~brutex.adapters.groww.errors.\
-            GrowwTimeoutError`, so the caller's resilience quarantines + re-pulls THAT
-            window instead of freezing the whole pool. CRUCIALLY the deadline wraps ONLY
-            the network mint (which returns the new SDK tuple WITHOUT touching shared
-            state); the lock-guarded PUBLISH happens only AFTER it returns, so a timeout
-            propagates out of the ``with self._lock`` block (the lock is RELEASED — never
-            a permanent hold) leaving NO half-written state (the abandoned daemon's
-            eventual result is discarded).
+            If the re-auth network call (the mint OR the SSM re-read) HANGS past
+            :attr:`_call_timeout_seconds` (a half-open socket at the 06:00 IST reset) —
+            the FREEZE GUARD (MINOR-1 of DEC-GROWW-TOKEN-REAUTH-001). The bounded call
+            raises a :class:`TimeoutError` mapped to a RETRYABLE
+            :class:`~brutex.adapters.groww.errors.GrowwTimeoutError`, so the caller's
+            resilience quarantines + re-pulls THAT window instead of freezing the whole
+            pool. CRUCIALLY the deadline wraps ONLY the network call, which RETURNS the new
+            ``(sdks, token)`` WITHOUT writing ANY shared state (``_build_sdks`` is a pure
+            builder — MAJOR-1); the lock-guarded PUBLISH of ``_sdks`` / ``_generation`` /
+            ``_current_token`` happens only AFTER a clean return, so a timeout propagates
+            out of the ``with self._lock`` block (the lock is RELEASED — never a permanent
+            hold) leaving NO half-written state, and the abandoned daemon's eventual result
+            (the unpublished ``(sdks, token)``) is simply discarded — it can NEVER reach
+            ``_current_token``, so a later re-read's NEW-vs-SAME decision is never poisoned.
         """
         with self._lock:
             if self._generation != seen_generation:
-                # Another thread already re-authed — single-flight: no second mint.
+                # Another thread already re-authed — single-flight: no second re-auth.
                 return self._generation
-            # FREEZE GUARD (MINOR-1): bound ONLY the FORCED network mint by the wall-clock
-            # deadline. `_mint_and_cache_sdks` returns the new SDK tuple WITHOUT writing the
-            # refresher's shared `_sdks`/`_generation`, so on a timeout `run_with_deadline`
-            # raises, the exception leaves the `with self._lock` block (lock released — no
-            # permanent hold), and NOTHING was half-published. The in-memory publish (store
-            # + bump) runs only AFTER a clean return. The best-effort disk-cache WRITE
-            # happens inside the minted call (the token IS valid once minted; the write
-            # never raises) — NOT a multi-second sleep, so it cannot starve the deadline.
+            # PIN the rejected reference token UNDER THE LOCK (MAJOR-1): the read-only
+            # re-read compares the freshly-read SSM token against THIS captured value, not
+            # `self._current_token` read live on the daemon thread (which a concurrent
+            # publish or an abandoned earlier daemon could race/poison).
+            pinned_token = self._current_token
+            # FREEZE GUARD (MINOR-1): bound ONLY the FORCED network call (mint or read-only
+            # SSM re-read) by the wall-clock deadline. Both `_mint_and_cache_sdks` and
+            # `_reread_and_adopt_sdks` return `(sdks, token)` WITHOUT writing the refresher's
+            # shared `_sdks`/`_generation`/`_current_token` (`_build_sdks` is a pure builder),
+            # so on a timeout `run_with_deadline` raises, the exception leaves the
+            # `with self._lock` block (lock released — no permanent hold), and NOTHING was
+            # half-published. The in-memory publish runs only AFTER a clean return. A
+            # GrowwTokenStillStaleError from the read-only re-read likewise propagates out of
+            # the released lock (retryable). Bind the read-only re-read hook + pinned token via
+            # `partial` so `_reread_and_adopt_sdks` takes them as non-optional args (no in-method
+            # `assert`/dead None-branch); the None case selects the local mint. Both are zero-arg
+            # for `run_with_deadline`.
+            refresh: Callable[[], tuple[tuple[GrowwSDK, ...], str]] = (
+                self._mint_and_cache_sdks
+                if self._readonly_reread is None
+                else partial(self._reread_and_adopt_sdks, self._readonly_reread, pinned_token)
+            )
             try:
-                new_sdks = run_with_deadline(self._mint_and_cache_sdks, self._call_timeout_seconds)
+                new_sdks, new_token = run_with_deadline(refresh, self._call_timeout_seconds)
             except TimeoutError as exc:
                 # Map the deadline TimeoutError to a RETRYABLE GrowwTimeoutError (the
                 # "deadline exceeded" hint is recognised by from_groww_exception) so the
-                # caller treats a hung re-mint as transient, NOT a terminal auth failure.
+                # caller treats a hung re-auth as transient, NOT a terminal auth failure.
                 raise from_groww_exception(exc) from exc
+            # Caller-thread publish (MAJOR-1): record the fresh token HERE, beside `_sdks` /
+            # `_generation`, ONLY after a clean deadline return — never on the daemon thread.
             self._sdks = new_sdks
+            self._current_token = new_token
             self._generation += 1
             return self._generation
+
+    def _reread_and_adopt_sdks(
+        self, reread: Callable[..., CachedToken | None], pinned_token: str
+    ) -> tuple[tuple[GrowwSDK, ...], str]:
+        """RE-READ the shared read-only token + adopt a Lambda-rotated one (never mint).
+
+        The read-only-broker reauth path (DEC-BROKER-READONLY-REAUTH-REREAD-001): BruteX is
+        a strictly read-only consumer of the shared daily token (a dedicated Lambda mints it
+        into AWS SSM Parameter Store), so on a mid-run auth rejection it RE-READS the shared
+        SecureString via *reread* (the read-only store's ``load`` bound by :meth:`reauth`,
+        contractually best-effort — it degrades any boto3/IAM/network error to ``None`` and
+        NEVER raises) and ADOPTS the Lambda's freshly-minted token instead of minting locally.
+
+        The rejected token to compare against is the *pinned_token* CAPTURED UNDER THE REAUTH
+        LOCK at :meth:`reauth` entry — NOT :attr:`_current_token` read live here (MAJOR-1 of
+        DEC-BROKER-READONLY-REAUTH-REREAD-001): this method runs on the freeze-guard DAEMON
+        thread, so reading the live field could race a concurrent publish, and an abandoned
+        daemon of an earlier HUNG re-read could have left the field stale — pinning the
+        reference token at lock-entry makes the NEW-vs-SAME decision race-free.
+
+        * A re-read that returns a NEW token (``!= pinned_token``) rebuilds the SDKs off it
+          and logs ``groww.token.reread`` — the self-heal, visible in ``/logs``.
+        * A re-read that returns the SAME token that just failed auth, or ``None`` (an SSM
+          miss — the Lambda has not minted the fresh token yet, e.g. reauth fired at 05:59
+          IST just before the ~06:05 mint), raises the RETRYABLE
+          :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` so the caller
+          quarantines + re-pulls that window LATER — never looping the dead token, never a
+          fail-loud restart.
+
+        Returns ``(sdks, token)`` so the CALLER records :attr:`_current_token` under the
+        lock after a clean :func:`run_with_deadline` return. Runs UNDER the reauth lock +
+        wrapped by the freeze-guard deadline (a hung SSM read raises a retryable timeout,
+        mirroring the mint path). It NEVER calls the local token_factory/store, so the
+        read-only host truly never mints. O(size).
+        """
+        cached = reread(self._creds, now_utc=self._clock())
+        fresh_token = cached.access_token if cached is not None else None
+        if fresh_token is None or fresh_token == pinned_token:
+            # The Lambda has not rotated the shared token yet — do NOT adopt the dead token
+            # (would loop it) and do NOT mint (read-only). Raise a retryable stall so the
+            # window is re-pulled later, when the fresh token is present in SSM.
+            _LOG.warning("groww.token.reread_still_stale", present=fresh_token is not None)
+            raise GrowwTokenStillStaleError(
+                "read-only broker re-read returned no fresh token yet: the shared Groww "
+                "access token has not been re-minted by the Lambda; re-pull later.",
+                safe_message=(
+                    "read-only broker re-read returned no fresh token yet: the shared Groww "
+                    "access token has not been re-minted by the Lambda; re-pull later."
+                ),
+            )
+        _LOG.warning("groww.token.reread")
+        return (self._build_sdks(fresh_token), fresh_token)
 
 
 __all__ = ["SdkRefresher"]

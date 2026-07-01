@@ -59,6 +59,18 @@ class TokenStore(Protocol):
     never mints the shared token).
     """
 
+    @property
+    def readonly(self) -> bool:
+        """``True`` iff this backend NEVER mints — a read-only shared-token consumer.
+
+        A read-only backend (the shared-AWS Parameter-Store store — the SOLE source under
+        DEC-AWS-ONLY-CREDS-001) drives the mid-run reauth to RE-READ the Lambda-minted token
+        instead of minting locally (DEC-BROKER-READONLY-REAUTH-REREAD-001). Read by
+        :func:`~brutex.adapters.groww.live._resolve_token_cache_hooks` to decide whether to
+        wire the read-only re-read hook into the refresher.
+        """
+        raise NotImplementedError  # structural Protocol stub — never executed
+
     def load(self, creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
         """Return the cached same-session token for *creds*, else ``None`` (NEVER raises)."""
         raise NotImplementedError  # structural Protocol stub — never executed
