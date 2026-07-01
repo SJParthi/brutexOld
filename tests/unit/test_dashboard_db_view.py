@@ -32,13 +32,18 @@ from brutex.adapters.groww.constants import (
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.db_view import (
     KNOWN_TABLES,
+    WINDOW_PHASES,
     _build_window_payload_duckdb,
     _json_safe,
     _window_counts_total,
     _window_severity_order_sql,
+    build_phase_progress,
     build_window_payload,
     clamp_limit,
     clamp_offset,
+    fno_current_phase_from_counts,
+    phase_progress_payload,
+    phase_window_progress,
     sample_rows,
     table_summary,
 )
@@ -1029,3 +1034,282 @@ class TestBuildWindowPayloadDuckDB:
         assert payload["source"] == "ledger"
         assert payload["count"] == 0
         assert payload["windows"] == []
+
+
+# ── Live per-phase pull progress (DEC-UNIVERSE-PER-PHASE-PROGRESS-001) ────────
+#
+# The Universe pull section shows, for EVERY window phase (spot / futures /
+# options), a live windows count + progress + status breakdown — CONSISTENTLY.
+# The per-segment counts are the SAME generation-cached `_window_counts_total`
+# the /coverage/windows page reads (no new scan); `phase_window_progress` /
+# `fno_current_phase_from_counts` / `build_phase_progress` are pure projections
+# over those counts, and `phase_progress_payload` is the one route entry point.
+
+
+class TestPhaseWindowProgress:
+    """`phase_window_progress` folds ONE bucket's status counts into the display shape."""
+
+    def test_full_status_breakdown(self) -> None:
+        p = phase_window_progress(
+            {"SUCCESS": 5, "SKIPPED": 2, "EMPTY": 3, "FAILED": 1, "PLANNED": 4}
+        )
+        assert p == {
+            "done": 7,  # SUCCESS + SKIPPED (the settled authority)
+            "total": 15,  # every status summed
+            "success": 5,
+            "empty": 3,
+            "failed": 1,
+            "pending": 4,  # PLANNED
+        }
+
+    def test_zero_window_phase_reads_all_zero(self) -> None:
+        # A phase with NO windows honestly reads total==0 — never a fake value.
+        assert phase_window_progress({}) == {
+            "done": 0,
+            "total": 0,
+            "success": 0,
+            "empty": 0,
+            "failed": 0,
+            "pending": 0,
+        }
+
+    def test_missing_status_keys_default_to_zero(self) -> None:
+        # Only SUCCESS present: done == total == success, the rest 0.
+        assert phase_window_progress({"SUCCESS": 9}) == {
+            "done": 9,
+            "total": 9,
+            "success": 9,
+            "empty": 0,
+            "failed": 0,
+            "pending": 0,
+        }
+
+    def test_pending_only_options_flush_lag(self) -> None:
+        # The options flush-lag: PLANNED rows on disk, nothing fetched yet → pending,
+        # never a fabricated 0-done "complete".
+        p = phase_window_progress({"PLANNED": 120})
+        assert p["pending"] == 120
+        assert p["done"] == 0
+        assert p["total"] == 120
+
+    def test_failed_phase_surfaces_failed_count(self) -> None:
+        # A FAILED phase surfaces its failed count honestly (never masked).
+        p = phase_window_progress({"FAILED": 7, "SUCCESS": 3})
+        assert p["failed"] == 7
+        assert p["done"] == 3
+        assert p["total"] == 10
+
+
+class TestFnoCurrentPhaseFromCounts:
+    """`fno_current_phase_from_counts` refines historical → futures/options from counts."""
+
+    def test_futures_current_while_pending(self) -> None:
+        counts = {"futures": {"SUCCESS": 2, "PLANNED": 3}, "options": {"PLANNED": 10}}
+        assert fno_current_phase_from_counts(counts) == "futures"
+
+    def test_options_current_once_futures_drained(self) -> None:
+        # Futures fully settled (no PLANNED) → options has taken over.
+        counts = {"futures": {"SUCCESS": 5, "SKIPPED": 1}, "options": {"SUCCESS": 2, "PLANNED": 8}}
+        assert fno_current_phase_from_counts(counts) == "options"
+
+    def test_no_futures_windows_yet_stays_futures(self) -> None:
+        # Nothing planned yet (total==0) → futures is still the current sub-phase.
+        assert fno_current_phase_from_counts({}) == "futures"
+        assert fno_current_phase_from_counts({"options": {"PLANNED": 4}}) == "futures"
+
+
+_PHASE_COUNTS: dict[str, dict[str, int]] = {
+    "spot": {"SUCCESS": 10, "PLANNED": 2},
+    "futures": {"SUCCESS": 3, "PLANNED": 1},
+    "options": {"PLANNED": 5},
+}
+
+
+class TestBuildPhaseProgress:
+    """`build_phase_progress` assembles the three phase rows + the current-phase flag."""
+
+    def test_always_three_rows_in_pull_order(self) -> None:
+        rows = build_phase_progress(_PHASE_COUNTS, current_phase="spot")
+        assert [r["phase"] for r in rows] == list(WINDOW_PHASES) == ["spot", "futures", "options"]
+
+    def test_spot_phase_highlights_spot(self) -> None:
+        rows = build_phase_progress(_PHASE_COUNTS, current_phase="spot")
+        current = {r["phase"] for r in rows if r["current"]}
+        assert current == {"spot"}
+        (spot,) = [r for r in rows if r["phase"] == "spot"]
+        assert spot["done"] == 10 and spot["total"] == 12 and spot["pending"] == 2
+
+    def test_metadata_phase_highlights_no_window_row(self) -> None:
+        # The metadata phase writes no windows → no row is current; all read pending.
+        rows = build_phase_progress(_PHASE_COUNTS, current_phase="metadata")
+        assert not any(r["current"] for r in rows)
+
+    def test_historical_phase_refined_to_futures_when_pending(self) -> None:
+        rows = build_phase_progress(_PHASE_COUNTS, current_phase="historical")
+        assert {r["phase"] for r in rows if r["current"]} == {"futures"}
+
+    def test_historical_phase_refined_to_options_when_futures_drained(self) -> None:
+        counts = {
+            "spot": {"SUCCESS": 10},
+            "futures": {"SUCCESS": 4},  # no PLANNED — drained
+            "options": {"SUCCESS": 1, "PLANNED": 9},
+        }
+        rows = build_phase_progress(counts, current_phase="historical")
+        assert {r["phase"] for r in rows if r["current"]} == {"options"}
+
+    def test_explicit_futures_and_options_labels_also_refine(self) -> None:
+        # A caller passing the refined label directly is still counts-driven (idempotent).
+        assert {
+            r["phase"]
+            for r in build_phase_progress(_PHASE_COUNTS, current_phase="futures")
+            if r["current"]
+        } == {"futures"}
+
+    def test_idle_label_highlights_nothing(self) -> None:
+        rows = build_phase_progress(_PHASE_COUNTS, current_phase="")
+        assert not any(r["current"] for r in rows)
+
+    def test_empty_counts_all_rows_zero_and_neutral(self) -> None:
+        rows = build_phase_progress({}, current_phase="spot")
+        assert all(r["total"] == 0 and r["done"] == 0 for r in rows)
+        # spot is current (the label) but its total is honestly 0 (never a fake).
+        assert {r["phase"] for r in rows if r["current"]} == {"spot"}
+
+
+def _save_phase_ledger(tmp_path: Path) -> None:
+    """Write a ledger with a DISTINCT status mix per bucket (spot/futures/options).
+
+    spot: SUCCESS + FAILED + PLANNED; futures: SUCCESS + PLANNED; options: PLANNED only
+    (the flush-lag shape — planned but not yet fetched).
+    """
+    ledger = WindowLedger()
+    # spot SUCCESS
+    ledger.record(
+        _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+    )
+    # spot FAILED
+    ledger.record(
+        _window_key("BANKNIFTY"),
+        raw_bars=0,
+        error_type="GrowwTimeoutError",
+        bars_appended=0,
+        now=_WINDOW_NOW,
+    )
+    # spot PLANNED
+    ledger.plan(_window_key("SENSEX"), now=_WINDOW_NOW)
+    # futures SUCCESS + PLANNED
+    fut_ok = WindowKey(
+        market=GROWW_FUTURE_COVERAGE_MARKET,
+        security_id="FUT1",
+        interval="1minute",
+        start=date(2021, 1, 1),
+        end=date(2021, 4, 1),
+    )
+    ledger.record(fut_ok, raw_bars=4, error_type=None, bars_appended=4, now=_WINDOW_NOW)
+    ledger.plan(
+        WindowKey(
+            market=GROWW_FUTURE_COVERAGE_MARKET,
+            security_id="FUT2",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 4, 1),
+        ),
+        now=_WINDOW_NOW,
+    )
+    # options PLANNED only (flush-lag: planned but not yet fetched)
+    ledger.plan(
+        WindowKey(
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            security_id="OPT1",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 4, 1),
+        ),
+        now=_WINDOW_NOW,
+    )
+    save_window_ledger(ledger, tmp_path)
+
+
+class TestPhaseProgressPayload:
+    """`phase_progress_payload` reads the CACHED window counts (no new scan) and projects."""
+
+    def test_reads_real_ledger_all_three_phases(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+
+        _save_phase_ledger(tmp_path)
+        rows = phase_progress_payload(duckdb.connect(), ledger_path(tmp_path), current_phase="spot")
+        by_phase = {r["phase"]: r for r in rows}
+        assert set(by_phase) == set(WINDOW_PHASES)
+        assert by_phase["spot"] == {
+            "phase": "spot",
+            "current": True,
+            "done": 1,  # NIFTY SUCCESS
+            "total": 3,  # + BANKNIFTY FAILED + SENSEX PLANNED
+            "success": 1,
+            "empty": 0,
+            "failed": 1,
+            "pending": 1,
+        }
+        assert by_phase["futures"]["done"] == 1 and by_phase["futures"]["pending"] == 1
+        assert by_phase["options"]["pending"] == 1  # flush-lag → pending, never a fake 0
+        assert by_phase["options"]["done"] == 0
+
+    def test_dry_run_no_ledger_yields_empty_list(self, tmp_path: Path) -> None:
+        # No ledger Parquet at all (a dry-run / a pull that planned nothing) → [].
+        from brutex.data.window_ledger_store import ledger_path
+
+        assert (
+            phase_progress_payload(duckdb.connect(), ledger_path(tmp_path), current_phase="spot")
+            == []
+        )
+
+    def test_historical_label_highlights_futures_over_a_real_ledger(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+
+        _save_phase_ledger(tmp_path)
+        rows = phase_progress_payload(
+            duckdb.connect(), ledger_path(tmp_path), current_phase="historical"
+        )
+        # futures still has a PLANNED window → it is the current sub-phase.
+        assert {r["phase"] for r in rows if r["current"]} == {"futures"}
+
+    def test_cache_reuses_counts_across_two_polls(self, tmp_path: Path) -> None:
+        # Prove NO new O(files) scan per poll: `_window_counts_total` runs ONCE per
+        # (generation, mtime) across two polls (the cache HIT), then again on a new
+        # generation (a pull) — the O(1)-on-repeat guarantee.
+        from brutex.data.window_ledger_store import ledger_path
+
+        _save_phase_ledger(tmp_path)
+        ledger_file = ledger_path(tmp_path)
+        conn = duckdb.connect()
+        cache = MoversSnapshotCache()
+        calls = {"n": 0}
+        original = _window_counts_total
+
+        def _counting(c: object, glob: str) -> tuple[dict[str, dict[str, int]], int]:
+            calls["n"] += 1
+            return original(c, glob)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("brutex.dashboard.db_view._window_counts_total", _counting)
+            phase_progress_payload(
+                conn, ledger_file, current_phase="spot", count_cache=cache, generation=1
+            )
+            phase_progress_payload(
+                conn, ledger_file, current_phase="spot", count_cache=cache, generation=1
+            )
+            assert calls["n"] == 1  # second poll is an O(1) cache HIT
+            # A new generation (a pull bumped it) → recompute, never stale.
+            phase_progress_payload(
+                conn, ledger_file, current_phase="spot", count_cache=cache, generation=2
+            )
+            assert calls["n"] == 2
+
+    def test_empty_ledger_parquet_all_zero_rows(self, tmp_path: Path) -> None:
+        # A 0-row ledger Parquet (planned nothing yet) → three neutral zero rows.
+        from brutex.data.window_ledger_store import ledger_path
+
+        save_window_ledger(WindowLedger(), tmp_path)
+        rows = phase_progress_payload(duckdb.connect(), ledger_path(tmp_path), current_phase="spot")
+        assert [r["phase"] for r in rows] == list(WINDOW_PHASES)
+        assert all(r["total"] == 0 and r["done"] == 0 for r in rows)

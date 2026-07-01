@@ -561,6 +561,17 @@ class BackgroundPullJob:
         """The incremental coverage counters fed by the write funnel — O(1)."""
         return self._counters
 
+    def set_phase(self, phase: str) -> None:
+        """Set the COARSE pipeline phase currently in flight — O(1) passthrough.
+
+        DEC-UNIVERSE-PER-PHASE-PROGRESS-001. The one-click pipeline's ``_work`` calls
+        this at each phase transition so the live Universe per-phase view highlights the
+        running phase; it delegates straight to
+        :meth:`~brutex.dashboard.pull_progress.PullProgress.set_phase` (a label only, no
+        counter is keyed by it).
+        """
+        self._progress.set_phase(phase)
+
     def snapshot(self) -> ProgressSnapshot:
         """Return the current O(1) progress snapshot for the polling route."""
         return self._progress.snapshot()
