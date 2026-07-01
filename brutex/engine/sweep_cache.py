@@ -78,6 +78,20 @@ class SweepCacheError(BruteXError):
     """Raised on a non-serialisable combo param or use of a closed cache."""
 
 
+class SweepCacheCapacityError(SweepCacheError):
+    """The persisted L2 exact-store already holds more digests than the L1 Bloom
+    capacity can accommodate.
+
+    Raised by :meth:`SweepCache.open` when a resume finds more previously-recorded
+    digests than the configured ``bloom_capacity`` — repopulating the Bloom would
+    overflow its FAIL_CLOSED capacity gate mid-rebuild
+    (:class:`brutex.orchestrator.bloom.BloomCapacityExceeded`). FAIL_CLOSED, never
+    silent: the operator must re-open with a larger ``bloom_capacity`` so the
+    resume's Bloom faithfully reflects every persisted digest (Golden Rule #5 —
+    no silent FPR drift).
+    """
+
+
 def combo_digest(
     mask: int,
     instrument: str,
@@ -157,9 +171,14 @@ class SweepCache:
     """Bloom + LMDB O(1) membership dedup for sweep combos.
 
     Open via :meth:`open` (a context manager); the caller owns the lifetime.
-    Thread-safe: the Bloom writer is internally locked, the LMDB transactions
-    are atomic, and the in-process counters are guarded by a lock so concurrent
-    sweep workers can share one cache instance.
+    Thread-safe: :meth:`seen_digest` and :meth:`record_digest` each hold
+    ``self._lock`` across the ENTIRE probe-then-act (the Bloom probe + the L2
+    exact-store confirm/insert + the counter bumps), so concurrent sweep workers
+    can share one cache instance and a given digest is admitted to the Bloom
+    exactly once — never double-counted against the FAIL_CLOSED capacity nor
+    double-evaluated. The critical section does no vendor / network I/O (the LMDB
+    point get/put are O(1)), so the hold time stays O(1) (mirrors
+    :meth:`brutex.data.option_dedup.OptionDedupIndex.add_if_new`).
 
     Parameters
     ----------
@@ -191,9 +210,15 @@ class SweepCache:
     ) -> SweepCache:
         """Open (creating if absent) a sweep dedup cache rooted at *path*.
 
-        The L1 Bloom filter is in-RAM (rebuilt each run); the L2 LMDB exact
-        store persists under ``path / "exact"`` so a re-run reloads the
-        ground-truth membership and resumes skipping.
+        The L1 Bloom filter is in-RAM; the L2 LMDB exact store persists under
+        ``path / "exact"`` so a re-run reloads the ground-truth membership and
+        resumes skipping. On a **resume** (a non-empty exact store) the fresh
+        in-RAM Bloom is **repopulated from the persisted digests** — see
+        :meth:`_rebuild_bloom_from_exact` — so a Bloom-negative can never mask a
+        combo the previous run already recorded (the resume-dedup guarantee,
+        CLAUDE.md §2 Rules 4 & 7). Without the rebuild, ``seen_digest`` would
+        treat every persisted digest as Bloom-negative and re-run the entire
+        prior sweep.
 
         Parameters
         ----------
@@ -204,6 +229,14 @@ class SweepCache:
             :data:`DEFAULT_BLOOM_FPR`).
         map_size_mb
             L2 LMDB memory-map ceiling in MiB.
+
+        Raises
+        ------
+        SweepCacheCapacityError
+            If the persisted exact store already holds more digests than
+            ``bloom_capacity`` — repopulating would overflow the Bloom's
+            FAIL_CLOSED capacity gate. FAIL_CLOSED: the operator must re-open
+            with a larger ``bloom_capacity`` (Golden Rule #5, no silent FPR drift).
         """
         # Imported lazily: both pull runtime-only deps (fastbloom_rs / lmdb) and
         # keep this module importable (for the per-module coverage gate) without
@@ -214,7 +247,39 @@ class SweepCache:
         path.mkdir(parents=True, exist_ok=True)
         bloom = BloomFilter(capacity=bloom_capacity, fpr_target=bloom_fpr)
         exact = LmdbMembership.open(path / _EXACT_SUBDIR, map_size_mb=map_size_mb)
+        cls._rebuild_bloom_from_exact(bloom, exact, bloom_capacity=bloom_capacity)
         return cls(bloom=bloom, exact=exact)
+
+    @staticmethod
+    def _rebuild_bloom_from_exact(
+        bloom: BloomFilter,
+        exact: LmdbMembership,
+        *,
+        bloom_capacity: int,
+    ) -> None:
+        """Repopulate a fresh *bloom* from every digest persisted in *exact*.
+
+        Called once by :meth:`open` on a resume so the in-RAM L1 Bloom reflects
+        the durable L2 ground truth. O(persisted) — a resume pays it exactly once
+        at startup. On a cold start (empty exact store) it is a no-op. The count
+        is checked FIRST against ``bloom_capacity`` so a persisted set larger than
+        the Bloom can hold FAILS_CLOSED with :class:`SweepCacheCapacityError`
+        rather than tripping the Bloom's own :class:`BloomCapacityExceeded`
+        part-way through the rebuild (which would leave a partially-populated
+        Bloom).
+        """
+        persisted = len(exact)
+        if persisted == 0:
+            return
+        if persisted > bloom_capacity:
+            raise SweepCacheCapacityError(
+                f"resume: persisted exact-store holds {persisted:_} digests but "
+                f"bloom_capacity is {bloom_capacity:_} — re-open with a larger "
+                f"bloom_capacity so the Bloom can faithfully reflect every "
+                f"recorded combo (FAIL_CLOSED, Golden Rule #5)."
+            )
+        for digest in exact.iter_keys():
+            bloom.add(digest)
 
     def __enter__(self) -> Self:
         return self
@@ -241,42 +306,63 @@ class SweepCache:
 
     # ── Digest-keyed core ──────────────────────────────────────────────────
 
-    def seen_digest(self, digest: bytes) -> bool:
-        """Return ``True`` iff *digest* has already been recorded — O(1).
+    def _seen_digest_locked(self, digest: bytes) -> bool:
+        """Membership probe — caller MUST hold ``self._lock`` (the shared logic).
 
         L1 Bloom first: a Bloom ``False`` is conclusive (no false negatives) so
-        the combo is *definitely new* and we skip the LMDB read. A Bloom
-        ``True`` falls through to the L2 exact store for the ground-truth answer.
+        the combo is *definitely new* and we skip the LMDB read; a Bloom ``True``
+        falls through to the L2 exact store for the ground-truth answer. The
+        LMDB point-get is O(1) and does no vendor / network I/O, so holding the
+        in-process lock across it keeps the hold time O(1).
+        """
+        self._checks += 1
+        if not self._bloom.might_contain(digest):
+            self._bloom_negatives += 1
+            return False
+        present = digest in self._exact
+        if present:
+            self._hits += 1
+        return present
+
+    def seen_digest(self, digest: bytes) -> bool:
+        """Return ``True`` iff *digest* has already been recorded — O(1), atomic.
+
+        The Bloom probe and the L2 exact-store confirm are ONE critical section,
+        so a concurrent :meth:`record_digest` of the same digest can never leave
+        the two tiers observed in an inconsistent interleaving (the docstring's
+        thread-safe-sharing promise, mirroring
+        :meth:`brutex.data.option_dedup.OptionDedupIndex.add_if_new`).
         """
         self._require_open()
         with self._lock:
-            self._checks += 1
-            if not self._bloom.might_contain(digest):
-                self._bloom_negatives += 1
-                return False
-        # L2 ground truth (LMDB txn is its own lock-free read).
-        present = digest in self._exact
-        if present:
-            with self._lock:
-                self._hits += 1
-        return present
+            return self._seen_digest_locked(digest)
 
     def record_digest(self, digest: bytes) -> bool:
-        """Mark *digest* as evaluated in both tiers — O(1).
+        """Mark *digest* as evaluated in both tiers — O(1), atomic.
 
         Returns ``True`` if it was newly recorded, ``False`` if it was already
         present (an idempotent re-record is a no-op that does not re-insert into
         the Bloom, so duplicate inserts never erode the FPR — CLAUDE.md §2
         Rule 7).
+
+        The exact-store probe, the Bloom insert, and the exact-store insert are
+        ONE critical section held under ``self._lock``, so two concurrent workers
+        recording the SAME new digest can never both pass the probe and both
+        insert — the digest is admitted to the Bloom EXACTLY once (no
+        double-count against the FAIL_CLOSED Bloom capacity, no double-evaluation
+        of the tuple). Mirrors
+        :meth:`brutex.data.option_dedup.OptionDedupIndex.add_if_new`. The LMDB
+        get/put are O(1) and I/O-free at the Python layer, so the hold time is
+        O(1).
         """
         self._require_open()
-        if digest in self._exact:
-            return False
         with self._lock:
+            if digest in self._exact:
+                return False
             self._bloom.add(digest)
             self._records += 1
-        self._exact.add(digest)
-        return True
+            self._exact.add(digest)
+            return True
 
     # ── Combo-keyed convenience ────────────────────────────────────────────
 
@@ -328,6 +414,7 @@ __all__ = [
     "DEFAULT_BLOOM_FPR",
     "DEFAULT_MAP_SIZE_MB",
     "SweepCache",
+    "SweepCacheCapacityError",
     "SweepCacheError",
     "combo_digest",
 ]

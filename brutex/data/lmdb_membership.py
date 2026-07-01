@@ -23,7 +23,7 @@ one write transaction (amortised O(1) per key).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
@@ -133,6 +133,34 @@ class LmdbMembership:
                 txn.put(key, _PRESENT)
                 count += 1
         return count
+
+    def __len__(self) -> int:
+        """Return the number of stored keys — O(1) via the LMDB stat entry count.
+
+        LMDB tracks ``entries`` in the main DB's B+tree metadata, so this is a
+        constant-time read (no scan). Used by
+        :meth:`brutex.engine.sweep_cache.SweepCache.open` to size / capacity-check
+        the L1 Bloom before repopulating it from this ground-truth store.
+        """
+        self._require_open()
+        with self._env.begin(write=False) as txn:
+            return int(txn.stat()["entries"])
+
+    def iter_keys(self) -> Iterator[bytes]:
+        """Yield every stored key in LMDB key order — O(1) per key.
+
+        A read cursor walk over the whole set. Used on a resume to rebuild the
+        in-RAM L1 Bloom from this durable ground truth (the persisted digests
+        the previous run recorded), so a Bloom-negative can never mask a
+        genuinely-recorded combo (CLAUDE.md §2 Rules 4 & 7, idempotence). The
+        whole read transaction is held open for the duration of the walk, so the
+        caller MUST fully consume (or close) the iterator promptly.
+        """
+        self._require_open()
+        with self._env.begin(write=False) as txn:
+            cursor = txn.cursor()
+            for key in cursor.iternext(keys=True, values=False):
+                yield bytes(key)
 
 
 __all__ = [

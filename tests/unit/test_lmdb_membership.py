@@ -78,6 +78,40 @@ class TestClosedGuard:
             m.add_many([_K1])
 
 
+def test_len_counts_stored_keys(tmp_path: Path) -> None:
+    with _open(tmp_path) as m:
+        assert len(m) == 0
+        m.add(_K1)
+        assert len(m) == 1
+        m.add(_K1)  # idempotent — count stays 1
+        assert len(m) == 1
+        m.add(_K2)
+        assert len(m) == 2
+
+
+def test_iter_keys_yields_all_stored(tmp_path: Path) -> None:
+    with _open(tmp_path) as m:
+        assert list(m.iter_keys()) == []  # empty
+        m.add_many([_K1, _K2])
+        assert set(m.iter_keys()) == {_K1, _K2}
+        # Every yielded key is exact bytes (not an lmdb buffer view).
+        assert all(isinstance(k, bytes) for k in m.iter_keys())
+
+
+class TestLenIterClosedGuard:
+    def test_len_after_close_raises(self, tmp_path: Path) -> None:
+        m = _open(tmp_path)
+        m.close()
+        with pytest.raises(LmdbMembershipError, match="closed"):
+            len(m)
+
+    def test_iter_keys_after_close_raises(self, tmp_path: Path) -> None:
+        m = _open(tmp_path)
+        m.close()
+        with pytest.raises(LmdbMembershipError, match="closed"):
+            list(m.iter_keys())
+
+
 def test_drop_in_as_dedup_exact_tier(tmp_path: Path) -> None:
     # The headline: LmdbMembership satisfies ExactMembership, so it is the
     # persistent exact-confirm tier of the O(1) dedup index.
