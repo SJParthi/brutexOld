@@ -84,6 +84,21 @@ def test_instrument_master_url_matches_allowlist_host() -> None:
     assert c.GROWW_INSTRUMENT_CSV_URL.startswith("https://")
 
 
+def test_http_socket_timeouts_are_below_the_wall_clock_cap() -> None:
+    # DEC-GROWW-HTTP-SOCKET-TIMEOUT-001: the SDK per-request connect + read socket
+    # timeouts MUST sit comfortably BELOW the 45 s wall-clock FREEZE GUARD so a dead
+    # socket fails via the socket timeout FIRST, leaving the wall-clock guard only as
+    # belt-and-suspenders. Positive + finite + connect < read < 45 s (a real handshake
+    # is quick; a slow ≤180-day window read is the longer bound).
+    assert 0.0 < c.GROWW_HTTP_CONNECT_TIMEOUT_S < c.GROWW_HTTP_READ_TIMEOUT_S
+    assert c.GROWW_HTTP_READ_TIMEOUT_S < c.GROWW_PULL_CALL_TIMEOUT_S
+    assert c.GROWW_HTTP_CONNECT_TIMEOUT_S == 10.0
+    assert c.GROWW_HTTP_READ_TIMEOUT_S == 30.0
+    # exported for downstream import (the http_timeout seam + docs cite them).
+    assert "GROWW_HTTP_CONNECT_TIMEOUT_S" in c.__all__
+    assert "GROWW_HTTP_READ_TIMEOUT_S" in c.__all__
+
+
 # ── resolve_pool_size — env override, default, clamp, fail-safe (DEC-GROWW-CLIENT-POOL-001) ──
 
 

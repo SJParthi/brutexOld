@@ -187,6 +187,36 @@ GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
 #: dead socket to seconds, not forever. NOT a vendor-documented limit.
 GROWW_PULL_CALL_TIMEOUT_S: Final[float] = 45.0
 
+#: TCP CONNECT timeout (seconds) for every underlying HTTP request the Groww SDK
+#: issues on our behalf (DEC-GROWW-HTTP-SOCKET-TIMEOUT-001). The ``growwapi`` SDK
+#: builds its requests with module-level ``requests.get``/``post`` and a per-call
+#: ``timeout`` defaulting to ``None`` (INFINITE), and BruteX never forwards one — so
+#: before this the ONLY bound on a half-open / dead socket was the 45 s wall-clock
+#: FREEZE GUARD (:data:`GROWW_PULL_CALL_TIMEOUT_S`), which on a flaky network burns
+#: 45 s × the bounded retry ladder (~6 attempts) ≈ 4.5 min PER window before the
+#: transient is even classified. A ``requests`` connect timeout fails a dead peer in
+#: SECONDS instead. 10 s is comfortably below the 45 s wall-clock cap (so the socket
+#: timeout ALWAYS fires first — the wall-clock guard stays only as belt-and-suspenders
+#: for a hang that occurs OUTSIDE the socket, e.g. a wedged non-network syscall) yet is
+#: generous for a real TCP handshake to Groww. A resulting ``requests.ConnectTimeout``
+#: is already classified RETRYABLE (:mod:`~brutex.adapters.groww.errors`), so it flows
+#: into the existing retry → defer → re-pull machinery with NO pacing change. Env-tunable
+#: via ``BRUTEX_GROWW_HTTP_CONNECT_TIMEOUT_S``. NOT a vendor-documented limit.
+GROWW_HTTP_CONNECT_TIMEOUT_S: Final[float] = 10.0
+
+#: SOCKET-READ timeout (seconds) for every underlying HTTP request the Groww SDK issues
+#: on our behalf (DEC-GROWW-HTTP-SOCKET-TIMEOUT-001) — the max idle gap the SDK will wait
+#: for the NEXT byte of a response before ``requests`` raises ``ReadTimeout``. This bounds
+#: the half-open socket that has connected but stalled mid-transfer (the classic dead-peer
+#: symptom the 45 s wall-clock guard used to absorb). 30 s is comfortably below the 45 s
+#: wall-clock cap (:data:`GROWW_PULL_CALL_TIMEOUT_S`) so the read timeout fires FIRST, yet
+#: is generous for a legitimately slow ≤180-day historical-candle window to stream. A
+#: resulting ``requests.ReadTimeout`` is already classified RETRYABLE
+#: (:mod:`~brutex.adapters.groww.errors`), so a stalled read flows into the existing
+#: retry → defer → re-pull machinery with NO pacing change. Env-tunable via
+#: ``BRUTEX_GROWW_HTTP_READ_TIMEOUT_S``. NOT a vendor-documented limit.
+GROWW_HTTP_READ_TIMEOUT_S: Final[float] = 30.0
+
 #: Hard per-window wall-clock deadline (seconds) for ONE durable lake write — the
 #: DURABLE-WRITE FREEZE GUARD (DEC-FETCH-HUNG-WRITE-DEADLINE-001). The lake
 #: read-modify-write ends in ``os.fsync`` + atomic ``os.replace``
@@ -349,6 +379,8 @@ __all__ = [
     "GROWW_DAILY_QUOTA_UNVERIFIED",
     "GROWW_EXCHANGES",
     "GROWW_FUTURE_COVERAGE_MARKET",
+    "GROWW_HTTP_CONNECT_TIMEOUT_S",
+    "GROWW_HTTP_READ_TIMEOUT_S",
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
     "GROWW_OPTION_COVERAGE_MARKET",

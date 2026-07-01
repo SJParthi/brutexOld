@@ -213,6 +213,32 @@ _NETWORK_ERROR_NAMES: frozenset[str] = frozenset(
     }
 )
 
+#: Transport-layer exception class-NAMES that mark a socket CONNECT / READ TIMEOUT —
+#: a RETRYABLE :class:`GrowwTimeoutError` (DEC-GROWW-HTTP-SOCKET-TIMEOUT-001). Once the
+#: Groww SDK's ``requests`` calls carry a ``(connect, read)`` socket timeout
+#: (:func:`~brutex.adapters.groww.http_timeout.apply_default_timeout`), a half-open / dead
+#: socket raises ``requests.ConnectTimeout`` (a subclass of BOTH ``requests.ConnectionError``
+#: AND ``requests.Timeout``) or ``requests.ReadTimeout`` (a subclass of ``requests.Timeout``)
+#: — plus the base ``requests.Timeout`` / stdlib ``socket.timeout`` (aliased ``TimeoutError``,
+#: whose class name is ``"timeout"`` on older builds). Matching by CLASS NAME (a string, like
+#: the SDK + network maps) keeps classification INDEPENDENT of the ``requests`` message text
+#: (which varies by version / pool wrapper) and needs neither ``requests`` nor ``urllib3``
+#: importable (the optional-extra resilience). Checked AFTER the typed Groww SDK map (a
+#: vendor-typed error always wins) but BEFORE :data:`_NETWORK_ERROR_NAMES`, so a
+#: ``ConnectTimeout`` — which is ALSO a ``ConnectionError`` by inheritance but whose OWN class
+#: name is ``"ConnectTimeout"``, not in the network set — is read as a TIMEOUT (the gentle
+#: timeout ladder), never a plain network blip. A socket timeout is NOT a quota signal, so it
+#: rides :class:`GrowwTimeoutError` (already in :func:`is_retryable`, NOT :func:`is_rate_limit`),
+#: never stepping the per-second rate ceiling down.
+_TIMEOUT_ERROR_NAMES: frozenset[str] = frozenset(
+    {
+        "ReadTimeout",
+        "ConnectTimeout",
+        "Timeout",
+        "timeout",
+    }
+)
+
 
 #: HTTP-ish status codes the SDK may carry on a GENERIC ``GrowwAPIException(msg,
 #: code)`` when it does NOT raise the typed subclass — mapped to the retryable
@@ -343,11 +369,23 @@ def from_groww_exception(exc: Exception) -> GrowwError:
     name-match is checked AFTER the typed Groww SDK map (a vendor-typed error always
     wins) but BEFORE :func:`_classify_generic` (so a ``requests.ConnectionError``
     whose message has no recognised hint is still caught by its class name).
+
+    **A socket CONNECT / READ timeout** (``requests.ConnectTimeout`` /
+    ``requests.ReadTimeout`` / the base ``requests.Timeout`` / stdlib ``socket.timeout`` —
+    :data:`_TIMEOUT_ERROR_NAMES`, matched by CLASS NAME) is recognised as a RETRYABLE
+    :class:`GrowwTimeoutError` (DEC-GROWW-HTTP-SOCKET-TIMEOUT-001) — a half-open / dead
+    socket the SDK's newly-imposed ``(connect, read)`` timeout aborts in seconds, so it is
+    re-issued rather than terminally quarantined. This name-match is checked BEFORE
+    :data:`_NETWORK_ERROR_NAMES` so a ``ConnectTimeout`` (which is ALSO a ``ConnectionError``
+    by inheritance) reads as a TIMEOUT (the gentle timeout ladder), never a plain network
+    blip — and is robust to the ``requests`` message text varying by version.
     """
     name = type(exc).__name__
     if isinstance(exc, json.JSONDecodeError):
         return GrowwEmptyResponseError(f"{name}: {exc}")
     error_cls = _SDK_NAME_TO_ERROR.get(name)
+    if error_cls is None and name in _TIMEOUT_ERROR_NAMES:
+        error_cls = GrowwTimeoutError
     if error_cls is None and name in _NETWORK_ERROR_NAMES:
         error_cls = GrowwNetworkError
     if error_cls is None:

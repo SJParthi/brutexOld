@@ -399,6 +399,85 @@ def test_typed_groww_class_wins_over_network_name_collision() -> None:
     assert e.is_retryable(mapped) is False
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Socket CONNECT / READ timeouts → RETRYABLE GrowwTimeoutError, NOT rate-limit
+# (DEC-GROWW-HTTP-SOCKET-TIMEOUT-001 — once the SDK's requests carry a
+# (connect, read) timeout, a half-open / dead socket raises one of these).
+# Fakes named EXACTLY like the requests / stdlib timeout classes (matched by
+# class NAME, so ``requests`` need not be importable + the message is irrelevant).
+# ──────────────────────────────────────────────────────────────────────────
+class ReadTimeout(Exception):
+    """Fake ``requests.exceptions.ReadTimeout`` (a stalled mid-transfer socket)."""
+
+
+class ConnectTimeout(Exception):
+    """Fake ``requests.exceptions.ConnectTimeout`` (a dead-peer TCP handshake).
+
+    In real ``requests`` this is ALSO a ``ConnectionError`` subclass — the test that it
+    still reads as a TIMEOUT (not a network blip) is the priority proof below.
+    """
+
+
+class Timeout(Exception):
+    """Fake ``requests.exceptions.Timeout`` (the base connect/read timeout)."""
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # class-name matched (the message is irrelevant — caught by the transport class)
+        ReadTimeout("HTTPSConnectionPool(host='api.groww.in'): Read timed out. (read timeout=30)"),
+        ReadTimeout("nondescript stall"),  # name wins even with no message hint
+        ConnectTimeout("Connection to api.groww.in timed out. (connect timeout=10)"),
+        ConnectTimeout("nondescript"),
+        Timeout("timed out"),
+    ],
+)
+def test_socket_timeout_classified_retryable(exc: Exception) -> None:
+    """A socket CONNECT / READ timeout → RETRYABLE :class:`GrowwTimeoutError`.
+
+    DEC-GROWW-HTTP-SOCKET-TIMEOUT-001 — a half-open / dead socket the SDK's injected
+    ``(connect, read)`` timeout aborts in seconds. It must map to a RETRYABLE timeout
+    (matched by the transport class NAME, so ``requests`` need not be importable + the
+    ``requests`` message text can vary by version) so it flows into the existing
+    retry → defer → re-pull machinery — NOT a rate-limit (never steps the rate ladder).
+    """
+    mapped = e.from_groww_exception(exc)
+    assert type(mapped) is e.GrowwTimeoutError
+    assert e.is_retryable(mapped) is True
+    assert e.is_rate_limit(mapped) is False  # a socket timeout is NOT a quota signal
+    assert e.is_auth_failure(mapped) is False
+    assert isinstance(mapped, e.GrowwError)
+    assert isinstance(mapped, BruteXError)
+    assert type(exc).__name__ in str(mapped)  # message preserved for the audit log
+
+
+def test_connect_timeout_reads_as_timeout_not_network() -> None:
+    """``ConnectTimeout`` — ALSO a ``ConnectionError`` by inheritance — reads as a TIMEOUT.
+
+    The timeout class-name check runs BEFORE the network class-name check, so a
+    ``ConnectTimeout`` (whose OWN class name is ``"ConnectTimeout"``, not in the network
+    set) is classified as :class:`GrowwTimeoutError` and rides the gentle timeout ladder,
+    never mis-read as a plain :class:`GrowwNetworkError`. (The mirror ``ConnectionError``
+    fake — whose name IS in the network set — is asserted network-mapped above, so this
+    proves the ``ConnectTimeout``-vs-``ConnectionError`` name split is honoured.)
+    """
+    mapped = e.from_groww_exception(ConnectTimeout("connect timed out"))
+    assert type(mapped) is e.GrowwTimeoutError
+    assert not isinstance(mapped, e.GrowwNetworkError)
+
+
+def test_typed_groww_class_wins_over_timeout_name_collision() -> None:
+    """A typed Groww SDK class always wins over the timeout name-match too.
+
+    The timeout class-name match is checked ONLY after the typed-SDK map, so a real
+    ``GrowwAPINotFoundException`` (or any typed class) is never re-classified — the
+    timeout branch cannot poach a vendor-typed error.
+    """
+    mapped = e.from_groww_exception(GrowwAPINotFoundException("symbol not found"))
+    assert type(mapped) is e.GrowwNotFoundError
+
+
 def test_is_rate_limit() -> None:
     assert e.is_rate_limit(e.GrowwRateLimitError("x")) is True
     assert e.is_rate_limit(e.GrowwTimeoutError("x")) is False
