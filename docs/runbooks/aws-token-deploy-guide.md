@@ -91,8 +91,7 @@ aws --version                      # e.g. aws-cli/2.x
 ### 1c. The two Groww secrets already seeded in Parameter Store
 
 The minter **reads** (never creates) your two Groww credentials. They must already
-exist as **SecureStrings** at these exact paths, encrypted by the KMS key
-`alias/tickvault-groww`:
+exist as **SecureStrings** at these exact paths:
 
 | Parameter | What it is |
 |-----------|------------|
@@ -113,28 +112,76 @@ does not eat any special characters):
 
 ```bash
 aws ssm put-parameter --region ap-south-1 --type SecureString \
-  --key-id alias/tickvault-groww \
   --name /tickvault/prod/groww/api-key   --value 'YOUR_GROWW_API_KEY'
 
 aws ssm put-parameter --region ap-south-1 --type SecureString \
-  --key-id alias/tickvault-groww \
   --name /tickvault/prod/groww/totp-secret --value 'YOUR_GROWW_TOTP_SECRET'
 ```
 
+> **Which KMS key encrypts these two?** It does not matter for the minter by default.
+> Whatever key you used — the AWS-managed default `alias/aws/ssm` (what you get by
+> omitting `--key-id`, and the likely key if you seeded these before the custom key
+> existed) **or** the custom `alias/tickvault-groww` — the minter can read them,
+> because the stack grants the Lambda `kms:Decrypt` on the default SSM key **tightly
+> scoped to decryption *through SSM only*** (`kms:ViaService = ssm.ap-south-1.amazonaws.com`).
+> This is on by default (`allow_ssm_default_key_decrypt = true`), so **you do NOT have
+> to re-put the creds** under the custom key. (Set `-var 'allow_ssm_default_key_decrypt=false'`
+> only if you have already put BOTH creds under `alias/tickvault-groww` and want the
+> minter's KMS reach limited to that one key — then re-put them with `--key-id
+> alias/tickvault-groww --overwrite` first, or the mint fails with `KMSAccessDeniedException`.)
+
 > The `access-token` parameter is **not** something you create — the Lambda creates
-> and writes it. Only these two credentials are your responsibility.
+> and writes it (encrypted under the custom `alias/tickvault-groww` key). Only these
+> two credentials are your responsibility.
 
-### 1d. The KMS key exists
+### 1d. The KMS key exists — create it first if it does not
 
-The two SecureStrings are encrypted by `alias/tickvault-groww`. Confirm it resolves:
+The two SecureStrings are encrypted by `alias/tickvault-groww`. This stack
+**references** that key via a Terraform `data` source and **never creates or
+manages it** (ADR-0014 §5 — deliberately, so `terraform destroy` can never delete
+the key guarding your real Groww creds). So the key must exist **before** you
+apply, or `terraform apply` dies mid-plan with:
+
+```
+Error: reading KMS Key (alias/tickvault-groww): couldn't find resource
+```
+
+Confirm it resolves:
 
 ```bash
 aws kms describe-key --region ap-south-1 --key-id alias/tickvault-groww \
   --query "KeyMetadata.{KeyId:KeyId,State:KeyState}" --output table
 ```
 
-You want `State = Enabled`. (If you use a different key alias, pass it later with
-`-var 'kms_key_alias=alias/your-key'`.)
+You want `State = Enabled`. The key is needed **regardless of where your two creds
+live**, because the stack encrypts the `access-token` it creates under this custom
+key. **If it does not exist yet**, create the customer-managed key and the alias this
+stack expects (one time):
+
+```bash
+# create the key — note the KeyId it prints
+aws kms create-key --region ap-south-1 \
+  --description 'Groww token-minter SecureString key (tickvault)' \
+  --query KeyMetadata.KeyId --output text
+
+# alias it (use the KeyId from the line above)
+aws kms create-alias --region ap-south-1 \
+  --alias-name alias/tickvault-groww --target-key-id <KeyId-from-above>
+```
+
+> **You do NOT need to re-put your creds under this key.** By default the minter is
+> granted `kms:Decrypt` on the AWS-managed default SSM key (`alias/aws/ssm`) too —
+> tightly scoped to decryption *through SSM only* (`kms:ViaService`), see §1c — so
+> creds seeded under the default key are read fine with no re-put. The only case that
+> needs a re-put is if you deliberately pass `-var 'allow_ssm_default_key_decrypt=false'`
+> to limit the minter to the one custom key; then put **both** creds under it (§1c's
+> `put-parameter` with `--key-id alias/tickvault-groww --overwrite`, plaintext again)
+> or the mint fails with `KMSAccessDeniedException`.
+
+`./deploy.sh` probes this key for you before it builds or applies: if it is missing
+the script prints these create commands and stops, so you never hit the raw Terraform
+error. (If you use a different key alias, pass it with `-var 'kms_key_alias=alias/your-key'`
+— the pre-flight honors the override.)
 
 ---
 
@@ -150,6 +197,12 @@ cd deploy/aws_token_minter
 
 **What `./deploy.sh` does, in order** (it never auto-approves — see below):
 
+0. **Pre-flight** — checks Terraform is on `PATH` and (if the `aws` CLI is present)
+   that the KMS key `alias/tickvault-groww` resolves in the target region. A
+   missing key stops the script **before** the build with the exact `aws kms
+   create-key` / `create-alias` + cred re-put commands (§1d), so you never hit the
+   opaque mid-plan `couldn't find resource` Terraform error. It honors your
+   `-var 'kms_key_alias=…'` / `-var 'region=…'` overrides.
 1. **Builds the Lambda bundle** (`build_lambda_package.sh`) — pip-installs `pyotp`
    into the deploy zip. That is the ONLY bundled dependency; it is a pure-Python
    universal wheel (zero platform-specific files), so the bundle imports cleanly on
@@ -166,14 +219,21 @@ cd deploy/aws_token_minter
 
 **What it creates** (all in `ap-south-1`, all least-privilege):
 
-- the **minter Lambda** `groww-token-minter` (serialized: `reserved_concurrent_executions = 1`);
+- the **minter Lambda** `groww-token-minter` (concurrency **unreserved by default** —
+  `lambda_reserved_concurrency = -1`, so it applies on a fresh account whose total
+  Lambda concurrency is the default 10; see the note below to opt into the strict
+  single-writer serialization);
 - the `access-token` **SSM SecureString** parameter it writes;
 - an **EventBridge schedule** `cron(35 0 * * ? *)` = 00:35 UTC = **06:05 IST**;
 - a **stale-token CloudWatch alarm** (pages if no successful mint in 24h) + a
   **Lambda-errors alarm** (pages on any hard failure) + the **SNS topic** they publish to;
 - **three least-privilege IAM roles** — the minter (read the 2 creds, write the
-  token, decrypt via KMS), plus `reader-tickvault` and `reader-brutex` (each can
-  ONLY `GetParameter` the token + `kms:Decrypt`, nothing else).
+  token; `kms:Decrypt`/`Encrypt` on the custom key for the token write, plus
+  Decrypt-only on the default `alias/aws/ssm` key scoped to *SSM-only* via
+  `kms:ViaService` so it can read creds under either key with no re-put — the latter
+  toggleable with `-var 'allow_ssm_default_key_decrypt=false'`), plus `reader-tickvault`
+  and `reader-brutex` (each can ONLY `GetParameter` the token + `kms:Decrypt` the
+  custom key, nothing else).
 
 **After `apply` succeeds, confirm the SNS email subscription.** AWS emails a
 confirmation link to `alert_email`; the alarm cannot page you until you click it.
@@ -184,6 +244,19 @@ parameter, one EventBridge rule, two alarms, one SNS topic, and three IAM roles 
 
 > Want to override a default (different account prefix, KMS alias, schedule)? Pass
 > extra `-var` flags straight through — see `docs/runbooks/aws-token-minter.md` §4.
+
+> **Reserved concurrency (default `-1`, unreserved).** A brand-new AWS account has a
+> total Lambda concurrency of **10**, and *reserving* any concurrency must leave at
+> least 10 unreserved — so a hard-coded reservation of 1 is **rejected** on a default
+> account with
+> `InvalidParameterValueException: … decreases account's UnreservedConcurrentExecution
+> below its minimum value of [10]`. The stack therefore defaults
+> `lambda_reserved_concurrency = -1` (unreserved), which applies everywhere. This is
+> safe for the minter: it is the **sole** token writer, a **daily single-shot** cron,
+> and its SSM write is idempotent last-writer-wins — a concurrent double-mint is both
+> unlikely and harmless (both write a valid fresh token). **If your account has
+> concurrency headroom** (a raised limit) and you want the strict single-writer
+> hardening, opt in with `./deploy.sh -var 'lambda_reserved_concurrency=1'`.
 
 ---
 
@@ -320,6 +393,8 @@ Once deployed, this runs itself — **zero clicks per day** (project rules §11)
 | **`./deploy.sh: Permission denied`** | The script is not executable. Run `chmod +x deploy.sh` (or `bash deploy.sh …`). |
 | **`terraform: command not found` inside IntelliJ/PyCharm but works in the Mac Terminal** | IntelliJ's built-in terminal often does not inherit your login shell's `PATH`, so Homebrew's `/opt/homebrew/bin` (Apple silicon) or `/usr/local/bin` (Intel) is missing. Fix: run `./deploy.sh` from the **macOS Terminal.app**, or add Homebrew's bin to the IDE terminal's `PATH` (IntelliJ → Settings → Tools → Terminal → *Environment variables*: `PATH=/opt/homebrew/bin:$PATH`), or invoke Terraform by absolute path. |
 | **`error minting: pyotp ImportError` in the Lambda logs** | The deploy bundle was not staged. `./deploy.sh` runs `build_lambda_package.sh`, which pip-installs `pyotp` (a pure-Python universal wheel — no Docker, no cross-compile) into the zip for you — re-run `./deploy.sh` (not a bare `terraform apply`) so the bundle is rebuilt with `pyotp` included. |
+| **`terraform apply`: `reading KMS Key (alias/tickvault-groww): couldn't find resource`** | The custom KMS key does not exist yet. This stack **references** it (never creates it — ADR-0014 §5). Create it once: §1d (`aws kms create-key` + `create-alias alias/tickvault-groww`), then re-run `./deploy.sh` — its pre-flight prints these commands for you. |
+| **Lambda logs `KMSAccessDeniedException` on the cred read** | By default this should NOT happen — the minter is granted SSM-scoped `kms:Decrypt` on the default `alias/aws/ssm` key **and** the custom key. It only occurs if you deployed with `-var 'allow_ssm_default_key_decrypt=false'` while a cred still lives under a key the minter cannot decrypt. Fix: either drop that `-var` (re-`./deploy.sh`) so the SSM-scoped default-key grant is restored, **or** re-put both creds under `alias/tickvault-groww` (§1c, `--key-id alias/tickvault-groww --overwrite`). |
 | **Never got the alarm email** | You did not confirm the SNS subscription. AWS emailed a confirmation link to `alert_email` after `apply` — click it. Re-subscribe with `aws sns subscribe --topic-arn "$(terraform output -raw alerts_topic_arn)" --protocol email --notification-endpoint you@example.com`. |
 
 ---
