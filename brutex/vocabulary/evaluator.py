@@ -1,8 +1,9 @@
 """The 52-condition evaluator — a thin marshalling shim over the shared Rust core.
 
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
-parameters and prior-bar history, and returns a u64 bitmask where bit `i` is set
-iff condition `i` is true.
+parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
+iff condition `i` is true. The vocabulary currently occupies bits 0..59 (60
+conditions), with headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
 Phase 2b (`docs/MIGRATION.md` #441) the 52-condition logic itself lives ONCE, in

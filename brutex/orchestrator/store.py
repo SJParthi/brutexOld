@@ -330,8 +330,21 @@ class WorkItemStore:
         If a :class:`BloomFilter` was supplied at :meth:`open` time, the
         item's content_hash is added to the L1 filter AFTER the LMDB
         transaction commits (DEC-P0-048 / 4-agent Architecture §6
-        ordering lock). A crash between commit and Bloom-add leaves
-        LMDB ahead by one item; the next cold-start rebuild reconciles.
+        ordering lock) — but ONLY on the key's FIRST insertion, never on
+        a subsequent state-transition put of an already-stored key
+        (DEC-DEDUP-CAPACITY-UNIQUE-001). The Bloom tracks the set of
+        distinct keys ever seen, so re-adding on every
+        PENDING→RUNNING→SUCCESS transition would inflate
+        :attr:`~brutex.orchestrator.bloom.BloomFilter.insertions_attempted`
+        (each combo is put multiple times) and could trip the FAIL_CLOSED
+        capacity gate long before ``capacity`` UNIQUE combos exist. LMDB
+        is the ground truth for newness: the first put of a key returns
+        newly-inserted (``overwrite=False`` → ``True``); a re-put of an
+        existing key leaves the value untouched (returns ``False``) and we
+        then apply the update with ``overwrite=True`` — the row still
+        transitions, but the Bloom-add is skipped. A crash between commit
+        and Bloom-add leaves LMDB ahead by one item; the next cold-start
+        rebuild reconciles.
 
         Raises
         ------
@@ -340,19 +353,28 @@ class WorkItemStore:
         StoreKeyError
             If the item's content_hash is malformed.
         BloomCapacityExceeded
-            If the supplied Bloom is at capacity. LMDB commit has
-            already succeeded; cold-start rebuild reconciles.
+            If the supplied Bloom is at capacity AND this is a genuinely
+            NEW key. LMDB commit has already succeeded; cold-start rebuild
+            reconciles.
         """
         if self._closed:
             raise StoreError(f"Store {self._path} is closed")
         key = _encode_key(item.content_hash)
         value = _serialize_item(item)
         with self._env.begin(write=True) as txn:
-            txn.put(key, value, db=self._dbs[item.phase])
+            # overwrite=False: writes iff the key is genuinely new (returns
+            # True) and, crucially, tells us so in ONE O(1) B+tree op — no
+            # extra read. If the key already existed the value is left
+            # untouched (returns False), so re-apply the state-transition
+            # update with an explicit overwrite.
+            is_new = txn.put(key, value, db=self._dbs[item.phase], overwrite=False)
+            if not is_new:
+                txn.put(key, value, db=self._dbs[item.phase], overwrite=True)
         # Post-commit Bloom-add. PR-H + PR-I locked: commit first, then
         # update L1, so a crash mid-flight never seeds Bloom with a
-        # rolled-back write.
-        if self._bloom is not None:
+        # rolled-back write. Add ONLY on first insertion so the capacity
+        # gate counts UNIQUE keys (DEC-DEDUP-CAPACITY-UNIQUE-001).
+        if self._bloom is not None and is_new:
             self._bloom.add(key)
 
     def put_many(self, items: list[WorkItem]) -> None:
