@@ -772,6 +772,54 @@ def test_auth_error_whose_remint_is_throttled_propagates_retryable_no_recursion(
     assert refresher.reauth_calls == 1  # exactly ONE forced re-mint — NO infinite recursion
 
 
+def test_readonly_reauth_still_stale_propagates_retryable_no_recursion() -> None:
+    """DEC-BROKER-READONLY-REAUTH-REREAD-001: a read-only re-read that is still stale surfaces
+    a RETRYABLE error that propagates OUT of ``_call`` WITHOUT re-entering the reauth branch.
+
+    On the shared-AWS read-only host the reauth RE-READS the shared token; if the Lambda has
+    not minted the fresh one yet, ``refresher.reauth`` raises a
+    :class:`GrowwTokenStillStaleError` (a GrowwAuthError subclass that ``is_retryable``).
+    The client must NOT recurse into another reauth (that would loop the dead token); it
+    propagates as a retryable error the ingest quarantines + re-pulls — never a restart.
+    Proven: reauth is called EXACTLY once.
+    """
+    from brutex.adapters.groww.errors import GrowwTokenStillStaleError, is_retryable
+
+    auth_sdk = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+
+    class _StillStaleReauthRefresher:
+        def __init__(self, sdk: _FakeSDK) -> None:
+            self.reauth_calls = 0
+            self.sdk = sdk
+
+        def sdk_at(self, _index: int) -> _FakeSDK:
+            return self.sdk
+
+        def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
+            return self.sdk
+
+        def current_generation(self) -> int:
+            return 0
+
+        def reauth(self, _seen_generation: int) -> int:
+            self.reauth_calls += 1
+            raise GrowwTokenStillStaleError(
+                "read-only broker re-read returned no fresh token yet", safe_message="stale"
+            )
+
+    refresher = _StillStaleReauthRefresher(auth_sdk)
+    client = GrowwClient(
+        sdk=auth_sdk,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_reauths=1,
+    )
+    with pytest.raises(GrowwTokenStillStaleError) as exc:
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert is_retryable(exc.value)  # the ingest quarantines + re-pulls later, never a restart
+    assert refresher.reauth_calls == 1  # exactly ONE read-only re-read — NO infinite recursion
+
+
 def test_with_pace_carries_the_refresher_through() -> None:
     """`with_pace` (dataclasses.replace) preserves the refresher + leaf index unchanged."""
     refresher = _FakeRefresher([_FakeSDK(payload={"candles": []})])

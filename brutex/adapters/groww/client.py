@@ -170,6 +170,12 @@ class GrowwClient:
         :class:`GrowwAuthError` subclass) that propagates straight OUT of this method —
         it is NOT re-entered into the reauth branch (so no infinite re-mint recursion) and
         the orchestrator's layer-3 re-queue re-pulls the window (``is_retryable`` is True).
+        On a READ-ONLY shared-AWS host (DEC-BROKER-READONLY-REAUTH-REREAD-001) the refresher
+        instead RE-READS the Lambda-minted token (never mints); a re-read that still holds the
+        SAME dead token raises a RETRYABLE
+        :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` which propagates OUT
+        of this method exactly like the throttle — the window quarantines + re-pulls later
+        (``is_retryable`` is True), never a fail-loud restart.
 
         A terminal error (auth with no refresher / budget exhausted / bad-request /
         not-found / unknown), or a retryable one that exhausts the budget, re-raises the

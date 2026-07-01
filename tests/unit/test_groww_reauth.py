@@ -24,6 +24,7 @@ from brutex.adapters.groww.errors import (
     GrowwAuthError,
     GrowwTimeoutError,
     GrowwTokenIssuanceThrottled,
+    GrowwTokenStillStaleError,
 )
 from brutex.adapters.groww.reauth import SdkRefresher
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
@@ -680,3 +681,287 @@ def _patched_sleep(sink: list[float]) -> Generator[None]:
         yield
     finally:
         time.sleep = orig
+
+
+# --------------------------------------------------------------------------- #
+# DEC-BROKER-READONLY-REAUTH-REREAD-001 — read-only broker RE-READS on reauth
+# --------------------------------------------------------------------------- #
+
+
+class _NoMintFactory:
+    """A token_factory that MUST NEVER be called on a read-only host (asserts if minted)."""
+
+    def __init__(self) -> None:
+        self.mints = 0
+
+    def __call__(self, _api_key: str, _totp: str) -> str:
+        self.mints += 1
+        raise AssertionError("read-only reauth must RE-READ SSM, never mint locally")
+
+
+def _ssm_load(box: dict[str, str]) -> Callable[..., CachedToken | None]:
+    """A read-only SSM re-read hook over an in-memory *box* (``{}`` ⇒ a miss)."""
+
+    def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+        token = box.get("tok")
+        if token is None:
+            return None
+        return CachedToken(access_token=token, issued_for_session=now_utc.date())
+
+    return load
+
+
+def _readonly_refresher(
+    box: dict[str, str],
+    *,
+    size: int = 1,
+    reread: Callable[..., CachedToken | None] | None = None,
+    minter: Callable[[str, str], str] | None = None,
+    call_timeout_seconds: float = 5.0,
+) -> SdkRefresher:
+    """Build a read-only-broker refresher: cold-start reads *box*, reauth RE-READS it.
+
+    ``token_cache_load`` reads the shared *box* (the SSM SecureString) so the cold-start is a
+    HIT (no mint); ``readonly_reread`` is the same read (unless overridden); ``token_factory``
+    asserts if a local mint is ever attempted (BruteX is read-only). ``token_cache_store``
+    is a no-op (the Lambda owns writes).
+    """
+    return SdkRefresher(
+        _CREDS,
+        size=size,
+        token_factory=minter or _NoMintFactory(),
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+        token_cache_load=_ssm_load(box),
+        token_cache_store=lambda *_a, **_k: True,
+        readonly_reread=reread if reread is not None else _ssm_load(box),
+        clock=lambda: _NOW,
+        call_timeout_seconds=call_timeout_seconds,
+    )
+
+
+class TestReadOnlyReauthReRead:
+    """Read-only reauth RE-READS the Lambda-minted token instead of minting (the FIX)."""
+
+    def test_reauth_rereads_and_adopts_new_lambda_token(self) -> None:
+        """The bug fix: a NEW token in SSM is ADOPTED on reauth — no mint, no fail-loud.
+
+        FAILS BEFORE the fix (reauth force-mints → the read-only store's store() would fire),
+        PASSES AFTER (the re-read adopts the Lambda-rotated token and bumps the generation).
+        """
+        box = {"tok": "TOKEN-V1"}
+        refresher = _readonly_refresher(box)
+        assert refresher.current_sdk().token == "TOKEN-V1"  # type: ignore[attr-defined]
+
+        # The Lambda rotates the shared token at ~06:05 IST; the current token is rejected.
+        box["tok"] = "TOKEN-V2"
+        new_gen = refresher.reauth(seen_generation=0)
+        assert new_gen == 1  # the re-read counted as a real refresh
+        assert refresher.current_generation() == 1
+        assert refresher.current_sdk().token == "TOKEN-V2"  # type: ignore[attr-defined]
+
+    def test_reauth_never_mints_locally(self) -> None:
+        """A read-only reauth must NEVER call the local token_factory (the Lambda mints)."""
+        box = {"tok": "TOKEN-V1"}
+        minter = _NoMintFactory()
+        refresher = _readonly_refresher(box, minter=minter)
+        box["tok"] = "TOKEN-V2"
+        refresher.reauth(seen_generation=0)
+        assert minter.mints == 0  # the token_factory was never invoked
+
+    def test_reauth_same_stale_token_raises_retryable_not_crash(self) -> None:
+        """SSM still holds the SAME dead token (Lambda not minted yet) ⇒ RETRYABLE, no crash.
+
+        The 05:59-before-06:05 race: the re-read returns the very token that just failed. It
+        must NOT be adopted (would loop the dead token) and must NOT mint (read-only). A
+        RETRYABLE GrowwTokenStillStaleError is raised so the window quarantines + re-pulls.
+        """
+        box = {"tok": "TOKEN-V1"}
+        refresher = _readonly_refresher(box)
+        from brutex.adapters.groww.errors import is_retryable
+
+        with pytest.raises(GrowwTokenStillStaleError) as exc:
+            refresher.reauth(seen_generation=0)  # SSM unchanged — same TOKEN-V1
+        assert is_retryable(exc.value)  # the caller re-pulls later, never a restart
+        # NO half-state: generation unchanged, the OLD SDK still served (no infinite loop).
+        assert refresher.current_generation() == 0
+        assert refresher.current_sdk().token == "TOKEN-V1"  # type: ignore[attr-defined]
+
+    def test_reauth_ssm_miss_raises_retryable(self) -> None:
+        """An SSM miss (empty box ⇒ re-read returns None) is the still-stale retryable case."""
+
+        def reread_miss(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            return None  # the shared parameter is absent / unreadable ⇒ a miss
+
+        box = {"tok": "TOKEN-V1"}
+        refresher = _readonly_refresher(box, reread=reread_miss)
+        with pytest.raises(GrowwTokenStillStaleError):
+            refresher.reauth(seen_generation=0)
+        assert refresher.current_generation() == 0
+
+    def test_reauth_single_flight_one_reread_per_generation(self) -> None:
+        """N concurrent read-only reauths do EXACTLY ONE SSM re-read (single-flight).
+
+        A barrier releases N threads that each captured generation 0; the lock + generation
+        check let exactly ONE win the re-read (adopting the new token) and the rest no-op.
+        """
+        box = {"tok": "TOKEN-V1"}
+        reads = {"n": 0}
+        gate = threading.Lock()
+
+        def counting_reread(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            with gate:
+                reads["n"] += 1
+            return CachedToken(access_token=box["tok"], issued_for_session=now_utc.date())
+
+        refresher = _readonly_refresher(box, reread=counting_reread)
+        box["tok"] = "TOKEN-V2"  # the Lambda rotated it
+        n = 16
+        barrier = threading.Barrier(n)
+
+        def _race() -> int:
+            seen = refresher.current_generation()  # all read 0 before the barrier releases
+            barrier.wait(timeout=5.0)
+            return refresher.reauth(seen)
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            gens = [f.result(timeout=10.0) for f in [ex.submit(_race) for _ in range(n)]]
+
+        assert reads["n"] == 1  # EXACTLY one SSM re-read despite N concurrent callers
+        assert refresher.current_generation() == 1
+        assert set(gens) == {1}  # every caller observes the single refreshed generation
+        assert refresher.current_sdk().token == "TOKEN-V2"  # type: ignore[attr-defined]
+
+    def test_reauth_cap_still_bounds_a_persistently_stale_broker(self) -> None:
+        """The reauth cap (max_reauths) still bounds a broker stuck on the same stale token.
+
+        A persistently-stale SSM (the Lambda is down) must not spin forever: with the
+        client's bounded ``max_reauths`` budget the still-stale reauth raises a retryable
+        error that the caller's bounded loop surfaces after the budget — never an infinite
+        loop. Here we drive the refresher directly: EVERY reauth on the same stale token
+        raises, and the generation NEVER advances (so the caller's fixed budget is spent
+        deterministically, not looped).
+        """
+        box = {"tok": "TOKEN-V1"}
+        refresher = _readonly_refresher(box)
+        for _ in range(3):  # simulate the caller's bounded retries — each stays stale
+            with pytest.raises(GrowwTokenStillStaleError):
+                refresher.reauth(seen_generation=refresher.current_generation())
+        assert refresher.current_generation() == 0  # never advanced on a stale re-read
+
+    def test_hung_reread_raises_retryable_timeout_releases_lock(self) -> None:
+        """A read-only re-read that HANGS past the deadline raises a retryable timeout.
+
+        The freeze guard bounds the SSM re-read exactly like the mint: a wedged SSM call at
+        06:00 IST raises a RETRYABLE GrowwTimeoutError (NOT a terminal), the lock is
+        released, and NO partial state is published.
+        """
+        release = threading.Event()
+        box = {"tok": "TOKEN-V1"}
+
+        def hung_reread(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            release.wait(timeout=5.0)  # block past the short injected deadline
+            return CachedToken(access_token="TOKEN-V2", issued_for_session=now_utc.date())
+
+        refresher = _readonly_refresher(box, reread=hung_reread, call_timeout_seconds=0.05)
+        initial = refresher.current_sdk()
+        try:
+            with pytest.raises(GrowwTimeoutError):
+                refresher.reauth(seen_generation=0)
+            assert refresher.current_generation() == 0  # no half-state
+            assert refresher.current_sdk() is initial  # OLD SDK still served
+            # The lock was released — a probe thread does not deadlock.
+            done: list[int] = []
+            probe = threading.Thread(target=lambda: done.append(refresher.current_generation()))
+            probe.start()
+            probe.join(timeout=2.0)
+            assert not probe.is_alive()
+            assert done == [0]
+        finally:
+            release.set()
+
+    def test_abandoned_hung_reread_daemon_does_not_poison_next_reread(self) -> None:
+        """REGRESSION (MAJOR-1): a HUNG re-read's abandoned daemon must NOT poison the next.
+
+        The exact hung-socket race the feature targets. Cold token is DEAD (V1). The FIRST
+        re-read HANGS past the deadline → the caller raises GrowwTimeoutError + releases the
+        lock; the abandoned freeze-guard daemon LATER completes, having read the Lambda-rotated
+        FRESH token (V2). A SECOND reauth re-reads V2 from SSM and MUST ADOPT it.
+
+        BEFORE the fix (`_build_sdks` wrote `self._current_token` on the daemon thread + the
+        compare read `self._current_token` live), the abandoned daemon set
+        `_current_token = "TOKEN-V2"`, so the second re-read saw `fresh == _current_token` and
+        WRONGLY raised GrowwTokenStillStaleError → the 06:00 host failed to self-heal.
+        AFTER the fix (`_build_sdks` is pure, the caller publishes only after a clean deadline
+        return, and the compare uses the lock-pinned reference token), the abandoned daemon
+        writes NOTHING and the second reauth adopts V2.
+        """
+        box = {"tok": "TOKEN-V1"}
+        first_reread_started = threading.Event()
+        release_first = threading.Event()
+        reads: list[str] = []
+
+        def racing_reread(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            token = box["tok"]
+            reads.append(token)
+            if len(reads) == 1:
+                # The FIRST re-read hangs past the deadline; only AFTER the caller has timed
+                # out do we release it so the abandoned daemon completes reading the ROTATED
+                # token (the poisoning window the bug exploited).
+                first_reread_started.set()
+                release_first.wait(timeout=5.0)
+                token = box["tok"]  # by now the Lambda has rotated V1 → V2
+            return CachedToken(access_token=token, issued_for_session=now_utc.date())
+
+        refresher = _readonly_refresher(box, reread=racing_reread, call_timeout_seconds=0.05)
+        assert refresher.current_sdk().token == "TOKEN-V1"  # type: ignore[attr-defined]
+
+        # (1) The token is rejected; the FIRST reauth's re-read hangs → retryable timeout.
+        with pytest.raises(GrowwTimeoutError):
+            refresher.reauth(seen_generation=0)
+        assert first_reread_started.wait(timeout=2.0)
+        # The Lambda rotates the shared token WHILE the first daemon is still blocked.
+        box["tok"] = "TOKEN-V2"
+        release_first.set()
+        # Give the abandoned daemon a moment to complete (it reads V2 and, in the BUGGY
+        # version, would write _current_token). No public API to join it, so poll on the
+        # second read landing (the daemon read is what the bug used to poison the field).
+        for _ in range(200):
+            if len(reads) >= 2:
+                break
+            time.sleep(0.01)
+
+        # (2) A SECOND reauth re-reads V2 from SSM and MUST ADOPT it (self-heal) — the fix.
+        new_gen = refresher.reauth(seen_generation=refresher.current_generation())
+        assert new_gen == 1
+        assert refresher.current_sdk().token == "TOKEN-V2"  # type: ignore[attr-defined]
+
+    def test_pool_sized_readonly_reauth_rereads_all_leaves_once(self) -> None:
+        """A size=K read-only refresher re-reads ONCE and rebuilds ALL K leaves' SDKs."""
+        box = {"tok": "TOKEN-V1"}
+        refresher = _readonly_refresher(box, size=3)
+        initial = [refresher.sdk_at(i) for i in range(3)]
+        box["tok"] = "TOKEN-V2"
+        refresher.reauth(seen_generation=0)
+        rebuilt = [refresher.sdk_at(i) for i in range(3)]
+        assert all(rebuilt[i] is not initial[i] for i in range(3))  # every leaf refreshed
+        assert all(sdk.token == "TOKEN-V2" for sdk in rebuilt)  # type: ignore[attr-defined]
+
+    def test_default_none_reread_keeps_local_mint_no_regression(self) -> None:
+        """readonly_reread=None (the default) keeps the byte-identical LOCAL-mint reauth.
+
+        Regression guard: a refresher WITHOUT the read-only hook still FORCE-MINTS on reauth
+        exactly as before the fix (the local-mint path is untouched).
+        """
+        _minted, _tokens, built, totp_minter, token_factory, sdk_factory = _counting_factories()
+        refresher = SdkRefresher(
+            _CREDS,
+            token_factory=token_factory,
+            totp_minter=totp_minter,
+            sdk_factory=sdk_factory,
+            # readonly_reread defaults to None ⇒ local-mint reauth
+        )
+        assert len(built) == 1  # initial mint
+        new_gen = refresher.reauth(seen_generation=0)
+        assert new_gen == 1
+        assert len(built) == 2  # a real LOCAL re-mint happened (not a re-read)

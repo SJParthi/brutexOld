@@ -38,6 +38,10 @@ def _clear_backend_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 class _FakeStore:
     """A minimal :class:`TokenStore` stand-in for the build-success path."""
 
+    @property
+    def readonly(self) -> bool:  # pragma: no cover - stub (never read on this path)
+        return True
+
     def load(self, creds: object, *, now_utc: object) -> None:  # pragma: no cover - stub
         return None
 
