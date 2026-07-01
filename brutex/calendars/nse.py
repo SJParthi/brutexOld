@@ -470,12 +470,97 @@ def get_session(d: date) -> TradingSession | None:
     )
 
 
+def get_session_checked(d: date) -> TradingSession | None:
+    """Strict :func:`get_session` — raise on an out-of-coverage date.
+
+    Identical to :func:`get_session` within the covered holiday span. For a date
+    whose year is OUTSIDE ``[HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR]`` it raises :class:`HolidayDataUnavailableError`
+    **only when the verdict would actually depend on the missing holiday
+    list** — i.e. a plain weekday — instead of silently FABRICATING a regular
+    09:15-15:30 session for an unknown weekday holiday. Two cases resolve
+    WITHOUT raising because their answer is data-complete regardless of the
+    holiday list, mirroring :func:`is_trading_day_checked`:
+
+    * a muhurat session or a special-weekend session (data the package
+      explicitly holds) → that session;
+    * a plain weekend with no special/muhurat session → ``None`` (a weekend is
+      never a trading day; the holiday list cannot change that).
+
+    A weekday outside the span is the genuinely-ambiguous case: it would carry a
+    regular session UNLESS it is an (unknown) holiday, so the strict variant
+    refuses (via :func:`is_trading_day_checked`) rather than guess a REGULAR
+    session. The unguarded :func:`get_session` keeps its byte-identical
+    back-compat behaviour (an out-of-coverage weekday reads as a REGULAR
+    session). O(1).
+
+    Raises
+    ------
+    HolidayDataUnavailableError
+        If ``d`` is an out-of-coverage WEEKDAY that is neither a muhurat nor a
+        special-weekend session.
+    """
+    if has_muhurat_session(d):
+        open_t, close_t = MUHURAT_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.MUHURAT,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
+    if is_special_weekend_session(d):
+        open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.REGULAR,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
+    if not is_trading_day_checked(d):
+        return None
+    return TradingSession(
+        date=d,
+        session_type=SessionType.REGULAR,
+        open_time_ist=SESSION_OPEN_IST,
+        close_time_ist=SESSION_CLOSE_IST,
+    )
+
+
 def trading_days_between(start: date, end: date) -> list[date]:
     """List of trading days in [start, end] inclusive."""
     days: list[date] = []
     d = start
     while d <= end:
         if is_trading_day(d):
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def trading_days_between_checked(start: date, end: date) -> list[date]:
+    """Strict :func:`trading_days_between` — raise on an out-of-coverage weekday.
+
+    Identical to :func:`trading_days_between` when every date in ``[start,
+    end]`` falls within the covered holiday span. If ANY date in the range is an
+    out-of-coverage WEEKDAY that is not a special session, the verdict for that
+    day turns on the missing holiday list, so this variant raises
+    :class:`HolidayDataUnavailableError` (via :func:`is_trading_day_checked`)
+    rather than silently INCLUDE an unknown weekday holiday as a trading day.
+    Out-of-coverage weekends resolve without raising (a weekend is never a
+    trading day, holiday list or not). The unguarded
+    :func:`trading_days_between` keeps its byte-identical back-compat behaviour.
+    O(days).
+
+    Raises
+    ------
+    HolidayDataUnavailableError
+        If any date in ``[start, end]`` is an out-of-coverage WEEKDAY that is
+        not a special session.
+    """
+    days: list[date] = []
+    d = start
+    while d <= end:
+        if is_trading_day_checked(d):
             days.append(d)
         d += timedelta(days=1)
     return days

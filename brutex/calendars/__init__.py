@@ -23,6 +23,7 @@ from brutex.calendars.nse import (
     forced_exit_seconds_for_session,
     forced_exit_time_for_session,
     get_session,
+    get_session_checked,
     has_muhurat_session,
     is_forced_exit_bar,
     is_holiday,
@@ -37,6 +38,7 @@ from brutex.calendars.nse import (
     nifty_rebalance_event_on,
     session_minutes_per_day,
     trading_days_between,
+    trading_days_between_checked,
 )
 
 __all__ = [
@@ -62,6 +64,7 @@ __all__ = [
     "forced_exit_seconds_for_session",
     "forced_exit_time_for_session",
     "get_session",
+    "get_session_checked",
     "has_muhurat_session",
     "is_forced_exit_bar",
     "is_holiday",
@@ -76,4 +79,5 @@ __all__ = [
     "nifty_rebalance_event_on",
     "session_minutes_per_day",
     "trading_days_between",
+    "trading_days_between_checked",
 ]
