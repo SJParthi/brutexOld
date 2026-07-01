@@ -707,6 +707,44 @@ class TestCascadeSpecsForRefinedCells:
         (spec,) = cascade_specs_for_refined_cells([cell], grid=_grid())
         assert spec.proximity_bps == (5, 10, 25)
 
+    def test_spec_carries_the_swept_fib_anchor(
+        self, pipeline: tuple[Path, Stage3PassReport], tmp_path: Path
+    ) -> None:
+        # DEC-NIFTY-FIB-AXIS-001 (the Stage-4 cascade MAJOR): a non-prev-day
+        # refined cell must produce a spec carrying its OWN swept anchor, so the
+        # cascade re-simulation scores against the right Fib levels. FAILS BEFORE
+        # the fix (the anchor was dropped, spec defaulted to prev-day).
+        _, report = pipeline
+        source_row = ResultsStore.load(report.cells[0].path).rows()[0]
+        path = tmp_path / "rolling.parquet"
+        store = ResultsStore(path=path)
+        store.append(source_row)
+        store.flush()
+        cell = Stage3RefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=Side.BUY,
+                k=1,
+                sl_paisa=80,
+                tp_paisa=50,
+                proximity=None,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            ),
+            path=path,
+            rows=1,
+        )
+        (spec,) = cascade_specs_for_refined_cells([cell], grid=_grid())
+        assert spec.fib_anchor is FibAnchorKind.ROLLING_WEEKLY
+
+    def test_spec_defaults_to_prev_day_anchor(
+        self, pipeline: tuple[Path, Stage3PassReport]
+    ) -> None:
+        # A default (prev-day) refined cell yields a prev-day spec — byte-identical.
+        _, report = pipeline
+        specs = cascade_specs_for_refined_cells(report.cells, grid=_grid())
+        assert all(spec.fib_anchor is FibAnchorKind.PREV_DAY for spec in specs)
+
 
 # ────── per-cell trial-stats sidecars (DEC-TRIAL-STATS-WRITE-001) ──────
 

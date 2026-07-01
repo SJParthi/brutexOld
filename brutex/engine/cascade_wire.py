@@ -168,6 +168,13 @@ class CascadeTupleSpec:
     winners
         The tuple's finalists as ``(run_id, mask)`` pairs; each ``run_id`` is
         64-char lowercase hex, each ``mask`` in ``[0, _MASK_BITS_MAX]``.
+    fib_anchor
+        The swept Fib-anchor family the tuple was evaluated against
+        (DEC-NIFTY-FIB-AXIS-001). Threaded into :func:`candidates_for_spec`'s
+        ``build_bar_bits`` so the Stage-4 cascade re-scores a non-prev-day
+        survivor against its OWN Fib levels, not the prev-day default. An
+        additive field (default prev-day) so a pre-axis manifest round-trips
+        byte-compatibly; the default keeps the prev-day path byte-identical.
 
     Raises
     ------
@@ -186,6 +193,7 @@ class CascadeTupleSpec:
     proximity_bps: tuple[int, int, int] | None
     start_equity_paisa: int
     winners: tuple[tuple[str, int], ...]
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -717,7 +725,9 @@ def candidates_for_spec(spec: CascadeTupleSpec, bars: Sequence[CandleBar]) -> li
             fib_proximity_bps=spec.proximity_bps[2],
         )
     )
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=spec.prior_n)
+    bar_bits = build_bar_bits(
+        bars, proximity=proximity, prior_n=spec.prior_n, fib_anchor=spec.fib_anchor
+    )
     return [
         build_candidate_input(
             run_id=run_id,
@@ -1129,6 +1139,7 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         "proximity_bps": None if spec.proximity_bps is None else list(spec.proximity_bps),
         "start_equity_paisa": spec.start_equity_paisa,
         "winners": [[run_id, mask] for run_id, mask in spec.winners],
+        "fib_anchor": spec.fib_anchor.value,
     }
 
 
@@ -1155,6 +1166,13 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
             proximity_bps=proximity_bps,
             start_equity_paisa=int(raw["start_equity_paisa"]),
             winners=winners,
+            # Absent on pre-DEC-NIFTY-FIB-AXIS-001 manifests (additive parse):
+            # default to prev-day, the only anchor those sweeps ran.
+            fib_anchor=(
+                FibAnchorKind.PREV_DAY
+                if raw.get("fib_anchor") is None
+                else FibAnchorKind(str(raw["fib_anchor"]))
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
@@ -1343,6 +1361,7 @@ def spec_from_store_rows(
     start_equity_paisa: int,
     rows: Sequence[ResultRow],
     top_k: int | None = None,
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
@@ -1358,6 +1377,11 @@ def spec_from_store_rows(
         The tuple's persisted :class:`~brutex.engine.results_store.ResultRow`\\s.
     top_k
         Keep only the top-``top_k`` by Sharpe, or ``None`` for all.
+    fib_anchor
+        The swept Fib-anchor family the tuple was evaluated against
+        (DEC-NIFTY-FIB-AXIS-001); carried onto the spec so the Stage-4 cascade
+        re-scores against the tuple's OWN Fib levels. Default prev-day keeps the
+        prev-day path byte-identical.
 
     Returns
     -------
@@ -1381,6 +1405,7 @@ def spec_from_store_rows(
         proximity_bps=proximity_bps,
         start_equity_paisa=start_equity_paisa,
         winners=winners,
+        fib_anchor=fib_anchor,
     )
 
 

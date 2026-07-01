@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -45,7 +45,7 @@ from brutex.metrics.deflated_sharpe import (
     deflated_sharpe_ratio,
     expected_max_sharpe_ratio,
 )
-from brutex.strategies.types import Side
+from brutex.strategies.types import FibAnchorKind, Side
 from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -109,6 +109,84 @@ def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
         return []
 
     return loader
+
+
+# ── Fib-anchor multi-day history (DEC-NIFTY-FIB-AXIS-001) ─────────────────────
+#
+# A 12-trading-day 1-minute stream ending on 2021-01-19, whose per-day OHLC is
+# hand-picked (mirroring ``test_engine_fib_axis._DAY_OHLC``) so the prev-day and
+# rolling-weekly Fib windows for the test day are DISTINCT: on 2021-01-19 the
+# rolling-weekly ``retrace_50`` sits at ₹10650 but the prev-day's does not, so a
+# test-day flat at ₹10650 fires Group-4 Fib bit 22 under ROLLING_WEEKLY and NO
+# test-day Fib bit under PREV_DAY. This is the fixture that makes the Stage-4
+# cascade-anchor bug observable end-to-end through :func:`candidates_for_spec`.
+
+_FIB_TRADING_DAYS: list[date] = [
+    date(2021, 1, 4),
+    date(2021, 1, 5),
+    date(2021, 1, 6),
+    date(2021, 1, 7),
+    date(2021, 1, 8),
+    date(2021, 1, 11),
+    date(2021, 1, 12),
+    date(2021, 1, 13),
+    date(2021, 1, 14),
+    date(2021, 1, 15),
+    date(2021, 1, 18),
+    date(2021, 1, 19),
+]
+
+_FIB_DAY_OHLC: dict[date, tuple[str, str, str, str]] = {
+    date(2021, 1, 4): ("10000", "10100", "9950", "10050"),
+    date(2021, 1, 5): ("10050", "10200", "10000", "10150"),
+    date(2021, 1, 6): ("10150", "10300", "10100", "10250"),
+    date(2021, 1, 7): ("10250", "10400", "10200", "10350"),
+    date(2021, 1, 8): ("10350", "10500", "10300", "10450"),
+    date(2021, 1, 11): ("10450", "10600", "10400", "10550"),
+    date(2021, 1, 12): ("10550", "10700", "10500", "10650"),
+    date(2021, 1, 13): ("10650", "11200", "10600", "10800"),  # week-2 HIGH
+    date(2021, 1, 14): ("10800", "10900", "9800", "10100"),  # week-2 LOW
+    date(2021, 1, 15): ("10100", "10500", "10050", "10300"),
+    date(2021, 1, 18): ("10500", "11500", "10400", "10600"),  # widens rolling high
+    date(2021, 1, 19): ("10600", "10700", "10500", "10650"),  # TEST day
+}
+
+#: The Group-4 Fib bit fired on 2021-01-19 by the rolling-weekly retrace_50
+#: (₹10650) but NOT by the prev-day anchor — verified empirically against
+#: :func:`build_bar_bits` on this fixture.
+_ROLLING_ONLY_FIB_BIT: int = 22
+
+
+def _fib_anchor_history(
+    *, test_day_bars: int = 30, prices_around: str = "10650"
+) -> list[CandleBar]:
+    """Build the 12-day stream ending 2021-01-19; 01-19 trades flat at *prices_around*."""
+    bars: list[CandleBar] = []
+    for day in _FIB_TRADING_DAYS:
+        o, h, low, c = _FIB_DAY_OHLC[day]
+        base = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
+        if day == _FIB_TRADING_DAYS[-1]:
+            for i in range(test_day_bars):
+                px = prices_around
+                bars.append(_bar_at(base + timedelta(minutes=i), px, px, px, px))
+            continue
+        # First bar establishes the day's open + extremes + close; interior flat.
+        bars.append(_bar_at(base, o, h, low, c))
+        for i in range(1, 5):
+            bars.append(_bar_at(base + timedelta(minutes=i), c, c, c, c))
+    return bars
+
+
+def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
+    return CandleBar(
+        timestamp=ts_ist.astimezone(UTC),
+        open=Decimal(o),
+        high=Decimal(h),
+        low=Decimal(low),
+        close=Decimal(c),
+        volume=1000,
+        open_interest=None,
+    )
 
 
 def _fat_tailed_bars() -> list[CandleBar]:
@@ -348,6 +426,88 @@ class TestBuildCandidateInput:
 
     def test_candidates_for_spec_empty_winners(self) -> None:
         assert cw.candidates_for_spec(_spec(winners=()), _session_bars()) == []
+
+    def test_candidates_for_spec_uses_the_swept_fib_anchor(self) -> None:
+        """A ROLLING_WEEKLY spec re-scores against rolling-weekly Fib levels (MAJOR fix).
+
+        The Stage-4 cascade re-simulation MUST build its ``bar_bits`` at the
+        tuple's OWN swept Fib anchor (DEC-NIFTY-FIB-AXIS-001) — before the fix
+        :func:`candidates_for_spec` called ``build_bar_bits`` at the DEFAULT
+        prev-day anchor, silently re-scoring a non-prev-day survivor against the
+        WRONG Fib levels.
+
+        The winner mask requires the Group-4 Fib bit that fires on 2021-01-19
+        ONLY under ROLLING_WEEKLY (₹10650 is rolling's ``retrace_50`` but not
+        prev-day's). Every test-day bar trades flat AT that level:
+          * PREV_DAY   → the bit never fires → 0 entry signals;
+          * ROLLING_WEEKLY → the bit fires on every test-day bar → 30 entries.
+        The reconstructed candidate's entry-signal count therefore differs by
+        anchor. FAILS BEFORE the fix (both anchors would score prev-day → 0
+        entries either way), PASSES AFTER.
+        """
+        bars = _fib_anchor_history()
+        mask = 1 << _ROLLING_ONLY_FIB_BIT
+
+        def entry_count(anchor: FibAnchorKind) -> int:
+            spec = _spec(winners=((_rid(1), mask),), fib_anchor=anchor)
+            # The wire reconstructs a real CandidateInput from the spec (smoke: a
+            # non-empty candidate is produced for the swept anchor).
+            assert cw.candidates_for_spec(spec, bars)
+            # The winner's entry signals are the SUPERSET-match of the mask over
+            # the reconstructed bar_bits at the spec's anchor — count them via the
+            # same builder + predicate the wire uses internally.
+            bar_bits = build_bar_bits(bars, prior_n=spec.prior_n, fib_anchor=anchor)
+            return sum(mask_to_entry_signals(bar_bits, mask))
+
+        prev_entries = entry_count(FibAnchorKind.PREV_DAY)
+        roll_entries = entry_count(FibAnchorKind.ROLLING_WEEKLY)
+        # Anchor-sensitivity of the fixture (guards the fixture, not the fix).
+        assert prev_entries == 0
+        assert roll_entries == 30
+
+        # The FIX proof: the anchor the wire threads into ``build_bar_bits`` is the
+        # spec's swept anchor, so the reconstructed bar_bits (and hence entry
+        # signals) DIFFER between the prev-day and rolling-weekly specs.
+        captured: list[FibAnchorKind] = []
+        real_build = build_bar_bits
+
+        def spy(bars_arg: object, **kwargs: object) -> object:
+            captured.append(kwargs["fib_anchor"])  # type: ignore[arg-type]
+            return real_build(bars_arg, **kwargs)  # type: ignore[arg-type]
+
+        from brutex.engine import stage1a
+
+        original = stage1a.build_bar_bits
+        stage1a.build_bar_bits = spy  # type: ignore[assignment]
+        try:
+            cw.candidates_for_spec(
+                _spec(winners=((_rid(1), mask),), fib_anchor=FibAnchorKind.ROLLING_WEEKLY),
+                bars,
+            )
+        finally:
+            stage1a.build_bar_bits = original  # type: ignore[assignment]
+        assert captured == [FibAnchorKind.ROLLING_WEEKLY]
+
+    def test_candidates_for_spec_defaults_to_prev_day_anchor(self) -> None:
+        """An unset ``fib_anchor`` threads PREV_DAY — the default path is byte-identical."""
+        bars = _fib_anchor_history()
+        mask = 1 << _ROLLING_ONLY_FIB_BIT
+        captured: list[FibAnchorKind] = []
+        real_build = build_bar_bits
+
+        def spy(bars_arg: object, **kwargs: object) -> object:
+            captured.append(kwargs["fib_anchor"])  # type: ignore[arg-type]
+            return real_build(bars_arg, **kwargs)  # type: ignore[arg-type]
+
+        from brutex.engine import stage1a
+
+        original = stage1a.build_bar_bits
+        stage1a.build_bar_bits = spy  # type: ignore[assignment]
+        try:
+            cw.candidates_for_spec(_spec(winners=((_rid(1), mask),)), bars)
+        finally:
+            stage1a.build_bar_bits = original  # type: ignore[assignment]
+        assert captured == [FibAnchorKind.PREV_DAY]
 
     def test_mc_evaluate_returns_finite_or_nan(self) -> None:
         bars = _session_bars()
@@ -646,6 +806,25 @@ class TestManifestSerialisation:
         once = cw.manifest_to_json(manifest)
         twice = cw.manifest_to_json(cw.manifest_from_json(once))
         assert once == twice
+
+    def test_round_trip_preserves_spec_fib_anchor(self) -> None:
+        # DEC-NIFTY-FIB-AXIS-001 (Stage-4 cascade anchor threading): a non-prev-day
+        # spec's swept anchor must round-trip through the manifest so the anchor
+        # survives serialize→deserialize (else the cascade would re-score prev-day).
+        manifest = _manifest(specs=(_spec(fib_anchor=FibAnchorKind.ROLLING_WEEKLY),))
+        restored = cw.manifest_from_json(cw.manifest_to_json(manifest))
+        assert restored == manifest
+        assert restored.specs[0].fib_anchor is FibAnchorKind.ROLLING_WEEKLY
+
+    def test_pre_axis_spec_without_fib_anchor_key_parses(self) -> None:
+        # Additive-parse precedent: a manifest written before the Fib axis (no
+        # ``fib_anchor`` key on a spec) parses as PREV_DAY (byte-compatible).
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest(specs=(_spec(),))))
+        del payload["specs"][0]["fib_anchor"]
+        restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+        assert restored.specs[0].fib_anchor is FibAnchorKind.PREV_DAY
 
     def test_bad_json_raises(self) -> None:
         with pytest.raises(cw.CascadeWireError, match="not valid JSON"):
@@ -1350,6 +1529,41 @@ class TestSpecFromStoreRows:
         )
         assert spec is not None
         assert spec.winners == ((_rid(2), 2), (_rid(3), 3))
+
+    def test_defaults_to_prev_day_fib_anchor(self) -> None:
+        spec = cw.spec_from_store_rows(
+            instrument="NIFTY",
+            tf_label="1minute",
+            tf_minutes=1,
+            direction_label="bull",
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=3,
+            proximity_bps=None,
+            start_equity_paisa=10_000_000,
+            rows=[_result_row(1, mask=1, sharpe=0.5)],
+        )
+        assert spec is not None
+        assert spec.fib_anchor is FibAnchorKind.PREV_DAY
+
+    def test_threads_the_swept_fib_anchor(self) -> None:
+        # DEC-NIFTY-FIB-AXIS-001: the swept anchor is carried onto the spec so the
+        # Stage-4 cascade re-scores against the tuple's OWN Fib levels.
+        spec = cw.spec_from_store_rows(
+            instrument="NIFTY",
+            tf_label="1minute",
+            tf_minutes=1,
+            direction_label="bull",
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=3,
+            proximity_bps=None,
+            start_equity_paisa=10_000_000,
+            rows=[_result_row(1, mask=1, sharpe=0.5)],
+            fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+        )
+        assert spec is not None
+        assert spec.fib_anchor is FibAnchorKind.ROLLING_WEEKLY
 
 
 # ── Output paths + IO + the end-to-end paths ──────────────────────────────────

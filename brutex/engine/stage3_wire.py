@@ -845,6 +845,7 @@ def cascade_specs_for_refined_cells(
             start_equity_paisa=grid.start_equity_paisa,
             rows=ResultsStore.load(cell.path).rows(),
             top_k=None,
+            fib_anchor=tuple_.fib_anchor,
         )
         if spec is not None:
             specs.append(spec)
