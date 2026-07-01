@@ -6,17 +6,17 @@ tested slice of multi-core grid-sweep parallelism, behind a DEFAULT-OFF flag.
 The 7-test-types discipline (CLAUDE.md §12 / Golden Rule #12), held to the strict
 100% line + 100% branch gate:
 
-* **unit** — :func:`resolve_sweep_workers` (every branch),
-  :func:`refuse_parallel_on_legacy_path`, the ``workers < 2`` guard, the
-  ``BufferedAuditCollector`` seam, ``_run_tuple_in_worker`` (success / no-bars /
-  ``SweepComboError`` → failed marker), ``_result_to_outcome`` (all three kinds),
-  ``_Outcome`` heap ordering, ``_NoDedup``'s raising probes, and ``_worker_init``'s
+* **unit** — :func:`mod.resolve_sweep_workers` (every branch),
+  :func:`mod.refuse_parallel_on_legacy_path`, the ``workers < 2`` guard, the
+  ``BufferedAuditCollector`` seam, ``mod._run_tuple_in_worker`` (success / no-bars /
+  ``SweepComboError`` → failed marker), ``mod._result_to_outcome`` (all three kinds),
+  ``mod._Outcome`` heap ordering, ``mod._NoDedup``'s raising probes, and ``mod._worker_init``'s
   determinism pins.
 * **integration** — a real end-to-end ``ProcessPoolExecutor`` sweep over real bars
   / real ``AuditWriter`` / ``SweepAuditWriter`` / ``ResultsStore`` / ``SweepCache``
   / ``SweepCheckpointStore``, incl. resume + cache + no-bars skips.
 * **golden (THE HEADLINE)** — a fixed grid run BOTH sequential (``workers=1`` via
-  ``run_supervised_grid``) AND parallel (``workers=4`` via ``run_parallel_grid``);
+  ``run_supervised_grid``) AND parallel (``workers=4`` via ``mod.run_parallel_grid``);
   every per-tuple Parquet + sidecar + sentinel is BYTE-IDENTICAL, the ingest audit
   chain is identical modulo timestamps AND verifies, and the checkpoint state is
   identical — regardless of worker interleaving.
@@ -42,6 +42,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import brutex.engine.sweep_parallel as mod
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
@@ -57,25 +58,6 @@ from brutex.engine.sweep_orchestrator import (
     iter_sweep_tuples,
     make_store_for,
     tuple_store_path,
-)
-from brutex.engine.sweep_parallel import (
-    DEFAULT_SWEEP_WORKERS,
-    SWEEP_WORKERS_ENV,
-    ParallelGridDriver,
-    SweepParallelUsageError,
-    SweepStallError,
-    TupleWorkResult,
-    _Accumulator,
-    _NoDedup,
-    _Outcome,
-    _result_to_outcome,
-    _run_tuple_in_worker,
-    _skip_outcome,
-    _worker_init,
-    _WorkerContext,
-    refuse_parallel_on_legacy_path,
-    resolve_sweep_workers,
-    run_parallel_grid,
 )
 from brutex.engine.sweep_progress import SweepProgress
 from brutex.engine.sweep_run import ComboDedup
@@ -220,7 +202,7 @@ def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[P
         AuditWriter.open(tmp / "ingest.jsonl") as ingest,
         _guards(tmp, grid) as guards,
     ):
-        run_parallel_grid(
+        mod.run_parallel_grid(
             grid,
             bars_for=_bars_for,
             root=out,
@@ -237,26 +219,26 @@ def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[P
 
 class TestResolveSweepWorkers:
     def test_default_when_unset(self) -> None:
-        assert resolve_sweep_workers({}) == DEFAULT_SWEEP_WORKERS == 1
+        assert mod.resolve_sweep_workers({}) == mod.DEFAULT_SWEEP_WORKERS == 1
 
     def test_default_when_blank(self) -> None:
-        assert resolve_sweep_workers({SWEEP_WORKERS_ENV: "   "}) == 1
+        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "   "}) == 1
 
     def test_default_when_non_integer(self) -> None:
-        assert resolve_sweep_workers({SWEEP_WORKERS_ENV: "four"}) == 1
+        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "four"}) == 1
 
     def test_default_when_below_one(self) -> None:
-        assert resolve_sweep_workers({SWEEP_WORKERS_ENV: "0"}) == 1
-        assert resolve_sweep_workers({SWEEP_WORKERS_ENV: "-3"}) == 1
+        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "0"}) == 1
+        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "-3"}) == 1
 
     def test_reads_valid_value(self) -> None:
-        assert resolve_sweep_workers({SWEEP_WORKERS_ENV: "6"}) == 6
+        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "6"}) == 6
 
     def test_reads_from_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(SWEEP_WORKERS_ENV, "5")
-        assert resolve_sweep_workers() == 5
-        monkeypatch.delenv(SWEEP_WORKERS_ENV, raising=False)
-        assert resolve_sweep_workers() == 1
+        monkeypatch.setenv(mod.SWEEP_WORKERS_ENV, "5")
+        assert mod.resolve_sweep_workers() == 5
+        monkeypatch.delenv(mod.SWEEP_WORKERS_ENV, raising=False)
+        assert mod.resolve_sweep_workers() == 1
 
 
 class TestDefaultOffProof:
@@ -271,7 +253,7 @@ class TestDefaultOffProof:
     def test_default_resolves_to_one(self) -> None:
         # An empty env → 1 → the caller dispatches ``run_supervised_grid`` (never
         # this driver), so production is byte-for-byte unchanged.
-        assert resolve_sweep_workers({}) == 1
+        assert mod.resolve_sweep_workers({}) == 1
 
     def test_sequential_result_is_the_reference(self, tmp_path: Path) -> None:
         # A workers=1 run IS the sequential path; the golden test proves the
@@ -290,24 +272,24 @@ class TestDefaultOffProof:
 class TestRefuseParallelOnLegacyPath:
     def test_workers_one_never_refused(self) -> None:
         # workers==1 is always fine on either path (sequential).
-        refuse_parallel_on_legacy_path(1, digest_path=False)
-        refuse_parallel_on_legacy_path(1, digest_path=True)
+        mod.refuse_parallel_on_legacy_path(1, digest_path=False)
+        mod.refuse_parallel_on_legacy_path(1, digest_path=True)
 
     def test_workers_gt1_on_digest_path_allowed(self) -> None:
-        refuse_parallel_on_legacy_path(4, digest_path=True)
+        mod.refuse_parallel_on_legacy_path(4, digest_path=True)
 
     def test_workers_gt1_on_legacy_path_refused(self) -> None:
-        with pytest.raises(SweepParallelUsageError, match="LEGACY no-digest"):
-            refuse_parallel_on_legacy_path(4, digest_path=False)
+        with pytest.raises(mod.SweepParallelUsageError, match="LEGACY no-digest"):
+            mod.refuse_parallel_on_legacy_path(4, digest_path=False)
 
     def test_driver_refuses_workers_below_two(self, tmp_path: Path) -> None:
         grid = _grid()
         with (
             _guards(tmp_path, grid) as guards,
             AuditWriter.open(tmp_path / "i.jsonl") as ing,
-            pytest.raises(SweepParallelUsageError, match="workers >= 2"),
+            pytest.raises(mod.SweepParallelUsageError, match="workers >= 2"),
         ):
-            ParallelGridDriver(
+            mod.ParallelGridDriver(
                 grid,
                 bars_for=_bars_for,
                 root=tmp_path / "out",
@@ -353,20 +335,20 @@ class TestBufferedAuditCollector:
 
 class TestNoDedup:
     def test_seen_raises(self) -> None:
-        with pytest.raises(SweepParallelUsageError, match="dedup.seen"):
-            _NoDedup().seen("deadbeef")
+        with pytest.raises(mod.SweepParallelUsageError, match="dedup.seen"):
+            mod._NoDedup().seen("deadbeef")
 
     def test_mark_many_raises(self) -> None:
-        with pytest.raises(SweepParallelUsageError, match="dedup.mark_many"):
-            _NoDedup().mark_many(["deadbeef"])
+        with pytest.raises(mod.SweepParallelUsageError, match="dedup.mark_many"):
+            mod._NoDedup().mark_many(["deadbeef"])
 
 
 class TestWorkerInit:
     def test_pins_single_threaded_numerics(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for var in ("OMP_NUM_THREADS", "RAYON_NUM_THREADS", "POLARS_MAX_THREADS"):
             monkeypatch.delenv(var, raising=False)
-        ctx = _WorkerContext(grid=_grid(), root=Path("/tmp/x"))
-        _worker_init(ctx)
+        ctx = mod._WorkerContext(grid=_grid(), root=Path("/tmp/x"))
+        mod._worker_init(ctx)
         import os as _os
 
         assert _os.environ["OMP_NUM_THREADS"] == "1"
@@ -374,19 +356,17 @@ class TestWorkerInit:
         assert _os.environ["POLARS_MAX_THREADS"] == "1"
 
     def test_stashes_context(self) -> None:
-        ctx = _WorkerContext(grid=_grid(), root=Path("/tmp/y"))
-        _worker_init(ctx)
-        import brutex.engine.sweep_parallel as mod
-
+        ctx = mod._WorkerContext(grid=_grid(), root=Path("/tmp/y"))
+        mod._worker_init(ctx)
         assert mod._WORKER_CTX is ctx
 
 
 class TestRunTupleInWorker:
     def test_success_returns_summary(self, tmp_path: Path) -> None:
         grid = _grid()
-        _worker_init(_WorkerContext(grid=grid, root=tmp_path / "out"))
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
-        result = _run_tuple_in_worker(0, tuple_, _BARS)
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
         assert result.index == 0
         assert result.failed_error is None
         assert result.summary is not None
@@ -396,9 +376,9 @@ class TestRunTupleInWorker:
 
     def test_no_bars_returns_none_summary(self, tmp_path: Path) -> None:
         grid = _grid()
-        _worker_init(_WorkerContext(grid=grid, root=tmp_path / "out"))
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
-        result = _run_tuple_in_worker(2, tuple_, [])
+        result = mod._run_tuple_in_worker(2, tuple_, [])
         assert result.index == 2
         assert result.summary is None
         assert result.failed_error is None
@@ -413,9 +393,9 @@ class TestRunTupleInWorker:
 
         monkeypatch.setattr(sr, "metrics_for_mask", _boom)
         grid = _grid()
-        _worker_init(_WorkerContext(grid=grid, root=tmp_path / "out"))
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
-        result = _run_tuple_in_worker(1, tuple_, _BARS)
+        result = mod._run_tuple_in_worker(1, tuple_, _BARS)
         assert result.summary is None
         assert result.failed_error is not None
         assert "combo blew up" in result.failed_error
@@ -429,37 +409,37 @@ class TestOutcomeAndResultMapping:
 
         grid = _grid()
         t = next(iter_sweep_tuples(grid))
-        heap: list[_Outcome] = []
+        heap: list[mod._Outcome] = []
         for i in (3, 1, 2, 0):
-            heapq.heappush(heap, _skip_outcome(i, t, "resume"))
+            heapq.heappush(heap, mod._skip_outcome(i, t, "resume"))
         assert [heapq.heappop(heap).index for _ in range(4)] == [0, 1, 2, 3]
 
     def test_result_to_outcome_done(self) -> None:
         grid = _grid()
         t = next(iter_sweep_tuples(grid))
-        _worker_init(_WorkerContext(grid=grid, root=Path("/tmp/z")))
+        mod._worker_init(mod._WorkerContext(grid=grid, root=Path("/tmp/z")))
         # A real summary via the worker.
-        res = _run_tuple_in_worker(0, t, _BARS)
-        outcome = _result_to_outcome(res, t)
+        res = mod._run_tuple_in_worker(0, t, _BARS)
+        outcome = mod._result_to_outcome(res, t)
         assert outcome.kind == "done"
         assert outcome.summary is not None
 
     def test_result_to_outcome_no_bars(self) -> None:
         grid = _grid()
         t = next(iter_sweep_tuples(grid))
-        res = TupleWorkResult(index=5, summary=None, failed_error=None, audit_records=())
-        assert _result_to_outcome(res, t).kind == "no_bars"
+        res = mod.TupleWorkResult(index=5, summary=None, failed_error=None, audit_records=())
+        assert mod._result_to_outcome(res, t).kind == "no_bars"
 
     def test_result_to_outcome_failed(self) -> None:
         grid = _grid()
         t = next(iter_sweep_tuples(grid))
-        res = TupleWorkResult(index=5, summary=None, failed_error="boom", audit_records=())
-        assert _result_to_outcome(res, t).kind == "failed"
+        res = mod.TupleWorkResult(index=5, summary=None, failed_error="boom", audit_records=())
+        assert mod._result_to_outcome(res, t).kind == "failed"
 
 
 class TestAccumulator:
     def test_defaults(self) -> None:
-        acc = _Accumulator()
+        acc = mod._Accumulator()
         assert acc.tuples_run == 0
         assert acc.had_failure is False
 
@@ -539,7 +519,7 @@ class TestParallelSkipPaths:
 
         out = tmp_path / "out"
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
-            summary = run_parallel_grid(
+            summary = mod.run_parallel_grid(
                 grid,
                 bars_for=_no_bars,
                 root=out,
@@ -577,7 +557,7 @@ class TestParallelSkipPaths:
                 cache=cache,
                 watchdog=SweepWatchdog(),
             )
-            summary = run_parallel_grid(
+            summary = mod.run_parallel_grid(
                 grid, bars_for=_bars_for, root=out2, ingest_audit=ing, guards=guards, workers=3
             )
         assert summary.skipped_cache == count_sweep_tuples(grid)
@@ -610,7 +590,7 @@ class TestParallelSkipPaths:
                 cache=cache,
                 watchdog=SweepWatchdog(),
             )
-            summary = run_parallel_grid(
+            summary = mod.run_parallel_grid(
                 grid, bars_for=_bars_for, root=out, ingest_audit=ing, guards=guards, workers=3
             )
         assert summary.skipped_resume == 2
@@ -626,7 +606,7 @@ class TestParallelSkipPaths:
 class _FakePool:
     """A ``pool.submit``-compatible fake that runs the worker body IN-PROCESS.
 
-    Each submitted tuple's :class:`TupleWorkResult` is either produced by the
+    Each submitted tuple's :class:`mod.TupleWorkResult` is either produced by the
     real in-process worker body OR overridden by an injected ``result_for`` /
     ``never_resolves`` map keyed on enumeration index — so a test can make one
     index fail, or wedge forever (for the stall watchdog).
@@ -634,25 +614,25 @@ class _FakePool:
 
     def __init__(
         self,
-        ctx: _WorkerContext,
+        ctx: mod._WorkerContext,
         *,
-        result_for: dict[int, TupleWorkResult] | None = None,
+        result_for: dict[int, mod.TupleWorkResult] | None = None,
         never_resolve: set[int] | None = None,
     ) -> None:
-        _worker_init(ctx)
+        mod._worker_init(ctx)
         self._result_for = result_for or {}
         self._never_resolve = never_resolve or set()
 
     def submit(
         self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
-    ) -> Future[TupleWorkResult]:
-        fut: Future[TupleWorkResult] = Future()
+    ) -> Future[mod.TupleWorkResult]:
+        fut: Future[mod.TupleWorkResult] = Future()
         if index in self._never_resolve:
             return fut  # deliberately never resolved → drives the stall watchdog
         if index in self._result_for:
             fut.set_result(self._result_for[index])
         else:
-            fut.set_result(_run_tuple_in_worker(index, tuple_, bars))
+            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
         return fut
 
 
@@ -665,7 +645,7 @@ def _driver(
     workers: int = 4,
     stall_seconds: float = 300.0,
     monotonic: Any = None,
-) -> ParallelGridDriver:
+) -> mod.ParallelGridDriver:
     kwargs: dict[str, Any] = {
         "bars_for": _bars_for,
         "root": tmp_path / "out",
@@ -676,16 +656,16 @@ def _driver(
     }
     if monotonic is not None:
         kwargs["monotonic"] = monotonic
-    return ParallelGridDriver(grid, **kwargs)
+    return mod.ParallelGridDriver(grid, **kwargs)
 
 
 def _drive_with_fake(
     tmp_path: Path,
     grid: SweepGridConfig,
     *,
-    result_for: dict[int, TupleWorkResult] | None = None,
+    result_for: dict[int, mod.TupleWorkResult] | None = None,
     later_seen_index: int | None = None,
-) -> tuple[_Accumulator, int, bool]:
+) -> tuple[mod._Accumulator, int, bool]:
     """Run the driver's core loop against a deterministic in-process fake pool.
 
     Returns ``(accumulator, checkpoint.next_index, later_tuple_cache_seen)``. The
@@ -700,8 +680,10 @@ def _drive_with_fake(
         driver = _driver(tmp_path, grid, guards, ing)
         guards.checkpoint.load()
         resume_from = guards.checkpoint.next_index
-        acc = _Accumulator()
-        fake = _FakePool(_WorkerContext(grid=grid, root=tmp_path / "out"), result_for=result_for)
+        acc = mod._Accumulator()
+        fake = _FakePool(
+            mod._WorkerContext(grid=grid, root=tmp_path / "out"), result_for=result_for
+        )
         driver._drive(fake, resume_from, 2, 4, acc)  # type: ignore[arg-type]
         if later_seen_index is not None:
             later = list(iter_sweep_tuples(grid))[later_seen_index]
@@ -723,7 +705,7 @@ class TestFailedTuplePrefixFreeze:
         total = count_sweep_tuples(grid)
         assert total >= 3  # the grid must span the failure + a later success
         # Inject a failure at enumeration index 1; every OTHER index runs normally.
-        failed = TupleWorkResult(index=1, summary=None, failed_error="boom", audit_records=())
+        failed = mod.TupleWorkResult(index=1, summary=None, failed_error="boom", audit_records=())
         acc, next_index, _ = _drive_with_fake(tmp_path, grid, result_for={1: failed})
         assert acc.tuples_failed == 1
         assert acc.had_failure is True
@@ -736,7 +718,7 @@ class TestFailedTuplePrefixFreeze:
     ) -> None:
         grid = _grid()
         total = count_sweep_tuples(grid)
-        failed = TupleWorkResult(index=0, summary=None, failed_error="boom", audit_records=())
+        failed = mod.TupleWorkResult(index=0, summary=None, failed_error="boom", audit_records=())
         # Probe the LAST tuple's cache-recording INSIDE the run (before cache close).
         acc, next_index, later_seen = _drive_with_fake(
             tmp_path, grid, result_for={0: failed}, later_seen_index=total - 1
@@ -766,11 +748,13 @@ class TestFailedTuplePrefixFreeze:
                 "bull" if hit.direction is Side.BUY else "bear",
                 tuple_cache_params(hit, grid),
             )
-            acc = _Accumulator()
+            acc = mod._Accumulator()
             # Fail index 0; index 2 is then a cache-skip that occurs AFTER the failure.
-            failed = TupleWorkResult(index=0, summary=None, failed_error="boom", audit_records=())
+            failed = mod.TupleWorkResult(
+                index=0, summary=None, failed_error="boom", audit_records=()
+            )
             fake = _FakePool(
-                _WorkerContext(grid=grid, root=tmp_path / "out"), result_for={0: failed}
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), result_for={0: failed}
             )
             driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
             next_index = guards.checkpoint.next_index
@@ -785,16 +769,18 @@ class TestFailedTuplePrefixFreeze:
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(tmp_path, grid, guards, ing)
             guards.checkpoint.load()
-            acc = _Accumulator()
+            acc = mod._Accumulator()
             # Fail index 0; make every OTHER tuple return no bars (a no-bars skip
             # that occurs AFTER the failure).
-            failed = TupleWorkResult(index=0, summary=None, failed_error="boom", audit_records=())
+            failed = mod.TupleWorkResult(
+                index=0, summary=None, failed_error="boom", audit_records=()
+            )
             no_bars = {
-                i: TupleWorkResult(index=i, summary=None, failed_error=None, audit_records=())
+                i: mod.TupleWorkResult(index=i, summary=None, failed_error=None, audit_records=())
                 for i in range(1, count_sweep_tuples(grid))
             }
             fake = _FakePool(
-                _WorkerContext(grid=grid, root=tmp_path / "out"),
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"),
                 result_for={0: failed, **no_bars},
             )
             driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
@@ -808,18 +794,20 @@ class TestFailedTuplePrefixFreeze:
 
 class TestStallWatchdog:
     def test_wedged_worker_raises_sweep_stall_error(self, tmp_path: Path) -> None:
-        """A worker whose future never resolves raises SweepStallError, never hangs."""
+        """A worker whose future never resolves raises mod.SweepStallError, never hangs."""
         grid = _grid()
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(
                 tmp_path, grid, guards, ing, stall_seconds=10.0, monotonic=_jumping_clock()
             )
             guards.checkpoint.load()
-            acc = _Accumulator()
+            acc = mod._Accumulator()
             # Index 0 never resolves → the drain waits, the clock jumps past the
-            # stall window, and SweepStallError is raised (bounded, not a hang).
-            fake = _FakePool(_WorkerContext(grid=grid, root=tmp_path / "out"), never_resolve={0})
-            with pytest.raises(SweepStallError, match="no progress"):
+            # stall window, and mod.SweepStallError is raised (bounded, not a hang).
+            fake = _FakePool(
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), never_resolve={0}
+            )
+            with pytest.raises(mod.SweepStallError, match="no progress"):
                 driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
 
     def test_run_wraps_a_drive_failure_in_an_abort_line(self, tmp_path: Path) -> None:
@@ -831,16 +819,16 @@ class TestStallWatchdog:
         is asserted without a heavy real sweep.
         """
 
-        class _AbortingDriver(ParallelGridDriver):
+        class _AbortingDriver(mod.ParallelGridDriver):
             def _drive(
                 self,
                 pool: Any,
                 resume_from: int,
                 max_inflight: int,
                 heap_cap: int,
-                acc: _Accumulator,
+                acc: mod._Accumulator,
             ) -> None:
-                raise SweepStallError("wedged")
+                raise mod.SweepStallError("wedged")
 
         grid = _grid()
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
@@ -852,7 +840,7 @@ class TestStallWatchdog:
                 guards=guards,
                 workers=2,
             )
-            with pytest.raises(SweepStallError, match="wedged"):
+            with pytest.raises(mod.SweepStallError, match="wedged"):
                 driver.run()
         # The supervisor chain carries the SUPERVISOR_ABORT line + the progress fails.
         actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
@@ -917,7 +905,7 @@ class TestCrashMidParallelResume:
                 cache=cache,
                 watchdog=SweepWatchdog(),
             )
-            run_parallel_grid(
+            mod.run_parallel_grid(
                 grid,
                 bars_for=_bars_for,
                 root=crash_root,
@@ -939,8 +927,10 @@ class TestWorkerCrashGlobalStop:
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(tmp_path, grid, guards, ing)
             guards.checkpoint.load()
-            acc = _Accumulator()
-            fake = _CrashingPool(_WorkerContext(grid=grid, root=tmp_path / "out"), crash_index=0)
+            acc = mod._Accumulator()
+            fake = _CrashingPool(
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), crash_index=0
+            )
             with pytest.raises(RuntimeError, match="worker exploded"):
                 driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
 
@@ -948,18 +938,18 @@ class TestWorkerCrashGlobalStop:
 class _CrashingPool:
     """A fake pool whose ``crash_index`` future raises a non-combo exception."""
 
-    def __init__(self, ctx: _WorkerContext, *, crash_index: int) -> None:
-        _worker_init(ctx)
+    def __init__(self, ctx: mod._WorkerContext, *, crash_index: int) -> None:
+        mod._worker_init(ctx)
         self._crash_index = crash_index
 
     def submit(
         self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
-    ) -> Future[TupleWorkResult]:
-        fut: Future[TupleWorkResult] = Future()
+    ) -> Future[mod.TupleWorkResult]:
+        fut: Future[mod.TupleWorkResult] = Future()
         if index == self._crash_index:
             fut.set_exception(RuntimeError("worker exploded"))
         else:
-            fut.set_result(_run_tuple_in_worker(index, tuple_, bars))
+            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
         return fut
 
 
@@ -976,17 +966,17 @@ class _DeferredPool:
     simultaneously-outstanding futures so the O(pool_size) bound can be asserted.
     """
 
-    def __init__(self, ctx: _WorkerContext) -> None:
-        _worker_init(ctx)
+    def __init__(self, ctx: mod._WorkerContext) -> None:
+        mod._worker_init(ctx)
         self.outstanding: list[
-            tuple[int, SweepTuple, Sequence[CandleBar], Future[TupleWorkResult]]
+            tuple[int, SweepTuple, Sequence[CandleBar], Future[mod.TupleWorkResult]]
         ] = []
         self.peak = 0
 
     def submit(
         self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
-    ) -> Future[TupleWorkResult]:
-        fut: Future[TupleWorkResult] = Future()
+    ) -> Future[mod.TupleWorkResult]:
+        fut: Future[mod.TupleWorkResult] = Future()
         self.outstanding.append((index, tuple_, bars, fut))
         self.peak = max(self.peak, len(self.outstanding))
         return fut
@@ -995,7 +985,7 @@ class _DeferredPool:
         """Resolve the LOWEST-index outstanding future (one completion)."""
         self.outstanding.sort(key=lambda e: e[0])
         index, tuple_, bars, fut = self.outstanding.pop(0)
-        fut.set_result(_run_tuple_in_worker(index, tuple_, bars))
+        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
 
 
 class TestBackPressure:
@@ -1003,21 +993,19 @@ class TestBackPressure:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The outstanding-futures window never exceeds ~2×pool_size (O(pool_size))."""
-        import brutex.engine.sweep_parallel as mod
-
         grid = _grid()
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(tmp_path, grid, guards, ing, workers=3)
             guards.checkpoint.load()
-            acc = _Accumulator()
-            fake = _DeferredPool(_WorkerContext(grid=grid, root=tmp_path / "out"))
+            acc = mod._Accumulator()
+            fake = _DeferredPool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
 
             def _fake_wait(
-                pending: Iterable[Future[TupleWorkResult]],
+                pending: Iterable[Future[mod.TupleWorkResult]],
                 *,
                 timeout: float,
                 return_when: object,
-            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+            ) -> tuple[set[Future[mod.TupleWorkResult]], set[Future[mod.TupleWorkResult]]]:
                 # The driver blocks here when the window is full → resolve exactly
                 # one future, then return the now-completed set (FIRST_COMPLETED).
                 fake.resolve_one()
@@ -1046,20 +1034,20 @@ class _HeadBlockedPool:
     The blocked head is resolved on demand via :meth:`resolve_head`.
     """
 
-    def __init__(self, ctx: _WorkerContext, *, blocked_index: int) -> None:
-        _worker_init(ctx)
+    def __init__(self, ctx: mod._WorkerContext, *, blocked_index: int) -> None:
+        mod._worker_init(ctx)
         self._blocked_index = blocked_index
-        self._head: Future[TupleWorkResult] | None = None
+        self._head: Future[mod.TupleWorkResult] | None = None
         self._head_payload: tuple[int, SweepTuple, Sequence[CandleBar]] | None = None
         self.deferred: list[
-            tuple[int, SweepTuple, Sequence[CandleBar], Future[TupleWorkResult]]
+            tuple[int, SweepTuple, Sequence[CandleBar], Future[mod.TupleWorkResult]]
         ] = []
 
     def submit(
         self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
-    ) -> Future[TupleWorkResult]:
+    ) -> Future[mod.TupleWorkResult]:
         """Return an UNRESOLVED future; park it as the head or a resolvable sibling."""
-        fut: Future[TupleWorkResult] = Future()
+        fut: Future[mod.TupleWorkResult] = Future()
         if index == self._blocked_index:
             self._head = fut
             self._head_payload = (index, tuple_, bars)
@@ -1073,14 +1061,14 @@ class _HeadBlockedPool:
             return False
         self.deferred.sort(key=lambda e: e[0])
         index, tuple_, bars, fut = self.deferred.pop(0)
-        fut.set_result(_run_tuple_in_worker(index, tuple_, bars))
+        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
         return True
 
     def resolve_head(self) -> None:
         """Resolve the blocked head future (the slow tuple finally finishes)."""
         assert self._head is not None and self._head_payload is not None
         index, tuple_, bars = self._head_payload
-        self._head.set_result(_run_tuple_in_worker(index, tuple_, bars))
+        self._head.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
 
 
 class TestHeadOfLineHeapBound:
@@ -1092,8 +1080,6 @@ class TestHeadOfLineHeapBound:
         """With index 0 blocked and MANY siblings completing, the heap never grows
         to O(T): dispatch pauses at the heap cap, so the peak heap is a small
         constant multiple of pool_size — NOT the whole remaining grid."""
-        import brutex.engine.sweep_parallel as mod
-
         # A grid MUCH larger than the O(pool_size) bound, so O(T) heap growth would
         # be unmistakable: 2 dir × 5 k × 2 sl × 2 tp = 40 tuples.
         grid = _grid(k_values=[1, 2, 3, 4, 5], stop_losses=[80, 90], take_profits=[50, 60])
@@ -1103,9 +1089,9 @@ class TestHeadOfLineHeapBound:
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(tmp_path, grid, guards, ing, workers=3)  # pool_size = 2
             guards.checkpoint.load()
-            acc = _Accumulator()
+            acc = mod._Accumulator()
             fake = _HeadBlockedPool(
-                _WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
             )
             pool_size = 2
             max_inflight = pool_size * 2  # 4
@@ -1114,11 +1100,11 @@ class TestHeadOfLineHeapBound:
             head_released = False
 
             def _fake_wait(
-                pending: Iterable[Future[TupleWorkResult]],
+                pending: Iterable[Future[mod.TupleWorkResult]],
                 *,
                 timeout: float,
                 return_when: object,
-            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+            ) -> tuple[set[Future[mod.TupleWorkResult]], set[Future[mod.TupleWorkResult]]]:
                 nonlocal peak_heap, head_released
                 # Record the reorder-heap depth every time the driver blocks (this is
                 # exactly the moment the head-of-line siblings have piled up).
@@ -1155,10 +1141,8 @@ class TestHeadOfLineStallClock:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A slow-but-progressing head (index 0) while siblings 1,2,… complete must
-        NOT raise SweepStallError — each sibling completion resets the stall clock,
+        NOT raise mod.SweepStallError — each sibling completion resets the stall clock,
         even though the head keeps the apply prefix blocked for a long time."""
-        import brutex.engine.sweep_parallel as mod
-
         grid = _grid(k_values=[1, 2, 3, 4, 5])  # 2 dir × 5 k = 10 tuples
         total = count_sweep_tuples(grid)
         assert total == 10
@@ -1174,18 +1158,18 @@ class TestHeadOfLineStallClock:
                 tmp_path, grid, guards, ing, workers=3, stall_seconds=250.0, monotonic=clock
             )
             guards.checkpoint.load()
-            acc = _Accumulator()
+            acc = mod._Accumulator()
             fake = _HeadBlockedPool(
-                _WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
             )
             head_released = False
 
             def _fake_wait(
-                pending: Iterable[Future[TupleWorkResult]],
+                pending: Iterable[Future[mod.TupleWorkResult]],
                 *,
                 timeout: float,
                 return_when: object,
-            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+            ) -> tuple[set[Future[mod.TupleWorkResult]], set[Future[mod.TupleWorkResult]]]:
                 nonlocal head_released
                 # A completion arrives ONLY if the driver still had time budget when
                 # it entered the wait — model that: a non-positive timeout means the
@@ -1211,10 +1195,8 @@ class TestHeadOfLineStallClock:
     def test_genuine_full_hang_still_aborts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A genuine hang — NOTHING ever completes — STILL raises SweepStallError
+        """A genuine hang — NOTHING ever completes — STILL raises mod.SweepStallError
         within the deadline (the liveness guarantee is preserved, not weakened)."""
-        import brutex.engine.sweep_parallel as mod
-
         grid = _grid(k_values=[1, 2, 3, 4, 5])
         clock = _stepping_clock(step=100.0)
 
@@ -1223,23 +1205,23 @@ class TestHeadOfLineStallClock:
                 tmp_path, grid, guards, ing, workers=3, stall_seconds=250.0, monotonic=clock
             )
             guards.checkpoint.load()
-            acc = _Accumulator()
+            acc = mod._Accumulator()
             fake = _HeadBlockedPool(
-                _WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
             )
 
             def _fake_wait(
-                pending: Iterable[Future[TupleWorkResult]],
+                pending: Iterable[Future[mod.TupleWorkResult]],
                 *,
                 timeout: float,
                 return_when: object,
-            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+            ) -> tuple[set[Future[mod.TupleWorkResult]], set[Future[mod.TupleWorkResult]]]:
                 # A total hang: no future EVER resolves (the head is blocked and no
                 # sibling is ever released), so every wait returns nothing done.
                 return set(), set(pending)
 
             monkeypatch.setattr(mod, "_futures_wait", _fake_wait)
-            with pytest.raises(SweepStallError, match="no progress"):
+            with pytest.raises(mod.SweepStallError, match="no progress"):
                 driver._drive(fake, 0, 4, 4, acc)  # type: ignore[arg-type]
 
 
