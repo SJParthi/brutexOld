@@ -34,7 +34,7 @@ mirroring ``tests/unit/test_engine_sweep_supervisor.py``.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -810,9 +810,10 @@ class TestStallWatchdog:
     def test_wedged_worker_raises_sweep_stall_error(self, tmp_path: Path) -> None:
         """A worker whose future never resolves raises SweepStallError, never hangs."""
         grid = _grid()
-        clock = _FakeClock()
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
-            driver = _driver(tmp_path, grid, guards, ing, stall_seconds=10.0, monotonic=clock)
+            driver = _driver(
+                tmp_path, grid, guards, ing, stall_seconds=10.0, monotonic=_jumping_clock()
+            )
             guards.checkpoint.load()
             acc = _Accumulator()
             # Index 0 never resolves → the drain waits, the clock jumps past the
@@ -857,15 +858,21 @@ class TestStallWatchdog:
         assert "SUPERVISOR_ABORT" in actions
 
 
-class _FakeClock:
-    """A monotonic clock that jumps 1000s per call — trips the stall deadline fast."""
+def _jumping_clock() -> Callable[[], float]:
+    """A monotonic clock that jumps 1000s per call — trips the stall deadline fast.
 
-    def __init__(self) -> None:
-        self._t = 0.0
+    A plain ``def`` closure over a mutable holder (NOT a callable CLASS) so CodeQL's
+    points-to analysis can see the production ``self._monotonic()`` call site is
+    callable (a callable-class fixture triggers a ``py/call-to-non-callable`` false
+    positive on the UNCHANGED production line).
+    """
+    holder = {"t": 0.0}
 
-    def __call__(self) -> float:
-        self._t += 1000.0
-        return self._t
+    def clock() -> float:
+        holder["t"] += 1000.0
+        return holder["t"]
+
+    return clock
 
 
 # ─────────────── crash-mid-parallel resume (redo-not-skip) ─────────────
