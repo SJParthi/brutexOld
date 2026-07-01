@@ -889,22 +889,35 @@ def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
 #     evening, since 2025 ~1 hr afternoon) is the only short session
 #     and is handled by :data:`MUHURAT_SESSIONS` above.
 #   • Special weekend trading sessions for Budget Day on Feb-1-Saturday
-#     occurred 2020-02-01 + 2025-02-01. The 2025/2026 sessions are
-#     modelled below; the 2020-02-01 Budget Saturday session is NOT added
-#     by DEC-CALENDAR-2020-DATA-001 (that scoped change adds only the 2020
-#     full-day holiday list + the 2020 Diwali Muhurat session — adding the
-#     2020 Budget session is a separate, deliberately-not-invented item).
-#     The 2026-02-01 (Sunday) session is announced but is the future-
-#     facing edge case; included with verified=True.
+#     occurred 2020-02-01 + 2025-02-01. All three in-scope Budget weekend
+#     sessions are modelled below. The 2020-02-01 Budget Saturday session
+#     (India's FY2020-21 Union Budget, presented Sat 1 Feb 2020 with a live
+#     NSE + BSE full-day session) is INSIDE the 2020-01-01 data-pull floor
+#     (GROWW_HISTORY_FLOOR) and is now added by
+#     DEC-CALENDAR-2020-BUDGET-SATURDAY-001 — it was previously omitted by
+#     DEC-CALENDAR-2020-DATA-001 (which scoped in only the 2020 full-day
+#     holiday list + the 2020 Diwali Muhurat session), so an in-scope full
+#     trading session was being scored as non-trading, corrupting PDH/PDL
+#     anchors + per-session stats on/around that day. The 2026-02-01
+#     (Sunday) session is announced but is the future-facing edge case;
+#     included with verified=True.
+#   • Feb-1 fell on a weekend only in 2020 (Sat), 2025 (Sat) and 2026 (Sun)
+#     across the 2020→today floor; 2021-2024 Feb-1 were weekdays. So these
+#     three entries are the COMPLETE set of Budget weekend sessions in scope.
 #
 # Source: NSE special-trading-session circulars + Business Standard /
-# Good Returns coverage of Budget-Day Saturday/Sunday sessions.
+# Good Returns coverage of Budget-Day Saturday/Sunday sessions
+# (DEC-CALENDAR-2020-BUDGET-SATURDAY-001).
 
 #: Special trading sessions on dates that would otherwise be non-trading
 #: (Saturday / Sunday). Keyed by date; value is (open, close) IST tuple.
 #: Sessions held during regular trading hours (09:15-15:30) unless the
 #: circular announces otherwise.
 SPECIAL_WEEKEND_TRADING_SESSIONS: Final[dict[date, tuple[time, time]]] = {
+    # Union Budget 2020-21 — Saturday session (NSE + BSE special live
+    # session; India's FY2020-21 Budget presented Sat 2020-02-01). Inside
+    # the 2020-01-01 data-pull floor; DEC-CALENDAR-2020-BUDGET-SATURDAY-001.
+    date(2020, 2, 1): (SESSION_OPEN_IST, SESSION_CLOSE_IST),
     # Union Budget 2025-26 — Saturday session (NSE circular Jan 2025).
     date(2025, 2, 1): (SESSION_OPEN_IST, SESSION_CLOSE_IST),
     # Union Budget 2026-27 — Sunday session (announced; verified by
