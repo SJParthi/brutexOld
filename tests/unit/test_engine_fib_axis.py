@@ -29,9 +29,11 @@ import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import (
+    _DAILY_HISTORY_MAX,  # pyright: ignore[reportPrivateUsage]
     FIB_DEPENDENT_MASK,
     PIVOT_DEPENDENT_MASK,
     FibAnchorKind,
+    Stage1AMatrixBuilder,
     build_bar_bits,
 )
 from brutex.engine.sweep_kernel import ResidentKernelCache, ResidentSweepKernel
@@ -419,3 +421,60 @@ class TestColdFibAnchorClearsOnlyFib:
         # The two clear-masks partition the anchor-dependent bits (no overlap), so
         # a Fib-only clear can never accidentally blank a pivot bit.
         assert FIB_DEPENDENT_MASK & PIVOT_DEPENDENT_MASK == 0
+
+
+class TestDailyHistoryIsBounded:
+    """The rolling daily-history is bounded to ``_DAILY_HISTORY_MAX`` (R-4, O(1)/bar).
+
+    DEC-NIFTY-FIB-AXIS-001: a non-prev-day anchor records each completed day into a
+    bounded ``OrderedDict`` and EVICTS the oldest once the bound is exceeded, so the
+    per-bar memory stays O(1) over an arbitrarily long stream (never O(days)).
+    """
+
+    @staticmethod
+    def _many_day_bars(n_completed_days: int) -> tuple[list[CandleBar], date]:
+        """A stream of ``n_completed_days`` completed NSE sessions + a final partial day.
+
+        A non-prev-day anchor resolves against REAL NSE trading days (the rolling
+        window raises on a non-session date), so this walks actual in-coverage 2021
+        sessions. Each session is one 09:15 bar (its whole OHLC); a trailing bar on
+        one further session keeps the last completed day OUT of the accumulating slot.
+        Returns the bars and the OLDEST completed session (which must be evicted).
+        """
+        from brutex.calendars.nse import is_trading_day
+
+        sessions: list[date] = []
+        cursor = date(2021, 1, 4)  # a Monday, in-coverage
+        while len(sessions) < n_completed_days + 1:  # +1 → a final accumulating day
+            if is_trading_day(cursor):
+                sessions.append(cursor)
+            cursor += timedelta(days=1)
+        bars: list[CandleBar] = []
+        price = 10000
+        for day in sessions:
+            base = datetime(day.year, day.month, day.day, 9, 15, tzinfo=IST)
+            hi = str(price + 100)
+            lo = str(price - 50)
+            bars.append(_bar(base, str(price), hi, lo, str(price + 50)))
+            price += 25
+        return bars, sessions[0]
+
+    def test_history_never_exceeds_the_bound_and_evicts_oldest(self) -> None:
+        # Feed MORE than the bound of completed days so the eviction loop fires.
+        n = _DAILY_HISTORY_MAX + 5
+        bars, oldest_day = self._many_day_bars(n)
+        builder = Stage1AMatrixBuilder(fib_anchor=FibAnchorKind.ROLLING_WEEKLY)
+        builder.build(bars)
+        hist = builder._daily_history  # pyright: ignore[reportPrivateUsage]
+        # The bound is enforced: at most `_DAILY_HISTORY_MAX` completed days retained.
+        assert len(hist) == _DAILY_HISTORY_MAX
+        # The retained days are the MOST-RECENT completed ones (oldest evicted).
+        assert oldest_day not in hist, "oldest completed day was not evicted"
+
+    def test_prev_day_anchor_keeps_history_empty(self) -> None:
+        # The prev-day path never populates the rolling history (byte-identical +
+        # allocation-free), so the eviction loop is never even reached for it.
+        bars, _oldest = self._many_day_bars(_DAILY_HISTORY_MAX + 5)
+        builder = Stage1AMatrixBuilder(fib_anchor=FibAnchorKind.PREV_DAY)
+        builder.build(bars)
+        assert len(builder._daily_history) == 0  # pyright: ignore[reportPrivateUsage]
