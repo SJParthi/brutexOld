@@ -17,8 +17,22 @@ a new performance path and NOT a replacement. It is an *index*-based instrumente
 accessor: it carries the engine's notion of "the current bar index ``N``",
 records every bar index a consumer touches, and raises
 :class:`~brutex.feed.errors.LookAheadError` the moment any access reaches an
-index ``> N``. The two guards are belt-and-suspenders — the timestamp guard
-catches a future *signal*; the index barrier catches a future *bar read*.
+index ``> N``.
+
+**Honest envelope — what each site actually catches (Golden Rule #10):** the
+timestamp guard (:meth:`~brutex.feed.replay.ReplayFeed.ensure_no_lookahead`,
+wired at ``runner.py:207``) is the guard that catches a future *strategy
+signal* — it is the real strategy-look-ahead defence. The barrier as wired into
+the runner/driver event loop asserts the **advance/access cursor invariant**:
+both sites ``advance_to(step)`` then ``guard(step, …)`` at the SAME ``step``, so
+the barrier fires only if that index-vs-cursor relationship is ever violated (a
+feed/barrier desync or a wiring regression) — it does NOT interpose on the
+arbitrary bar reads a strategy performs off its own state, so a future-peeking
+strategy is caught by ``ensure_no_lookahead``, not by the runner-loop barrier.
+The barrier's index-``> N`` teeth are genuinely exercised by an ``access`` at a
+future index — done by the property tests and by the manual
+``brutex verify-lookahead`` recheck. So the two guards are complementary, not
+literally redundant coverage of the same failure at the same site.
 
 **O(1) discipline (CLAUDE.md Rule #5):** every :meth:`LookAheadBarrier.access`
 / :meth:`LookAheadBarrier.advance_to` call is **O(1) per operation** — a couple
@@ -104,16 +118,19 @@ class LookAheadBarrier:
 
     @property
     def touched_indices(self) -> tuple[int, ...]:
-        """Every index passed to :meth:`access`, in call order.
+        """Every *permitted* index passed to :meth:`access`, in call order.
 
-        Empty when ``record=False`` (the barrier still validated each
-        access, it just did not retain the trail).
+        A rejected look-ahead index (one ``> N`` that raised) is NOT
+        recorded — the append happens only after the bounds check passes,
+        so a FAIL never poisons the trail. Empty when ``record=False``
+        (the barrier still validated each access, it just did not retain
+        the trail).
         """
         return tuple(self._touched)
 
     @property
     def max_touched(self) -> int | None:
-        """Largest index ever touched, or ``None`` if nothing was recorded."""
+        """Largest *permitted* index touched, or ``None`` if nothing was recorded."""
         return max(self._touched) if self._touched else None
 
     # ── Cursor + access ───────────────────────────────────────────
@@ -176,13 +193,16 @@ class LookAheadBarrier:
             )
         if index < 0:
             raise ValueError(f"access: bar index must be >= 0, got {index}")
-        if self._record:
-            self._touched.append(index)
         if index > self._current_index:
             raise LookAheadError(
                 f"bar index {index} > current {self._current_index}: "
                 f"look-ahead read forbidden (P-06 / FR-INT-004)"
             )
+        # Record ONLY a *permitted* access — appended AFTER the bounds check so a
+        # rejected future index can never poison the ``touched_indices`` trail
+        # (and thus ``max_touched`` / a report's ``max_index_touched``) on a FAIL.
+        if self._record:
+            self._touched.append(index)
         return index
 
     def guard(self, index: int, value: _T) -> _T:

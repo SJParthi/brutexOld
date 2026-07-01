@@ -946,9 +946,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_la = sub.add_parser(
         "verify-lookahead",
         help=(
-            "MANUAL Property-P-06 recheck: re-run a bounded lake slice forward "
-            "through the instrumented look-ahead barrier and report pass/fail "
-            "(the same barrier that is active automatically on every sweep eval)"
+            "MANUAL feed-ordering + cursor-invariant recheck: walk a bounded "
+            "lake slice forward through the look-ahead barrier and report "
+            "pass/fail. Confirms forward index order + the advance/access cursor "
+            "invariant only; it does not run a strategy, so a well-formed slice "
+            "always passes (strategy look-ahead is guarded by "
+            "ReplayFeed.ensure_no_lookahead)"
         ),
     )
     verify_la.add_argument(
@@ -3495,21 +3498,27 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     end: str,
     run_id: str | None,
 ) -> int:
-    """MANUAL Property-**P-06** recheck — re-run a lake slice through the barrier.
+    """MANUAL feed-ordering + cursor-invariant recheck over a lake slice.
 
-    The hand-trigger counterpart of the AUTOMATIC barrier that
+    The hand-trigger counterpart of the barrier that
     :class:`~brutex.strategies.runner.StrategyRunner` /
-    :class:`~brutex.execution.driver.BacktestDriver` run on every sweep eval
+    :class:`~brutex.execution.driver.BacktestDriver` build on every sweep eval
     (DEC-LOOKAHEAD-BARRIER-001). It loads one ``(symbol, interval)`` window
     from the lake via the SAME ``Catalog`` / ``ReplayFeed`` path the engine
-    uses, then replays those bars **forward** through a recording
+    uses, then walks those bars **forward** through a recording
     :class:`~brutex.feed.lookahead.LookAheadBarrier` — advancing the cursor to
-    bar ``i`` and accessing index ``i`` exactly as the engine consumes them —
-    and reports the :class:`~brutex.feed.lookahead.LookAheadReport` verdict via
+    bar ``i`` and accessing index ``i`` — and reports the
+    :class:`~brutex.feed.lookahead.LookAheadReport` verdict via
     :func:`~brutex.feed.lookahead.verify_with_barrier`.
 
-    A look-ahead (any access index ``> N``) surfaces as a clear FAIL line +
-    non-zero exit, never a traceback. An empty slice is a user error.
+    **Honest scope (Golden Rule #10):** this re-confirms that the lake slice
+    loads and replays in **forward, non-decreasing index order** and that the
+    barrier's advance/access **cursor invariant** holds over that walk — it does
+    NOT run a strategy, so it cannot exercise strategy-level look-ahead (that is
+    ``ReplayFeed.ensure_no_lookahead``'s job, integration-tested in the runner);
+    because each bar is accessed at exactly its own index, a well-formed slice
+    always PASSES. It is a lightweight ordering/cursor smoke check, not a
+    strategy-consumption oracle. An empty slice is a user error.
     """
     from brutex.data.catalog import Catalog
     from brutex.feed.lookahead import LookAheadBarrier, verify_with_barrier
@@ -3540,9 +3549,12 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     barrier = LookAheadBarrier(record=True)
 
     def _replay_slice() -> None:
-        # Forward replay over the run's REAL bars — the exact order the engine
-        # consumes them. Each bar is read at its own index, so a correct replay
-        # never trips the barrier; a wiring regression that peeked ahead would.
+        # Forward walk over the run's REAL bars in ascending index order. Each
+        # bar is accessed at its OWN index, so this re-confirms the feed loads +
+        # replays forward and the advance/access cursor invariant holds — it is
+        # NOT a strategy replay, so a well-formed slice always passes (it cannot
+        # by construction access a future index). Honest: an ordering/cursor
+        # smoke check, not a strategy-look-ahead oracle.
         for index in range(len(bars)):
             barrier.advance_to(index)
             barrier.access(index)
