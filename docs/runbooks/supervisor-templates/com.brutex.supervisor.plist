@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template — macOS auto-restart for the BruteX sweep supervisor
+  (DEC-SUPERVISOR-AUTORESTART-001).
+
+  KeepAlive=true makes launchd RELAUNCH the process whenever it dies — after a
+  crash, a reboot, or an operator logout — which is the REAL hard-reboot
+  survival the in-process `brutex supervisor` cannot provide on its own (that
+  one only survives a CHILD crash while the supervisor itself is alive; this
+  survives the supervisor / machine dying too).
+
+  This runs `brutex supervisor`, which in turn runs `brutex sweep-daemon` as its
+  child and auto-relaunches it with exponential backoff on a crash. The two
+  layers are complementary: launchd keeps the SUPERVISOR alive across reboots;
+  the supervisor keeps the SWEEP DAEMON alive across in-session crashes.
+
+  ── INSTALL (edit the {{PLACEHOLDERS}} first) ──
+    1. Replace every {{PLACEHOLDER}} below with an ABSOLUTE path / value.
+    2. cp this file to  ~/Library/LaunchAgents/com.brutex.supervisor.plist
+    3. launchctl load -w ~/Library/LaunchAgents/com.brutex.supervisor.plist
+    4. launchctl start com.brutex.supervisor   # (KeepAlive also auto-starts it)
+
+  ── STOP / UNINSTALL ──
+    launchctl stop  com.brutex.supervisor
+    launchctl unload -w ~/Library/LaunchAgents/com.brutex.supervisor.plist
+
+  A launchd `stop` sends SIGTERM, which the `brutex supervisor` process handles
+  by shutting its sweep-daemon child down gracefully and NOT relaunching.
+
+  See docs/runbooks/supervisor-autorestart.md for the full runbook.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.brutex.supervisor</string>
+
+    <!-- {{BRUTEX_VENV_BIN}} = the venv's bin dir, e.g. /Users/you/bruteX/.venv/bin -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{BRUTEX_VENV_BIN}}/brutex</string>
+        <string>supervisor</string>
+        <string>--</string>
+        <string>--schedule</string>
+        <string>daily@02:30</string>
+    </array>
+
+    <!-- {{BRUTEX_REPO_DIR}} = the checkout root, e.g. /Users/you/bruteX -->
+    <key>WorkingDirectory</key>
+    <string>{{BRUTEX_REPO_DIR}}</string>
+
+    <!-- Relaunch on crash / reboot / logout — the whole point of the template. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Back off between launchd relaunches so a hard crash-loop cannot spin the
+         CPU (this is launchd's OWN throttle, on top of the supervisor's backoff). -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- BruteX reads its Groww creds + lake root from these; fill them in.
+         The credentials themselves live in ~/.brutex (keychain / creds file),
+         NOT here — never put a secret in a plist. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BRUTEX_LAKE_ROOT</key>
+        <string>{{BRUTEX_LAKE_ROOT}}</string>
+        <key>PATH</key>
+        <string>{{BRUTEX_VENV_BIN}}:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Logs (rotate/prune these yourself; launchd does not). -->
+    <key>StandardOutPath</key>
+    <string>{{BRUTEX_LAKE_ROOT}}/logs/supervisor.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{BRUTEX_LAKE_ROOT}}/logs/supervisor.err.log</string>
+</dict>
+</plist>

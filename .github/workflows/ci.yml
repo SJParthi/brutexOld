@@ -1831,6 +1831,20 @@ jobs:
           else
             echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
           fi
+          # DEC-SUPERVISOR-AUTORESTART-001 (MIGRATION.md #1052): the process
+          # supervisor that AUTO-RELAUNCHES the sweep daemon after a hard crash
+          # ships at 100% line+branch. The PURE supervise loop (backoff / cap /
+          # signals / audit) is fully tested with a FAKE injected child + an
+          # injected clock/sleeper (no real subprocess/sleep); the production
+          # subprocess + signal-handler adapters are `# pragma: no cover` (the
+          # same live-side-effect boundary the CLI daemon loop is excluded at),
+          # and a single integration test spawns ONE deterministic real
+          # subprocess to prove the wrapper wiring.
+          if compgen -G "tests/unit/test_orchestrator_supervisor.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.supervisor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_supervisor.py
+          else
+            echo "(brutex.orchestrator.supervisor test file not present yet — gate inactive)"
+          fi
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS

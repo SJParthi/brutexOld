@@ -826,6 +826,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timezone offset (minutes) for a daily --schedule (default: IST, +330)",
     )
 
+    # ── supervisor (DEC-SUPERVISOR-AUTORESTART-001) — auto-relaunch the sweep daemon ──
+    # Closes the ONE real §11 AUTOMATED gap the watchdogs leave open: the watchdogs
+    # DETECT a crash, but nothing AUTO-RELAUNCHES the process after a hard crash.
+    # This spawns `brutex sweep-daemon` as a CHILD, monitors it, and relaunches it
+    # on an UNEXPECTED exit (non-zero / signal death) with exponential backoff + a
+    # max-restart cap + a reset-after-stable-uptime window; a clean exit or an
+    # operator SIGTERM/SIGINT stops it (no relaunch). Each restart is audit-logged.
+    # Checkpoint auto-resume makes each relaunch resume bit-identically.
+    supervisor = sub.add_parser(
+        "supervisor",
+        help=(
+            "Process supervisor: run `brutex sweep-daemon` as a child and AUTO-RELAUNCH "
+            "it on an unexpected crash (backoff + cap); clean exit / SIGTERM stops it"
+        ),
+    )
+    supervisor.add_argument(
+        "child_args",
+        nargs=argparse.REMAINDER,
+        help=(
+            "Arguments passed verbatim to `brutex sweep-daemon` (everything after `--`), "
+            "e.g. `brutex supervisor -- --schedule daily@02:30`"
+        ),
+    )
+    supervisor.add_argument(
+        "--backoff-base-seconds",
+        type=float,
+        default=None,
+        dest="backoff_base_seconds",
+        help="Delay (s) before the first relaunch (default: 1.0)",
+    )
+    supervisor.add_argument(
+        "--backoff-factor",
+        type=float,
+        default=None,
+        dest="backoff_factor",
+        help="Backoff multiplier per consecutive crash (default: 2.0)",
+    )
+    supervisor.add_argument(
+        "--backoff-cap-seconds",
+        type=float,
+        default=None,
+        dest="backoff_cap_seconds",
+        help="Ceiling (s) the backoff can never exceed (default: 300.0)",
+    )
+    supervisor.add_argument(
+        "--reset-after-uptime-seconds",
+        type=float,
+        default=None,
+        dest="reset_after_uptime_seconds",
+        help="A child up longer than this (s) before dying resets the backoff (default: 60.0)",
+    )
+    supervisor.add_argument(
+        "--max-restarts",
+        type=int,
+        default=None,
+        dest="supervisor_max_restarts",
+        help="Give up loudly after this many consecutive crashes (default: 10)",
+    )
+    supervisor.add_argument(
+        "--shutdown-grace-seconds",
+        type=float,
+        default=None,
+        dest="shutdown_grace_seconds",
+        help="Seconds to wait after SIGTERM before SIGKILL on an operator stop (default: 10.0)",
+    )
+    supervisor.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (for the supervisor audit log path; default: env/CWD lake)",
+    )
+
     # ── results (DEC-SWEEP-WINNERS-BY-NAME-001) — read back a sweep results tree ──
     from brutex.engine.results_report import DEFAULT_SORT_BY, SORT_ALIASES
 
@@ -3411,6 +3483,154 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
     return EXIT_OK
 
 
+def _build_supervisor_backoff(
+    *,
+    backoff_base_seconds: float | None,
+    backoff_factor: float | None,
+    backoff_cap_seconds: float | None,
+    reset_after_uptime_seconds: float | None,
+    max_restarts: int | None,
+) -> Any:
+    """Build a :class:`BackoffPolicy` from the CLI flags, applying module defaults.
+
+    Pure + fully tested: each ``None`` flag falls back to the supervisor module's
+    default constant, and the resulting policy validates its own invariants
+    (raising :class:`ValueError` on e.g. ``cap < base``), so the CLI surfaces a
+    clean user error instead of a stack trace.
+    """
+    from brutex.orchestrator.supervisor import (
+        DEFAULT_BACKOFF_BASE_SECONDS,
+        DEFAULT_BACKOFF_CAP_SECONDS,
+        DEFAULT_BACKOFF_FACTOR,
+        DEFAULT_MAX_RESTARTS,
+        DEFAULT_RESET_AFTER_UPTIME_SECONDS,
+        BackoffPolicy,
+    )
+
+    return BackoffPolicy(
+        base_seconds=(
+            backoff_base_seconds
+            if backoff_base_seconds is not None
+            else DEFAULT_BACKOFF_BASE_SECONDS
+        ),
+        factor=backoff_factor if backoff_factor is not None else DEFAULT_BACKOFF_FACTOR,
+        cap_seconds=(
+            backoff_cap_seconds if backoff_cap_seconds is not None else DEFAULT_BACKOFF_CAP_SECONDS
+        ),
+        reset_after_uptime_seconds=(
+            reset_after_uptime_seconds
+            if reset_after_uptime_seconds is not None
+            else DEFAULT_RESET_AFTER_UPTIME_SECONDS
+        ),
+        max_restarts=max_restarts if max_restarts is not None else DEFAULT_MAX_RESTARTS,
+    )
+
+
+def _supervisor_child_argv(child_args: list[str]) -> list[str]:
+    """Return the argv that launches ``brutex sweep-daemon`` with *child_args*.
+
+    Runs the daemon via the SAME Python interpreter (``sys.executable -m
+    brutex``) so the child inherits this exact venv + install — robust whether or
+    not the ``brutex`` console script is on ``PATH``. ``argparse.REMAINDER``
+    leaves a leading ``--`` separator in *child_args*; it is stripped so
+    ``brutex supervisor -- --schedule X`` forwards ``--schedule X`` cleanly.
+    """
+    forwarded = list(child_args)
+    if forwarded and forwarded[0] == "--":
+        forwarded = forwarded[1:]
+    return [sys.executable, "-m", "brutex", "sweep-daemon", *forwarded]
+
+
+def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals + lake I/O); the supervisor CORE is 100%-tested in brutex.orchestrator.supervisor
+    *,
+    child_args: list[str],
+    backoff_base_seconds: float | None,
+    backoff_factor: float | None,
+    backoff_cap_seconds: float | None,
+    reset_after_uptime_seconds: float | None,
+    max_restarts: int | None,
+    shutdown_grace_seconds: float | None,
+    lake_root: Path | None,
+) -> int:
+    """Supervise ``brutex sweep-daemon`` — auto-relaunch it on a hard crash.
+
+    The missing *actor* the watchdogs left out (DEC-SUPERVISOR-AUTORESTART-001):
+    the two sweep watchdogs DETECT a crash but nothing RELAUNCHES the process.
+    This spawns the sweep daemon as a CHILD, monitors it, and auto-relaunches it
+    on an UNEXPECTED exit (non-zero code / death-by-signal) with exponential
+    backoff + a max-restart cap + a reset-after-stable-uptime window. A CLEAN
+    exit (the sweep genuinely completed) stops it; an operator SIGTERM/SIGINT
+    shuts the child down gracefully and does NOT relaunch. Each restart appends a
+    hash-chained audit row. Because the sweep's checkpoint auto-resume already
+    makes a relaunch bit-identical, each relaunch resumes from the checkpoint.
+
+    It re-implements NO supervise or backoff logic — it composes the
+    100%-line+branch-tested :class:`brutex.orchestrator.supervisor.ProcessSupervisor`
+    with a real ``subprocess.Popen`` launcher + real SIGTERM/SIGINT handlers
+    (CLAUDE.md §11 COMMON). This shim is the live-side-effect boundary.
+
+    Honest envelope (Golden Rule #10): this is the CROSS-PLATFORM layer — it
+    survives a CHILD crash while the supervisor itself is alive. Surviving a
+    machine REBOOT / logout is the OS service manager's job (the shipped launchd
+    + systemd templates under ``docs/runbooks/``).
+    """
+    from brutex.engine.sweep_audit import SweepAuditWriter
+    from brutex.orchestrator.supervisor import (
+        AUDIT_ACTION_GIVE_UP,
+        DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        ProcessSupervisor,
+        SupervisorOutcome,
+        build_subprocess_launcher,
+        install_signal_stop,
+    )
+
+    try:
+        policy = _build_supervisor_backoff(
+            backoff_base_seconds=backoff_base_seconds,
+            backoff_factor=backoff_factor,
+            backoff_cap_seconds=backoff_cap_seconds,
+            reset_after_uptime_seconds=reset_after_uptime_seconds,
+            max_restarts=max_restarts,
+        )
+    except ValueError as exc:
+        print(f"[brutex] supervisor policy error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    audit_path = resolved_lake / "sweeps" / "audit" / "supervisor.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    argv = _supervisor_child_argv(child_args)
+    stop_requested = install_signal_stop()
+    print(
+        f"[brutex] supervisor starting — child: {' '.join(argv)} — audit: {audit_path}",
+    )
+
+    with SweepAuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        supervisor = ProcessSupervisor(
+            launch=build_subprocess_launcher(argv),
+            policy=policy,
+            subject="supervisor:sweep-daemon",
+            audit=audit,
+            stop_requested=stop_requested,
+            shutdown_grace_seconds=(
+                shutdown_grace_seconds
+                if shutdown_grace_seconds is not None
+                else DEFAULT_SHUTDOWN_GRACE_SECONDS
+            ),
+        )
+        result = supervisor.run()
+
+    print(
+        f"[brutex] supervisor stopped ({result.outcome.value}) after "
+        f"{result.restarts} restart(s); last child exit={result.last_exit_code}"
+    )
+    if result.outcome is SupervisorOutcome.GAVE_UP:
+        _ = AUDIT_ACTION_GIVE_UP  # documented in the audit trail; loud non-zero exit
+        return EXIT_INTERNAL_ERROR
+    return EXIT_OK
+
+
 def cmd_results_show(*, results_root: Path, top: int, sort_by: str) -> int:
     """Read back a sweep results tree and print the ranked winners-by-name leaderboard.
 
@@ -4645,6 +4865,19 @@ def main(argv: list[str] | None = None) -> int:
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
             stage3_restarts=args.stage3_restarts,
+        )
+    # Process supervisor (DEC-SUPERVISOR-AUTORESTART-001) — auto-relaunch the
+    # sweep daemon on a hard crash; composes brutex.orchestrator.supervisor.
+    if args.command == "supervisor":
+        return cmd_supervisor(
+            child_args=args.child_args,
+            backoff_base_seconds=args.backoff_base_seconds,
+            backoff_factor=args.backoff_factor,
+            backoff_cap_seconds=args.backoff_cap_seconds,
+            reset_after_uptime_seconds=args.reset_after_uptime_seconds,
+            max_restarts=args.supervisor_max_restarts,
+            shutdown_grace_seconds=args.shutdown_grace_seconds,
+            lake_root=args.lake_root,
         )
     # Thin dispatch over cmd_results_show (DEC-SWEEP-WINNERS-BY-NAME-001).
     if args.command == "results" and args.results_command == "show":
