@@ -31,6 +31,7 @@ from brutex.calendars.nse import (
     forced_exit_seconds_for_session,
     forced_exit_time_for_session,
     get_session,
+    get_session_checked,
     has_muhurat_session,
     is_forced_exit_bar,
     is_holiday,
@@ -45,6 +46,7 @@ from brutex.calendars.nse import (
     nifty_rebalance_event_on,
     session_minutes_per_day,
     trading_days_between,
+    trading_days_between_checked,
 )
 
 
@@ -487,6 +489,84 @@ class TestTradingDayChecked:
         # session is in-coverage; this guards the precedence contract.)
         d = date(2025, 2, 1)  # Budget-day Saturday, in coverage
         assert is_trading_day_checked(d) is True
+
+
+class TestGetSessionChecked:
+    """DEC-CALENDAR-CHECKED-TWINS-001: strict get_session refuses to FABRICATE a
+    regular session for an out-of-coverage weekday holiday."""
+
+    def test_regular_weekday_in_range_matches_unchecked(self) -> None:
+        d = date(2024, 2, 20)  # Tuesday, no holiday
+        checked = get_session_checked(d)
+        assert checked == get_session(d)
+        assert checked is not None
+        assert checked.session_type is SessionType.REGULAR
+        assert checked.open_time_ist == SESSION_OPEN_IST
+        assert checked.close_time_ist == SESSION_CLOSE_IST
+
+    def test_holiday_in_range_returns_none(self) -> None:
+        # 2024-01-26 (Fri) Republic Day — a listed holiday inside coverage.
+        assert get_session_checked(date(2024, 1, 26)) is None
+
+    def test_weekend_in_range_returns_none(self) -> None:
+        assert get_session_checked(date(2024, 5, 11)) is None  # Saturday
+
+    def test_muhurat_session_in_range(self) -> None:
+        # 2024-11-01 Diwali muhurat — precedence over the holiday flag.
+        checked = get_session_checked(date(2024, 11, 1))
+        assert checked is not None
+        assert checked.session_type is SessionType.MUHURAT
+
+    def test_out_of_range_weekday_raises(self) -> None:
+        # 2030-06-24 (Monday) is an out-of-coverage weekday: the UNGUARDED
+        # get_session FABRICATES a REGULAR session (back-compat, unchanged) — the
+        # strict variant DETECTS the missing-data case and refuses to guess.
+        fabricated = get_session(date(2030, 6, 24))
+        assert fabricated is not None
+        assert fabricated.session_type is SessionType.REGULAR
+        with pytest.raises(HolidayDataUnavailableError):
+            get_session_checked(date(2030, 6, 24))
+
+    def test_out_of_range_weekend_resolves_none_without_raising(self) -> None:
+        # A weekend is non-trading INDEPENDENT of the holiday list, so its
+        # verdict consults no missing data and is honest even out of coverage.
+        assert get_session_checked(date(2030, 6, 22)) is None  # Saturday
+        assert get_session_checked(date(2030, 6, 23)) is None  # Sunday
+
+    def test_special_weekend_session_overrides_even_out_of_coverage(self) -> None:
+        # A date the package DOES hold data for resolves without raising.
+        checked = get_session_checked(date(2025, 2, 1))  # Budget-day Saturday
+        assert checked is not None
+        assert checked.session_type is SessionType.REGULAR
+
+
+class TestTradingDaysBetweenChecked:
+    """DEC-CALENDAR-CHECKED-TWINS-001: strict trading_days_between refuses an
+    out-of-coverage weekday instead of silently including an unknown holiday."""
+
+    def test_in_range_matches_unchecked(self) -> None:
+        start, end = date(2024, 2, 19), date(2024, 2, 25)
+        assert trading_days_between_checked(start, end) == trading_days_between(start, end)
+
+    def test_excludes_in_range_holiday(self) -> None:
+        # 2024-01-26 (Fri) Republic Day falls in this range and is excluded.
+        days = trading_days_between_checked(date(2024, 1, 22), date(2024, 1, 28))
+        assert date(2024, 1, 26) not in days
+        assert len(days) == 4  # Mon, Tue, Wed, Thu
+
+    def test_empty_range_returns_empty(self) -> None:
+        assert trading_days_between_checked(date(2024, 5, 11), date(2024, 5, 11)) == []
+
+    def test_out_of_range_weekday_in_span_raises(self) -> None:
+        # 2030-06-24 (Monday) out of coverage: the UNGUARDED variant INCLUDES it
+        # (back-compat); the strict variant refuses the whole span.
+        assert date(2030, 6, 24) in trading_days_between(date(2030, 6, 22), date(2030, 6, 26))
+        with pytest.raises(HolidayDataUnavailableError):
+            trading_days_between_checked(date(2030, 6, 22), date(2030, 6, 26))
+
+    def test_out_of_range_weekend_only_span_resolves_without_raising(self) -> None:
+        # A pure-weekend out-of-coverage span consults no missing data.
+        assert trading_days_between_checked(date(2030, 6, 22), date(2030, 6, 23)) == []
 
 
 class TestSessionBoundaries:
