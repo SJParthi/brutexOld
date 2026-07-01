@@ -46,6 +46,7 @@ from brutex.adapters.groww.option_ingest import (
     ingest_underlying_futures,
     ingest_underlying_options,
     plan_contract_windows,
+    reconcile_fno_ledger_windows,
     run_groww_option_ingest,
     scan_underlying_all_empty,
 )
@@ -2761,3 +2762,259 @@ def test_budget_all_empty_detector_still_fires_with_reduced_budget() -> None:
     assert any(r["event"] == UNDERLYING_ALL_EMPTY_EVENT for r in logs)
     # each was fetched exactly once (reduced), but the all-empty flag still fired.
     assert all(sdk.fetches[c.symbol] == 1 for c in chain)
+
+
+# --- DEC-FNO-LEDGER-LAKE-RECONCILE-001: F&O cold-start ledger↔lake reconcile ----------
+
+#: A fixed IST clock well past the 15:30 close so ``_clamped_window_key`` is deterministic
+#: (independent of when the suite runs). Both expiries below are BEFORE this date, so an
+#: intraday window's ``clamp_window_end`` never extends past the resolved ``end``.
+_FNO_NOW = datetime(2026, 1, 1, 18, 0, tzinfo=UTC)
+_FNO_START = date(2024, 12, 3)
+_FNO_END = date(2025, 1, 2)
+
+
+def _fno_span(
+    contract: DerivativeContract,
+    *,
+    interval: str = "1minute",
+    bars: int = 100,
+    first: str | None = "2024-12-01",
+    last: str | None = "2025-01-05",
+) -> dict[str, object]:
+    """A ``summarize_spot_datasets``-shaped lake span for a contract's F&O partition."""
+    return {
+        "exchange": contract_exchange(contract),
+        "segment": "FNO",
+        "symbol": contract.symbol,
+        "interval": interval,
+        "bars": bars,
+        "first_date": first,
+        "last_date": last,
+    }
+
+
+def _reconcile_ce(
+    ledger: WindowLedger,
+    spans: Sequence[dict[str, object]],
+    *,
+    contract: DerivativeContract | None = None,
+    market: str = GROWW_OPTION_COVERAGE_MARKET,
+    contract_windows: Mapping[str, tuple[date, date]] | None = None,
+) -> int:
+    """Run the F&O reconcile over one contract with the deterministic clock/window."""
+    c = contract if contract is not None else _ce()
+    return reconcile_fno_ledger_windows(
+        ledger,
+        list(spans),
+        contracts=[c],
+        intervals=["1minute"],
+        start=_FNO_START,
+        end=_FNO_END,
+        market=market,
+        contract_windows=contract_windows,
+        now=_FNO_NOW,
+        now_ist=lambda: _FNO_NOW,
+    )
+
+
+def _fetched_key(
+    contract: DerivativeContract, *, market: str = GROWW_OPTION_COVERAGE_MARKET
+) -> WindowKey:
+    """The exact key the fetch/plan records — the reconcile seed MUST byte-match this."""
+    key = _oi._clamped_window_key(
+        contract.symbol,
+        interval="1minute",
+        start=_FNO_START,
+        end=_FNO_END,
+        market=market,
+        now_for_clamp=_FNO_NOW,
+    )
+    assert key is not None
+    return key
+
+
+class TestReconcileFnoLedgerWindows:
+    """DEC-FNO-LEDGER-LAKE-RECONCILE-001: seed SUCCESS for lake-enclosed absent F&O windows."""
+
+    def test_seeds_an_enclosed_window_making_it_skippable(self) -> None:
+        # A lake with F&O bars + an EMPTY ledger → the reconcile seeds the window SUCCESS,
+        # so the upcoming is_skippable flip skips it (fails-before: without this, the window
+        # is only PLANNED, which is NOT skippable → re-fetched).
+        ledger = WindowLedger()
+        contract = _ce()
+        seeded = _reconcile_ce(ledger, [_fno_span(contract)])
+        assert seeded == 1
+        rec = ledger.records()[0]
+        assert rec.status == "SUCCESS"
+        assert rec.bars == 100
+        # The seeded key is BYTE-IDENTICAL to the fetch/plan key → is_skippable is True.
+        assert ledger.is_skippable(_fetched_key(contract))
+
+    def test_seeded_key_equals_planned_key(self) -> None:
+        # The reconcile seed and plan_contract_windows produce the SAME key (no ghost).
+        ledger = WindowLedger()
+        contract = _ce()
+        _reconcile_ce(ledger, [_fno_span(contract)])
+        # A subsequent plan_contract_windows must find the row already settled (untouched).
+        plan_contract_windows(
+            ledger,
+            contracts=[contract],
+            intervals=["1minute"],
+            start=_FNO_START,
+            end=_FNO_END,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            now_ist=lambda: _FNO_NOW,
+        )
+        # Still exactly ONE row, still SUCCESS (the plan did NOT overwrite it to PLANNED).
+        assert ledger.count == 1
+        assert ledger.records()[0].status == "SUCCESS"
+
+    def test_genuinely_missing_window_is_not_seeded_and_stays_pullable(self) -> None:
+        # No span for this contract → nothing seeded → the window has NO row → not skippable.
+        ledger = WindowLedger()
+        contract = _ce()
+        seeded = _reconcile_ce(ledger, [])  # empty lake
+        assert seeded == 0
+        assert ledger.count == 0
+        assert not ledger.is_skippable(_fetched_key(contract))
+
+    def test_partially_covered_window_stays_re_pullable(self) -> None:
+        # The span does NOT fully enclose the window (last_date before window end) → NOT
+        # seeded → the window stays re-pullable (never falsely marked done).
+        ledger = WindowLedger()
+        contract = _ce()
+        seeded = _reconcile_ce(ledger, [_fno_span(contract, last="2024-12-20")])
+        assert seeded == 0
+        assert ledger.count == 0
+        assert not ledger.is_skippable(_fetched_key(contract))
+
+    def test_partial_left_edge_stays_re_pullable(self) -> None:
+        # The span starts AFTER the window start (first_date > window start) → not enclosed.
+        ledger = WindowLedger()
+        contract = _ce()
+        seeded = _reconcile_ce(ledger, [_fno_span(contract, first="2024-12-15")])
+        assert seeded == 0
+        assert ledger.count == 0
+
+    def test_zero_bar_and_null_and_missing_spans_seed_nothing(self) -> None:
+        contract = _ce()
+        assert _reconcile_ce(WindowLedger(), [_fno_span(contract, bars=0)]) == 0
+        assert _reconcile_ce(WindowLedger(), [_fno_span(contract, first=None, last=None)]) == 0
+        assert _reconcile_ce(WindowLedger(), []) == 0
+
+    def test_never_overwrites_an_existing_failed_row(self) -> None:
+        ledger = WindowLedger()
+        contract = _ce()
+        key = _fetched_key(contract)
+        ledger.record(
+            key, raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=_FNO_NOW
+        )
+        seeded = _reconcile_ce(ledger, [_fno_span(contract)])
+        assert seeded == 0  # the FAILED row is left for a re-pull, never masked
+        assert ledger.records()[0].status == "FAILED"
+
+    def test_never_reseeds_an_already_success_row(self) -> None:
+        ledger = WindowLedger()
+        contract = _ce()
+        # First reconcile seeds it SUCCESS.
+        assert _reconcile_ce(ledger, [_fno_span(contract)]) == 1
+        # A second reconcile is a no-op (only-if-absent) — never double-counts.
+        assert _reconcile_ce(ledger, [_fno_span(contract)]) == 0
+        assert ledger.count == 1
+
+    def test_futures_market_namespace_is_honoured(self) -> None:
+        # A FUT contract seeds under the FUTURES ledger namespace (never the option one).
+        ledger = WindowLedger()
+        fut = _fut()
+        seeded = _reconcile_ce(
+            ledger, [_fno_span(fut)], contract=fut, market=GROWW_FUTURE_COVERAGE_MARKET
+        )
+        assert seeded == 1
+        assert ledger.is_skippable(_fetched_key(fut, market=GROWW_FUTURE_COVERAGE_MARKET))
+        # It is NOT skippable under the option namespace (distinct buckets).
+        assert not ledger.is_skippable(_fetched_key(fut, market=GROWW_OPTION_COVERAGE_MARKET))
+
+    def test_empty_clamped_range_yields_no_candidate(self) -> None:
+        # A start >= end range clamps to None → no candidate → nothing seeded (no crash).
+        ledger = WindowLedger()
+        contract = _ce()
+        seeded = reconcile_fno_ledger_windows(
+            ledger,
+            [_fno_span(contract)],
+            contracts=[contract],
+            intervals=["1minute"],
+            start=_FNO_END,  # start == end → empty clamped range
+            end=_FNO_END,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            now=_FNO_NOW,
+            now_ist=lambda: _FNO_NOW,
+        )
+        assert seeded == 0
+        assert ledger.count == 0
+
+    def test_contract_windows_bounds_the_seed_key(self) -> None:
+        # A per-contract bounded window (contract_windows) → the seed key uses the bounded
+        # range (byte-matching the fetch), so a span enclosing the BOUNDED window seeds it.
+        ledger = WindowLedger()
+        contract = _ce()
+        bounded = (date(2024, 12, 10), date(2024, 12, 20))
+        seeded = _reconcile_ce(
+            ledger,
+            [_fno_span(contract, first="2024-12-05", last="2024-12-25")],
+            contract_windows={contract.symbol: bounded},
+        )
+        assert seeded == 1
+        # The seeded key is the BOUNDED window, not the global one.
+        bounded_key = WindowKey(
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            security_id=contract.symbol,
+            interval="1minute",
+            start=bounded[0],
+            end=bounded[1],
+        )
+        assert ledger.is_skippable(bounded_key)
+
+    def test_defaults_now_and_clock_when_absent(self) -> None:
+        # now=None / now_ist=None exercise the default-clock branches (a real seed still
+        # lands SUCCESS; we only assert the count, not the exact wall-clock stamp).
+        ledger = WindowLedger()
+        contract = _ce()
+        seeded = reconcile_fno_ledger_windows(
+            ledger,
+            [_fno_span(contract)],
+            contracts=[contract],
+            intervals=["1minute"],
+            start=_FNO_START,
+            end=_FNO_END,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+        )
+        assert seeded == 1
+        assert ledger.records()[0].status == "SUCCESS"
+
+
+class TestReconcileFnoLedgerWithLake:
+    """The wired entry point: load_lake_spans + the pure reconcile."""
+
+    def test_with_lake_delegates_and_seeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.adapters.groww.option_ingest import reconcile_fno_ledger_with_lake
+
+        contract = _ce()
+        monkeypatch.setattr(
+            "brutex.dashboard.coverage_reconcile.load_lake_spans",
+            lambda _root: [_fno_span(contract)],
+        )
+        ledger = WindowLedger()
+        seeded = reconcile_fno_ledger_with_lake(
+            ledger,
+            Path("/unused"),
+            contracts=[contract],
+            intervals=["1minute"],
+            start=_FNO_START,
+            end=_FNO_END,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            now=_FNO_NOW,
+            now_ist=lambda: _FNO_NOW,
+        )
+        assert seeded == 1
+        assert ledger.is_skippable(_fetched_key(contract))
