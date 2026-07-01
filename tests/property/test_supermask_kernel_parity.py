@@ -23,6 +23,12 @@ Invariants covered
    ``mask == 0`` → all bars; full-width (bit 63) masks.
 3. **Determinism** — repeated calls on the same input return the same
    result (no hidden state / nondeterminism).
+4. **u128 two-limb path** (DEC-DEDUP-CAPACITY-UNIQUE-001) — when a bar/mask
+   sets a bit ``>= 64`` the ``count_supermasks`` facade + ``ResidentBarBuffer``
+   route to the bit-exact two-limb numpy path; this must equal an independent
+   pure-Python scalar ``(bar & mask) == mask`` oracle over the FULL u128 range,
+   so a future vocabulary growth past 64 bits cannot silently truncate a high
+   bit and corrupt the Stage-2 hit count / blake3 run-identity hash.
 """
 
 from __future__ import annotations
@@ -40,6 +46,26 @@ from hypothesis import strategies as st
 _U64 = st.integers(min_value=0, max_value=(1 << 64) - 1)
 _BARS = st.lists(_U64, max_size=200)
 _MASKS = st.lists(_U64, max_size=64)
+
+# ── u128 range (DEC-DEDUP-CAPACITY-UNIQUE-001, FIX 3) ─────────────────────
+# The Rust hot kernel is u64-native; when ANY bar/mask sets a bit >= 64 the
+# ``count_supermasks`` facade + ``ResidentBarBuffer`` route to the bit-exact
+# two-limb numpy path (``combo_mask.py:413`` / the fits_u64=False branch) so no
+# high bit is truncated. The old strategies only sampled up to ``(1<<64)-1``, so
+# that two-limb path had thin property coverage. These strategies span the FULL
+# u128 range (bits 0..127) — the ``_HI128`` variants FORCE at least one bit >= 64
+# so the two-limb branch is definitely exercised, hardening against a future
+# vocabulary growth past 64 bits (the vocab is at 60 bits today, headroom to 128).
+_U128 = st.integers(min_value=0, max_value=(1 << 128) - 1)
+# A value guaranteed to have a bit >= 64 set (so ``v > U64_MASK`` — the two-limb
+# trigger): OR in a random high limb bit.
+_HI128 = st.integers(min_value=0, max_value=(1 << 64) - 1).flatmap(
+    lambda lo: st.integers(min_value=1, max_value=(1 << 64) - 1).map(lambda hi: lo | (hi << 64))
+)
+_BARS128 = st.lists(_U128, max_size=200)
+_MASKS128 = st.lists(_U128, max_size=64)
+_BARS_HI128 = st.lists(_HI128, min_size=1, max_size=200)
+_MASKS_HI128 = st.lists(_HI128, min_size=1, max_size=64)
 
 
 @given(bars=_BARS, masks=_MASKS)
@@ -176,3 +202,81 @@ def test_resident_reuse_equals_fresh(bars: list[int], masks: list[int]) -> None:
     again = reused.count_supermasks(masks)
     fresh = ResidentBarBuffer(bars).count_supermasks(masks)
     assert again == fresh == count_supermasks(bars, masks)
+
+
+# ─────────────────────────────────────────────────────────────────
+# u128 two-limb path parity (DEC-DEDUP-CAPACITY-UNIQUE-001, FIX 3)
+# ─────────────────────────────────────────────────────────────────
+#
+# The above suites only sample bars/masks up to ``(1<<64)-1``, so the two-limb
+# numpy path in ``combo_mask.py`` (taken when any bar/mask has a bit >= 64) had
+# thin property coverage. These tests sample inputs spanning the FULL u128 range
+# — and, in the ``_hi128`` variants, FORCE a bit >= 64 — and compare against an
+# INDEPENDENT pure-Python scalar oracle. Python ints are arbitrary-precision so
+# ``(bar & mask) == mask`` is exact over u128; the two-limb numpy path must agree
+# bit-for-bit. NB: the u64-native Rust kernel (``fno_math.count_supermasks_u64s``)
+# is NOT called with u128 inputs — it would truncate the high limb; the facade
+# and buffer route around it by construction, which is the property under test.
+
+
+def _scalar_superset_count(bars: list[int], masks: list[int]) -> list[int]:
+    """Independent pure-Python oracle: per-mask count of superset bars.
+
+    Uses arbitrary-precision Python-int ``(bar & mask) == mask`` — no numpy, no
+    Rust, no limb split — so it is a trustworthy ground truth for the FULL u128
+    range (and beyond). Mirrors the ``count_supermasks_reference`` contract:
+    empty masks → ``[]``; empty bars → ``0`` per mask; ``mask == 0`` → all bars.
+    """
+    return [sum(1 for b in bars if (b & m) == m) for m in masks]
+
+
+@given(bars=_BARS128, masks=_MASKS128)
+def test_facade_matches_scalar_oracle_u128(bars: list[int], masks: list[int]) -> None:
+    """The ``count_supermasks`` facade == pure-Python scalar oracle over u128."""
+    assert count_supermasks(bars, masks) == _scalar_superset_count(bars, masks)
+
+
+@given(bars=_BARS128, masks=_MASKS128)
+def test_reference_matches_scalar_oracle_u128(bars: list[int], masks: list[int]) -> None:
+    """The numpy two-limb reference == pure-Python scalar oracle over u128."""
+    assert count_supermasks_reference(bars, masks) == _scalar_superset_count(bars, masks)
+
+
+@given(bars=_BARS_HI128, masks=_MASKS_HI128)
+def test_facade_routes_to_two_limb_when_bit_ge_64(bars: list[int], masks: list[int]) -> None:
+    """A bar/mask with a bit >= 64 forces the two-limb path; it stays exact.
+
+    Every ``bars``/``masks`` element here has a bit >= 64 set (``_HI128``), so
+    ``combo_mask.count_supermasks`` MUST route to ``count_supermasks_reference``
+    (its ``any(... > U64_MASK ...)`` guard) rather than the u64 Rust kernel. The
+    result must equal the independent scalar oracle — proving no high bit is
+    dropped.
+    """
+    assert any(b > (1 << 64) - 1 for b in bars)
+    assert any(m > (1 << 64) - 1 for m in masks)
+    assert count_supermasks(bars, masks) == _scalar_superset_count(bars, masks)
+
+
+@given(bars=_BARS128, masks=_MASKS128)
+def test_resident_matches_scalar_oracle_u128(bars: list[int], masks: list[int]) -> None:
+    """``ResidentBarBuffer`` (two-limb numpy backing) == scalar oracle over u128.
+
+    A bar with a bit >= 64 forces ``fits_u64=False`` so the buffer holds the
+    two-limb numpy arrays instead of the Rust ``ResidentBars``; the count must
+    still be bit-exact for the full u128 range.
+    """
+    assert ResidentBarBuffer(bars).count_supermasks(masks) == _scalar_superset_count(bars, masks)
+
+
+@given(bars=_BARS_HI128, masks=_MASKS_HI128)
+def test_resident_two_limb_backing_matches_oracle(bars: list[int], masks: list[int]) -> None:
+    """Forced-high-bit bars keep the buffer on its two-limb numpy backing.
+
+    With every bar bit >= 64, ``ResidentBarBuffer`` never builds the u64 Rust
+    ``ResidentBars`` — it must serve counts from the two-limb numpy arrays and
+    still match the scalar oracle exactly.
+    """
+    buf = ResidentBarBuffer(bars)
+    assert buf.count_supermasks(masks) == _scalar_superset_count(bars, masks)
+    # Determinism on the two-limb backing: a second call agrees.
+    assert buf.count_supermasks(masks) == buf.count_supermasks(masks)
