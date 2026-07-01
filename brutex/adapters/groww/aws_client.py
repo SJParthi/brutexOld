@@ -46,11 +46,12 @@ SSM_PARAMETER_NOT_FOUND: str = "ParameterNotFound"  # exception class name, not 
 
 
 class AwsBackendUnavailable(ImportError):
-    """boto3 is not installed, so the AWS token backend cannot be built.
+    """boto3 is not installed, so the AWS credential/token backend cannot be built.
 
-    An :class:`ImportError` subclass so the resolver's ``except ImportError`` fail-safe
-    (DEC-TOKEN-BROKER-AWS-001) catches it and degrades to the local disk backend —
-    a missing extra can never crash a pull.
+    An :class:`ImportError` subclass. AWS is now the SOLE credential/token source
+    (DEC-AWS-ONLY-CREDS-001), so the resolver maps this to a clear fail-fast error naming the
+    missing extra — there is NO local fallback (a missing extra means the pull cannot get
+    credentials and must stop loudly, never silently).
     """
 
 
@@ -75,18 +76,19 @@ class AwsClient(Protocol):
 def build_real_aws_client(region: str) -> AwsClient:  # pragma: no cover — needs boto3 + AWS
     """Build the production :class:`AwsClient` backed by a boto3 SSM client (lazy import).
 
-    Reached ONLY when the read-only broker is selected AND the extra is installed. A
-    missing boto3 raises :class:`AwsBackendUnavailable` (caught by the resolver → local
-    fallback). *region* (from :func:`~brutex.adapters.groww.constants.\
-    resolve_token_broker_region`, default ``ap-south-1``) is passed to the client so
-    BruteX always targets the region the SecureStrings live in.
+    AWS is the SOLE credential/token source (DEC-AWS-ONLY-CREDS-001). A missing boto3 raises
+    :class:`AwsBackendUnavailable`, which the resolver maps to a clear fail-fast error (no
+    env / file / local-mint fallback). *region* (from
+    :func:`~brutex.adapters.groww.constants.resolve_token_broker_region`, default
+    ``ap-south-1``) is passed to the client so BruteX always targets the region the
+    SecureStrings live in.
     """
     try:
         import boto3  # type: ignore[import-not-found, unused-ignore]
     except ImportError as exc:
         raise AwsBackendUnavailable(
-            "boto3 is required for BRUTEX_TOKEN_BROKER_READONLY; "
-            'install the extra: pip install -e ".[token-broker]"'
+            "boto3 is required to read the Groww credentials + token from AWS Parameter "
+            'Store; install the extra: pip install -e ".[token-broker]"'
         ) from exc
 
     ssm = boto3.client("ssm", region_name=region)

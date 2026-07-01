@@ -8,16 +8,17 @@ Pins the operator-requested visual layer on top of the nav-link unification
    top-nav header block renders against a single grid/spacing source of truth
    (CLAUDE.md §11 COMMON). The shared file itself carries the canonical ``header``
    rules, the keyboard focus ring, and the ``prefers-reduced-motion`` opt-out.
-2. **Credentials page de-clutter** — the ``~/.brutex/credentials.json`` footer
-   note and the "Other views" link line are GONE; the form + Save/Test buttons +
-   the Status line stay.
-3. **/db hides the expired-options lake from the browsable list** — the
+2. **/db hides the expired-options lake from the browsable list** — the
    ``data-candles="option"`` list row is dropped (SCOPE-SAFE: the lake, its data,
    and the browse route are untouched); the spot ``data-candles="spot"`` row stays.
 
+(The former "Credentials page de-clutter" checks were removed with the whole in-app
+credentials webpage — DEC-AWS-ONLY-CREDS-001 — credentials now live ONLY in AWS
+Parameter Store.)
+
 Rendered against the pages' own ``_render_*_html`` helpers + a ``TestClient`` for
-the served static asset, mirroring ``test_dashboard_a11y_polish.py`` /
-``test_dashboard_groww_credentials_route.py``. Skipped cleanly without ``[ui]``.
+the served static asset, mirroring ``test_dashboard_a11y_polish.py``. Skipped cleanly
+without ``[ui]``.
 """
 # pyright: reportPrivateUsage=none
 
@@ -33,7 +34,6 @@ from brutex.dashboard.app import (
     _render_db_html,
     _render_expired_options_html,
     _render_fetch_windows_html,
-    _render_groww_credentials_html,
     _render_movers_html,
     _render_reports_html,
     _render_spot_coverage_html,
@@ -44,9 +44,10 @@ from fastapi.testclient import TestClient
 
 #: Every served top-nav page → its pure render helper. Each must link the shared
 #: theme so the header aligns to ONE grid (the consistency the operator asked for).
+#: (The in-app Groww credentials page was removed — DEC-AWS-ONLY-CREDS-001 — credentials
+#: now live ONLY in AWS Parameter Store, so there is no page to render/de-clutter.)
 _TOPNAV_PAGES = {
     "/universe": _render_universe_html,
-    "/groww-credentials": _render_groww_credentials_html,
     "/db": _render_db_html,
     "/coverage": _render_coverage_html,
     "/movers": _render_movers_html,
@@ -99,27 +100,6 @@ def test_shared_theme_is_served_and_canonical() -> None:
     assert "header .logo" in body
     assert "prefers-reduced-motion" in body
     assert ":focus-visible" in body
-
-
-# ── Complaint 2: credentials page de-clutter ─────────────────────────────────
-
-
-def test_credentials_page_clutter_is_removed() -> None:
-    """The footer storage note + the 'Other views' link line are GONE."""
-    html = _render_groww_credentials_html()
-    assert "~/.brutex/credentials.json" not in html, "the footer storage note survived"
-    assert "never leaves this machine" not in html, "the footer storage note survived"
-    assert "Other views:" not in html, "the 'Other views' link line survived"
-
-
-def test_credentials_page_keeps_its_core_controls() -> None:
-    """De-clutter is surgical: the form + Save/Test buttons + Status line stay."""
-    html = _render_groww_credentials_html()
-    assert 'id="api_key"' in html
-    assert 'id="totp_secret"' in html
-    assert "Save credentials" in html
-    assert "Test / verify" in html
-    assert 'id="status"' in html  # the "Status: …" line
 
 
 # ── Complaint 3: /db hides the expired-options lake from the browsable list ───

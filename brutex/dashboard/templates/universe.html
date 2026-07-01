@@ -472,7 +472,6 @@
     <nav class="topnav" aria-label="Primary">
       <a href="/">Operator</a>
       <a href="/universe" aria-current="page">Universe</a>
-      <a href="/groww-credentials">Credentials</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
       <a href="/movers">Movers</a>
@@ -488,16 +487,6 @@
       <span><span id="qgRem">-</span> left · <span id="qgPct">-</span>%</span>
     </div>
   </header>
-
-  <div id="credBanner" style="display:none; margin:8px 24px 4px; padding:12px 18px;
-       background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
-       border:1px solid var(--yellow); border-radius:12px; display:none;
-       align-items:center; gap:12px;">
-    <span style="font-weight:700; color:var(--yellow);">⚠ Set Groww credentials to auto-pull expiries &amp; contracts</span>
-    <a href="/groww-credentials" style="color:var(--blue); text-decoration:none; font-weight:700;">Set credentials →</a>
-    <button id="credBannerDismiss" title="Dismiss" style="margin-left:auto; background:transparent;
-         border:none; color:var(--muted); cursor:pointer; font-size:16px; line-height:1;">✕</button>
-  </div>
 
   <div class="band" id="tabs"></div>
 
@@ -536,15 +525,15 @@
       The dashboard works, but there are <b>0 instruments</b> because nothing has been ingested.
       To fill it:
       <b>1)</b> the instrument master loads automatically on this page (a public list — no keys needed; it is loading now if this is a fresh clone);
-      <b>2)</b> for live candle pulls set <code>BRUTEX_GROWW_API_KEY</code> + <code>BRUTEX_GROWW_TOTP_SECRET</code>,
-      then hit <b>▶ Pull · full pipeline</b> above — without keys it runs an offline synthetic preview.
+      <b>2)</b> live candle pulls read the Groww credentials + daily token from <b>AWS Parameter Store</b>
+      (<code>/tickvault/prod/groww/*</code>, minted by the dedicated Lambda), then hit <b>▶ Pull · full pipeline</b>
+      above — with no AWS token available the pull fails fast (it never falls back to env vars or a local file).
     </div>
     <div style="font-size:12px; color:var(--muted); margin-top:10px;">
       Paths — lake: <code>~/.brutex/lake</code> · DB: <code>~/.brutex/lake/instruments.duckdb</code> ·
       logs: <code>~/.brutex/logs/brutex.log</code> &nbsp;|&nbsp;
       Other views: <a href="/" style="color:var(--blue)">Report</a> ·
-      <a href="/db" style="color:var(--blue)">Database</a> ·
-      <a href="/groww-credentials" style="color:var(--blue)">Credentials</a>
+      <a href="/db" style="color:var(--blue)">Database</a>
     </div>
   </div>
 
@@ -1910,27 +1899,10 @@ function renderLiveStats(s) {
   });
 }
 
-/* ── Credentials banner (DEC-INSTRUMENT-UNIVERSE-FAST-001) ──
-   Shown only when GET /api/v1/groww/credentials/status reports creds absent
-   (Groww is the PRIMARY surface post-cutover, DEC-DHAN-GROWW-REMIGRATE-001), so
-   the operator knows expiry/contract auto-pull needs keys. Dismissible per page
-   load (no persistence — a fresh load re-checks status). */
-async function checkCredentialsBanner() {
-  const banner = document.getElementById('credBanner');
-  if (!banner) return;
-  try {
-    const r = await fetch('/api/v1/groww/credentials/status');
-    if (!r.ok) return;
-    const body = await r.json();
-    banner.style.display = body && body.present ? 'none' : 'flex';
-  } catch (e) { /* offline — leave hidden */ }
-}
-const credDismiss = document.getElementById('credBannerDismiss');
-if (credDismiss) credDismiss.addEventListener('click', () => {
-  const b = document.getElementById('credBanner');
-  if (b) b.style.display = 'none';
-});
-checkCredentialsBanner();
+/* The in-app "Set Groww credentials" banner + its /api/v1/groww/credentials/status
+   fetch were REMOVED with the whole credentials webpage — Groww credentials + the
+   daily token now live ONLY in AWS Parameter Store (DEC-AWS-ONLY-CREDS-001), so
+   there is no in-app credential status to poll (the /status endpoint is gone). */
 refreshVerdict();  // show any prior pull's verdict banner on load (DEC-VERDICT-BANNER-001)
 
 /* Initial page render uses the already-loaded GET endpoints only. The keyless

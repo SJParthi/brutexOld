@@ -270,10 +270,10 @@ def _build_live_client(  # pragma: no cover - live Groww TOTP token + SDK + netw
     """
     from brutex.adapters.groww.auth import GrowwCredentials
     from brutex.adapters.groww.live import build_live_client
-    from brutex.config.credentials import resolve_groww_file_credentials
+    from brutex.config.credentials import resolve_groww_aws_credentials
 
-    file_creds = resolve_groww_file_credentials()
-    creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
+    aws_creds = resolve_groww_aws_credentials()
+    creds = GrowwCredentials(api_key=aws_creds.api_key, totp_secret=aws_creds.totp_secret)
     return build_live_client(creds, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success)
 
 

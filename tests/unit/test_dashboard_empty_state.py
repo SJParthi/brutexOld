@@ -34,7 +34,6 @@ pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import (
     DashboardState,
-    _render_groww_credentials_html,
     _render_universe_html,
     build_app,
 )
@@ -271,12 +270,3 @@ def test_universe_template_has_r_ok_guard_for_contracts() -> None:
     # both the expiries and contracts fetch now guard r.ok (two distinct messages)
     assert html.count("if (!r.ok)") >= 2
     assert "couldn't load contracts" in html
-
-
-def test_groww_credentials_template_has_first_run_hint() -> None:
-    html = _render_groww_credentials_html()
-    assert 'id="firstrun"' in html
-    assert "No Groww credentials set yet" in html
-    # the banner is toggled by refreshStatus on present===false / fetch failure
-    assert "firstrun.classList.add('show')" in html
-    assert "firstrun.classList.remove('show')" in html

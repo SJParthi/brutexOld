@@ -32,9 +32,9 @@ Design (CLAUDE.md §11 COMMON · Golden Rule #10):
   mismatch ⇒ ignored.
 
 **Honest envelope (Golden Rule #10):** the daily token is stored PLAINTEXT at mode 0600
-under ``~/.brutex/cache/`` — exactly as sensitive as the already-on-disk TOTP secret
-(``save_groww_credentials``), so it does NOT widen the single-user threat model, but it
-is NOT encrypted at rest (OS-keyring / age is an explicit follow-up, out of scope). A
+under ``~/.brutex/cache/`` — no more sensitive than the account it authenticates — so it
+does NOT widen the single-user threat model, but it is NOT encrypted at rest (OS-keyring /
+age is an explicit follow-up, out of scope). A
 0600 token leak is bounded to ≤1 trading day (the 06:00 reset). The cache is PER-MACHINE,
 so a Groww-side ACCOUNT-WIDE issuance limit shared across many hosts is NOT solved here
 (that needs a networked token broker — out of scope, not claimed). This eliminates the

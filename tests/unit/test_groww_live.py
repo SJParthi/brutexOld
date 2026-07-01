@@ -4,28 +4,47 @@ Drives :func:`brutex.adapters.groww.live.build_live_client` with injected fakes
 (``token_factory`` / ``totp_minter`` / ``sdk_factory``) so the whole
 creds → token → SDK → client composition is 100% covered without ``growwapi`` /
 ``pyotp`` and without network.
+
+The default daily-token backend is now the shared read-only AWS store (the SOLE source,
+DEC-AWS-ONLY-CREDS-001); these composition tests fake it via ``_ephemeral_token_store`` so
+the refresher mints through the injected ``token_factory`` (backend load ⇒ miss, store ⇒
+no-op) exactly as the old local backend did — keeping the composition assertions intact
+without any AWS/boto3.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import datetime
 
 import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
 from brutex.adapters.groww.client import GrowwClient
-from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.adapters.groww.errors import GrowwAuthError
 from brutex.adapters.groww.live import build_live_client, build_live_pool
 from brutex.adapters.groww.pool import ClientPool
+from brutex.adapters.groww.token_cache import CachedToken
 
 _CREDS = GrowwCredentials(api_key="fake_key", totp_secret="fake_secret")
 
 
+class _EphemeralTokenStore:
+    """A no-cache token store: ``load`` always misses ⇒ the refresher mints via its factory."""
+
+    def load(self, creds: object, *, now_utc: datetime) -> CachedToken | None:
+        return None
+
+    def store(self, creds: object, token: str, *, now_utc: datetime) -> bool:
+        return True
+
+
 @pytest.fixture(autouse=True)
-def _isolated_token_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect the on-disk daily-token cache (DEC-GROWW-TOKEN-DISK-CACHE-001) at a clean
-    tmp file so the cache-first cold-start mints fresh here (no real ``~/.brutex`` read)."""
-    monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(tmp_path / "tok.json"))
+def _ephemeral_token_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake the resolved daily-token backend so the composition mints via ``token_factory``.
+
+    The default backend is now AWS-only + fail-fast; a composition test that does not inject
+    explicit token hooks would otherwise hit the real AWS store. A no-cache fake keeps these
+    tests exercising the mint→SDK→client path with NO AWS."""
+    monkeypatch.setattr("brutex.adapters.groww.live.resolve_token_store", _EphemeralTokenStore)
 
 
 class _FakeSDK:
@@ -83,8 +102,6 @@ def test_build_live_client_both_cache_hooks_injected_skip_resolve() -> None:
     (e.g. a test double or a preconfigured broker) must have its exact ``(load, store)``
     threaded straight into the refresher, never overridden by ``resolve_token_store``.
     """
-    from brutex.adapters.groww.token_cache import CachedToken
-
     load_calls: list[object] = []
     store_calls: list[object] = []
 

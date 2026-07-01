@@ -222,22 +222,6 @@ def test_token_disk_cache_constants() -> None:
 # ── token-broker resolvers — env toggle / region / param-path (DEC-TOKEN-BROKER-AWS-001) ──
 
 
-def test_resolve_token_broker_readonly_truthy_values_enable(monkeypatch) -> None:
-    """Each accepted truthy spelling (case-insensitive, whitespace-trimmed) → True."""
-    for raw in ("1", "true", "TRUE", "Yes", " on ", "On"):
-        monkeypatch.setenv(c.GROWW_TOKEN_BROKER_READONLY_ENV, raw)
-        assert c.resolve_token_broker_readonly() is True
-
-
-def test_resolve_token_broker_readonly_falsy_and_unset_stay_off(monkeypatch) -> None:
-    """Blank / "0" / "false" / any unrecognised value / unset → False (fail-safe local)."""
-    for raw in ("", "  ", "0", "false", "no", "off", "maybe", "2"):
-        monkeypatch.setenv(c.GROWW_TOKEN_BROKER_READONLY_ENV, raw)
-        assert c.resolve_token_broker_readonly() is False
-    monkeypatch.delenv(c.GROWW_TOKEN_BROKER_READONLY_ENV, raising=False)
-    assert c.resolve_token_broker_readonly() is False
-
-
 def test_resolve_token_broker_region_prefers_brutex_env(monkeypatch) -> None:
     """A non-blank BRUTEX_TOKEN_AWS_REGION wins over AWS_REGION + the default."""
     monkeypatch.setenv(c.GROWW_TOKEN_AWS_REGION_ENV, " us-east-1 ")
