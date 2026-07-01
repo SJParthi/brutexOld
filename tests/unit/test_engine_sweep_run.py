@@ -34,6 +34,7 @@ from brutex.engine.sweep_run import (
     SweepRunConfig,
     SweepRunSummary,
     canonical_trade_params,
+    direction_label,
     mask_run_id,
     ranked_combo_to_result_row,
     run_persisted_sweep,
@@ -111,6 +112,30 @@ def _make_config(**overrides: object) -> SweepRunConfig:
 
 def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+
+
+# ────── direction_label (public re-export for the parallel driver) ──────
+
+
+class TestDirectionLabel:
+    """The PUBLIC re-export the parallel driver uses (DEC-MULTICORE-SWEEP-PHASE1-001).
+
+    ``direction_label`` is the ONE-source-of-truth seam so
+    :mod:`brutex.engine.sweep_parallel` builds byte-identical cache keys + labels
+    without importing the private ``_direction_label``. These focused unit tests
+    scope the re-export's coverage to sweep_run's OWN per-module gate (the parallel
+    suite is not scoped for this module by the touched-module coverage gate).
+    """
+
+    def test_buy_is_bull(self) -> None:
+        assert direction_label(Side.BUY) == "bull"
+
+    def test_sell_is_bear(self) -> None:
+        assert direction_label(Side.SELL) == "bear"
+
+    def test_hold_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Side.BUY or Side.SELL"):
+            direction_label(Side.HOLD)
 
 
 # ────── mask_run_id ──────
