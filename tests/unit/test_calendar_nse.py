@@ -325,6 +325,42 @@ class TestNiftyRebalanceEvents:
 class TestSpecialWeekendSessions:
     """DEC-P0-046 / Q-09: Budget Day Saturday/Sunday full sessions."""
 
+    def test_budget_day_2020_is_special_weekend_session(self) -> None:
+        # 2020-02-01 was a Saturday — Union Budget 2020-21 special NSE + BSE
+        # live session (inside the 2020-01-01 data-pull floor).
+        # DEC-CALENDAR-2020-BUDGET-SATURDAY-001.
+        assert is_special_weekend_session(date(2020, 2, 1))
+
+    def test_budget_day_2020_promotes_saturday_to_trading_day(self) -> None:
+        # is_trading_day(2020-02-01) must be True (fail-before: False).
+        d = date(2020, 2, 1)
+        assert is_weekend(d)
+        assert is_trading_day(d)
+
+    def test_budget_day_2020_prev_trading_day_anchor(self) -> None:
+        # Mon 2020-02-03's prior trading day must be the Sat Budget session
+        # (2020-02-01), NOT Fri 2020-01-31 — so PDH/PDL anchors correctly.
+        from brutex.indicators.prev_day_ohlc import find_prev_trading_day
+
+        assert find_prev_trading_day(date(2020, 2, 3)) == date(2020, 2, 1)
+
+    def test_budget_day_2020_get_session_regular_hours_forced_exit(self) -> None:
+        # Full 09:15-15:30 REGULAR hours + 15:20 forced-exit, like the other
+        # special Saturday sessions.
+        session = get_session(date(2020, 2, 1))
+        assert session is not None
+        assert session.session_type == SessionType.REGULAR
+        assert session.open_time_ist == time(9, 15)
+        assert session.close_time_ist == time(15, 30)
+        assert session.duration_minutes == 375
+        assert forced_exit_time_for_session(session) == time(15, 20)
+
+    def test_budget_day_2020_not_in_holiday_list(self) -> None:
+        # 2020-02-01 must NOT be in ALL_HOLIDAYS (it is a trading day).
+        from brutex.calendars.nse import ALL_HOLIDAYS
+
+        assert date(2020, 2, 1) not in ALL_HOLIDAYS
+
     def test_budget_day_2025_is_special_weekend_session(self) -> None:
 
         # 2025-02-01 was a Saturday — Union Budget 2025-26 special session.
