@@ -31,6 +31,7 @@ NO external dependencies in the hot math path beyond Python stdlib
 
 from brutex.costs import constants
 from brutex.costs.calculator import compute_trade_cost
+from brutex.costs.scope import is_cost_bearing, is_cost_free, is_index_future
 from brutex.costs.types import (
     Broker,
     GstSplit,
@@ -55,4 +56,7 @@ __all__ = [
     "UnsupportedTradeOutcomeError",
     "compute_trade_cost",
     "constants",
+    "is_cost_bearing",
+    "is_cost_free",
+    "is_index_future",
 ]
