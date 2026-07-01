@@ -116,10 +116,22 @@ def _now_utc() -> datetime:
 
 
 def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
-    """Default SDK factory: ``GrowwAPI(token)`` (lazy import of the real SDK)."""
+    """Default SDK factory: ``GrowwAPI(token)`` with a connect+read socket timeout.
+
+    The single COMMON factory seam BOTH live build sites default to
+    (:func:`~brutex.adapters.groww.live.build_live_client` /
+    :func:`~brutex.adapters.groww.live.build_live_pool`), so imposing the socket timeout
+    HERE means every live pull inherits it with no per-site change
+    (DEC-GROWW-HTTP-SOCKET-TIMEOUT-001). :func:`~brutex.adapters.groww.http_timeout.\
+    apply_default_timeout` patches the SDK's ``requests``-issuing ``_request_*`` helpers so
+    a half-open / dead socket fails in seconds (the env-tunable connect 10 s / read 30 s)
+    instead of burning the 45 s wall-clock guard, which stays as belt-and-suspenders.
+    """
     from growwapi import GrowwAPI  # type: ignore[import-not-found, unused-ignore]
 
-    return GrowwAPI(token)  # type: ignore[no-any-return]
+    from brutex.adapters.groww.http_timeout import apply_default_timeout
+
+    return apply_default_timeout(GrowwAPI(token))  # type: ignore[return-value]
 
 
 class SdkRefresher:
