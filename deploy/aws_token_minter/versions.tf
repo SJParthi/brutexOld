@@ -7,7 +7,8 @@
 # aws_ssm_parameter, the aws_ssm_parameter / aws_kms_key data sources) are all
 # GA in that line. The archive provider zips the Lambda bundle; the null provider
 # runs the local-exec build step (build_lambda_package.sh) that pip-installs
-# growwapi + pyotp into the bundle. Bump deliberately, never floating.
+# pyotp (the one pure-Python universal wheel) into the bundle. Bump deliberately,
+# never floating.
 
 terraform {
   required_version = ">= 1.5.0"

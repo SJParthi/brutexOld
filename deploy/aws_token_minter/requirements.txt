@@ -1,0 +1,17 @@
+# AWS Groww token-minter Lambda — bundled runtime dependencies.
+#
+# DEC-MINTER-PURE-PYTHON-001 (docs/MIGRATION.md #1069). The ONLY third-party dep
+# vendored into the deploy zip is pyotp, a pure-Python UNIVERSAL wheel
+# (py3-none-any, zero runtime deps) — so the bundle has ZERO platform-specific
+# wheels and build_lambda_package.sh builds identically on macOS/ARM64 and Linux
+# with no Docker. boto3 is on the AWS Lambda runtime and is NOT bundled. The
+# Groww token mint is a pure-stdlib HTTPS POST in handler.py (reimplementing the
+# request + token-extraction contract of growwapi 1.5.0 GrowwAPI.get_access_token
+# with simpler structural error handling), so growwapi is deliberately NOT a
+# dependency here.
+#
+# PINNED: 2.10.0 is the latest within BruteX's pyproject.toml `pyotp>=2.9,<3.0`.
+# build_lambda_package.sh's PYOTP_VERSION default and the Terraform
+# var.pyotp_version default carry the same pin; this file is the human-readable
+# declaration of the bundle's dependency truth.
+pyotp==2.10.0

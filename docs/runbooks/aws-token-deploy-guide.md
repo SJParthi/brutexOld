@@ -150,11 +150,15 @@ cd deploy/aws_token_minter
 
 **What `./deploy.sh` does, in order** (it never auto-approves — see below):
 
-1. **Builds the Lambda bundle** (`build_lambda_package.sh`) — pip-installs
-   `growwapi` + `pyotp` into the deploy zip, cross-compiled for the Lambda's
-   x86_64 Linux / Python 3.12 runtime, so the bundle imports cleanly even when you
-   build on an Apple-silicon Mac (project rules §8). This step needs `pip` + PyPI
-   network access on your machine.
+1. **Builds the Lambda bundle** (`build_lambda_package.sh`) — pip-installs `pyotp`
+   into the deploy zip. That is the ONLY bundled dependency; it is a pure-Python
+   universal wheel (zero platform-specific files), so the bundle imports cleanly on
+   the Lambda's x86_64 Linux / Python 3.12 runtime **no matter what you build on**
+   — including an Apple-silicon Mac (project rules §8) — with **no Docker**. The
+   Groww token is minted by a pure-stdlib HTTPS POST in the handler (no `growwapi`),
+   which is what removed the old cross-compile/Docker requirement
+   (DEC-MINTER-PURE-PYTHON-001). This step needs `pip` + PyPI network access on your
+   machine.
 2. **`terraform init`** — downloads the AWS/archive/null providers.
 3. **`terraform apply`** — Terraform **shows you the full plan and stops, waiting for
    you to type `yes`.** Nothing is created until you confirm. This script **never**
@@ -315,7 +319,7 @@ Once deployed, this runs itself — **zero clicks per day** (project rules §11)
 | **Reader/minter reads the wrong (or empty) region** | Region mismatch. BruteX resolves region as `BRUTEX_TOKEN_AWS_REGION` → `AWS_REGION` → `ap-south-1` default. Set `AWS_REGION=ap-south-1` (or `BRUTEX_TOKEN_AWS_REGION=ap-south-1`) and re-run. The minter/Terraform region is `-var 'region=ap-south-1'` (the default). |
 | **`./deploy.sh: Permission denied`** | The script is not executable. Run `chmod +x deploy.sh` (or `bash deploy.sh …`). |
 | **`terraform: command not found` inside IntelliJ/PyCharm but works in the Mac Terminal** | IntelliJ's built-in terminal often does not inherit your login shell's `PATH`, so Homebrew's `/opt/homebrew/bin` (Apple silicon) or `/usr/local/bin` (Intel) is missing. Fix: run `./deploy.sh` from the **macOS Terminal.app**, or add Homebrew's bin to the IDE terminal's `PATH` (IntelliJ → Settings → Tools → Terminal → *Environment variables*: `PATH=/opt/homebrew/bin:$PATH`), or invoke Terraform by absolute path. |
-| **`error minting: growwapi/pyotp ImportError` in the Lambda logs** | The deploy bundle was built without cross-compiling. `./deploy.sh` runs `build_lambda_package.sh` with the x86_64/manylinux/cp312 flags for you — re-run `./deploy.sh` (not a bare `terraform apply`) so the bundle is rebuilt correctly. |
+| **`error minting: pyotp ImportError` in the Lambda logs** | The deploy bundle was not staged. `./deploy.sh` runs `build_lambda_package.sh`, which pip-installs `pyotp` (a pure-Python universal wheel — no Docker, no cross-compile) into the zip for you — re-run `./deploy.sh` (not a bare `terraform apply`) so the bundle is rebuilt with `pyotp` included. |
 | **Never got the alarm email** | You did not confirm the SNS subscription. AWS emailed a confirmation link to `alert_email` after `apply` — click it. Re-subscribe with `aws sns subscribe --topic-arn "$(terraform output -raw alerts_topic_arn)" --protocol email --notification-endpoint you@example.com`. |
 
 ---
