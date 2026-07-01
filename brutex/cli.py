@@ -65,6 +65,7 @@ from typing import Any
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import read_runtime_file
+from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
 # ────────────────────────────────────────────────────────────────────────
 # Exit codes
@@ -87,6 +88,34 @@ EXIT_HEAL_REFUSED = 5
 #: NON-ZERO so an operator script never mistakes a partial sweep for a clean one
 #: (the failed tuples are un-sentineled and will redo next run).
 EXIT_SWEEP_TUPLE_FAILED = 6
+
+
+def default_condition_bits() -> list[int]:
+    """Return the DEFAULT swept condition-bit set — every IMPLEMENTED bit.
+
+    The ONE source of truth for "which conditions does a sweep test when
+    ``--conditions`` is not given" (CLAUDE.md §11 COMMON). It is derived
+    from the vocabulary's :data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK`
+    — the bitmask of conditions whose evaluator computes a real boolean —
+    so the default AUTOMATICALLY tracks the vocabulary and can never drift
+    behind it again (the pre-DEC-SWEEP-DEFAULT-CONDITIONS-60-001 bug where
+    the default was hardcoded to ``range(52)`` while the vocabulary had
+    grown to 60 conditions, silently excluding bits 52..59 — VWAP position,
+    pivot R5/S5, BOS/CHoCH — from every default sweep).
+
+    Deriving from ``IMPLEMENTED_MASK`` (rather than ``range(TOTAL_CONDITIONS)``)
+    is deliberately HONEST: a future LAYOUT-ONLY bit (``implemented=false`` in
+    ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so the
+    default never sweeps a dead condition that could never fire. Today every one
+    of the ``TOTAL_CONDITIONS`` bits is implemented (``IMPLEMENTED_MASK`` is
+    dense ``0..TOTAL_CONDITIONS-1``), so this returns ``[0, 1, ..., 59]``.
+
+    Returns
+    -------
+    list[int]
+        The implemented condition-bit indices in ascending order.
+    """
+    return [bit for bit in range(TOTAL_CONDITIONS) if IMPLEMENTED_MASK & (1 << bit)]
 
 
 def sweep_all_exit_code(tuples_failed: int) -> int:
@@ -186,7 +215,10 @@ def _add_sweep_grid_args(
     parser.add_argument(
         "--conditions",
         default=None,
-        help="Comma-separated condition bit indices 0..51 to sweep (default: all 52)",
+        help=(
+            f"Comma-separated condition bit indices 0..{TOTAL_CONDITIONS - 1} to sweep "
+            f"(default: all {TOTAL_CONDITIONS} implemented conditions)"
+        ),
     )
     parser.add_argument(
         "--sl",
@@ -709,7 +741,10 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument(
         "--conditions",
         default=None,
-        help="Comma-separated condition bit indices 0..51 to sweep (default: all 52)",
+        help=(
+            f"Comma-separated condition bit indices 0..{TOTAL_CONDITIONS - 1} to sweep "
+            f"(default: all {TOTAL_CONDITIONS} implemented conditions)"
+        ),
     )
     sweep.add_argument(
         "--sl",
@@ -2775,7 +2810,7 @@ def cmd_sweep(
     condition_bits = (
         [int(tok) for tok in conditions.split(",") if tok.strip()]
         if conditions
-        else list(range(52))
+        else default_condition_bits()
     )
     with Catalog.open(catalog) as cat:
         feed = ReplayFeed(
@@ -2988,7 +3023,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     condition_bits = (
         [int(tok) for tok in conditions.split(",") if tok.strip()]
         if conditions
-        else list(range(52))
+        else default_condition_bits()
     )
 
     # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
@@ -3895,7 +3930,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     condition_bits = (
         [int(tok) for tok in conditions.split(",") if tok.strip()]
         if conditions
-        else list(range(52))
+        else default_condition_bits()
     )
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
     # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
