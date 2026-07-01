@@ -3,7 +3,7 @@
 The pure supervise loop is 100%-line+branch tested with a FAKE child in
 ``tests/unit/test_orchestrator_supervisor.py``; this ONE integration test proves
 the production wiring — :func:`build_subprocess_launcher` +
-:class:`PopenChildHandle` driving a real :class:`subprocess.Popen` through the
+:class:`PopenChildProcess` driving a real :class:`subprocess.Popen` through the
 real :class:`ProcessSupervisor.run` — actually spawns, monitors, and relaunches
 a child.
 

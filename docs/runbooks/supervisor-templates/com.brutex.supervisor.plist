@@ -3,11 +3,19 @@
   launchd template — macOS auto-restart for the BruteX sweep supervisor
   (DEC-SUPERVISOR-AUTORESTART-001).
 
-  KeepAlive=true makes launchd RELAUNCH the process whenever it dies — after a
-  crash, a reboot, or an operator logout — which is the REAL hard-reboot
-  survival the in-process `brutex supervisor` cannot provide on its own (that
-  one only survives a CHILD crash while the supervisor itself is alive; this
-  survives the supervisor / machine dying too).
+  KeepAlive={SuccessfulExit=false} makes launchd RELAUNCH the process on a
+  NON-ZERO exit (a crash) or a reboot / logout — but NOT when `brutex supervisor`
+  exits 0. That distinction matters: this template is for the ALWAYS-ON
+  `--schedule` mode, whose supervisor keeps running and only ever exits non-zero
+  (a give-up). If you instead ran a one-shot `brutex supervisor -- --once` under an
+  UNCONDITIONAL `KeepAlive=true`, launchd would relaunch it forever the instant the
+  sweep FINISHED cleanly (exit 0) — a spin loop. The dict form relaunches on a
+  crash / reboot but lets a genuine clean completion actually stop. So run `--once`
+  by hand or from cron, NOT under this always-on template.
+
+  This is the REAL hard-reboot survival the in-process `brutex supervisor` cannot
+  provide on its own (that one only survives a CHILD crash while the supervisor
+  itself is alive; this survives the supervisor / machine dying too).
 
   This runs `brutex supervisor`, which in turn runs `brutex sweep-daemon` as its
   child and auto-relaunches it with exponential backoff on a crash. The two
@@ -34,7 +42,9 @@
     <key>Label</key>
     <string>com.brutex.supervisor</string>
 
-    <!-- {{BRUTEX_VENV_BIN}} = the venv's bin dir, e.g. /Users/you/bruteX/.venv/bin -->
+    <!-- {{BRUTEX_VENV_BIN}} = the venv's bin dir, e.g. /Users/you/bruteX/.venv/bin.
+         This is the ALWAYS-ON `--schedule` mode; do NOT swap in `--once` under this
+         template (a clean --once completion + an unconditional keep-alive spin-loops). -->
     <key>ProgramArguments</key>
     <array>
         <string>{{BRUTEX_VENV_BIN}}/brutex</string>
@@ -48,9 +58,15 @@
     <key>WorkingDirectory</key>
     <string>{{BRUTEX_REPO_DIR}}</string>
 
-    <!-- Relaunch on crash / reboot / logout — the whole point of the template. -->
+    <!-- Relaunch ONLY on a non-zero exit (a crash) or a reboot — NOT on a clean
+         exit 0. `KeepAlive=true` would relaunch even a successful completion (a
+         spin loop under `--once`); the SuccessfulExit=false dict form is correct
+         for the always-on `--schedule` mode. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
 

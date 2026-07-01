@@ -11,10 +11,10 @@ UNEXPECTED exit (non-zero code or death-by-signal) with exponential backoff, a
 max-restart cap, and a reset-backoff-after-stable-uptime window — while stopping
 cleanly on a genuine success and never relaunching after an operator stop.
 
-Because the sweep's checkpoint auto-resume (DEC-SWEEP-CHECKPOINT-001) already
-makes a relaunch bit-identical (chaos-tested), each relaunch simply resumes from
-the checkpoint — so this module only has to DO the relaunch, not re-implement
-resume.
+Because the sweep's checkpoint auto-resume (DEC-SWEEP-REALTIME-GUARANTEE-001)
+already makes a relaunch bit-identical (chaos-tested), each relaunch simply
+resumes from the checkpoint — so this module only has to DO the relaunch, not
+re-implement resume.
 
 ## Design (mirrors the two watchdogs — DEC-WATCHDOG-001 / DEC-RATE-STORM-WATCHDOG-001)
 
@@ -38,12 +38,18 @@ resume.
 
 Per child life-cycle iteration:
 
-1. launch the child, record its start time,
-2. block until it exits (``child.wait()``),
-3. classify the exit:
+1. launch the child (in its OWN process group), record its start time,
+2. wait for it to exit with an INTERRUPTIBLE wait — poll ``child.wait_for`` in
+   short slices, checking the operator-stop predicate between slices, so a
+   SIGTERM/SIGINT that arrives WHILE the child is still alive is honoured
+   promptly instead of blocking until the child happens to die,
+3. classify the outcome:
+   * **operator stop requested WHILE the child is alive** (SIGTERM/SIGINT
+     reached the supervisor) → gracefully shut the child down (SIGTERM → bounded
+     grace wait → SIGKILL via :meth:`shutdown_child`), STOP, do not relaunch,
    * **clean success** (exit code ``0``) → STOP, do not relaunch,
-   * **operator stop requested** (SIGTERM/SIGINT reached the supervisor) →
-     graceful child shutdown, STOP, do not relaunch,
+   * **operator stop that raced the child's own exit** → STOP, do not relaunch
+     (the child is already gone, so no shutdown is needed),
    * **unexpected exit** (non-zero code OR death-by-signal, i.e. a negative
      ``returncode`` on POSIX) → RELAUNCH after backoff,
 4. if the child had been UP longer than ``reset_after_uptime_seconds`` before it
@@ -59,25 +65,51 @@ Per child life-cycle iteration:
   ``systemd`` (``Restart=always``) templates. This supervisor survives a child
   CRASH while the supervisor itself is alive; the OS templates survive a
   supervisor / machine death. They are complementary, not redundant.
-* The supervisor is single-threaded + blocking on ``child.wait()``; it is NOT a
-  scheduler and does NOT itself run on a cadence. Its only job is "keep exactly
-  one child alive until it succeeds or the operator stops it".
+* The supervisor is single-threaded; it is NOT a scheduler and does NOT itself
+  run on a cadence. Its only job is "keep exactly one child alive until it
+  succeeds or the operator stops it". It waits on the child with an
+  INTERRUPTIBLE poll (short ``wait_for`` slices) rather than a single blocking
+  ``child.wait()`` — a bare ``os.waitpid`` is NOT interrupted by a delivered
+  signal (PEP 475 auto-retries it), so an operator stop would otherwise not be
+  observed until the child died on its own. Polling in slices lets the loop act
+  on the stop flag promptly and terminate the child itself.
 
 ## Decision: DEC-SUPERVISOR-AUTORESTART-001 (MIGRATION.md entry #1052).
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Final, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from brutex.models import BruteXError
 
 logger = logging.getLogger(__name__)
+
+
+class _WaitSentinel(enum.Enum):
+    """Distinguishes 'operator stop while the child was alive' from an exit code.
+
+    A single-member enum used purely as a typed sentinel: the interruptible wait
+    returns :data:`_STOPPED_WHILE_ALIVE` (not an ``int``) when it observed an
+    operator stop with the child still running, so :meth:`ProcessSupervisor.run`
+    can branch to the graceful-shutdown path. mypy narrows the enum literal
+    cleanly, so the post-check ``exit_code`` is a plain ``int``.
+    """
+
+    STOPPED_WHILE_ALIVE = "stopped_while_alive"
+
+
+#: Sentinel returned by the interruptible wait when an operator stop arrived
+#: WHILE the child was still alive (so the child must be terminated, not reaped).
+_STOPPED_WHILE_ALIVE: Final[Literal[_WaitSentinel.STOPPED_WHILE_ALIVE]] = (
+    _WaitSentinel.STOPPED_WHILE_ALIVE
+)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -116,51 +148,60 @@ DEFAULT_MAX_RESTARTS: Final[int] = 10
 #: after a SIGTERM before escalating to SIGKILL on an operator stop.
 DEFAULT_SHUTDOWN_GRACE_SECONDS: Final[float] = 10.0
 
+#: Default slice (seconds) for the INTERRUPTIBLE child wait: the supervisor polls
+#: ``child.wait_for(poll)`` in slices this long, re-checking the operator-stop
+#: predicate between slices so a SIGTERM arriving while the child is alive is
+#: acted on within one slice (a bare blocking ``wait`` would not be interrupted —
+#: PEP 475 auto-retries ``os.waitpid``). Small enough to be prompt, large enough
+#: to keep the poll overhead negligible against a long-running child.
+DEFAULT_POLL_INTERVAL_SECONDS: Final[float] = 0.5
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Injected collaborators (Protocols) + defaults
 # ────────────────────────────────────────────────────────────────────────
 
 
-class ChildHandle(Protocol):
+class ChildProcess(Protocol):
     """A running child process the supervisor monitors.
 
-    Matched by :class:`PopenChildHandle` (the production ``subprocess.Popen``
+    Matched by :class:`PopenChildProcess` (the production ``subprocess.Popen``
     wrapper) and by any test fake exposing the same surface, so the supervisor
     never depends on the concrete process class.
+
+    A value-returning stub method ``raise``\\s ``NotImplementedError`` (a real
+    statement, never a bare ``...`` no-op flagged by static analysis, and it
+    satisfies the declared return type); the ``None``-returning ones are a
+    docstring only.
     """
 
     @property
     def pid(self) -> int:
         """The child's OS process ID (for logging / audit)."""
-        ...
+        raise NotImplementedError
 
-    def wait(self) -> int:
-        """Block until the child exits; return its ``returncode``.
+    def wait_for(self, timeout: float) -> int | None:
+        """Block up to *timeout* seconds; return the code, or ``None`` if still alive.
 
         On POSIX a NEGATIVE return code means the child was killed by signal
         ``-returncode`` (Python's :class:`subprocess.Popen` convention); the
         supervisor treats any non-zero code (positive OR negative) as an
-        UNEXPECTED exit.
+        UNEXPECTED exit. This is the ONLY wait the supervisor uses — it polls in
+        short slices so an operator stop is honoured promptly (a single blocking
+        ``wait`` would not be interrupted by a delivered signal, PEP 475).
         """
-        ...
+        raise NotImplementedError
 
     def terminate(self) -> None:
         """Ask the child to exit gracefully (SIGTERM on POSIX)."""
-        ...
 
     def kill(self) -> None:
         """Force-kill the child (SIGKILL on POSIX)."""
-        ...
-
-    def wait_for(self, timeout: float) -> int | None:
-        """Block up to *timeout* seconds; return the code, or ``None`` if still alive."""
-        ...
 
 
-#: Launches a fresh child and returns its :class:`ChildHandle`. Injected so the
+#: Launches a fresh child and returns its :class:`ChildProcess`. Injected so the
 #: production path builds a real ``subprocess.Popen`` and tests build a fake.
-ChildLauncher = Callable[[], ChildHandle]
+ChildLauncher = Callable[[], ChildProcess]
 
 #: Monotonic-seconds source. Default :func:`time.monotonic`; tests fake it.
 Clock = Callable[[], float]
@@ -190,7 +231,6 @@ class AuditSink(Protocol):
 
     def append(self, *, action: str, subject: str, payload: dict[str, Any]) -> Any:
         """Append one hash-chained audit row and return the written entry."""
-        ...
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -308,7 +348,7 @@ class ProcessSupervisor:
     ----------
     launch
         The injected :data:`ChildLauncher` — spawns a fresh child and returns
-        its :class:`ChildHandle`. In production this builds a real
+        its :class:`ChildProcess`. In production this builds a real
         ``subprocess.Popen`` (see :func:`build_subprocess_launcher`); tests
         inject a fake.
     policy
@@ -320,12 +360,17 @@ class ProcessSupervisor:
         Optional :class:`AuditSink`; when wired, every restart / clean-exit /
         operator-stop / give-up appends one hash-chained audit row.
     stop_requested
-        Injected :data:`StopRequested` predicate (default: never). Checked after
-        every child exit AND consulted during the backoff wait so an operator
-        stop during a backoff sleep is honoured promptly.
+        Injected :data:`StopRequested` predicate (default: never). Consulted
+        BETWEEN interruptible wait slices while the child is alive (so a stop
+        gracefully shuts the child down), after every child exit, AND during the
+        backoff wait so an operator stop is honoured promptly at every point.
     shutdown_grace_seconds
         Seconds the supervisor waits for the child to exit after SIGTERM before
         escalating to SIGKILL on an operator stop. Must be ``> 0``.
+    poll_interval_seconds
+        The slice (seconds) of the INTERRUPTIBLE child wait — the loop polls
+        ``child.wait_for(poll_interval_seconds)`` and re-checks the stop
+        predicate between slices. Must be ``> 0``.
     clock
         Monotonic-seconds source (default :func:`time.monotonic`) that times the
         child's uptime.
@@ -346,6 +391,7 @@ class ProcessSupervisor:
     audit: AuditSink | None = None
     stop_requested: StopRequested = _never_stop
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     clock: Clock = time.monotonic
     sleeper: Sleeper = time.sleep
 
@@ -353,6 +399,10 @@ class ProcessSupervisor:
         if self.shutdown_grace_seconds <= 0:
             raise ValueError(
                 f"shutdown_grace_seconds must be > 0; got {self.shutdown_grace_seconds!r}"
+            )
+        if self.poll_interval_seconds <= 0:
+            raise ValueError(
+                f"poll_interval_seconds must be > 0; got {self.poll_interval_seconds!r}"
             )
 
     def run(self) -> SupervisorResult:
@@ -377,8 +427,30 @@ class ProcessSupervisor:
             child = self.launch()
             start = self.clock()
             logger.info("supervisor: child launched (pid=%s)", child.pid)
-            exit_code = child.wait()
+            exit_code = self._wait_for_exit_or_stop(child)
             uptime = self.clock() - start
+
+            # An operator stop arrived WHILE the child was still alive: shut the
+            # child down gracefully (SIGTERM → grace wait → SIGKILL) and do NOT
+            # relaunch. This is the headline path — the operator ran `launchctl
+            # stop` / `kill`, so the running child must actually be terminated,
+            # not orphaned. ``_wait_for_exit_or_stop`` returns the sentinel when it
+            # observed the stop with the child still alive; the shutdown happens
+            # HERE via ``shutdown_child``.
+            if exit_code is _STOPPED_WHILE_ALIVE:
+                shutdown_code = self.shutdown_child(child)
+                last_exit_code = shutdown_code if shutdown_code is not None else last_exit_code
+                self._stamp(
+                    AUDIT_ACTION_OPERATOR_STOP,
+                    {
+                        "phase": "shutdown",
+                        "exit_code": shutdown_code,
+                        "uptime_seconds": uptime,
+                    },
+                )
+                logger.info("supervisor: operator stop — child shut down, not relaunching")
+                return SupervisorResult(SupervisorOutcome.OPERATOR_STOP, restarts, last_exit_code)
+
             last_exit_code = exit_code
 
             # An operator stop that raced the child's own exit: honour the stop,
@@ -448,18 +520,50 @@ class ProcessSupervisor:
                 )
                 return SupervisorResult(SupervisorOutcome.OPERATOR_STOP, restarts, last_exit_code)
 
+    def _wait_for_exit_or_stop(
+        self, child: ChildProcess
+    ) -> int | Literal[_WaitSentinel.STOPPED_WHILE_ALIVE]:
+        """INTERRUPTIBLY wait for *child* to exit, honouring an operator stop.
+
+        Polls ``child.wait_for(poll_interval_seconds)`` in short slices, checking
+        the operator-stop predicate BEFORE each slice. Returns the child's exit
+        code once it exits, or :data:`_STOPPED_WHILE_ALIVE` the moment a stop is
+        observed while the child is still running — the caller then shuts the
+        child down gracefully.
+
+        A single blocking ``wait`` cannot be used here: a bare ``os.waitpid`` is
+        NOT interrupted by a delivered signal (PEP 475 auto-retries it), so it
+        would block until the child died on its own and the operator stop would
+        never be acted on — the exact orphaned-child bug this poll loop fixes.
+        """
+        while True:
+            if self.stop_requested():
+                return _STOPPED_WHILE_ALIVE
+            code = child.wait_for(self.poll_interval_seconds)
+            if code is not None:
+                return code
+
     def _sleep_backoff(self, delay: float) -> bool:
         """Wait out *delay* seconds, returning ``True`` if an operator stop arrived.
 
-        Sleeps once for the full ``delay`` via the injected sleeper, then checks
-        the stop predicate — an injected sleeper in tests makes this
-        deterministic, and the real :func:`time.sleep` is interrupted by a
-        delivered signal so the post-sleep check is prompt in production.
+        Sleeps in short slices (``poll_interval_seconds`` each) via the injected
+        sleeper, re-checking the stop predicate BETWEEN slices, so an operator
+        stop that arrives DURING a long backoff is honoured within one slice
+        rather than at the end of the whole delay. (A single ``time.sleep`` is
+        NOT interrupted by a delivered signal — PEP 475 auto-retries it — so
+        slicing is what makes the stop prompt.) An injected sleeper in tests
+        records every slice and stays deterministic.
         """
-        self.sleeper(delay)
+        remaining = delay
+        while remaining > 0:
+            if self.stop_requested():
+                return True
+            slice_seconds = min(self.poll_interval_seconds, remaining)
+            self.sleeper(slice_seconds)
+            remaining -= slice_seconds
         return self.stop_requested()
 
-    def shutdown_child(self, child: ChildHandle) -> int | None:
+    def shutdown_child(self, child: ChildProcess) -> int | None:
         """Gracefully stop *child* (SIGTERM, wait, then SIGKILL). Return its code.
 
         Public so an owner that holds the handle (a signal handler wired outside
@@ -497,23 +601,24 @@ class ProcessSupervisor:
 # Production adapters — real subprocess + real signal handlers
 # ────────────────────────────────────────────────────────────────────────
 #
-# These wrap the OS surfaces the supervisor abstracts over. They are
+# These wrap the OS surfaces the supervisor abstracts over. The ``PopenChildProcess``
+# process methods + ``build_subprocess_launcher`` + ``install_signal_stop`` are
 # ``# pragma: no cover`` because they spawn a REAL child / install REAL signal
-# handlers / block on a REAL ``os.waitpid`` — the same live-side-effect boundary
-# the CLI daemon loop (``cmd_sweep_daemon``) is excluded at. The PURE loop above
-# is 100%-tested with a fake ``ChildHandle`` + injected clock/sleeper; a trivial
-# end-to-end integration test spawns ONE deterministic real subprocess to prove
-# the wrapper wiring.
+# handlers — the same live-side-effect boundary the CLI daemon loop
+# (``cmd_sweep_daemon``) is excluded at. The PURE loop above is 100%-tested with a
+# fake ``ChildProcess`` + injected clock/sleeper; a trivial end-to-end integration
+# test spawns ONE deterministic real subprocess to prove the wrapper wiring. The
+# ``_SignalStop`` LATCH is a pure in-process flag (no OS side effect) and IS
+# unit-tested — only its real-signal INSTALLATION carries a pragma.
 
 
-class PopenChildHandle:  # pragma: no cover — thin wrapper over a real subprocess.Popen
-    """A :class:`ChildHandle` backed by a real :class:`subprocess.Popen`.
+class PopenChildProcess:  # pragma: no cover — thin wrapper over a real subprocess.Popen
+    """A :class:`ChildProcess` backed by a real :class:`subprocess.Popen`.
 
-    Wraps the live process surface the supervisor needs: ``wait`` (block for the
-    return code), ``wait_for`` (bounded wait), ``terminate`` (SIGTERM), and
-    ``kill`` (SIGKILL). Python's ``Popen.returncode`` is NEGATIVE when the child
-    died by signal, which the supervisor already classifies as an unexpected
-    exit.
+    Wraps the live process surface the supervisor needs: ``wait_for`` (bounded
+    poll), ``terminate`` (SIGTERM), and ``kill`` (SIGKILL). Python's
+    ``Popen.returncode`` is NEGATIVE when the child died by signal, which the
+    supervisor already classifies as an unexpected exit.
     """
 
     __slots__ = ("_proc",)
@@ -526,13 +631,9 @@ class PopenChildHandle:  # pragma: no cover — thin wrapper over a real subproc
         """The child's OS process ID."""
         return int(self._proc.pid)
 
-    def wait(self) -> int:
-        """Block until the child exits; return its ``returncode``."""
-        return int(self._proc.wait())
-
     def wait_for(self, timeout: float) -> int | None:
         """Block up to *timeout* seconds; return the code, or ``None`` if alive."""
-        import subprocess
+        import subprocess  # nosec B404 — stdlib subprocess, list-argv launch, no shell (see below)
 
         try:
             return int(self._proc.wait(timeout=timeout))
@@ -544,7 +645,7 @@ class PopenChildHandle:  # pragma: no cover — thin wrapper over a real subproc
         self._proc.terminate()
 
     def kill(self) -> None:
-        """Send SIGKILL to the child."""
+        """Force-kill the child (SIGKILL on POSIX)."""
         self._proc.kill()
 
 
@@ -554,25 +655,38 @@ def build_subprocess_launcher(
     """Return a :data:`ChildLauncher` that spawns ``argv`` as a fresh subprocess.
 
     Each call to the returned launcher starts a brand-new ``subprocess.Popen``
-    of *argv* and wraps it in a :class:`PopenChildHandle`. The child inherits the
+    of *argv* and wraps it in a :class:`PopenChildProcess`. The child inherits the
     parent's stdio + environment (so the sweep daemon logs to the same console
     and reads the same ``BRUTEX_*`` config); no shell is used (``argv`` is a
-    list, never a string) — no shell-injection surface.
+    list, never a string) — no shell-injection surface. It is started in its OWN
+    session/process group (``start_new_session=True``) so a graceful shutdown can
+    signal it cleanly and an operator's terminal Ctrl-C is not forwarded to it
+    twice (the supervisor's SIGINT handler is the single stop authority).
     """
-    import subprocess
+    import subprocess  # nosec B404 — stdlib subprocess, list-argv launch, no shell (see B603 below)
 
-    def _launch() -> ChildHandle:
-        proc = subprocess.Popen(argv)  # noqa: S603 — argv list, no shell, trusted CLI
-        return PopenChildHandle(proc)
+    def _launch() -> ChildProcess:
+        # nosec B603: `argv` is a fixed list built from `sys.executable` + literal
+        # subcommand tokens (see cli._supervisor_child_argv) — NOT a shell string
+        # and NOT untrusted input; `shell=` is never set, so there is no
+        # shell-injection surface. `start_new_session=True` isolates the child's
+        # process group for clean signalling.
+        proc = subprocess.Popen(  # nosec B603  # noqa: S603 — list argv, no shell, trusted CLI
+            argv, start_new_session=True
+        )
+        return PopenChildProcess(proc)
 
     return _launch
 
 
-class _SignalStop:  # pragma: no cover — holds real signal-handler state
+class _SignalStop:
     """A latching stop flag flipped by a delivered SIGTERM/SIGINT.
 
     Once set it stays set (a second signal is a no-op), so the supervisor's
-    :data:`StopRequested` predicate reads ``True`` for the rest of the run.
+    :data:`StopRequested` predicate reads ``True`` for the rest of the run. The
+    latch logic is a pure in-process flag with NO OS side effect, so it is
+    directly unit-testable (and IS unit-tested); only :func:`install_signal_stop`
+    (which installs REAL OS handlers) carries a coverage pragma.
     """
 
     __slots__ = ("_stopped",)
@@ -585,7 +699,7 @@ class _SignalStop:  # pragma: no cover — holds real signal-handler state
         return self._stopped
 
     def trip(self, _signum: int, _frame: Any) -> None:
-        """Signal handler — latch the stop flag."""
+        """Signal handler — latch the stop flag (idempotent; a repeat is a no-op)."""
         self._stopped = True
 
 
@@ -615,14 +729,15 @@ __all__ = [
     "DEFAULT_BACKOFF_CAP_SECONDS",
     "DEFAULT_BACKOFF_FACTOR",
     "DEFAULT_MAX_RESTARTS",
+    "DEFAULT_POLL_INTERVAL_SECONDS",
     "DEFAULT_RESET_AFTER_UPTIME_SECONDS",
     "DEFAULT_SHUTDOWN_GRACE_SECONDS",
     "AuditSink",
     "BackoffPolicy",
-    "ChildHandle",
     "ChildLauncher",
+    "ChildProcess",
     "Clock",
-    "PopenChildHandle",
+    "PopenChildProcess",
     "ProcessSupervisor",
     "Sleeper",
     "StopRequested",

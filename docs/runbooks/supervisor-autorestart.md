@@ -23,9 +23,9 @@ Neither alone is enough: the OS service relaunches `brutex supervisor` after a
 reboot; the supervisor relaunches `brutex sweep-daemon` after an in-session
 crash. Together they give hands-off survival across both failure classes.
 
-Because the sweep's **checkpoint auto-resume** (DEC-SWEEP-CHECKPOINT-001) already
-makes a relaunch **bit-identical** (chaos-tested), every relaunch simply resumes
-from the checkpoint — the supervisor only has to DO the relaunch, not
+Because the sweep's **checkpoint auto-resume** (DEC-SWEEP-REALTIME-GUARANTEE-001)
+already makes a relaunch **bit-identical** (chaos-tested), every relaunch simply
+resumes from the checkpoint — the supervisor only has to DO the relaunch, not
 re-implement resume.
 
 ---
@@ -77,10 +77,20 @@ tune them to your crash tolerance before wiring the OS service.
 
 ---
 
-## macOS — launchd (`KeepAlive=true`)
+> **Always-on `--schedule` mode only.** Both OS templates below run
+> `brutex supervisor -- --schedule …` and relaunch ONLY on a crash / reboot
+> (launchd `KeepAlive={SuccessfulExit=false}` / systemd `Restart=on-failure`), NOT
+> on a clean exit 0. Do **not** run a one-shot `brutex supervisor -- --once` under
+> either template: `--once` completes and exits 0, and an unconditional keep-alive
+> (`KeepAlive=true` / `Restart=always`) would relaunch the finished sweep forever —
+> a spin loop. Run `--once` by hand or from cron/a systemd timer instead.
+
+## macOS — launchd (`KeepAlive={SuccessfulExit=false}`)
 
 The template is `docs/runbooks/supervisor-templates/com.brutex.supervisor.plist`.
-`KeepAlive=true` makes launchd relaunch the supervisor on crash / reboot / logout.
+`KeepAlive={SuccessfulExit=false}` makes launchd relaunch the supervisor on a
+NON-ZERO exit (a crash) or reboot / logout, but NOT on a clean exit 0 (so a
+genuinely completed sweep stops instead of spin-looping).
 
 1. **Fill in the placeholders.** Copy the template and replace every
    `{{PLACEHOLDER}}` with an ABSOLUTE path / value:
@@ -95,9 +105,10 @@ The template is `docs/runbooks/supervisor-templates/com.brutex.supervisor.plist`
       ~/Library/LaunchAgents/com.brutex.supervisor.plist
    launchctl load -w ~/Library/LaunchAgents/com.brutex.supervisor.plist
    ```
-   `RunAtLoad` + `KeepAlive` start it immediately and keep it alive across
-   reboots. `ThrottleInterval=30` is launchd's own crash-loop throttle (on top
-   of the supervisor's exponential backoff).
+   `RunAtLoad` + `KeepAlive={SuccessfulExit=false}` start it immediately and
+   relaunch it across a crash / reboot (but not a clean exit 0).
+   `ThrottleInterval=30` is launchd's own crash-loop throttle (on top of the
+   supervisor's exponential backoff).
 
 3. **Stop / uninstall** (SIGTERM → graceful child shutdown, no relaunch):
    ```
@@ -110,11 +121,12 @@ them yourself; launchd does not.
 
 ---
 
-## Linux — systemd (`Restart=always`)
+## Linux — systemd (`Restart=on-failure`)
 
 The template is `docs/runbooks/supervisor-templates/brutex-supervisor.service`.
-`Restart=always` makes systemd relaunch the supervisor on ANY exit (crash,
-reboot, kill).
+`Restart=on-failure` makes systemd relaunch the supervisor on a NON-ZERO exit (a
+crash) or a reboot, but NOT on a clean exit 0 (so a completed sweep stops instead
+of spin-looping).
 
 1. **Fill in the placeholders** (same paths as above, plus `{{BRUTEX_USER}}` —
    the account owning `~/.brutex` + the lake; omit `User=` for a `--user` unit).
