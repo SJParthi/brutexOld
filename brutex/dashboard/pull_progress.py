@@ -64,6 +64,14 @@ class ProgressSnapshot:
         Free-text status / error message (empty unless set).
     updated_at
         The injected clock's value at the last mutation.
+    phase
+        The COARSE pipeline phase currently in flight — one of ``"spot"`` /
+        ``"metadata"`` / ``"futures"`` / ``"options"`` / ``"historical"`` (or ``""``
+        when idle / not set). Set by the one-click pipeline's ``_work`` at each phase
+        transition so the live Universe per-phase view can highlight the running phase
+        (DEC-UNIVERSE-PER-PHASE-PROGRESS-001). Purely informational — no counter is
+        keyed by it (the spot/futures/options window tallies come from the ledger
+        counts, not this label), so a stale / empty phase never fabricates progress.
     """
 
     state: str
@@ -75,6 +83,7 @@ class ProgressSnapshot:
     detail: str
     updated_at: float
     gaps: int = 0
+    phase: str = ""
 
     @property
     def percent(self) -> float:
@@ -102,6 +111,7 @@ class ProgressSnapshot:
             "percent": self.percent,
             "running": self.running,
             "updated_at": self.updated_at,
+            "phase": self.phase,
         }
 
 
@@ -134,6 +144,7 @@ class PullProgress:
         self._current = ""
         self._detail = ""
         self._updated_at = 0.0
+        self._phase = ""
 
     def start(self, *, total: int, detail: str = "") -> None:
         """Begin a job of *total* units — resets all counters to ``running``.
@@ -151,6 +162,7 @@ class PullProgress:
             self._bars = 0
             self._current = ""
             self._detail = detail
+            self._phase = ""
             self._updated_at = self._clock()
 
     def advance(
@@ -216,6 +228,20 @@ class PullProgress:
             self._current = current
             self._updated_at = self._clock()
 
+    def set_phase(self, phase: str) -> None:
+        """Set the COARSE pipeline phase currently in flight — O(1).
+
+        DEC-UNIVERSE-PER-PHASE-PROGRESS-001. The one-click pipeline's ``_work`` calls
+        this at each phase transition (``"spot"`` → ``"metadata"`` → ``"historical"``)
+        so the live Universe per-phase view can highlight the running phase. Purely a
+        label — no counter is keyed by it (the per-segment window tallies come from the
+        ledger counts), so a stale / empty phase can never fabricate progress. An empty
+        string is honoured (it clears the label back to "no phase in flight").
+        """
+        with self._lock:
+            self._phase = phase
+            self._updated_at = self._clock()
+
     def finish(self, *, detail: str = "") -> None:
         """Mark the job cleanly complete (``done``) — O(1)."""
         with self._lock:
@@ -243,6 +269,7 @@ class PullProgress:
                 current=self._current,
                 detail=self._detail,
                 updated_at=self._updated_at,
+                phase=self._phase,
             )
 
 

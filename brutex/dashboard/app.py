@@ -79,6 +79,7 @@ from brutex.dashboard.db_view import (
     list_option_series,
     list_registry_contracts,
     list_registry_expiries,
+    phase_progress_payload,
     query_candles,
     query_option_candles,
     query_table,
@@ -2587,6 +2588,10 @@ def build_app(
                 )
 
             def _run_spot() -> BulkSpotReport:
+                # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: tag the coarse phase so the live
+                # per-phase view highlights the running phase (label only — the window
+                # tallies come from the ledger counts, never this string).
+                _pull_job.set_phase("spot")
                 # The operator-picked spot range (DEC-UNIVERSE-PULL-DATERANGE-001);
                 # blank ⇒ None ⇒ pull_all_spot's resolve_candle_range default
                 # [2020-01-01, prev-day] (byte-identical to the pre-picker pull).
@@ -2607,6 +2612,10 @@ def build_app(
                 )
 
             def _run_metadata() -> MetadataPullReport:
+                # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the metadata phase writes NO
+                # window-ledger rows, so the three window rows stay honestly "pending"
+                # (build_phase_progress highlights no window row on the metadata label).
+                _pull_job.set_phase("metadata")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_expiries_contracts(
                         tradable,
@@ -2619,6 +2628,12 @@ def build_app(
                     )
 
             def _run_historical() -> CompositePullReport:
+                # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the historical F&O phase pulls
+                # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
+                # "historical" label is REFINED to futures-vs-options by the live ledger
+                # counts in build_phase_progress (fno_current_phase_from_counts), so no
+                # segment tag is threaded through the F&O spine.
+                _pull_job.set_phase("historical")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -2991,18 +3006,54 @@ def build_app(
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
-        """GET /api/v1/universe/pull-progress — the LIVE per-unit pull snapshot.
+        """GET /api/v1/universe/pull-progress — the LIVE per-unit + per-phase pull snapshot.
 
         Returns the background job's O(1)
         :meth:`brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot` — ``state``
         (idle/running/done/error), ``total`` / ``completed`` / ``failed`` /
-        ``gaps`` / ``bars`` / ``percent`` / ``current``. The page polls this while
-        a pull runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001);
+        ``gaps`` / ``bars`` / ``percent`` / ``current`` / ``phase``. The page polls this
+        while a pull runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001);
         the terminal-header builder (``terminalPullHeader``) reads ``gaps`` to
         distinguish a clean finish from a no-data-gap partial, so it is documented
         here as a first-class snapshot key (it is NOT dead code).
+
+        DEC-UNIVERSE-PER-PHASE-PROGRESS-001: ADDITIONALLY carries a ``phases`` array —
+        ONE row per window phase (spot / futures / options) with ``done`` / ``total`` /
+        ``success`` / ``empty`` / ``failed`` / ``pending`` + a ``current`` flag — so the
+        Universe pull section shows every phase's live windows count + progress
+        CONSISTENTLY. The counts are read THROUGH the SAME generation-stamped
+        ``_window_counts_cache`` the ``/coverage/windows`` page uses (NO new scan — a
+        repeat poll within one ``(generation, ledger-mtime)`` is an O(1) hit), on the
+        threadpool worker so the store's RLock stays on one thread
+        (DEC-DASHBOARD-FASTREAD-001). None-safe: a dry-run / no store / no ledger yields
+        ``phases: []`` (an honest empty list, never a fabricated window count). Every
+        existing flat snapshot key is UNCHANGED.
         """
-        return JSONResponse(_pull_job.snapshot().to_dict())
+        from brutex.data.window_ledger_store import ledger_path
+
+        snap = _pull_job.snapshot().to_dict()
+        current_phase = str(snap.get("phase", ""))
+        store: Any = instrument_store
+        lake_root = getattr(store, "path", None)
+        if store is None or not isinstance(lake_root, Path):
+            snap["phases"] = []
+            return JSONResponse(snap)
+        # Resolve the ledger path HERE (not inside phase_progress_payload) so db_view
+        # carries no `window_ledger_store` import edge — CodeQL py/cyclic-import.
+        ledger_file = ledger_path(lake_root.parent)
+
+        def _phases() -> list[dict[str, Any]]:
+            """Read the cached per-segment window counts and project the phase rows."""
+            return phase_progress_payload(
+                store.connection,
+                ledger_file,
+                current_phase=current_phase,
+                count_cache=_window_counts_cache,
+                generation=_summary_cache.generation,
+            )
+
+        snap["phases"] = await run_in_threadpool(_phases)
+        return JSONResponse(snap)
 
     @app.get("/api/v1/universe/pull-verdict")
     async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route

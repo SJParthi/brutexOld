@@ -159,6 +159,7 @@ def test_to_dict_shape() -> None:
         "percent": 50.0,
         "running": True,
         "updated_at": d["updated_at"],
+        "phase": "",
     }
     assert isinstance(d["updated_at"], float)
 
@@ -280,3 +281,58 @@ class TestSetCurrent:
         before = p.snapshot().updated_at
         p.set_current("")  # no-op — does not even stamp the clock
         assert p.snapshot().updated_at == before
+
+
+# ── set_phase — the COARSE pipeline phase label (DEC-UNIVERSE-PER-PHASE-PROGRESS-001) ──
+
+
+def test_phase_defaults_to_empty() -> None:
+    # A fresh tracker has no phase — the live per-phase view highlights nothing.
+    assert PullProgress(clock=_FakeClock()).snapshot().phase == ""
+
+
+def test_set_phase_records_the_running_phase() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=3)
+    p.set_phase("spot")
+    assert p.snapshot().phase == "spot"
+    assert p.snapshot().to_dict()["phase"] == "spot"
+    # A later transition overwrites it (spot → metadata → historical).
+    p.set_phase("historical")
+    assert p.snapshot().phase == "historical"
+
+
+def test_set_phase_empty_clears_the_label() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=1)
+    p.set_phase("futures")
+    p.set_phase("")  # honoured — back to "no phase in flight"
+    assert p.snapshot().phase == ""
+
+
+def test_set_phase_stamps_the_clock() -> None:
+    clock = _FakeClock()
+    p = PullProgress(clock=clock)
+    p.start(total=1)
+    before = p.snapshot().updated_at
+    p.set_phase("options")
+    assert p.snapshot().updated_at > before
+
+
+def test_start_resets_the_phase() -> None:
+    # A fresh pull (idempotent re-click) clears any stale phase label.
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=2)
+    p.set_phase("historical")
+    p.start(total=2)  # reset
+    assert p.snapshot().phase == ""
+
+
+def test_set_phase_does_not_touch_counters() -> None:
+    # Purely a label — no counter is keyed by it (no fabricated progress).
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=4)
+    p.advance(current="NIFTY", bars=10)
+    p.set_phase("spot")
+    snap = p.snapshot()
+    assert snap.completed == 1 and snap.bars == 10 and snap.total == 4
