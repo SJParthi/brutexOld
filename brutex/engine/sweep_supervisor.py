@@ -873,6 +873,14 @@ def idle_progress() -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_WORKER_NAME",
+    "SUPERVISOR_ACTION_ABORT",
+    "SUPERVISOR_ACTION_COMPLETE",
+    "SUPERVISOR_ACTION_START",
+    "SUPERVISOR_ACTION_TUPLE_CACHE",
+    "SUPERVISOR_ACTION_TUPLE_DONE",
+    "SUPERVISOR_ACTION_TUPLE_FAILED",
+    "SUPERVISOR_ACTION_TUPLE_NO_BARS",
+    "SUPERVISOR_ACTION_TUPLE_RESUME",
     "SupervisedGridSummary",
     "SweepGuards",
     "grid_identity",
@@ -881,4 +889,6 @@ __all__ = [
     "read_progress",
     "run_supervised_grid",
     "tuple_cache_key",
+    "tuple_cache_params",
+    "tuple_label",
 ]

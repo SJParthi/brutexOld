@@ -702,7 +702,7 @@ def _drive_with_fake(
         resume_from = guards.checkpoint.next_index
         acc = _Accumulator()
         fake = _FakePool(_WorkerContext(grid=grid, root=tmp_path / "out"), result_for=result_for)
-        driver._drive(fake, resume_from, 2, acc)  # type: ignore[arg-type]
+        driver._drive(fake, resume_from, 2, 4, acc)  # type: ignore[arg-type]
         if later_seen_index is not None:
             later = list(iter_sweep_tuples(grid))[later_seen_index]
             later_seen = guards.cache.seen(
@@ -772,7 +772,7 @@ class TestFailedTuplePrefixFreeze:
             fake = _FakePool(
                 _WorkerContext(grid=grid, root=tmp_path / "out"), result_for={0: failed}
             )
-            driver._drive(fake, 0, 2, acc)  # type: ignore[arg-type]
+            driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
             next_index = guards.checkpoint.next_index
         assert acc.skipped_cache == 1
         assert acc.had_failure is True
@@ -797,7 +797,7 @@ class TestFailedTuplePrefixFreeze:
                 _WorkerContext(grid=grid, root=tmp_path / "out"),
                 result_for={0: failed, **no_bars},
             )
-            driver._drive(fake, 0, 2, acc)  # type: ignore[arg-type]
+            driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
             next_index = guards.checkpoint.next_index
         assert acc.tuples_failed == 1
         assert acc.tuples_skipped_no_bars == count_sweep_tuples(grid) - 1
@@ -820,7 +820,7 @@ class TestStallWatchdog:
             # stall window, and SweepStallError is raised (bounded, not a hang).
             fake = _FakePool(_WorkerContext(grid=grid, root=tmp_path / "out"), never_resolve={0})
             with pytest.raises(SweepStallError, match="no progress"):
-                driver._drive(fake, 0, 2, acc)  # type: ignore[arg-type]
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
 
     def test_run_wraps_a_drive_failure_in_an_abort_line(self, tmp_path: Path) -> None:
         """``run()`` records a SUPERVISOR_ABORT line then re-raises when ``_drive`` fails.
@@ -837,6 +837,7 @@ class TestStallWatchdog:
                 pool: Any,
                 resume_from: int,
                 max_inflight: int,
+                heap_cap: int,
                 acc: _Accumulator,
             ) -> None:
                 raise SweepStallError("wedged")
@@ -941,7 +942,7 @@ class TestWorkerCrashGlobalStop:
             acc = _Accumulator()
             fake = _CrashingPool(_WorkerContext(grid=grid, root=tmp_path / "out"), crash_index=0)
             with pytest.raises(RuntimeError, match="worker exploded"):
-                driver._drive(fake, 0, 2, acc)  # type: ignore[arg-type]
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
 
 
 class _CrashingPool:
@@ -1024,7 +1025,236 @@ class TestBackPressure:
                 return {next(iter(done))}, set()
 
             monkeypatch.setattr(mod, "_futures_wait", _fake_wait)
-            driver._drive(fake, 0, (3 - 1) * 2, acc)  # type: ignore[arg-type] # max_inflight=4
+            # max_inflight=4, heap_cap=4 (pool_size 2 × the multipliers); in-order
+            # resolution keeps the heap near-empty so neither bound binds here.
+            driver._drive(fake, 0, (3 - 1) * 2, (3 - 1) * 2, acc)  # type: ignore[arg-type]
         # The peak simultaneously-outstanding futures never exceeded the window.
         assert fake.peak <= 4
         assert acc.tuples_run == count_sweep_tuples(grid)
+
+
+# ─────────── head-of-line blocking: heap bound (MAJOR-1) + stall (MAJOR-2) ──────────
+
+
+class _HeadBlockedPool:
+    """A fake pool that keeps ONE designated ``blocked_index`` future UNRESOLVED.
+
+    Every OTHER submitted tuple's future is created UNRESOLVED too and parked in
+    ``deferred`` (lowest-index-first); the test's patched ``_futures_wait``
+    resolves them one at a time via :meth:`resolve_one_sibling`, modelling a real
+    pool where the HEAD tuple is legitimately slow while its siblings complete.
+    The blocked head is resolved on demand via :meth:`resolve_head`.
+    """
+
+    def __init__(self, ctx: _WorkerContext, *, blocked_index: int) -> None:
+        _worker_init(ctx)
+        self._blocked_index = blocked_index
+        self._head: Future[TupleWorkResult] | None = None
+        self._head_payload: tuple[int, SweepTuple, Sequence[CandleBar]] | None = None
+        self.deferred: list[
+            tuple[int, SweepTuple, Sequence[CandleBar], Future[TupleWorkResult]]
+        ] = []
+
+    def submit(
+        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+    ) -> Future[TupleWorkResult]:
+        """Return an UNRESOLVED future; park it as the head or a resolvable sibling."""
+        fut: Future[TupleWorkResult] = Future()
+        if index == self._blocked_index:
+            self._head = fut
+            self._head_payload = (index, tuple_, bars)
+        else:
+            self.deferred.append((index, tuple_, bars, fut))
+        return fut
+
+    def resolve_one_sibling(self) -> bool:
+        """Resolve the lowest-index parked SIBLING future; ``False`` if none remain."""
+        if not self.deferred:
+            return False
+        self.deferred.sort(key=lambda e: e[0])
+        index, tuple_, bars, fut = self.deferred.pop(0)
+        fut.set_result(_run_tuple_in_worker(index, tuple_, bars))
+        return True
+
+    def resolve_head(self) -> None:
+        """Resolve the blocked head future (the slow tuple finally finishes)."""
+        assert self._head is not None and self._head_payload is not None
+        index, tuple_, bars = self._head_payload
+        self._head.set_result(_run_tuple_in_worker(index, tuple_, bars))
+
+
+class TestHeadOfLineHeapBound:
+    """MAJOR-1: dispatch is coupled to apply-progress so the reorder heap is bounded."""
+
+    def test_heap_stays_bounded_while_head_is_blocked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With index 0 blocked and MANY siblings completing, the heap never grows
+        to O(T): dispatch pauses at the heap cap, so the peak heap is a small
+        constant multiple of pool_size — NOT the whole remaining grid."""
+        import brutex.engine.sweep_parallel as mod
+
+        # A grid MUCH larger than the O(pool_size) bound, so O(T) heap growth would
+        # be unmistakable: 2 dir × 5 k × 2 sl × 2 tp = 40 tuples.
+        grid = _grid(k_values=[1, 2, 3, 4, 5], stop_losses=[80, 90], take_profits=[50, 60])
+        total = count_sweep_tuples(grid)
+        assert total == 40
+
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing, workers=3)  # pool_size = 2
+            guards.checkpoint.load()
+            acc = _Accumulator()
+            fake = _HeadBlockedPool(
+                _WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
+            )
+            pool_size = 2
+            max_inflight = pool_size * 2  # 4
+            heap_cap = pool_size * 2  # 4
+            peak_heap = 0
+            head_released = False
+
+            def _fake_wait(
+                pending: Iterable[Future[TupleWorkResult]],
+                *,
+                timeout: float,
+                return_when: object,
+            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+                nonlocal peak_heap, head_released
+                # Record the reorder-heap depth every time the driver blocks (this is
+                # exactly the moment the head-of-line siblings have piled up).
+                peak_heap = max(peak_heap, len(driver._heap))
+                already_done = {f for f in pending if f.done()}
+                if already_done:
+                    return {next(iter(already_done))}, set()
+                # Resolve one more sibling; when the siblings are exhausted the ONLY
+                # thing left is the blocked head → release it so the drive completes.
+                if not fake.resolve_one_sibling() and not head_released:
+                    fake.resolve_head()
+                    head_released = True
+                done = {f for f in pending if f.done()}
+                return {next(iter(done))}, set()
+
+            monkeypatch.setattr(mod, "_futures_wait", _fake_wait)
+            driver._drive(fake, 0, max_inflight, heap_cap, acc)  # type: ignore[arg-type]
+
+        # THE BOUND: the heap never approached O(T). It can overshoot the cap by the
+        # futures already in flight when dispatch pauses, so the honest ceiling is
+        # heap_cap + max_inflight — a small constant multiple of pool_size, FAR below
+        # the 40-tuple grid (which is what an unbounded O(T) heap would reach).
+        assert peak_heap <= heap_cap + max_inflight
+        assert peak_heap < total  # genuinely bounded, not O(T)
+        # Correctness is untouched: every tuple still ran + applied in order.
+        assert acc.tuples_run == total
+        assert guards.checkpoint.next_index == total
+
+
+class TestHeadOfLineStallClock:
+    """MAJOR-2: the stall clock measures time-since-COMPLETION, not time-since-APPLY."""
+
+    def test_slow_head_with_completing_siblings_does_not_abort(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slow-but-progressing head (index 0) while siblings 1,2,… complete must
+        NOT raise SweepStallError — each sibling completion resets the stall clock,
+        even though the head keeps the apply prefix blocked for a long time."""
+        import brutex.engine.sweep_parallel as mod
+
+        grid = _grid(k_values=[1, 2, 3, 4, 5])  # 2 dir × 5 k = 10 tuples
+        total = count_sweep_tuples(grid)
+        assert total == 10
+
+        # A clock that advances 100s per _futures_wait call. With stall_seconds=250
+        # the CUMULATIVE time across the many sibling completions FAR exceeds the
+        # stall window — so the OLD (reset-only-on-apply) watchdog would spuriously
+        # abort. The FIX (reset on completion) refreshes the deadline each sibling.
+        clock = _stepping_clock(step=100.0)
+
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(
+                tmp_path, grid, guards, ing, workers=3, stall_seconds=250.0, monotonic=clock
+            )
+            guards.checkpoint.load()
+            acc = _Accumulator()
+            fake = _HeadBlockedPool(
+                _WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
+            )
+            head_released = False
+
+            def _fake_wait(
+                pending: Iterable[Future[TupleWorkResult]],
+                *,
+                timeout: float,
+                return_when: object,
+            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+                nonlocal head_released
+                # A completion arrives ONLY if the driver still had time budget when
+                # it entered the wait — model that: a non-positive timeout means the
+                # deadline expired with NOTHING done (the genuine-stall signal).
+                if timeout <= 0.0:
+                    return set(), set(pending)
+                already_done = {f for f in pending if f.done()}
+                if already_done:
+                    return {next(iter(already_done))}, set()
+                if not fake.resolve_one_sibling() and not head_released:
+                    fake.resolve_head()
+                    head_released = True
+                done = {f for f in pending if f.done()}
+                return {next(iter(done))}, set()
+
+            monkeypatch.setattr(mod, "_futures_wait", _fake_wait)
+            # Must NOT raise: the head is slow but siblings keep completing.
+            driver._drive(fake, 0, 4, 4, acc)  # type: ignore[arg-type]
+
+        assert acc.tuples_run == total
+        assert guards.checkpoint.next_index == total
+
+    def test_genuine_full_hang_still_aborts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuine hang — NOTHING ever completes — STILL raises SweepStallError
+        within the deadline (the liveness guarantee is preserved, not weakened)."""
+        import brutex.engine.sweep_parallel as mod
+
+        grid = _grid(k_values=[1, 2, 3, 4, 5])
+        clock = _stepping_clock(step=100.0)
+
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(
+                tmp_path, grid, guards, ing, workers=3, stall_seconds=250.0, monotonic=clock
+            )
+            guards.checkpoint.load()
+            acc = _Accumulator()
+            fake = _HeadBlockedPool(
+                _WorkerContext(grid=grid, root=tmp_path / "out"), blocked_index=0
+            )
+
+            def _fake_wait(
+                pending: Iterable[Future[TupleWorkResult]],
+                *,
+                timeout: float,
+                return_when: object,
+            ) -> tuple[set[Future[TupleWorkResult]], set[Future[TupleWorkResult]]]:
+                # A total hang: no future EVER resolves (the head is blocked and no
+                # sibling is ever released), so every wait returns nothing done.
+                return set(), set(pending)
+
+            monkeypatch.setattr(mod, "_futures_wait", _fake_wait)
+            with pytest.raises(SweepStallError, match="no progress"):
+                driver._drive(fake, 0, 4, 4, acc)  # type: ignore[arg-type]
+
+
+def _stepping_clock(*, step: float) -> Callable[[], float]:
+    """A monotonic clock advancing by ``step`` seconds per call (a plain-def closure).
+
+    A plain ``def`` closure over a mutable holder (NOT a callable CLASS) so CodeQL's
+    points-to analysis keeps seeing the production ``self._monotonic()`` call site as
+    callable (a callable-class fixture triggers a ``py/call-to-non-callable`` false
+    positive on the UNCHANGED production line — same guard as :func:`_jumping_clock`).
+    """
+    holder = {"t": 0.0}
+
+    def clock() -> float:
+        holder["t"] += step
+        return holder["t"]
+
+    return clock

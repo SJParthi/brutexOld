@@ -631,7 +631,6 @@ class AuditSink(Protocol):
         ts_utc: float | None = None,
     ) -> object:
         """Append one audit line (or buffer it); return value is ignored by callers."""
-        ...
 
 
 class BufferedAuditCollector:

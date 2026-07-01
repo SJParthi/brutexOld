@@ -42,6 +42,20 @@ ACROSS independent tuples. No "millions in minutes."
        completion sentinel; audit lines collected as PLAIN DATA (BufferedAuditCollector)
 ```
 
+## Bounded memory under head-of-line blocking (Golden Rule #5)
+
+The reorder heap holds a completed tuple's ``_Outcome`` (its ``SweepRunSummary`` +
+buffered audit) until the contiguous-clean ``next_apply`` prefix reaches it. If the
+HEAD tuple is legitimately slow while its siblings complete, those sibling outcomes
+would pile into the heap — O(T − next_apply), unbounded on a multi-million-tuple
+sweep. So DISPATCH is COUPLED to APPLY-progress: no new tuple is dispatched while
+the heap is at its cap (:data:`_HEAP_CAP_MULTIPLIER` × pool_size). The heap is thus
+GENUINELY BOUNDED to O(pool_size) — the honest tradeoff is that a blocked head
+throttles throughput (bounded memory > max throughput). The STALL clock measures
+time-since-last-COMPLETION (bumped on ANY future resolving), NOT time-since-last-
+APPLY, so a slow-but-progressing head with completing siblings never spuriously
+raises :class:`SweepStallError` — only a genuine no-completion hang does.
+
 ## Scope (Golden Rule #3) — digest path ONLY
 
 This driver is scoped to the **production digest path** (a tuple digest is always
@@ -71,6 +85,7 @@ the flag, not a real production limitation.
 from __future__ import annotations
 
 import contextlib
+import functools
 import heapq
 import multiprocessing
 import os
@@ -135,9 +150,23 @@ SWEEP_WORKERS_ENV: Final[str] = "BRUTEX_SWEEP_WORKERS"
 DEFAULT_SWEEP_WORKERS: Final[int] = 1
 
 #: The bounded in-flight submission window, as a multiple of the pool size — caps
-#: outstanding futures so the reorder heap + result backlog stay O(pool_size)
-#: (mirrors the ``fetch_pipeline`` back-pressure design).
+#: outstanding FUTURES (``pending``) so the fan-out never over-submits (mirrors the
+#: ``fetch_pipeline`` back-pressure design). This alone does NOT bound the reorder
+#: heap under head-of-line blocking — see :data:`_HEAP_CAP_MULTIPLIER`.
 _INFLIGHT_MULTIPLIER: Final[int] = 2
+
+#: The reorder-heap cap, as a multiple of the pool size. Under head-of-line
+#: blocking (a legitimately-slow head tuple while siblings complete) the completed
+#: siblings' ``_Outcome`` objects accumulate in the heap; without a cap that is
+#: O(T − next_apply) — unbounded on a multi-million-tuple sweep. DISPATCH is
+#: therefore COUPLED to APPLY-progress: no new tuple is dispatched while
+#: ``len(heap) >= pool_size * _HEAP_CAP_MULTIPLIER``, so the heap is GENUINELY
+#: bounded (the honest tradeoff: a blocked head throttles throughput, but bounded
+#: memory > max throughput). The heap can transiently overshoot the cap by the
+#: futures already in flight when dispatch pauses, so the true ceiling is
+#: ``pool_size * (_HEAP_CAP_MULTIPLIER + _INFLIGHT_MULTIPLIER)`` — still O(pool_size),
+#: independent of T.
+_HEAP_CAP_MULTIPLIER: Final[int] = 2
 
 #: How long (seconds) the parent will wait for the NEXT result before firing the
 #: stall watchdog, when work is in flight. A wedged worker's future never resolves,
@@ -302,10 +331,11 @@ def _worker_init(ctx: _WorkerContext) -> None:
     threads would BOTH oversubscribe AND risk an order-DEPENDENT float reduction
     (a reduction whose order changes with the thread count breaks bit-for-bit
     determinism). So every worker forces ``OMP_NUM_THREADS`` /
-    ``RAYON_NUM_THREADS`` / ``POLARS_MAX_THREADS`` to ``1``. Proven by the
-    sequential-vs-parallel golden test.
+    ``RAYON_NUM_THREADS`` / ``POLARS_MAX_THREADS`` to ``1``. Bit-for-bit
+    seq-vs-parallel equivalence empirically holds for this pure-Python +
+    integer-reduction hot path (the golden test proves the end-to-end equivalence,
+    not that these specific env pins are the sole cause).
     """
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["RAYON_NUM_THREADS"] = "1"
     os.environ["POLARS_MAX_THREADS"] = "1"
@@ -370,12 +400,24 @@ class _NoDedup:
     whole parallel design rests on.
     """
 
-    def seen(self, run_id_hex: str) -> bool:  # pragma: no cover — must never be called
+    def seen(self, run_id_hex: str) -> bool:
+        """RAISE — the digest path must never consult ``dedup.seen``.
+
+        Reached only by the legacy-path guard test (which asserts this raise); in
+        production the digest path bypasses dedup, so a real call here would be a
+        broken invariant, surfaced loudly rather than silently mis-answered.
+        """
         raise SweepParallelUsageError(
             "parallel sweep worker consulted dedup.seen on the digest path"
         )
 
-    def mark_many(self, run_id_hexes: object) -> int:  # pragma: no cover — never called
+    def mark_many(self, run_id_hexes: object) -> int:
+        """RAISE — the digest path must never consult ``dedup.mark_many``.
+
+        Reached only by the legacy-path guard test (which asserts this raise); in
+        production the digest path bypasses dedup, so a real call here would be a
+        broken invariant, surfaced loudly rather than silently mis-answered.
+        """
         raise SweepParallelUsageError(
             "parallel sweep worker consulted dedup.mark_many on the digest path"
         )
@@ -386,6 +428,7 @@ class _NoDedup:
 # ────────────────────────────────────────────────────────────────────────
 
 
+@functools.total_ordering
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     """One enumeration slot's applied-in-order result (the reorder-heap payload).
@@ -397,6 +440,12 @@ class _Outcome:
     ``run_supervised_grid`` loop. The parent computes ``resume`` / ``cache`` slots
     synchronously at dispatch time; ``no_bars`` / ``failed`` / ``done`` arrive from
     a worker via :class:`TupleWorkResult`.
+
+    Ordering is by enumeration :attr:`index` ONLY (the canonical apply order); the
+    :func:`functools.total_ordering` decorator derives ``__le__`` / ``__gt__`` /
+    ``__ge__`` from :meth:`__lt__` + the dataclass's ``__eq__`` so the type is a
+    fully-ordered heap payload (heap semantics unchanged — the heap only ever
+    consults ``__lt__``).
     """
 
     index: int
@@ -407,7 +456,7 @@ class _Outcome:
     audit_records: tuple[BufferedAuditRecord, ...]
 
     def __lt__(self, other: _Outcome) -> bool:
-        # Heap ordering is by enumeration index ONLY (the canonical apply order).
+        """Order two outcomes by enumeration ``index`` (the canonical apply order)."""
         return self.index < other.index
 
 
@@ -427,9 +476,13 @@ class ParallelGridDriver:
     dispatches with a bounded in-flight window, drains results through a reorder
     min-heap keyed on the enumeration index, and applies ALL ordered state (both
     audit chains, the contiguous-clean-prefix checkpoint, the ``SweepCache``, and
-    progress) in enumeration order — so the result set, the audit chains, and the
-    checkpoint are BIT-FOR-BIT identical to a sequential run regardless of worker
-    interleaving.
+    progress) in enumeration order — so the per-tuple Parquet tree is BYTE-IDENTICAL
+    to a sequential run, and both audit chains are CONTENT-IDENTICAL MODULO
+    TIMESTAMPS (and, for the supervisor chain, its ``SUPERVISOR_START`` payload's
+    added ``workers`` key) AND independently verify, regardless of worker
+    interleaving. (``ts_utc`` participates in each entry's chain hash, so the chains
+    are not literally byte-for-byte across two runs — the invariant is byte-equal
+    results + content-equal-modulo-ts, verifying chains + an identical checkpoint.)
 
     Not reusable — construct one per grid run and call :meth:`run` once.
     """
@@ -513,10 +566,13 @@ class ParallelGridDriver:
     def run(self) -> SupervisedGridSummary:
         """Execute the whole grid in parallel; return the aggregate tally.
 
-        Bit-for-bit identical to
-        :func:`~brutex.engine.sweep_supervisor.run_supervised_grid` on the result
-        set, both audit chains, and the checkpoint state (Golden Rule #4 / #7 /
-        #8) — proven by the sequential-vs-parallel golden test.
+        Equivalent to :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`
+        (Golden Rule #4 / #7 / #8): the per-tuple Parquet tree is BYTE-IDENTICAL,
+        both audit chains are CONTENT-IDENTICAL MODULO TIMESTAMPS (plus the
+        supervisor ``SUPERVISOR_START`` ``workers`` key) AND verify, and the
+        checkpoint state is identical — proven by the sequential-vs-parallel golden
+        test (``test_..._modulo_ts``). ``ts_utc`` participates in the chain hash, so
+        the chains are not literally byte-for-byte across runs.
         """
         sweep_id = grid_identity(self._grid)
         total = count_sweep_tuples(self._grid)
@@ -547,6 +603,7 @@ class ParallelGridDriver:
         acc = _Accumulator()
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
+        heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
         ctx = _WorkerContext(grid=self._grid, root=self._root)
         try:
             with ProcessPoolExecutor(
@@ -563,7 +620,7 @@ class ParallelGridDriver:
                 initializer=_worker_init,
                 initargs=(ctx,),
             ) as pool:
-                self._drive(pool, resume_from, max_inflight, acc)
+                self._drive(pool, resume_from, max_inflight, heap_cap, acc)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # Record-then-re-raise — mirror the sequential ABORT contract. The
             # secondary progress/audit writes are suppressed so the halt that
@@ -626,17 +683,38 @@ class ParallelGridDriver:
         pool: ProcessPoolExecutor,
         resume_from: int,
         max_inflight: int,
+        heap_cap: int,
         acc: _Accumulator,
     ) -> None:
-        """Interleave dispatch + drain, applying outcomes in enumeration order."""
+        """Interleave dispatch + drain, applying outcomes in enumeration order.
+
+        Two bounds keep the driver honest under head-of-line blocking:
+
+        * DISPATCH is gated on BOTH ``len(pending) < max_inflight`` (the outstanding
+          FUTURES window) AND ``len(self._heap) < heap_cap`` (the reorder-heap cap),
+          so completed-but-not-yet-applied sibling outcomes cannot accumulate
+          unboundedly while the head tuple is slow — the heap stays O(pool_size)
+          (:data:`_HEAP_CAP_MULTIPLIER`). ``next_apply`` is ALWAYS already in the
+          heap or in ``pending`` (dispatch is strictly in enumeration order and
+          never skips an index), so pausing dispatch on a full heap can never
+          deadlock — the head is drained by step 2 or awaited by step 3.
+        * The STALL clock (``last_progress``) is reset on ANY forward progress —
+          a future COMPLETION (step 3) OR an APPLY (step 2). Crucially it is reset
+          on a future resolving even when NOTHING is applyable yet (a slow head
+          blocks the apply prefix while siblings complete), so a slow-but-
+          progressing head with completing siblings never spuriously raises
+          ``SweepStallError`` — only a genuine no-completion, no-apply hang does.
+        """
         pending: dict[Future[TupleWorkResult], SweepTuple] = {}
         last_progress = self._monotonic()
         enumerator = enumerate(iter_sweep_tuples(self._grid))
         exhausted = False
 
         while not exhausted or pending or self._heap:
-            # 1. Dispatch until the in-flight window is full (or the grid is done).
-            while not exhausted and len(pending) < max_inflight:
+            # 1. Dispatch until the in-flight window OR the heap cap is full (or the
+            #    grid is done). Coupling dispatch to the heap cap is the memory bound
+            #    under head-of-line blocking (Golden Rule #5).
+            while not exhausted and len(pending) < max_inflight and len(self._heap) < heap_cap:
                 try:
                     index, tuple_ = next(enumerator)
                 except StopIteration:
@@ -647,13 +725,18 @@ class ParallelGridDriver:
                 if slot is not None:
                     heapq.heappush(self._heap, slot)
 
-            # 2. Apply every contiguous outcome the heap now permits (in order).
+            # 2. Apply every contiguous outcome the heap now permits (in order) —
+            #    an APPLY is forward progress and resets the stall clock.
             if self._apply_ready_prefix(acc):
                 last_progress = self._monotonic()
 
-            # 3. If nothing is applyable yet, wait for the NEXT worker result.
+            # 3. If nothing is applyable yet, wait for the NEXT worker result. A
+            #    future COMPLETING is itself forward progress (even when the slow
+            #    head keeps the apply prefix blocked), so it resets the stall clock
+            #    BEFORE any apply — this is the head-of-line liveness fix.
             if pending and (not self._heap or self._heap[0].index != self._next_apply):
                 slot = self._await_next_result(pending, last_progress)
+                last_progress = self._monotonic()
                 heapq.heappush(self._heap, slot)
                 if self._apply_ready_prefix(acc):
                     last_progress = self._monotonic()
@@ -695,9 +778,13 @@ class ParallelGridDriver:
     ) -> _Outcome:
         """Block for the next completed worker future; STALL-guard the wait.
 
-        Raises :class:`SweepStallError` if no result arrives within
-        ``stall_seconds`` while work is in flight — a wedged worker's future never
-        resolves, so this is the ONLY guarantee the sweep cannot hang forever.
+        Raises :class:`SweepStallError` if NO future completes within
+        ``stall_seconds`` of the last progress (``last_progress`` — reset by the
+        caller on any completion or apply) while work is in flight. A wedged
+        worker's future never resolves, so this is the guarantee the sweep cannot
+        hang forever; because the clock measures time-since-last-COMPLETION, a
+        slow-but-progressing head with completing siblings never trips it (only a
+        genuine no-completion hang does).
         """
         deadline = last_progress + self._stall_seconds
         timeout = max(0.0, deadline - self._monotonic())
@@ -936,7 +1023,6 @@ class AuditWriterLike(Protocol):
         ts_utc: float | None = None,
     ) -> object:
         """Append one audit line; the return value is ignored by the driver."""
-        ...
 
 
 def run_parallel_grid(
@@ -955,8 +1041,10 @@ def run_parallel_grid(
     The parallel entry point (DEC-MULTICORE-SWEEP-PHASE1-001) — the twin of
     :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`, scoped to the
     PRODUCTION digest path. HARD-REFUSES ``workers < 2`` (the caller runs the
-    sequential path itself for ``workers == 1``). The result set, both audit
-    chains, and the checkpoint are BIT-FOR-BIT identical to a sequential run.
+    sequential path itself for ``workers == 1``). The per-tuple Parquet tree is
+    BYTE-IDENTICAL to a sequential run, both audit chains are CONTENT-IDENTICAL
+    MODULO TIMESTAMPS (plus the supervisor ``workers`` key) AND verify, and the
+    checkpoint is identical.
 
     Parameters mirror :class:`ParallelGridDriver` (``root`` replaces the
     sequential ``store_for``: workers rebuild ``store_for`` from ``(root, grid)``,
