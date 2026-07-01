@@ -1090,6 +1090,17 @@ def pull_contract_candles(
     if run_parallel is None:
         run_parallel = _option_run_parallel(dry_run=dry_run, session_rate=session_rate)
     client, sink = client_factory(lake_root)
+    # Register the F&O client pool's shared MEASURED-rate meter into the session controller
+    # (DEC-RATE-WIDGET-FNO-MEASURED-001) so the observe-only RatePanelSampler — which holds
+    # only the session controller, NOT this deep-in-the-spine pool — can read the transport
+    # CallMeter's real ``effective_rps`` during the long F&O phase and push the TRUE completed
+    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). Best-effort +
+    # observe-only: a dry-run / no-``session_rate`` pull, or a client with no ``.meter``
+    # (the empty-candle dry-run client), is a silent no-op. The lazy import avoids any
+    # module-load ordering coupling with pull_controller.
+    from brutex.dashboard.pull_controller import register_pull_meter
+
+    register_pull_meter(session_rate, client)
     # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) for the F&O
     # (futures + options) pull — the F&O TWIN of the spot spine's wiring
     # (DEC-FNO-ASYNC-PIPELINE-WIRE-001). When built (DEFAULT ON; ``None`` for a dry-run / the
