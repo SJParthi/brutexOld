@@ -1,0 +1,84 @@
+# systemd unit template — Linux auto-restart for the BruteX sweep supervisor
+# (DEC-SUPERVISOR-AUTORESTART-001).
+#
+# Restart=on-failure makes systemd RELAUNCH the process on a NON-ZERO exit (a
+# crash) or a reboot — but NOT when `brutex supervisor` exits 0. This template is
+# for the ALWAYS-ON `--schedule` mode, whose supervisor keeps running and only
+# ever exits non-zero (a give-up). `Restart=always` would relaunch even a CLEAN
+# completion — under a one-shot `--once` sweep that means an instant spin loop the
+# moment the sweep FINISHES. So run `--once` by hand or from a timer, NOT under
+# this always-on unit; `on-failure` relaunches a crash / reboot but lets a genuine
+# clean completion actually stop.
+#
+# This is the REAL hard-reboot survival the in-process `brutex supervisor` cannot
+# provide on its own (that one only survives a CHILD crash while the supervisor
+# itself is alive; this survives the supervisor / machine dying too).
+#
+# This runs `brutex supervisor`, which in turn runs `brutex sweep-daemon` as its
+# child and auto-relaunches it with exponential backoff on a crash. The two
+# layers are complementary: systemd keeps the SUPERVISOR alive across reboots;
+# the supervisor keeps the SWEEP DAEMON alive across in-session crashes.
+#
+# ── INSTALL (edit the {{PLACEHOLDERS}} first) ──
+#   1. Replace every {{PLACEHOLDER}} below with an ABSOLUTE path / value.
+#   2a. SYSTEM service:  sudo cp brutex-supervisor.service /etc/systemd/system/
+#       sudo systemctl daemon-reload
+#       sudo systemctl enable --now brutex-supervisor.service
+#   2b. USER service (no root; survives login, not a headless reboot unless you
+#       `loginctl enable-linger <user>`):
+#       cp brutex-supervisor.service ~/.config/systemd/user/
+#       systemctl --user daemon-reload
+#       systemctl --user enable --now brutex-supervisor.service
+#       loginctl enable-linger "$USER"   # keep the user service up across reboots
+#
+# ── STATUS / LOGS / STOP ──
+#   systemctl status brutex-supervisor.service      # (add --user for a user unit)
+#   journalctl -u brutex-supervisor.service -f      # (add --user for a user unit)
+#   systemctl stop brutex-supervisor.service
+#
+# A systemd `stop` sends SIGTERM, which the `brutex supervisor` process handles
+# by shutting its sweep-daemon child down gracefully and NOT relaunching.
+#
+# See docs/runbooks/supervisor-autorestart.md for the full runbook.
+
+[Unit]
+Description=BruteX sweep supervisor (auto-relaunch the sweep daemon)
+Documentation=file://{{BRUTEX_REPO_DIR}}/docs/runbooks/supervisor-autorestart.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# {{BRUTEX_USER}} — the account that owns ~/.brutex + the lake. Omit both User=
+# and Group= for a `--user` unit (systemctl --user already runs as you).
+User={{BRUTEX_USER}}
+
+# {{BRUTEX_REPO_DIR}} = the checkout root, e.g. /home/you/bruteX
+WorkingDirectory={{BRUTEX_REPO_DIR}}
+
+# {{BRUTEX_VENV_BIN}} = the venv's bin dir, e.g. /home/you/bruteX/.venv/bin
+# Everything after `--` is forwarded verbatim to `brutex sweep-daemon`. This is
+# the ALWAYS-ON `--schedule` mode; do NOT swap in `--once` here (a clean --once
+# completion + `Restart=always` spin-loops — that is why this unit uses on-failure).
+ExecStart={{BRUTEX_VENV_BIN}}/brutex supervisor -- --schedule daily@02:30
+
+# BruteX reads its lake root here; the Groww creds live in ~/.brutex (creds
+# file), NEVER in the unit — never put a secret in a systemd unit file.
+Environment=BRUTEX_LAKE_ROOT={{BRUTEX_LAKE_ROOT}}
+
+# Relaunch on a NON-ZERO exit (crash) or a reboot — NOT on a clean exit 0 (which
+# would spin-loop a completed `--once` sweep). `on-failure` is correct for the
+# always-on `--schedule` mode; the supervisor only exits non-zero on a give-up.
+Restart=on-failure
+# Back off 30 s between systemd relaunches so a hard crash-loop cannot spin the
+# CPU (systemd's OWN throttle, on top of the supervisor's exponential backoff).
+RestartSec=30
+
+# On `systemctl stop`, send SIGTERM (the supervisor's graceful-stop signal) and
+# give it up to 30 s to shut its child down before systemd SIGKILLs the group.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
