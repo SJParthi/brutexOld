@@ -15,13 +15,19 @@
  *   - req/10min (MEASURED rolling-600s issue count — the new metric);
  *   - req/hour (MEASURED rolling-3600s count, with the older "obs" extrapolation beside it).
  *
- * HONEST achieved (DEC-RATE-WIDGET-FNO-HONEST-001): req/sec "achieved" is the MEASURED
- * COMPLETED rate from the transport call-meter, which is only wired during the SPOT phase.
- * During the metadata + F&O phases the meter is unreachable, so "achieved" reads an honest 0
- * (no fabricated completed-rate) and the expanded view instead shows "req/min rate" — the
- * controller's ADMISSION-derived per-minute average expressed as r/s (recent_minute / 60),
- * which is openly an ISSUED-calls average, NOT a measured completed throughput. The stall
- * light during those phases tracks whether ANY calls are being issued (req/min > 0).
+ * HONEST achieved (DEC-RATE-WIDGET-FNO-HONEST-001, extended by
+ * DEC-RATE-WIDGET-FNO-MEASURED-001): req/sec "achieved" is the MEASURED COMPLETED rate from
+ * the transport call-meter. The pull now REGISTERS the client pool's shared meter into the
+ * session controller at every build site, so "achieved" reads the real measured completed
+ * rate across the SPOT phase AND the metadata + F&O phases (once the pool is built). It falls
+ * back to an honest 0/absent only before a meter is registered — e.g. a dry-run or a pre-pool
+ * phase — never a fabricated completed-rate; in that fallback case the expanded view instead
+ * shows "req/min rate", the controller's ADMISSION-derived per-minute average expressed as r/s
+ * (recent_minute / 60), which is openly an ISSUED-calls average, NOT a measured completed
+ * throughput. The stall light now reads the MEASURED completed rate wherever a meter is
+ * registered (so an issued-but-all-failing F&O pull whose completed rate sits at/below the
+ * floor reads STALLED, not a fake-alive "flowing"); only before a meter exists does it fall
+ * back to whether ANY calls are being issued (req/min > 0).
  *
  * BIGGER, TRUSTWORTHY view (DEC-RATE-MONITOR-EXPAND-001): clicking the pill (or its
  * "expand" affordance) opens a LARGE fixed-position overlay panel — easy to read at a
@@ -256,8 +262,10 @@
         "Evidence (real counts from the rate controller's per-second issue ring): " +
         "the rates above ARE these trailing-window issue counts — req/sec = count in the " +
         "last 1s, req/min = last 60s, req/10min = last 600s, req/hour = last 3600s. " +
-        "req/sec 'achieved' is the MEASURED completed rate (wired only on the spot phase); " +
-        "'req/min rate' is the admission per-minute average (issued ÷ 60), NOT a completed rate.",
+        "req/sec 'achieved' is the MEASURED completed rate wherever the client pool's meter is " +
+        "registered (spot AND metadata/F&O once the pool is built), an honest 0 only before a " +
+        "meter exists; 'req/min rate' is the admission per-minute average (issued ÷ 60), NOT a " +
+        "completed rate.",
     });
     var card = el("div", { cls: "bxrm-card" }, [ehead, grid, evidence]);
     var o = el("div", { id: OVERLAY_ID }, [card]);

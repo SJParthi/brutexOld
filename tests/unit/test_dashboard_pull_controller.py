@@ -42,6 +42,7 @@ from brutex.dashboard.pull_controller import (
     parse_symbol_list,
     pull_all_spot,
     pull_candles,
+    register_pull_meter,
     resolve_candle_range,
     resolve_fetch_intervals,
     resolve_pull_symbols,
@@ -993,6 +994,176 @@ class TestSessionRateController:
         assert ctl.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
         assert snap["current_rps"] == 8.0
         assert GROWW_RATE_LIMIT_RPS_CEILING * 60 <= GROWW_RATE_LIMIT_PER_MIN
+
+
+class TestSessionRateControllerMeter:
+    """``register_meter`` / ``peek_meter`` — publish the pool's MEASURED-rate meter.
+
+    DEC-RATE-WIDGET-FNO-MEASURED-001: the pull build sites register the live client pool's
+    shared transport ``CallMeter`` so the observe-only ``RatePanelSampler`` (which holds
+    only the session controller) can read the REAL completed-rate during the metadata + F&O
+    phases, not the admission average.
+    """
+
+    def test_peek_meter_none_before_registration(self) -> None:
+        """peek_meter() reads None until a real pull registers a meter — never builds one."""
+        holder = SessionRateController()
+        assert holder.peek_meter() is None  # never built a controller; never a meter either
+
+    def test_register_then_peek_returns_same_meter(self) -> None:
+        """A registered meter is returned VERBATIM by peek_meter (the same instance)."""
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        meter = CallMeter()
+        holder.register_meter(meter)
+        assert holder.peek_meter() is meter
+
+    def test_register_none_is_ignored_leaving_prior_meter_intact(self) -> None:
+        """Registering None NEVER blanks a prior live meter (a defensive best-effort guard).
+
+        A client that (defensively) exposed no ``.meter`` would register ``None``; that must
+        not clear a meter a real pool already published, so a transient factory oddity never
+        blinds the sampler mid-pull.
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        meter = CallMeter()
+        holder.register_meter(meter)
+        holder.register_meter(None)  # a no-meter client → ignored, prior meter kept
+        assert holder.peek_meter() is meter
+
+    def test_register_overwrites_with_new_pools_meter(self) -> None:
+        """A second pull's pool meter OVERWRITES the first (the pool holds ONE aggregate)."""
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        first = CallMeter()
+        second = CallMeter()
+        holder.register_meter(first)
+        holder.register_meter(second)
+        assert holder.peek_meter() is second
+
+    def test_concurrent_register_peek_and_meter_writes_never_tear(self) -> None:
+        """Racing register_meter/peek_meter against live meter start/stop is torn-read-free.
+
+        DEC-RATE-WIDGET-FNO-MEASURED-001 (concurrency): the sampler thread reads
+        ``peek_meter()`` then ``snapshot()`` while the fetch worker races ``start()``/
+        ``stop()`` on the SAME meter and a rebuild races ``register_meter()``. A lightweight
+        port of the verification stress test: every read returns a fresh scalar dict with a
+        non-negative ``effective_rps`` and no exception is raised on any thread — the holder
+        lock guards the single-slot handle and the meter lock guards its own gauges, so the
+        reader's snapshot can never crash on a mutation-during-iteration or observe a torn /
+        negative rate.
+        """
+        import threading
+
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        meter = CallMeter()
+        holder.register_meter(meter)
+        stop_flag = threading.Event()
+        errors: list[Exception] = []
+
+        def _writer() -> None:
+            try:
+                while not stop_flag.is_set():
+                    meter.start()
+                    meter.stop(elapsed_ms=1.0, completed=True)
+            except Exception as exc:  # pragma: no cover - only on a real race bug
+                errors.append(exc)
+
+        def _rebuilder() -> None:
+            try:
+                while not stop_flag.is_set():
+                    holder.register_meter(CallMeter())
+                    holder.register_meter(meter)
+            except Exception as exc:  # pragma: no cover - only on a real race bug
+                errors.append(exc)
+
+        def _reader() -> None:
+            try:
+                while not stop_flag.is_set():
+                    live = holder.peek_meter()
+                    if live is not None:
+                        snap = live.snapshot()
+                        assert snap["effective_rps"] >= 0.0
+            except Exception as exc:  # pragma: no cover - only on a real race bug
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_writer),
+            threading.Thread(target=_rebuilder),
+            threading.Thread(target=_reader),
+            threading.Thread(target=_reader),
+        ]
+        for thread in threads:
+            thread.start()
+        stop_flag.wait(0.5)
+        stop_flag.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+            assert not thread.is_alive()
+        assert errors == []
+
+
+class TestRegisterPullMeter:
+    """``register_pull_meter`` — the COMMON extract-and-register seam the build sites call."""
+
+    def test_none_session_is_a_noop(self) -> None:
+        """A None session_rate (dry-run / injected factory) → no-op, never raises."""
+        from brutex.adapters.call_meter import CallMeter
+
+        class _Client:
+            meter = CallMeter()
+
+        # No session → nothing to register into; must simply return without error.
+        register_pull_meter(None, _Client())
+
+    def test_registers_meter_from_a_client_pool_directly(self) -> None:
+        """A source with a ``.meter`` (a ClientPool / GrowwClient) registers it directly."""
+        from brutex.adapters.call_meter import CallMeter
+
+        meter = CallMeter()
+
+        class _Pool:
+            meter = None  # placeholder overridden below
+
+        pool = _Pool()
+        pool.meter = meter  # type: ignore[assignment]
+        holder = SessionRateController()
+        register_pull_meter(holder, pool)
+        assert holder.peek_meter() is meter
+
+    def test_registers_meter_from_an_adapters_client(self) -> None:
+        """A source with no ``.meter`` but a ``.client.meter`` (an adapter) registers that."""
+        from brutex.adapters.call_meter import CallMeter
+
+        meter = CallMeter()
+
+        class _Client:
+            def __init__(self, m: CallMeter) -> None:
+                self.meter = m
+
+        class _Adapter:
+            def __init__(self, c: _Client) -> None:
+                self.client = c
+
+        holder = SessionRateController()
+        register_pull_meter(holder, _Adapter(_Client(meter)))
+        assert holder.peek_meter() is meter
+
+    def test_source_with_no_meter_anywhere_is_a_noop(self) -> None:
+        """A source with neither ``.meter`` nor ``.client.meter`` leaves the holder empty."""
+
+        class _Bare:
+            pass
+
+        holder = SessionRateController()
+        register_pull_meter(holder, _Bare())
+        assert holder.peek_meter() is None
 
 
 # ── parse_symbol_list + resolve_pull_symbols — the multi-select pull ──
