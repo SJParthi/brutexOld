@@ -136,17 +136,17 @@ class TestReadOnlyMintBlocked:
         assert fake.parameters == {}  # nothing ever written to SSM
 
 
-class TestForcedReauthAlsoBlocked:
-    """A forced reauth on a read-only host is a mint attempt ⇒ fails LOUD (never local mint).
+class TestForcedReauthWithoutReReadHookStillFailsLoud:
+    """A refresher WITHOUT the read-only re-read hook still fails LOUD on a forced reauth.
 
-    ``SdkRefresher.reauth`` is a FORCED mint (it is invoked only because the current token
-    was rejected, so it never re-reads the same-session cache). On a read-only host a
-    forced mint is exactly what BruteX must NOT do — the Lambda owns re-minting. HONEST
-    envelope: the read-only store cannot suppress the mint network CALL (that is the
-    injected ``token_factory``), only the local WRITE — but the ``store`` hook fails LOUD
-    the moment the persist is attempted, so there is NEVER a silent local token written,
-    and the pull halts with a clear error. BruteX picks up the Lambda's re-minted token on
-    the NEXT cold-start (a fresh refresher / process restart), proven below.
+    This pins the SdkRefresher PRIMITIVE's legacy behaviour: when ``readonly_reread`` is NOT
+    wired (a caller that only threads ``token_cache_load``/``store``), ``reauth`` FORCE-MINTS,
+    which on a read-only store hits the fail-loud ``store`` (BruteX never writes the shared
+    token). The PRODUCTION path (``build_live_client``) DOES wire the re-read hook so it
+    self-heals with NO restart — proven in :class:`TestReadOnlyReauthSelfHeals` below
+    (DEC-BROKER-READONLY-REAUTH-REREAD-001). HONEST envelope: the store cannot suppress the
+    mint network CALL (the injected ``token_factory``), only the local WRITE — so this
+    primitive-level path still surfaces a loud, non-silent failure.
     """
 
     def test_forced_reauth_fails_fast(self) -> None:
@@ -173,6 +173,63 @@ class TestForcedReauthAlsoBlocked:
         minter = _CountingMinter()
         assert _refresher(_store(fake), minter).current_sdk() == "TOKEN-V2"
         assert minter.mints == 0
+
+
+def _readonly_refresher(
+    store: ParameterStoreTokenStore, minter: Callable[[str, str], str]
+) -> SdkRefresher:
+    """A refresher wired EXACTLY as production (``build_live_client`` with a read-only store).
+
+    ``readonly_reread`` is the SAME read-only store's ``load``, so a mid-run reauth RE-READS
+    the shared token instead of minting — the DEC-BROKER-READONLY-REAUTH-REREAD-001 self-heal.
+    """
+    return SdkRefresher(
+        _CREDS,
+        token_factory=minter,
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_str_sdk,
+        token_cache_load=store.load,
+        token_cache_store=store.store,
+        readonly_reread=store.load,
+        clock=lambda: _NOW,
+    )
+
+
+class TestReadOnlyReauthSelfHeals:
+    """DEC-BROKER-READONLY-REAUTH-REREAD-001 — the read-only reauth RE-READS SSM, self-heals.
+
+    The FIX for the shared-AWS gap: on a mid-run token rejection a read-only host no longer
+    tries to re-mint (hitting the fail-loud store → a manual restart). It RE-READS the
+    Lambda-minted token from SSM and adopts it — the process self-heals the 06:00-IST
+    rotation with NO restart. The refresher is wired exactly as production
+    (``build_live_client`` threads the read-only store's ``load`` as ``readonly_reread``).
+    """
+
+    def test_reauth_adopts_lambda_reminted_token_no_mint_no_restart(self) -> None:
+        """BEFORE: reauth re-mints → fails loud → restart. AFTER: re-reads V2, self-heals."""
+        fake = FakeAwsClient(parameters={_TOKEN_PATH: "TOKEN-V1"})
+        store = _store(fake)
+        minter = _CountingMinter()
+        refresher = _readonly_refresher(store, minter)
+        assert refresher.current_sdk() == "TOKEN-V1"
+        # The Lambda rotates the shared token at ~06:05 IST; the current token is rejected.
+        fake.parameters[_TOKEN_PATH] = "TOKEN-V2"
+        new_gen = refresher.reauth(refresher.current_generation())
+        assert new_gen == 1  # a real refresh (the re-read), NOT a no-op
+        assert refresher.current_sdk() == "TOKEN-V2"  # the fresh Lambda token was ADOPTED
+        assert minter.mints == 0  # BruteX NEVER minted — it re-read (read-only)
+        assert fake.parameters == {_TOKEN_PATH: "TOKEN-V2"}  # BruteX never wrote SSM
+
+    def test_reauth_still_stale_is_retryable_not_a_crash(self) -> None:
+        """SSM still holds the SAME dead token (Lambda not minted yet) ⇒ retryable, no restart."""
+        from brutex.adapters.groww.errors import GrowwTokenStillStaleError, is_retryable
+
+        fake = FakeAwsClient(parameters={_TOKEN_PATH: "TOKEN-V1"})
+        refresher = _readonly_refresher(_store(fake), _CountingMinter())
+        with pytest.raises(GrowwTokenStillStaleError) as exc:
+            refresher.reauth(refresher.current_generation())  # SSM unchanged
+        assert is_retryable(exc.value)  # the window quarantines + re-pulls later
+        assert refresher.current_generation() == 0  # never advanced, never looped
 
 
 class TestReadDegradesNeverRaises:
