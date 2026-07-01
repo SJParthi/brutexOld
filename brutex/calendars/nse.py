@@ -906,7 +906,8 @@ def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
 #     three entries are the COMPLETE set of Budget weekend sessions in scope.
 #
 # Source: NSE special-trading-session circulars + Business Standard /
-# Good Returns coverage of Budget-Day Saturday/Sunday sessions.
+# Good Returns coverage of Budget-Day Saturday/Sunday sessions
+# (DEC-CALENDAR-2020-BUDGET-SATURDAY-001).
 
 #: Special trading sessions on dates that would otherwise be non-trading
 #: (Saturday / Sunday). Keyed by date; value is (open, close) IST tuple.
