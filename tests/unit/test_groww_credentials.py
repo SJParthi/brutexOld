@@ -268,6 +268,52 @@ class TestResolveGroww:
         out = resolve_groww_file_credentials(path=tmp_path / "nope.json")
         assert out == GrowwFileCredentials(api_key="k", totp_secret="s")
 
+    def test_aws_loader_supplies_both_fields(self, tmp_path: Path) -> None:
+        # env empty + no file ⇒ the injected AWS tier resolves BOTH fields
+        # (exercises _resolve_aws_credentials(aws_loader) and the aws-branch of
+        # each field).
+        calls: list[int] = []
+
+        def _aws_loader() -> GrowwFileCredentials:
+            calls.append(1)
+            return GrowwFileCredentials(api_key="aws_key", totp_secret="aws_secret")
+
+        out = resolve_groww_file_credentials(
+            {}, path=tmp_path / "nope.json", aws_loader=_aws_loader
+        )
+        assert out == GrowwFileCredentials(api_key="aws_key", totp_secret="aws_secret")
+        assert calls == [1]
+
+    def test_env_wins_over_aws_loader(self, tmp_path: Path) -> None:
+        # env satisfies BOTH fields ⇒ the AWS tier is short-circuited (loader
+        # never invoked) and env wins.
+        def _aws_loader() -> GrowwFileCredentials:  # pragma: no cover - must not run
+            raise AssertionError("AWS loader must not be consulted when env is complete")
+
+        env = {ENV_GROWW_API_KEY: "env_key", ENV_GROWW_TOTP_SECRET: "env_secret"}
+        out = resolve_groww_file_credentials(
+            env, path=tmp_path / "nope.json", aws_loader=_aws_loader
+        )
+        assert out == GrowwFileCredentials(api_key="env_key", totp_secret="env_secret")
+
+    def test_aws_loader_none_falls_back_to_file(self, tmp_path: Path) -> None:
+        # env open + injected AWS tier returns None ⇒ the file supplies both.
+        path = tmp_path / "credentials.json"
+        save_groww_credentials(_groww(), path=path)
+        out = resolve_groww_file_credentials({}, path=path, aws_loader=lambda: None)
+        assert out == _groww()
+
+    def test_env_supplies_api_key_aws_supplies_totp(self, tmp_path: Path) -> None:
+        # Mixed tier: env gives the api_key, the AWS loader gives the totp.
+        def _aws_loader() -> GrowwFileCredentials:
+            return GrowwFileCredentials(api_key="aws_key", totp_secret="aws_secret")
+
+        env = {ENV_GROWW_API_KEY: "env_key"}
+        out = resolve_groww_file_credentials(
+            env, path=tmp_path / "nope.json", aws_loader=_aws_loader
+        )
+        assert out == GrowwFileCredentials(api_key="env_key", totp_secret="aws_secret")
+
 
 class TestPresentGroww:
     def test_true_when_resolvable(self, tmp_path: Path) -> None:
