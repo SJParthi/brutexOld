@@ -33,6 +33,7 @@ that route through :func:`cache_tier_ceiling`.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 from brutex.indicators.market_structure import MarketStructureState
 
@@ -49,31 +50,73 @@ ITERATIONS = 200_000
 #: Warm-up ``update`` calls before each timed phase.
 _WARMUP = 2_000
 
-#: A representative OHLC-ish bar in int64 paisa (the update's argument unit).
-_BASE_HIGH = 2_000_000
-_BASE_LOW = 1_990_000
+#: Mid price in int64 paisa the oscillation is anchored to (the update's unit).
 _BASE_CLOSE = 1_995_000
+#: Half-spread of each bar's high/low around its close (paisa).
+_HALF_SPREAD = 300
+#: Bars per spike period: a single strict-peak bar + a single strict-trough bar.
+_PERIOD = 12
+#: Cycles per drift ramp before it saws back to zero (so later peaks/troughs
+#: re-cross earlier CONFIRMED swings → the BOS/CHoCH resolution branches fire).
+_DRIFT_CYCLES = 8
+#: Paisa the peak/trough level climbs per cycle inside a drift ramp.
+_DRIFT_STEP = 800
+#: Paisa a spike bar juts above (peak) / below (trough) the drifted mid.
+_SPIKE = 4_000
+#: Gentle per-phase slope on the non-spike bars (keeps every level distinct so
+#: a spike bar is a STRICT local extremum over its fixed 2k neighbours).
+_PHASE_SLOPE = 100
 
 
 def _bar(seq: int) -> tuple[int, int, int]:
-    """A deterministic, size-independent (high, low, close) that oscillates.
+    """A deterministic, size-independent (high, low, close) that fires BOS/CHoCH.
 
-    The close swings above/below the confirmed swing levels often enough to
-    exercise BOTH the BOS/CHoCH resolution branches AND the swing-confirmation
-    branch — so the timed op is the REAL mixed hot path, not a no-op fast path.
+    The series is a strictly periodic train of isolated single-bar spikes: within
+    each fixed ``_PERIOD``-bar cycle exactly one bar juts up to a strict local
+    maximum (a confirmable swing HIGH) and exactly one juts down to a strict local
+    minimum (a confirmable swing LOW), while a sawtooth ``drift`` walks the whole
+    train up over ``_DRIFT_CYCLES`` cycles then resets. That drift makes each new
+    peak/trough re-cross the PREVIOUSLY confirmed swing high/low, so the close
+    actually breaks the confirmed levels — exercising the real BOS/CHoCH
+    resolution branches (``bos_*`` / ``choch_*`` = ``True``) AND the per-bar
+    ``_confirm_centre_swing`` scan, not just the no-op warm-up fast path. The
+    train is fully periodic (a pure function of ``seq``, no RNG, no growing
+    state), so the timed op is byte-for-byte identical at 1K deep and 100K deep —
+    which is exactly what makes the O(1) ratio meaningful.
     """
-    high = _BASE_HIGH + (seq % 1_000)
-    low = _BASE_LOW - (seq % 1_000)
-    close = _BASE_CLOSE + ((seq * 7) % 1_500)
-    return high, low, close
+    phase = seq % _PERIOD
+    cycle = seq // _PERIOD
+    drift = (cycle % _DRIFT_CYCLES) * _DRIFT_STEP
+    mid = _BASE_CLOSE + drift
+    if phase == 3:  # single strict PEAK bar → confirmable swing high
+        close = mid + _SPIKE
+    elif phase == 9:  # single strict TROUGH bar → confirmable swing low
+        close = mid - _SPIKE
+    else:  # distinct sloped mid levels so the spike stays a strict extremum
+        close = mid + (phase - 6) * _PHASE_SLOPE
+    return close + _HALF_SPREAD, close - _HALF_SPREAD, close
 
 
-def _time_update(prefilled_bars: int) -> float:
-    """Mean ns per ``update`` AFTER the session already consumed ``prefilled_bars``.
+@dataclass(frozen=True)
+class _TimedPhase:
+    """Result of one timed steady-state phase: mean latency + fired-signal tally."""
+
+    #: Mean ns per ``update`` in the timed steady-state region.
+    mean_ns: float
+    #: Total BOS ``True`` signals (bullish + bearish) fired in the timed region.
+    bos_fired: int
+    #: Total CHoCH ``True`` signals (bullish + bearish) fired in the timed region.
+    choch_fired: int
+
+
+def _time_update(prefilled_bars: int) -> _TimedPhase:
+    """Time ``update`` AFTER the session already consumed ``prefilled_bars``.
 
     Proves the per-bar cost is independent of session depth: the fixed-size ring
     is fully primed and ``count`` carries the whole history, yet the steady-state
-    ``update`` cost must match a shallow session's.
+    ``update`` cost must match a shallow session's. Also tallies the BOS/CHoCH
+    ``True`` signals fired in the timed region so the caller can assert the timed
+    op really is the mixed signal-firing hot path (not a warm-up no-op).
     """
     state = MarketStructureState()  # k=2 default (production 5-bar fractal)
     for i in range(prefilled_bars):
@@ -82,11 +125,19 @@ def _time_update(prefilled_bars: int) -> float:
     for k in range(_WARMUP):  # warm up branch predictor + attribute caches
         state.update(*_bar(base + k))
     start = base + _WARMUP
+    bos_fired = 0
+    choch_fired = 0
     t0 = time.perf_counter_ns()
     for k in range(ITERATIONS):
-        state.update(*_bar(start + k))
+        sig = state.update(*_bar(start + k))
+        bos_fired += sig.bos_bullish + sig.bos_bearish
+        choch_fired += sig.choch_bullish + sig.choch_bearish
     t1 = time.perf_counter_ns()
-    return (t1 - t0) / ITERATIONS
+    return _TimedPhase(
+        mean_ns=(t1 - t0) / ITERATIONS,
+        bos_fired=bos_fired,
+        choch_fired=choch_fired,
+    )
 
 
 def test_market_structure_update_is_o1_in_session_bars() -> None:
@@ -97,13 +148,30 @@ def test_market_structure_update_is_o1_in_session_bars() -> None:
     it must NOT scale with the number of bars already fed (bits 56-59,
     DEC-NIFTY-BOS-CHOCH-001). A regression to a session-history re-scan blows this.
     """
-    t_small = _time_update(N_SMALL)
-    t_big = _time_update(N_BIG)
-    ratio = t_big / max(t_small, 1.0)
+    small = _time_update(N_SMALL)
+    big = _time_update(N_BIG)
+
+    # The timed op must be the REAL mixed hot path: the price train breaks the
+    # confirmed swing levels, so both a BOS and a CHoCH ``True`` branch actually
+    # fire in the timed region (not just the warm-up no-op fast path). Enforcing
+    # it here keeps the ``_bar`` docstring honest (Golden Rule #10) — a generator
+    # that stopped firing signals would silently downgrade this to a no-op bench.
+    for phase, label in ((small, "shallow"), (big, "deep")):
+        assert phase.bos_fired > 0, (
+            f"{label} timed phase fired ZERO BOS True signals — the bench would be "
+            f"a no-op fast path, not the mixed BOS/CHoCH hot path it claims."
+        )
+        assert phase.choch_fired > 0, (
+            f"{label} timed phase fired ZERO CHoCH True signals — the bench would "
+            f"be a no-op fast path, not the mixed BOS/CHoCH hot path it claims."
+        )
+
+    ratio = big.mean_ns / max(small.mean_ns, 1.0)
 
     assert ratio < ratio_ceiling(5.0), (
         f"MarketStructureState.update latency ratio {ratio:.2f}× ({N_BIG} vs "
         f"{N_SMALL} session bars) exceeds the CI ceiling — the BOS/CHoCH per-bar "
         f"path may have regressed away from O(1) (e.g. an unbounded window or a "
-        f"session-history re-scan). t_small={t_small:.1f}ns, t_big={t_big:.1f}ns."
+        f"session-history re-scan). t_small={small.mean_ns:.1f}ns, "
+        f"t_big={big.mean_ns:.1f}ns."
     )
