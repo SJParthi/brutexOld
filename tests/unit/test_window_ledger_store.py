@@ -1324,7 +1324,7 @@ class TestSaveMergeCrossProcess:
         # read-merge-write so ALL 8 rows land (no lost update, any interleaving).
         n = 8
         barrier = threading.Barrier(n)
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def _save_one(i: int) -> None:
             ledger = WindowLedger()
@@ -1332,7 +1332,10 @@ class TestSaveMergeCrossProcess:
             barrier.wait(timeout=10.0)
             try:
                 save_window_ledger(ledger, tmp_path)
-            except BaseException as exc:  # surfaced to the main thread's assert
+            except Exception as exc:
+                # Any save failure (LakeWriteHalt / OSError / pyarrow) is an Exception
+                # subclass — captured here and surfaced to the main thread's
+                # ``errors == []`` assert (never BaseException; CodeQL py/catch-base-exception).
                 errors.append(exc)
 
         threads = [threading.Thread(target=_save_one, args=(i,)) for i in range(n)]
