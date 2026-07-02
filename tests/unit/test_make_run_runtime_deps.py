@@ -62,8 +62,12 @@ def _make_run_install_set() -> set[str]:
     pkgs = _core_deps()
     extras = project.get("optional-dependencies")
     extras = extras if isinstance(extras, dict) else {}
-    # `make run` runs `pip install -e ".[data,ui,groww]"` (the live Groww SDK + pyotp
-    # are needed for the creds probe + the live pull — DEC-MAKE-RUN-GROWW-EXTRA-001).
+    # The RAW direct entry `make run-raw` runs `pip install -e ".[data,ui,groww]"`
+    # (the live Groww SDK + pyotp are needed for the creds probe + the live pull —
+    # DEC-MAKE-RUN-GROWW-EXTRA-001). The unified `make run` delegates to ./up.sh
+    # (DEC-ONE-ENTRY-UNIFY-001), which installs the SUPERSET
+    # `.[dev,data,ui,groww,token-broker]` — so this set is the honest MINIMUM
+    # both entries provide.
     for extra in ("data", "ui", "groww"):
         for spec in _str_list(extras.get(extra)):
             pkgs.add(_norm(spec))
@@ -71,11 +75,11 @@ def _make_run_install_set() -> set[str]:
 
 
 def test_make_run_installs_data_ui_groww_extras() -> None:
-    """Ground the test's assumption: `make run` really installs `.[data,ui,groww]`."""
+    """Ground the test's assumption: `make run-raw` really installs `.[data,ui,groww]`."""
     makefile = MAKEFILE.read_text(encoding="utf-8")
     assert '".[data,ui,groww]"' in makefile, (
-        "make run no longer installs .[data,ui,groww] — update _make_run_install_set "
-        "to match the new extras it installs."
+        "make run-raw no longer installs .[data,ui,groww] — update "
+        "_make_run_install_set to match the new extras it installs."
     )
 
 
