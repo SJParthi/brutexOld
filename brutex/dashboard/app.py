@@ -50,7 +50,12 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from brutex.config.credentials import groww_credentials_present
+from brutex.adapters.ingest_common import (
+    gate_pull_credentials,
+    label_synthetic,
+    verdict_message,
+)
+from brutex.config.credentials import groww_credentials_error
 from brutex.dashboard.completeness import (
     build_completeness_scoreboard,
     categorize_instruments,
@@ -1674,6 +1679,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         spot_interval: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull — ingest one instrument's candles.
 
@@ -1697,14 +1703,13 @@ def build_app(
         (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): 1-minute is the ONLY granularity fetched
         from Groww and 1-day is DERIVED from it, so :func:`resolve_fetch_intervals`
         always resolves to ``("1minute",)`` regardless of this value.
-        ``dry_run`` is forced ``True`` automatically when Groww
-        credentials are not present (via the testable
-        :func:`brutex.config.credentials.groww_credentials_present`
-        gate — Groww is the PRIMARY spot surface post-cutover,
-        DEC-DHAN-GROWW-REMIGRATE-001), so the page never attempts a live
-        network call without creds.
+        ``dry_run`` is EXPLICIT opt-in ONLY (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001):
+        a real pull with missing/broken Groww credentials is REFUSED with a 503
+        carrying the CredentialsError's own fix text — it is never silently
+        downgraded to the synthetic dry-run (audit finding R1); pass
+        ``?dry_run=true`` for the loudly-labeled synthetic run.
         """
-        dry_run = not groww_credentials_present()
+        dry_run = _gate_pull_dry_run(dry_run, route="universe.pull")
         _LOG.info(
             "universe.pull.requested",
             symbol=symbol,
@@ -1816,6 +1821,49 @@ def build_app(
     # thread (CPython GIL → torn-state-free). `None` until the first pull lands.
     _last_pull_verdict: dict[str, dict[str, Any] | None] = {"verdict": None}
 
+    def _gate_pull_dry_run(dry_run_requested: bool, *, route: str) -> bool:
+        """Resolve a pull route's EFFECTIVE dry_run — explicit opt-in or LOUD refusal.
+
+        DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 (killing audit finding R1): every
+        pull route used to compute ``dry_run = not groww_credentials_present()``,
+        so ANY Groww/AWS credential failure SILENTLY swapped the real pull for
+        the synthetic ``(SyntheticSpotAdapter, NullBarSink)`` pair and reported
+        the pull GREEN with counts while ZERO real bars landed — and the
+        :class:`~brutex.config.credentials_types.CredentialsError`'s actionable
+        fix text was discarded at the gate. Now the ONE shared gate
+        (:func:`~brutex.adapters.ingest_common.gate_pull_credentials`, also run
+        by the CLI — CLAUDE.md §11 COMMON) decides:
+
+        * ``dry_run_requested=True`` (the explicit ``?dry_run=true`` param) →
+          synthetic runs, loudly labeled — credentials irrelevant.
+        * credentials resolve → the REAL pull proceeds (``False``).
+        * otherwise → **HTTP 503** whose detail is the relayed CredentialsError
+          fix text (whatever env var / SSM parameter it names — DYNAMIC, no
+          hardcoding), the same text logged at ERROR and stamped into the
+          ``/pull-verdict`` banner slot as the red ``credentials_missing``
+          verdict (``needs_operator=True``) — never a silent downgrade.
+
+        (Defined after ``_last_pull_verdict`` but referenced by the earlier
+        ``/universe/pull`` route — closure names bind at request time.)
+        """
+        refusal = gate_pull_credentials(
+            dry_run_requested=dry_run_requested,
+            credentials_error=groww_credentials_error,
+        )
+        if refusal is not None:
+            # Stamp the RED refusal verdict so the /universe banner shows the
+            # fix text too — needs_operator semantics, not just a 503 body.
+            _last_pull_verdict["verdict"] = refusal.to_dict()
+            _LOG.error(
+                "universe.pull.refused_no_credentials",
+                route=route,
+                reason=refusal.auth_cause,
+            )
+            raise HTTPException(status_code=503, detail=verdict_message(refusal))
+        if dry_run_requested:
+            _LOG.info("universe.pull.synthetic_dry_run_requested", route=route)
+        return dry_run_requested
+
     @app.post("/api/v1/universe/pull-all")
     async def api_universe_pull_all(
         kind: str | None = Query(default=None),
@@ -1825,6 +1873,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         spot_interval: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-all — start a bulk / multi / per-symbol SPOT pull.
 
@@ -1844,10 +1893,13 @@ def build_app(
         ALL are blank the full Track-1 history applies (the Pull-ALL default, so
         the ``?kind=`` callers are byte-for-byte unchanged). Single-flight; an empty
         / unknown ``?symbols=`` id fails CLOSED (400, naming offenders — never a
-        silent partial). ``dry_run`` is forced when Groww creds are absent
-        (the PRIMARY spot gate post-cutover, DEC-DHAN-GROWW-REMIGRATE-001).
+        silent partial). ``dry_run`` is EXPLICIT opt-in ONLY
+        (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): missing/broken Groww creds
+        REFUSE the real pull with a 503 relaying the CredentialsError fix text
+        (never a silent synthetic downgrade); ``?dry_run=true`` runs the
+        loudly-labeled synthetic dry-run.
         """
-        dry_run = not groww_credentials_present()
+        dry_run = _gate_pull_dry_run(dry_run, route="universe.pull_all")
         if symbols is not None:
             try:
                 instruments = resolve_pull_symbols(symbols, _require_store().get)
@@ -1872,6 +1924,10 @@ def build_app(
                 status_code=400,
                 detail="pull-all requires ?symbols=..., ?symbol=... or ?kind=...",
             )
+        if dry_run:
+            # Explicit synthetic run: the progress title must SAY so loudly
+            # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
+            detail = label_synthetic(detail)
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info(
             "universe.pull_all.requested",
@@ -1977,6 +2033,7 @@ def build_app(
         symbols: str | None = Query(default=None),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-expiries-contracts — METADATA-only chain pull.
 
@@ -1998,11 +2055,14 @@ def build_app(
         a bad selection is a 400. ``from_date`` / ``to_date`` narrow the Phase-1
         YEAR grid (the metadata grid is year-granular) — absent ⇒ the full
         2020 → current-year vendor-history floor; a reversed or non-ISO range is a
-        400. ``dry_run`` is forced when Groww creds are absent, and the dry-run
+        400. ``dry_run`` is EXPLICIT opt-in ONLY
+        (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): missing/broken Groww creds
+        REFUSE the real pull with a 503 relaying the CredentialsError fix text
+        (never a silent synthetic downgrade); an explicit ``?dry_run=true``
         enumerates an honest EMPTY chain (strikes/expiries are real vendor data,
-        never fabricated offline, Golden Rule #1).
+        never fabricated offline, Golden Rule #1), loudly labeled.
         """
-        dry_run = not groww_credentials_present()
+        dry_run = _gate_pull_dry_run(dry_run, route="universe.pull_expiries_contracts")
         try:
             years = _resolve_metadata_years(from_date, to_date)
         except ValueError as exc:
@@ -2031,6 +2091,10 @@ def build_app(
                 status_code=400,
                 detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
             )
+        if dry_run:
+            # Explicit synthetic run: the progress title must SAY so loudly
+            # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
+            detail = label_synthetic(detail)
         # Skip reference-only underlyings BEFORE the chain pull's network calls
         # (DEC-SKIP-REF-METADATA-001). A REFERENCE_ONLY underlying — a spot-only
         # index (INDIAVIX / MIDCAP50 / NIFTY100, …) or a non-F&O NTM constituent
@@ -2253,7 +2317,12 @@ def build_app(
                 )
             return report.to_dict()
 
-        started = _pull_job.start(_work, total=tradable_count, detail=f"{tradable_count} composite")
+        composite_detail = f"{tradable_count} composite"
+        if dry_run:
+            # Explicit synthetic run: the progress title must SAY so loudly
+            # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
+            composite_detail = label_synthetic(composite_detail)
+        started = _pull_job.start(_work, total=tradable_count, detail=composite_detail)
         return JSONResponse(
             {
                 "started": started,
@@ -2283,6 +2352,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         until_clean: bool = Query(default=True),
+        dry_run: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-historical — download OHLC for the SELECTED contracts.
 
@@ -2308,7 +2378,10 @@ def build_app(
         pointing at the metadata button (NEVER a fabricated contract — Golden Rule #1).
         ``until_clean`` DEFAULTS to ``true`` (DEC-GROWW-DERIV-UNTIL-CLEAN-001 #730 —
         auto-retry every failed window until the selection drains clean). ``dry_run`` is
-        forced when Groww creds are absent (the empty-candle client appends 0 bars — an
+        EXPLICIT opt-in ONLY (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): missing/broken
+        Groww creds REFUSE the real pull with a 503 relaying the CredentialsError fix
+        text (never a silent synthetic downgrade); an explicit ``?dry_run=true`` runs
+        the loudly-labeled offline pass (the empty-candle client appends 0 bars — an
         expired contract's OHLC is real vendor data, never fabricated offline).
 
         **One-click multi-select COMPOSITE (DEC-FNO-ONECLICK-HISTORICAL-001).** When
@@ -2325,7 +2398,7 @@ def build_app(
         also infers the composite whenever ``?symbols=`` is present). An unknown symbol
         in ``?symbols=`` is a 400; an ALL-reference-only selection is an honest no-op.
         """
-        dry_run = not groww_credentials_present()
+        dry_run = _gate_pull_dry_run(dry_run, route="universe.pull_historical")
         try:
             intervals = resolve_pull_intervals(interval)
             expiry_date = _parse_iso_date_arg(expiry, "expiry") if expiry is not None else None
@@ -2375,6 +2448,10 @@ def build_app(
                 ),
             )
         detail = f"{len(selected)} contracts historical"
+        if dry_run:
+            # Explicit synthetic run: the progress title must SAY so loudly
+            # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
+            detail = label_synthetic(detail)
         _LOG.info(
             "universe.pull_historical.requested",
             contract=contract,
@@ -2446,6 +2523,7 @@ def build_app(
         symbol: str | None = Query(default=None),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
 
@@ -2479,10 +2557,12 @@ def build_app(
         a raised chain enumeration) STOPS the chain — the later phases never make a
         doomed vendor call and are reported ``None`` (fail-CLOSED, never a false
         "complete"). Runs on the single-flight background job (returns at once; poll
-        ``/pull-progress``). ``dry_run`` is forced when Groww creds are absent (the
-        PRIMARY gate post-cutover, DEC-DHAN-GROWW-REMIGRATE-001) — a no-creds run
-        honestly pulls nothing and stops at an empty chain (never fabricated data,
-        Golden Rule #1).
+        ``/pull-progress``). ``dry_run`` is EXPLICIT opt-in ONLY
+        (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): missing/broken Groww creds REFUSE
+        the real pipeline with a 503 relaying the CredentialsError fix text (never
+        a silent synthetic downgrade); an explicit ``?dry_run=true`` runs the
+        loudly-labeled offline pass, which honestly pulls nothing real and stops
+        at an empty chain (never fabricated data, Golden Rule #1).
 
         ``from_date`` / ``to_date`` (ISO ``YYYY-MM-DD``) re-add a date range to the
         SPOT history phase (DEC-UNIVERSE-PULL-DATERANGE-001, re-wiring the picker
@@ -2497,7 +2577,7 @@ def build_app(
         — a reversed / below-2020 / non-ISO range is a clean 400, never a silent
         empty pull.
         """
-        dry_run = not groww_credentials_present()
+        dry_run = _gate_pull_dry_run(dry_run, route="universe.pull_pipeline")
         # Normalize the date params to ONE definition of "blank" up front: an
         # empty / whitespace-only value becomes ``None`` so every downstream
         # helper (``resolve_candle_range`` AND ``_resolve_metadata_years`` AND
@@ -2864,8 +2944,13 @@ def build_app(
                 _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
             return report.to_dict()
 
+        pipeline_detail = f"pipeline {len(targets)} symbols"
+        if dry_run:
+            # Explicit synthetic run: the progress title must SAY so loudly
+            # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
+            pipeline_detail = label_synthetic(pipeline_detail)
         started = _pull_job.start(
-            _work, total=len(targets), detail=f"pipeline {len(targets)} symbols", ledger_synced=True
+            _work, total=len(targets), detail=pipeline_detail, ledger_synced=True
         )
         return JSONResponse(
             {
@@ -2889,6 +2974,7 @@ def build_app(
         year: int | None = Query(default=None),
         spot_interval: str | None = Query(default=None),
         until_clean: bool = Query(default=False),
+        dry_run: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/retry-failed — MANUAL re-pull of ONLY the leftover failed windows.
 
@@ -2904,10 +2990,12 @@ def build_app(
         is targeted (index + stock). The persisted coverage ledger means windows
         already in the lake are skipped, so this re-pulls only the gaps.
 
-        ``dry_run`` is forced when Groww creds are absent (the PRIMARY spot gate
-        post-cutover, DEC-DHAN-GROWW-REMIGRATE-001).
+        ``dry_run`` is EXPLICIT opt-in ONLY (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001):
+        missing/broken Groww creds REFUSE the retry with a 503 relaying the
+        CredentialsError fix text (never a silent synthetic downgrade);
+        ``?dry_run=true`` runs the loudly-labeled synthetic pass.
         """
-        dry_run = not groww_credentials_present()
+        dry_run = _gate_pull_dry_run(dry_run, route="universe.retry_failed")
         # SHARED selection resolver (CLAUDE.md §11 COMMON — the same precedence
         # symbols > symbol > whole-universe the pull-pipeline uses; fail-CLOSED on an
         # empty/unknown selection → 400, DEC-PULL-SELECTED-PIPELINE-001).
@@ -2923,6 +3011,10 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         detail = f"retry {symbols or symbol or (kind or 'all')} spot ({target_source})"
+        if dry_run:
+            # Explicit synthetic run: the progress title must SAY so loudly
+            # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
+            detail = label_synthetic(detail)
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info(
             "universe.retry_failed.requested",
