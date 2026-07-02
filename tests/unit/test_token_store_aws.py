@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
+from brutex.adapters.groww.aws_client import SSM_PARAMETER_NOT_FOUND
 from brutex.adapters.groww.constants import (
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
     resolve_token_broker_region,
@@ -24,6 +25,7 @@ from brutex.adapters.groww.token_store_aws import (
     TokenBrokerReadOnlyError,
     build_readonly_token_store_with,
 )
+from structlog.testing import capture_logs
 
 from tests.fakes.fake_aws_client import FakeAwsClient
 
@@ -185,3 +187,95 @@ class TestResolveTokenParamPath:
     def test_env_override_stripped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SOME_PATH_ENV", "  /custom/x  ")
         assert resolve_token_param_path("SOME_PATH_ENV", "/def/path") == "/custom/x"
+
+
+# ── load_with_reason (R7 seam) + the load() logging contract ────────────────
+# DEC-DOCTOR-LIVE-PROOF-KIT-001. Stem-matched HERE (the module's own per-file
+# coverage gate): scripts/ci/coverage_gate_discovery.py maps
+# brutex/adapters/groww/token_store_aws.py -> tests/unit/test_token_store_aws.py.
+
+
+class TestLoadWithReason:
+    """The reason-carrying seam: WHY a load missed (read-error vs genuinely absent)."""
+
+    def test_hit_returns_token_and_no_miss(self) -> None:
+        token, miss = _store(FakeAwsClient(parameters={_TOKEN_PATH: "tok"})).load_with_reason(
+            now_utc=_NOW
+        )
+        assert miss is None
+        assert token is not None
+        assert token.access_token == "tok"
+
+    def test_read_error_carries_error_kind(self) -> None:
+        token, miss = _store(FakeAwsClient(fail_get_parameter=True)).load_with_reason(now_utc=_NOW)
+        assert token is None
+        assert miss is not None
+        assert (miss.kind, miss.error_type) == ("error", "FakeAwsError")
+        assert "access denied" in miss.detail
+
+    def test_parameter_not_found_is_genuinely_absent(self) -> None:
+        client = FakeAwsClient(param_not_found=frozenset({_TOKEN_PATH}))
+        token, miss = _store(client).load_with_reason(now_utc=_NOW)
+        assert token is None
+        assert miss is not None
+        assert miss.kind == "absent"
+        assert miss.error_type == SSM_PARAMETER_NOT_FOUND
+
+    def test_blank_value_is_absent(self) -> None:
+        token, miss = _store(FakeAwsClient(parameters={_TOKEN_PATH: "  "})).load_with_reason(
+            now_utc=_NOW
+        )
+        assert token is None
+        assert miss is not None
+        assert (miss.kind, miss.error_type) == ("absent", None)
+
+    def test_token_param_property(self) -> None:
+        assert _store(FakeAwsClient()).token_param == _TOKEN_PATH
+
+    def test_load_delegates_and_keeps_never_raises_contract(self) -> None:
+        assert _store(FakeAwsClient(fail_get_parameter=True)).load(_CREDS, now_utc=_NOW) is None
+        assert (
+            _store(FakeAwsClient(param_not_found=frozenset({_TOKEN_PATH}))).load(
+                _CREDS, now_utc=_NOW
+            )
+            is None
+        )
+        hit = _store(FakeAwsClient(parameters={_TOKEN_PATH: "tok"})).load(_CREDS, now_utc=_NOW)
+        assert hit is not None
+        assert hit.access_token == "tok"
+
+
+class TestLoadLoggingContract:
+    """Hostile-review m-1: production observability must not silently downgrade.
+
+    The pre-seam ``load()`` logged WARNING ``groww.token.aws_load_failed`` for ANY
+    raised read (including ``ParameterNotFound``); the seam refactor had downgraded
+    the ParameterNotFound arm to DEBUG. These pin the RESTORED contract (asserted
+    via ``structlog.testing.capture_logs`` — the repo's structured-log oracle).
+    """
+
+    def test_load_logs_warning_for_parameter_not_found(self) -> None:
+        client = FakeAwsClient(param_not_found=frozenset({_TOKEN_PATH}))
+        with capture_logs() as logs:
+            assert _store(client).load(_CREDS, now_utc=_NOW) is None
+        warnings = [e for e in logs if e["log_level"] == "warning"]
+        assert len(warnings) == 1
+        assert warnings[0]["event"] == "groww.token.aws_load_failed"
+        assert warnings[0]["error_type"] == SSM_PARAMETER_NOT_FOUND
+
+    def test_load_logs_warning_for_read_error(self) -> None:
+        with capture_logs() as logs:
+            assert _store(FakeAwsClient(fail_get_parameter=True)).load(_CREDS, now_utc=_NOW) is None
+        warnings = [e for e in logs if e["log_level"] == "warning"]
+        assert len(warnings) == 1
+        assert warnings[0]["event"] == "groww.token.aws_load_failed"
+        assert warnings[0]["error_type"] == "FakeAwsError"
+
+    def test_load_logs_debug_only_for_blank_value(self) -> None:
+        with capture_logs() as logs:
+            assert (
+                _store(FakeAwsClient(parameters={_TOKEN_PATH: "  "})).load(_CREDS, now_utc=_NOW)
+                is None
+            )
+        assert [e for e in logs if e["log_level"] in ("warning", "error")] == []
+        assert [e["event"] for e in logs if e["log_level"] == "debug"] == ["groww.token.aws_miss"]

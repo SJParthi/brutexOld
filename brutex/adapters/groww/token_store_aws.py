@@ -130,7 +130,13 @@ class ParameterStoreTokenStore:
         Reads the shared SecureString (``GetParameter WithDecryption=True``). Any
         boto3/network/IAM/KMS error, or an absent/blank value, degrades to ``None`` (a
         miss — the spine then reauths, which fails LOUD on a read-only host rather than
-        minting locally). The returned token is stamped with the CURRENT session
+        minting locally). Logging contract (the pre-seam behaviour, RESTORED per the
+        hostile-review m-1 finding): ANY raised read — including ``ParameterNotFound``,
+        which :meth:`load_with_reason` classifies as "genuinely absent" — logs WARNING
+        ``groww.token.aws_load_failed`` (production observability must see a missing
+        shared token loudly); only a read that SUCCEEDED and returned a blank/``None``
+        value logs DEBUG ``groww.token.aws_miss``. The returned token is stamped with
+        the CURRENT session
         (:func:`~brutex.adapters.groww.token_cache.current_session`) so it satisfies the
         :class:`~brutex.adapters.groww.token_cache.CachedToken` contract; *creds* is unused
         (the shared parameter is account-scoped, not fingerprint-keyed — single account).
@@ -138,7 +144,7 @@ class ParameterStoreTokenStore:
         _ = creds
         token, miss = self.load_with_reason(now_utc=now_utc)
         if miss is not None:
-            if miss.kind == "error":
+            if miss.error_type is not None:
                 _LOG.warning("groww.token.aws_load_failed", error_type=miss.error_type)
             else:
                 _LOG.debug("groww.token.aws_miss", reason="absent")
@@ -151,10 +157,12 @@ class ParameterStoreTokenStore:
         """Read the shared token, RETURNING the miss reason instead of swallowing it (R7 seam).
 
         Exactly one side of the pair is non-``None``. The production :meth:`load`
-        delegates here (so the read stays in ONE place — CLAUDE.md §11 COMMON) and
-        keeps its NEVER-raises degrade-to-``None`` contract; a caller that must
-        distinguish "read failed" (reader-side IAM/KMS/network — do NOT deploy
-        anything) from "token genuinely absent" (run the minter Lambda) reads the
+        delegates here (so the read stays in ONE place — CLAUDE.md §11 COMMON),
+        keeping its NEVER-raises degrade-to-``None`` RETURN contract and its
+        pre-seam LOGGING contract (WARNING for any raised read, DEBUG for a blank
+        value — see :meth:`load`); a caller that must distinguish "read failed"
+        (reader-side IAM/KMS/network — do NOT deploy anything) from "token
+        genuinely absent" (run the minter Lambda) reads the
         :class:`TokenLoadMiss` instead (``brutex doctor --live`` stage 3).
         """
         try:

@@ -196,10 +196,12 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     ),
     "creds.failed": "FAIL creds[R1]: {reason}",
     "creds.synthetic_note": (
-        "NOTE[R1]: on the dashboard this EXACT failure silently downgrades every pull to "
-        "SYNTHETIC data with a green verdict (the '● PREVIEW' badge is the only trace). "
-        "Every 'successful' dashboard pull you ran while this failure existed fetched ZERO "
-        "real bars."
+        "NOTE[R1]: on a dashboard WITHOUT the R1 fix "
+        "(DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001) this EXACT failure silently downgrades "
+        "every pull to SYNTHETIC data with a green verdict (the '● PREVIEW' badge is the "
+        "only trace) — every 'successful' pull run on such a build while this failure "
+        "existed fetched ZERO real bars. With that fix deployed, real pulls REFUSE loudly "
+        "(HTTP 503 + red credentials_missing verdict) instead of downgrading."
     ),
     "creds.fix_boto3": "FIX[R1]: boto3 is missing from THIS venv → pip install 'brutex[aws]'.",
     "creds.fix_no_aws_creds": (
@@ -273,10 +275,10 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     ),
     "token.rejected": (
         "FAIL token[M1]: token present but the vendor REJECTED it ({error}) — the shared token "
-        "in SSM is DEAD and the Lambda will not re-mint until 06:05 IST. Production pulls "
-        "today would grind all day as amber 'transient — re-pull to finish' (a futile "
-        "prescription). Fix: aws lambda invoke --function-name groww-token-minter /dev/stdout, "
-        "then re-run this stage."
+        "in SSM is DEAD and the Lambda will not re-mint until the next scheduled ~06:05 IST "
+        "mint (log-derived, UNVERIFIED) — or invoke it now. Production pulls today would grind "
+        "all day as amber 'transient — re-pull to finish' (a futile prescription). Fix: aws "
+        "lambda invoke --function-name groww-token-minter /dev/stdout, then re-run this stage."
     ),
     "token.bare_auth_evidence": (
         "EVIDENCE[M2]: the rejection arrived as a BARE GrowwAPIException (code={code}, "
@@ -364,6 +366,13 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "(+05:30 systematic shift). Production silently DROPS these and stores the survivors "
         "under WRONG stamps. Do NOT run a backfill until the parser semantics are fixed."
     ),
+    "spot1m.first_bar_missing": (
+        "FAIL spot-1m[M12]: first session bar is {first_ist} IST, not 09:15, while only "
+        "{dropped}/{total} bars fall outside the NSE session — missing OPENING bars, not "
+        "necessarily a timezone shift (a +05:30 UTC-shift would drop far more of the day). "
+        "Production would store the day WITHOUT its open. Do NOT run a backfill until the "
+        "09:15-{first_ist} gap is explained; transcript records the first raw stamp."
+    ),
     "spot1m.null_ohlc": (
         "WARN spot-1m[M15]: {percent}% of bars skipped for absent/zero OHLC — production "
         "drops these with ZERO logging (bare except…continue). Vendor data-quality "
@@ -400,6 +409,14 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "it to a green 'No action needed' while vix_at_entry/vix_at_exit silently have no "
         "data. Do not proceed with Track-1 pulls; escalate per ADR-0009 (rescind or source "
         "VIX elsewhere)."
+    ),
+    "vix.absent_1m": (
+        "FAIL vix[R5]: NSE-INDIAVIX serves NO 1-minute candles, but the 1day fallback "
+        "returned {daily} bars — VIX EXISTS on Groww, so the ADR-0009 §3.2 "
+        "MIGRATION-RESCINDING gate does NOT fire on this evidence; intraday "
+        "vix_at_entry/vix_at_exit stamping is still impossible. Escalate per ADR-0009 "
+        "(accept daily-granularity VIX stamps or source intraday VIX elsewhere) before "
+        "Track-1 pulls."
     ),
     # ── stage 8 · 1-day derivation + NSE bhavcopy cross-check ─────────
     "bhavcopy.pass": (
@@ -1467,7 +1484,7 @@ def stage_spot1m(deps: KitDeps, ctx: KitContext) -> StageOutcome:
         encoding=encoding,
         day=day.isoformat(),
     )
-    if drop_ratio > SESSION_DROP_FAIL_RATIO or not first_session_ok:
+    if drop_ratio > SESSION_DROP_FAIL_RATIO:
         return StageOutcome(
             stage=5,
             name="spot-1m",
@@ -1476,6 +1493,27 @@ def stage_spot1m(deps: KitDeps, ctx: KitContext) -> StageOutcome:
                 render_diagnostic(
                     "spot1m.session_shift",
                     first_ist=first_ist,
+                    dropped=dropped,
+                    total=len(bars),
+                ),
+            ),
+        )
+    if not first_session_ok:
+        # Distinct from the UTC-shift diagnosis (hostile-review M-1): a LOW
+        # drop ratio with a late first session bar means the OPENING bars are
+        # missing, not that the whole day is systematically mis-stamped — a
+        # +05:30 shift would push far more of the day out of the session.
+        # (session_bars is non-empty here: an empty session list makes
+        # drop_ratio == 1.0, which takes the session_shift arm above.)
+        first_session_ist = session_bars[0].timestamp.astimezone(IST).strftime("%H:%M")
+        return StageOutcome(
+            stage=5,
+            name="spot-1m",
+            status=STATUS_FAIL,
+            lines=(
+                render_diagnostic(
+                    "spot1m.first_bar_missing",
+                    first_ist=first_session_ist,
                     dropped=dropped,
                     total=len(bars),
                 ),
@@ -1583,16 +1621,59 @@ def stage_vix(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     """Stage 7 — the resurrected VIX probe (R5; the migration-rescinding hard gate)."""
     if ctx.client is None:
         return _skip(7, "vix", "stage 3 did not run — no live client")
+    client = ctx.client
+    today = deps.now_utc().date()
+
+    def _daily_rows(symbol: str, label: str) -> tuple[int, str]:
+        """ONE 1day fetch → ``(rows, text)``; a raise degrades to ``(0, "ERROR(...)")``."""
+        ctx.budget.spend(label=label)
+        try:
+            daily_payload = client.historical_candles(
+                exchange="NSE",
+                segment="CASH",
+                groww_symbol=symbol,
+                interval="1day",
+                start=f"{(today - timedelta(days=30)).isoformat()} 00:00:00",
+                end=f"{today.isoformat()} 15:30:00",
+            )
+        except GrowwError as exc:
+            ctx.transcript.event("vix.daily", ok=False, error=str(exc))
+            return 0, f"ERROR({type(exc).__name__})"
+        rows = _rows_in(daily_payload)
+        ctx.transcript.event("vix.daily", ok=True, rows=str(rows))
+        return rows, str(rows)
+
     ctx.budget.spend(3, label="vix.probe")  # probe_vix tries ≤ 3 candidate symbols
-    result = probe_vix(ctx.client)
+    result = probe_vix(client)
     ctx.transcript.event("vix", verdict=result.verdict, detail=result.detail, symbol=result.symbol)
     if result.verdict == VERDICT_ABSENT:
+        # Hostile-review m-2: before concluding the MIGRATION-RESCINDING gate,
+        # spend ONE more call on the 1day interval — "1m absent / daily
+        # present" is a DIFFERENT honest state from "no candles at all". This
+        # is +1 call on the absent path only; the stage's worst case stays 4
+        # (the PASS path already spends 3 probe + 1 daily).
+        daily_rows, daily_text = _daily_rows(INDIA_VIX_SYMBOL, "vix.daily_fallback")
+        if daily_rows:
+            return StageOutcome(
+                stage=7,
+                name="vix",
+                status=STATUS_FAIL,
+                lines=(render_diagnostic("vix.absent_1m", daily=daily_rows),),
+            )
+        fallback_note = (
+            f"1day fallback {daily_text}"
+            if daily_text.startswith("ERROR")
+            else "1day fallback also empty"
+        )
         return StageOutcome(
             stage=7,
             name="vix",
             status=STATUS_FAIL,
             lines=(
-                render_diagnostic("vix.absent", shape="clean-empty 200 on every candidate symbol"),
+                render_diagnostic(
+                    "vix.absent",
+                    shape=f"clean-empty 200 on every candidate symbol (1minute); {fallback_note}",
+                ),
             ),
         )
     if result.verdict != VERDICT_OK:
@@ -1602,24 +1683,7 @@ def stage_vix(deps: KitDeps, ctx: KitContext) -> StageOutcome:
             status=STATUS_FAIL,
             lines=(render_diagnostic("vix.absent", shape=f"typed error — {result.detail}"),),
         )
-    today = deps.now_utc().date()
-    ctx.budget.spend(label="vix.daily")
-    daily_text = "0"
-    try:
-        daily_payload = ctx.client.historical_candles(
-            exchange="NSE",
-            segment="CASH",
-            groww_symbol=result.symbol or INDIA_VIX_SYMBOL,
-            interval="1day",
-            start=f"{(today - timedelta(days=30)).isoformat()} 00:00:00",
-            end=f"{today.isoformat()} 15:30:00",
-        )
-    except GrowwError as exc:
-        ctx.transcript.event("vix.daily", ok=False, error=str(exc))
-        daily_text = f"ERROR({type(exc).__name__})"
-    else:
-        daily_text = str(_rows_in(daily_payload))
-        ctx.transcript.event("vix.daily", ok=True, rows=daily_text)
+    _, daily_text = _daily_rows(result.symbol or INDIA_VIX_SYMBOL, "vix.daily")
     return StageOutcome(
         stage=7,
         name="vix",
