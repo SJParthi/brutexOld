@@ -929,6 +929,22 @@ class TestStageSpot1m:
         assert outcome.status == dl.STATUS_FAIL
         assert outcome.lines[0].startswith("FAIL spot-1m[M12]: first bar parses to 03:15 IST")
 
+    def test_missing_opening_bars_with_low_drop_is_distinct_from_utc_shift(
+        self, tmp_path: Path
+    ) -> None:
+        """Hostile-review M-1: the OR short-circuit used to collapse this state
+        into the '+05:30 UTC-shift' wording — a false trail when the drop ratio
+        is LOW and only the opening bars are missing."""
+        deps, ctx, box = prepare_client(tmp_path)
+        box["handler"] = lambda _kwargs: {"candles": full_day_candles("2026-07-01")[15:]}
+        outcome = dl.stage_spot1m(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert outcome.lines[0] == dl.render_diagnostic(
+            "spot1m.first_bar_missing", first_ist="09:30", dropped=0, total=360
+        )
+        assert "not necessarily a timezone shift" in outcome.lines[0]
+        assert "UTC-encoded" not in outcome.lines[0]
+
     def test_null_ohlc_epidemic_warns_m15(self, tmp_path: Path) -> None:
         deps, ctx, box = prepare_client(tmp_path)
 
@@ -1044,8 +1060,40 @@ class TestStageVix:
         outcome = dl.stage_vix(deps, ctx)
         assert outcome.status == dl.STATUS_FAIL
         assert outcome.lines[0] == dl.render_diagnostic(
-            "vix.absent", shape="clean-empty 200 on every candidate symbol"
+            "vix.absent",
+            shape=("clean-empty 200 on every candidate symbol (1minute); 1day fallback also empty"),
         )
+        assert "MIGRATION-RESCINDING" in outcome.lines[0]
+
+    def test_absent_1m_but_daily_present_is_the_distinct_honest_state(self, tmp_path: Path) -> None:
+        """Hostile-review m-2: 1m-absent must try DAILY before concluding the gate."""
+        deps, ctx, box = prepare_client(tmp_path)
+
+        def _daily_only(kwargs: dict[str, object]) -> Mapping[str, object]:
+            if kwargs.get("candle_interval") == "1day":
+                return {"candles": full_day_candles("2026-07-01")[:22]}
+            return {"candles": []}
+
+        box["handler"] = _daily_only
+        outcome = dl.stage_vix(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert outcome.lines[0] == dl.render_diagnostic("vix.absent_1m", daily=22)
+        assert "does NOT fire" in outcome.lines[0]
+
+    def test_absent_1m_with_daily_fallback_error_reports_the_error_shape(
+        self, tmp_path: Path
+    ) -> None:
+        deps, ctx, box = prepare_client(tmp_path)
+
+        def _both_down(kwargs: dict[str, object]) -> Mapping[str, object]:
+            if kwargs.get("candle_interval") == "1day":
+                raise RuntimeError("daily endpoint melt")
+            return {"candles": []}
+
+        box["handler"] = _both_down
+        outcome = dl.stage_vix(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert "1day fallback ERROR(GrowwError)" in outcome.lines[0]
         assert "MIGRATION-RESCINDING" in outcome.lines[0]
 
     def test_typed_error_fails_r5_with_shape(self, tmp_path: Path) -> None:
@@ -1384,9 +1432,11 @@ class TestStageResume:
         assert outcome.lines[0] == dl.render_diagnostic("resume.pass", outstanding=0)
 
     def test_interrupted_pull_warns_g5_with_outstanding_windows(self, tmp_path: Path) -> None:
+        # ONE import style for window_ledger_store repo-file-wide (CodeQL
+        # py/import-and-import-from — the ledger-state test imports it as wls).
+        import brutex.data.window_ledger_store as wls
         from brutex.data.fetch_coverage import WindowKey
         from brutex.data.window_ledger import WindowLedger
-        from brutex.data.window_ledger_store import save_window_ledger
         from brutex.observability.pull_journal import record_pull_start
 
         deps, _box = make_deps(tmp_path)
@@ -1402,7 +1452,7 @@ class TestStageResume:
             ),
             now=_NOW,
         )
-        save_window_ledger(ledger, ctx.lake_root)
+        wls.save_window_ledger(ledger, ctx.lake_root)
         record_pull_start(
             ctx.lake_root, pull_id="p9", dry_run=False, now_utc=_NOW, monotonic_s=10.0
         )
@@ -1619,8 +1669,3 @@ class TestDefensiveArms:
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0].startswith("EVIDENCE rate[R4/M6]:")
         assert len(outcome.lines) == 1  # no abort line — the burst never sustained
-
-
-# The CLI wiring tests (``parse_stage_selection`` / the ``doctor --live``
-# dispatch / ``MINT_ANYWAY_WARNING``) live in ``test_cli_doctor_live.py`` —
-# stem-matched to ``brutex/cli.py`` for the per-module coverage discovery gate.

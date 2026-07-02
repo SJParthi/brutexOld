@@ -1,10 +1,12 @@
-"""Unit tests for the ``brutex doctor --live`` CLI wiring (DEC-DOCTOR-LIVE-PROOF-KIT-001).
+"""CLI wiring for ``brutex doctor --live`` (DEC-DOCTOR-LIVE-PROOF-KIT-001).
 
-Stem-matched to ``brutex/cli.py`` so the strict per-module coverage discovery
-gate scopes these tests to the module they cover — the ``--stage`` selection
-parser, the ``doctor --live`` dispatch branch, and the red ``--mint-anyway``
-warning constant (moved out of ``test_doctor_live.py``, whose stem matches the
-kit module, not ``cli.py``).
+Pins the ``--stage`` parser, the ``doctor --live`` dispatch line, and the red
+``--mint-anyway`` warning. Stem-matched HERE (``brutex/cli.py``'s own per-file
+coverage gate): ``scripts/ci/coverage_gate_discovery.py`` maps ``brutex/cli.py``
+to ``tests/unit/test_cli_*.py``, so the kit's CLI lines must be covered by a
+``test_cli_*`` file, not the doctor-live stage suite. ``cmd_doctor_live`` itself
+is the real-deps composition wrapper (``# pragma: no cover``); every kit
+behaviour behind it is unit-tested in ``tests/unit/test_doctor_live.py``.
 """
 
 from __future__ import annotations

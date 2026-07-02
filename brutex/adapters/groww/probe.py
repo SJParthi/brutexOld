@@ -44,7 +44,7 @@ class CandleFetcher(Protocol):
         end: str,
     ) -> Mapping[str, object]:
         """Fetch one historical-candle window (row-of-arrays payload)."""
-        ...  # pragma: no cover — structural Protocol stub, never executed
+        raise NotImplementedError  # structural Protocol stub — never executed
 
 
 #: India VIX is the HARD-GATE (ADR-0009 risk #3). The exact ``groww_symbol`` is
