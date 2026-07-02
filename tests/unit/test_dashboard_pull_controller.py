@@ -2377,11 +2377,9 @@ class _DeferredPipeline:
         self, *, bars_appended: int, conflicts: int, series_key: tuple[str, str]
     ) -> None:
         """Accept the tail's totals (unused — the test asserts on the lake itself)."""
-        del bars_appended, conflicts, series_key
 
     def fold_tail_transient(self, series_key: tuple[str, str]) -> None:
         """Accept a deferred-window tally (unused)."""
-        del series_key
 
     def per_series_totals(self) -> dict[tuple[str, str], object]:
         """No folded totals — the producer reports stand (the lake is the oracle)."""
