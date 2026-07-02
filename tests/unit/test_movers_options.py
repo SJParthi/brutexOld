@@ -267,6 +267,8 @@ def _mover(
     moneyness: Moneyness = Moneyness.ITM,
     atm_offset: int | None = -8,
     moneyness_label: str = "ITM -8",
+    iv: float | None = None,
+    delta: float | None = None,
 ) -> OptionMover:
     """An :class:`OptionMover` with sensible defaults (override per test)."""
     return OptionMover(
@@ -288,6 +290,8 @@ def _mover(
         moneyness=moneyness,
         atm_offset=atm_offset,
         moneyness_label=moneyness_label,
+        iv=iv,
+        delta=delta,
     )
 
 
@@ -358,6 +362,33 @@ class TestComputeOptionMover:
         assert m.moneyness is Moneyness.OTM
         assert m.atm_offset is None
         assert m.moneyness_label == "OTM"  # no grid → bucket only
+        # Greeks default to an honest None when the caller has no stored overlay
+        # (DEC-GREEKS-ENGINE-PR3B-001) — never a fabricated value.
+        assert m.iv is None
+        assert m.delta is None
+
+    def test_greeks_passthrough_full_precision(self) -> None:
+        """Stored iv/delta pass through VERBATIM — full precision, never rounded
+        (statistical values, CLAUDE.md §4; DEC-GREEKS-ENGINE-PR3B-001)."""
+        m = compute_option_mover(
+            underlying="NIFTY",
+            expiry=date(2025, 6, 30),
+            strike=Decimal("24000"),
+            opt_type="CE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            exchange="NSE",
+            ltp=Decimal("164"),
+            volume=1000,
+            value_paisa=16_400_000,
+            oi=1100,
+            prev_close=Decimal("100"),
+            spot_ltp=Decimal("23622.9"),
+            prev_oi=1000,
+            iv=0.1812345678901234,
+            delta=-0.2260012345678901,
+        )
+        assert m.iv == 0.1812345678901234
+        assert m.delta == -0.2260012345678901
 
     def test_moneyness_with_dynamic_step(self) -> None:
         # spot 23622.90, strike 24000, step 50 → CE OTM, ATM offset round((24000-23622.90)/50)=8.
@@ -581,6 +612,25 @@ class TestBuildOptionsPayload:
         assert row["moneyness"] == "ITM -8"
         assert row["moneyness_bucket"] == "ITM"
         assert row["atm_offset"] == -8
+        # No stored overlay on the default mover → honest null cells (the screen
+        # renders "—"; DEC-GREEKS-ENGINE-PR3B-001).
+        assert row["iv"] is None
+        assert row["delta"] is None
+
+    def test_row_projection_stored_greeks_verbatim(self) -> None:
+        """Stored iv/delta reach the payload as FULL-PRECISION floats — never
+        stringified/rounded (DEC-GREEKS-ENGINE-PR3B-001; CLAUDE.md §4)."""
+        payload = build_options_payload(
+            [_mover(iv=0.1812345678901234, delta=-0.2260012345678901)],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+        )
+        row = payload["highest_oi"][0]
+        assert row["iv"] == 0.1812345678901234
+        assert row["delta"] == -0.2260012345678901
 
     def test_null_metrics_render_none(self) -> None:
         m = _mover(spot=None, pct_change=None, oi_chg=None, oi_chg_pct=None)
