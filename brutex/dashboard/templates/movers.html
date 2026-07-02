@@ -204,7 +204,11 @@ const ASSETS = {
   },
   options: {
     cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
-    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    /* IV + Delta are the STORED per-bar Greeks overlay as of the snapshot (last kept
+       session bar; DEC-GREEKS-ENGINE-PR3B-001 over the Phase-2b store) — full-precision
+       floats in the payload, 4dp DISPLAY-only ("num4"); null (legacy pre-Greeks
+       partition / stamped-NA bar) renders "—", never a fabricated Greek. */
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
 };
 /* Lake interval label → bar minutes for ALL 21 Track-1 timeframes — mirrors
@@ -237,9 +241,9 @@ const SAMPLE = {
     {name:"RELIANCE 30 JUN FUT", ltp:"₹1,296.50", spot:"₹1,293.00", premium:"+3.50", pct_change:"2.40", value_cr:"106.32", oi:"2,33,500", oi_chg_pct:"-1.1", volume:"8,200"},
   ],
   options: [
-    {name:"NIFTY 30 JUN 24000 CALL", spot:"₹23,622.90", ltp:"₹164.00", moneyness:"OTM +8", pct_change:"179.62", oi:"76,10,235", oi_chg:"-3,00,440", oi_chg_pct:"-3.80", volume:"1,47,65,790"},
-    {name:"BANKNIFTY 30 JUN 56000 CALL", spot:"₹56,814.80", ltp:"₹1,414.00", moneyness:"ITM -8", pct_change:"138.97", oi:"10,43,760", oi_chg:"89,640", oi_chg_pct:"9.40", volume:"59,83,260"},
-    {name:"NIFTY 30 JUN 23000 PUT", spot:"₹23,622.90", ltp:"₹73.50", moneyness:"OTM +12", pct_change:"-67.50", oi:"60,92,940", oi_chg:"8,82,770", oi_chg_pct:"16.94", volume:"1,06,25,485"},
+    {name:"NIFTY 30 JUN 24000 CALL", spot:"₹23,622.90", ltp:"₹164.00", moneyness:"OTM +8", iv:"0.1812", delta:"0.3421", pct_change:"179.62", oi:"76,10,235", oi_chg:"-3,00,440", oi_chg_pct:"-3.80", volume:"1,47,65,790"},
+    {name:"BANKNIFTY 30 JUN 56000 CALL", spot:"₹56,814.80", ltp:"₹1,414.00", moneyness:"ITM -8", iv:"0.2140", delta:"0.7810", pct_change:"138.97", oi:"10,43,760", oi_chg:"89,640", oi_chg_pct:"9.40", volume:"59,83,260"},
+    {name:"NIFTY 30 JUN 23000 PUT", spot:"₹23,622.90", ltp:"₹73.50", moneyness:"OTM +12", iv:"0.1975", delta:"-0.2260", pct_change:"-67.50", oi:"60,92,940", oi_chg:"8,82,770", oi_chg_pct:"16.94", volume:"1,06,25,485"},
   ],
 };
 
@@ -313,6 +317,7 @@ function renderRows() {
       if (type === "int") v = v.toLocaleString("en-IN");
       else if (type === "money") v = "₹" + v.toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
       else if (type === "num") v = v.toFixed(2);
+      else if (type === "num4") v = v.toFixed(4);  /* Greeks (iv/delta) — display-only 4dp, payload stays full precision */
     }
     if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
       const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";

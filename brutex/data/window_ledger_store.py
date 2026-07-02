@@ -16,13 +16,21 @@ Design (priority law — Correctness > Reliability > … > Performance):
   §2 Rule 7). (Honest envelope: Parquet *file bytes* may differ across writers via
   embedded library metadata; the ROW CONTENT is the reproducible contract, and
   every test asserts the row fixed point, not the byte stream.)
-* **Reliability — never crash a pull.** :func:`load_window_ledger` degrades to an
-  EMPTY ledger (a structured WARNING, never an exception) on a missing /
-  unreadable / malformed / wrong-shaped file — a lost ledger costs a re-pull
-  (idempotent keep-first sink), never data.
-* **Reliability — crash-safe write + graceful disk-full halt.**
-  :func:`save_window_ledger` writes a sibling ``*.tmp`` then :func:`os.replace`
-  (atomic on POSIX within one filesystem) via the COMMON
+* **Reliability — never crash a pull, never SILENT.** :func:`load_window_ledger`
+  degrades to an EMPTY ledger (a structured WARNING, never an exception) on a
+  missing / unreadable / malformed / wrong-shaped file — a lost ledger costs a
+  re-pull (idempotent keep-first sink), never data. When the file EXISTED but could
+  not be read, the returned ledger carries ``load_failed=True``
+  (DEC-WINDOW-LEDGER-RESCUE-001) so the pull drivers ANNOUNCE the full re-verify in
+  the pull report / note instead of quietly re-downloading everything.
+* **Reliability — crash-safe, cross-process-safe write + graceful disk-full halt.**
+  :func:`save_window_ledger` holds the COMMON per-partition
+  :func:`~brutex.data.partition_lock.partition_write_lock` (keyed on the ledger
+  path) across a READ-MERGE-WRITE — the on-disk rows are merged with the in-memory
+  ones per key (:func:`merge_ledger_rows`) so two concurrent pulls on one lake never
+  last-writer-wins clobber each other's rows (DEC-WINDOW-LEDGER-RESCUE-001, the
+  ledger twin of DEC-LAKE-PARTITION-FLOCK-001) — then writes a sibling ``*.tmp`` and
+  :func:`os.replace` (atomic on POSIX within one filesystem) via the COMMON
   :func:`~brutex.data.atomic_io.atomic_write_via`, which maps a disk-full
   (``ENOSPC``) / out-of-memory to a :class:`~brutex.data.errors.LakeWriteHalt` —
   a pull-wide global stop (a member of both ingest spines'
@@ -43,19 +51,24 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from brutex.calendars.nse import IST
 from brutex.data.atomic_io import atomic_write_via
+from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
+    FAILED,
     PLANNED,
     SKIPPED,
+    SUCCESS,
     WindowLedger,
     WindowLedgerRecord,
 )
@@ -229,64 +242,192 @@ def load_window_ledger(
         return WindowLedger.from_rows(_rows_to_records(rows), threshold=threshold)
     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
         _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
-        return WindowLedger(_threshold=threshold)
+        # LOUD degrade (DEC-WINDOW-LEDGER-RESCUE-001): the file EXISTED but could not
+        # be read — mark the returned empty ledger so the pull drivers can announce
+        # the failed reload (window ledger reload FAILED — running full re-verify
+        # pull, no skip) on the pull report / note instead of silently re-fetching
+        # everything. Still never raises (a lost ledger costs a re-pull, never data).
+        degraded = WindowLedger(_threshold=threshold)
+        degraded.load_failed = True
+        return degraded
+
+
+#: One serialised ledger row — EXACTLY the 13-field tuple :meth:`WindowLedger.to_rows`
+#: emits (and :meth:`WindowLedger.from_rows` restores). The merge-on-save operates on
+#: this shape directly so the conflict rule below is pure + unit-testable.
+LedgerRow = tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]
+
+#: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
+#: :meth:`WindowLedger._key` derives from a :class:`WindowKey`).
+_RowKey = tuple[str, str, str, str, str]
+
+#: Settledness rank for the same-key merge conflict rule (DEC-WINDOW-LEDGER-RESCUE-001):
+#: a MORE-SETTLED status wins — ``SUCCESS`` / ``SKIPPED`` (terminal, skippable) over
+#: ``EMPTY`` (a genuine observation) over ``FAILED`` (transient) over ``PLANNED`` (pure
+#: intent). An UNKNOWN status ranks BELOW everything (defensive — never let a malformed
+#: row displace a real one).
+_STATUS_SETTLE_RANK: dict[str, int] = {SUCCESS: 3, SKIPPED: 3, EMPTY: 2, FAILED: 1, PLANNED: 0}
+
+
+def _row_key(row: LedgerRow) -> _RowKey:
+    """The window identity of one serialised row — O(1)."""
+    return (row[0], row[1], row[2], row[3], row[4])
+
+
+def _row_preference(row: LedgerRow) -> tuple[int, str, int, tuple[str, ...]]:
+    """The total order that decides a same-key merge conflict — pure, O(1).
+
+    DEC-WINDOW-LEDGER-RESCUE-001 conflict rule (documented in
+    :func:`merge_ledger_rows`): (1) the MORE-SETTLED status wins
+    (``SUCCESS``/``SKIPPED`` > ``EMPTY`` > ``FAILED`` > ``PLANNED``); (2) then the
+    NEWER ``last_attempt_at`` (ISO-8601 UTC strings compare lexicographically;
+    ``None`` — never attempted — sorts oldest); (3) then the HIGHER ``attempts``;
+    (4) then the lexicographically greater full row (``None`` → ``""``) — a pure
+    determinism tie-break so the merged result is identical regardless of which
+    writer's save runs last (order-independence, Golden Rule #7).
+    """
+    return (
+        _STATUS_SETTLE_RANK.get(row[5], -1),
+        row[10] or "",
+        row[7],
+        tuple("" if v is None else str(v) for v in row),
+    )
+
+
+def merge_ledger_rows(
+    memory_rows: Sequence[LedgerRow],
+    disk_rows: Sequence[LedgerRow],
+    *,
+    pruned_keys: frozenset[_RowKey] = frozenset(),
+) -> list[LedgerRow]:
+    """Merge the in-memory rows with the on-disk rows per window key — pure.
+
+    DEC-WINDOW-LEDGER-RESCUE-001. The save is a whole-file replace, so without this
+    merge two CONCURRENT pulls sharing one lake (a CLI ``brutex fetch`` + a dashboard
+    pull) last-writer-wins clobber each other's settled rows — the exact silent
+    cross-process data-LOSS class DEC-LAKE-PARTITION-FLOCK-001 closed for the bar
+    partitions. Rules (per key):
+
+    * **memory-only** → the in-memory row (this writer's new work).
+    * **disk-only** → the on-disk row is KEPT (a concurrent writer's work) — UNLESS
+      its key is in *pruned_keys* (a row THIS ledger deliberately pruned via
+      :meth:`~brutex.data.window_ledger.WindowLedger.prune_superseded`), which is
+      dropped so the DEC-WINDOW-TRAILING-GC-001 orphan GC is not undone by the merge.
+    * **both (a genuine semantic conflict — same key, both updated)** → the winner by
+      :func:`_row_preference`: the MORE-SETTLED status first
+      (``SUCCESS``/``SKIPPED`` > ``EMPTY`` > ``FAILED`` > ``PLANNED``), then the newer
+      ``last_attempt_at`` timestamp, then the higher ``attempts``, then a
+      deterministic full-row tie-break — so the merged file is IDENTICAL regardless
+      of writer order (no row loss, deterministic winner).
+
+    Output is sorted by window key (the same order :meth:`WindowLedger.to_rows`
+    emits), so a merge with an empty/absent disk side is byte-row-identical to the
+    pre-merge save. O(memory + disk) with O(1) per-row work.
+    """
+    merged: dict[_RowKey, LedgerRow] = {_row_key(row): row for row in memory_rows}
+    for row in disk_rows:
+        key = _row_key(row)
+        mine = merged.get(key)
+        if mine is None:
+            if key not in pruned_keys:
+                merged[key] = row
+            continue
+        if _row_preference(row) > _row_preference(mine):
+            merged[key] = row
+    return sorted(merged.values(), key=_row_key)
 
 
 def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
-    """Persist *ledger* to *lake_root*'s Parquet table atomically (crash-safe).
+    """Persist *ledger* — cross-process-locked READ-MERGE-WRITE, then atomic replace.
 
-    Serialises :meth:`WindowLedger.to_rows` (sorted, deterministic) to a Parquet
-    table with the fixed :data:`_COLUMNS` schema, writes a sibling ``*.tmp`` then
-    :func:`os.replace` onto the final path. The ledger directory is created if
-    absent. O(N) over the recorded windows (once per run / per throttled flush).
+    DEC-WINDOW-LEDGER-RESCUE-001 (supersedes the unlocked whole-file replace): the
+    whole save runs under the COMMON per-partition cross-process
+    :func:`~brutex.data.partition_lock.partition_write_lock` keyed on the ledger
+    path, and under the lock it (1) loads the CURRENT on-disk ledger (never raises —
+    a corrupt/absent file merges as empty), (2) merges it with the in-memory rows via
+    :func:`merge_ledger_rows` (per-key, preferring the more-settled status →
+    newer ``last_attempt_at`` → higher ``attempts``; a row this ledger deliberately
+    PRUNED is dropped, not resurrected), then (3) serialises the merged rows to a
+    Parquet table with the fixed :data:`_COLUMNS` schema and atomically replaces the
+    file. Two concurrent pulls on one lake therefore NEVER clobber each other's rows
+    (the later writer reads AFTER the earlier writer's ``os.replace``). The ledger
+    directory is created if absent. O(N) over the recorded windows plus one on-disk
+    read (once per run / per throttled flush — the adaptive flush throttle self-paces
+    on the measured save duration, so the added read never dominates wall time).
+
+    A bounded lock-acquire expiry (:class:`~brutex.data.errors.PartitionLockTimeout`
+    — a peer wedged past the deadline) SKIPS this save with a loud
+    ``window_ledger.save_lock_timeout`` WARNING instead of crashing the pull: the
+    in-memory ledger is intact, the next throttled flush / pull-end save retries, and
+    even a lost final save only costs a re-pull (idempotent keep-first sink), never
+    data. A disk-full/OOM still maps to the pull-wide
+    :class:`~brutex.data.errors.LakeWriteHalt` (see below), and any other error
+    propagates unchanged.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     directory = ledger_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
-    rows = ledger.to_rows()
-    # Build per-column arrays in the fixed order so the schema is stable.
-    by_col: dict[str, list[Any]] = {name: [] for name in _COLUMNS}
-    for row in rows:
-        for name, value in zip(_COLUMNS, row, strict=True):
-            by_col[name].append(value)
-    schema = pa.schema(
-        [
-            ("market", pa.string()),
-            ("security_id", pa.string()),
-            ("interval", pa.string()),
-            ("window_start", pa.string()),
-            ("window_end", pa.string()),
-            ("status", pa.string()),
-            ("bars", pa.int64()),
-            ("attempts", pa.int64()),
-            ("last_error", pa.string()),
-            ("first_seen_at", pa.string()),
-            ("last_attempt_at", pa.string()),
-            ("empty_streak", pa.int64()),
-            ("in_pull_fetches", pa.int64()),
-        ]
-    )
-    table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
     path = ledger_path(lake_root)
+    try:
+        # Cross-process lock keyed on the ledger path (DEC-LAKE-PARTITION-FLOCK-001
+        # mechanics, DEC-WINDOW-LEDGER-RESCUE-001 wiring): held across the WHOLE
+        # read-merge-write so the later writer reads AFTER the earlier writer's
+        # os.replace — its merge then includes the earlier rows (no lost update).
+        with partition_write_lock(lake_root, path):
+            disk_rows = load_window_ledger(lake_root).to_rows()
+            rows = merge_ledger_rows(ledger.to_rows(), disk_rows, pruned_keys=ledger.pruned_keys())
+            # Build per-column arrays in the fixed order so the schema is stable.
+            by_col: dict[str, list[Any]] = {name: [] for name in _COLUMNS}
+            for row in rows:
+                for name, value in zip(_COLUMNS, row, strict=True):
+                    by_col[name].append(value)
+            schema = pa.schema(
+                [
+                    ("market", pa.string()),
+                    ("security_id", pa.string()),
+                    ("interval", pa.string()),
+                    ("window_start", pa.string()),
+                    ("window_end", pa.string()),
+                    ("status", pa.string()),
+                    ("bars", pa.int64()),
+                    ("attempts", pa.int64()),
+                    ("last_error", pa.string()),
+                    ("first_seen_at", pa.string()),
+                    ("last_attempt_at", pa.string()),
+                    ("empty_streak", pa.int64()),
+                    ("in_pull_fetches", pa.int64()),
+                ]
+            )
+            table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
 
-    def _write_parquet(tmp: Path) -> None:
-        pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+            def _write_parquet(tmp: Path) -> None:
+                pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
 
-    # COMMON lake-safe atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
-    # DEC-WINDOW-LEDGER-WRITE-HALT-001): the ledger is a LAKE write (it lives under
-    # <lake_root>/window_ledger/), so a disk-full (ENOSPC) / OOM here fails every
-    # remaining window identically — it must HALT the pull gracefully, not be
-    # mis-quarantined per-symbol (which would keep hammering a full disk). `atomic_write_via`
-    # maps ENOSPC→LakeWriteHalt("disk_full") / MemoryError→LakeWriteHalt("out_of_memory")
-    # (every other error UNCHANGED — a non-ENOSPC OSError such as EACCES propagates raw,
-    # never mis-escalated). LakeWriteHalt is a member of BOTH ingest spines'
-    # _GLOBAL_STOP_ERRORS, so it propagates past the per-symbol/per-contract quarantine
-    # to the CLI `_pull_halt_errors` / dashboard `_is_pull_halt` halt handling already in
-    # place (the call-path verification the prior deferral flagged — now complete). The
-    # fsync (durability for the durable ledger) + temp cleanup on any error are unchanged.
-    atomic_write_via(path, _write_parquet)
+            # COMMON lake-safe atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
+            # DEC-WINDOW-LEDGER-WRITE-HALT-001): the ledger is a LAKE write (it lives under
+            # <lake_root>/window_ledger/), so a disk-full (ENOSPC) / OOM here fails every
+            # remaining window identically — it must HALT the pull gracefully, not be
+            # mis-quarantined per-symbol (which would keep hammering a full disk).
+            # `atomic_write_via` maps ENOSPC→LakeWriteHalt("disk_full") /
+            # MemoryError→LakeWriteHalt("out_of_memory") (every other error UNCHANGED — a
+            # non-ENOSPC OSError such as EACCES propagates raw, never mis-escalated).
+            # LakeWriteHalt is a member of BOTH ingest spines' _GLOBAL_STOP_ERRORS, so it
+            # propagates past the per-symbol/per-contract quarantine to the CLI
+            # `_pull_halt_errors` / dashboard `_is_pull_halt` halt handling already in
+            # place. The fsync (durability for the durable ledger) + temp cleanup on any
+            # error are unchanged.
+            atomic_write_via(path, _write_parquet)
+    except PartitionLockTimeout as exc:
+        # A peer held the ledger lock past the bounded deadline (a wedged writer).
+        # SKIP this save loudly — never crash the pull mid-flush: the in-memory
+        # ledger is intact and the next throttled flush / pull-end save retries.
+        _LOG.warning(
+            "window_ledger.save_lock_timeout",
+            path=str(path),
+            error=str(exc),
+        )
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:
@@ -562,19 +703,56 @@ def seed_enclosed_windows(
     candidates: Iterable[SeedCandidate],
     *,
     now: datetime,
+    today_ist: date | None = None,
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for each candidate window the lake ENCLOSES — the COMMON core.
 
     The single reconcile engine shared by the spot + F&O cold-starts (CLAUDE.md §11
     COMMON). For each ``(window_key, span_key)`` candidate it looks up the lake span,
     and — iff the span has ≥ 1 bar and its stored ``[first_date, last_date]`` FULLY
-    encloses the window (``first_date <= window.start AND window.end <= last_date``, the
-    conservative DEC-LAKE-RECONCILE-001 rule) — seeds the window ``SUCCESS`` via
+    encloses the window — seeds the window ``SUCCESS`` via
     :meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success` (which NEVER
     overwrites an existing ``FAILED`` / ``PLANNED`` / settled row, so a genuinely-missing
     or partially-covered window is left re-pullable). Returns the number of windows newly
     seeded. Pure over *span_index* + *candidates*; O(candidates) with O(1) lookups.
+
+    **Enclosure rule (DEC-WINDOW-LEDGER-RESCUE-001, fixing the DEC-LAKE-RECONCILE-001
+    off-by-one):** a window key's ``end`` is fetch-EXCLUSIVE (the last requested bar
+    is on ``end − 1 day``) while the lake span's ``last_date`` is bar-INCLUSIVE, so
+    the test is ``first_date <= window.start AND (window.end − 1 day) <= last_date``.
+    The prior ``window.end <= last_date`` form compared an exclusive bound against an
+    inclusive one — for a default-window F&O contract (``end = expiry + 1 day``,
+    stored bars end ON expiry) it was ``expiry + 1 <= expiry``: ALWAYS false, so the
+    F&O rescue deterministically seeded 0 windows even over a maximally dense lake.
+    Boundary: ``end − 1 == last_date`` seeds; ``end − 1 == last_date + 1`` does not.
+
+    **Honesty — this fix GROWS the span-masking surface from ~zero to live (Golden
+    Rule #10):** pre-fix the rescue was largely DEAD, not merely boundary-drifted —
+    the F&O reconcile seeded 0 windows EVER, and on a DEFAULT (floor → today) spot
+    pull the daily whole-range window and the trailing sub-daily window were equally
+    dead (their exclusive ``end`` sits at today while the storable ``last_date`` is
+    at most yesterday); only interior sub-daily tiles (and historical sub-range
+    pulls) ever seeded. Now that the rescue is LIVE, remember it is a SPAN test, not
+    a DENSITY test: a window inside the lake's ``[first_date, last_date]`` seeds
+    ``SUCCESS`` even if it has an INTERIOR HOLE, and on a lost ledger that window is
+    then auto-skipped. The compensating, operator-visible signal is the /completeness
+    scoreboard (density-based — it reads the LAKE, not the ledger); the fetch-time
+    interior-gap detector (DEC-INTERIOR-GAP-DETECT-001, MIGRATION.md #1031) does NOT
+    compensate here — it never sees a seeded window (skipped before any fetch). The
+    load-bearing safety stands: seeding is strictly ONLY-IF-ABSENT
+    (:meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success`), so a
+    ``FAILED`` / ``EMPTY`` / ``PLANNED`` row is never masked.
+
+    **Live-edge guard:** a window whose coverage INCLUDES the current IST day
+    (``end − 1 >= today_ist``) is NEVER seeded — the day's session data may still be
+    partial (a mid-session store puts a bar on ``today`` without completing it), and a
+    span-level check cannot tell partial from complete, so the trailing live-edge
+    window is conservatively left to the fetch (idempotent; no data ever masked).
+    *today_ist* defaults to *now* converted to the IST calendar day; the F&O reconcile
+    injects its clamp clock's date so reconcile == plan == fetch stays deterministic.
     """
+    if today_ist is None:
+        today_ist = now.astimezone(IST).date()
     seeded = 0
     for window_key, span_key in candidates:
         entry = span_index.get(span_key)
@@ -587,7 +765,10 @@ def seed_enclosed_windows(
             continue
         first_date = date.fromisoformat(str(entry["first_date"]))
         last_date = date.fromisoformat(str(entry["last_date"]))
-        if not (first_date <= window_key.start and window_key.end <= last_date):
+        last_covered = window_key.end - timedelta(days=1)  # end is fetch-EXCLUSIVE
+        if last_covered >= today_ist:
+            continue  # live edge — today's data may be partial; never seed it settled
+        if not (first_date <= window_key.start and last_covered <= last_date):
             continue
         if ledger.seed_lake_success(window_key, bars=int(entry["bars"]), now=now):
             seeded += 1
@@ -613,8 +794,10 @@ def reconcile_ledger_windows(
     bars but the ledger is empty, so once the ledger drives the skip a re-pull would
     re-fetch EVERYTHING (the rescue the old ``reconcile_coverage_with_lake`` gave the
     coverage set). For each ``(instrument, interval)`` whose stored span ENCLOSES a
-    planned window (``first_date <= window_start AND window_end <= last_date``, span
-    has ≥ 1 bar — the conservative DEC-LAKE-RECONCILE-001 rule), seed that window
+    planned window (``first_date <= window_start AND window_end − 1 day <=
+    last_date``, span has ≥ 1 bar — the fetch-exclusive-end enclosure rule of
+    DEC-WINDOW-LEDGER-RESCUE-001, plus the live-edge guard; see
+    :func:`seed_enclosed_windows`), seed that window
     ``SUCCESS`` — but ONLY if ABSENT (:meth:`WindowLedger.seed_lake_success` NEVER
     overwrites a ``FAILED`` / ``PLANNED`` / settled row, so it can't mask a re-pull).
     *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
@@ -828,6 +1011,7 @@ __all__ = [
     "LEDGER_DIRNAME",
     "LEDGER_FILENAME",
     "LIVE_FLUSH_MIN_INTERVAL_S",
+    "LedgerRow",
     "begin_pull_ledger",
     "end_pull_ledger",
     "index_lake_spans",
@@ -836,6 +1020,7 @@ __all__ = [
     "load_or_migrate_window_ledger",
     "load_window_ledger",
     "make_live_ledger_flush",
+    "merge_ledger_rows",
     "plan_windows",
     "reconcile_ledger_windows",
     "reconcile_ledger_with_lake",

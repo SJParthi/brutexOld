@@ -601,7 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
             "MANUAL: keep running bounded auto-retry rounds until the coverage "
             "ledger is CLEAN, OR the token dies (stop + auth_expired verdict), OR "
             "the round budget is spent — reuses the same retry engine, rate-safe "
-            "(≤5 r/s), bounded (NOT infinite) (DEC-TOKEN-PREFLIGHT-001)"
+            "(≤8 r/s), bounded (NOT infinite) (DEC-TOKEN-PREFLIGHT-001)"
         ),
     )
     fetch.add_argument(
@@ -2694,7 +2694,7 @@ def cmd_fetch(
     ``--until-clean-rounds`` OUTER budget is spent. It REUSES
     :func:`~brutex.adapters.ingest_common.run_until_clean` over the SAME retry
     engine (no duplicated round loop); honest envelope (Golden Rule #10): the round
-    count is bounded (NOT infinite), each round is one ``≤ 5 r/s`` pass, and the
+    count is bounded (NOT infinite), each round is one ``≤ 8 r/s`` pass, and the
     work is ``O(failed_windows)`` per round — never an "O(1)-total" claim.
     """
     if max_retry_minutes is not None and max_retry_minutes < 1:
@@ -2796,6 +2796,7 @@ def cmd_fetch(
     fetch_instruments: list[Any]
     pace: Any = None
     on_rate_limit: Any = None
+    on_timeout: Any = None
     on_success: Any = None
     # The live pull's RateController (DEC-CLI-RATE-BRIDGE-001): held so the per-window
     # ``on_window`` hook can publish the live rate to the cross-process bridge file. Stays
@@ -2915,11 +2916,12 @@ def cmd_fetch(
             if inspect:
                 sink = NullBarSink()
             # Token-bucket pacing for the live pull. The per-second ceiling is the
-            # operator-DIRECTED 5 r/s (constants.GROWW_RATE_LIMIT_RPS_CEILING,
-            # lowered 8 → 5 on 2026-06-22) — the backtesting per-second cap itself
-            # stays officially UNVERIFIED (Golden Rule #1/#10); 5 is an operator
-            # decision, fed as the controller's CEILING into the existing adaptive
-            # token-bucket MECHANISM rather than a hardcoded verified rate.
+            # operator-DIRECTED 8 r/s (constants.GROWW_RATE_LIMIT_RPS_CEILING,
+            # raised 5 → 8 on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002) — the
+            # backtesting per-second cap itself stays officially UNVERIFIED
+            # (Golden Rule #1/#10); 8 is an operator decision, fed as the
+            # controller's CEILING into the existing adaptive token-bucket
+            # MECHANISM rather than a hardcoded verified rate.
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
@@ -2927,11 +2929,12 @@ def cmd_fetch(
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
 
-            # Operator-DIRECTED 5 r/s per-second ceiling (the per-second cap stays
+            # Operator-DIRECTED 8 r/s per-second ceiling (the per-second cap stays
             # officially UNVERIFIED); the operator-confirmed 500/min governor
-            # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 5×60 = 300 < 500,
+            # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500,
             # so the per-second ceiling is the binding gate without fighting the
-            # governor; the AIMD ladder still steps DOWN on 429s (lowered 8 → 5 on 2026-06-22).
+            # governor; the AIMD ladder still steps DOWN on 429s (raised 5 → 8 on
+            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
@@ -2942,6 +2945,13 @@ def cmd_fetch(
             # No-op when Telegram is disabled; never blocks the pull.
             _alerter = SweepAlerter()
             pace, on_success = _rate.pace, _rate.on_success
+            # Bind the controller's OWN timeout ladder too, mirroring the dashboard's
+            # `_live_rate_runtime` hook quad (pace / on_rate_limit / on_timeout /
+            # on_success): without it a sustained 5xx/timeout storm on `brutex fetch`
+            # never reached `RateController.on_timeout`, so the gentle AIMD step-down
+            # (8 → … → TIMEOUT_FLOOR_RPS 1 r/s) was DEAD on the CLI path while the
+            # dashboard pull eased off correctly (forensic-audit finding #16).
+            on_timeout = _rate.on_timeout
             on_rate_limit = _alerter.rate_breach_callback(_rate)
             # Hold the controller for the cross-process rate-bridge publisher
             # (DEC-CLI-RATE-BRIDGE-001) — its per-window snapshot feeds the dashboard widget.
@@ -3087,6 +3097,7 @@ def cmd_fetch(
                     pace=pace,
                     ledger=ledger,
                     on_rate_limit=on_rate_limit,
+                    on_timeout=on_timeout,
                     on_success=on_success,
                     on_progress=storm_progress,
                     on_window=ledger_checkpoint,

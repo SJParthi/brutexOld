@@ -1208,9 +1208,14 @@ def reconcile_fno_ledger_windows(
     F&O phase never did — the gap this closes.
 
     For each ``(contract, interval)`` whose stored F&O-partition span ENCLOSES the pair's
-    clamped window (``first_date <= window_start AND window_end <= last_date``, span with
-    ≥ 1 bar — the SAME conservative DEC-LAKE-RECONCILE-001 rule the spot reconcile uses),
-    seed that window ``SUCCESS`` — but ONLY if ABSENT
+    clamped window (``first_date <= window_start AND window_end − 1 day <= last_date``,
+    span with ≥ 1 bar — the fetch-EXCLUSIVE-end enclosure rule of
+    DEC-WINDOW-LEDGER-RESCUE-001, shared with the spot reconcile via the COMMON
+    :func:`~brutex.data.window_ledger_store.seed_enclosed_windows`; the prior
+    ``window_end <= last_date`` form compared the exclusive ``expiry + 1 day`` end
+    against the bar-inclusive ``last_date <= expiry``, so this rescue was DEAD CODE —
+    deterministically 0 windows even over a maximally dense lake), seed that window
+    ``SUCCESS`` — but ONLY if ABSENT
     (:meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success` NEVER overwrites a
     ``FAILED`` / ``PLANNED`` / settled row, so it can never mask a re-pull). A
     genuinely-missing window (no span, or the span does not fully enclose it — a
@@ -1236,7 +1241,11 @@ def reconcile_fno_ledger_windows(
         contract_windows=contract_windows,
         now_for_clamp=now_for_clamp,
     )
-    return seed_enclosed_windows(ledger, span_index, candidates, now=stamp)
+    # The live-edge guard's "today" is the SAME injected IST clamp clock the key
+    # derivation uses, so reconcile == plan == fetch stays deterministic offline.
+    return seed_enclosed_windows(
+        ledger, span_index, candidates, now=stamp, today_ist=now_for_clamp.date()
+    )
 
 
 def reconcile_fno_ledger_with_lake(
@@ -1577,7 +1586,21 @@ def run_groww_option_ingest(
     # in ``dashboard/historical_pull.py``), so this skip no longer leaves the detector dead.
     if fetch_pipeline is None:
         emit_underlying_all_empty(pairs, contract_list, pull_id=pull_id)
-    return GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
+    run_report = GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
+    # VISIBLE settled-window skips (DEC-WINDOW-LEDGER-RESCUE-001): ONE INFO line per
+    # driver pass with the AGGREGATE count — the per-window skip stays DEBUG (a
+    # universe pull skips tens of thousands), but the operator could previously never
+    # SEE the no-vendor-hit skip engaging at the default log level at all. Emitted
+    # unconditionally (0 is an honest "nothing was skippable"), on the controller
+    # thread, after the fan-out drain.
+    _LOG.info(
+        "option.ingest.windows_skipped_settled",
+        pull_id=pull_id,
+        market=market,
+        windows_skipped_settled=run_report.skipped_windows,
+        pairs=len(pairs),
+    )
+    return run_report
 
 
 def ingest_underlying_options(

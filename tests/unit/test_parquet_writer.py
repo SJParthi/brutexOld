@@ -209,6 +209,173 @@ class TestBarsAddedDedup:
         assert len(second.conflicts) == 1
 
 
+class TestFreshWriteBatchDedup:
+    """Within-batch duplicate-timestamp de-dup on a FRESH partition write.
+
+    Forensic-audit finding #11 (DEC-FRESH-WRITE-BATCH-DEDUP-001): ``write``
+    sorted the incoming batch but never de-duplicated it, and the fresh branch
+    rendered ``sorted_bars`` directly — so a corrupt vendor payload repeating a
+    timestamp stored BOTH rows on a first write, and a settled past month is
+    never rewritten, so the duplicate persisted. The fresh branch now applies
+    the SAME per-``merge_mode`` keep-first/latest-wins collision rule
+    ``_merge_write``'s timestamp-keyed dict already applies, so both branches
+    see de-duplicated input consistently.
+    """
+
+    def test_duplicate_ts_fresh_write_stores_exactly_one_row(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE regression: an identical duplicate-ts payload on a fresh
+        partition stores exactly ONE row (the unfixed writer stored two)."""
+        pl = pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        dupe = _bar(0, open_="100.00", high="110.00", low="90.00", close="105.00")
+        result = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[dupe, dupe],
+        )
+        assert result.row_count == 1
+        assert result.bars_added == 1  # ONE distinct bar contributed, not the input count 2
+        assert result.conflicts == ()  # an identical duplicate is a silent drop (merge parity)
+        df = pl.read_parquet(result.path)
+        assert df.height == 1  # the lake holds ONE row for the duplicated minute
+
+    def test_duplicate_ts_differing_values_keep_first_records_conflict(
+        self, tmp_path: Path
+    ) -> None:
+        """A differing-value duplicate keeps the FIRST occurrence in sorted order
+        and records the dropped duplicate as a BarConflict (the existing
+        observability surface — logged downstream, never silently discarded)."""
+        pl = pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        result = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[
+                _bar(0, open_="100.00", high="110.00", low="90.00", close="105.00"),  # kept
+                _bar(0, open_="200.00", high="210.00", low="190.00", close="205.00"),  # dropped
+            ],
+        )
+        assert result.row_count == 1
+        assert result.bars_added == 1
+        (conflict,) = result.conflicts
+        assert conflict.stored.open == Decimal("100.00")  # the kept first occurrence
+        assert conflict.vendor.open == Decimal("200.00")  # the discarded duplicate
+        df = pl.read_parquet(result.path)
+        assert df["open"][0] == 100.0  # first-in-sorted-order wins (keep-first)
+
+    def test_duplicate_ts_latest_wins_keeps_last_and_converges_with_merge(
+        self, tmp_path: Path
+    ) -> None:
+        """Under latest-wins the LATER duplicate wins (no conflict) — the same rule
+        the merge applies, so a re-pull of the same batch is byte-stable (Rule #7)."""
+        pl = pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [
+            _bar(0, open_="100.00", high="110.00", low="90.00", close="105.00"),
+            _bar(0, open_="200.00", high="210.00", low="190.00", close="205.00"),
+        ]
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1day",
+        }
+        result = writer.write(bars=bars, merge_mode="latest-wins", **coords)
+        assert result.row_count == 1
+        assert result.conflicts == ()  # an intentional restate, never a conflict
+        assert pl.read_parquet(result.path)["open"][0] == 200.0  # the LATER restate won
+        # Re-pulling the SAME duplicate batch through the MERGE path converges on
+        # the same bytes — the fresh dedup mirrors the merge rule per mode.
+        again = writer.write(bars=bars, merge_mode="latest-wins", **coords)
+        assert again.raw_hash == result.raw_hash
+
+    def test_distinct_ts_fresh_write_byte_identical_to_direct_render(self, tmp_path: Path) -> None:
+        """A duplicate-free batch passes the dedup unchanged: the stored bytes equal
+        a direct render of the sorted tick-rounded bars — byte-identical pre-fix."""
+        import hashlib
+
+        pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [
+            _bar(1, open_="106.00", high="111.00", low="91.00", close="107.00"),
+            _bar(0, open_="100.00", high="110.00", low="90.00", close="105.00"),
+        ]
+        result = writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+        expected = writer._render_bytes(
+            sorted((_tick_round(b) for b in bars), key=lambda b: b.timestamp)
+        )
+        assert result.raw_hash == hashlib.sha256(expected).hexdigest()
+        assert result.row_count == 2
+        assert result.bars_added == 2
+        assert result.conflicts == ()
+
+    def test_merge_path_still_conflicts_against_the_stored_bar(self, tmp_path: Path) -> None:
+        """Merge path UNCHANGED: within-batch duplicates against an EXISTING partition
+        each conflict against the STORED bar (both ``stored`` = the lake value) — the
+        batch is NOT pre-deduped before the merge, which would re-pair the conflicts."""
+        pl = pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        coords = {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
+        writer.write(
+            bars=[_bar(0, open_="100.00", high="110.00", low="90.00", close="105.00")], **coords
+        )
+        second = writer.write(
+            bars=[
+                _bar(0, open_="101.00", high="111.00", low="91.00", close="106.00"),
+                _bar(0, open_="102.00", high="112.00", low="92.00", close="107.00"),
+            ],
+            **coords,
+        )
+        assert second.row_count == 1
+        assert second.bars_added == 0
+        # BOTH restates conflict against the STORED 100.00 bar (keep-first), proving
+        # the raw batch reached the merge — not a within-batch (101 vs 102) pairing.
+        assert [c.stored.open for c in second.conflicts] == [Decimal("100.00")] * 2
+        assert [c.vendor.open for c in second.conflicts] == [Decimal("101.00"), Decimal("102.00")]
+        assert pl.read_parquet(second.path)["open"][0] == 100.0
+
+    def test_fresh_dedup_oom_maps_to_lake_write_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OOM inside the fresh dedup loop (the per-duplicate value check) maps to
+        a graceful LakeWriteHalt — DEC-LAKE-MERGE-OOM-HALT-001 parity with the merge
+        loop, never a raw worker crash."""
+        pytest.importorskip("polars")
+        from brutex.data.errors import LakeWriteHalt
+
+        writer = ParquetWriter(lake_root=tmp_path)
+
+        def _oom(*_a: object, **_k: object) -> object:
+            raise MemoryError("fresh dedup OOM")
+
+        monkeypatch.setattr(writer, "_bar_values_equal", _oom)
+        dupe = _bar(0, open_="100.00", high="110.00", low="90.00", close="105.00")
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            writer.write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                bars=[dupe, dupe],  # the duplicate reaches the value-equality check
+            )
+        assert exc_info.value.reason == "out_of_memory"
+
+
 class TestWriterErrors:
     """Empty-bars and multi-partition guard paths in ParquetWriter.write."""
 

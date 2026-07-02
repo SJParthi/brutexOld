@@ -516,6 +516,14 @@ requires operator go before Phase 1.**
 - **Gate:** `movers_options` 100% line + branch; corrupt-file-skip resilience
   preserved (DEC-MOVERS-CORRUPT-SKIP-001 #886); read-only accelerator; ENGINE
   UNCHANGED.
+- **Status: SHIPPED (DEC-GREEKS-ENGINE-PR3B-001, MIGRATION.md #1133)** — post-#1111
+  the cells are the STORED overlay (not a read-time re-derive): the shared
+  `_read_future_session` returns the LAST kept bar's stored `iv`/`delta` off the
+  SAME single frame read (`_last_bar_overlay`, schema-tolerant — legacy
+  partition / stamped-§15.8-NULL bar / FUT ⇒ honest `None`, never backfilled);
+  `OptionMover.iv/.delta` + `_option_row` project them full-precision; the
+  `movers.html` options table shows IV + Delta (4dp display-only `num4`). Both
+  movers modules re-verified 100% line+branch under their discovery stem sets.
 
 ### Phase 3c — Options executor delta-target activation (backtest realism)
 - **Deliverable:** a lake-backed `DeltaChainProvider` feeding
