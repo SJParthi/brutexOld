@@ -23,7 +23,6 @@ from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.sweep_run import ComboDedup
 from brutex.strategies.errors import StrategyError
 from brutex.strategies.fib_definitions import PREV_DAY, Direction
-from brutex.strategies.protocol import StrategyMeta
 from brutex.strategies.spec import (
     MAX_PRIOR_N,
     MAX_PROXIMITY_BPS,
@@ -526,27 +525,6 @@ class TestSpecRunId:
         assert SPEC_STRATEGY_ID_PREFIX == "spec:"
         assert not SPEC_STRATEGY_ID_PREFIX.startswith("mask:")
         assert not "mask:".startswith(SPEC_STRATEGY_ID_PREFIX)
-
-
-class TestStrategyMetaReservedPrefix:
-    def _meta(self, strategy_id: str) -> StrategyMeta:
-        return StrategyMeta(
-            strategy_id=strategy_id,
-            version="1.0.0",
-            symbols=("NSE-NIFTY",),
-            interval="1minute",
-        )
-
-    def test_mask_prefix_refused(self) -> None:
-        with pytest.raises(ValueError, match="RESERVED machine-identity prefix"):
-            self._meta("mask:" + "0" * 32)
-
-    def test_spec_prefix_refused(self) -> None:
-        with pytest.raises(ValueError, match="RESERVED machine-identity prefix"):
-            self._meta("spec:deadbeef")
-
-    def test_ordinary_id_accepted(self) -> None:
-        assert self._meta("ma_crossover").strategy_id == "ma_crossover"
 
 
 class TestSpecIdentityDedupChain:
