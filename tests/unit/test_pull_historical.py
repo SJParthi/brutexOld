@@ -2065,3 +2065,84 @@ class TestGreeksEnrichWiring:
             )
         assert captured == [good.symbol]
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.done"] != []
+
+
+class TestMassEmptyHaltVerdictFnoRoute:
+    """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 minor M-5 — the F&O bulk route's polished halt."""
+
+    def test_halt_produces_polished_verdict_and_fires_alert(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An all-empty vendor (the R2 throttle-from-START shape) with an env-injected
+        # trip-at-the-2nd-observation FRACTION breaker: the FUT bucket's single window
+        # settles (its per-bucket breaker sees only 1 observation), then the options
+        # bucket's 2nd empty TRIPS. The halt is CAUGHT inside `_run_phase` and folded
+        # into the POLISHED mass_empty_halt verdict (the spot route's twin) instead of
+        # escaping as a generic job error — and the CRITICAL Telegram pull-halt alert
+        # fires from the catch site (M-3 parity).
+        monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")  # synchronous tails
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_CONSECUTIVE", "0")
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_MIN_OBSERVATIONS", "2")
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_FRACTION", "1.0")
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_FRACTION_MIN_SERIES", "1")
+        alerts: list[Exception] = []
+        monkeypatch.setattr("brutex.dashboard.historical_pull.emit_pull_halt_alert", alerts.append)
+        sdk = _EmptyCandleSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts(underlying="NIFTY")  # FUT + CE + PE
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+        assert report.mass_empty_cause is not None
+        verdict = report.verdict
+        assert verdict.kind == "mass_empty_halt"
+        assert verdict.needs_operator is True
+        # The halt's count-naming message is relayed verbatim into the action…
+        assert verdict.action.startswith("Mass-empty circuit breaker TRIPPED")
+        assert "reopen-skipped" in verdict.action
+        # …and the settles that landed BEFORE the trip (the FUT window + the first
+        # option window — old + confirmed-empty → fast-settled) are counted + named.
+        assert report.settled_skipped == 2
+        assert "2 window(s)" in verdict.action
+        # The one-line note names the halt; the route JSON carries the full verdict.
+        assert "mass-empty circuit breaker HALTED" in report.note
+        assert report.to_dict()["verdict"]["kind"] == "mass_empty_halt"  # type: ignore[index]
+        # A halted phase is never the clean barrier.
+        assert report.phase1_clean is False
+        # M-3 parity: exactly one CRITICAL pull-halt alert from the catch site.
+        assert len(alerts) == 1
+        from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+
+        assert isinstance(alerts[0], MassEmptySettleHalt)
+
+    def test_clean_pull_reports_clean_verdict(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        # The polished verdict rides EVERY F&O bulk report, not only halts: a clean
+        # LIVE-shaped pull reads `clean` with no operator flag.
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts(underlying="NIFTY")
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+        assert report.mass_empty_cause is None
+        assert report.verdict.kind == "clean"
+        assert report.verdict.needs_operator is False
+        assert report.to_dict()["mass_empty_cause"] is None

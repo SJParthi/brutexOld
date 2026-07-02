@@ -27,7 +27,10 @@ from typing import cast
 
 import pytest
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwBadRequestError
-from brutex.adapters.ingest_common import SyntheticSpotAdapter
+from brutex.adapters.ingest_common import (
+    SETTLED_SKIPPED_OPERATOR_THRESHOLD,
+    SyntheticSpotAdapter,
+)
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.pull_controller import (
     GROWW_FETCH_INTERVALS,
@@ -693,9 +696,13 @@ class TestPullAllSpot:
         assert report.total_no_data == 2  # both the 1day + 1minute phases ran + empty
         assert report.total_completed == 0
         assert report.symbols[0].symbol == "13"
-        # Nothing completed + only no-data → the known-gap verdict (no operator action).
+        # Nothing completed + only no-data → the known-gap verdict…
         assert report.verdict.kind == "known_gap_only"
-        assert report.verdict.needs_operator is False
+        # …but this full-range all-empty pull fast-settled ~90 old windows SKIPPED —
+        # a mass write-off ABOVE the settled-skipped threshold, so needs_operator
+        # flips True (minor M-4): a human confirms a write-off this large once.
+        assert report.verdict.settled_skipped > SETTLED_SKIPPED_OPERATOR_THRESHOLD
+        assert report.verdict.needs_operator is True
         assert report.to_dict()["verdict"]["kind"] == "known_gap_only"
         # A failing adapter → BOTH phases quarantine (terminal, not auth): the 1-minute
         # phase now runs the full range too, and the failing adapter raises for it as
@@ -738,10 +745,15 @@ class TestPullAllSpot:
         # DEC-SPOT-INTERVAL-DECOUPLE-001: BOTH phases run the full range over the symbol;
         # the empty adapter returns no bars for each → two settled no-data cells.
         assert all_gap.total_no_data == 2  # both 1day + 1minute are settled no-data (EMPTY)
-        # Nothing completed + only no-data → known_gap_only (no operator action),
-        # NOT transient_residual — zero manual re-pull is asked.
+        # Nothing completed + only no-data → known_gap_only,
+        # NOT transient_residual — zero manual re-pull is asked. The mass fast-settle
+        # (~90 old windows SKIPPED) crosses the settled-skipped threshold, so
+        # needs_operator flips True (minor M-4) — the action names the count + the
+        # reopen-skipped re-verify path.
         assert all_gap.verdict.kind == "known_gap_only"
-        assert all_gap.verdict.needs_operator is False
+        assert all_gap.verdict.settled_skipped > SETTLED_SKIPPED_OPERATOR_THRESHOLD
+        assert all_gap.verdict.needs_operator is True
+        assert f"{all_gap.verdict.settled_skipped} window(s)" in all_gap.verdict.action
         assert all_gap.verdict.pending_windows == 0
 
     def test_daily_gap_with_intraday_data_pulls_minute(self, tmp_path: Path) -> None:
@@ -2225,16 +2237,25 @@ class TestMassEmptyCircuitBreaker:
     def test_trip_halts_bulk_pull_with_needs_operator_verdict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # An all-empty vendor (the R2 soft-throttle shape) with a 2-consecutive breaker
-        # (env-injected — the DYNAMIC config seam): the 1day phase trips after two
-        # confirmed-empty windows → the pull HALTS with the loud, needs-operator
-        # mass_empty_halt verdict naming the counts, the minute phase is SKIPPED (the
-        # global-stop guard), and the windows settled before the trip are surfaced.
-        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_CONSECUTIVE", "2")
-        # A single-symbol pull is one series per phase — arm the gate at 1 for the
-        # test (production's 3-series default is what keeps a lone dead symbol from
-        # halting a pull; pinned in test_empty_circuit_breaker.py).
-        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_MIN_SERIES", "1")
+        # An all-empty vendor (the R2 throttle-from-START shape) with a trip-at-the-
+        # 2nd-observation FRACTION breaker (env-injected — the DYNAMIC config seam;
+        # an all-empty fresh pull can only trip the fraction rule — the consecutive
+        # rule requires a post-data empty, pinned in test_empty_circuit_breaker.py):
+        # the 1day phase trips after two confirmed-empty windows → the pull HALTS
+        # with the loud, needs-operator mass_empty_halt verdict naming the counts,
+        # the minute phase is SKIPPED (the global-stop guard), the windows settled
+        # before the trip are surfaced, AND the CRITICAL Telegram pull-halt alert
+        # fires from the catch site (minor M-3 — the halt never escapes to the job
+        # layer's alerting path, so parity is wired here).
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_CONSECUTIVE", "0")
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_MIN_OBSERVATIONS", "2")
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_FRACTION", "1.0")
+        # A single-symbol pull is one series per phase — arm the fraction floor at 1
+        # for the test (production's 10-series floor is what keeps a small targeted
+        # pull from halting; pinned in test_empty_circuit_breaker.py).
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_FRACTION_MIN_SERIES", "1")
+        alerts: list[Exception] = []
+        monkeypatch.setattr("brutex.dashboard.pull_controller.emit_pull_halt_alert", alerts.append)
         report = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
@@ -2259,6 +2280,12 @@ class TestMassEmptyCircuitBreaker:
         if report.settled_skipped:
             assert f"{report.settled_skipped} window(s)" in verdict.action
         assert report.to_dict()["verdict"]["kind"] == "mass_empty_halt"
+        # Minor M-3: the dashboard spot halt fires the SAME CRITICAL Telegram alert
+        # the escaping-exception job path fires — exactly once per halt.
+        assert len(alerts) == 1
+        from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+
+        assert isinstance(alerts[0], MassEmptySettleHalt)
 
     def test_below_threshold_settles_produce_loud_verdict_not_silence(self, tmp_path: Path) -> None:
         # Mixed real+empty BELOW the default thresholds (the register's "mixed" case):

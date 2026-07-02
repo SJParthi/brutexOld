@@ -459,7 +459,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Re-open SKIPPED (settled no-data) pull windows so the next pull "
             "re-verifies them — the un-cement path for windows a vendor "
-            "soft-throttle / mis-addressed request may have faked empty"
+            "soft-throttle / mis-addressed request may have faked empty. "
+            "Refuses while a pull is running (the account-wide single-flight "
+            "lock); re-opened windows are breaker-exempt re-checks"
         ),
     )
     reopen_skipped.add_argument(
@@ -1394,12 +1396,28 @@ def cmd_reopen_skipped(
     the divergence register's R2 fix demands: a ``SKIPPED`` settle is no longer
     permanent-forever. Loads the durable window ledger, demotes every matching
     ``SKIPPED`` row to a retryable ``FAILED`` (``empty_streak`` reset — the next
-    pull re-fetches it with the FULL fresh confirmation budget, under the
-    mass-empty breaker's guard), and persists the ledger atomically. DATA-SAFE:
-    stored lake bars are untouched; the idempotent keep-first sink absorbs the
-    re-fetch (Golden Rule #7). ``--symbol`` / ``--market`` scope the selection;
-    ``--limit`` bounds it (the bounded-sample re-verify).
+    pull re-fetches it with the FULL fresh confirmation budget; the ``REOPENED``
+    marker makes those re-checks breaker-exempt), and persists the ledger
+    atomically. DATA-SAFE: stored lake bars are untouched; the idempotent
+    keep-first sink absorbs the re-fetch (Golden Rule #7). ``--symbol`` /
+    ``--market`` scope the selection; ``--limit`` bounds it (the bounded-sample
+    re-verify).
+
+    **Single-flight guard (minor M-2):** the load→mutate→save runs INSIDE the
+    account-wide pull single-flight lock
+    (:func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock` —
+    the same ``flock`` a real pull holds for its whole duration). While a pull
+    is running the non-blocking acquire fails and this command REFUSES loudly
+    (exit ``EXIT_USER_ERROR``) instead of racing the pull's own throttled ledger
+    flushes — a mid-pull reopen would be silently overwritten by the pull's next
+    ledger persist (last-writer-wins on the whole file). The lock is held only
+    for the fast local mutation (ms), so a pull starting in that instant simply
+    retries; no vendor call is ever made here.
     """
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
     from brutex.data.window_ledger_store import (
         ledger_path,
         load_window_ledger,
@@ -1414,20 +1432,33 @@ def cmd_reopen_skipped(
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    ledger = load_window_ledger(resolved)
-    reopened = ledger.reopen_skipped(market=market, security_id=symbol, limit=limit)
+    try:
+        with pull_singleflight_lock(resolved):
+            ledger = load_window_ledger(resolved)
+            reopened = ledger.reopen_skipped(market=market, security_id=symbol, limit=limit)
+            if reopened:
+                save_window_ledger(ledger, resolved)
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] reopen-skipped REFUSED — a pull is currently running against this lake "
+            f"({exc}). Re-opening windows mid-pull would race the pull's own ledger writes "
+            "(the pull's next ledger persist would silently overwrite the re-open). Wait for "
+            "the pull to finish (or stop it), then re-run.",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     if reopened == 0:
         print(
             "[brutex] reopen-skipped — 0 windows matched (nothing was SKIPPED under "
             f"symbol={symbol or 'any'} market={market or 'any'}); ledger unchanged."
         )
         return EXIT_OK
-    save_window_ledger(ledger, resolved)
     print(
         f"[brutex] reopen-skipped — re-opened {reopened} window(s) "
         f"(symbol={symbol or 'any'} market={market or 'any'} limit={limit or 'all'}). "
         "Re-pull to re-verify them; genuinely-empty windows re-settle honestly, "
-        "throttle-poisoned ones recover their data."
+        "throttle-poisoned ones recover their data (re-opened windows are "
+        "breaker-exempt deliberate re-checks — the re-pull cannot re-trip on them)."
     )
     return EXIT_OK
 

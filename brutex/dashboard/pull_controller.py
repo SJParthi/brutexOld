@@ -109,6 +109,7 @@ from brutex.data.window_ledger_store import (
     reconcile_ledger_with_lake,
 )
 from brutex.models import Instrument
+from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.correlation import pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
 from brutex.orchestrator.parallel import PoolRunParallel
@@ -1774,8 +1775,20 @@ def pull_all_spot(
                 # committed survives (bars via the sink, window records via the throttled
                 # flush + the outer finally); every un-settled window stays retryable. Map to
                 # the loud needs-operator ``mass_empty_halt`` verdict (naming the counts +
-                # candidate causes) instead of a generic job error.
+                # candidate causes) instead of a generic job error. Because the halt is
+                # CAUGHT here (it never escapes to the job layer's ``_is_pull_halt``
+                # escaping-exception path), the CRITICAL Telegram pull-halt alert is fired
+                # HERE — parity with the F&O route and the CLI ``_pull_halt_errors`` set
+                # (DEC-TELEGRAM-PULL-HALT-001; minor M-3). Best-effort by construction —
+                # the helper can never mask the verdict flow.
+                emit_pull_halt_alert(exc)
                 final_mass_empty_cause = str(exc)
+                # HONEST UNDERCOUNT: ``passes`` holds only COMPLETED passes — the pass the
+                # halt aborted never appended, so its still-pending windows are NOT in this
+                # tally (the verdict's ``pending_windows`` reads low after a mid-pass halt).
+                # Harmless for control flow — the halt verdict already demands operator
+                # triage + a re-pull, and the ledger (not this count) is the retry
+                # authority — but do not present this number as the full residual.
                 final_still_failed += passes[-1].report.still_failed_windows if passes else 0
                 final_auth_aborted = final_auth_aborted or (
                     bool(passes) and passes[-1].report.auth_aborted

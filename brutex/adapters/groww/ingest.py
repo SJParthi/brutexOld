@@ -828,18 +828,25 @@ def _fetch_window_raw(
     # Mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): feed the window's
     # final fetch shape to the per-pull breaker. A data-bearing window resets its
     # consecutive-empty run (and retro-clears this series' leading pre-listing prefix); a
-    # final-empty window counts toward BOTH trip rules and — the moment either rule
+    # final-empty window counts toward the trip rules and — the moment either rule
     # crosses — RAISES MassEmptySettleHalt on this producer thread, which propagates as a
     # GLOBAL stop (the pull halts loudly; the tripping window is never recorded, so it
-    # stays retryable). Observed BEFORE the fast-settle math below so a poisoned window
-    # can never settle on the very call that trips the breaker.
+    # stays retryable). A window whose OWN ledger row already says EMPTY (a prior pull saw
+    # it empty — the empty-dominated RESUME shape) or is REOPENED-marked (a deliberate
+    # `brutex reopen-skipped` re-check) re-confirming empty is EXPECTED, not throttle
+    # evidence — observed but never counted (`is_expected_empty_recheck`). Observed BEFORE
+    # the fast-settle math below so a poisoned window can never settle on the very call
+    # that trips the breaker.
     if empty_breaker is not None:
         series = f"{instrument.symbol_name}:{interval}"
         if raw_bars:
             empty_breaker.observe_data(series)
         else:
             empty_breaker.observe_empty(
-                series, symbol=instrument.symbol_name, window_end=window_end
+                series,
+                symbol=instrument.symbol_name,
+                window_end=window_end,
+                expected=ledger is not None and ledger.is_expected_empty_recheck(key),
             )
     # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an EMPTY window confirmed empty
     # ACROSS an in-pull retry (``fetch_count >= 2`` — one glitch-prone fetch is not enough;

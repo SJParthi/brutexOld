@@ -46,6 +46,7 @@ __all__ = [
     "EMPTY_TERMINAL_THRESHOLD",
     "FAILED",
     "PLANNED",
+    "REOPENED_MARKER",
     "SETTLED_STATUSES",
     "SKIPPED",
     "SUCCESS",
@@ -81,6 +82,15 @@ SKIPPED: str = "SKIPPED"
 #: old-gap settle path (DEC-OLD-GAP-FAST-SETTLE-001), so this never re-hammers an
 #: ancient dead window — only recent maybe-late windows get the few extra chances.
 EMPTY_TERMINAL_THRESHOLD: int = 3
+
+#: The ``last_error`` marker :meth:`WindowLedger.reopen_skipped` stamps on a
+#: re-opened row (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). A ``FAILED`` row carrying
+#: this marker is a DELIBERATE operator re-check (``brutex reopen-skipped``), so
+#: :meth:`WindowLedger.is_expected_empty_recheck` reports it expected-empty and the
+#: mass-empty breaker never counts its re-verification — a reopen + re-pull can
+#: never re-trip the breaker endlessly on the very windows the operator chose to
+#: re-verify.
+REOPENED_MARKER: str = "REOPENED"
 
 #: The two settled statuses — a window in either is skipped on the next pull.
 _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
@@ -311,6 +321,36 @@ class WindowLedger:
             record = self._by_window.get(wk)
             return record is not None and record.status in _SKIPPABLE
 
+    def is_expected_empty_recheck(self, key: WindowKey) -> bool:
+        """``True`` iff an EMPTY re-fetch of *key* is EXPECTED, not throttle evidence — **O(1)**.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the ledger-knowledge feed for the
+        mass-empty breaker's per-call ``expected`` hint. Two prior-row shapes make a
+        fresh empty response UNINFORMATIVE for throttle detection:
+
+        * the row is already ``EMPTY`` — a prior pull saw this window empty, so a
+          re-confirmation is the expected outcome (the empty-dominated RESUME shape:
+          a worklist made of prior pulls' pre-listing prefixes must not read as a
+          throttled universe);
+        * the row is a ``FAILED`` stamped :data:`REOPENED_MARKER` — a DELIBERATE
+          operator re-check via ``brutex reopen-skipped``; re-verifying it empty is
+          the whole point, so it is breaker-exempt by design (a bulk reopen +
+          re-pull can never re-trip the breaker endlessly).
+
+        Any other row (``PLANNED`` / ordinary ``FAILED`` / absent) leaves the empty
+        fully counted — a 429-retried or never-fetched window coming back empty IS
+        informative. The breaker still counts these windows as OBSERVED (only the
+        trip tally is exempt), and it still refuses their SETTLE after a trip.
+        """
+        wk = self._key(key)
+        with self._lock:
+            record = self._by_window.get(wk)
+            if record is None:
+                return False
+            return record.status == EMPTY or (
+                record.status == FAILED and record.last_error == REOPENED_MARKER
+            )
+
     def record(
         self,
         key: WindowKey,
@@ -532,7 +572,7 @@ class WindowLedger:
         market: str | None = None,
         security_id: str | None = None,
         limit: int | None = None,
-        reason: str = "REOPENED",
+        reason: str = REOPENED_MARKER,
     ) -> int:
         """Re-open ``SKIPPED`` windows for re-verification — returns the count re-opened.
 
@@ -542,17 +582,23 @@ class WindowLedger:
         *reason* stamped as ``last_error`` — so :meth:`is_skippable` turns ``False``
         and the next pull re-fetches it with the FULL fresh confirmation budget (a
         genuinely-empty window re-settles honestly on that pull, now under the
-        breaker's guard; a throttle-poisoned one recovers its data). ``bars`` /
-        ``attempts`` / ``first_seen_at`` / ``last_attempt_at`` are preserved (no
-        fetch happened here); the stored lake bars are untouched (the idempotent
-        keep-first sink absorbs the re-fetch) — re-opening is always DATA-SAFE.
+        breaker's guard; a throttle-poisoned one recovers its data). The default
+        *reason* is :data:`REOPENED_MARKER`, which
+        :meth:`is_expected_empty_recheck` recognises — the re-verify pull treats the
+        re-opened windows as DELIBERATE re-checks, exempt from the mass-empty
+        breaker's trip tally (a bulk reopen + re-pull can never re-trip endlessly).
+        ``bars`` / ``attempts`` / ``first_seen_at`` / ``last_attempt_at`` are
+        preserved (no fetch happened here); the stored lake bars are untouched (the
+        idempotent keep-first sink absorbs the re-fetch) — re-opening is always
+        DATA-SAFE.
 
         *market* / *security_id* filter the selection (``None`` = any); *limit*
         bounds it to the FIRST *limit* rows in the deterministic
         (market, symbol, interval, start, end) sort order — the bounded-sample
-        re-verify path. Each re-open is an **O(1)** row swap; the selection scan is
-        O(rows) once per operator action (the ``prune_superseded`` envelope, never
-        the per-window hot path). Idempotent: re-running re-opens nothing new
+        re-verify path. Each re-open is an **O(1)** row swap; the selection pass is
+        **O(rows log rows)** once per operator action (the ``sorted`` scan that buys
+        the deterministic ``--limit`` sample; the ``prune_superseded`` envelope,
+        never the per-window hot path). Idempotent: re-running re-opens nothing new
         (``FAILED`` rows no longer match).
         """
         doomed: list[tuple[str, str, str, str, str]] = []

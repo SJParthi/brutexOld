@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 from brutex.adapters.ingest_common import (
     CREDENTIALS_REFUSAL_HEADLINE,
+    SETTLED_SKIPPED_OPERATOR_THRESHOLD,
     SYNTHETIC_DRY_RUN_LABEL,
     PullVerdict,
     classify_pull,
@@ -399,3 +400,70 @@ class TestSettledSkippedHonesty:
             kwargs.update(extra)
             verdict = classify_pull(**kwargs)
             assert "7 window(s)" in verdict.action, verdict.kind
+
+
+class TestSettledSkippedOperatorThreshold:
+    """Minor M-4 — a mass write-off flips needs_operator even on a clean verdict."""
+
+    def _clean(self, settled_skipped: int) -> PullVerdict:
+        return classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+            settled_skipped=settled_skipped,
+        )
+
+    def test_above_threshold_flips_needs_operator_on_clean(self) -> None:
+        verdict = self._clean(SETTLED_SKIPPED_OPERATOR_THRESHOLD + 1)
+        assert verdict.kind == "clean"
+        assert verdict.needs_operator is True  # a mass write-off demands eyes
+        assert verdict.to_dict()["needs_operator"] is True
+
+    def test_at_threshold_stays_quiet(self) -> None:
+        # The gate is STRICTLY above (> 50): exactly-at stays a quiet clean.
+        verdict = self._clean(SETTLED_SKIPPED_OPERATOR_THRESHOLD)
+        assert verdict.kind == "clean"
+        assert verdict.needs_operator is False
+
+    def test_threshold_applies_on_non_clean_kinds_too(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=2,  # quarantined_symbols — normally needs_operator=False
+            no_data=0,
+            completed=1,
+            settled_skipped=SETTLED_SKIPPED_OPERATOR_THRESHOLD + 5,
+        )
+        assert verdict.kind == "quarantined_symbols"
+        assert verdict.needs_operator is True
+
+
+class TestReVerifyGuidanceTexts:
+    """Minor M-1 — the halt + settle-note texts explain the bounded re-verify path."""
+
+    def test_mass_empty_action_names_limit_and_envs(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            mass_empty_cause="tripped",
+        )
+        assert "--limit N" in verdict.action  # the bounded re-verify sample
+        assert "REOPENED" in verdict.action  # re-checks are breaker-exempt
+        assert "BRUTEX_EMPTY_BREAKER" in verdict.action  # the env-tunable thresholds
+
+    def test_settle_note_names_limit_and_exemption(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=3,
+            settled_skipped=2,
+        )
+        assert "--limit N" in verdict.action
+        assert "breaker-exempt" in verdict.action

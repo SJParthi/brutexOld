@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pytest
 from brutex import cli
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import FAILED, SKIPPED, WindowLedger
@@ -102,3 +103,31 @@ class TestReopenSkippedCommand:
     def test_missing_ledger_refuses_loudly(self, tmp_path: Path) -> None:
         rc = cli.main(["reopen-skipped", "--lake-root", str(tmp_path / "empty")])
         assert rc == cli.EXIT_USER_ERROR
+
+    def test_refuses_while_a_pull_holds_the_account_lock(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Minor M-2 (single-flight guard): while a pull holds the account-wide
+        # single-flight lock, reopen-skipped REFUSES loudly instead of racing the
+        # pull's own throttled ledger flushes (a mid-pull re-open would be silently
+        # overwritten by the pull's next whole-file ledger persist).
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        _seed_lake(tmp_path)
+        with pull_singleflight_lock(tmp_path):  # "a pull is running"
+            rc = cli.main(["reopen-skipped", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_USER_ERROR
+        assert "REFUSED" in capsys.readouterr().err
+        # Nothing was mutated — every settle survives untouched.
+        restored = load_window_ledger(tmp_path)
+        assert all(r.status == SKIPPED for r in restored.records())
+
+    def test_lock_released_after_a_normal_reopen(self, tmp_path: Path) -> None:
+        # The guard holds the lock only for the ms-scale local mutation — a pull
+        # starting right after a reopen acquires it cleanly.
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        _seed_lake(tmp_path)
+        assert cli.main(["reopen-skipped", "--lake-root", str(tmp_path)]) == cli.EXIT_OK
+        with pull_singleflight_lock(tmp_path):  # would raise if still held
+            pass

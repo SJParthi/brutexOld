@@ -18,6 +18,7 @@ from brutex.data.window_ledger import (
     EMPTY_TERMINAL_THRESHOLD,
     FAILED,
     PLANNED,
+    REOPENED_MARKER,
     SETTLED_STATUSES,
     SKIPPED,
     SUCCESS,
@@ -1013,3 +1014,45 @@ class TestReopenSkipped:
             settle_empty=True,
         )
         assert status == SKIPPED
+
+
+class TestIsExpectedEmptyRecheck:
+    """`is_expected_empty_recheck` — the mass-empty breaker's ledger-knowledge hint."""
+
+    def test_prior_empty_row_is_expected(self) -> None:
+        # A window a prior pull already saw EMPTY: re-confirming it empty is the
+        # expected outcome (the empty-dominated RESUME shape), never throttle evidence.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.records()[0].status == EMPTY
+        assert ledger.is_expected_empty_recheck(_key())
+
+    def test_reopened_row_is_expected(self) -> None:
+        # A REOPENED-marked row is a deliberate operator re-check (minor M-1):
+        # breaker-exempt, so reopen + re-pull can never re-trip endlessly.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, settle_empty=True
+        )
+        assert ledger.reopen_skipped() == 1
+        row = ledger.records()[0]
+        assert row.status == FAILED
+        assert row.last_error == REOPENED_MARKER
+        assert ledger.is_expected_empty_recheck(_key())
+
+    def test_absent_planned_and_ordinary_failed_are_not_expected(self) -> None:
+        ledger = WindowLedger()
+        assert not ledger.is_expected_empty_recheck(_key())  # absent — informative
+        ledger.plan(_key(), now=_NOW)
+        assert not ledger.is_expected_empty_recheck(_key())  # PLANNED — never fetched
+        ledger.record(
+            _key(), raw_bars=0, error_type="GrowwRateLimitError", bars_appended=0, now=_NOW
+        )
+        # An ordinary FAILED (a 429) coming back empty IS informative — counted.
+        assert not ledger.is_expected_empty_recheck(_key())
+
+    def test_success_row_is_not_expected(self) -> None:
+        # (A SUCCESS window is skipped before any fetch, but the rule stays honest.)
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert not ledger.is_expected_empty_recheck(_key())

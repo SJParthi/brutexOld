@@ -3027,8 +3027,15 @@ class TestEmptyBreakerOptionSpine:
         from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
 
         ledger = WindowLedger()
+        # Trip on the FIRST observed empty via the FRACTION rule (an all-empty fresh
+        # pull is the throttle-from-start shape; the consecutive rule requires a
+        # post-data empty, so it can never fire here by design).
         breaker = EmptySettleBreaker(
-            min_series=1, consecutive_limit=1, fraction_limit=1.0, min_observations=999
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=1,
+            fraction_min_series=1,
         )
         with pytest.raises(MassEmptySettleHalt):
             ingest_option_contract(
@@ -3082,7 +3089,11 @@ class TestEmptyBreakerOptionSpine:
         from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
 
         breaker = EmptySettleBreaker(
-            min_series=1, consecutive_limit=2, fraction_limit=1.0, min_observations=999
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=2,
+            fraction_min_series=1,
         )
         with pytest.raises(MassEmptySettleHalt) as excinfo:
             run_groww_option_ingest(
@@ -3110,7 +3121,11 @@ class TestEmptyBreakerOptionSpine:
         from brutex.data.window_ledger import EMPTY as _EMPTY_STATUS
 
         breaker = EmptySettleBreaker(
-            min_series=1, consecutive_limit=1, fraction_limit=1.0, min_observations=999
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=1,
+            fraction_min_series=1,
         )
         with pytest.raises(MassEmptySettleHalt):
             breaker.observe_empty("X:1day", symbol="X", window_end=date(2024, 1, 2))

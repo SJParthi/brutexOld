@@ -483,16 +483,25 @@ def ingest_option_contract(
 
     # Mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the spot-spine
     # twin): feed this contract window's final fetch shape to the per-pull breaker. A
-    # final-empty window counts toward both trip rules; a trip RAISES MassEmptySettleHalt
+    # final-empty window counts toward the trip rules; a trip RAISES MassEmptySettleHalt
     # on this producer thread, which propagates as a GLOBAL stop (the pull halts loudly;
-    # the tripping window is never recorded, so it stays retryable). Observed BEFORE the
-    # fast-settle math so a poisoned window can never settle on the tripping call.
+    # the tripping window is never recorded, so it stays retryable). A window whose OWN
+    # ledger row already says EMPTY (a prior pull saw it empty — the empty-dominated
+    # RESUME shape) or is REOPENED-marked (a deliberate `brutex reopen-skipped` re-check)
+    # re-confirming empty is EXPECTED, not throttle evidence — observed but never counted
+    # (`is_expected_empty_recheck`). Observed BEFORE the fast-settle math so a poisoned
+    # window can never settle on the tripping call.
     if empty_breaker is not None:
         series = f"{contract.symbol}:{interval}"
         if raw_bars:
             empty_breaker.observe_data(series)
         else:
-            empty_breaker.observe_empty(series, symbol=contract.symbol, window_end=clamped_end)
+            empty_breaker.observe_empty(
+                series,
+                symbol=contract.symbol,
+                window_end=clamped_end,
+                expected=ledger is not None and ledger.is_expected_empty_recheck(key),
+            )
     # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 — the spot-spine twin): an EMPTY
     # window confirmed empty ACROSS an in-pull retry (``fetch_count >= 2``) AND OLD enough
     # that vendor data can never appear (``clamped_end`` strictly before ``old_cutoff``) is a

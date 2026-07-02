@@ -759,7 +759,12 @@ _ACTION: Final[dict[str, str]] = {
         "pre-listing gap; the code cannot tell which, so NOTHING more was settled as "
         "SKIPPED and every un-settled window stays retryable. Wait out a possible "
         "throttle, verify the symbol addressing, then re-pull; if windows were settled "
-        "before the halt, `brutex reopen-skipped` re-opens them for re-verification."
+        "before the halt, `brutex reopen-skipped` re-opens them for re-verification "
+        "(`--limit N` bounds the re-open to a sample). Re-opened (REOPENED) windows are "
+        "deliberate re-checks the breaker never counts, so reopen + re-pull cannot "
+        "re-trip endlessly; if a genuine no-data universe keeps tripping, the thresholds "
+        "are env-tunable (BRUTEX_EMPTY_BREAKER_*) and BRUTEX_EMPTY_BREAKER=off is the "
+        "explicit kill switch."
     ),
     "quota_exhausted": (
         "The 100,000/day Groww quota is spent — the auto-resume paused itself "
@@ -781,6 +786,17 @@ _ACTION: Final[dict[str, str]] = {
     ),
     "clean": "No action needed.",
 }
+
+#: Settled-``SKIPPED`` count above which an otherwise-clean pull still flips
+#: :attr:`PullVerdict.needs_operator` (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 minor
+#: M-4). A pull that permanently wrote off MORE than this many windows in one go
+#: deserves operator eyes even when nothing failed — a mass write-off is either a
+#: legitimate first full backfill settling late-listing prefixes (confirm once,
+#: then it never recurs — settles are transitions, not re-counts) or exactly the
+#: throttle/mis-addressing shape the breaker exists for. The config knob is this
+#: named constant (deliberately NOT env-read: the verdict layer stays pure +
+#: deterministic — no I/O, no env, per :func:`classify_pull`'s contract).
+SETTLED_SKIPPED_OPERATOR_THRESHOLD: Final[int] = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,7 +839,14 @@ class PullVerdict:
         ``mass_empty_halt`` counts (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the pull
         halted on a suspected soft-throttle / mis-addressing episode — blindly
         re-pulling into the same episode is exactly what the breaker prevents.
+        A ``settled_skipped`` count ABOVE
+        :data:`SETTLED_SKIPPED_OPERATOR_THRESHOLD` also counts, on EVERY kind
+        (minor M-4): a pull that permanently wrote off that many windows must be
+        confirmed by a human once — the ``action`` text already names the count
+        and the ``brutex reopen-skipped`` re-verify path.
         """
+        if self.settled_skipped > SETTLED_SKIPPED_OPERATOR_THRESHOLD:
+            return True
         return self.kind in (
             "credentials_missing",
             "auth_expired",
@@ -991,8 +1014,10 @@ def _settled_skipped_note(settled_skipped: int) -> str:
     return (
         f"NOTE: {settled_skipped} window(s) were settled as permanent no-data (SKIPPED) "
         "this pull. If that is unexpected (a vendor soft-throttle or a mis-addressed "
-        "symbol can fake no-data), run `brutex reopen-skipped` to re-open them, then "
-        "re-pull to re-verify."
+        "symbol can fake no-data), run `brutex reopen-skipped` to re-open them "
+        "(`--symbol`/`--market` scope it, `--limit N` bounds a sample re-verify), then "
+        "re-pull — re-opened (REOPENED) windows are breaker-exempt deliberate "
+        "re-checks, so the re-verify pull cannot re-trip the mass-empty breaker on them."
     )
 
 
@@ -1659,6 +1684,7 @@ __all__ = [
     "DEFAULT_MAX_ROUNDS",
     "GROWW_COVERAGE_MARKET",
     "OLD_GAP_HORIZON_DAYS",
+    "SETTLED_SKIPPED_OPERATOR_THRESHOLD",
     "SYNTHETIC_DRY_RUN_LABEL",
     "DateWindow",
     "LoopVerdict",

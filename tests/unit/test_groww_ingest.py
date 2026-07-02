@@ -1680,17 +1680,24 @@ class TestEmptyBreakerSpotSpine:
     """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the mass-empty breaker on the spot spine."""
 
     def test_trip_halts_pull_and_leaves_windows_retryable(self) -> None:
-        # Always-empty adapter over a 3-window intraday range + a 2-consecutive breaker:
-        # window 1 records (settled), window 2's empty TRIPS → MassEmptySettleHalt
-        # propagates out of ingest_spot (the global stop), window 2 is NEVER recorded
-        # (stays PLANNED-absent → retryable) and window 3 is never fetched.
+        # Always-empty adapter over an 8-window intraday range + a trip-at-the-2nd-
+        # observation FRACTION breaker (the throttle-from-start signature — an
+        # all-empty fresh pull can only trip the fraction rule; the consecutive rule
+        # requires a post-data empty): window 1 records (settled), window 2's empty
+        # TRIPS → MassEmptySettleHalt propagates out of ingest_spot (the global
+        # stop), window 2 is NEVER recorded (stays PLANNED-absent → retryable) and
+        # window 3 is never fetched.
         from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
         from brutex.data.window_ledger import SKIPPED, WindowLedger
 
         ledger = WindowLedger()
         adapter = _BarSeqAdapter([[]])  # always empty
         breaker = EmptySettleBreaker(
-            min_series=1, consecutive_limit=2, fraction_limit=1.0, min_observations=999
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=2,
+            fraction_min_series=1,
         )
         with pytest.raises(MassEmptySettleHalt) as excinfo:
             ingest_spot(
@@ -1735,7 +1742,11 @@ class TestEmptyBreakerSpotSpine:
 
         ledger = WindowLedger()
         breaker = EmptySettleBreaker(
-            min_series=1, consecutive_limit=2, fraction_limit=1.0, min_observations=999
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=2,
+            fraction_min_series=1,
         )
         with pytest.raises(MassEmptySettleHalt):
             ingest_spot(
@@ -1764,7 +1775,11 @@ class TestEmptyBreakerSpotSpine:
             run_parallel=_sync_run_parallel,
             now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
             empty_breaker=EmptySettleBreaker(
-                min_series=1, consecutive_limit=2, fraction_limit=1.0, min_observations=999
+                min_series=1,
+                consecutive_limit=0,
+                fraction_limit=1.0,
+                min_observations=2,
+                fraction_min_series=1,
             ),
         )
         # Window 1 settled SKIPPED in pull 1 → skipped; the 7 others fetched + SUCCESS.
@@ -1810,7 +1825,11 @@ class TestEmptyBreakerSpotSpine:
         from brutex.data.window_ledger import EMPTY, WindowLedger
 
         breaker = EmptySettleBreaker(
-            min_series=1, consecutive_limit=1, fraction_limit=1.0, min_observations=999
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=1,
+            fraction_min_series=1,
         )
         with pytest.raises(MassEmptySettleHalt):
             breaker.observe_empty("NIFTY:1minute", symbol="NIFTY", window_end=date(2021, 4, 1))
@@ -1858,9 +1877,10 @@ class TestEmptyBreakerSpotSpine:
         ledger = WindowLedger()
         breaker = EmptySettleBreaker(
             min_series=1,
-            consecutive_limit=1,  # would trip on the FIRST counted empty…
-            fraction_limit=1.0,
-            min_observations=999,
+            consecutive_limit=0,
+            fraction_limit=0.5,  # would trip at the 2nd counted empty…
+            min_observations=2,
+            fraction_min_series=1,
             expected_empty=lambda _symbol, window_end: window_end < date(2023, 1, 1),
         )
         report = ingest_spot(
@@ -1878,4 +1898,160 @@ class TestEmptyBreakerSpotSpine:
         )
         assert not breaker.tripped  # …but every empty was provably pre-listing
         assert report.windows == 8
+        assert breaker.counts() == (8, 0, 0)  # observed, never counted
         assert all(r.status == SKIPPED for r in ledger.records())  # settled honestly
+
+    def test_empty_dominated_resume_does_not_retrip(self) -> None:
+        # REGRESSION (hostile review MAJOR-1, scenario "empty-dominated resume"):
+        # pull 1 records the symbol's windows EMPTY (below the SKIPPED threshold —
+        # single-fetch, no in-pull confirmation). Pull 2 re-fetches them and they
+        # re-confirm empty — the spine passes expected=True from the prior-EMPTY
+        # ledger rows (`is_expected_empty_recheck`), so a breaker that WOULD trip on
+        # two counted empties (the pre-redesign behaviour) never counts them.
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _BarSeqAdapter([[]]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),  # 8 windows, all EMPTY (streak 1, unsettled)
+            ledger=ledger,
+            empty_retry_attempts=1,  # single fetch → no fast-settle confirmation
+            run_parallel=_sync_run_parallel,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+        )
+        assert all(r.status == EMPTY for r in ledger.records())
+        # The RESUME: every window re-fetches (EMPTY is not skippable) and
+        # re-confirms empty. This breaker trips at 2 counted empties (0.5 of 2) —
+        # exactly what the old design did here — but the prior-EMPTY hint keeps
+        # every re-confirmation uncounted.
+        breaker = EmptySettleBreaker(
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=0.5,
+            min_observations=2,
+            fraction_min_series=1,
+        )
+        report = ingest_spot(
+            _BarSeqAdapter([[]]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+            empty_retry_attempts=1,
+            run_parallel=_sync_run_parallel,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+            empty_breaker=breaker,
+        )
+        assert not breaker.tripped
+        assert report.windows == 8
+        assert breaker.counts() == (8, 0, 0)  # observed, never counted
+
+    def test_reopened_windows_are_breaker_exempt_on_reverify(self) -> None:
+        # Minor M-1: after `brutex reopen-skipped`, the re-verify pull re-fetches the
+        # REOPENED windows deliberately — their re-confirmed empties are exempt from
+        # the trip tally, so reopen + re-pull can never re-trip endlessly, and the
+        # genuinely-empty windows re-settle honestly.
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+        from brutex.data.window_ledger import SKIPPED, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _BarSeqAdapter([[]]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+            empty_retry_attempts=2,  # confirmed + old → all 8 fast-settle SKIPPED
+            run_parallel=_sync_run_parallel,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+        )
+        assert all(r.status == SKIPPED for r in ledger.records())
+        assert ledger.reopen_skipped() == 8  # the operator re-opens everything
+        breaker = EmptySettleBreaker(
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=0.5,  # would trip at the 2nd counted empty…
+            min_observations=2,
+            fraction_min_series=1,
+        )
+        ingest_spot(
+            _BarSeqAdapter([[]]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+            empty_retry_attempts=2,
+            run_parallel=_sync_run_parallel,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+            empty_breaker=breaker,
+        )
+        assert not breaker.tripped  # …but REOPENED re-checks are breaker-exempt
+        assert breaker.counts() == (8, 0, 0)
+        # The deliberate re-verify re-settled the genuinely-empty windows honestly.
+        assert all(r.status == SKIPPED for r in ledger.records())
+
+    def test_recent_listing_prefix_never_trips_consecutive(self) -> None:
+        # REGRESSION (hostile review MAJOR-1, scenario "targeted pull of recent
+        # listings"): a recently-listed symbol's 2020→today backfill starts with a
+        # long run of pre-listing empties BEFORE its first bar. The pre-redesign
+        # consecutive rule tripped inside that prefix; the post-data requirement
+        # makes the prefix structurally ineligible, data then retro-clears it.
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+        from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
+
+        listing = date(2021, 5, 20)
+
+        class _ListedAdapter:
+            """Empty before *listing*, one trailing in-session bar after."""
+
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                del symbol, exchange, interval, start
+                if end <= listing:
+                    return []
+                last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+                ts = datetime(
+                    last_session.year, last_session.month, last_session.day, 4, 5, tzinfo=UTC
+                )
+                return [_bar(ts)]
+
+        ledger = WindowLedger()
+        breaker = EmptySettleBreaker(
+            min_series=1,
+            consecutive_limit=3,  # the OLD rule tripped on the 3rd prefix empty
+            fraction_limit=1.0,
+            min_observations=999,
+        )
+        report = ingest_spot(
+            _ListedAdapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),  # 8 windows: 4 pre-listing empties then data
+            ledger=ledger,
+            empty_retry_attempts=2,
+            run_parallel=_sync_run_parallel,
+            now_ist=lambda: datetime(2026, 6, 19, 8, 0, tzinfo=UTC),
+            empty_breaker=breaker,
+        )
+        assert not breaker.tripped
+        assert report.windows == 8
+        _observed, empties, consecutive = breaker.counts()
+        assert empties == 0  # first data retro-cleared the whole leading prefix
+        assert consecutive == 0
+        statuses = [r.status for r in ledger.records()]
+        assert statuses.count(SKIPPED) == 4  # the genuine pre-listing gap settled
+        assert statuses.count(SUCCESS) == 4  # …and the listed range landed bars
