@@ -26,6 +26,7 @@ from brutex.adapters.groww.auth import (
 )
 from brutex.adapters.groww.client import GrowwClient, GrowwSDK, _noop_hook, _noop_pace
 from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
+from brutex.adapters.groww.errors import GrowwAuthError
 from brutex.adapters.groww.pool import ClientPool
 from brutex.adapters.groww.reauth import SdkRefresher, _real_sdk_factory
 from brutex.adapters.groww.token_cache import CachedToken
@@ -34,6 +35,55 @@ from brutex.adapters.groww.token_store import resolve_token_store
 #: Type aliases for the injected daily-token cache hooks (DEC-TOKEN-BROKER-AWS-001).
 TokenCacheLoad = Callable[..., CachedToken | None]
 TokenCacheStore = Callable[..., bool]
+
+
+class KitMintBlockedError(GrowwAuthError):
+    """A Groww token MINT was reached while the live-proof kit's no-mint guard is active.
+
+    ``brutex doctor --live`` (DEC-DOCTOR-LIVE-PROOF-KIT-001) NEVER mints a Groww
+    token: under the recorded single-active-token behaviour (UNVERIFIED — treated
+    as true, register rows R7/M4) a kit-side mint could REVOKE the shared token
+    the minter Lambda / TickVault own, corrupting the very pull the kit is
+    diagnosing. The kit therefore wires :func:`mint_blocked_token_factory` /
+    :func:`mint_blocked_totp_minter` into :func:`build_live_client`, making a
+    mint PHYSICALLY impossible (safety invariant 2 of the kit spec). Reaching
+    this error means the kit tried to build a client without an SSM token —
+    re-run with ``--mint-anyway`` to override (prints a red warning first).
+    """
+
+
+def mint_blocked_token_factory(api_key: str, totp: str) -> str:
+    """A ``token_factory`` that REFUSES to mint (the kit's no-mint guard, R7/M4)."""
+    _ = (api_key, totp)
+    raise KitMintBlockedError(
+        "doctor --live never mints a Groww token (a mint may revoke the shared "
+        "Lambda/TickVault token — single-active-token, UNVERIFIED but treated as "
+        "true). Re-run with --mint-anyway to override."
+    )
+
+
+def mint_blocked_totp_minter(secret: str) -> str:
+    """A ``totp_minter`` that REFUSES to mint (belt-and-suspenders over the factory)."""
+    _ = secret
+    raise KitMintBlockedError(
+        "doctor --live never mints a TOTP code for token issuance (no-mint guard). "
+        "Re-run with --mint-anyway to override."
+    )
+
+
+def installed_growwapi_version() -> str | None:
+    """Return the installed ``growwapi`` distribution version, or ``None`` when absent.
+
+    The G2 telemetry seam: the SDK version is the single most reality-divergent
+    variable on the operator's Mac and appears in no log today. Kit stage 0
+    prints it; the eventual client-build logging fix reuses this helper.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("growwapi")
+    except PackageNotFoundError:
+        return None
 
 
 def _resolve_token_cache_hooks(
@@ -236,8 +286,12 @@ def build_live_pool(
 
 
 __all__ = [
+    "KitMintBlockedError",
     "TokenCacheLoad",
     "TokenCacheStore",
     "build_live_client",
     "build_live_pool",
+    "installed_growwapi_version",
+    "mint_blocked_token_factory",
+    "mint_blocked_totp_minter",
 ]

@@ -26,12 +26,17 @@ on a read-only host the forced re-mint fails loud rather than minting locally.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
 
 from brutex.adapters.groww.auth import GrowwCredentials
-from brutex.adapters.groww.aws_client import AwsClient, build_real_aws_client
+from brutex.adapters.groww.aws_client import (
+    SSM_PARAMETER_NOT_FOUND,
+    AwsClient,
+    build_real_aws_client,
+)
 from brutex.adapters.groww.constants import (
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV,
@@ -57,6 +62,36 @@ class TokenBrokerReadOnlyError(GrowwAuthError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class TokenLoadMiss:
+    """WHY a Parameter-Store token load missed (the reason-carrying seam, register R7).
+
+    The production ``load`` contract degrades ANY failure to ``None`` (the mint
+    spine's NEVER-raises contract), which makes a reader-side IAM/KMS/network
+    failure indistinguishable from "token genuinely absent" — the exact R7
+    misleading-diagnosis trap. This record carries the distinction for callers
+    that need it (``brutex doctor --live`` stage 3; the eventual R7 cold-start
+    guard reuses it).
+
+    Attributes
+    ----------
+    kind
+        ``"error"`` (the read RAISED — IAM/KMS/network/boto3; the token may well
+        exist) or ``"absent"`` (the read SUCCEEDED and the parameter is
+        genuinely missing/blank).
+    error_type
+        The raising exception's class name for ``kind="error"`` (e.g.
+        ``AccessDeniedException``, ``ParameterNotFound``), else ``None``.
+    detail
+        A short human-readable, secret-free description (exception text or the
+        parameter path that came back absent/blank).
+    """
+
+    kind: str
+    error_type: str | None
+    detail: str
+
+
 class ParameterStoreTokenStore:
     """The shared daily-token backend — a READ-ONLY Parameter-Store SecureString reader.
 
@@ -73,6 +108,11 @@ class ParameterStoreTokenStore:
     def __init__(self, *, client: AwsClient, token_param: str) -> None:
         self._client = client
         self._token_param = token_param
+
+    @property
+    def token_param(self) -> str:
+        """The Parameter-Store path of the shared access token (for diagnostics)."""
+        return self._token_param
 
     @property
     def readonly(self) -> bool:
@@ -96,17 +136,49 @@ class ParameterStoreTokenStore:
         (the shared parameter is account-scoped, not fingerprint-keyed — single account).
         """
         _ = creds
+        token, miss = self.load_with_reason(now_utc=now_utc)
+        if miss is not None:
+            if miss.kind == "error":
+                _LOG.warning("groww.token.aws_load_failed", error_type=miss.error_type)
+            else:
+                _LOG.debug("groww.token.aws_miss", reason="absent")
+            return None
+        return token
+
+    def load_with_reason(
+        self, *, now_utc: datetime
+    ) -> tuple[CachedToken | None, TokenLoadMiss | None]:
+        """Read the shared token, RETURNING the miss reason instead of swallowing it (R7 seam).
+
+        Exactly one side of the pair is non-``None``. The production :meth:`load`
+        delegates here (so the read stays in ONE place — CLAUDE.md §11 COMMON) and
+        keeps its NEVER-raises degrade-to-``None`` contract; a caller that must
+        distinguish "read failed" (reader-side IAM/KMS/network — do NOT deploy
+        anything) from "token genuinely absent" (run the minter Lambda) reads the
+        :class:`TokenLoadMiss` instead (``brutex doctor --live`` stage 3).
+        """
         try:
             token = self._client.get_parameter(name=self._token_param, with_decryption=True)
         except Exception as exc:  # pylint: disable=broad-exception-caught — a raise ⇒ unreachable ⇒ miss
-            _LOG.warning("groww.token.aws_load_failed", error_type=type(exc).__name__)
-            return None
+            # A ParameterNotFound IS a definitive "genuinely absent" answer (the
+            # SSM read worked; the parameter does not exist) — the R7 distinction
+            # mirrors ``credentials_aws._read_param``'s class-name classification.
+            if type(exc).__name__ == SSM_PARAMETER_NOT_FOUND:
+                return None, TokenLoadMiss(
+                    kind="absent",
+                    error_type=type(exc).__name__,
+                    detail=f"parameter {self._token_param} not found (ParameterNotFound)",
+                )
+            return None, TokenLoadMiss(kind="error", error_type=type(exc).__name__, detail=str(exc))
         if token is None or not token.strip():
-            _LOG.debug("groww.token.aws_miss", reason="absent")
-            return None
+            return None, TokenLoadMiss(
+                kind="absent",
+                error_type=None,
+                detail=f"parameter {self._token_param} absent or blank",
+            )
         session = current_session(now_utc)
         _LOG.debug("groww.token.aws_hit", session=session.isoformat())
-        return CachedToken(access_token=token, issued_for_session=session)
+        return CachedToken(access_token=token, issued_for_session=session), None
 
     def store(self, creds: GrowwCredentials, token: str, *, now_utc: datetime) -> bool:
         """Fail LOUD — BruteX is read-only and must NEVER mint/write the shared token.
@@ -161,6 +233,7 @@ def build_readonly_token_store_with(client: AwsClient) -> ParameterStoreTokenSto
 __all__ = [
     "ParameterStoreTokenStore",
     "TokenBrokerReadOnlyError",
+    "TokenLoadMiss",
     "build_readonly_token_store",
     "build_readonly_token_store_with",
 ]

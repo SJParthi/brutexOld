@@ -18,11 +18,34 @@ scope for a single button (Golden Rule #1 — no invented automatic verdict).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
+from datetime import date, timedelta
+from typing import Final, Protocol
 
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
+from brutex.adapters.groww.constants import EARLIEST_HISTORY
 from brutex.adapters.groww.errors import GrowwError
+
+
+class CandleFetcher(Protocol):
+    """The ONE vendor surface the depth probe needs (a structural subset of
+    :class:`~brutex.adapters.groww.client.GrowwClientProtocol`, so the real
+    client satisfies it and a probe test double stays minimal)."""
+
+    def historical_candles(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        groww_symbol: str,
+        interval: str,
+        start: str,
+        end: str,
+    ) -> Mapping[str, object]:
+        """Fetch one historical-candle window (row-of-arrays payload)."""
+        ...  # pragma: no cover — structural Protocol stub, never executed
+
 
 #: India VIX is the HARD-GATE (ADR-0009 risk #3). The exact ``groww_symbol`` is
 #: one of the unknowns the probe resolves; these are the documented candidates to
@@ -81,7 +104,7 @@ def _candle_rows(resp: object) -> int:
     return len(candles)
 
 
-def probe_vix(client: GrowwClient) -> ProbeResult:
+def probe_vix(client: GrowwClientProtocol) -> ProbeResult:
     """ADR-0009 §4.1 — HARD-GATE: is India VIX present + fetchable on Groww?
 
     Tries each candidate ``groww_symbol`` over a short 2024 window; returns OK on
@@ -212,6 +235,208 @@ def probe_options(client: GrowwClient) -> ProbeResult:
     )
 
 
+#: Days per depth-probe window — the 1-minute interval's vendor cap is 30 days per
+#: request; a 15-day tile stays comfortably inside it while keeping the bisection
+#: predicate simple (a window has rows iff the true floor falls before its end).
+_DEPTH_WINDOW_DAYS: Final[int] = 15
+
+#: Hard per-symbol call bound for the depth bisection (kit spec stage 6: ≤ 20).
+DEPTH_PROBE_MAX_CALLS: Final[int] = 20
+
+
+@dataclass(frozen=True, slots=True)
+class DepthProbeResult:
+    """One symbol's 1-minute history-depth probe outcome (ADR-0009 §3.1 open gate).
+
+    Attributes
+    ----------
+    symbol
+        The probed ``groww_symbol``.
+    verdict
+        :data:`VERDICT_OK` (a floor was established), :data:`VERDICT_ABSENT`
+        (no 1-minute data found anywhere in the probed range), or
+        :data:`VERDICT_ERROR` (a :class:`GrowwError` interrupted the probe).
+    first_ts
+        The raw timestamp of the FIRST 1-minute bar observed at the floor
+        window (vendor encoding preserved for the transcript), else ``None``.
+    probed_floor
+        The first probed calendar day whose window returned rows (the observed
+        1-minute floor, to window granularity), else ``None``.
+    boundary_has_data
+        ``True`` iff the window AT the configured boundary (2020-01-01) itself
+        returned rows — the direct GROWW_HISTORY_FLOOR confirmation.
+    calls_used
+        Vendor calls this probe consumed (bounded by
+        :data:`DEPTH_PROBE_MAX_CALLS`).
+    detail
+        Human-readable, secret-free summary line.
+    """
+
+    symbol: str
+    verdict: str
+    first_ts: str | None
+    probed_floor: date | None
+    boundary_has_data: bool
+    calls_used: int
+    detail: str
+
+
+def _first_row_ts(resp: object) -> str | None:
+    """The raw first-candle timestamp of a payload (``None`` when there are no rows)."""
+    if not isinstance(resp, dict):
+        return None
+    candles = resp.get("candles")
+    if not isinstance(candles, list) or not candles:
+        return None
+    first = candles[0]
+    if isinstance(first, (list, tuple)) and first:
+        return str(first[0])
+    return str(first)
+
+
+def _date_of_first_ts(first_ts: str | None) -> date | None:
+    """The calendar date of a raw vendor timestamp string, else ``None``.
+
+    Handles the documented native-IST string shapes (``YYYY-MM-DD…``); an
+    epoch-encoded stamp does not parse here and the caller falls back to the
+    window start (an honest window-granularity floor, stated in the detail).
+    """
+    if first_ts is None:
+        return None
+    try:
+        return date.fromisoformat(first_ts[:10])
+    except ValueError:
+        return None
+
+
+def probe_depth(
+    client: CandleFetcher,
+    *,
+    symbol: str = "NSE-NIFTY",
+    exchange: str = "NSE",
+    segment: str = "CASH",
+    boundary: date = EARLIEST_HISTORY,
+    today: date,
+    bisect: bool = False,
+    max_calls: int = DEPTH_PROBE_MAX_CALLS,
+) -> DepthProbeResult:
+    """Probe the TRUE 1-minute history floor for *symbol* (kit stage 6, register R6).
+
+    First fetches ONE :data:`_DEPTH_WINDOW_DAYS`-day 1-minute window at
+    *boundary* (2020-01-01). Rows there CONFIRM the configured floor. An empty
+    boundary window with ``bisect=False`` reports the shallow-floor hazard
+    without further calls; with ``bisect=True`` a BOUNDED binary search over
+    day offsets in ``[boundary, today]`` finds the earliest window with data
+    (the observed floor) in ``≤ log2(range) + 2`` calls, hard-capped at
+    *max_calls* (the property-tested bound).
+
+    The window-has-rows predicate is monotone when vendor history is
+    contiguous-from-floor (the honest assumption; a vendor serving old ranges
+    INTERMITTENTLY makes any probe a lower bound — stated in the detail line).
+    """
+    calls = 0
+
+    def _window_rows(start_day: date) -> tuple[int, str | None]:
+        nonlocal calls
+        calls += 1
+        window_end = start_day + timedelta(days=_DEPTH_WINDOW_DAYS - 1)
+        resp = client.historical_candles(
+            exchange=exchange,
+            segment=segment,
+            groww_symbol=symbol,
+            interval="1minute",
+            start=f"{start_day.isoformat()} 09:15:00",
+            end=f"{window_end.isoformat()} 15:30:00",
+        )
+        return _candle_rows(resp), _first_row_ts(resp)
+
+    try:
+        boundary_rows, boundary_first = _window_rows(boundary)
+        if boundary_rows:
+            return DepthProbeResult(
+                symbol=symbol,
+                verdict=VERDICT_OK,
+                first_ts=boundary_first,
+                probed_floor=_date_of_first_ts(boundary_first) or boundary,
+                boundary_has_data=True,
+                calls_used=calls,
+                detail=(
+                    f"{symbol} 1m has data at the {boundary.isoformat()} boundary "
+                    f"(first_ts={boundary_first})"
+                ),
+            )
+        if not bisect:
+            return DepthProbeResult(
+                symbol=symbol,
+                verdict=VERDICT_ABSENT,
+                first_ts=None,
+                probed_floor=None,
+                boundary_has_data=False,
+                calls_used=calls,
+                detail=(
+                    f"{symbol} 1m window at {boundary.isoformat()} is EMPTY — true floor "
+                    f"unknown (re-run with --depth-bisect to locate it)"
+                ),
+            )
+        # Bounded bisection over day offsets. Invariant: lo's window is EMPTY,
+        # hi's window HAS rows. Establish hi AT today first (one call — the
+        # window may extend past today, which is harmless); a symbol empty
+        # there too has no probed 1m data at all.
+        span_days = max((today - boundary).days, 1)
+        lo, hi = 0, span_days
+        hi_rows, hi_first = _window_rows(boundary + timedelta(days=hi))
+        if not hi_rows:
+            return DepthProbeResult(
+                symbol=symbol,
+                verdict=VERDICT_ABSENT,
+                first_ts=None,
+                probed_floor=None,
+                boundary_has_data=False,
+                calls_used=calls,
+                detail=(
+                    f"{symbol} 1m windows at BOTH {boundary.isoformat()} and near "
+                    f"{today.isoformat()} are empty — no probed 1m data at all"
+                ),
+            )
+        floor_first = hi_first
+        while hi - lo > 1 and calls < max_calls:
+            mid = (lo + hi) // 2
+            mid_rows, mid_first = _window_rows(boundary + timedelta(days=mid))
+            if mid_rows:
+                hi, floor_first = mid, mid_first
+            else:
+                lo = mid
+        # The found window STARTS up to (window − 1) days before the true first
+        # bar; the first row's own date is the honest floor when parseable
+        # (string-stamped), else the window start (window-granularity bound).
+        probed_floor = _date_of_first_ts(floor_first) or (boundary + timedelta(days=hi))
+        converged = hi - lo <= 1
+        return DepthProbeResult(
+            symbol=symbol,
+            verdict=VERDICT_OK,
+            first_ts=floor_first,
+            probed_floor=probed_floor,
+            boundary_has_data=False,
+            calls_used=calls,
+            detail=(
+                f"{symbol} 1m observed floor ≈ {probed_floor.isoformat()} "
+                f"(first_ts={floor_first}; {calls} calls"
+                f"{'' if converged else '; call budget hit — floor is an UPPER bound'}; "
+                f"a lower bound if the vendor serves old ranges intermittently)"
+            ),
+        )
+    except GrowwError as exc:
+        return DepthProbeResult(
+            symbol=symbol,
+            verdict=VERDICT_ERROR,
+            first_ts=None,
+            probed_floor=None,
+            boundary_has_data=False,
+            calls_used=calls,
+            detail=f"{symbol} depth probe failed: {exc}",
+        )
+
+
 def run_probe(client: GrowwClient) -> list[ProbeResult]:
     """Run the three LIVE Groww checks (vix + granularity + options) in order.
 
@@ -223,10 +448,14 @@ def run_probe(client: GrowwClient) -> list[ProbeResult]:
 
 
 __all__ = [
+    "DEPTH_PROBE_MAX_CALLS",
     "VERDICT_ABSENT",
     "VERDICT_ERROR",
     "VERDICT_OK",
+    "CandleFetcher",
+    "DepthProbeResult",
     "ProbeResult",
+    "probe_depth",
     "probe_granularity",
     "probe_options",
     "probe_vix",

@@ -108,6 +108,7 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
+from brutex.observability.pull_journal import record_pull_finish, record_pull_start
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
@@ -1424,6 +1425,12 @@ def pull_all_spot(
     # (``groww.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
     with pull_id_scope(pull_id) as pid:
+        # DURABLE pull journal (G5, DEC-DOCTOR-LIVE-PROOF-KIT-001): a start record
+        # that survives a mid-pull process death, paired with the finish record at
+        # the bottom — ``brutex doctor --live`` stage 12 reads a start-without-finish
+        # as "the overnight pull died mid-run". Never raises (an unwritable journal
+        # must never break a pull — the swallow lives inside the journal module).
+        record_pull_start(lake_root, pull_id=pid, dry_run=dry_run)
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
         # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
         # ledger is the SOLE skip authority, so its own per-window record + the
@@ -1935,6 +1942,10 @@ def pull_all_spot(
             _autoderive_after_pull(
                 instruments=instruments, bulk=bulk, lake_root=lake_root, pull_id=pid
             )
+        # The G5 finish record (pairs with the start above): a crash anywhere in
+        # between leaves start-without-finish — exactly the interrupted-pull
+        # signature stage 12 diagnoses. Never raises.
+        record_pull_finish(lake_root, pull_id=pid, verdict=verdict.kind)
     return bulk
 
 

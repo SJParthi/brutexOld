@@ -81,6 +81,12 @@ _REQUEST_METHOD_NAMES: tuple[str, ...] = (
     "_request_put",
 )
 
+#: Public alias of the patched-method list for the ``doctor --live`` SDK shape
+#: probe (register G2): the kit checks these names exist on the REAL installed
+#: SDK before a pull relies on the timeout patch, reusing this single source of
+#: truth (CLAUDE.md §11 COMMON) instead of re-listing the private names.
+REQUEST_METHOD_NAMES: tuple[str, ...] = _REQUEST_METHOD_NAMES
+
 
 def _resolve_timeout_seconds(env_var: str, default: float) -> float:
     """Resolve one HTTP timeout: the env override if valid, else the audited *default*.
@@ -237,6 +243,7 @@ def apply_default_timeout(sdk: object, *, timeout: tuple[float, float] | None = 
 __all__ = [
     "HTTP_CONNECT_TIMEOUT_ENV",
     "HTTP_READ_TIMEOUT_ENV",
+    "REQUEST_METHOD_NAMES",
     "apply_default_timeout",
     "resolve_http_timeout",
 ]
