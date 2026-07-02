@@ -16,7 +16,8 @@ Modules:
 - `strike_rules` — 10 pre-trade strike selection rules (Track 2 §6b)
 - `strike_grid` — strike step + ATM rounding per underlying
 - `expiry_calendar` — per-underlying weekly + monthly expiry day registry
-- `risk_free` — T-bill rate table for BSM (TBD)
+- `risk_free` — stamped risk-free `r` sources (fixed default + T-bill CSV
+  step function) for the gated Greeks phases (DEC-GREEKS-ENGINE-PR1-001)
 - `greeks` — Black-Scholes-Merton wrapper around Rust kernel (TBD)
 
 Per ``docs/track2/TRACK2_OPTIONS_SPEC.md``. All modules satisfy the
@@ -68,6 +69,18 @@ from brutex.options.lot_size_history import (
     all_transitions,
     get_lot_size,
 )
+from brutex.options.risk_free import (
+    DAY_COUNT_BASE,
+    DEFAULT_FIXED_RATE,
+    RISK_FREE_SOURCE_VERSION,
+    CsvRateSource,
+    FixedRateSource,
+    RiskFreeError,
+    RiskFreeRate,
+    RiskFreeSource,
+    load_risk_free_csv,
+    money_market_to_continuous,
+)
 from brutex.options.strike_grid import (
     STRIKE_STEP,
     get_strike_step,
@@ -89,18 +102,23 @@ from brutex.options.strike_rules import (
 
 __all__ = [
     "ALL_STRIKE_RULES",
+    "DAY_COUNT_BASE",
+    "DEFAULT_FIXED_RATE",
     "DELTA_TARGET_RULES",
     "FRIDAY",
     "MONDAY",
     "NO_WEEKLY",
     "OFFSET_RULES",
+    "RISK_FREE_SOURCE_VERSION",
     "RULES_BY_NAME",
     "STRIKE_STEP",
     "THURSDAY",
     "TUESDAY",
     "WEDNESDAY",
     "AuditAppend",
+    "CsvRateSource",
     "ExpiryKind",
+    "FixedRateSource",
     "LakeOptionBarSource",
     "LotSizeChange",
     "MaterializedTrade",
@@ -111,6 +129,9 @@ __all__ = [
     "OptionsUnderlying",
     "RejectReason",
     "RejectedTrade",
+    "RiskFreeError",
+    "RiskFreeRate",
+    "RiskFreeSource",
     "SpotSignal",
     "SpotTrade",
     "StrikeRule",
@@ -125,7 +146,9 @@ __all__ = [
     "get_weekly_dow",
     "grid_around_atm",
     "has_weekly",
+    "load_risk_free_csv",
     "materialize_trade",
+    "money_market_to_continuous",
     "next_monthly_expiry",
     "next_weekly_expiry",
     "resolve_current_expiry",
