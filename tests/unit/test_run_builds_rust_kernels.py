@@ -80,13 +80,20 @@ def _module_top_imports(import_name: str) -> bool:
 def _make_target_body(makefile: str, target: str) -> str:
     """Return the recipe body of Makefile *target* (lines until the next target).
 
-    Lets the build-step assertions check the step is wired INSIDE the `run`
-    target's recipe, not merely present somewhere in the file (agent-3
-    hostile-review hardening — closes the decoupled-substring gap).
+    Lets the build-step assertions check the step is wired INSIDE the target's
+    recipe, not merely present somewhere in the file (agent-3 hostile-review
+    hardening — closes the decoupled-substring gap). Target-specific VARIABLE
+    lines (``target: export VAR := value`` — DEC-ONE-ENTRY-UNIFY-001 scoped the
+    ``LOG_DIR`` export to ``run-raw``/``wipe`` that way) contain ``=`` and are
+    skipped: they declare no recipe.
     """
     lines = makefile.splitlines()
     start = next(
-        (i for i, ln in enumerate(lines) if re.match(rf"^{re.escape(target)}\b.*:", ln)),
+        (
+            i
+            for i, ln in enumerate(lines)
+            if re.match(rf"^{re.escape(target)}\b.*:", ln) and "=" not in ln
+        ),
         None,
     )
     assert start is not None, f"Makefile has no `{target}:` target"
@@ -118,16 +125,23 @@ def test_kernel_is_imported_by_brutex(import_name: str) -> None:
 
 
 @pytest.mark.parametrize(("import_name", "crate_dir"), sorted(KERNELS.items()))
-def test_make_run_builds_kernel(import_name: str, crate_dir: str) -> None:
-    """``make run`` must build each kernel (cd rust/<crate> + maturin develop)."""
-    run_body = _make_target_body(MAKEFILE.read_text(encoding="utf-8"), "run")
+def test_make_run_raw_builds_kernel(import_name: str, crate_dir: str) -> None:
+    """``make run-raw`` must build each kernel (cd rust/<crate> + maturin develop).
+
+    The unified ``make run`` delegates to ``./up.sh`` (DEC-ONE-ENTRY-UNIFY-001),
+    whose Step 3 builds both kernels itself (pinned by tests/deploy/
+    test_up_bootstrap.py); the RAW direct entry ``run-raw`` preserves the
+    pre-unification body and must keep the build steps — this guard now pins
+    that target so the #479 bug class cannot recur on the direct path either.
+    """
+    run_body = _make_target_body(MAKEFILE.read_text(encoding="utf-8"), "run-raw")
     assert f"import {import_name}" in run_body, (
-        f"Makefile `run` target never probes `import {import_name}` — a clean "
+        f"Makefile `run-raw` target never probes `import {import_name}` — a clean "
         f"clone will crash with ModuleNotFoundError: No module named "
         f"'{import_name}' (the DEC-RUN-TRADING-CORE-BUILD-001 bug)."
     )
     assert f"rust/{crate_dir}" in run_body and "maturin" in run_body, (
-        f"Makefile `run` target never builds rust/{crate_dir} via maturin."
+        f"Makefile `run-raw` target never builds rust/{crate_dir} via maturin."
     )
 
 

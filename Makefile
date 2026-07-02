@@ -1,13 +1,14 @@
 # BruteX — development Makefile
 # Every target maps directly to a CI gate in REQUIREMENTS.md §17.
 
-.PHONY: help setup install run preflight fmt lint type test test-unit test-cov audit bench clean wipe wipe-dry all
+.PHONY: help setup install run run-raw preflight fmt lint type test test-unit test-cov audit bench clean wipe wipe-dry all
 
 help:
 	@echo "BruteX development targets:"
 	@echo "  setup      — turnkey full env: venv + all libs + Rust kernel (scripts/setup/bootstrap.sh)"
 	@echo "  install    — install package + dev dependencies via pip (into the active env)"
-	@echo "  run        — turnkey one-click: venv + [data,ui,groww] libs (incl. the live Groww SDK) + fno_math + trading_core kernels + launch (opens browser, http://127.0.0.1:9080)"
+	@echo "  run        — ONE entry: delegates to ./up.sh (self-check → self-heal → dashboard; ~1s fast path when already ready) — same path as the IDE ▶ BruteX config"
+	@echo "  run-raw    — RAW direct entry (pre-unification run body): venv + [data,ui,groww] libs + kernels + python -m brutex run, NO up.sh self-checks (CI/debugging)"
 	@echo "  fmt        — run ruff format"
 	@echo "  lint       — run ruff check"
 	@echo "  type       — run mypy --strict + pyright"
@@ -28,14 +29,17 @@ VPY  := $(VENV)/bin/python
 VPIP := $(VENV)/bin/pip
 
 # Log-redirect knob (DEC-INSTRUMENT-UNIVERSE-FAST-001 + DEC-LEAN-REINGEST-FIX-001).
-# Defaults to ./.brutex-logs (in the repo tree) so `make run` logs are visible
-# in IntelliJ/IDEA out of the box (and the /logs web viewer reads the same
-# file). Override with `make run LOG_DIR=/some/other/path`, or
-# `make run LOG_DIR=` to fall back to the runtime's ~/.brutex/logs default.
-# ./.brutex-logs/ is .gitignored.
+# Scoped to the RAW direct entry + the wipe targets ONLY (target-specific
+# export, DEC-ONE-ENTRY-UNIFY-001): the unified `run` → ./up.sh path uses the
+# runtime default ~/.brutex/logs/brutex.log, so `make run`, `./up.sh`, and the
+# IDE ▶ BruteX config are byte-identical (ONE log location, printed at boot).
+# `make run-raw` keeps the in-repo ./.brutex-logs default so an IDE can tail
+# it; override with `make run-raw LOG_DIR=/some/other/path`, or
+# `make run-raw LOG_DIR=` to fall back to the runtime's ~/.brutex/logs
+# default. ./.brutex-logs/ is .gitignored.
 LOG_DIR ?= ./.brutex-logs
 ifneq ($(LOG_DIR),)
-export BRUTEX_LOG_DIR := $(LOG_DIR)
+run-raw wipe wipe-dry: export BRUTEX_LOG_DIR := $(LOG_DIR)
 endif
 
 install:
@@ -48,24 +52,38 @@ install:
 setup:
 	bash scripts/setup/bootstrap.sh
 
-# One-command clone-and-run (DEC-CLONE-RUN-002 + DEC-ONECLICK-RUN-001). Creates
-# the venv, installs the dashboard runtime + Groww live libs ([data,ui,groww] —
-# Groww authenticates via the growwapi SDK + pyotp TOTP, so the live probe/pull
-# need the [groww] extra; DEC-DHAN-GROWW-REMIGRATE-001 / DEC-MAKE-RUN-GROWW-EXTRA-001),
-# builds the fno_math
-# Rust kernel when it is not importable (brutex.strategies.combo imports it at
-# module top, combo.py:64) AND the trading_core kernel (the shared 52-vocab
-# core — brutex.indicators.fib_levels imports it at module top, fib_levels.py:68,
-# DEC-SHARED-CORE-001), then launches the one-click `brutex run` (resolves
-# the lake root, opens the browser, boots the server). Idempotent: re-running
-# skips work already done. Open http://127.0.0.1:9080.
-# Verify the three host tools `run` depends on (python3.12 / make / cargo)
-# BEFORE doing any work, so a missing tool yields a clear one-line fix instead
-# of a cryptic downstream crash (DEC-RUN-PREFLIGHT-001).
+# Verify the three host tools the raw entry depends on (python3.12 / make /
+# cargo) BEFORE doing any work, so a missing tool yields a clear one-line fix
+# instead of a cryptic downstream crash (DEC-RUN-PREFLIGHT-001).
 preflight:
 	@PY="$(PY)" bash scripts/run/preflight.sh
 
-run: preflight
+# ONE entry point (DEC-ONE-ENTRY-UNIFY-001): `make run`, `./up.sh`, and the
+# committed IntelliJ ▶ "BruteX" run configuration all execute the SAME path —
+# ./up.sh (self-check → self-heal → start dashboard, DEC-ONE-COMMAND-UP-001).
+# up.sh fast-paths to "already ready" in about a second when a dashboard is
+# already running, so repeat runs stay instant. The operator never chooses
+# between entries. The pre-unification direct body is preserved verbatim as
+# `run-raw` below (CI reproduction / debugging). NOTE: the CI "make run smoke
+# (cold-start boot)" job does NOT invoke make — it reproduces the run-raw
+# dependency set step-by-step in .github/workflows/ci.yml, so re-wiring `run`
+# cannot break it (asserted by tests/deploy/test_one_entry_unify.py).
+run:
+	./up.sh
+
+# run-raw — the RAW direct entry (the pre-DEC-ONE-ENTRY-UNIFY-001 `run` body,
+# DEC-CLONE-RUN-002 + DEC-ONECLICK-RUN-001): creates the venv, installs the
+# dashboard runtime + Groww live libs ([data,ui,groww] — Groww authenticates
+# via the growwapi SDK + pyotp TOTP, so the live probe/pull need the [groww]
+# extra; DEC-DHAN-GROWW-REMIGRATE-001 / DEC-MAKE-RUN-GROWW-EXTRA-001), builds
+# the fno_math Rust kernel when it is not importable (brutex.strategies.combo
+# imports it at module top, combo.py:64) AND the trading_core kernel (the
+# shared 52-vocab core — brutex.indicators.fib_levels imports it at module
+# top, fib_levels.py:68, DEC-SHARED-CORE-001), then launches the one-click
+# `brutex run` (resolves the lake root, opens the browser, boots the server).
+# Idempotent: re-running skips work already done. Open http://127.0.0.1:9080.
+# NO up.sh self-check/self-heal chain — use `make run` (or ./up.sh) for that.
+run-raw: preflight
 	@test -d $(VENV) || $(PY) -m venv $(VENV)
 	$(VPIP) install --upgrade pip
 	$(VPIP) install -e ".[data,ui,groww]"
