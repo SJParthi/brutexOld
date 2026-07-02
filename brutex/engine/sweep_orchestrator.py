@@ -91,8 +91,8 @@ if TYPE_CHECKING:
     # so the strict per-module `--cov=brutex.engine` gate stays clean (the same
     # constraint sweep_run.py observes). Both are *received*, never constructed.
     from brutex.data.models import CandleBar
-    from brutex.engine.sweep_run import ComboDedup
-    from brutex.orchestrator.audit import AuditWriter
+    from brutex.engine.sweep_run import DedupSink
+    from brutex.orchestrator.audit import AuditSink
 
 _LOG = structlog.get_logger("brutex.engine.sweep_orchestrator")
 
@@ -748,8 +748,8 @@ def run_one_tuple(
     *,
     bars_for: Callable[[str, str], Sequence[CandleBar]],
     store_for: Callable[[SweepTuple], ResultsStore],
-    dedup: ComboDedup,
-    audit: AuditWriter,
+    dedup: DedupSink,
+    audit: AuditSink,
     skip_empty: bool = True,
     kernel_cache: ResidentKernelCache | None = None,
 ) -> SweepRunSummary | None:
@@ -844,8 +844,8 @@ def run_sweep_grid(
     *,
     bars_for: Callable[[str, str], Sequence[CandleBar]],
     store_for: Callable[[SweepTuple], ResultsStore],
-    dedup: ComboDedup,
-    audit: AuditWriter,
+    dedup: DedupSink,
+    audit: AuditSink,
     skip_empty: bool = True,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     reuse_bar_bits: bool = True,

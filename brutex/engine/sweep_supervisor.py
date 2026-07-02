@@ -137,6 +137,19 @@ _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
 _ACTION_COMPLETE: Final[str] = "SUPERVISOR_COMPLETE"
 _ACTION_ABORT: Final[str] = "SUPERVISOR_ABORT"
 
+#: PUBLIC aliases of the supervisor audit-action labels, so the parallel driver
+#: (:mod:`brutex.engine.sweep_parallel`, DEC-MULTICORE-SWEEP-PHASE1-001) can emit
+#: the BYTE-IDENTICAL supervisor chain without importing the private originals —
+#: ONE source of truth (CLAUDE.md §11 COMMON), re-exported, never re-defined.
+SUPERVISOR_ACTION_START: Final[str] = _ACTION_START
+SUPERVISOR_ACTION_TUPLE_DONE: Final[str] = _ACTION_TUPLE_DONE
+SUPERVISOR_ACTION_TUPLE_CACHE: Final[str] = _ACTION_TUPLE_CACHE
+SUPERVISOR_ACTION_TUPLE_RESUME: Final[str] = _ACTION_TUPLE_RESUME
+SUPERVISOR_ACTION_TUPLE_NO_BARS: Final[str] = _ACTION_TUPLE_NO_BARS
+SUPERVISOR_ACTION_TUPLE_FAILED: Final[str] = _ACTION_TUPLE_FAILED
+SUPERVISOR_ACTION_COMPLETE: Final[str] = _ACTION_COMPLETE
+SUPERVISOR_ACTION_ABORT: Final[str] = _ACTION_ABORT
+
 #: Default supervisor worker name for the (single) sweep thread's heartbeat.
 DEFAULT_WORKER_NAME: Final[str] = "sweep-worker-0"
 
@@ -400,6 +413,28 @@ def _tuple_label(tuple_: SweepTuple) -> str:
         f"{tuple_.instrument}/{tuple_.tf.label}/{_direction_label(tuple_.direction)}"
         f"/k={tuple_.k}/sl={tuple_.sl_paisa}/tp={tuple_.tp_paisa}"
     )
+
+
+def tuple_label(tuple_: SweepTuple) -> str:
+    """PUBLIC re-export of :func:`_tuple_label` for the parallel driver — O(1).
+
+    ONE source of truth (CLAUDE.md §11 COMMON): the parallel driver
+    (:mod:`brutex.engine.sweep_parallel`, DEC-MULTICORE-SWEEP-PHASE1-001) uses this
+    to emit BYTE-IDENTICAL progress/audit labels without importing the private
+    ``_tuple_label``.
+    """
+    return _tuple_label(tuple_)
+
+
+def tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, Any]:
+    """PUBLIC re-export of :func:`_tuple_cache_params` for the parallel driver — O(1).
+
+    The full-identity ``params`` dict the :class:`SweepCache` ``seen`` / ``record``
+    calls take. Exposed publicly so the parallel driver
+    (DEC-MULTICORE-SWEEP-PHASE1-001) gates the cache with the BYTE-IDENTICAL key
+    without importing the private ``_tuple_cache_params`` — ONE source of truth.
+    """
+    return _tuple_cache_params(tuple_, grid)
 
 
 def _drive_watchdog(
@@ -838,6 +873,14 @@ def idle_progress() -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_WORKER_NAME",
+    "SUPERVISOR_ACTION_ABORT",
+    "SUPERVISOR_ACTION_COMPLETE",
+    "SUPERVISOR_ACTION_START",
+    "SUPERVISOR_ACTION_TUPLE_CACHE",
+    "SUPERVISOR_ACTION_TUPLE_DONE",
+    "SUPERVISOR_ACTION_TUPLE_FAILED",
+    "SUPERVISOR_ACTION_TUPLE_NO_BARS",
+    "SUPERVISOR_ACTION_TUPLE_RESUME",
     "SupervisedGridSummary",
     "SweepGuards",
     "grid_identity",
@@ -846,4 +889,6 @@ __all__ = [
     "read_progress",
     "run_supervised_grid",
     "tuple_cache_key",
+    "tuple_cache_params",
+    "tuple_label",
 ]

@@ -49,7 +49,18 @@ cd "${REPO_ROOT}" 2>/dev/null || exit 0  # silent exit if not a repo
   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   UNCOMMITTED=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
   AHEAD=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo "?")
-  LAST_COMMIT=$(git log -1 --format='%h %s' 2>/dev/null | head -c 80)
+  # Truncate to 80 bytes, then drop any trailing INCOMPLETE multi-byte UTF-8
+  # sequence `head -c` may have severed (a commit subject with a multi-byte
+  # char — e.g. an em-dash or `→` arrow — straddling the byte boundary would
+  # otherwise emit invalid UTF-8 and break any UTF-8 consumer of this stream;
+  # `iconv -c` strips the orphaned byte(s)). Falls back to the raw 80-byte cut
+  # if iconv is unavailable, so the HEAD line is always populated.
+  LAST_COMMIT_RAW=$(git log -1 --format='%h %s' 2>/dev/null | head -c 80)
+  if command -v iconv >/dev/null 2>&1; then
+    LAST_COMMIT=$(printf '%s' "${LAST_COMMIT_RAW}" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null)
+  else
+    LAST_COMMIT="${LAST_COMMIT_RAW}"
+  fi
 
   echo "  Branch:           ${BRANCH}"
   echo "  Commits ahead of main: ${AHEAD}"
