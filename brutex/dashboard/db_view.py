@@ -56,6 +56,7 @@ from brutex.data.fno_candle_lake import (
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from brutex.data.moneyness import derive_strike_step, moneyness_view
 from brutex.data.partition import (
     SPOT_PROBE_SEGMENTS,
@@ -120,6 +121,37 @@ CANDLE_COLUMNS: Final = (
     "volume",
     "open_interest",
 )
+
+#: The 10 STORED per-bar Greeks overlay columns an **F&O** candle page may
+#: additionally project (DEC-GREEKS-ENGINE-PR3-001) — written at generation time
+#: by the Phase-2b enrichment (DEC-GREEKS-ENGINE-PR2B-001,
+#: :data:`brutex.data.models.GREEKS_OVERLAY_FIELDS` — the ONE source of truth,
+#: re-exported here so the viewer can never drift from the writer schema;
+#: CLAUDE.md §11 COMMON). Mapped to each column's DuckDB SQL type so a LEGACY
+#: pre-Greeks partition tree (7-column files only — no file carries the overlay)
+#: can be projected schema-tolerantly as typed NULLs instead of a binder error:
+#: within a MIXED tree ``union_by_name=true`` already inserts NULLs for the
+#: files lacking a column, but when NO file has it DuckDB (correctly) refuses
+#: the reference, so :func:`query_candles` probes the physical union schema once
+#: and substitutes ``CAST(NULL AS <type>) AS <col>`` for the absent ones —
+#: honest NULL cells, never a fabricated Greek (Golden Rule #1). Spot pages
+#: never accept these columns (the overlay exists only under ``segment="FNO"``).
+FNO_GREEKS_COLUMN_TYPES: Final[dict[str, str]] = {
+    "iv": "DOUBLE",
+    "delta": "DOUBLE",
+    "gamma": "DOUBLE",
+    "theta": "DOUBLE",
+    "vega": "DOUBLE",
+    "rho": "DOUBLE",
+    "spot_at_bar": "DOUBLE",
+    "t_years_used": "DOUBLE",
+    "rate_used": "DOUBLE",
+    "greeks_provenance_id": "INTEGER",
+}
+
+#: The selectable stored-overlay column tuple, in writer order (a verbatim
+#: re-export of :data:`brutex.data.models.GREEKS_OVERLAY_FIELDS`).
+FNO_GREEKS_COLUMNS: Final = GREEKS_OVERLAY_FIELDS
 
 #: The 18 columns every expired-option Parquet partition carries
 #: (``brutex/data/option_parquet_writer.py`` ``_render_df`` schema,
@@ -662,6 +694,50 @@ def _select_list(columns: tuple[str, ...] | None, valid_columns: frozenset[str])
         if column not in valid_columns:
             raise ValueError(f"unknown column {column!r}; allowed: {sorted(valid_columns)}")
     return ", ".join(_quote_ident(c) for c in columns)
+
+
+def _physical_union_columns(conn: Any, base: Path, *, source: str) -> frozenset[str]:
+    """Return the physical union-schema column names of a partition tree.
+
+    One ``DESCRIBE`` over the same resilient ``read_parquet(?, union_by_name=true)``
+    source the page query uses — a Parquet-FOOTER read per file (O(files), the same
+    order as the page ``COUNT(*)``), no data scan. Consumed only by
+    :func:`_greeks_tolerant_select` when a Greeks overlay column is actually
+    requested, so a plain OHLCV page never pays it.
+    """
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
+        "SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet(?, union_by_name=true))",
+        [],
+        source=source,
+    )
+    return frozenset(str(row[0]) for row in rows)
+
+
+def _greeks_tolerant_select(conn: Any, base: Path, columns: tuple[str, ...], *, source: str) -> str:
+    """Build the page select list with typed-NULL substitution for absent overlay columns.
+
+    Schema tolerance for the stored Greeks overlay (DEC-GREEKS-ENGINE-PR3-001):
+    within a MIXED legacy/enriched tree ``union_by_name=true`` already inserts
+    NULLs for the files lacking an overlay column, but a PURE-legacy tree (no
+    file carries it) would make the column reference a binder error and 500 the
+    page. So each requested overlay column absent from the physical union
+    schema is projected as ``CAST(NULL AS <type>) AS <col>`` — the page keeps a
+    stable column set with honest NULL cells, never a fabricated Greek (Golden
+    Rule #1). Non-overlay columns pass through verbatim (already validated by
+    :func:`_select_list`).
+    """
+    present = _physical_union_columns(conn, base, source=source)
+    parts: list[str] = []
+    for column in columns:
+        if column in FNO_GREEKS_COLUMN_TYPES and column not in present:
+            parts.append(
+                f"CAST(NULL AS {FNO_GREEKS_COLUMN_TYPES[column]}) AS {_quote_ident(column)}"
+            )
+        else:
+            parts.append(_quote_ident(column))
+    return ", ".join(parts)
 
 
 def query_table(
@@ -1463,8 +1539,10 @@ def query_candles(
     start, end
         Inclusive ISO ``YYYY-MM-DD`` bounds on the bar timestamp, or ``None``.
     columns
-        OHLCV columns to project (subset of :data:`CANDLE_COLUMNS`), or
-        ``None`` for all. An empty tuple is rejected.
+        OHLCV columns to project (subset of :data:`CANDLE_COLUMNS`; an F&O page
+        may additionally name the stored Greeks overlay columns
+        :data:`FNO_GREEKS_COLUMNS` — DEC-GREEKS-ENGINE-PR3-001), or ``None``
+        for all. An empty tuple is rejected.
     descending, limit, offset
         Sort direction on ``timestamp`` + page bounds (clamped).
     count_cache, generation
@@ -1489,7 +1567,12 @@ def query_candles(
         or a malformed ISO date bound.
     """
     _validate_candle_coords(exchange, segment, symbol, interval)
+    # An F&O page may ALSO project the 10 stored per-bar Greeks overlay columns
+    # (DEC-GREEKS-ENGINE-PR3-001) — the Phase-2b enrichment writes them only
+    # under segment="FNO", so a spot page still rejects them as unknown.
     valid_columns = frozenset(CANDLE_COLUMNS)
+    if segment == FNO_CANDLE_LAKE_SEGMENT:
+        valid_columns |= frozenset(FNO_GREEKS_COLUMNS)
     select = _select_list(columns, valid_columns)
     safe_limit = clamp_limit(limit)
     safe_offset = clamp_offset(offset)
@@ -1535,6 +1618,13 @@ def query_candles(
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
     skip_source = f"candle:{exchange}/{segment}/{symbol}/{interval}"
+
+    # A requested Greeks overlay column may be physically ABSENT from a legacy
+    # (pre-Greeks) partition tree — substitute a typed NULL projection so the
+    # page renders honest blank cells instead of a binder-error 500
+    # (DEC-GREEKS-ENGINE-PR3-001; see _greeks_tolerant_select).
+    if columns is not None and any(c in FNO_GREEKS_COLUMN_TYPES for c in columns):
+        select = _greeks_tolerant_select(conn, base, columns, source=skip_source)
 
     # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
     # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
@@ -3412,6 +3502,8 @@ __all__ = [
     "ALLOWED_OPERATORS",
     "CANDLE_COLUMNS",
     "FNO_DERIVED_COLUMNS",
+    "FNO_GREEKS_COLUMNS",
+    "FNO_GREEKS_COLUMN_TYPES",
     "FNO_MONEYNESS_COLUMNS",
     "FNO_VALUE_COLUMNS",
     "KNOWN_TABLES",

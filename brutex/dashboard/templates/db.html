@@ -336,6 +336,9 @@ const NUM_COLS = new Set([
   // F&O derived value columns (DEC-DB-FNO-COLUMNS-001) — numeric, NOT timestamps,
   // even though "time_value"/"days_to_expiry" contain the substrings time/expiry.
   "intrinsic", "time_value", "days_to_expiry",
+  // Stored Greeks overlay columns (DEC-GREEKS-ENGINE-PR3-001) — all numeric
+  // ("iv" is already above; "greeks_provenance_id" matches the _id suffix).
+  "delta", "gamma", "theta", "vega", "rho", "spot_at_bar", "t_years_used", "rate_used",
 ]);
 function colType(col) {
   const c = String(col).toLowerCase();
@@ -698,6 +701,14 @@ const CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume", "ope
 /* Expired-option columns: OHLCV+OI PLUS the per-bar option stamps (mirrors
    db_view.OPTION_CANDLE_COLUMNS — the backend re-validates). */
 const OPTION_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest", "side", "strike", "spot", "iv"];
+/* F&O STORED Greeks overlay columns (mirrors db_view.FNO_GREEKS_COLUMNS /
+   models.GREEKS_OVERLAY_FIELDS — the backend re-validates): the per-1-minute-bar
+   Greeks the Phase-2b enrichment stores alongside each option bar
+   (DEC-GREEKS-ENGINE-PR2B-001), selectable on F&O candle pages only
+   (DEC-GREEKS-ENGINE-PR3-001). A legacy pre-Greeks partition renders honest
+   null cells (the backend substitutes typed NULLs), never a fabricated Greek. */
+const FNO_GREEKS_COLS = ["iv", "delta", "gamma", "theta", "vega", "rho",
+  "spot_at_bar", "t_years_used", "rate_used", "greeks_provenance_id"];
 
 /* Shared grid + Prev/Next pager HTML (used by both table + candle views).
    The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
@@ -893,10 +904,15 @@ function dsKey(d) {
   return "spot:" + [d.exchange, d.segment, d.symbol, d.interval].join("|");
 }
 function curDataset() { return cstate.datasets.find(d => dsKey(d) === cstate.key) || null; }
-/* Columns available for the currently-selected dataset. Spot AND F&O share the 7
-   OHLCV CANDLE_COLS (open_interest is first-class for F&O); only the expired-options
-   lake uses OPTION_COLS. */
-function curCols() { const d = curDataset(); return d && d.kind === "option" ? OPTION_COLS : CANDLE_COLS; }
+/* Columns available for the currently-selected dataset. Spot uses the 7 OHLCV
+   CANDLE_COLS; F&O additionally offers the 10 STORED Greeks overlay columns
+   (DEC-GREEKS-ENGINE-PR3-001); only the expired-options lake uses OPTION_COLS. */
+function curCols() {
+  const d = curDataset();
+  if (d && d.kind === "option") return OPTION_COLS;
+  if (d && d.kind === "fno") return CANDLE_COLS.concat(FNO_GREEKS_COLS);
+  return CANDLE_COLS;
+}
 /* Friendly decoded label for an F&O contract dataset (underlying · expiry ·
    strike+CE/PE or FUT · interval), falling back to the raw groww_symbol when the
    directory name didn't decode (DEC-FNO-CANDLE-LAKE-001). Display-only — dsKey() /
