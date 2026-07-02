@@ -9,23 +9,32 @@ fix text was discarded at the gate. This suite pins the new contract on every
 layer:
 
 * :func:`brutex.config.credentials.groww_credentials_error` — preserves the
-  CredentialsError's own fix text instead of swallowing it to a bare ``False``.
-* :func:`brutex.adapters.ingest_common.gate_pull_credentials` + the
-  ``credentials_missing`` verdict — the ONE gate both surfaces (dashboard + CLI)
-  run (CLAUDE.md §11 COMMON), relaying the fix text verbatim (DYNAMIC — no
-  per-field hardcoding).
+  CredentialsError's own fix text instead of swallowing it to a bare ``False``,
+  driven end-to-end through the REAL ``load_groww_aws_credentials``
+  classification (fake SSM clients).
+* The ``credentials_missing`` refusal verdict rendered red through the REAL
+  ``banner_for`` machinery.
 * The dashboard routes — a REAL pull with broken creds is a **503** whose
   detail carries the relayed fix text, logged at ERROR and stamped into the
   ``/pull-verdict`` banner as the red ``needs_operator`` refusal; an EXPLICIT
-  ``?dry_run=true`` still works and is LOUDLY labeled synthetic.
-* The CLI ``brutex fetch`` — the same refusal message on stderr (exit 1),
-  including the creds-vanished-mid-build race.
+  ``?dry_run=true`` still works and is LOUDLY labeled synthetic — including
+  the CredentialsError-raised-mid-build race (route 400 + background job
+  settling ``error``).
 
 Extreme permutations covered: creds absent · AWS reachable but a parameter
 missing · parameter present-but-blank (invalid shape) · AWS hard read failure
-(IAM/KMS) · CredentialsError raised mid-build (route + background job + CLI) ·
+(IAM/KMS) · CredentialsError raised mid-build (route + background job) ·
 explicit dry-run (works, loudly labeled) · real pull with good creds
 (behaviour unchanged).
+
+The PURE unit tests on the shared gate + labels
+(:func:`~brutex.adapters.ingest_common.gate_pull_credentials` /
+``credentials_refusal_verdict`` / ``verdict_message`` / ``label_synthetic`` /
+``mark_synthetic``) live in ``tests/unit/test_ingest_common_pull_verdict.py``,
+and the CLI creds-vanished-mid-build race lives in
+``tests/unit/test_cli_retry_storm.py`` (next to the up-front CLI refusal) —
+placed so the strict per-module 100% coverage gates (the static file lists in
+``ci.yml`` + the stem-matched discovery gate) scope them to their modules.
 """
 
 from __future__ import annotations
@@ -42,13 +51,8 @@ import pytest
 from brutex.adapters.ingest_common import (
     CREDENTIALS_REFUSAL_HEADLINE,
     SYNTHETIC_DRY_RUN_LABEL,
-    PullVerdict,
     classify_pull,
     credentials_refusal_verdict,
-    gate_pull_credentials,
-    label_synthetic,
-    mark_synthetic,
-    verdict_message,
 )
 from brutex.config.credentials import (
     CredentialsError,
@@ -153,93 +157,12 @@ class TestRealChainPermutations:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# ingest_common — the ONE shared gate + refusal verdict + synthetic labels
+# verdict_banner — the refusal verdict renders RED with the fix text
+# (the pure gate/label units live in test_ingest_common_pull_verdict.py)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestGatePullCredentials:
-    def test_explicit_dry_run_short_circuits_without_resolving(self) -> None:
-        calls: list[bool] = []
-
-        def _spy() -> str | None:
-            calls.append(True)
-            return _FIX_TEXT
-
-        assert gate_pull_credentials(dry_run_requested=True, credentials_error=_spy) is None
-        assert calls == []  # credentials are IRRELEVANT to an explicit dry-run
-
-    def test_good_credentials_proceed(self) -> None:
-        assert (
-            gate_pull_credentials(dry_run_requested=False, credentials_error=lambda: None) is None
-        )
-
-    def test_broken_credentials_return_the_refusal_verdict(self) -> None:
-        verdict = gate_pull_credentials(
-            dry_run_requested=False, credentials_error=lambda: _FIX_TEXT
-        )
-        assert verdict is not None
-        assert verdict.kind == "credentials_missing"
-        assert verdict.needs_operator is True
-        assert verdict.headline == CREDENTIALS_REFUSAL_HEADLINE
-        assert _FIX_TEXT in verdict.action  # relayed VERBATIM (DYNAMIC)
-        assert verdict.auth_cause == _FIX_TEXT
-        assert (verdict.pending_windows, verdict.failed_pairs, verdict.no_data) == (0, 0, 0)
-        assert verdict.completed == 0
-
-    def test_default_resolver_refuses_via_the_real_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # credentials_error=None → the gate lazily imports the REAL resolver.
-        monkeypatch.setattr("brutex.config.credentials_aws.load_groww_aws_credentials", _bad_loader)
-        verdict = gate_pull_credentials(dry_run_requested=False)
-        assert verdict is not None
-        assert _FIX_TEXT in verdict.action
-
-    def test_default_resolver_proceeds_via_the_real_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "brutex.config.credentials_aws.load_groww_aws_credentials", _good_loader
-        )
-        assert gate_pull_credentials(dry_run_requested=False) is None
-
-
-class TestRefusalVerdictAndLabels:
-    def test_verdict_message_joins_headline_and_action(self) -> None:
-        verdict = credentials_refusal_verdict(_FIX_TEXT)
-        message = verdict_message(verdict)
-        assert message.startswith(CREDENTIALS_REFUSAL_HEADLINE)
-        assert _FIX_TEXT in message
-
-    def test_refusal_verdict_to_dict_is_needs_operator(self) -> None:
-        payload = credentials_refusal_verdict(_FIX_TEXT).to_dict()
-        assert payload["kind"] == "credentials_missing"
-        assert payload["needs_operator"] is True
-        assert _FIX_TEXT in payload["action"]
-
-    def test_refusal_verdict_never_mentions_success(self) -> None:
-        verdict = credentials_refusal_verdict(_FIX_TEXT)
-        assert "REFUSED" in verdict.headline
-        assert "NEVER silently degrades" in verdict.action
-
-    def test_label_synthetic_prefixes_the_loud_label(self) -> None:
-        assert label_synthetic("index spot") == f"{SYNTHETIC_DRY_RUN_LABEL} — index spot"
-
-    def test_mark_synthetic_relabels_headline_and_action_preserving_kind(self) -> None:
-        clean = classify_pull(
-            auth_aborted=False,
-            still_failed_windows=0,
-            failed_pairs=0,
-            no_data=0,
-            completed=3,
-        )
-        marked = mark_synthetic(clean)
-        assert marked.kind == clean.kind  # the classifier stays the ONE authority
-        assert marked.headline.startswith(f"🧪 {SYNTHETIC_DRY_RUN_LABEL} — ")
-        assert clean.headline in marked.headline
-        assert "DISCARDED — zero real bars landed" in marked.action
-        assert isinstance(marked, PullVerdict)
-
+class TestRefusalBanner:
     def test_banner_for_credentials_missing_is_red_with_retry(self) -> None:
         banner = banner_for(credentials_refusal_verdict(_FIX_TEXT).to_dict())
         assert banner.kind == "credentials_missing"
@@ -638,47 +561,3 @@ def _fake_composite(*args: Any, **kwargs: Any) -> Any:
         ),
         note="offline fake",
     )
-
-
-# ────────────────────────────────────────────────────────────────────────
-# CLI — the SAME refusal path (CLAUDE.md §11 COMMON)
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestCliMidBuildRefusal:
-    def test_creds_vanishing_mid_build_refuses_with_the_relayed_text(
-        self,
-        tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The gate passes, then the adapter build raises CredentialsError (the race).
-
-        The CLI must print the SAME COMMON refusal (headline + relayed fix
-        text) and exit with the user-error code — never a silent downgrade.
-        """
-        pytest.importorskip("polars")
-        pytest.importorskip("duckdb")
-        cli = importlib.import_module("brutex.cli")
-        credentials = importlib.import_module("brutex.config.credentials")
-        monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
-        monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: [])
-
-        def _vanished(*_a: Any, **_k: Any) -> Any:
-            raise CredentialsError(_FIX_TEXT)
-
-        monkeypatch.setattr(cli, "_build_live_groww_spot", _vanished)
-        rc = cli.cmd_fetch(
-            tmp_path,
-            "2024-01-02",
-            "2024-01-03",
-            "1m",
-            window_days=None,
-            dry_run=False,
-            inspect=False,
-            rows_per_chunk=5,
-        )
-        assert rc == cli.EXIT_USER_ERROR
-        captured = capsys.readouterr()
-        assert CREDENTIALS_REFUSAL_HEADLINE in captured.err
-        assert _FIX_TEXT in captured.err

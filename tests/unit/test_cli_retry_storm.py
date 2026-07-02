@@ -24,6 +24,7 @@ from unittest import mock
 
 import pytest
 from brutex import cli
+from brutex.config.credentials import CredentialsError
 from brutex.orchestrator.audit import read_entries, verify_chain
 
 
@@ -785,6 +786,44 @@ def test_cmd_fetch_live_missing_groww_creds_is_user_error(
     # The COMMON refusal message: static headline + the RELAYED fix text.
     assert "Pull REFUSED — Groww credentials unavailable" in captured.err
     assert "SSM parameter /tickvault/prod/groww/api-key is absent (test fix text)" in captured.err
+
+
+def test_cmd_fetch_creds_vanishing_mid_build_refuses_with_the_relayed_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate passes, then the adapter build raises CredentialsError (the race).
+
+    The CLI must print the SAME COMMON refusal (headline + relayed fix text)
+    and exit with the user-error code — never a silent downgrade
+    (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: [])
+
+    def _vanished(*_a: Any, **_k: Any) -> Any:
+        raise CredentialsError(
+            "seed /tickvault/prod/groww/api-key + totp-secret in ap-south-1 (test fix text)"
+        )
+
+    monkeypatch.setattr(cli, "_build_live_groww_spot", _vanished)
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    # The SAME loud refusal as the up-front gate, with the relayed fix text.
+    assert "Pull REFUSED — Groww credentials unavailable" in captured.err
+    assert "seed /tickvault/prod/groww/api-key + totp-secret in ap-south-1" in captured.err
 
 
 # ── cmd_fetch --until-clean (bounded rounds, DEC-TOKEN-PREFLIGHT-001) ───
