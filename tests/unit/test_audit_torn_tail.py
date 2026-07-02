@@ -25,6 +25,7 @@ here.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.engine import sweep_audit as sweep_audit_mod
@@ -466,13 +467,15 @@ def test_truncate_io_error_wraps(
     _write_clean_chain(backend, path, 1)
     _append_raw(path, '{"seq": 1, "prev')
 
-    # Make os.replace blow up to drive the OSError → write-error mapping.
+    # Make the in-place os.truncate blow up to drive the OSError → write-error
+    # mapping (DEC-AUDIT-TORN-TAIL-O1-001 truncates in place instead of the old
+    # temp-file os.replace rewrite).
     import os as _os
 
-    def _boom(_src: object, _dst: object) -> None:
+    def _boom(_fd: object, _length: object) -> None:
         raise OSError("disk gone")
 
-    monkeypatch.setattr(_os, "replace", _boom)
+    monkeypatch.setattr(_os, "truncate", _boom)
     with pytest.raises(backend.write_error):
         backend.truncate(path)
 
@@ -752,3 +755,223 @@ def test_tailread_parses_o1_lines_not_all(
     assert tail_entry is not None
     assert tail_entry.seq == full_entries[-1].seq == 499
     assert tail_entry.entry_hash == full_entries[-1].entry_hash
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-AUDIT-TORN-TAIL-O1-001 — O(1)-memory torn-tail REPAIR
+#
+# `_truncate_torn_tail` used to `f.read()` the WHOLE log to find the last
+# newline (`data.rfind(b"\n")`) — an OOM risk on a multi-GB log. It now locates
+# the cut with the same bounded reverse-seek the resume tail-read uses
+# (`_iter_reverse_chunks` → `_find_last_newline_offset`) and truncates in
+# place. These tests pin, for BOTH chains:
+#   * BYTE-IDENTITY: the repaired file equals the OLD implementation's output
+#     (`data[: data.rfind(b"\n") + 1]`, empty when no newline) on every edge —
+#     empty file, single clean line, single torn line, many clean lines, many
+#     clean lines + torn tail, a torn line LONGER than one reverse-seek chunk
+#     (the multi-block walk), last-byte-is/-isn't-newline, torn-at-start.
+#   * O(1) MEMORY: the repair's largest single read is bounded by the chunk
+#     size — it provably never reads the whole file (the teeth test).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _old_truncate_semantics(data: bytes) -> bytes:
+    """The OLD `_truncate_torn_tail` result, verbatim: keep to the last newline.
+
+    Mirrors the pre-DEC-AUDIT-TORN-TAIL-O1-001 body byte-for-byte:
+    ``cut = data.rfind(b"\\n"); committed = data[: cut + 1] if cut != -1 else b""``.
+    """
+    cut = data.rfind(b"\n")
+    return data[: cut + 1] if cut != -1 else b""
+
+
+# Raw byte contents covering every torn-tail geometry the repair can meet.
+# ids double as documentation of the case.
+_TRUNCATE_CASES: list[tuple[str, bytes]] = [
+    ("empty_file", b""),
+    ("single_clean_line", b'{"a": 1}\n'),
+    ("single_torn_line", b'{"seq": 0, "prev'),
+    ("many_clean_lines", b'{"a": 1}\n{"b": 2}\n{"c": 3}\n'),
+    ("many_clean_plus_torn_tail", b'{"a": 1}\n{"b": 2}\n{"seq": 2, "pre'),
+    # A torn line LONGER than one reverse-seek chunk: with the chunk pinned to
+    # 8 bytes below, this 100-byte torn tail spans 13 reverse blocks before the
+    # walk reaches the last committed newline (the critical multi-block edge).
+    ("torn_longer_than_chunk", b'{"a": 1}\n' + b"X" * 100),
+    # A torn line longer than one chunk with NO newline anywhere (cut == -1
+    # after walking every block to offset 0).
+    ("all_torn_longer_than_chunk_no_newline", b"Y" * 100),
+    ("last_byte_is_newline", b'{"a": 1}\n{"b": 2}\n'),
+    ("last_byte_not_newline", b'{"a": 1}\n{"b": 2}'),
+    ("torn_at_very_start_only_byte", b"{"),
+    ("blank_lines_then_torn", b"\n\n\n{torn"),
+    ("newline_only_file", b"\n"),
+]
+
+
+@pytest.mark.parametrize(("case_id", "data"), _TRUNCATE_CASES, ids=[c[0] for c in _TRUNCATE_CASES])
+def test_truncate_byte_identical_to_old_impl(
+    backend: _Backend,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
+    data: bytes,
+) -> None:
+    """The O(1) repair's output is byte-identical to the old whole-file rewrite.
+
+    The chunk size is pinned to 8 bytes so every multi-block reverse-walk arm
+    (including a torn tail spanning many chunks) is really exercised, not just
+    the one-read fast path.
+    """
+    monkeypatch.setattr(backend.module, "_TAIL_CHUNK_BYTES", 8)
+    path = tmp_path / f"bytes_{case_id}.jsonl"
+    path.write_bytes(data)
+
+    backend.truncate(path)
+
+    assert path.read_bytes() == _old_truncate_semantics(data)
+
+
+@pytest.mark.parametrize(("case_id", "data"), _TRUNCATE_CASES, ids=[c[0] for c in _TRUNCATE_CASES])
+def test_truncate_byte_identical_default_chunk(
+    backend: _Backend, tmp_path: Path, case_id: str, data: bytes
+) -> None:
+    """Same byte-identity matrix at the PRODUCTION chunk size (single-read path)."""
+    path = tmp_path / f"bytes_dflt_{case_id}.jsonl"
+    path.write_bytes(data)
+
+    backend.truncate(path)
+
+    assert path.read_bytes() == _old_truncate_semantics(data)
+
+
+def test_truncate_is_idempotent(backend: _Backend, tmp_path: Path) -> None:
+    """Repairing an already-clean file is a no-op (re-run safety, Golden Rule 7)."""
+    path = tmp_path / "idem.jsonl"
+    _write_clean_chain(backend, path, 3)
+    clean = path.read_bytes()
+
+    backend.truncate(path)
+    once = path.read_bytes()
+    backend.truncate(path)
+    twice = path.read_bytes()
+
+    assert once == twice == clean
+    assert backend.verify(path) == 3
+
+
+def test_truncate_real_writer_torn_tail_verifies(backend: _Backend, tmp_path: Path) -> None:
+    """End-to-end: a real chain + torn remnant repairs to a fully verifying chain."""
+    path = tmp_path / "e2e.jsonl"
+    _write_clean_chain(backend, path, 5)
+    committed = path.read_bytes()
+    _append_raw(path, '{"seq": 5, "prev_hash": "abc", "ts_utc": 1.0, "act')
+
+    backend.truncate(path)
+
+    assert path.read_bytes() == committed
+    assert backend.verify(path) == 5
+
+
+class _ReadTrackingFile:
+    """A binary-file proxy that records the size of every read() it serves.
+
+    ``__enter__`` / ``__exit__`` are defined explicitly (NOT via
+    ``__getattr__``) because the ``with`` statement looks special methods up on
+    the type; ``__enter__`` returns the proxy itself so reads inside the
+    ``with`` body stay tracked.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.read_sizes: list[int] = []
+
+    def read(self, n: int = -1) -> bytes:
+        data: bytes = self._inner.read(n)
+        self.read_sizes.append(len(data))
+        return data
+
+    def __enter__(self) -> _ReadTrackingFile:
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._inner.__exit__(*exc_info)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_truncate_memory_is_o_chunk_not_o_filesize(
+    backend: _Backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TEETH: the repair NEVER reads the whole file — every read is chunk-bounded.
+
+    Builds a ~1 MiB log (128x the 8 KiB chunk) with a torn tail, wraps `open`
+    so every `read()` size is recorded, and asserts (a) the largest single read
+    is ≤ `_TAIL_CHUNK_BYTES` and (b) the TOTAL bytes read are a small bounded
+    multiple of the chunk size (the reverse walk stops at the first newline),
+    NOT the file size. The old implementation's single `f.read()` of the whole
+    ~1 MiB file would fail both assertions.
+    """
+    chunk = backend.module._TAIL_CHUNK_BYTES
+    path = tmp_path / "big.jsonl"
+    # ~1 MiB of committed lines, then a torn tail longer than one chunk so the
+    # reverse walk must cross a block boundary before finding the last newline.
+    line = b'{"filler": "' + b"f" * 100 + b'"}\n'
+    n_lines = (128 * chunk) // len(line) + 1
+    with path.open("wb") as f:
+        for _ in range(n_lines):
+            f.write(line)
+        f.write(b"T" * (chunk + chunk // 2))  # torn tail spanning 2 chunks
+    committed_size = n_lines * len(line)
+    file_size = path.stat().st_size
+    assert file_size > 128 * chunk  # the log really is >> one chunk
+
+    tracker: list[_ReadTrackingFile] = []
+    real_open = open
+
+    def _spy_open(file: Any, mode: str = "r", **kwargs: Any) -> Any:
+        fh = real_open(file, mode, **kwargs)
+        if file == path and "b" in mode:
+            proxy = _ReadTrackingFile(fh)
+            tracker.append(proxy)
+            return proxy
+        return fh
+
+    monkeypatch.setattr(backend.module, "open", _spy_open, raising=False)
+    backend.truncate(path)
+    monkeypatch.undo()
+
+    # Behaviour: torn tail gone, committed prefix intact byte-for-byte.
+    assert path.stat().st_size == committed_size
+    data = path.read_bytes()
+    assert data.endswith(line)
+    assert len(data) == committed_size
+
+    # Memory teeth: every single read ≤ one chunk; total read ≤ 4 chunks
+    # (the walk stops at the first block containing a newline) — and in every
+    # case far below the file size the old implementation slurped.
+    assert tracker, "the repair must have opened the log through the spy"
+    all_reads = [n for t in tracker for n in t.read_sizes]
+    assert all_reads, "the repair must actually read"
+    assert max(all_reads) <= chunk
+    assert sum(all_reads) <= 4 * chunk
+    assert sum(all_reads) < file_size
+
+
+def test_truncate_reverse_chunks_shared_with_tailread(backend: _Backend) -> None:
+    """COMMON: the repair and the resume tail-read share ONE reverse-seek helper.
+
+    Guards the dedup: `_read_tail_entry` and `_find_last_newline_offset` must
+    both delegate to the module's single `_iter_reverse_chunks` generator (no
+    copy-pasted reverse-walk loops).
+    """
+    import inspect
+
+    module = backend.module
+    assert hasattr(module, "_iter_reverse_chunks")
+    assert "_iter_reverse_chunks(" in inspect.getsource(module._read_tail_entry)
+    assert "_iter_reverse_chunks(" in inspect.getsource(module._find_last_newline_offset)
+    # And the repair itself no longer whole-file-reads: it delegates the cut
+    # search to _find_last_newline_offset.
+    assert "_find_last_newline_offset(" in inspect.getsource(module._truncate_torn_tail)
