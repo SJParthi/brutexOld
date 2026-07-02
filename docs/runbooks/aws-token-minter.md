@@ -78,8 +78,14 @@ DynamoDB / no compare-and-swap.
 ## 4. One-command deploy
 
 The single command is **`./deploy.sh`** — it builds the bundle (handler + pyotp, pure
-Python, no Docker), runs `terraform init`, then `terraform apply`, which SHOWS the
-plan and requires you to type `yes` (it never auto-approves):
+Python, no Docker), runs `terraform init`, auto-adopts any pre-existing name-fixed
+resources into the remote state (`terraform import`, idempotent —
+DEC-DEPLOY-AUTO-FIRST-MINT-001), then `terraform apply`, which SHOWS the
+plan and requires you to type `yes` (it never auto-approves), and finally triggers
+the **first token mint itself** (one `aws lambda invoke`, verified `ok: true`,
+honest `FIRST MINT: PASS`/`FAIL`, non-zero exit on failure) so the token param is
+live immediately — no manual invoke, no empty-token window until the next
+06:05 IST cron:
 
 ```bash
 cd deploy/aws_token_minter
@@ -114,6 +120,12 @@ After `apply`, **confirm the SNS email subscription** (AWS emails a confirmation
 link to `alert_email`; the alarm cannot page until you click it).
 
 ## 5. On-demand mint (manual invoke)
+
+> You normally never need this: `./deploy.sh` performs the FIRST mint itself right
+> after a successful apply (step 6/6, DEC-DEPLOY-AUTO-FIRST-MINT-001) and fails the
+> deploy loudly (non-zero exit) if that mint did not report `ok: true`. Use the
+> command below only for an ad-hoc re-mint — it is idempotent (the Lambda is the
+> sole token writer; the SSM write is last-writer-wins `Overwrite=True`).
 
 ```bash
 aws lambda invoke \
