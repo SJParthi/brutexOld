@@ -324,6 +324,104 @@ def test_futures_genuine_bug_propagates() -> None:
         )
 
 
+# ── poisoned-partition quarantine + global-stop boundary (DEC-LAKE-WRITE-UNIQUE-001) ──
+
+
+def test_spot_resample_input_error_is_quarantined_not_stage_abort() -> None:
+    """FAILS on unfixed main: ResampleInputError escaped the (ValueError, OSError)
+    catch and ABORTED the whole pre-build stage — now the poisoned symbol is
+    quarantined + reported and every other symbol still runs."""
+    from brutex.data.errors import ResampleInputError
+
+    def materialize_spot(inst: Instrument) -> MaterializeResult:
+        if inst.symbol_name == "POISONED":
+            raise ResampleInputError("ts_utc must be STRICTLY increasing")
+        return _ok(5)
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("GOOD-A"), _spot("POISONED"), _spot("GOOD-B")],
+        materialize_spot=materialize_spot,
+        futures_contracts_for=_no_futures,
+        materialize_future=_raise_future,
+    )
+
+    spot = report.phases[0]
+    assert spot.attempted == ("GOOD-A", "POISONED", "GOOD-B")
+    assert spot.succeeded == ("GOOD-A", "GOOD-B")  # the healthy symbols still built
+    assert spot.failed == (("POISONED", "ResampleInputError: ts_utc must be STRICTLY increasing"),)
+    assert report.halted_after == "spot"  # the gate still holds on a failing phase
+
+
+def test_futures_resample_input_error_is_quarantined() -> None:
+    from brutex.data.errors import ResampleInputError
+
+    def materialize_future(contract: str) -> MaterializeResult:
+        if contract == "FUT-POISONED":
+            raise ResampleInputError("duplicate ts_utc")
+        return _ok(7)
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("NSE-NIFTY")],
+        materialize_spot=lambda _i: _ok(3),
+        futures_contracts_for=lambda _i: ["FUT-OK", "FUT-POISONED"],
+        materialize_future=materialize_future,
+    )
+
+    futures = report.phases[1]
+    assert futures.succeeded == ("FUT-OK",)
+    assert futures.failed == (("FUT-POISONED", "ResampleInputError: duplicate ts_utc"),)
+
+
+def test_futures_discovery_resample_input_error_is_quarantined() -> None:
+    from brutex.data.errors import ResampleInputError
+
+    def futures_for(_inst: Instrument) -> list[str]:
+        raise ResampleInputError("poisoned discovery read")
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("NSE-NIFTY")],
+        materialize_spot=lambda _i: _ok(3),
+        futures_contracts_for=futures_for,
+        materialize_future=_raise_future,
+    )
+
+    futures = report.phases[1]
+    assert futures.failed == (("NSE-NIFTY", "ResampleInputError: poisoned discovery read"),)
+
+
+def test_lake_write_halt_propagates_through_spot_phase() -> None:
+    """Regression pin: the widened per-symbol quarantine catches the NARROW
+    ResampleInputError subclass, NOT DataLakeError broadly — LakeWriteHalt
+    (disk-full / OOM, a pull-wide global stop) STILL propagates."""
+    from brutex.data.errors import LakeWriteHalt
+
+    def materialize_spot(_inst: Instrument) -> MaterializeResult:
+        raise LakeWriteHalt("disk_full")
+
+    with pytest.raises(LakeWriteHalt, match="disk_full"):
+        run_gated_prebuild(
+            underlyings=[_spot("X")],
+            materialize_spot=materialize_spot,
+            futures_contracts_for=_no_futures,
+            materialize_future=_raise_future,
+        )
+
+
+def test_lake_write_halt_propagates_through_futures_phase() -> None:
+    from brutex.data.errors import LakeWriteHalt
+
+    def materialize_future(_c: str) -> MaterializeResult:
+        raise LakeWriteHalt("out_of_memory")
+
+    with pytest.raises(LakeWriteHalt, match="out_of_memory"):
+        run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(1),
+            futures_contracts_for=lambda _i: ["FUT-X"],
+            materialize_future=materialize_future,
+        )
+
+
 def test_empty_selection_runs_three_empty_phases() -> None:
     report = run_gated_prebuild(
         underlyings=[],

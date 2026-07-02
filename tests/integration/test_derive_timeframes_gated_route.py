@@ -285,3 +285,68 @@ def test_no_symbol_or_symbols_is_400(client: TestClient) -> None:
     resp = client.post("/api/v1/universe/derive-timeframes")
     assert resp.status_code == 400
     assert "?symbol=" in resp.json()["detail"]
+
+
+# ── poisoned-partition quarantine verdict (DEC-LAKE-WRITE-UNIQUE-001) ──────
+
+
+def test_poisoned_symbol_returns_gated_verdict_not_500(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FAILS on unfixed main: the resampler tripwire's ``ResampleInputError``
+    escaped the per-symbol quarantine and the ``?symbols=`` route 500'd — now
+    the route returns 200 with the honest per-symbol gated verdict (the
+    poisoned symbol named in ``failed``, the healthy one still built).
+    """
+    from brutex.data.errors import ResampleInputError
+
+    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    store.upsert_many(
+        [_index("NSE-NIFTY", 1), _index("NSE-BANKNIFTY", 2)],
+        snapshot_date=date(2024, 1, 2),
+        run_id="r1",
+        csv_source_sha256="0" * 64,
+    )
+
+    def _poisoned_materialize(
+        *,
+        lake_root: Any,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        kind: Any,
+        tfs: Any = (),
+    ) -> MaterializeResult:
+        if symbol == "NSE-BANKNIFTY":
+            raise ResampleInputError("ts_utc must be STRICTLY increasing (duplicate row)")
+        return MaterializeResult(written={"5m": 9}, skipped=())
+
+    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _poisoned_materialize)
+    monkeypatch.setattr(app_module, "list_fno_candle_datasets", lambda _root: [])
+    try:
+        with TestClient(
+            build_app(DashboardState(), instrument_store=store),
+            raise_server_exceptions=False,
+        ) as client:
+            resp = client.post(
+                "/api/v1/universe/derive-timeframes",
+                params={"symbols": "NSE-NIFTY,NSE-BANKNIFTY"},
+            )
+    finally:
+        store.close()
+
+    assert resp.status_code == 200  # was a 500 before the quarantine widening
+    body = resp.json()
+    assert body["gated"] is True
+    assert body["ok"] is False
+    assert body["halted_after"] == "spot"
+    spot = body["phases"][0]
+    assert spot["attempted"] == ["NSE-NIFTY", "NSE-BANKNIFTY"]
+    assert spot["succeeded"] == ["NSE-NIFTY"]  # the healthy symbol still built
+    assert spot["failed"] == [
+        {
+            "symbol": "NSE-BANKNIFTY",
+            "error": ("ResampleInputError: ts_utc must be STRICTLY increasing (duplicate row)"),
+        }
+    ]
