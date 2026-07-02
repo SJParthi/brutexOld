@@ -467,7 +467,7 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "settle decision made during such an episode is unsafe; both hashes written to the "
         "transcript."
     ),
-    "integrity.lake_pass": (
+    "integrity.lake_pass": (  # nosec B105 — a diagnostic template, not a credential
         "PASS integrity: {matched}/{total} recorded production-lake windows re-fetched "
         "bit-identical"
     ),
