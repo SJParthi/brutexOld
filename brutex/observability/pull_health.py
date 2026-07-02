@@ -120,11 +120,30 @@ class DwellProvider:
 
     A :class:`~brutex.observability.sla.SLARule` value-provider that returns the wrapped
     ``value_provider`` reading ONLY once :meth:`predicate` has held ``True`` for
-    ``samples`` consecutive calls; otherwise it returns ``None``. Because
+    ``samples`` consecutive calls. Because
     :class:`~brutex.observability.sla.SLADetector` skips a rule whose provider returns
     ``None`` (the documented "value not available yet" contract), the dwell requirement
     is layered on top of the detector WITHOUT modifying it — a transient single-sample
     dip never trips a CRITICAL alert, only a sustained one does.
+
+    The dwell gate is ASYMMETRIC by design (DEC-PULL-STALLED-REFIRE-001):
+
+    * While the predicate holds but the streak is still building (``< samples``),
+      the provider returns ``None`` — no premature breach.
+    * Once the streak reaches ``samples``, the (breaching) value is surfaced —
+      the detector fires the OK→BREACH edge.
+    * On the FIRST healthy sample (predicate ``False`` with a real value), the
+      provider surfaces the REAL value — the detector sees a non-breaching
+      reading and fires the BREACH→OK recovery edge immediately (recovery has
+      no dwell; paging fast on recovery is harmless, paging never on a
+      re-stall is not).
+    * ``None`` is returned ONLY when the underlying value itself is
+      unavailable — preserving the detector's None-skip contract exactly.
+
+    Before DEC-PULL-STALLED-REFIRE-001 the recovery branch ALSO returned
+    ``None``, so the detector's state stuck at BREACH forever: recovery was
+    never logged and a second genuine stall produced no OK→BREACH edge — the
+    CRITICAL ``pull.stalled`` alert fired AT MOST ONCE per process.
 
     Parameters
     ----------
@@ -163,11 +182,20 @@ class DwellProvider:
             raise ValueError(f"DwellProvider.samples must be >= 1, got {self.samples}")
 
     def __call__(self) -> float | None:
-        """Return the value once the predicate has dwelt ``samples`` times, else ``None``."""
+        """Return the dwelt breaching value, the real value on recovery, or ``None``.
+
+        ``None`` means ONLY "value genuinely unavailable this tick" (or the
+        breach streak is still building) — a healthy reading is surfaced so
+        the detector's BREACH→OK recovery edge can fire
+        (DEC-PULL-STALLED-REFIRE-001).
+        """
         value = self.value_provider()
-        if value is None or not self.predicate(value):
+        if value is None:
             self._streak = 0
             return None
+        if not self.predicate(value):
+            self._streak = 0
+            return value
         self._streak += 1
         if self._streak < self.samples:
             return None
