@@ -634,6 +634,14 @@ jobs:
           else
             echo "(brutex.options.strike_grid test file not present yet — gate inactive)"
           fi
+          # 12c · brutex.options.risk_free (106 stmts, 24 branches, 42 tests)
+          #       DEC-GREEKS-ENGINE-PR1-001: stamped risk-free `r` sources
+          #       (fixed default + T-bill CSV step function) — Greeks Phase 1
+          if compgen -G "tests/unit/test_options_risk_free.py" > /dev/null; then
+            pytest --cov=brutex.options.risk_free --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_risk_free.py
+          else
+            echo "(brutex.options.risk_free test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 13 (entry #224): 2-module double-add of
           # SUBSTANTIAL modules from the second-pass probe. Both
           # verified at 100% with existing dedicated test files.
