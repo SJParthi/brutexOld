@@ -340,8 +340,19 @@ class TestLiveKitHelpers:
         with pytest.raises(KitMintBlockedError, match="never mints a TOTP code"):
             mint_blocked_totp_minter("secret")
 
-    def test_installed_growwapi_version_absent_is_none(self) -> None:
-        # The sandbox venv has no growwapi (the honest premise of the kit).
+    def test_installed_growwapi_version_absent_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DETERMINISTIC absence: the helper must map PackageNotFoundError -> None.
+        # (growwapi is a MAIN dependency - pyproject growwapi>=1.0,<2.0 - so a
+        # standard install HAS it; an env-dependent bare assert fails on any such
+        # env, including CI. Simulate the absent-distribution case explicitly.)
+        import importlib.metadata
+
+        def _absent(_name: str) -> str:
+            raise importlib.metadata.PackageNotFoundError("growwapi")
+
+        monkeypatch.setattr(importlib.metadata, "version", _absent)
         assert installed_growwapi_version() is None
 
     def test_installed_growwapi_version_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
