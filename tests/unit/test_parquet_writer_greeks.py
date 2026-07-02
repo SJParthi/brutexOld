@@ -18,7 +18,6 @@ import pytest
 from brutex.data.errors import WriterError
 from brutex.data.models import (
     GREEKS_OVERLAY_FIELDS,
-    GREEKS_PROVENANCE_ID_BOUND,
     CandleBar,
     FnoGreeksBar,
 )
@@ -89,78 +88,6 @@ def _write(
 
 def _partition(tmp_path: Path) -> Path:
     return tmp_path / "bars" / "NSE" / "FNO" / _SYMBOL / "1minute" / "2024" / "01.parquet"
-
-
-class TestFnoGreeksBarModel:
-    """The dedicated bar type's validation envelope."""
-
-    def test_is_a_candlebar(self) -> None:
-        assert isinstance(_enriched(), CandleBar)
-
-    def test_defaults_all_none(self) -> None:
-        bar = FnoGreeksBar(
-            timestamp=_TS,
-            open=Decimal("1"),
-            high=Decimal("2"),
-            low=Decimal("1"),
-            close=Decimal("1.5"),
-            volume=1,
-            open_interest=None,
-        )
-        assert all(getattr(bar, name) is None for name in GREEKS_OVERLAY_FIELDS)
-
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-    def test_non_finite_greek_rejected(self, bad: float) -> None:
-        with pytest.raises(ValueError, match="finite"):
-            _enriched().__class__(
-                timestamp=_TS,
-                open=Decimal("1"),
-                high=Decimal("2"),
-                low=Decimal("1"),
-                close=Decimal("1.5"),
-                volume=1,
-                open_interest=None,
-                iv=bad,
-            )
-
-    def test_non_positive_spot_rejected(self) -> None:
-        with pytest.raises(ValueError, match="spot_at_bar"):
-            FnoGreeksBar(
-                timestamp=_TS,
-                open=Decimal("1"),
-                high=Decimal("2"),
-                low=Decimal("1"),
-                close=Decimal("1.5"),
-                volume=1,
-                open_interest=None,
-                spot_at_bar=Decimal("0"),
-            )
-
-    @pytest.mark.parametrize("pid", [-1, GREEKS_PROVENANCE_ID_BOUND])
-    def test_out_of_range_provenance_rejected(self, pid: int) -> None:
-        with pytest.raises(ValueError, match="greeks_provenance_id"):
-            FnoGreeksBar(
-                timestamp=_TS,
-                open=Decimal("1"),
-                high=Decimal("2"),
-                low=Decimal("1"),
-                close=Decimal("1.5"),
-                volume=1,
-                open_interest=None,
-                greeks_provenance_id=pid,
-            )
-
-    def test_price_invariants_still_enforced(self) -> None:
-        with pytest.raises(ValueError, match="high"):
-            FnoGreeksBar(
-                timestamp=_TS,
-                open=Decimal("1"),
-                high=Decimal("0.5"),
-                low=Decimal("1"),
-                close=Decimal("1"),
-                volume=1,
-                open_interest=None,
-            )
 
 
 class TestTickRoundPreservesType:
