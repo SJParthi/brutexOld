@@ -26,11 +26,17 @@ class _FakeStore:
         self.path = lake_root / "instruments.duckdb"
 
 
-def _client(state: DashboardState, instrument_store: Any = None) -> Any:
+def _client(
+    state: DashboardState, instrument_store: Any = None, *, pull_active: bool | None = None
+) -> Any:
+    """``pull_active`` pins the stall gate's pull-run probe (DEC-RATE-STALL-PULL-GATE-001):
+    ``True`` simulates a mid-flight DASHBOARD pull; ``None`` keeps the production
+    default (the fresh app's job is not running)."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    return TestClient(build_app(state, instrument_store=instrument_store))
+    probe = None if pull_active is None else (lambda: pull_active)
+    return TestClient(build_app(state, instrument_store=instrument_store, pull_active_probe=probe))
 
 
 def _publish_now(lake_root: Path, *, effective_rps: float, current_rps: float) -> None:
@@ -88,7 +94,7 @@ def test_route_no_bridge_file_uses_in_memory_panel(tmp_path: Path) -> None:
         {"current_rps": 8.0, "recent_hits": 1, "recent_minute": 400, "ceiling_per_min": 500},
         {"effective_rps": 7.0, "latency_ms_p95": 150.0},
     )
-    with _client(state, _FakeStore(tmp_path)) as c:
+    with _client(state, _FakeStore(tmp_path), pull_active=True) as c:
         body = c.get("/api/v1/pull/rate").json()
     # No bridge → the dashboard pull's numbers win.
     assert body["flow_state"] == "flowing"
@@ -113,7 +119,7 @@ def test_route_panel_fresher_than_bridge_keeps_dashboard_numbers(tmp_path: Path)
         {"current_rps": 8.0, "recent_hits": 0, "recent_minute": 410, "ceiling_per_min": 500},
         {"effective_rps": 7.5, "latency_ms_p95": 140.0},
     )  # dashboard ticked just now → fresher than the 8 s-old bridge
-    with _client(state, _FakeStore(tmp_path)) as c:
+    with _client(state, _FakeStore(tmp_path), pull_active=True) as c:
         body = c.get("/api/v1/pull/rate").json()
     assert body["req_per_sec_achieved"] == 7.5
     assert body["req_per_min"] == 410
@@ -138,7 +144,7 @@ def test_route_corrupt_bridge_file_falls_back_to_panel(tmp_path: Path) -> None:
         {"current_rps": 8.0, "recent_hits": 0, "recent_minute": 333, "ceiling_per_min": 500},
         {"effective_rps": 6.0, "latency_ms_p95": 100.0},
     )
-    with _client(state, _FakeStore(tmp_path)) as c:
+    with _client(state, _FakeStore(tmp_path), pull_active=True) as c:
         resp = c.get("/api/v1/pull/rate")
     assert resp.status_code == 200
     body = resp.json()

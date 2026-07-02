@@ -39,6 +39,11 @@ from typing import Any, Final
 #: the daily quota; not broken, just waiting for the IST-midnight reset —
 #: DEC-AUTO-RESUME-QUOTA-001), distinct from the red ``auth_expired`` "broken token".
 _KIND_STYLE: Final[dict[str, tuple[str, str]]] = {
+    # ``credentials_missing`` is the PRE-pull refusal (a REAL pull refused
+    # loudly because the Groww credentials did not resolve — nothing fetched,
+    # nothing written; DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). Red like
+    # ``auth_expired``: only the operator can fix it.
+    "credentials_missing": ("verdict--red", "red"),
     "auth_expired": ("verdict--red", "red"),
     "quota_exhausted": ("verdict--amber", "amber"),
     "transient_residual": ("verdict--amber", "amber"),

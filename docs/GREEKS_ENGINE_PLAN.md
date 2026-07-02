@@ -657,14 +657,22 @@ defaults for each, all overridable.
 > optional cache" HYBRID to a HYBRID drawn on COST-CLASS. Sourced from the 14-agent
 > verification panel LOCKED design.
 >
-> **Status honesty up front (Golden Rule #1 / #10).** NONE of this is shipped. The
-> shared Rust Greeks kernel does NOT exist (`rust/trading-core/src/indicators/`
-> registers only ema / fib / market_structure / metadata / pivots / vwap — §1
-> ground truth); there is no `greeks_enrich_after_pull` hook; the frozen 400-case
-> answer-key covers the condition-vocabulary mask, NOT Greeks; the engine consumes
-> ZERO Greeks (all 60 vocabulary bits are price / volume-derived; `iv` is
-> display / analysis only). This is the LOCKED TARGET architecture to implement,
-> not a description of existing behaviour, and it is CONDITIONAL and gated (§15.6).
+> **Status honesty up front (Golden Rule #1 / #10 — refreshed by
+> DEC-GREEKS-ENGINE-PR2B-001).** The gated build phases have now LANDED this
+> section's core: Phase 1 shipped the stamped `RiskFreeSource` seam
+> (`brutex/options/risk_free.py`, DEC-GREEKS-ENGINE-PR1-001 #1094); Phase 2
+> shipped the shared Rust Black-76 kernel + verified Jäckel IV inversion +
+> the frozen `tests/golden/fixtures/greeks_golden.json`
+> (`rust/trading-core/src/greeks/` + `brutex/options/greeks.py`,
+> DEC-GREEKS-ENGINE-PR2-001 #1100); Phase 2b shipped THIS section's
+> generation-time store — the `FNO_CANDLE_LAKE_SCHEMA_VERSION` 2→3 additive
+> overlay columns, the `greeks_enrich_after_pull` hook
+> (`brutex/data/greeks_enrich.py`, wired at the `historical_pull.py` post-drain
+> seam), and the locked `(r, q=0, T=Act/365-to-15:30-IST)` provenance stamp
+> (DEC-GREEKS-ENGINE-PR2B-001). Still true: the engine consumes ZERO Greeks
+> (all 60 vocabulary bits are price / volume-derived); the Phase-3 read
+> surfaces (`/db` stored-column read, `/movers` cells, executor delta-target,
+> §15.10 derived-TF close-snapshot propagation) are NOT yet built.
 
 ### 15.1 Verdict — a HYBRID drawn on cost-class, not "store everything"
 
@@ -886,6 +894,17 @@ skip price validation.
   value.
 
 ### 15.6 Gating (the verdict is CONDITIONAL)
+
+> **Gate status (DEC-GREEKS-ENGINE-PR2B-001):** BOTH gates are now SATISFIED —
+> (a) the shared kernel + frozen `greeks_golden.json` merged GREEN
+> (DEC-GREEKS-ENGINE-PR2-001 #1100); (b) `r` is locked through the PR-1
+> `RiskFreeSource` seam (fixed 6.5% default / `BRUTEX_RISK_FREE_CSV` T-bill
+> curve, DEC-GREEKS-ENGINE-PR1-001 #1094), `q = 0` per ADR-0015 §3 #3, and the
+> `T` convention is locked as calendar Act/365 seconds to 15:30 IST on expiry
+> (the kernel's own day-count; the §3 #4 trading-minutes refinement stays an
+> operator-overridable stamp-driven follow-up). All three are packed into the
+> stored `greeks_provenance_id`, so a later revision is a clean stamp-driven
+> re-enrich, exactly as designed below.
 
 The store-at-generation write CANNOT ship until BOTH:
 

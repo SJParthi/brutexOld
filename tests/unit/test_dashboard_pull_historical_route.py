@@ -106,8 +106,17 @@ def client(
         yield c
 
 
-def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
+def _pin_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the credential gate OPEN (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+
+    These tests exercise the historical route's selection/validation over a
+    fully-faked candle pull, not the credential gate (which has its own
+    dedicated suite); pinning ``groww_credentials_error`` to ``None`` keeps
+    every request deterministic regardless of the ambient environment. The old
+    ``_force_dry_run`` (creds-absent → silent synthetic downgrade) is gone:
+    a creds-absent real pull now REFUSES with a 503.
+    """
+    monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
 
 
 def _captured() -> dict[str, Any]:
@@ -168,7 +177,7 @@ def _lake_root(store: InstrumentStore) -> Path:
 def test_underlying_form_resolves_whole_chain(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -190,7 +199,7 @@ def test_underlying_form_resolves_whole_chain(
 def test_expiry_narrows_to_chain(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -206,7 +215,7 @@ def test_expiry_narrows_to_chain(
 def test_single_contract_form(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -222,7 +231,7 @@ def test_single_contract_form(
 def test_multi_contracts_form(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -241,7 +250,7 @@ def test_multi_contracts_form(
 def test_kind_form_resolves_admitted_underlyings(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -255,7 +264,7 @@ def test_kind_form_resolves_admitted_underlyings(
 def test_all_form_resolves_every_cached_contract(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -268,7 +277,7 @@ def test_all_form_resolves_every_cached_contract(
 def test_interval_and_until_clean_off_echoed(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))
@@ -290,7 +299,7 @@ def test_interval_and_until_clean_off_echoed(
 
 def test_empty_registry_is_honest_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """No cached contracts (registry empty) → an honest 400 pointing at the ⛓ button."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
     assert resp.status_code == 400
     assert "pull expiries + contracts first" in resp.json()["detail"]
@@ -299,7 +308,7 @@ def test_empty_registry_is_honest_400(client: TestClient, monkeypatch: pytest.Mo
 def test_no_match_selection_is_honest_400(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _seed_registry(_lake_root(store))
     resp = client.post(
         "/api/v1/universe/pull-historical", params={"contract": "NSE-NOPE-01Jan20-100-CE"}
@@ -311,7 +320,7 @@ def test_no_match_selection_is_honest_400(
 def test_no_selection_is_honest_400(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _seed_registry(_lake_root(store))
     resp = client.post("/api/v1/universe/pull-historical")
     assert resp.status_code == 400
@@ -324,7 +333,7 @@ def test_no_selection_is_honest_400(
 def test_bad_interval_400(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _seed_registry(_lake_root(store))
     resp = client.post(
         "/api/v1/universe/pull-historical",
@@ -337,7 +346,7 @@ def test_bad_interval_400(
 def test_bad_expiry_400(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _seed_registry(_lake_root(store))
     resp = client.post(
         "/api/v1/universe/pull-historical",
@@ -548,7 +557,7 @@ def test_composite_symbols_starts_job(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``?symbols=`` routes to the composite: tradable pulled, REF skipped + reported."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured: dict[str, Any] = {}
     _patch_composite(monkeypatch, captured)
     resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY,INDIAVIX"})
@@ -570,7 +579,7 @@ def test_composite_enumerate_flag_without_symbols_400(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``enumerate=true`` with no ``?symbols=`` is an honest 400."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = ref_client.post("/api/v1/universe/pull-historical", params={"enumerate": "true"})
     assert resp.status_code == 400
     assert "enumerate=true requires ?symbols" in resp.json()["detail"]
@@ -580,7 +589,7 @@ def test_composite_unknown_symbol_400(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An unknown symbol in ``?symbols=`` is a 400 (never a fabricated underlying)."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY,NOPE"})
     assert resp.status_code == 400
     assert "NOPE" in resp.json()["detail"]
@@ -590,7 +599,7 @@ def test_composite_all_reference_only_is_honest_no_op(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An ALL-REF ``?symbols=`` selection is an honest no-op (started: False, not a 400)."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured: dict[str, Any] = {}
     _patch_composite(monkeypatch, captured)
     resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "INDIAVIX"})
@@ -608,7 +617,7 @@ def test_composite_bad_from_date_400(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-ISO ``from_date`` with ``?symbols=`` is a 400 (the metadata-year parse)."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = ref_client.post(
         "/api/v1/universe/pull-historical",
         params={"symbols": "NIFTY", "from_date": "not-a-date"},
@@ -621,7 +630,7 @@ def test_single_underlying_back_compat_preserved(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No ``?symbols=`` / ``enumerate`` → the ORIGINAL single-underlying path is unchanged."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     captured = _captured()
     _patch_historical(monkeypatch, captured)
     _seed_registry(_lake_root(store))

@@ -720,7 +720,15 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
                     "volume": pl.Int64,
                 }
             )
-        df = pl.read_parquet(files)
+        # SCHEMA-TOLERANT multi-file read (DEC-GREEKS-ENGINE-PR2B-001): an OPTION
+        # contract's month files can mix the raw 7-column and the Greeks-enriched
+        # 17-column shape (plan §15.3 — e.g. a window-bounded enrich, or a crash
+        # mid-pass), and polars refuses mixed schemas by default. The first file's
+        # schema anchors; a missing column null-fills, an extra one is ignored —
+        # the `.select(*columns)` below needs only the base OHLCV(+OI) columns,
+        # which every shape carries, so the output is byte-identical for a
+        # uniform tree.
+        df = pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore").collect()
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()

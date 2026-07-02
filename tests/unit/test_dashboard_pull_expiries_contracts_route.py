@@ -129,8 +129,17 @@ def ref_client(
         yield c
 
 
-def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
+def _pin_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the credential gate OPEN (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+
+    These tests exercise the metadata route's selection/validation over a
+    fully-faked pull, not the credential gate (which has its own dedicated
+    suite); pinning ``groww_credentials_error`` to ``None`` keeps every request
+    deterministic regardless of the ambient environment. The old
+    ``_force_dry_run`` (creds-absent → silent synthetic downgrade) is gone:
+    a creds-absent real pull now REFUSES with a 503.
+    """
+    monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
 
 
 def _fake_report(instruments: list[Instrument], *, years: Any, dry_run: bool) -> MetadataPullReport:
@@ -182,9 +191,12 @@ def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any
 
 
 def test_kind_form_starts_metadata_job(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_metadata(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"kind": "index"})
+    resp = client.post(
+        "/api/v1/universe/pull-expiries-contracts",
+        params={"kind": "index", "dry_run": "true"},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is True
@@ -198,7 +210,7 @@ def test_kind_form_starts_metadata_job(client: TestClient, monkeypatch: pytest.M
 def test_symbol_form_starts_metadata_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_metadata(monkeypatch)
     resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"symbol": "NIFTY"})
     assert resp.status_code == 200
@@ -208,7 +220,7 @@ def test_symbol_form_starts_metadata_job(
 
 
 def test_symbols_form_echoes_selection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_metadata(monkeypatch)
     resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"symbols": "NIFTY"})
     assert resp.status_code == 200
@@ -220,7 +232,7 @@ def test_symbols_form_echoes_selection(client: TestClient, monkeypatch: pytest.M
 def test_date_bounds_narrow_the_year_grid(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_metadata(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-expiries-contracts",
@@ -236,28 +248,28 @@ def test_date_bounds_narrow_the_year_grid(
 
 
 def test_unknown_symbol_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"symbol": "NOPE"})
     assert resp.status_code == 400
     assert resp.json()["detail"] == "unknown security_id 'NOPE' — not in the instrument store"
 
 
 def test_unknown_symbols_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"symbols": "NIFTY,NOPE"})
     assert resp.status_code == 400
     assert "NOPE" in resp.json()["detail"]
 
 
 def test_bad_kind_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"kind": "bogus"})
     assert resp.status_code == 400
     assert "kind must be one of" in resp.json()["detail"]
 
 
 def test_no_selection_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post("/api/v1/universe/pull-expiries-contracts")
     assert resp.status_code == 400
     assert resp.json()["detail"] == (
@@ -266,7 +278,7 @@ def test_no_selection_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_bad_from_date_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-expiries-contracts",
         params={"kind": "index", "from_date": "not-a-date"},
@@ -276,7 +288,7 @@ def test_bad_from_date_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_reversed_year_range_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-expiries-contracts",
         params={"kind": "index", "from_date": "2024-01-01", "to_date": "2022-01-01"},
@@ -339,7 +351,7 @@ def test_reference_only_selection_is_skipped_and_reported(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A REF underlying in a mixed selection is SKIPPED (never passed to the pull) + reported."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     seen: list[list[str]] = []
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _recording_pull(seen))
     resp = ref_client.post(
@@ -359,7 +371,7 @@ def test_mixed_selection_passes_only_tradable(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A mix → only the TRADABLE instruments reach the pull; the REF set is echoed."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     seen: list[list[str]] = []
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _recording_pull(seen))
     resp = ref_client.post(
@@ -377,7 +389,7 @@ def test_all_reference_only_selection_is_an_honest_no_op(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """All-REF selection → honest "nothing to pull" note, the pull fake NOT called."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     seen: list[list[str]] = []
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _recording_pull(seen))
     resp = ref_client.post(
@@ -397,7 +409,7 @@ def test_fully_tradable_selection_is_unchanged(
     ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A fully-tradable selection is byte-unchanged — no skips, the pull receives it all."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     seen: list[list[str]] = []
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _recording_pull(seen))
     resp = ref_client.post("/api/v1/universe/pull-expiries-contracts", params={"symbol": "NIFTY"})

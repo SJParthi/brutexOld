@@ -57,11 +57,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from types import TracebackType
-from typing import Any, Final, Self
+from typing import Any, BinaryIO, Final, Self
 
 import blake3
 
@@ -510,10 +511,35 @@ def _read_entries(path: Path) -> list[SweepAuditEntry]:
     return entries
 
 
-#: Reverse-read chunk size (bytes) for :func:`_read_tail_entry`. Read the file
-#: end backwards this many bytes at a time until the last committed line is
-#: isolated — so a resume touches O(1) tail bytes, never the whole log.
+#: Reverse-read chunk size (bytes) for :func:`_read_tail_entry` +
+#: :func:`_truncate_torn_tail`. Read the file end backwards this many bytes at a
+#: time until the last committed line (resume) / last newline (truncate) is
+#: isolated — so BOTH the resume tail-read AND the torn-tail repair touch O(1)
+#: tail bytes, never the whole log.
 _TAIL_CHUNK_BYTES: Final[int] = 8192
+
+
+def _iter_reverse_chunks(f: BinaryIO, size: int) -> Iterator[tuple[int, bytes]]:
+    """Yield ``(pos, block)`` reading *f* backward from *size* in bounded blocks.
+
+    The SINGLE reverse-seek mechanism shared by :func:`_read_tail_entry` (isolate
+    the last committed line) and :func:`_find_last_newline_offset` (locate the
+    last ``"\\n"`` for :func:`_truncate_torn_tail`) — so neither materialises the
+    whole log (COMMON; one source of truth for the bounded reverse read). The
+    STANDALONE twin of :func:`brutex.orchestrator.audit._iter_reverse_chunks`.
+
+    Each yielded ``block`` is at most :data:`_TAIL_CHUNK_BYTES` bytes and ``pos``
+    is its absolute start offset in *f*; blocks are yielded from the END of the
+    file toward the start until offset ``0`` is reached. Peak resident bytes are
+    O(:data:`_TAIL_CHUNK_BYTES`), never O(*size*). *f* must be a binary file
+    already seekable to any offset in ``[0, size]``.
+    """
+    pos = size
+    while pos > 0:
+        read_size = min(_TAIL_CHUNK_BYTES, pos)
+        pos -= read_size
+        f.seek(pos)
+        yield pos, f.read(read_size)
 
 
 def _read_tail_entry(path: Path) -> tuple[SweepAuditEntry | None, bool]:
@@ -569,11 +595,9 @@ def _read_tail_entry(path: Path) -> tuple[SweepAuditEntry | None, bool]:
         buf = b""
         pos = size
         last_committed_line: bytes | None = None
-        while pos > 0:
-            read_size = min(_TAIL_CHUNK_BYTES, pos)
-            pos -= read_size
-            f.seek(pos)
-            buf = f.read(read_size) + buf
+        for chunk_start, block in _iter_reverse_chunks(f, size):
+            pos = chunk_start  # how far back the reverse walk has reached
+            buf = block + buf
             newline_idx = buf.find(b"\n")
             if newline_idx == -1:
                 continue
@@ -615,16 +639,47 @@ def _last_nonblank_committed_line(chunk: bytes) -> bytes | None:
     return None
 
 
+def _find_last_newline_offset(f: BinaryIO, size: int) -> int:
+    """Return the absolute offset of the LAST ``"\\n"`` in *f*, or ``-1`` if none.
+
+    Walks *f* backward via :func:`_iter_reverse_chunks`, so it reads O(1) tail
+    bytes (peak O(:data:`_TAIL_CHUNK_BYTES`)) rather than the whole file — even
+    when the torn final line spans several reverse-seek blocks. The first block
+    (scanning from the end) that contains any ``"\\n"`` yields the answer: the
+    last newline in the file is that block's LAST newline (no earlier block can
+    hold a later one). *size* must equal the file's byte length. The STANDALONE
+    twin of :func:`brutex.orchestrator.audit._find_last_newline_offset`.
+    """
+    for pos, block in _iter_reverse_chunks(f, size):
+        idx = block.rfind(b"\n")
+        if idx != -1:
+            return pos + idx
+    return -1
+
+
 def _truncate_torn_tail(path: Path) -> None:
     """Drop a torn final line so the next append continues a clean chain.
 
-    Rewrites *path* keeping ONLY its committed (newline-terminated) bytes — the
-    longest prefix ending in ``"\\n"`` — so the uncommitted torn remnant a crash
-    left behind is removed and :meth:`SweepAuditWriter.append` resumes a
-    pristine chain (DEC-AUDIT-TORN-TAIL-001). Done with an atomic
-    ``os.replace`` of a sibling temp file so an interruption DURING the repair
-    can never itself corrupt the committed prefix. A best-effort ``fsync``
-    mirrors the writer's durability guard.
+    Truncates *path* IN PLACE to keep ONLY its committed (newline-terminated)
+    bytes — the longest prefix ending in ``"\\n"`` — so the uncommitted torn
+    remnant a crash left behind is removed and :meth:`SweepAuditWriter.append`
+    resumes a pristine chain (DEC-AUDIT-TORN-TAIL-001).
+
+    The cut point (the last ``"\\n"``) is located with a bounded reverse-seek
+    (:func:`_find_last_newline_offset`) instead of reading the whole log into
+    memory, so the repair is O(:data:`_TAIL_CHUNK_BYTES`) resident bytes even on
+    a multi-GB sweep log (DEC-AUDIT-TORN-TAIL-O1-001, superseding the prior
+    ``f.read()``-the-whole-file rewrite). The resulting file is byte-identical to
+    that earlier rewrite for every input: the kept prefix is exactly
+    ``data[: data.rfind(b"\\n") + 1]`` (empty when there is no committed
+    newline).
+
+    The truncation is an in-place :func:`os.truncate`, which only ever DROPS the
+    trailing (uncommitted) bytes — the committed prefix bytes are never
+    rewritten or moved, so an interruption DURING the repair cannot corrupt them
+    (and a re-run simply re-truncates the same boundary; idempotent). A
+    best-effort ``fsync`` persists the shortened length, mirroring the writer's
+    durability guard.
 
     The STANDALONE twin of
     :func:`brutex.orchestrator.audit._truncate_torn_tail`.
@@ -632,21 +687,19 @@ def _truncate_torn_tail(path: Path) -> None:
     Raises
     ------
     SweepAuditWriteError
-        If the rewrite fails for any I/O reason.
+        If the repair fails for any I/O reason.
     """
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-        cut = data.rfind(b"\n")
-        # cut == -1 → no committed line at all → keep nothing.
-        committed = data[: cut + 1] if cut != -1 else b""
-        tmp = path.with_name(f"{path.name}.torn-tail-{os.getpid()}.tmp")
-        with open(tmp, "wb") as out:
-            out.write(committed)
-            out.flush()
+        with open(path, "r+b") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            cut = _find_last_newline_offset(f, size)
+            # cut == -1 → no committed newline at all → keep nothing.
+            keep = cut + 1 if cut != -1 else 0
+            os.truncate(f.fileno(), keep)
+            f.flush()
             with contextlib.suppress(OSError):
-                os.fsync(out.fileno())
-        os.replace(tmp, path)
+                os.fsync(f.fileno())
     except OSError as exc:
         raise SweepAuditWriteError(
             f"Failed to truncate torn tail of sweep audit log {path}: {exc}"

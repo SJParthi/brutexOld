@@ -26,14 +26,26 @@ the wall-clock age of its last update, :func:`build_pull_rate_view` derives a
   ``stalled`` verdict the pull-health monitor's ``pull.stalled`` rule encodes
   (achieved r/s below a floor while a pull is ACTIVELY ticking).
 
-## The three flow states (honest, never fabricated)
+## The four flow states (honest, never fabricated)
 
-* ``idle`` — no live tick within ``stale_after_s`` (no pull running / the pull ended): the
-  view ZEROES every live number so the widget shows a dark "idle" light, never the last
-  live figure (Golden Rule #1 — never a fake "live" number when idle).
-* ``stalled`` — a tick landed recently (a pull IS active) but the achieved r/s is at/below
-  :data:`STALL_RPS_FLOOR`: the pull is effectively dead → a RED light.
+* ``idle`` — no live tick within ``stale_after_s`` (no pull running / the pull ended a
+  while ago): the view ZEROES every live number so the widget shows a dark "idle" light,
+  never the last live figure (Golden Rule #1 — never a fake "live" number when idle).
+* ``done`` — the caller KNOWS no pull is running (``pull_active=False`` —
+  DEC-RATE-STALL-PULL-GATE-001) while the last tick is still fresh: the pull JUST
+  finished. Every live number is zeroed and the light is dark — NEVER the red
+  "stalled" the pre-fix projection showed right after a successful completion (the
+  operator's 80/80-complete pull read "PULL RATE stalled": honest counts, wrong word).
+  Once the tick ages past ``stale_after_s`` this settles to plain ``idle``.
+* ``stalled`` — a pull IS ACTIVE but its req/sec has flatlined: either a fresh tick with
+  achieved r/s at/below :data:`STALL_RPS_FLOOR`, or (when the caller asserts
+  ``pull_active=True``) NO tick within ``stale_after_s`` at all → a RED light. STALLED
+  is NEVER shown when the caller knows no pull is running.
 * ``flowing`` — a recent tick with achieved r/s above the floor → a GREEN light.
+
+``pull_active=None`` (the default) means the caller has NO pull-run signal (e.g. the
+cross-process CLI bridge, which carries no active flag) — the projection then falls back
+to the pre-existing tick-freshness heuristic, byte-identical to the pre-gate behaviour.
 
 ## Honest envelope (Golden Rule #10)
 
@@ -91,6 +103,10 @@ CEILING_PER_MIN_LIMIT: Final[int] = GROWW_RATE_LIMIT_PER_MIN
 FLOW_IDLE: Final[str] = "idle"
 FLOW_FLOWING: Final[str] = "flowing"
 FLOW_STALLED: Final[str] = "stalled"
+#: The pull JUST finished (``pull_active=False`` while the last tick is still fresh) —
+#: dark light, honest label, never a red "stalled" on a completed pull
+#: (DEC-RATE-STALL-PULL-GATE-001).
+FLOW_DONE: Final[str] = "done"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,14 +116,19 @@ class PullRateView:
     Attributes
     ----------
     flow_state
-        One of :data:`FLOW_IDLE` / :data:`FLOW_FLOWING` / :data:`FLOW_STALLED` — the
-        widget's stall-light colour (dark / green / red).
+        One of :data:`FLOW_IDLE` / :data:`FLOW_DONE` / :data:`FLOW_FLOWING` /
+        :data:`FLOW_STALLED` — the widget's stall-light colour (dark / dark / green /
+        red). ``done`` = the caller knows no pull is running while the last tick is
+        still fresh (a pull just completed — DEC-RATE-STALL-PULL-GATE-001).
     active
-        ``True`` iff a live rate tick landed within ``stale_after_s`` (a pull is running).
-        When ``False`` every live number below is zeroed (idle).
+        ``True`` iff the view carries LIVE numbers — a rate tick landed within
+        ``stale_after_s`` and the pull is not known-finished. When ``False`` every
+        live number below is zeroed.
     stalled
-        ``True`` iff a pull is ACTIVE but its achieved r/s is at/below
-        :data:`STALL_RPS_FLOOR` — the pull is effectively dead.
+        ``True`` iff a pull is ACTIVE but its req/sec has flatlined (achieved r/s
+        at/below :data:`STALL_RPS_FLOOR`, or — under an explicit ``pull_active=True`` —
+        no tick within the staleness window at all). NEVER ``True`` when the caller
+        knows no pull is running (``pull_active=False``).
     req_per_sec_achieved
         The transport's MEASURED ``effective_rps`` (calls ÷ wall-span). Zeroed when idle.
     req_per_sec_allowed
@@ -196,13 +217,14 @@ def build_pull_rate_view(
     recent_600s: int = 0,
     recent_3600s: int = 0,
     meter_present: bool = True,
+    pull_active: bool | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
     """Derive the :class:`PullRateView` from a rate panel's live fields + its update age.
 
     Pure + fully injectable (no clock / global state) so a test drives it with explicit
-    values and asserts the idle / flowing / stalled projection deterministically.
+    values and asserts the idle / done / flowing / stalled projection deterministically.
 
     Parameters
     ----------
@@ -235,6 +257,17 @@ def build_pull_rate_view(
         signal (``recent_minute == 0`` ⇒ stalled / idle) and ``req_per_sec_achieved`` stays a
         HONEST ``0`` (no fabricated completed-rate), the per-minute admission average being
         carried separately in :attr:`~PullRateView.req_per_min_rate`.
+    pull_active
+        The caller's AUTHORITATIVE pull-run signal (DEC-RATE-STALL-PULL-GATE-001).
+        ``False`` = the caller KNOWS no pull is running (the dashboard's
+        ``BackgroundPullJob.running`` is ``False``) ⇒ the verdict can NEVER be
+        ``stalled``: a still-fresh tick reads :data:`FLOW_DONE` (the pull just
+        finished), a stale one plain :data:`FLOW_IDLE` — closing the "PULL RATE
+        stalled right after a successful 80/80 completion" mislabel. ``True`` = a pull
+        IS running ⇒ a fresh tick keeps the measured flowing/stalled verdict, and NO
+        tick within ``stale_after_s`` reads ``stalled`` (an active pull whose rate
+        ticks flatlined). ``None`` (the default) = no signal available (the CLI
+        bridge) ⇒ the pre-existing tick-freshness heuristic, byte-identical.
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -255,15 +288,14 @@ def build_pull_rate_view(
         # and this read can never read as a negative age.
         seconds_since_update = max(0.0, now_monotonic - last_update_monotonic)
 
-    active = seconds_since_update <= stale_after_s
+    tick_fresh = seconds_since_update <= stale_after_s
 
-    if not active:
-        # Idle: a pull ended or none ran — ZERO every live number so the widget never shows
-        # a stale "live" figure (Golden Rule #1). The limits + staleness stay real.
+    def _quiet(flow_state: str, *, stalled: bool) -> PullRateView:
+        """A zeroed (no live numbers) view — the limits + staleness stay real."""
         return PullRateView(
-            flow_state=FLOW_IDLE,
+            flow_state=flow_state,
             active=False,
-            stalled=False,
+            stalled=stalled,
             req_per_sec_achieved=0.0,
             req_per_sec_allowed=0.0,
             req_per_min=0,
@@ -277,6 +309,25 @@ def build_pull_rate_view(
             ceiling_rps=CEILING_RPS_LIMIT,
             ceiling_per_min=CEILING_PER_MIN_LIMIT,
         )
+
+    if pull_active is False:
+        # The caller KNOWS no pull is running (DEC-RATE-STALL-PULL-GATE-001): the verdict
+        # can NEVER be "stalled". A still-fresh tick means the pull JUST finished — an
+        # honest dark "done", never the red mislabel the operator saw right after an
+        # 80/80-complete pull; once the tick ages out it settles to plain "idle". Every
+        # live number is zeroed either way (the last live figures are history, not a
+        # current rate — Golden Rule #1).
+        return _quiet(FLOW_DONE if tick_fresh else FLOW_IDLE, stalled=False)
+
+    if not tick_fresh:
+        if pull_active is True:
+            # A pull IS running but NO rate tick landed within the staleness window —
+            # its req/sec has flatlined entirely: the honest verdict is STALLED (red),
+            # with the live numbers zeroed (there is no fresh measurement to show).
+            return _quiet(FLOW_STALLED, stalled=True)
+        # No pull-run signal (pull_active=None — the CLI bridge): the pre-gate
+        # tick-freshness heuristic, byte-identical — a stale tick reads idle.
+        return _quiet(FLOW_IDLE, stalled=False)
 
     # The ADMISSION-derived per-minute average expressed as r/s (DEC-RATE-WIDGET-FNO-HONEST-001):
     # what the controller ISSUED ÷ 60. It is NOT a measured completed throughput — surfaced in
@@ -333,6 +384,7 @@ def build_pull_rate_view_merged(
     panel_recent_600s: int = 0,
     panel_recent_3600s: int = 0,
     panel_meter_present: bool = True,
+    panel_pull_active: bool | None = None,
     bridge_effective_rps: float | None = None,
     bridge_current_rps: float | None = None,
     bridge_recent_minute: int | None = None,
@@ -342,6 +394,7 @@ def build_pull_rate_view_merged(
     bridge_recent_600s: int | None = None,
     bridge_recent_3600s: int | None = None,
     bridge_meter_present: bool = True,
+    bridge_pull_active: bool | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -392,6 +445,15 @@ def build_pull_rate_view_merged(
         Whether the bridge snapshot's ``effective_rps`` is a REAL measured completed-rate
         (DEC-RATE-WIDGET-FNO-HONEST-001). The CLI ``brutex fetch`` pull publishes a real meter
         rate, so this defaults ``True`` (the bridge contract is unchanged).
+    panel_pull_active, bridge_pull_active
+        The per-source AUTHORITATIVE pull-run signal threaded into
+        :func:`build_pull_rate_view` (DEC-RATE-STALL-PULL-GATE-001) for whichever source
+        wins the freshness pick. The dashboard route passes its
+        ``BackgroundPullJob.running`` as ``panel_pull_active``, so a just-completed
+        dashboard pull reads ``done``/``idle``, never ``stalled``. The CLI bridge file
+        carries NO active flag, so ``bridge_pull_active`` stays ``None`` (the honest
+        tick-freshness fallback) until the bridge publishes one — an explicit follow-up,
+        NOT claimed here.
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -422,6 +484,7 @@ def build_pull_rate_view_merged(
             recent_600s=bridge_recent_600s if bridge_recent_600s is not None else 0,
             recent_3600s=bridge_recent_3600s if bridge_recent_3600s is not None else 0,
             meter_present=bridge_meter_present,
+            pull_active=bridge_pull_active,
             last_update_monotonic=0.0,
             now_monotonic=bridge_seconds_since_update,
             stale_after_s=stale_after_s,
@@ -436,6 +499,7 @@ def build_pull_rate_view_merged(
         recent_600s=panel_recent_600s,
         recent_3600s=panel_recent_3600s,
         meter_present=panel_meter_present,
+        pull_active=panel_pull_active,
         last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
         now_monotonic=panel_seconds_since_update
         if math.isfinite(panel_seconds_since_update)
@@ -448,6 +512,7 @@ def build_pull_rate_view_merged(
 __all__ = [
     "CEILING_PER_MIN_LIMIT",
     "CEILING_RPS_LIMIT",
+    "FLOW_DONE",
     "FLOW_FLOWING",
     "FLOW_IDLE",
     "FLOW_STALLED",

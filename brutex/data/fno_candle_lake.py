@@ -42,12 +42,18 @@ FNO_CANDLE_LAKE_SEGMENT: Final[str] = "FNO"
 
 #: Schema version of the F&O candle logical table. Bumped only on a non-additive
 #: shape change; the registration is idempotent (``INSERT OR REPLACE``) so re-opening
-#: an existing master always re-stamps the current descriptor. v2: the two #865 derived
-#: columns ``(moneyness, atm_offset)`` were collapsed into ONE combined ``moneyness``
-#: label (DEC-FNO-MONEYNESS-LABEL-001) — a column dropped from the advertised set is a
-#: non-additive change, so the version bumps (no on-disk migration: both were always
-#: ``source="derived"``, never physical Parquet columns).
-FNO_CANDLE_LAKE_SCHEMA_VERSION: Final[int] = 2
+#: an existing master always re-stamps the current descriptor. v3: the ten nullable
+#: Greeks-overlay columns (``iv``…``greeks_provenance_id``) became PHYSICAL
+#: ``source="bar"`` columns written by the generation-time enrichment
+#: (`DEC-GREEKS-GENERATION-TIME-001` / plan §15.3 / ADR-0015 D11 — a shape change, so
+#: the version bumps). The ON-DISK change is nevertheless ADDITIVE: every new column
+#: is nullable and appended after ``open_interest``, so a legacy 7-column partition
+#: reads them as NULL with NO migration (the writer's schema-tolerant read-back).
+#: v2: the two #865 derived columns ``(moneyness, atm_offset)`` were collapsed into
+#: ONE combined ``moneyness`` label (DEC-FNO-MONEYNESS-LABEL-001) — a column dropped
+#: from the advertised set is a non-additive change, so the version bumped (no
+#: on-disk migration: both were always ``source="derived"``, never physical columns).
+FNO_CANDLE_LAKE_SCHEMA_VERSION: Final[int] = 3
 
 #: The on-disk partition path template (``str.format`` placeholders), documenting
 #: where a row physically lives. ``groww_symbol`` is the full contract symbol
@@ -105,6 +111,40 @@ FNO_CANDLE_COLUMNS: Final[tuple[FnoCandleColumn, ...]] = (
     FnoCandleColumn("volume", "int", "bar", False, "Traded contracts in the bar."),
     FnoCandleColumn(
         "open_interest", "int", "bar", False, "Open interest — FIRST-CLASS for F&O (FUT/CE/PE)."
+    ),
+    # STORED Greeks overlay (DEC-GREEKS-GENERATION-TIME-001 / DEC-GREEKS-ENGINE-PR2B-001,
+    # plan §15.3 / ADR-0015 D11) — the ten nullable PHYSICAL columns the post-pull
+    # ``greeks_enrich_after_pull`` writes for OPTION (CE/PE) bars via the shared Rust
+    # Black-76 kernel. The EXPENSIVE per-bar-IV-solve family is stored once at
+    # generation time; the CHEAP family below (moneyness/spot/intrinsic/…) stays
+    # read-time derived. NULL on a legacy / never-enriched partition, on every FUT bar
+    # (never a bogus Greek for a future), and on any honestly-unsolvable bar (the
+    # stamped reason rides ``greeks_provenance_id`` — plan §15.8). ``iv``…``rho`` are
+    # FULL precision (DEC-MONEY-2DP-001 forbids rounding statistical values);
+    # ``spot_at_bar`` is the ONE 2dp-snapped price.
+    FnoCandleColumn("iv", "float", "bar", True, "Solved implied volatility (annualized)."),
+    FnoCandleColumn("delta", "float", "bar", True, "∂price/∂spot (signed; CE + / PE −)."),
+    FnoCandleColumn("gamma", "float", "bar", True, "∂delta/∂spot (>= 0)."),
+    FnoCandleColumn("theta", "float", "bar", True, "∂price/∂time per Act/365 calendar day."),
+    FnoCandleColumn("vega", "float", "bar", True, "∂price/∂σ per 1 vol-point (>= 0)."),
+    FnoCandleColumn("rho", "float", "bar", True, "∂price/∂r per 1% rate (signed)."),
+    FnoCandleColumn(
+        "spot_at_bar",
+        "decimal",
+        "bar",
+        True,
+        "Underlying spot close at the SAME minute, materialized by the enrich join (₹, 2-dp).",
+    ),
+    FnoCandleColumn(
+        "t_years_used", "float", "bar", True, "Time-to-expiry (years) frozen into the Greeks."
+    ),
+    FnoCandleColumn("rate_used", "float", "bar", True, "Risk-free r frozen into the Greeks."),
+    FnoCandleColumn(
+        "greeks_provenance_id",
+        "int",
+        "bar",
+        True,
+        "Packed provenance stamp (formula/rate/q/T/style/status) — the staleness key.",
     ),
     FnoCandleColumn("exchange", "string", "partition", False, "NSE / BSE."),
     FnoCandleColumn("segment", "string", "partition", False, "Always FNO."),
