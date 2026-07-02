@@ -131,7 +131,7 @@ class RiskFreeSource(Protocol):
             The stamped rate, or ``None`` when the source honestly has no
             rate on/before ``on_date`` (never a fabricated value).
         """
-        ...  # pragma: no cover - Protocol body
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def _validate_rate(rate: float, *, context: str) -> None:
