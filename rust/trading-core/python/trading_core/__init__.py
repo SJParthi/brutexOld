@@ -23,6 +23,13 @@ wheel is built by maturin and installed in every CI job that imports
 * ``compute_ema`` / ``ema_alpha`` / ``ema_seed`` / ``ema_step`` — the single-source
   EMA 20/200 recurrence BruteX's ``brutex.indicators.ema`` shim delegates to
   (``DEC-EMA-RUST-PORT-001``).
+* ``greeks`` — the ONE shared Black-76 Greeks + verified Jäckel-IV seam
+  (``DEC-GREEKS-ENGINE-PR2-001``): ``greeks(price, sigma, forward, strike,
+  t_years, rate, is_call)`` → ``(iv, delta, gamma, theta, vega, rho, price,
+  admissible)``; ``sigma=Some`` prices directly (live path), ``sigma=None``
+  solves IV from the traded price first (historical path). BruteX's thin
+  ``brutex.options.greeks`` wrapper delegates here; the ``GREEKS_*`` constants
+  mirror the kernel's clamp / floor / admission constants.
 * ``VwapState`` / ``MarketStructureState`` — the stateful, look-ahead-clean
   session-anchored VWAP + BOS/CHoCH detectors BruteX's ``stage1a`` engine drives
   per bar so the per-bar compute runs in Rust (the bit-identical
@@ -34,6 +41,11 @@ from __future__ import annotations
 
 from ._trading_core import (  # type: ignore[import-not-found]
     FIB_LEVELS_LEN,
+    GREEKS_DELTA_ADMISSION_FLOOR,
+    GREEKS_IV_CLAMP_MAX,
+    GREEKS_IV_CLAMP_MIN,
+    GREEKS_T_FLOOR_YEARS,
+    GREEKS_VEGA_ADMISSION_FLOOR,
     IMPLEMENTED_MASK,
     PIVOT_LEVELS_LEN,
     SPEC_SCHEMA_VERSION,
@@ -51,6 +63,7 @@ from ._trading_core import (  # type: ignore[import-not-found]
     evaluate_from_raw,
     evaluate_spec,
     evaluate_with_levels,
+    greeks,
     minute_of_session,
     resolve_near_month,
     total_conditions,
@@ -60,6 +73,11 @@ from ._trading_core import (  # type: ignore[import-not-found]
 
 __all__ = [
     "FIB_LEVELS_LEN",
+    "GREEKS_DELTA_ADMISSION_FLOOR",
+    "GREEKS_IV_CLAMP_MAX",
+    "GREEKS_IV_CLAMP_MIN",
+    "GREEKS_T_FLOOR_YEARS",
+    "GREEKS_VEGA_ADMISSION_FLOOR",
     "IMPLEMENTED_MASK",
     "PIVOT_LEVELS_LEN",
     "SPEC_SCHEMA_VERSION",
@@ -77,6 +95,7 @@ __all__ = [
     "evaluate_from_raw",
     "evaluate_spec",
     "evaluate_with_levels",
+    "greeks",
     "minute_of_session",
     "resolve_near_month",
     "total_conditions",

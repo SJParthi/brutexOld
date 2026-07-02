@@ -122,6 +122,11 @@ locals {
 }
 
 resource "null_resource" "build_lambda_package" {
+  # requirements.txt is deliberately NOT hashed here: the build installs from
+  # var.pyotp_version (threaded to build_lambda_package.sh as PYOTP_VERSION),
+  # so that variable — not requirements.txt, which is documentation of the same
+  # pin — is the rebuild trigger. Editing requirements.txt alone will NOT
+  # re-run the build; bump var.pyotp_version instead (keep the two in sync).
   triggers = {
     handler_sha  = filesha256("${path.module}/handler.py")
     init_sha     = filesha256("${path.module}/__init__.py")
