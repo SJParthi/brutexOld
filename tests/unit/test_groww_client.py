@@ -106,6 +106,27 @@ def test_replace_preserves_the_same_meter_instance() -> None:
     assert paced.meter is client.meter
 
 
+def test_self_paces_predicate_single_admission_seam() -> None:
+    """`self_paces` is True iff a real pace is bound; `client_self_paces` is getattr-safe.
+
+    The single-admission seam (DEC-PULL-FORENSIC-WAVE1-001): the spines drop the
+    per-window pace only when the client self-paces, so a fetch is admitted once.
+    """
+    from dataclasses import replace
+
+    from brutex.adapters.groww.client import client_self_paces
+
+    unpaced = GrowwClient(sdk=_FakeSDK())  # default pace = the no-op sentinel
+    paced = replace(unpaced, pace=lambda: None)
+
+    assert unpaced.self_paces is False
+    assert paced.self_paces is True
+    assert client_self_paces(paced) is True
+    assert client_self_paces(unpaced) is False
+    assert client_self_paces(None) is False  # a None client never self-paces
+    assert client_self_paces(object()) is False  # a fake with no attr → False
+
+
 def test_call_logs_real_per_call_latency() -> None:
     """Every successful Groww call logs its REAL wall-clock latency (DEC-GROWW-CALL-LATENCY-LOG-001).
 
