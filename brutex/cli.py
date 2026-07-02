@@ -1819,12 +1819,16 @@ def cmd_run(
 ) -> int:
     """One-click entry point: start the dashboard + open the browser.
 
-    This is what ``python -m brutex run``, ``make run`` and the committed
-    IntelliJ run configuration invoke (DEC-ONECLICK-RUN-001) — clone the
-    repo, click ▶ Run, and the live dashboard opens. It resolves the lake
-    root (``--lake-root`` → ``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``),
-    prints a startup banner, optionally opens the browser, then delegates
-    to :func:`cmd_dashboard`.
+    This is the runtime entry every operator surface ultimately boots
+    (DEC-ONECLICK-RUN-001): ``./up.sh``, ``make run``, and the committed
+    IntelliJ ▶ ``BruteX`` run configuration all execute the ONE ``./up.sh``
+    bootstrap (self-check → self-heal → start, DEC-ONE-ENTRY-UNIFY-001),
+    whose final step execs ``python -m brutex run`` — this function
+    (``make run-raw`` reaches it directly). It resolves the lake root
+    (``--lake-root`` → ``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``), prints
+    a startup banner, optionally opens the browser, then delegates to
+    :func:`cmd_dashboard` — which prints the dashboard URL and the rotating
+    log-file location, one clear line each.
 
     The browser is opened best-effort *before* the server finishes binding,
     so it may need one refresh on a cold start — acceptable for a local
