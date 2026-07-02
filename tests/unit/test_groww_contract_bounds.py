@@ -242,15 +242,51 @@ def test_default_option_window_clamps_start_to_full_start() -> None:
 
 
 def test_default_future_window_clamps_end_to_full_end() -> None:
-    # expiry+1day is AFTER full_end → end clamps down to full_end.
+    # expiry+1day is AFTER full_end → end clamps down to full_end, and the lookback
+    # anchors at min(expiry, full_end) — DEC-PULL-FORENSIC-WAVE2-001 — so a LIVE
+    # near-month contract pulls a FULL 60 days of actual data (full_end−60d) instead
+    # of the shrinking expiry−60d tail (which collapsed to the whole multi-year range
+    # once expiry−60d crossed full_end).
     win = default_fno_minute_window(
         date(2026, 6, 30),
         full_start=date(2020, 1, 1),
         full_end=date(2026, 6, 13),
         is_option=False,
     )
-    # expiry−60 days = 2026-05-01; end clamps to full_end 2026-06-13.
-    assert win == (date(2026, 5, 1), date(2026, 6, 13))
+    # min(expiry, full_end)=2026-06-13 → start = 06-13−60d = 2026-04-14.
+    assert win == (date(2026, 4, 14), date(2026, 6, 13))
+
+
+def test_default_option_window_far_month_live_expiry_is_recent_tail() -> None:
+    # DEC-PULL-FORENSIC-WAVE2-001 regression: a LIVE far-month option whose
+    # expiry−30d lies BEYOND full_end (an August contract pulled in early July)
+    # previously inverted the span (start>=end) and degraded to the FULL multi-year
+    # range (~79 month-tiles). It must now pull the honest recent tail instead.
+    full = (date(2020, 1, 1), date(2026, 7, 2))
+    win = default_fno_minute_window(
+        date(2026, 8, 27), full_start=full[0], full_end=full[1], is_option=True
+    )
+    assert win == (date(2026, 6, 2), date(2026, 7, 2)), "must be the 30-day recent tail"
+    assert win != full, "the full-range degrade is the bug this pins against"
+
+
+def test_default_future_window_garbage_far_future_expiry_is_recent_tail() -> None:
+    # A vendor-garbage far-future expiry (e.g. 2099) must anchor at the envelope's
+    # end — the bounded 60-day recent tail — never the full multi-year range.
+    full = (date(2020, 1, 1), date(2026, 7, 2))
+    win = default_fno_minute_window(
+        date(2099, 12, 31), full_start=full[0], full_end=full[1], is_option=False
+    )
+    assert win == (date(2026, 5, 3), date(2026, 7, 2))
+
+
+def test_default_option_window_expiry_at_full_end_boundary_unchanged() -> None:
+    # expiry == full_end → min() is a no-op → byte-identical to the pre-clamp maths.
+    full = (date(2020, 1, 1), date(2026, 7, 2))
+    win = default_fno_minute_window(
+        date(2026, 7, 2), full_start=full[0], full_end=full[1], is_option=True
+    )
+    assert win == (date(2026, 6, 2), date(2026, 7, 2))
 
 
 def test_default_fno_window_none_expiry_is_full_range() -> None:

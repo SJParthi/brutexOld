@@ -74,6 +74,10 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from brutex.dashboard.fno_underlying import (
+    primary_fno_underlying,
+    resolve_fno_index_aliases,
+)
 from brutex.dashboard.historical_pull import (
     HistoricalClientFactory,
     HistoricalPullReport,
@@ -167,6 +171,32 @@ def _partition_reference_only(
     return tradable, skipped
 
 
+def _registry_read_keys(instruments: Sequence[Instrument]) -> tuple[str, ...]:
+    """Map the tradable spot instruments → the REGISTRY ``underlying`` keys to re-read.
+
+    DEC-PULL-FORENSIC-WAVE2-001 — the read-key half of the write/read symmetry.
+    Phase (a) (:func:`~brutex.dashboard.metadata_pull.pull_expiries_contracts`)
+    persists every expiry/contract under the PRIMARY F&O underlying form
+    (:func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` — the alias /
+    normalization bridge: ``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` →
+    ``BAJAJAUTO``), but phase (b) previously re-read with the RAW spot
+    ``symbol_name`` — so an aliased index / hyphenated stock read back ZERO rows and
+    its freshly-enumerated chain was silently invisible (no candles pulled). The
+    read key now goes through the SAME resolver the write key uses, byte-symmetric.
+    Order-preserving first-wins de-dup mirrors the write-side grid de-dup, so two
+    spot spellings that share one F&O primary are read once.
+    """
+    aliases = resolve_fno_index_aliases()
+    keys: list[str] = []
+    seen: set[str] = set()
+    for inst in instruments:
+        key = primary_fno_underlying(inst.symbol_name, aliases=aliases)
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
+
 def _select_fresh_contracts(
     registry: RegistryStore, underlyings: Sequence[str]
 ) -> list[ContractRow]:
@@ -175,7 +205,8 @@ def _select_fresh_contracts(
     Phase (b) reads the registry AFTER phase (a) refreshed it, so the candle pull
     sees the just-enumerated expiries + contracts (FUT + CE + PE) — without the
     candle engine ever re-enumerating the chain. One ``list_contracts`` per
-    underlying keeps the SQL static (CLAUDE.md §11 COMMON).
+    underlying keeps the SQL static (CLAUDE.md §11 COMMON). *underlyings* must be
+    the RESOLVED registry keys (:func:`_registry_read_keys`), never raw spot names.
     """
     rows: list[ContractRow] = []
     for underlying in underlyings:
@@ -320,7 +351,10 @@ def pull_historical_for_underlyings(
     )
 
     # ── Phase (b) — CANDLE pull over the FRESHLY-cached registry rows (no re-enum) ──
-    selected = _select_fresh_contracts(registry, tradable_names)
+    # Read with the RESOLVED registry keys (the SAME primary form phase (a) persisted
+    # under), never the raw spot names — DEC-PULL-FORENSIC-WAVE2-001 (an aliased index
+    # like NIFTYJR or a hyphenated stock like BAJAJ-AUTO otherwise reads back ZERO rows).
+    selected = _select_fresh_contracts(registry, _registry_read_keys(tradable))
     if not selected:
         # The metadata refresh persisted no contract (e.g. an honest dry-run / a name
         # with no live chain). An empty candle selection would be a 0-bar no-op, so

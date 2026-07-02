@@ -294,6 +294,16 @@ def default_fno_minute_window(
     ``(full_start, full_end)`` range — the conservative never-skip choice (Golden
     Rule #10).
 
+    **Far-dated expiry clamp (DEC-PULL-FORENSIC-WAVE2-001).** The lookback anchor is
+    ``min(expiry, full_end)``: a LIVE far-month contract whose ``expiry − lookback``
+    lies beyond ``full_end`` (e.g. an August option pulled in early July), or a
+    vendor-garbage far-future expiry, previously inverted the span and degraded to the
+    FULL multi-year range (~79 month-tiles instead of 1–2 — a bounded but ~40×
+    fetch amplification per contract). Anchoring at the envelope's end yields the
+    honest recent tail (``full_end − lookback → full_end``) instead — still
+    never-skip (a bounded window is always fetched; explicit operator dates
+    override this default entirely).
+
     Parameters
     ----------
     expiry
@@ -316,9 +326,12 @@ def default_fno_minute_window(
     if expiry is None:
         return (full_start, full_end)
     lookback_days = DEFAULT_OPTION_LOOKBACK_DAYS if is_option else DEFAULT_FUTURES_LOOKBACK_DAYS
-    lookback_start = expiry - timedelta(days=lookback_days)
+    # Anchor the lookback at min(expiry, full_end): a far-month/garbage expiry beyond
+    # the envelope pulls the recent tail, never the full multi-year range (see above).
+    effective_expiry = min(expiry, full_end)
+    lookback_start = effective_expiry - timedelta(days=lookback_days)
     start = max(full_start, lookback_start)
-    end = min(full_end, expiry + timedelta(days=1))
+    end = min(full_end, effective_expiry + timedelta(days=1))
     if start >= end:
         return (full_start, full_end)
     return (start, end)
