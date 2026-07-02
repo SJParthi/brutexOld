@@ -1665,8 +1665,11 @@ async function startAndPoll(path, label) {
       return;
     }
     document.getElementById('previewBadge').classList.toggle('on', !!body.dry_run);
+    /* DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001: an explicit synthetic dry-run must
+       never be titled "live" — say SYNTHETIC loudly (real pulls are unchanged). */
     document.getElementById('pulltitle').textContent =
-      `Pulling ${label} · ${(body.total||0).toLocaleString('en-IN')} units · live`;
+      `Pulling ${label} · ${(body.total||0).toLocaleString('en-IN')} units · ` +
+      (body.dry_run ? 'SYNTHETIC DRY-RUN — no real data' : 'live');
     pollProgress(label);
   } catch (e) {
     document.getElementById('pulltitle').innerHTML =

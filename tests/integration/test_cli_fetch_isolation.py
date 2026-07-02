@@ -69,9 +69,13 @@ class _TimedAdapter:
 
 
 def _credless(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pass the up-front Groww creds gate without any real keys."""
+    """Pass the up-front Groww creds gate without any real keys.
+
+    The gate resolves via ``groww_credentials_error`` (``None`` = credentials
+    present; DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+    """
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
 
 
 def _one_index(monkeypatch: pytest.MonkeyPatch) -> None:

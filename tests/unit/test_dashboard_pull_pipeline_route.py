@@ -77,8 +77,17 @@ def client(
         yield c
 
 
-def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
+def _pin_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the credential gate OPEN (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+
+    These tests exercise pipeline sequencing/validation over fully-faked
+    spines, not the credential gate (which has its own dedicated suite);
+    pinning ``groww_credentials_error`` to ``None`` keeps every request
+    deterministic regardless of the ambient environment. The old
+    ``_force_dry_run`` (creds-absent → silent synthetic downgrade) is gone:
+    a creds-absent real pull now REFUSES with a 503.
+    """
+    monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
 
 
 def _fake_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
@@ -159,9 +168,9 @@ def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any
 def test_pull_pipeline_starts_full_universe_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-pipeline")
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is True
@@ -175,7 +184,7 @@ def test_pull_pipeline_starts_full_universe_job(
 def test_pull_pipeline_completes_and_records_verdict(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post("/api/v1/universe/pull-pipeline")
     assert resp.status_code == 200
@@ -195,7 +204,7 @@ def test_pull_pipeline_no_selection_is_whole_universe(
 ) -> None:
     # No ?symbols= / ?symbol= → the whole admitted universe (backward-compatible
     # with the "▶ Pull EVERYTHING" hero); target_source echoes "universe".
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     body = client.post("/api/v1/universe/pull-pipeline").json()
     assert body["started"] is True
@@ -208,7 +217,7 @@ def test_pull_pipeline_symbols_scopes_to_selection(
 ) -> None:
     # ?symbols= the ticked id → scoped to the selection (one name here);
     # target_source echoes "selection", and the chain still settles clean offline.
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     body = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"}).json()
     assert body["started"] is True
@@ -220,7 +229,7 @@ def test_pull_pipeline_symbols_scopes_to_selection(
 def test_pull_pipeline_single_symbol_scopes_to_one(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     body = client.post("/api/v1/universe/pull-pipeline", params={"symbol": "NIFTY"}).json()
     assert body["targets"] == 1
@@ -233,7 +242,7 @@ def test_pull_pipeline_unknown_selection_fails_closed_400(
 ) -> None:
     # An unknown id never silently pulls a partial set — it fails CLOSED with a 400
     # naming the offender (Golden Rule #1; DEC-PULL-SELECTED-PIPELINE-001).
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "99999"})
     assert resp.status_code == 400
@@ -264,7 +273,7 @@ def test_pull_pipeline_runs_prebuild_as_final_stage_on_clean_fetch(
         return real_report
 
     monkeypatch.setattr(tf_autoderive, "run_autoderive", _spy_run_autoderive)
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post("/api/v1/universe/pull-pipeline")
     assert resp.status_code == 200
@@ -314,7 +323,7 @@ def test_pull_pipeline_blank_dates_thread_none_to_spot(
     resolves the canonical ``[2020-01-01, previous trading day]`` default, and the
     metadata-year grid spans the full 2020 → current-year floor.
     """
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
     resp = client.post("/api/v1/universe/pull-pipeline")
     assert resp.status_code == 200
@@ -335,7 +344,7 @@ def test_pull_pipeline_explicit_dates_thread_to_spot_and_metadata(
     narrowed to those bounds' YEARS (the grid is year-granular) — so a 2021→2022
     range pulls metadata for exactly [2021, 2022].
     """
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-pipeline",
@@ -353,7 +362,7 @@ def test_pull_pipeline_reversed_dates_is_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A from_date AFTER to_date is a clean 400, never a silent empty pull."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-pipeline",
@@ -372,7 +381,7 @@ def test_pull_pipeline_below_2020_from_date_is_clamped_not_error(
     2020 and pulls — so the route accepts it and threads the raw string to the spot
     phase (the phase's own ``resolve_candle_range`` re-clamps identically).
     """
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     spot_calls, _ = _patch_spines_capturing(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-pipeline",
@@ -387,7 +396,7 @@ def test_pull_pipeline_non_iso_date_is_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-ISO date string is a clean 400 (validated eagerly, never queued)."""
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-pipeline",
@@ -409,7 +418,7 @@ def test_pull_pipeline_whitespace_dates_behave_as_blank(
     did not → ``date.fromisoformat("  ")`` raised → a 500). Unreachable from the
     date-input UI, but ``/pull-pipeline`` is a public API.
     """
-    _force_dry_run(monkeypatch)
+    _pin_creds_present(monkeypatch)
     spot_calls, metadata_calls = _patch_spines_capturing(monkeypatch)
     resp = client.post(
         "/api/v1/universe/pull-pipeline",

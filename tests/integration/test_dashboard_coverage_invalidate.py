@@ -103,17 +103,9 @@ def _spot_headline(client: TestClient) -> dict[str, int]:
     return r.json()["headline"]
 
 
-def test_single_symbol_pull_invalidates_coverage_cache(
-    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_single_symbol_pull_invalidates_coverage_cache(store: InstrumentStore) -> None:
     """A one-off /universe/pull must refresh /coverage/spot (the stale-empty bug)."""
     lake_root = Path(store.path).parent
-    # Pin the readiness gate to "no creds" so the pull runs OFFLINE (dry-run) — the Groww
-    # credentials now resolve ONLY from AWS Parameter Store (DEC-AWS-ONLY-CREDS-001), and
-    # this test must never touch AWS / the network (it writes the bars directly below).
-    import brutex.dashboard.app as app_module
-
-    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
     # ttl_floor_s=0.0 → no throttle, so the post-pull re-read is deterministic.
     cache = SummaryCache(ttl_floor_s=0.0)
     app = build_app(DashboardState(), instrument_store=store, summary_cache=cache)
@@ -125,10 +117,13 @@ def test_single_symbol_pull_invalidates_coverage_cache(
         #    test needs no live Dhan; the bytes are what a real pull would land).
         _write_spot_bar(lake_root)
 
-        # 3) The single-symbol pull route runs (dry-run — no creds). WITHOUT the
-        #    fix it never marks the cache dirty, so step 4 would still read the
-        #    stale empty snapshot (a clean cache hit at generation 0).
-        resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY"})
+        # 3) The single-symbol pull route runs as an EXPLICIT dry-run
+        #    (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — a creds-absent pull now
+        #    REFUSES instead of silently degrading, so the offline test opts in;
+        #    this must never touch AWS / the network). WITHOUT the fix it never
+        #    marks the cache dirty, so step 4 would still read the stale empty
+        #    snapshot (a clean cache hit at generation 0).
+        resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY", "dry_run": "true"})
         assert resp.status_code == 200
 
         # 4) The next coverage poll now REFLECTS the just-written dataset.

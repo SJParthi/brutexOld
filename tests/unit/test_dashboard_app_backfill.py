@@ -163,14 +163,15 @@ def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any
     raise AssertionError("background pull job did not settle within the timeout")
 
 
-def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the Groww creds gate closed so every pull is the offline dry-run.
+def _dry(params: dict[str, str] | None = None) -> dict[str, str]:
+    """Return *params* + the EXPLICIT ``dry_run=true`` opt-in.
 
-    The spot routes gate on Groww (DEC-DHAN-GROWW-REMIGRATE-001); pinning it
-    closed makes every selection form deterministically dry-run regardless of
-    the ambient environment.
+    DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 killed the silent creds-absent
+    downgrade (the old ``_force_dry_run`` monkeypatch): synthetic pulls now
+    require the explicit ``?dry_run=true`` param, which also short-circuits the
+    credential gate — deterministic regardless of the ambient environment.
     """
-    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
+    return {**(params or {}), "dry_run": "true"}
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -419,12 +420,9 @@ def test_load_instruments_maps_oserror_to_502(
 # ────────────────────────────────────────────────────────────────────────
 
 
-def test_universe_pull_unknown_symbol_400(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_universe_pull_unknown_symbol_400(client: TestClient) -> None:
     """An unknown ?symbol= on /universe/pull fails closed with the real reason."""
-    _force_dry_run(monkeypatch)
-    resp = client.post("/api/v1/universe/pull", params={"symbol": "NOPE"})
+    resp = client.post("/api/v1/universe/pull", params=_dry({"symbol": "NOPE"}))
     assert resp.status_code == 400
     assert resp.json()["detail"] == "unknown security_id 'NOPE' — not in the instrument store"
 
@@ -433,13 +431,12 @@ def test_universe_pull_surfaces_real_failure_as_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pull failure surfaces its REAL type + message, never a blank 400."""
-    _force_dry_run(monkeypatch)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("vendor exploded")
 
     monkeypatch.setattr(app_module, "pull_candles", _boom)
-    resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY"})
+    resp = client.post("/api/v1/universe/pull", params=_dry({"symbol": "NIFTY"}))
     assert resp.status_code == 400
     assert resp.json()["detail"] == "RuntimeError: vendor exploded"
 
@@ -453,9 +450,8 @@ def test_pull_all_symbols_form_starts_background_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """?symbols= resolves the ticked ids and starts the single-flight job."""
-    _force_dry_run(monkeypatch)
     monkeypatch.setattr(app_module, "pull_all_spot", _fake_pull_all_spot)
-    resp = client.post("/api/v1/universe/pull-all", params={"symbols": "NIFTY"})
+    resp = client.post("/api/v1/universe/pull-all", params=_dry({"symbols": "NIFTY"}))
     assert resp.status_code == 200
     assert (
         resp.json()
@@ -471,12 +467,9 @@ def test_pull_all_symbols_form_starts_background_job(
     assert _wait_for_job(client)["state"] == "done"
 
 
-def test_pull_all_symbols_unknown_id_fails_closed(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pull_all_symbols_unknown_id_fails_closed(client: TestClient) -> None:
     """An unknown id in ?symbols= rejects the WHOLE request, naming the offender."""
-    _force_dry_run(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-all", params={"symbols": "NIFTY,NOPE"})
+    resp = client.post("/api/v1/universe/pull-all", params=_dry({"symbols": "NIFTY,NOPE"}))
     assert resp.status_code == 400
     assert resp.json()["detail"] == "unknown security_id(s) not in the instrument store: NOPE"
 
@@ -485,9 +478,8 @@ def test_pull_all_symbol_form_starts_background_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """?symbol= resolves one instrument and starts the single-flight job."""
-    _force_dry_run(monkeypatch)
     monkeypatch.setattr(app_module, "pull_all_spot", _fake_pull_all_spot)
-    resp = client.post("/api/v1/universe/pull-all", params={"symbol": "NIFTY"})
+    resp = client.post("/api/v1/universe/pull-all", params=_dry({"symbol": "NIFTY"}))
     assert resp.status_code == 200
     assert (
         resp.json()
@@ -503,10 +495,9 @@ def test_pull_all_symbol_form_starts_background_job(
     assert _wait_for_job(client)["state"] == "done"
 
 
-def test_pull_all_unknown_symbol_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pull_all_unknown_symbol_400(client: TestClient) -> None:
     """An unknown ?symbol= on pull-all fails closed with the real reason."""
-    _force_dry_run(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-all", params={"symbol": "NOPE"})
+    resp = client.post("/api/v1/universe/pull-all", params=_dry({"symbol": "NOPE"}))
     assert resp.status_code == 400
     assert resp.json()["detail"] == "unknown security_id 'NOPE' — not in the instrument store"
 
@@ -515,9 +506,8 @@ def test_pull_all_kind_form_starts_background_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """?kind=index selects every admitted index and starts the single-flight job."""
-    _force_dry_run(monkeypatch)
     monkeypatch.setattr(app_module, "pull_all_spot", _fake_pull_all_spot)
-    resp = client.post("/api/v1/universe/pull-all", params={"kind": "index"})
+    resp = client.post("/api/v1/universe/pull-all", params=_dry({"kind": "index"}))
     assert resp.status_code == 200
     assert (
         resp.json()
@@ -533,20 +523,16 @@ def test_pull_all_kind_form_starts_background_job(
     assert _wait_for_job(client)["state"] == "done"
 
 
-def test_pull_all_invalid_kind_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pull_all_invalid_kind_400(client: TestClient) -> None:
     """An unknown ?kind= maps the bulk-target ValueError to HTTP 400."""
-    _force_dry_run(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-all", params={"kind": "bogus"})
+    resp = client.post("/api/v1/universe/pull-all", params=_dry({"kind": "bogus"}))
     assert resp.status_code == 400
     assert resp.json()["detail"] == "kind must be one of ('index', 'stock'), got 'bogus'"
 
 
-def test_pull_all_requires_a_selection_form(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pull_all_requires_a_selection_form(client: TestClient) -> None:
     """No symbols / symbol / kind → 400 naming all three accepted forms."""
-    _force_dry_run(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-all")
+    resp = client.post("/api/v1/universe/pull-all", params=_dry())
     assert resp.status_code == 400
     assert resp.json()["detail"] == "pull-all requires ?symbols=..., ?symbol=... or ?kind=..."
 
