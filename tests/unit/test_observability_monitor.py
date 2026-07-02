@@ -21,6 +21,7 @@ from brutex.observability.sla import (
     SLARule,
 )
 from brutex.observability.watchdog import Watchdog
+from brutex.orchestrator.audit import AuditError
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -131,7 +132,7 @@ class TestTickOnce:
         loop.tick_once()  # tick 3: run
         assert calls == [1]
 
-    @pytest.mark.parametrize("exc_cls", [OSError, ValueError, RuntimeError])
+    @pytest.mark.parametrize("exc_cls", [OSError, ValueError, RuntimeError, AuditError])
     def test_sla_check_once_exception_does_not_propagate(
         self,
         exc_cls: type[BaseException],
@@ -146,7 +147,7 @@ class TestTickOnce:
             loop.tick_once()
         assert "SLA detector check_once raised" in caplog.text
 
-    @pytest.mark.parametrize("exc_cls", [OSError, ValueError, RuntimeError])
+    @pytest.mark.parametrize("exc_cls", [OSError, ValueError, RuntimeError, AuditError])
     def test_watchdog_check_once_exception_does_not_propagate(
         self,
         exc_cls: type[BaseException],
@@ -161,7 +162,7 @@ class TestTickOnce:
             loop.tick_once()
         assert "watchdog check_once raised" in caplog.text
 
-    @pytest.mark.parametrize("exc_cls", [OSError, ValueError, RuntimeError])
+    @pytest.mark.parametrize("exc_cls", [OSError, ValueError, RuntimeError, AuditError])
     def test_replay_check_exception_does_not_propagate(
         self,
         exc_cls: type[BaseException],
@@ -247,3 +248,50 @@ class TestDaemonThreadLifecycle:
         loop = MonitorLoop()
         loop.stop()  # must not raise
         assert loop.is_running is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Regression — the monitor must NEVER die on the AuditError its replay
+# oracle exists to raise (DEC-MONITOR-NEVER-DIE-001).
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNeverDiesOnAuditError:
+    def test_tick_once_survives_replay_audit_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A replay_check raising AuditError is caught, not propagated.
+
+        Fails-before DEC-MONITOR-NEVER-DIE-001: the guard caught only
+        (OSError, ValueError, RuntimeError), so the AuditError the oracle
+        raises on a real dedup inconsistency escaped tick_once.
+        """
+
+        def _raises_audit() -> None:
+            raise AuditError("dedup inconsistency")
+
+        loop = MonitorLoop(replay_check=_raises_audit)
+        with caplog.at_level(logging.ERROR, logger="brutex.observability.monitor"):
+            loop.tick_once()  # must NOT raise
+        assert "replay_check raised AuditError" in caplog.text
+
+    def test_daemon_thread_survives_audit_error_and_keeps_ticking(self) -> None:
+        """The whole watchdog/alerting rail keeps running after an AuditError.
+
+        Fails-before: the unguarded AuditError propagated out of ``_run`` and
+        killed the daemon thread (is_running → False, no restart, no alert) —
+        a silent loss of the entire monitor rail for the process lifetime.
+        """
+        calls: list[int] = []
+
+        def _raises_then_counts() -> None:
+            calls.append(1)
+            raise AuditError("persistent inconsistency")
+
+        loop = MonitorLoop(replay_check=_raises_then_counts, poll_interval_seconds=0.02)
+        loop.start()
+        try:
+            time.sleep(0.15)  # ~7 ticks worth
+            assert loop.is_running, "daemon thread must survive AuditError"
+        finally:
+            loop.stop()
+        # It kept ticking despite EVERY tick raising AuditError.
+        assert len(calls) >= 3
