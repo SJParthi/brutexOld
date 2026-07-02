@@ -138,46 +138,59 @@ credentials the checks degrade honestly: the dashboard still runs, a live pull
 needs the fix each FAIL line names (`aws configure`; token minting lives in
 `deploy/aws_token_minter/`).
 
+**ONE entry point — never choose (DEC-ONE-ENTRY-UNIFY-001):** click ▶ Run
+(**BruteX**) in IntelliJ IDEA / PyCharm, or run `make run`, or run `./up.sh` —
+**all three are the same thing.** Each executes the ONE `./up.sh` path
+(self-check → self-heal → start dashboard); when everything is already up it
+fast-paths to `already ready` in about a second. The boot output prints the
+dashboard URL (`http://127.0.0.1:9080`) and the rotating log-file location
+(default `~/.brutex/logs/brutex.log`), one clear line each.
+
+**In IntelliJ IDEA / PyCharm — one click, nothing to configure:** open the
+cloned folder and pick **`BruteX`** from the Run dropdown (top-right ▶). It
+ships with the repo (`.idea/runConfigurations/BruteX.xml`) and runs `./up.sh`
+in a terminal tab — the same unified entry as `make run`. It is the ONLY
+committed run configuration; if your local IDE still shows a stale
+`brutex (one-click · make run)` entry from an earlier checkout, remove it via
+Run → Edit Configurations (locally-created IDE state cannot be deleted by a
+repo change).
+
 ### Appendix — manual setup (CI / debugging reference)
 
 ```bash
-make run            # turnkey: venv + libs + Rust kernel + launches the server
+make run            # ONE entry: delegates to ./up.sh (identical to the IDE ▶ BruteX config)
+make run-raw        # RAW direct entry: venv + libs + Rust kernels + launch, NO up.sh self-checks
 #   → open http://127.0.0.1:9080
 ```
 
-`make run` is self-contained and idempotent (DEC-CLONE-RUN-002). From a
-clean clone it: creates a `.venv/`, installs the `[data,ui]` runtime
-extras, builds the `fno_math` Rust kernel if it is not importable (needs
-`cargo`; the engine's `brutex.strategies.combo` imports it at module top),
+`make run-raw` preserves the pre-unification direct body — self-contained and
+idempotent (DEC-CLONE-RUN-002) — for CI reproduction and debugging. From a
+clean clone it: creates a `.venv/`, installs the `[data,ui,groww]` runtime
+extras, builds the `fno_math` + `trading_core` Rust kernels if they are not
+importable (needs `cargo`; `brutex.strategies.combo` and
+`brutex.indicators.fib_levels` import them at module top),
 then launches the dashboard. Re-running skips work already done. It is
 roughly equivalent to:
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
-pip install -e ".[data,ui]"
-( cd rust/fno-math && maturin develop --release )   # build fno_math kernel
-python -m brutex dashboard                           # alias: brutex run
+pip install -e ".[data,ui,groww]"
+( cd rust/fno-math && maturin develop --release )      # build fno_math kernel
+( cd rust/trading-core && maturin develop --release )  # build trading_core kernel
+python -m brutex dashboard                             # alias: brutex run
 ```
 
 For a full development environment (all extras + Rust toolchain + the
 `brutex doctor` smoke), run `make setup` (wraps `scripts/setup/bootstrap.sh`).
 
-Every run starts with a **preflight** (`scripts/run/preflight.sh`,
-DEC-RUN-PREFLIGHT-001) that verifies the three host tools `make run` is built
+`make run-raw` starts with a **preflight** (`scripts/run/preflight.sh`,
+DEC-RUN-PREFLIGHT-001) that verifies the three host tools it is built
 on — `python3.12`, `make`, `cargo` — and, if one is missing, prints the exact
-one-line install command for your OS instead of crashing. Everything the
+one-line install command for your OS instead of crashing (`./up.sh` performs
+the same probes itself, with the same per-OS fix hints). Everything the
 project owns (venv, libraries, Rust kernel) is then installed automatically.
 The only manual step that can ever exist is installing one of those three base
 tools on a bare machine — a process cannot install the interpreter it runs on.
-
-**In IntelliJ IDEA / PyCharm — one click, nothing to configure:** open the
-cloned folder and pick **`brutex (one-click · make run)`** from the Run
-dropdown (top-right ▶). It ships with the repo (`.idea/runConfigurations/`)
-and runs `make run` in a terminal tab — venv, libs, Rust kernel, and the
-dashboard are all built/launched for you. Prerequisites on the machine:
-`python3.12`, `make`, and `cargo` (for the one-time kernel build). The older
-`BruteX` Python config also exists, but it assumes the interpreter + deps are
-already set up — use the one-click for a fresh clone.
 
 > **What you'll see today:** the **Strategy Report** dashboard renders
 > immediately, but its numbers are **placeholders**. Real values appear
@@ -228,17 +241,21 @@ brutex dashboard          # alias: brutex run
 ### Logs — the rotating log file + `LOG_DIR` knob
 
 The runtime writes a rotating JSON log file. By default it lives at
-`~/.brutex/logs/brutex.log`. To redirect it
-**into the repo tree** so an IDE such as IntelliJ/IDEA can tail it, pass the
-`LOG_DIR` knob — it exports `BRUTEX_LOG_DIR` for the run:
+`~/.brutex/logs/brutex.log`, and every boot prints its location as one clear
+`logs → …` line (the unified `make run` / `./up.sh` / IDE ▶ BruteX entry all
+use this default — DEC-ONE-ENTRY-UNIFY-001). To redirect it
+**into the repo tree** so an IDE such as IntelliJ/IDEA can tail it, use the
+RAW direct entry's `LOG_DIR` knob — it exports `BRUTEX_LOG_DIR` for the run
+(the knob is scoped to `run-raw` + the `wipe` targets; the unified `run`
+ignores it so all three entries stay identical):
 
 ```bash
-make run LOG_DIR=./.brutex-logs   # log → ./.brutex-logs/brutex.log
+make run-raw LOG_DIR=./.brutex-logs   # log → ./.brutex-logs/brutex.log
 ```
 
 `./.brutex-logs/` is git-ignored. The knob is opt-in only — omitting it keeps
-the `~/.brutex/logs` default unchanged. (`BRUTEX_LOG_FILE` overrides the full
-path directly if you need a specific filename.)
+`run-raw`'s in-repo `./.brutex-logs` default. (`BRUTEX_LOG_FILE` overrides the
+full path directly if you need a specific filename.)
 
 ---
 
