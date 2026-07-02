@@ -20,7 +20,14 @@ import pytest
 from brutex.adapters.groww.auth import GrowwCredentials
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.errors import GrowwAuthError
-from brutex.adapters.groww.live import build_live_client, build_live_pool
+from brutex.adapters.groww.live import (
+    KitMintBlockedError,
+    build_live_client,
+    build_live_pool,
+    installed_growwapi_version,
+    mint_blocked_token_factory,
+    mint_blocked_totp_minter,
+)
 from brutex.adapters.groww.pool import ClientPool
 from brutex.adapters.groww.token_cache import CachedToken
 
@@ -316,3 +323,40 @@ def test_build_live_pool_leaves_share_one_refresher_with_distinct_indices() -> N
     # Each leaf binds a distinct index → distinct SDK connections (K-way concurrency kept).
     assert sorted(leaf.refresher_index for leaf in leaves) == [0, 1, 2]
     assert len({id(leaf.sdk) for leaf in leaves}) == 3
+
+
+# ── kit helpers: no-mint guard + growwapi version stamp (G2) ────────────────
+# DEC-DOCTOR-LIVE-PROOF-KIT-001. Stem-matched HERE (the module's own per-file
+# coverage gate): scripts/ci/coverage_gate_discovery.py maps
+# brutex/adapters/groww/live.py -> tests/unit/test_groww_live*.py.
+
+
+class TestLiveKitHelpers:
+    def test_mint_blocked_token_factory_refuses(self) -> None:
+        with pytest.raises(KitMintBlockedError, match="never mints a Groww token"):
+            mint_blocked_token_factory("key", "123456")
+
+    def test_mint_blocked_totp_minter_refuses(self) -> None:
+        with pytest.raises(KitMintBlockedError, match="never mints a TOTP code"):
+            mint_blocked_totp_minter("secret")
+
+    def test_installed_growwapi_version_absent_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DETERMINISTIC absence: the helper must map PackageNotFoundError -> None.
+        # (growwapi is a MAIN dependency - pyproject growwapi>=1.0,<2.0 - so a
+        # standard install HAS it; an env-dependent bare assert fails on any such
+        # env, including CI. Simulate the absent-distribution case explicitly.)
+        import importlib.metadata
+
+        def _absent(_name: str) -> str:
+            raise importlib.metadata.PackageNotFoundError("growwapi")
+
+        monkeypatch.setattr(importlib.metadata, "version", _absent)
+        assert installed_growwapi_version() is None
+
+    def test_installed_growwapi_version_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import importlib.metadata
+
+        monkeypatch.setattr(importlib.metadata, "version", lambda _name: "1.5.2")
+        assert installed_growwapi_version() == "1.5.2"
