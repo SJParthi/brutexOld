@@ -107,10 +107,13 @@ _DEFAULT_MAX_RETRY_ROUNDS: int = 3
 def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
     """Return *adapter* with its Groww client's ``pace`` hook wired to the shared bucket.
 
-    Closes the only physical-call path the per-window ``pace`` does not cover — the
-    Groww client's bounded fast-retry of a transient timeout: injecting *pace* into
-    the client (it acquires a token before each retry call) keeps every physical
-    call bucket-bounded.
+    The client's per-attempt ``pace()`` (inside ``GrowwClient._call``) is the ONE
+    canonical admission point per physical fetch — first attempts AND the client's
+    bounded fast-retry attempts alike (DEC-RATE-SINGLE-ADMISSION-001). Once bound
+    here, the spine's per-window ``pace()`` is skipped (``ingest_spot`` detects the
+    self-pacing client via
+    :func:`~brutex.adapters.groww.client.client_self_paces`), so a fetch is never
+    admitted twice against the 500/min governor + AIMD ladder.
 
     A no-op (returns *adapter* unchanged) when there is nothing to wire: an
     unthrottled run (*pace* is ``None``), or any adapter that is not the live
@@ -294,9 +297,12 @@ def run_groww_spot_ingest(
     start, end
         Half-open date range, shared by every pair.
     pace
-        Optional per-window pacing hook, threaded into each :func:`ingest_spot`
-        call AND wired into the adapter's Groww client. Groww's r/s is UNVERIFIED,
-        so this injected bucket is the only rate governor.
+        Optional pacing hook, wired into the adapter's Groww client as the ONE
+        canonical per-fetch admission (retries included) AND threaded into each
+        :func:`ingest_spot` call — where the per-window acquire stands down when
+        the client self-paces, so each physical fetch is admitted exactly ONCE
+        (DEC-RATE-SINGLE-ADMISSION-001). Groww's r/s is UNVERIFIED, so this
+        injected bucket is the only rate governor.
     on_rate_limit, on_timeout, on_success
         Optional rate-controller feedback hooks threaded into every pair.
     on_progress
@@ -362,9 +368,11 @@ def run_groww_spot_ingest(
     # the fetch worker until the durable write returns, so settle-after-durable holds.
     if write_pool is not None:
         sink = WriteConsumerSink(consumer=write_pool)
-    # Wire the shared bucket's *pace* into the adapter's Groww client so a client
-    # fast-retry re-acquires a token instead of bypassing the limiter. No-op for
-    # adapters without a paceable client (fakes) or when unthrottled.
+    # Wire the shared bucket's *pace* into the adapter's Groww client — the ONE
+    # canonical admission point per physical fetch, retries included; the spine's
+    # per-window pace then stands down (DEC-RATE-SINGLE-ADMISSION-001). No-op for
+    # adapters without a paceable client (fakes) or when unthrottled — those keep
+    # the per-window pace as the fallback admission.
     adapter = _with_paced_client(adapter, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
 

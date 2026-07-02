@@ -531,6 +531,36 @@ class TestPruneSuperseded:
         assert ledger.prune_superseded(_plan_index(planned)) == 0
         assert ledger.count == 2
 
+    def test_legacy_far_expiry_full_range_row_inert_under_stable_start_plan(self) -> None:
+        # DEC-FNO-FAR-EXPIRY-WINDOW-001 legacy proof: a PRE-fix far-expiry pull left a
+        # settled full-range row (start = 2020-01-01, the old full-history fallback).
+        # The post-fix default plan uses the STABLE expiry-anchored start, so the
+        # legacy row is off-tiling → KEPT — a BOUNDED one-time orphan (no new orphan
+        # is ever minted: the strict-window law has no moving start) and a settled
+        # SUCCESS row is never wrongly pruned.
+        ledger = WindowLedger()
+        legacy = _tkey(end=date(2026, 6, 30), start=date(2020, 1, 1))
+        ledger.record(legacy, raw_bars=1000, error_type=None, bars_appended=1000, now=_NOW)
+        planned = _tkey(end=date(2026, 7, 2), start=date(2026, 6, 1))  # stable expiry−lookback
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.is_skippable(legacy) is True  # intact settled history
+        assert ledger.count == 2
+
+    def test_legacy_far_expiry_full_range_row_prunable_by_full_range_replan(self) -> None:
+        # ...and the legacy row REMAINS PRUNABLE exactly as before: its start is the
+        # STABLE 2020-01-01 anchor, so an explicit full-range re-pull re-plans the
+        # SAME start with a longer end and the EXISTING shorter-end rule collects it
+        # (no new GC mechanism needed — DEC-FNO-FAR-EXPIRY-WINDOW-001).
+        ledger = WindowLedger()
+        legacy = _tkey(end=date(2026, 6, 30), start=date(2020, 1, 1))
+        ledger.record(legacy, raw_bars=1000, error_type=None, bars_appended=1000, now=_NOW)
+        planned = _tkey(end=date(2026, 7, 2), start=date(2020, 1, 1))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 1
+        assert [r.window_start for r in ledger.records()] == ["2020-01-01"]
+        assert ledger.records()[0].window_end == "2026-07-02"
+
     def test_prune_is_idempotent(self) -> None:
         ledger = WindowLedger()
         ledger.record(
