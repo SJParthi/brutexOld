@@ -93,6 +93,7 @@ from brutex.adapters.ingest_common import (
     SyntheticSpotAdapter,
     UntilCleanRound,
     classify_pull,
+    mark_synthetic,
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
@@ -743,8 +744,14 @@ class BulkSpotReport:
         retry-residual pull never sits silent — ``auth_expired`` (regenerate the
         token), ``transient_residual`` (re-pull / auto-retry finishes),
         ``known_gap_only`` (reference symbols with no intraday), or ``clean``.
+
+        An EXPLICIT synthetic dry-run's verdict is re-labeled through
+        :func:`~brutex.adapters.ingest_common.mark_synthetic`
+        (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): the headline/action SAY
+        "SYNTHETIC DRY-RUN — no real data" loudly, so a dry-run can never read
+        as a green real pull (the classification ``kind`` itself is preserved).
         """
-        return classify_pull(
+        verdict = classify_pull(
             auth_aborted=self.auth_aborted,
             still_failed_windows=self.still_failed_windows,
             failed_pairs=self.total_failed,
@@ -753,6 +760,9 @@ class BulkSpotReport:
             auth_cause=self.auth_cause,
             quota_exhausted=self.quota_exhausted,
         )
+        if self.dry_run:
+            return mark_synthetic(verdict)
+        return verdict
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route."""
