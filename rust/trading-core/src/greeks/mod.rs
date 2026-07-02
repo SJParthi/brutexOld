@@ -845,6 +845,62 @@ mod tests {
     }
 
     #[test]
+    fn black76_price_matches_the_kernel_price_bit_for_bit() {
+        // Mutation teeth: `black76_price` is a separate expression path from
+        // `greeks_from_sigma`'s internal price — any mutation of either
+        // (e.g. `df * b` -> `df + b`, or a dropped discount sign) breaks this
+        // bit-for-bit cross-check at r > 0.
+        for is_call in [true, false] {
+            for &(strike, sigma) in &[(23_000.0, 0.14), (K, 0.2), (24_000.0, 0.35)] {
+                let out = greeks(None, Some(sigma), F, strike, T, R, is_call).unwrap();
+                let direct = black76_price(sigma, F, strike, T, R, is_call);
+                assert_eq!(
+                    direct.to_bits(),
+                    out.price.to_bits(),
+                    "black76_price diverged from the kernel price: {direct} vs {}",
+                    out.price
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vega_undiscounted_matches_central_finite_difference() {
+        // Mutation teeth: pins the Newton slope itself (a zeroed / negated /
+        // mis-composed vega would otherwise be masked by the bisection
+        // safety net and only show up as slower convergence).
+        let h = 1e-6;
+        for &(strike, sigma) in &[(23_000.0, 0.14), (K, 0.2), (26_000.0, 0.8)] {
+            let up = black_undiscounted(sigma + h, F, strike, T, true);
+            let down = black_undiscounted(sigma - h, F, strike, T, true);
+            let finite_difference = (up - down) / (2.0 * h);
+            let analytic = vega_undiscounted(sigma, F, strike, T);
+            assert!(
+                (analytic - finite_difference).abs() <= 1e-4 * analytic.abs().max(1.0),
+                "vega slope drift: analytic {analytic} vs FD {finite_difference}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_newton_acceleration_stays_fast_on_the_deep_otm_tail() {
+        // Mutation teeth + performance pin: log-Newton converges in ~14
+        // iterations on the measured deep-OTM point; a broken slope degrades
+        // the loop to bisection-only (~50+ iterations), so a tight iteration
+        // budget catches slope mutations the bracket would otherwise mask.
+        let strike = 27_600.0;
+        let sigma_true = 0.015;
+        let b = black_undiscounted(sigma_true, F, strike, T, true);
+        let (sigma, iters) =
+            bracketed_solve(b, F, strike, T, true, VERIFY_REL_TOL * b).expect("must converge");
+        assert!(
+            (sigma - sigma_true).abs() <= 1e-6 * sigma_true,
+            "root drift: {sigma}"
+        );
+        assert!(iters <= 25, "Newton acceleration lost: {iters} iterations");
+    }
+
+    #[test]
     fn error_strings_carry_exactly_one_known_prefix() {
         let invalid = greeks(None, None, F, K, T, R, true).unwrap_err();
         let na = greeks(None, Some(0.2), F, K, 0.0, R, true).unwrap_err();
