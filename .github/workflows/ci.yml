@@ -652,6 +652,20 @@ jobs:
           else
             echo "(brutex.options.greeks test file not present yet — gate inactive)"
           fi
+          # 12e · brutex.data.greeks_enrich + brutex.data.spot_join
+          #       DEC-GREEKS-ENGINE-PR2B-001: the generation-time Greeks
+          #       enrichment (greeks_enrich_after_pull) + the COMMON
+          #       same-minute spot join — Greeks Phase 2b (needs the
+          #       trading_core wheel, installed above in this job)
+          if compgen -G "tests/unit/test_greeks_enrich.py" > /dev/null; then
+            pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
+              tests/integration/test_greeks_enrich_lake_roundtrip.py \
+              tests/property/test_greeks_enrich_properties.py \
+              tests/golden/test_greeks_enrich_golden.py
+          else
+            echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 13 (entry #224): 2-module double-add of
           # SUBSTANTIAL modules from the second-pass probe. Both
           # verified at 100% with existing dedicated test files.

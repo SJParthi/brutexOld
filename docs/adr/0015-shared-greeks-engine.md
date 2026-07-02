@@ -135,9 +135,11 @@ exercise-style, and the flag set. The full 17-row edge matrix is in
 > SHARPENS D7 (storage) — it does NOT delete D1–D9. Both this ADR and the
 > refinement stay PROPOSED, docs-only, fully reversible, OPERATOR-OVERRIDABLE.
 > Sourced from the 14-agent verification panel LOCKED design; the full detail is
-> `docs/GREEKS_ENGINE_PLAN.md` §15. NONE of it is shipped (the shared Greeks kernel
-> does not exist; the engine consumes ZERO Greeks — all 60 vocabulary bits are
-> price / volume, `iv` is display / analysis only).
+> `docs/GREEKS_ENGINE_PLAN.md` §15. *(Status refresh, DEC-GREEKS-ENGINE-PR2B-001:
+> the kernel shipped in Phase 2 — DEC-GREEKS-ENGINE-PR2-001 #1100 — and this §2b
+> refinement itself shipped in Phase 2b with both D13 gates satisfied; the engine
+> still consumes ZERO Greeks — all 60 vocabulary bits are price / volume, `iv` is
+> display / analysis only.)*
 
 **D10 — HYBRID drawn on COST-CLASS (refines D7).** Compute-and-STORE at generation
 time the EXPENSIVE family (`iv`, `delta`, `gamma`, `theta`, `vega`, `rho` + the
@@ -232,9 +234,9 @@ tolerance).
 | Phase | Deliverable | Status |
 |---|---|---|
 | **0** | this ADR + `GREEKS_ENGINE_PLAN.md` + MIGRATION.md #1070 / #1071 (spec reconcile + the generation-time refinement) | **THIS PR (docs only)** |
-| 1 | `brutex/options/risk_free.py` (+ fixed-`r` const or T-bill CSV) — 100% gate | awaiting go |
-| 2 | `rust/trading-core/src/greeks/` kernel + PyO3 + thin wrapper + frozen golden | awaiting go |
-| **2b** | pull-time Greeks materialization — the `FNO_CANDLE_LAKE_SCHEMA_VERSION` 2→3 additive columns + the `greeks_enrich_after_pull` hook (`DEC-GREEKS-GENERATION-TIME-001`, §2b); gated on Phase 2's green golden + `r`/`q`/`T` locked | awaiting go |
+| 1 | `brutex/options/risk_free.py` (+ fixed-`r` const or T-bill CSV) — 100% gate | **SHIPPED** — DEC-GREEKS-ENGINE-PR1-001 #1094 |
+| 2 | `rust/trading-core/src/greeks/` kernel + PyO3 + thin wrapper + frozen golden | **SHIPPED** — DEC-GREEKS-ENGINE-PR2-001 #1100 |
+| **2b** | pull-time Greeks materialization — the `FNO_CANDLE_LAKE_SCHEMA_VERSION` 2→3 additive columns + the `greeks_enrich_after_pull` hook (`DEC-GREEKS-GENERATION-TIME-001`, §2b); gated on Phase 2's green golden + `r`/`q`/`T` locked (both gates satisfied at ship time) | **SHIPPED** — DEC-GREEKS-ENGINE-PR2B-001 |
 | 3a | `/db` F&O candle-table columns — a plain STORED-column read with a read-time NULL-fallback (was: six derived columns) | awaiting go |
 | 3b | `/movers` options `delta` / `iv` cells | awaiting go |
 | 3c | options-executor delta-target rules 8 / 9 / 10 + `iv_at_entry` | awaiting go |

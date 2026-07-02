@@ -262,14 +262,16 @@ def test_bounded_read_reads_strictly_fewer_files_than_whole_tree(
     assert len(whole_tree_files) == 5  # five month partitions on disk
 
     captured: list[list[str]] = []
-    real_read_parquet = pl.read_parquet
+    real_scan_parquet = pl.scan_parquet
 
-    def _spy(source: list[str]) -> pl.DataFrame:
-        # The bounded reader passes an EXPLICIT list of file paths (not a glob string).
+    def _spy(source: list[str], **kwargs: object) -> pl.LazyFrame:
+        # The bounded reader passes an EXPLICIT list of file paths (not a glob string)
+        # to the schema-tolerant scan (DEC-GREEKS-ENGINE-PR2B-001 — a mixed
+        # 7/17-column option tree reads cleanly; the bounding contract is unchanged).
         captured.append(list(source))
-        return real_read_parquet(source)
+        return real_scan_parquet(source, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(pl, "read_parquet", _spy)
+    monkeypatch.setattr(pl, "scan_parquet", _spy)
     read = make_lake_read_1m_window(
         lake_root=tmp_path,
         exchange=_EXCHANGE,
