@@ -407,6 +407,30 @@ def test_load_invalid_utf8_cache_is_none_and_feature_stays_alive(tmp_path: Path)
     assert reloaded is not None and reloaded.kind == da.KIND_PASS
 
 
+def test_load_pathologically_deep_cache_is_none_and_never_raises(tmp_path: Path) -> None:
+    """A ~100k-deep nested JSON cache fails closed to no-cache (``RecursionError``).
+
+    The JSON parser raises ``RecursionError`` on pathologically deep
+    nesting — neither an ``OSError`` nor a ``ValueError``, so the old catch
+    let it escape and the "Never raises" contract of ``load_verdict`` was
+    false. A hostile/corrupt cache must read as absent and the holder must
+    still construct — never crash.
+    """
+    lake = tmp_path / "lake"
+    path = da.probes_cache_path(lake)
+    path.parent.mkdir(parents=True)
+    depth = 100_000
+    path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    assert da.load_verdict(path) is None
+    # The holder constructs fine over the hostile cache (feature alive)…
+    holder = _holder(tmp_path, probes_runner=_pass_probes_report)
+    assert holder.status()["probes"]["verdict"] is None
+    # …and the next pull re-probes and overwrites it with good JSON.
+    assert holder.on_real_pull() is True
+    reloaded = da.load_verdict(path)
+    assert reloaded is not None and reloaded.kind == da.KIND_PASS
+
+
 def test_save_verdict_is_atomic_against_a_torn_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -454,10 +478,10 @@ def test_cache_paths_live_under_the_liveproof_area(tmp_path: Path) -> None:
 
 
 def test_probe_controller_factory_is_bounded() -> None:
-    """The probe controller starts at the 1 r/s floor under its 20/min slice."""
+    """The probe controller starts at the 1 r/s floor under its 16/min slice."""
     controller = da.probe_controller_factory()
     assert controller.current_rps == da.AUTORUN_PROBE_CEILING_RPS == 1.0
-    assert controller.snapshot()["ceiling_per_min"] == da.AUTORUN_PROBE_CEILING_PER_MIN == 20
+    assert controller.snapshot()["ceiling_per_min"] == da.AUTORUN_PROBE_CEILING_PER_MIN == 16
 
 
 def test_probe_budget_composes_under_the_account_cap() -> None:
@@ -466,12 +490,19 @@ def test_probe_budget_composes_under_the_account_cap() -> None:
     The probe controller is a SEPARATE instance from the pull job's — the
     per-minute governors do NOT share state — so composition holds only by
     budget split: pull ≤ 8 r/s → 480/min worst-case, probes ≤ their own
-    20/min slice, and the sum may never exceed the operator-confirmed
+    16/min slice, and the sum may never exceed the operator-confirmed
     account-level cap. This test pins the arithmetic against the production
     constants so any future ceiling bump re-proves the split.
     """
     pull_worst_case_per_min = GROWW_RATE_LIMIT_RPS_CEILING * 60.0
     assert pull_worst_case_per_min + da.AUTORUN_PROBE_CEILING_PER_MIN <= GROWW_RATE_LIMIT_PER_MIN
+    # No knife edge: the two rolling windows are independent, so fencepost
+    # counting against a fixed wall-clock minute can observe up to ONE extra
+    # issue per stream (481 + 17 with the production constants). The old
+    # 20/min slice summed to a boundary-countable 502; the split must hold
+    # even with both fenceposts counted.
+    boundary_worst_case = (pull_worst_case_per_min + 1) + (da.AUTORUN_PROBE_CEILING_PER_MIN + 1)
+    assert boundary_worst_case <= GROWW_RATE_LIMIT_PER_MIN
     # And the probe slice itself is a strict LOWERING (Rule 6 — never a raise).
     assert da.AUTORUN_PROBE_CEILING_PER_MIN < GROWW_RATE_LIMIT_PER_MIN
 
@@ -807,6 +838,50 @@ def test_probes_spawn_failure_rolls_back_and_a_later_pull_retries(tmp_path: Path
     failures["on"] = False
     assert holder.on_real_pull() is True
     assert holder.status()["probes"]["state"] == da.STATE_DONE
+    assert holder.status()["probes"]["verdict"]["kind"] == da.KIND_PASS
+
+
+def test_spawn_failure_rolls_back_even_when_verdict_construction_raises(
+    tmp_path: Path,
+) -> None:
+    """The rollback to ``idle`` happens BEFORE the error verdict is built.
+
+    ``_spawn_failed`` touches the injected clock (and the scrub belt) to
+    construct the honest ``error`` verdict; if THAT raises, the raise still
+    surfaces (the app.py belt guards log it) but the state must already be
+    rolled back — a construction crash may never re-wedge the flow at
+    ``running``, which would permanently refuse every later trigger.
+    """
+    failures = {"on": True}
+    clock_broken = {"on": True}
+
+    def _fragile_clock() -> datetime:
+        if clock_broken["on"]:
+            raise RuntimeError("clock exploded")
+        return _NOW
+
+    holder = da.LiveProofAutorun(
+        tmp_path / "lake",
+        env={},
+        credentials_error=lambda: None,
+        preflight_runner=_pass_preflight_report,
+        probes_runner=_pass_probes_report,
+        now_utc=_fragile_clock,
+        thread_starter=_flaky_starter(failures),
+    )
+    with pytest.raises(RuntimeError, match="clock exploded"):
+        holder.start_preflight()
+    with pytest.raises(RuntimeError, match="clock exploded"):
+        holder.on_real_pull()
+    status = holder.status()
+    assert status["preflight"]["state"] == da.STATE_IDLE  # NOT wedged at RUNNING
+    assert status["probes"]["state"] == da.STATE_IDLE
+    # Fully retryable once the machinery recovers.
+    failures["on"] = False
+    clock_broken["on"] = False
+    assert holder.start_preflight() is True
+    assert holder.on_real_pull() is True
+    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_PASS
     assert holder.status()["probes"]["verdict"]["kind"] == da.KIND_PASS
 
 

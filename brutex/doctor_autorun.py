@@ -30,7 +30,7 @@ dashboard app instance — no module-global mutable state, CLAUDE.md §4):
    and every kit run is capped by the kit's own :class:`~brutex.doctor_live.\
 CallBudget`. Probe runs inject a **1 r/s** controller ceiling
    (:data:`AUTORUN_PROBE_CEILING_RPS` — the ladder's deep floor) **under a
-   dedicated 20/min hard slice** (:data:`AUTORUN_PROBE_CEILING_PER_MIN`); the
+   dedicated 16/min hard slice** (:data:`AUTORUN_PROBE_CEILING_PER_MIN`); the
    probes share NO state with the dashboard's pull job.
 
 Rate-budget composition (CLAUDE.md §2 Rule 6 — honest arithmetic, not a
@@ -41,9 +41,13 @@ the account-level **500 req/min** cap (``GROWW_RATE_LIMIT_PER_MIN``,
 operator-confirmed) must hold by BUDGET SPLIT: the production pull ceiling is
 8 r/s (``GROWW_RATE_LIMIT_RPS_CEILING``, DEC-GROWW-RATE-CEILING-8-001) → at
 most **480 issues/min** worst-case, and the probes' own per-minute governor is
-capped at **20/min**, so ``480 + 20 = 500 ≤ 500`` even when a probe run stacks
-on a full-throttle in-flight pull. Both probe bounds only ever LOWER the issue
-rate (a cap, never a raise — Rule 6 safe direction).
+capped at **16/min**, so ``480 + 16 = 496 ≤ 500`` even when a probe run stacks
+on a full-throttle in-flight pull. The 4/min headroom is deliberate — NOT a
+knife edge: the two rolling windows are independent, so fencepost counting
+against a fixed wall-clock minute can observe up to one extra issue per
+stream (``481 + 17 = 498 ≤ 500``); the earlier 20/min slice summed to a
+boundary-countable 502 worst case. Both probe bounds only ever LOWER the
+issue rate (a cap, never a raise — Rule 6 safe direction).
 
 Honesty (Golden Rules #1/#10 — this repo just killed the R1 silent degrade;
 do NOT reintroduce one):
@@ -146,9 +150,12 @@ AUTORUN_PROBE_CEILING_RPS: Final[float] = 1.0
 #: account-level 500/min cap. The probe controller is a SEPARATE instance
 #: from the pull job's (rolling windows do not share state), so composition
 #: is guaranteed by budget split: pull ≤ 8 r/s → 480/min worst-case, probes
-#: ≤ this 20/min slice, 480 + 20 = 500 ≤ ``GROWW_RATE_LIMIT_PER_MIN``.
+#: ≤ this 16/min slice, 480 + 16 = 496 ≤ ``GROWW_RATE_LIMIT_PER_MIN`` — with
+#: 4/min headroom so window-boundary fencepost counting (≤ 1 extra per
+#: stream, 481 + 17 = 498) still fits; the earlier 20/min slice was a
+#: knife-edge 500 that boundary counting could push to 502.
 #: Only ever LOWER than the account cap (Rule 6 — a cap, never a raise).
-AUTORUN_PROBE_CEILING_PER_MIN: Final[int] = 20
+AUTORUN_PROBE_CEILING_PER_MIN: Final[int] = 16
 
 #: A ``warn`` probes verdict is settled for this many days, then re-probes on
 #: the next real pull: a WARN (e.g. the NSE archive unreachable) is expected
@@ -376,16 +383,16 @@ def load_verdict(path: Path) -> AutorunVerdict | None:
 
     Never raises: an unreadable file, invalid BYTES (``UnicodeDecodeError``
     is a ``ValueError`` — a torn write / disk corruption must fail-closed to
-    "no cache", never crash the holder), invalid JSON, or a schema/shape
-    mismatch all read as "no cache" (the next run re-computes — bounded).
+    "no cache", never crash the holder), invalid JSON
+    (``json.JSONDecodeError`` is a ``ValueError`` too), pathologically DEEP
+    nesting (the JSON parser raises ``RecursionError``, which is neither —
+    it must fail-closed the same way, not kill the holder), or a
+    schema/shape mismatch all read as "no cache" (the next run re-computes
+    — bounded).
     """
     try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return None
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
         return None
     return verdict_from_payload(payload)
 
@@ -569,7 +576,7 @@ def error_verdict(
 
 
 def probe_controller_factory() -> RateController:
-    """The bounded controller PROBE runs inject — 1 r/s under a 20/min hard slice.
+    """The bounded controller PROBE runs inject — 1 r/s under a 16/min hard slice.
 
     HONEST composition with the account-level 500/min cap: this is a
     SEPARATE :class:`RateController` instance from the pull job's — rolling
@@ -577,10 +584,12 @@ def probe_controller_factory() -> RateController:
     must hold by BUDGET SPLIT, not by a shared governor. The split: the
     production pull ceiling is 8 r/s (``GROWW_RATE_LIMIT_RPS_CEILING``) →
     ≤ 480 issues/min worst-case; probes get the dedicated
-    :data:`AUTORUN_PROBE_CEILING_PER_MIN` = 20/min slice → ``480 + 20 = 500
+    :data:`AUTORUN_PROBE_CEILING_PER_MIN` = 16/min slice → ``480 + 16 = 496
     ≤ GROWW_RATE_LIMIT_PER_MIN`` even when a probe run stacks on a
-    full-throttle in-flight pull. Both bounds only ever LOWER the issue
-    rate (CLAUDE.md §2 Rule 6 — a cap, never a raise).
+    full-throttle in-flight pull, with 4/min headroom absorbing
+    window-boundary fencepost counting (see the constant's note). Both
+    bounds only ever LOWER the issue rate (CLAUDE.md §2 Rule 6 — a cap,
+    never a raise).
     """
     return RateController(
         ceiling_rps=AUTORUN_PROBE_CEILING_RPS,
@@ -695,7 +704,7 @@ class LiveProofAutorun:
             *probe_controller*).
         probe_controller
             The pacing factory PROBE runs inject (default the bounded
-            1 r/s + 20/min :func:`probe_controller_factory`); tests inject a
+            1 r/s + 16/min :func:`probe_controller_factory`); tests inject a
             fake-clock controller so the default probes composition runs
             instantly.
         now_utc
@@ -775,7 +784,7 @@ class LiveProofAutorun:
         pull path: a thread-spawn failure rolls the state back to ``idle``,
         records an honest ``error`` verdict, and returns ``False`` — the
         NEXT real pull retries. The probes share NO state with the pull job
-        and pace at the 1 r/s + 20/min probe budget.
+        and pace at the 1 r/s + 16/min probe budget.
         """
         with self._lock:
             if not self._enabled or self._probes_state == STATE_RUNNING:
@@ -817,22 +826,28 @@ class LiveProofAutorun:
     def _spawn_failed(self, label: str, exc: Exception) -> None:
         """A worker thread could not be SPAWNED — roll back + report honestly.
 
-        The flow's state returns to ``idle`` (never left wedged ``running``,
-        which would permanently refuse every later trigger) and an honest
-        ``error`` verdict lands in memory + on disk, so the banner shows the
-        machinery failure instead of silent nothing. The NEXT trigger may
-        retry (an ``error`` cache is never :func:`cache_usable`).
+        The flow's state returns to ``idle`` FIRST — BEFORE the error verdict
+        is even constructed: the construction touches the injected clock and
+        the scrub belt, and a raise inside it must never re-wedge the state
+        at ``running`` (which would permanently refuse every later trigger).
+        Then an honest ``error`` verdict lands in memory + on disk, so the
+        banner shows the machinery failure instead of silent nothing. The
+        NEXT trigger may retry (an ``error`` cache is never
+        :func:`cache_usable`).
         """
         _LOG.error("liveproof.thread_spawn_failed", label=label, error=str(exc))
+        with self._lock:
+            if label == "preflight":
+                self._preflight_state = STATE_IDLE
+            else:
+                self._probes_state = STATE_IDLE
         verdict = error_verdict(f"{type(exc).__name__}: {exc}", now=self._now_utc(), env=self._env)
         if label == "preflight":
             with self._lock:
-                self._preflight_state = STATE_IDLE
                 self._preflight_verdict = verdict
             self._persist(preflight_cache_path(self._lake_root), verdict, label=label)
         else:
             with self._lock:
-                self._probes_state = STATE_IDLE
                 self._probes_verdict = verdict
             self._persist(probes_cache_path(self._lake_root), verdict, label=label)
 
