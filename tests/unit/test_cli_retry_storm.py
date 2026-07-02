@@ -441,7 +441,9 @@ def test_cmd_fetch_real_pull_after_dry_run_stores_real_bars(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    # Post-DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 the CLI gate consumes
+    # groww_credentials_error() (None = creds OK), not the old bool present-check.
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli,
         "_build_live_groww_spot",

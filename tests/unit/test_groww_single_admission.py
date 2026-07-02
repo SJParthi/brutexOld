@@ -23,14 +23,12 @@ import threading
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
-from typing import Any
 
 from brutex.adapters.groww.adapter import GrowwMarketAdapter
-from brutex.adapters.groww.client import GrowwClient, client_self_paces
+from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.adapters.groww.instruments import load_index_from_csv
 from brutex.adapters.groww.option_ingest import ingest_option_contract
-from brutex.adapters.groww.pool import ClientPool
 from brutex.adapters.groww.run_ingest import run_groww_spot_ingest
 from brutex.adapters.protocol import DerivativeContract, MarketAdapter
 from brutex.adapters.rate_common import RateController
@@ -174,31 +172,10 @@ def _run_spot(adapter: MarketAdapter, pace: _Admissions) -> None:
     )
 
 
-# ── self_paces / client_self_paces — the predicate surface ───────────────────────
-
-
-class TestSelfPacesPredicate:
-    def test_default_client_does_not_self_pace(self) -> None:
-        client = GrowwClient(sdk=_FakeSDK())
-        assert client.self_paces is False
-        assert client_self_paces(client) is False
-
-    def test_bound_pace_flips_self_paces(self) -> None:
-        client = GrowwClient(sdk=_FakeSDK()).with_pace(lambda: None)
-        assert client.self_paces is True
-        assert client_self_paces(client) is True
-
-    def test_pool_self_paces_only_when_every_leaf_paced(self) -> None:
-        sdk: Any = _FakeSDK()
-        paced = GrowwClient(sdk=sdk).with_pace(lambda: None)
-        unpaced = GrowwClient(sdk=sdk, meter=paced.meter)
-        assert ClientPool([paced, paced]).self_paces is True
-        assert ClientPool([paced, unpaced]).self_paces is False
-        assert client_self_paces(ClientPool([paced, paced])) is True
-
-    def test_objects_without_the_surface_read_false(self) -> None:
-        assert client_self_paces(object()) is False
-        assert client_self_paces(None) is False
+# The self_paces / client_self_paces PREDICATE tests live in the stem-matched
+# ``test_groww_client_self_paces.py`` + ``test_groww_pool_self_paces.py`` (and the
+# F&O window-pace-drop test in ``test_groww_option_ingest_self_paced.py``) so the
+# strict per-module coverage discovery gate scopes them to the modules they cover.
 
 
 # ── SPOT spine — one admission per physical fetch ─────────────────────────────────
@@ -296,25 +273,8 @@ class TestSpotSingleAdmission:
 
 
 class TestFnoSingleAdmission:
-    def test_each_physical_fetch_admitted_exactly_once(self) -> None:
-        """Production wiring: pace baked into the client AND passed to the spine (pre-fix 2×)."""
-        admissions = _Admissions()
-        sdk = _FakeSDK()
-        # Mirrors historical_pull: build_live_client bakes controller.pace into the client
-        # AND run_groww_option_ingest receives the SAME controller.pace per window.
-        client = GrowwClient(sdk=sdk, sleep=lambda _s: None, pace=admissions.pace)
-        report = ingest_option_contract(
-            client,
-            _Sink(),
-            contract=_ce(),
-            interval="1day",
-            start=date(2024, 1, 1),
-            end=date(2024, 1, 2),
-            pace=admissions.pace,
-        )
-        assert report.bars_appended == 1
-        assert sdk.calls == 1
-        assert admissions.count == sdk.calls  # exactly ONE admission per fetch (was 2)
+    # The paced-client window-pace-drop test lives in the stem-matched
+    # ``test_groww_option_ingest_self_paced.py`` (per-module coverage gate).
 
     def test_retry_attempt_gets_its_own_admission(self) -> None:
         admissions = _Admissions()
