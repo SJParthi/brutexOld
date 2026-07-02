@@ -371,7 +371,8 @@ def test_sweep_truncate_keeps_committed_prefix(tmp_path: Path) -> None:
     entries, torn = _sweep_read_with_tail(path)
     assert torn is False
     assert [e.seq for e in entries] == [0, 1]
-    # The atomic-replace temp file was cleaned up.
+    # The in-place truncate (DEC-AUDIT-TORN-TAIL-O1-001) leaves no sibling temp
+    # file behind (the prior os.replace rewrite is gone).
     assert list(path.parent.glob("*.torn-tail-*.tmp")) == []
 
 
@@ -390,16 +391,18 @@ def test_sweep_truncate_only_torn_line_empties_file(tmp_path: Path) -> None:
 
 
 def test_sweep_truncate_io_error_wraps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An OSError during the atomic replace is wrapped in SweepAuditWriteError."""
+    """An OSError during the in-place truncate is wrapped in SweepAuditWriteError."""
     path = tmp_path / "sweep_trunc_fail.jsonl"
     with SweepAuditWriter.open(path) as log:
         log.append(action="A", subject="s0", payload={"i": 0}, ts_utc=1.0)
     _append_raw(path, '{"seq": 1, "prev')
 
-    def _boom(_src: object, _dst: object) -> None:
+    def _boom(_fd: object, _length: object) -> None:
         raise OSError("disk gone")
 
-    monkeypatch.setattr("brutex.engine.sweep_audit.os.replace", _boom)
+    # DEC-AUDIT-TORN-TAIL-O1-001 truncates in place, so os.truncate is the I/O
+    # failure point (was os.replace on the old temp-file rewrite).
+    monkeypatch.setattr("brutex.engine.sweep_audit.os.truncate", _boom)
     with pytest.raises(SweepAuditWriteError):
         _sweep_truncate(path)
 
