@@ -94,6 +94,19 @@ class ClientPool:
         """The number of independent SDK connections (leaves) in the pool."""
         return len(self._clients)
 
+    @property
+    def self_paces(self) -> bool:
+        """Whether EVERY leaf admits its own physical calls through a real ``pace`` hook.
+
+        The pool twin of :attr:`~brutex.adapters.groww.client.GrowwClient.self_paces`
+        (DEC-RATE-SINGLE-ADMISSION-001): ``True`` only when ALL leaves carry a bound
+        pace hook (:func:`~brutex.adapters.groww.live.build_live_pool` and
+        :meth:`with_pace` both bind ONE shared hook into every leaf), so the ingest
+        spines drop the per-window admission only when NO connection can bypass the
+        shared bucket.
+        """
+        return all(leaf.self_paces for leaf in self._clients)
+
     def _leaf(self) -> GrowwClient:
         """Return THIS thread's bound leaf, assigning one round-robin on first use (O(1)).
 
