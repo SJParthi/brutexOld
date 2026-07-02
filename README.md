@@ -243,7 +243,13 @@ brutex dashboard          # alias: brutex run
 The runtime writes a rotating JSON log file. By default it lives at
 `~/.brutex/logs/brutex.log`, and every boot prints its location as one clear
 `logs → …` line (the unified `make run` / `./up.sh` / IDE ▶ BruteX entry all
-use this default — DEC-ONE-ENTRY-UNIFY-001). To redirect it
+use this default — DEC-ONE-ENTRY-UNIFY-001). The unified entry ALSO maintains
+an idempotent **`<repo>/logs` symlink** to that log directory
+(DEC-LOGS-IN-PROJECT-001), so the live log folder + file are visible INSIDE
+the IntelliJ/PyCharm project tree — click ▶ BruteX and watch `logs/brutex.log`
+without leaving the IDE. The symlink is git-ignored, repointed if the log dir
+moves, and a REAL directory named `logs` is never clobbered (a warning is
+printed instead). To redirect it
 **into the repo tree** so an IDE such as IntelliJ/IDEA can tail it, use the
 RAW direct entry's `LOG_DIR` knob — it exports `BRUTEX_LOG_DIR` for the run
 (the knob is scoped to `run-raw` + the `wipe` targets; the unified `run`
