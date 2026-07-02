@@ -294,6 +294,21 @@ def default_fno_minute_window(
     ``(full_start, full_end)`` range — the conservative never-skip choice (Golden
     Rule #10).
 
+    **FAR-EXPIRY guard (DEC-FNO-FAR-EXPIRY-WINDOW-001):** a contract whose
+    ``expiry − <lookback>`` falls ON or AFTER ``full_end`` (e.g. a September monthly
+    pulled in early July) has its whole lookback span OUTSIDE the pull envelope, so
+    the clamp above collapses it to an empty window — and the pre-fix code degraded
+    to the FULL 2020→today range (~80 × 30-day chunks of dead history per contract; a
+    verified forensic audit of a real production log measured 4 such contracts ×
+    80 chunks = 320 vendor calls = 22.5% of the entire ADANIENT pull wasted). A
+    far-expiry contract now pulls the most RECENT lookback span the envelope allows
+    instead: ``start = max(full_start, full_end − <lookback>)`` with the SAME
+    ``min(full_end, expiry + 1 day)`` end clamp — NEVER the full-history fallback.
+    The genuinely-empty spans (no ``expiry``; ``expiry`` before ``full_start``; a
+    degenerate ``full_start >= full_end`` envelope) still fall back to the full
+    range, and explicit operator dates never reach this helper at all
+    (``historical_pull._resolve_minute_windows`` short-circuits them verbatim).
+
     Parameters
     ----------
     expiry
@@ -316,9 +331,16 @@ def default_fno_minute_window(
     if expiry is None:
         return (full_start, full_end)
     lookback_days = DEFAULT_OPTION_LOOKBACK_DAYS if is_option else DEFAULT_FUTURES_LOOKBACK_DAYS
-    lookback_start = expiry - timedelta(days=lookback_days)
-    start = max(full_start, lookback_start)
+    lookback = timedelta(days=lookback_days)
+    lookback_start = expiry - lookback
     end = min(full_end, expiry + timedelta(days=1))
+    if lookback_start >= full_end:
+        # FAR-EXPIRY (DEC-FNO-FAR-EXPIRY-WINDOW-001): the lookback span starts at/after
+        # the envelope's end, so clamping would empty it and the old code fell back to
+        # the FULL 2020→today range. Pull the most RECENT lookback span instead.
+        start = max(full_start, full_end - lookback)
+    else:
+        start = max(full_start, lookback_start)
     if start >= end:
         return (full_start, full_end)
     return (start, end)

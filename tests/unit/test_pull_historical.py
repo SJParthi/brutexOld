@@ -1550,6 +1550,73 @@ def test_resolve_minute_windows_default_splits_futures_60_options_30(
     )
 
 
+def test_resolve_minute_windows_default_far_expiry_pulls_recent_lookback(
+    registry: RegistryStore,
+) -> None:
+    """A FAR-EXPIRY contract's DEFAULT window is the recent lookback, never 2020→today.
+
+    DEC-FNO-FAR-EXPIRY-WINDOW-001 (fails pre-fix): a Sep-2026 monthly whose
+    ``expiry − lookback`` lies AFTER the resolved ``end`` used to degrade to the FULL
+    2020→today range (~80 × 30-day chunks of dead history per contract). Through the
+    real call site the CE now gets the recent 30-day span and the FUT the recent
+    60-day span, both ending at the envelope's ``end``.
+    """
+    far_expiry = date(2026, 9, 29)
+    registry.upsert_contract(
+        "NSE",
+        "NIFTY",
+        far_expiry,
+        "NSE-NIFTY-29Sep26-21000-CE",
+        side="CE",
+        strike=21000.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    registry.upsert_contract(
+        "NSE",
+        "NIFTY",
+        far_expiry,
+        "NSE-NIFTY-29Sep26-FUT",
+        side="FUT",
+        strike=None,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    rebuilt = hp._rebuild_contracts(
+        [r for r in registry.list_contracts(underlying="NIFTY") if r.expiry_date == far_expiry]
+    )
+    out = hp._resolve_minute_windows(
+        rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 7, 1)
+    )
+    assert out["NSE-NIFTY-29Sep26-21000-CE"] == (date(2026, 6, 1), date(2026, 7, 1))
+    assert out["NSE-NIFTY-29Sep26-FUT"] == (date(2026, 5, 2), date(2026, 7, 1))
+
+
+def test_resolve_minute_windows_explicit_overrides_far_expiry(registry: RegistryStore) -> None:
+    """Explicit operator dates stay BYTE-IDENTICAL even for a FAR-EXPIRY contract.
+
+    DEC-FNO-FAR-EXPIRY-WINDOW-001 must not touch the explicit-dates path: with
+    ``explicit_dates=True`` a Sep-2026 contract gets the resolved envelope verbatim,
+    never a lookback-derived window.
+    """
+    registry.upsert_contract(
+        "NSE",
+        "NIFTY",
+        date(2026, 9, 29),
+        "NSE-NIFTY-29Sep26-21000-CE",
+        side="CE",
+        strike=21000.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
+    out = hp._resolve_minute_windows(
+        rebuilt=rebuilt, explicit_dates=True, start=date(2026, 6, 1), end=date(2026, 7, 1)
+    )
+    assert out["NSE-NIFTY-29Sep26-21000-CE"] == (date(2026, 6, 1), date(2026, 7, 1))
+    assert set(out.values()) == {(date(2026, 6, 1), date(2026, 7, 1))}
+
+
 def test_derive_daily_from_minute_writes_one_day_partition(
     registry: RegistryStore, tmp_lake: Path
 ) -> None:

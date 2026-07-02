@@ -286,6 +286,85 @@ def test_default_option_window_collapsed_span_falls_back_to_full() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# default_fno_minute_window — FAR-EXPIRY guard (DEC-FNO-FAR-EXPIRY-WINDOW-001)
+# ─────────────────────────────────────────────────────────────────────────
+def test_default_far_expiry_option_pulls_recent_30d_never_full_range() -> None:
+    # REGRESSION (fails pre-fix): a Sep-2026 monthly option pulled on 2026-07-02
+    # (full_end = prev-day 2026-07-01) has expiry−30d = 2026-08-30 AFTER full_end, so
+    # the clamped span collapsed and the OLD code degraded to the FULL 2020→today
+    # range (80 × 30-day chunks — a measured 22.5% of a real ADANIENT pull wasted).
+    # NOW: the most RECENT 30-day span [full_end−30d, full_end).
+    win = default_fno_minute_window(
+        date(2026, 9, 29),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win == (date(2026, 6, 1), date(2026, 7, 1))
+
+
+def test_default_far_expiry_future_pulls_recent_60d_never_full_range() -> None:
+    # REGRESSION (fails pre-fix) — the FUT twin: expiry−60d = 2026-07-31 is AFTER
+    # full_end → the most RECENT 60-day span [full_end−60d, full_end).
+    win = default_fno_minute_window(
+        date(2026, 9, 29),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=False,
+    )
+    assert win == (date(2026, 5, 2), date(2026, 7, 1))
+
+
+def test_default_far_expiry_boundary_lookback_start_equals_full_end() -> None:
+    # BOUNDARY (fails pre-fix): expiry−30d == full_end EXACTLY — the half-open
+    # clamped span is empty ([full_end, full_end)), so the old code degraded to the
+    # full range too. NOW: the recent 30-day span.
+    win = default_fno_minute_window(
+        date(2026, 7, 31),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win == (date(2026, 6, 1), date(2026, 7, 1))
+
+
+def test_default_near_expiry_just_inside_full_end_unchanged() -> None:
+    # expiry−30d == full_end − 1 day (just INSIDE the envelope) → pre-fix behaviour
+    # was already correct and must stay byte-identical: the 1-day window
+    # [expiry−30d, full_end).
+    win = default_fno_minute_window(
+        date(2026, 7, 30),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win == (date(2026, 6, 30), date(2026, 7, 1))
+
+
+def test_default_far_expiry_recent_span_start_clamps_to_full_start() -> None:
+    # A far-expiry contract against a NARROW envelope (< the lookback) clamps the
+    # recent span's start UP to full_start — the default never widens scope.
+    win = default_fno_minute_window(
+        date(2026, 9, 29),
+        full_start=date(2026, 6, 20),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win == (date(2026, 6, 20), date(2026, 7, 1))
+
+
+def test_default_far_expiry_degenerate_envelope_falls_back_to_full() -> None:
+    # DEFENSIVE: an empty envelope (full_start == full_end) leaves even the recent
+    # span empty → the conservative full-range fallback (itself empty) — the
+    # never-skip guard still terminates the far-expiry branch.
+    full = (date(2026, 7, 1), date(2026, 7, 1))
+    win = default_fno_minute_window(
+        date(2026, 9, 29), full_start=full[0], full_end=full[1], is_option=True
+    )
+    assert win == full
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # contract_daily_coverage (lake read)
 # ─────────────────────────────────────────────────────────────────────────
 def test_daily_coverage_none_when_no_partitions(tmp_path: Path) -> None:
