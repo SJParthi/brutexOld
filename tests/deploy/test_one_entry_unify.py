@@ -266,11 +266,20 @@ def test_stale_one_click_config_is_gone() -> None:
 # Startup visibility — URL + log-file location, one clear line each.
 # --------------------------------------------------------------------------- #
 def test_up_sh_fast_path_prints_the_log_location(up_text: str) -> None:
-    """Both ``already ready`` fast paths print the resolved rotating log file."""
-    assert up_text.count("printf 'logs → %s\\n' \"$(resolve_log_file)\"") == 2, (
-        "each of the two `already ready` fast paths must print one clear "
-        "`logs → …` line (the exec'd runtime prints its own on a real boot)"
-    )
+    """Both ``already ready`` fast paths surface the log location.
+
+    Since DEC-LOGS-IN-PROJECT-001 the one clear ``logs → …`` line is printed by
+    ``link_repo_logs`` (which ALSO refreshes the in-project ``<repo>/logs``
+    symlink); each fast path invokes it right after the ``already ready`` line —
+    the fuller wiring contract lives in tests/deploy/test_logs_in_project.py.
+    """
+    ready_sites = up_text.split("already ready — BruteX dashboard is running")[1:]
+    assert len(ready_sites) >= 2, "both fast paths must print the already-ready line"
+    for site in ready_sites:
+        assert "link_repo_logs" in site.split("exit 0")[0], (
+            "each `already ready` fast path must print one clear `logs → …` line "
+            "via link_repo_logs before exiting"
+        )
 
 
 def test_up_sh_log_resolution_mirrors_the_runtime(up_text: str) -> None:

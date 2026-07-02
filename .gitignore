@@ -83,8 +83,13 @@ credentials.json
 *.credentials.json
 .brutex/
 
-# In-repo log redirect target (make run LOG_DIR=./.brutex-logs → BRUTEX_LOG_DIR)
+# In-repo log redirect target (make run-raw LOG_DIR=./.brutex-logs → BRUTEX_LOG_DIR)
 .brutex-logs/
+
+# In-project log visibility symlink (DEC-LOGS-IN-PROJECT-001): up.sh creates/refreshes
+# <repo>/logs → the resolved log directory (default ~/.brutex/logs) so the IntelliJ
+# project tree shows the live log. A machine-local pointer — never committed.
+/logs
 
 # Local sweep-validation artifacts — synthetic lake + sweep outputs from
 # pipeline-mechanics runs. NEVER commit: these are throwaway artifacts and the

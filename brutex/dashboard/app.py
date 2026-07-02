@@ -896,6 +896,7 @@ def build_app(
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
     quota_tracker: Any = None,
+    pull_active_probe: Callable[[], bool | None] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -948,6 +949,15 @@ def build_app(
         ``/universe`` gauge shows today's PERSISTED usage on page-load, before
         any pull in this session reports onto the live rate panel. Injected so
         tests drive a deterministic fake (no LMDB).
+    pull_active_probe
+        Optional pull-run signal for the ``/api/v1/pull/rate`` stall gate
+        (DEC-RATE-STALL-PULL-GATE-001). A zero-arg callable returning ``True``
+        (a pull IS running), ``False`` (no pull running — a fresh-ticked panel
+        then reads ``done``, never a red ``stalled`` right after a successful
+        completion), or ``None`` (no signal — tick-freshness fallback). ``None``
+        (the default) wires the production probe — this app's own
+        ``BackgroundPullJob.running``. Injected so tests drive the mid-pull /
+        just-finished transitions deterministically.
 
     Returns
     -------
@@ -1267,6 +1277,12 @@ def build_app(
             panel_recent_600s=panel_recent_600s,
             panel_recent_3600s=panel_recent_3600s,
             panel_meter_present=panel_meter_present,
+            # DEC-RATE-STALL-PULL-GATE-001: the AUTHORITATIVE pull-run signal — the
+            # in-process panel is only ever fed by THIS app's pulls, so its stall
+            # verdict is gated on the job actually running: a just-completed pull
+            # reads "done"/"idle", never a red "stalled" (the CLI bridge below has no
+            # active flag, so its side keeps the tick-freshness fallback).
+            panel_pull_active=_pull_active_probe(),
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
@@ -1806,6 +1822,14 @@ def build_app(
     # CoverageCounters that back the O(1) coverage headline
     # (DEC-DASHBOARD-FASTREAD-001).
     _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
+
+    # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
+    # the production default reads THIS app's own single-flight job (`running` is an O(1)
+    # lock-guarded bool), so the widget can never read "stalled" after the pull finished;
+    # tests inject a deterministic probe. Resolved at request time via the route closure.
+    _pull_active_probe: Callable[[], bool | None] = (
+        pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
 
     # Last finished spot pull's verdict dict (DEC-VERDICT-BANNER-001). The
     # background _work closure stamps the BulkSpotReport's `.verdict.to_dict()`
