@@ -197,6 +197,13 @@ def _stub_dashboard_runtime(
     # tested in isolation (test_cli_auto_resume + test_orchestrator_auto_resume). Mirrors the
     # ``_start_instrument_autoload`` stub above (both are live-side-effect boot seams).
     monkeypatch.setattr(cli, "_start_auto_resume_on_boot", lambda *args, **kwargs: None)
+    # HERMETIC (DEC-DOCTOR-LIVE-AUTORUN-001): stub the live-proof autorun builder to
+    # ``None`` so these dashboard-boot tests never construct the real holder (whose
+    # preflight worker would resolve AWS credentials) nor spawn its daemon thread —
+    # the autorun's own behaviour is tested in isolation (test_doctor_autorun + the
+    # dedicated cmd_dashboard wiring tests). ``None`` takes the honest "not wired"
+    # path (the /api/v1/liveproof route then reads ``present: false``).
+    monkeypatch.setattr(cli, "_build_liveproof_autorun", lambda _root: None)
 
 
 def test_dashboard_missing_uvicorn_is_user_error(
