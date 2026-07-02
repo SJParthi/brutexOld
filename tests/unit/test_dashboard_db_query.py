@@ -21,6 +21,8 @@ import pytest
 from brutex.dashboard.db_view import (
     ALLOWED_OPERATORS,
     CANDLE_COLUMNS,
+    FNO_GREEKS_COLUMN_TYPES,
+    FNO_GREEKS_COLUMNS,
     OPTION_CANDLE_COLUMNS,
     SPOT_DERIVED_COLUMNS,
     _aggregate_parquet_resilient,
@@ -59,7 +61,12 @@ from brutex.data.partition import build_partition_path
 from brutex.models import Exchange, InstrumentType, Segment
 from structlog.testing import capture_logs
 
-from brutex.data.models import CandleBar, OptionBar  # isort: skip  (kept near other data imports)
+from brutex.data.models import (  # isort: skip  (kept near other data imports)
+    GREEKS_OVERLAY_FIELDS,
+    CandleBar,
+    FnoGreeksBar,
+    OptionBar,
+)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -2639,3 +2646,169 @@ def test_clamp_offset_caps_above_int64_and_floors_negative() -> None:
     assert clamp_offset(42) == 42
     assert clamp_offset(_OFFSET_MAX) == _OFFSET_MAX
     assert clamp_offset(10**19) == _OFFSET_MAX  # > 2**63 - 1 → capped, not overflowed
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F&O stored Greeks overlay projection (DEC-GREEKS-ENGINE-PR3-001)
+# ────────────────────────────────────────────────────────────────────────
+
+#: A decodable F&O option contract symbol (underlying spot absent on purpose —
+#: the derived moneyness cells honestly read "?" without breaking the page).
+_GREEKS_SYMBOL = "NSE-NIFTY-30Jun25-24000-CE"
+
+
+def _greeks_bar(ts: datetime, close: str) -> FnoGreeksBar:
+    """One ENRICHED option bar carrying the full stored Greeks overlay."""
+    c = Decimal(close)
+    return FnoGreeksBar(
+        timestamp=ts,
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=25,
+        open_interest=1000,
+        iv=0.1812,
+        delta=0.62,
+        gamma=0.0004,
+        theta=-3.5,
+        vega=11.2,
+        rho=4.1,
+        spot_at_bar=Decimal("24000.00"),
+        t_years_used=0.076,
+        rate_used=0.0655,
+        greeks_provenance_id=1234,
+    )
+
+
+def _write_fno(lake_root: Path, bars: list[CandleBar], symbol: str = _GREEKS_SYMBOL) -> None:
+    """Write one F&O 1-minute partition batch via the production writer."""
+    ParquetWriter(lake_root=lake_root).write(
+        exchange="NSE", segment="FNO", symbol=symbol, interval="1minute", bars=bars
+    )
+
+
+class TestFnoGreeksProjection:
+    """The 10 stored per-bar Greeks overlay columns on an F&O candle page."""
+
+    def test_column_map_mirrors_writer_schema(self) -> None:
+        """The viewer's selectable overlay set can never drift from the writer's
+        (models.GREEKS_OVERLAY_FIELDS is the ONE source of truth — §11 COMMON)."""
+        assert FNO_GREEKS_COLUMNS == GREEKS_OVERLAY_FIELDS
+        assert tuple(FNO_GREEKS_COLUMN_TYPES) == GREEKS_OVERLAY_FIELDS
+        # Every overlay column has a concrete SQL type for the typed-NULL cast.
+        assert set(FNO_GREEKS_COLUMN_TYPES.values()) == {"DOUBLE", "INTEGER"}
+        assert FNO_GREEKS_COLUMN_TYPES["greeks_provenance_id"] == "INTEGER"
+
+    def test_enriched_partition_returns_stored_values(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _write_fno(tmp_path, [_greeks_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "150.00")])
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=_GREEKS_SYMBOL,
+            interval="1minute",
+            columns=("timestamp", "close", "iv", "delta", "greeks_provenance_id"),
+            limit=10,
+        )
+        assert out["columns"][:5] == ["timestamp", "close", "iv", "delta", "greeks_provenance_id"]
+        row = out["rows"][0]
+        assert float(row[2]) == pytest.approx(0.1812)
+        assert float(row[3]) == pytest.approx(0.62)
+        assert int(row[4]) == 1234
+
+    def test_legacy_partition_renders_typed_nulls(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """A pre-Greeks 7-column partition tree serves honest NULL cells for every
+        requested overlay column instead of a binder-error 500 (Golden Rule #1)."""
+        _write_fno(tmp_path, [_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.40")])
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=_GREEKS_SYMBOL,
+            interval="1minute",
+            columns=("timestamp", *FNO_GREEKS_COLUMNS),
+            limit=10,
+        )
+        assert out["columns"][: 1 + len(FNO_GREEKS_COLUMNS)] == ["timestamp", *FNO_GREEKS_COLUMNS]
+        assert out["total"] == 1
+        overlay_cells = out["rows"][0][1 : 1 + len(FNO_GREEKS_COLUMNS)]
+        assert all(cell is None for cell in overlay_cells)
+
+    def test_mixed_tree_unions_legacy_and_enriched(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """A mixed legacy/enriched tree pages both file generations in one query:
+        the legacy month's overlay cells are NULL, the enriched month's are real."""
+        _write_fno(tmp_path, [_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.20")])
+        _write_fno(tmp_path, [_greeks_bar(datetime(2024, 4, 1, 9, 15, tzinfo=UTC), "150.00")])
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=_GREEKS_SYMBOL,
+            interval="1minute",
+            columns=("timestamp", "iv"),
+            limit=10,
+        )
+        assert out["total"] == 2
+        ivs = [row[1] for row in out["rows"]]
+        assert ivs[0] is None
+        assert float(ivs[1]) == pytest.approx(0.1812)
+
+    def test_spot_page_rejects_overlay_column(self, store: InstrumentStore, tmp_path: Path) -> None:
+        """The overlay exists only under segment="FNO" — a spot page still rejects
+        a Greeks column as unknown (never a silently-NULL spot Greek)."""
+        _write_candles(tmp_path)
+        with pytest.raises(ValueError, match="unknown column"):
+            query_candles(
+                store.connection,
+                tmp_path,
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                columns=("timestamp", "iv"),
+                limit=10,
+            )
+
+    def test_select_star_carries_stored_overlay(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _write_fno(tmp_path, [_greeks_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "150.00")])
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=_GREEKS_SYMBOL,
+            interval="1minute",
+            limit=10,
+        )
+        for column in FNO_GREEKS_COLUMNS:
+            assert column in out["columns"]
+
+    def test_empty_partition_keeps_requested_overlay_columns(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The empty-page early return echoes the requested overlay columns so the
+        viewer's column set is stable across an empty vs populated partition."""
+        out = query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=_GREEKS_SYMBOL,
+            interval="1minute",
+            columns=("timestamp", "iv"),
+            limit=10,
+        )
+        assert out["rows"] == []
+        assert out["columns"][:2] == ["timestamp", "iv"]

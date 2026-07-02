@@ -1010,9 +1010,20 @@ docs-only, operator-overridable.
 ### 15.10 Derived-timeframe propagation — CLOSE-SNAPSHOT, never aggregated (LOCKED semantics, `DEC-GREEKS-ENGINE-PR1-001`)
 
 > Operator-directed semantics lock (2026-07-02, recorded in the Phase-1 PR
-> `DEC-GREEKS-ENGINE-PR1-001`, MIGRATION.md #1094). This section LOCKS the rule
-> only; the implementation lands with the resample-consuming surfaces
-> (Phase 2b / 3), same as the rest of §15.
+> `DEC-GREEKS-ENGINE-PR1-001`, MIGRATION.md #1094). *(Status:
+> DEC-GREEKS-ENGINE-PR3-001 IMPLEMENTED the rule at the ONE canonical seam —
+> `tf_resampler.resample_1m_to_tf` carries every stored overlay column by
+> LAST-VALUE whenever the input frame has it, so the on-demand option TF read
+> (`fno_resample.resample_session_to_tf`) and every other consumer inherit it
+> automatically. The SAME PR also shipped the Phase-3a `/db` DISPLAY of the
+> STORED overlay: the F&O candle browser's column picker offers the 10
+> `GREEKS_OVERLAY_FIELDS` (`db_view.FNO_GREEKS_COLUMNS` +
+> `FNO_GREEKS_COLUMN_TYPES` typed-NULL substitution for a legacy pre-Greeks
+> partition tree — honest NULL cells, never a binder-error 500; `db.html`
+> `FNO_GREEKS_COLS`/`curCols()`), which SUPERSEDES this section's original
+> read-time-derived `_fno_derived_rows` sketch for /db — the STORED columns
+> ARE the /db surface post-§15 (generation-time compute-and-store). The
+> `/movers` delta/iv cells remain Phase 3b, deliberately NOT folded in.)*
 
 When the 19 derived intraday TFs + `1d` are resampled from the stored
 1-minute bars (`resample_1m_to_tf` on the movers / display path;

@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import polars as pl
 
+from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from brutex.data.timeframes import ALL_TF_MINUTES, is_intraday
 
 # Required schema for input 1m DataFrame.
@@ -192,6 +193,23 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         # ``.last()`` deterministically the latest-timestamp bar's OI (a STOCK
         # snapshot, never the volume FLOW). A null last bar yields null OI.
         aggregations.append(pl.col(OPEN_INTEREST_COLUMN).last().alias(OPEN_INTEREST_COLUMN))
+    # Greeks CLOSE-SNAPSHOT propagation (plan §15.10, semantics LOCKED by
+    # DEC-GREEKS-ENGINE-PR1-001; implemented by DEC-GREEKS-ENGINE-PR3-001):
+    # when the input frame carries any of the ten stored Greeks-overlay
+    # columns (an ENRICHED option 1-minute read — DEC-GREEKS-ENGINE-PR2B-001),
+    # each propagates by LAST-VALUE — a derived bar's iv/delta/gamma/theta/
+    # vega/rho (+ inputs + provenance stamp) are EXACTLY its last constituent
+    # 1-minute bar's stored values. Greeks are STATE, not FLOW: never summed,
+    # never averaged, never OHLC-aggregated — the same rule ``close`` and OI
+    # already obey, so it is zero-recompute, O(1) per derived bar, and
+    # bit-identical across every TF. A NULL last constituent (an honest §15.8
+    # stamped-NA minute) stays NULL — NEVER backfilled from an earlier
+    # constituent minute (that would be a stale-spot fabrication). Spot /
+    # futures / legacy frames carry none of these columns, so the output is
+    # byte-identical for them (purely additive, exactly like the OI branch).
+    for overlay_column in GREEKS_OVERLAY_FIELDS:
+        if overlay_column in df_1m.columns:
+            aggregations.append(pl.col(overlay_column).last().alias(overlay_column))
 
     return (
         df_1m.with_columns(bucket_utc.alias("_bucket_ts"))

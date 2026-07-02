@@ -132,3 +132,22 @@ def test_option_dataset_label_rendered_with_raw_series_fallback() -> None:
     assert '"/api/v1/db/options?series=" + encodeURIComponent(d.series)' in html, (
         "the option query URL must keep addressing the raw series key"
     )
+
+
+def test_fno_greeks_columns_offered_in_picker() -> None:
+    """The F&O candle browser offers the 10 STORED Greeks overlay columns
+    (DEC-GREEKS-ENGINE-PR3-001): the FNO_GREEKS_COLS list mirrors
+    db_view.FNO_GREEKS_COLUMNS (the backend re-validates), and curCols()
+    branches to CANDLE_COLS + FNO_GREEKS_COLS for an F&O dataset only."""
+    from brutex.dashboard.db_view import FNO_GREEKS_COLUMNS
+
+    html = _render_db_html()
+    assert "const FNO_GREEKS_COLS" in html, "the F&O Greeks column list is missing"
+    for column in FNO_GREEKS_COLUMNS:
+        assert f'"{column}"' in html, f"overlay column {column!r} missing from the picker list"
+    # curCols() offers the overlay set for the F&O kind only (spot stays 7-col;
+    # the expired-options lake keeps OPTION_COLS).
+    assert "CANDLE_COLS.concat(FNO_GREEKS_COLS)" in html, (
+        "curCols() must offer CANDLE_COLS + FNO_GREEKS_COLS for an F&O dataset"
+    )
+    assert 'd.kind === "fno"' in html, "curCols() must branch on the fno dataset kind"
