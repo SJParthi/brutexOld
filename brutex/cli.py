@@ -55,8 +55,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import shutil
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1803,12 +1805,30 @@ def _start_instrument_autoload(
 
 
 def _auto_resume_child_argv(lake_root: Path) -> list[str]:
-    """Return the argv that resumes an in-progress universe pull for *lake_root*.
+    """Return the argv that resumes an in-progress pull for *lake_root*.
 
-    Runs ``brutex fetch --universe --until-clean --lake-root <lake_root>`` via the
-    SAME Python interpreter (``sys.executable -m brutex``) so the resumed pull
+    Runs ``brutex fetch --until-clean --lake-root <lake_root>`` via the SAME
+    Python interpreter (``sys.executable -m brutex``) so the resumed pull
     inherits this exact venv + install — robust whether or not the ``brutex``
     console script is on ``PATH`` (mirrors :func:`_supervisor_child_argv`).
+
+    ``fetch --until-clean`` (NOT the legacy ``--universe`` form) is LOAD-BEARING
+    (DEC-AUTO-RESUME-ARGV-FIX-001): ``--universe`` is RETIRED — :func:`cmd_fetch`
+    refuses it with ``EXIT_USER_ERROR`` before any pull work (the DEC-DHAN-FINALIZE-001
+    retirement notice), so a child spawned with it exits immediately having resumed
+    NOTHING while the boot log still read ``verdict=resumed`` (the silent-dead-resume
+    BLOCKER this fixes). ``fetch --until-clean`` is the CURRENT CLI pull entry: it
+    re-runs the spot ingest over the SHARED durable window ledger in bounded
+    until-clean rounds — re-fetching ONLY the unsettled (PLANNED / FAILED) windows,
+    the keep-first sink no-oping the settled ones. HONEST limit (Golden Rule #10):
+    ``cmd_fetch``'s live path binds ``fetch_instruments = _resolve_brute_force_instruments()``,
+    which filters to ONLY the 3 brute-force INDICES (NIFTY / BANKNIFTY / SENSEX), so
+    this child resumes ONLY the 3 index SPOT windows. Outstanding NON-index spot
+    windows (the ~750 reference underlyings) AND all F&O contract windows are NOT
+    settled by this child (the CLI has no composite-pipeline subcommand) — they
+    re-trigger a bounded, once-per-boot resume every restart until they are re-pulled
+    via the dashboard ``/pull-pipeline``. This is a partial (index-spot) resume, not a
+    full-universe one; auto-settling the rest is the ledger's job on the next dashboard pull.
 
     The explicit ``--lake-root`` is LOAD-BEARING (hostile-review MAJOR): the
     dashboard resolved the ledger from *lake_root* (which may be an explicit
@@ -1830,17 +1850,69 @@ def _auto_resume_child_argv(lake_root: Path) -> list[str]:
         "-m",
         "brutex",
         "fetch",
-        "--universe",
         "--until-clean",
         "--lake-root",
         str(lake_root),
     ]
 
 
+#: Best-effort early-exit probe window (seconds) for the spawned auto-resume child
+#: (DEC-AUTO-RESUME-ARGV-FIX-001): a child that dies with a usage / user error exits
+#: well inside this window, so the resume verdict can read ERROR instead of a false
+#: ``resumed``. Runs on the boot DAEMON thread (never the uvicorn bind path), so
+#: waiting this long never blocks or delays the boot.
+_AUTO_RESUME_EARLY_EXIT_PROBE_S = 2.0
+
+
+def _validate_auto_resume_argv(argv: list[str]) -> None:
+    """Prove *argv* dispatches to the REAL ``fetch`` pull entry — raise on ANY drift.
+
+    The guard that makes a dead auto-resume LOUD (DEC-AUTO-RESUME-ARGV-FIX-001):
+    the child argv is re-parsed through the REAL :func:`build_parser` BEFORE the
+    subprocess is spawned, and rejected (``ValueError``) unless it (a) runs
+    ``python -m brutex``, (b) parses cleanly, (c) dispatches to the ``fetch``
+    subcommand, (d) avoids the modes that exit WITHOUT pulling (the RETIRED
+    ``--universe`` refusal + the load-master-and-exit ``--instruments``), and
+    (e) carries ``--until-clean`` (the bounded resume-until-done contract of
+    DEC-AUTO-RESUME-ON-BOOT-001). A raise propagates into
+    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`'s guard, which
+    logs ``auto_resume.error`` and returns the honest ``error`` verdict — never
+    ``resumed`` — while the boot itself is unaffected (the never-raises contract).
+
+    Pure over *argv* (one parser build + parse; no subprocess, no I/O beyond
+    argparse's own stderr usage line on a reject — deliberately loud).
+    """
+    prefix = [sys.executable, "-m", "brutex"]
+    if argv[: len(prefix)] != prefix:
+        raise ValueError(f"auto-resume child argv must run `python -m brutex`: {argv!r}")
+    tokens = argv[len(prefix) :]
+    if not tokens:
+        raise ValueError("auto-resume child argv carries no CLI subcommand tokens")
+    parser = build_parser()
+    try:
+        args = parser.parse_args(tokens)
+    except SystemExit as exc:
+        # argparse rejected the tokens (unknown flag / bad value) via parser.error —
+        # the exact usage-error a spawned child would die on with EXIT_USER_ERROR.
+        raise ValueError(f"auto-resume child argv rejected by the CLI parser: {tokens!r}") from exc
+    if args.command != "fetch":
+        raise ValueError(f"auto-resume child argv must dispatch to `fetch`, got {args.command!r}")
+    if args.universe:
+        # The retired legacy three-phase flag: cmd_fetch refuses it with
+        # EXIT_USER_ERROR before any pull work — the dead-resume BLOCKER.
+        raise ValueError("auto-resume child argv carries the RETIRED `--universe` flag")
+    if args.instruments:
+        raise ValueError(
+            "auto-resume child argv carries `--instruments` (loads the master and exits — no pull)"
+        )
+    if not args.until_clean:
+        raise ValueError("auto-resume child argv must carry `--until-clean`")
+
+
 def _spawn_auto_resume_pull(
     incomplete: Any, lake_root: Path, log: Any
 ) -> None:  # pragma: no cover — live subprocess spawn (the fetch spine is tested separately)
-    """Spawn a detached ``brutex fetch --universe --until-clean`` on *lake_root* to resume.
+    """Spawn a detached ``brutex fetch --until-clean`` on *lake_root* to resume.
 
     The injected resume ACTION for
     :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`. A SEPARATE
@@ -1855,10 +1927,23 @@ def _spawn_auto_resume_pull(
     the ledger is clean / the token dies / the round budget is spent). Any spawn
     error is caught by the ``maybe_resume_on_boot`` guard, so it can never crash
     the boot.
+
+    Two dead-resume guards (DEC-AUTO-RESUME-ARGV-FIX-001), each surfacing as the
+    honest ``error`` verdict instead of a false ``resumed``:
+
+    1. the argv is validated against the REAL parser BEFORE spawning
+       (:func:`_validate_auto_resume_argv` — the retired ``--universe`` regression
+       class can never ship a child the CLI refuses); and
+    2. a bounded best-effort early-exit probe AFTER spawning — a child that dies
+       within :data:`_AUTO_RESUME_EARLY_EXIT_PROBE_S` with a non-zero exit
+       (a usage / user error) raises into the ``maybe_resume_on_boot`` guard.
+       Runs on the boot daemon thread, so the probe never blocks the port bind;
+       a child that outlives the probe stays the un-reaped fire-and-forget resume.
     """
     import subprocess  # nosec B404 — stdlib subprocess, list-argv launch, no shell (see B603 below)
 
     argv = _auto_resume_child_argv(lake_root)
+    _validate_auto_resume_argv(argv)
     log.info(
         "auto_resume.spawn",
         outstanding=incomplete.outstanding,
@@ -1872,10 +1957,26 @@ def _spawn_auto_resume_pull(
     # there is no shell-injection surface. `start_new_session=True` isolates the child's
     # process group so the resumed pull outlives a dashboard restart (re-parented to init,
     # deliberately un-reaped — a fire-and-forget resume, unlike the supervised child).
-    subprocess.Popen(  # nosec B603  # noqa: S603 — list argv, no shell, trusted CLI
+    child = subprocess.Popen(  # nosec B603  # noqa: S603 — list argv, no shell, trusted CLI
         argv,
         start_new_session=True,
     )
+    try:
+        returncode = child.wait(timeout=_AUTO_RESUME_EARLY_EXIT_PROBE_S)
+    except subprocess.TimeoutExpired:
+        # Still running after the probe — the normal fire-and-forget resume path
+        # (deliberately un-reaped; the kernel re-parents it on dashboard exit).
+        return
+    if returncode != 0:
+        # An immediate non-zero exit is a usage / user error (e.g. an argv the CLI
+        # refuses) — the resume did NOT happen. Raise into the maybe_resume_on_boot
+        # guard so the boot log reads the honest `error` verdict, never `resumed`.
+        raise RuntimeError(
+            f"auto-resume child exited immediately with code {returncode} (argv={argv!r})"
+        )
+    # A clean immediate exit means the child found nothing left to pull (the
+    # ledger settled between the detect and the spawn) — a successful resume.
+    log.info("auto_resume.child_completed", returncode=returncode)
 
 
 def _start_auto_resume_on_boot(
@@ -2031,7 +2132,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
     # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an
     # in-progress pull (PLANNED / FAILED windows), auto-continue it by spawning
-    # `brutex fetch --universe --until-clean --lake-root <resolved>` — so a fresh
+    # `brutex fetch --until-clean --lake-root <resolved>` — so a fresh
     # container / redeploy / restart picks up an unfinished pull with ZERO clicks
     # (§11 AUTOMATED). Runs in a daemon thread so the ledger read / spawn never blocks
     # the uvicorn bind, and is a no-op unless the flag is set (default OFF — a dev / CI
@@ -2325,6 +2426,49 @@ def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + li
         return load_instrument_master(store)
     finally:
         store.close()
+
+
+def _make_dryrun_lake_root() -> Path:
+    """Create the clearly-labelled ephemeral system-temp lake for ``--dry-run``.
+
+    DEC-DRYRUN-LAKE-ISOLATION-001: a ``--dry-run`` drives the REAL
+    :class:`~brutex.data.sink.ParquetBarSink` pipeline with SYNTHETIC bars, so its
+    sink + catalog must NEVER point at the resolved production lake — a synthetic
+    bar stored first would make the keep-first partition merge PERMANENTLY drop the
+    real vendor bar that arrives later at the same ``(series, timestamp)``. The
+    dry-run therefore writes into this isolated ``tempfile.mkdtemp`` directory
+    (removed best-effort by :func:`_ephemeral_dryrun_lake_cleanup`), preserving the
+    full offline fetch → session-filter → sink proof + its reported counts.
+
+    Returns
+    -------
+    Path
+        A fresh ``brutex-fetch-dryrun-lake-*`` directory under the system temp.
+    """
+    return Path(tempfile.mkdtemp(prefix="brutex-fetch-dryrun-lake-"))
+
+
+@contextlib.contextmanager
+def _ephemeral_dryrun_lake_cleanup(lake_root: Path | None) -> Generator[None, None, None]:
+    """Remove the ephemeral ``--dry-run`` temp lake on ANY exit (best-effort).
+
+    ``None`` (a live / ``--inspect`` pull — no ephemeral lake) is a no-op. Entered
+    as the OUTERMOST fetch context so the dry-run catalog opened on the ephemeral
+    lake is closed BEFORE the tree is removed; ``ignore_errors=True`` keeps cleanup
+    from ever masking the pull's own outcome (on a failed removal the directory is
+    still clearly labelled ``brutex-fetch-dryrun-lake-*`` under the system temp).
+
+    Parameters
+    ----------
+    lake_root
+        The ephemeral dry-run lake from :func:`_make_dryrun_lake_root`, or ``None``
+        when the pull writes to the real lake (live) or nowhere (``--inspect``).
+    """
+    try:
+        yield
+    finally:
+        if lake_root is not None:
+            shutil.rmtree(lake_root, ignore_errors=True)
 
 
 def _arm_retry_storm_guard(
@@ -2730,14 +2874,27 @@ def cmd_fetch(
     # ``on_window`` hook can publish the live rate to the cross-process bridge file. Stays
     # ``None`` for --dry-run / --inspect (no real account pacing, nothing to publish).
     rate_controller: Any = None
+    # --dry-run lake ISOLATION (DEC-DRYRUN-LAKE-ISOLATION-001): the dry-run's synthetic
+    # bars run through the REAL ParquetBarSink pipeline, so its sink + catalog (and the
+    # optional retry-storm audit) are routed into an EPHEMERAL system-temp lake instead
+    # of the resolved PRODUCTION lake — otherwise the synthetic bars would occupy the
+    # keep-first merge slots and PERMANENTLY drop the real vendor bars pulled later.
+    # The counts are still reported off the same pipeline; the temp tree is removed
+    # best-effort by the outermost `_ephemeral_dryrun_lake_cleanup` context below.
+    # `--inspect` already persists nothing (NullBarSink, no catalog) so it needs none.
+    dryrun_lake_root: Path | None = None
+    if dry_run and not inspect:
+        dryrun_lake_root = _make_dryrun_lake_root()
+    sink_lake_root = resolved if dryrun_lake_root is None else dryrun_lake_root
     # Persisting pulls register every written partition in the DuckDB catalog
     # so `brutex sweep-all` can read the bars back (DEC-CATALOG-RECONCILE-WIRE-001
     # — historically the sink was built with catalog=None, leaving the catalog
     # empty and the sweep blind). --inspect persists nothing, so it needs no
     # catalog. The catalog's own lock serialises the upserts under the parallel
-    # window fan-out (DEC-DHAN-PARALLEL-INGEST-001).
+    # window fan-out (DEC-DHAN-PARALLEL-INGEST-001). A --dry-run catalog lives on
+    # the ephemeral temp lake, never the production `catalog.duckdb`.
     cat_ctx: Any = (
-        contextlib.nullcontext(None) if inspect else Catalog.open(resolved / "catalog.duckdb")
+        contextlib.nullcontext(None) if inspect else Catalog.open(sink_lake_root / "catalog.duckdb")
     )
     # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): a real live pull
     # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
@@ -2753,7 +2910,10 @@ def cmd_fetch(
         audit_ctx = AuditWriter.open(_ingest_audit_path, resume=_ingest_audit_path.exists())
     # Integration merge: keep BOTH the ingest-audit context (base-13,
     # DEC-INGEST-AUDIT-CHAIN-001) AND the retry-storm ExitStack (main, #533).
+    # The dry-run temp-lake cleanup is OUTERMOST so it removes the ephemeral tree
+    # only AFTER the catalog opened on it is closed (DEC-DRYRUN-LAKE-ISOLATION-001).
     with (
+        _ephemeral_dryrun_lake_cleanup(dryrun_lake_root),
         cat_ctx as cat,
         audit_ctx as ingest_audit,
         contextlib.ExitStack() as storm_stack,
@@ -2775,12 +2935,19 @@ def cmd_fetch(
             sink = (
                 NullBarSink()
                 if inspect
-                else ParquetBarSink(writer=ParquetWriter(lake_root=resolved), catalog=cat)
+                else ParquetBarSink(writer=ParquetWriter(lake_root=sink_lake_root), catalog=cat)
             )
-            # Loud, unmistakable label (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001):
-            # an explicit --dry-run must never read like a real pull.
+            # Loud, unmistakable label (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001) +
+            # the Wave-1 ephemeral-lake note (DEC-PULL-FORENSIC-WAVE1-001): an
+            # explicit --dry-run must never read like a real pull, and it names
+            # the isolated lake it writes to.
             print(
-                f"[brutex] {label_synthetic('fetch --dry-run → synthetic candles')}",
+                f"[brutex] {label_synthetic('fetch --dry-run → synthetic candles')}"
+                + (
+                    ""
+                    if dryrun_lake_root is None
+                    else f" (ephemeral lake: {dryrun_lake_root} — production lake untouched)"
+                ),
                 file=sys.stderr,
             )
         else:
@@ -2906,9 +3073,12 @@ def cmd_fetch(
         # watchdog so a 429 storm's silent bar-loss becomes a loud, audited,
         # once-per-symbol alert instead of a manual audit-chain diff (Gap #3).
         # No-op (None) when the flag is unset.
+        # The storm-guard audit rides the SINK lake root, so a --dry-run's audit
+        # lands on the ephemeral temp lake, never the production `<lake>/audit/`
+        # (DEC-DRYRUN-LAKE-ISOLATION-001); a live pull is byte-unchanged.
         storm_progress = _arm_retry_storm_guard(
             max_retry_minutes=max_retry_minutes,
-            lake_root=resolved,
+            lake_root=sink_lake_root,
             instruments=fetch_instruments,
             intervals=intervals,
             stack=storm_stack,
@@ -2975,7 +3145,7 @@ def cmd_fetch(
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
-        fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=resolved)
+        fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -3103,7 +3273,8 @@ def cmd_fetch(
         )
         if verdict.needs_operator:
             print(f"[brutex] {verdict.headline} {verdict.action}", file=sys.stderr)
-    print(f"[brutex] lake: {resolved}")
+    _lake_note = "" if dryrun_lake_root is None else " (dry-run — production lake untouched)"
+    print(f"[brutex] lake: {resolved}{_lake_note}")
     # With --until-clean the FINAL residual (post all rounds) is the truth, not the
     # first pass's; otherwise the wrapper's still_failed_windows is correct.
     residual = (

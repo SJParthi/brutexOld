@@ -68,6 +68,7 @@ import structlog
 
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.groww.chunks import window_days_for_interval
+from brutex.adapters.groww.client import client_self_paces
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.write_deadline import append_with_deadline
@@ -309,7 +310,11 @@ def ingest_spot(
     pace
         Optional per-window pacing hook (rate-limit acquire) — the SHARED rate
         bucket every worker acquires from. Groww's backtesting r/s is UNVERIFIED,
-        so this is the only rate governor; nothing is hardcoded.
+        so this is the only rate governor; nothing is hardcoded. When the
+        adapter's Groww client ALREADY self-paces (the client's ``pace`` is bound
+        to the shared bucket — the production wiring), the window-level acquire is
+        SKIPPED so each physical fetch is admitted exactly ONCE, by the client
+        (DEC-RATE-SINGLE-ADMISSION-001); *pace* is then only a pool-sizing hint.
     on_rate_limit, on_timeout, on_success
         Optional rate-controller feedback hooks. ``on_rate_limit`` fires on a
         Groww rate-limit error, ``on_timeout`` on a non-rate-limit retryable
@@ -396,6 +401,15 @@ def ingest_spot(
     pull_id = current_pull_id()
     series_fields = {"symbol": instrument.symbol_name, "interval": interval}
     empty_backoff = empty_retry_backoff if empty_retry_backoff is not None else _noop_empty_backoff
+    # SINGLE ADMISSION (DEC-RATE-SINGLE-ADMISSION-001): when the adapter's Groww client
+    # already self-paces (``run_groww_spot_ingest`` binds the shared bucket into the
+    # client, whose ``_call`` then acquires ONE token per physical attempt — retry
+    # attempts included), the per-window ``pace()`` below would be a SECOND admission
+    # for the SAME physical fetch — halving the achieved rate and double-charging the
+    # 500/min governor. The client is the canonical admission point; the window-level
+    # pace stays ONLY as the fallback for an un-paceable adapter (a fake / synthetic).
+    # The raw *pace* is still read above for pool SIZING (a hint, never an admission).
+    window_pace = None if client_self_paces(getattr(adapter, "client", None)) else pace
 
     def _fetch_window(window: tuple[date, date]) -> _WindowOutcome:
         """Pull ONE window — runs inside a worker thread under the fan-out.
@@ -412,7 +426,7 @@ def ingest_spot(
                 instrument=instrument,
                 interval=interval,
                 window=window,
-                pace=pace,
+                pace=window_pace,
                 ledger=ledger,
                 on_rate_limit=on_rate_limit,
                 on_timeout=on_timeout,

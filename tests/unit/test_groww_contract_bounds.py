@@ -15,7 +15,7 @@ mirroring the blessed reconcile→read pattern (``cascade_wire`` /
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,6 +30,7 @@ from brutex.adapters.groww.contract_bounds import (
     coverage_to_minute_window,
     default_fno_minute_window,
     derive_contract_minute_windows,
+    fno_window_opens_on,
 )
 from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.nse import IST
@@ -281,6 +282,108 @@ def test_default_option_window_collapsed_span_falls_back_to_full() -> None:
     full = (date(2024, 1, 1), date(2026, 6, 13))
     win = default_fno_minute_window(
         date(2023, 6, 1), full_start=full[0], full_end=full[1], is_option=True
+    )
+    assert win == full
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# default_fno_minute_window — NOT-YET-OPEN skip (DEC-FNO-FAR-EXPIRY-WINDOW-001,
+# operator law: STRICTLY [expiry − lookback, expiry] ∩ envelope — never a
+# substitute window; not open yet ⇒ None ⇒ fetch NOTHING)
+# ─────────────────────────────────────────────────────────────────────────
+def test_default_far_expiry_option_not_open_returns_none() -> None:
+    # REGRESSION (fails pre-fix): a Sep-2026 monthly option pulled on 2026-07-02
+    # (full_end = prev-day 2026-07-01) has expiry−30d = 2026-08-30 AFTER full_end —
+    # its strict window has not OPENED, so the answer is None (skip: zero vendor
+    # calls). The OLD code degraded to the FULL 2020→today range (80 × 30-day
+    # chunks — a measured 22.5% of a real ADANIENT pull wasted).
+    win = default_fno_minute_window(
+        date(2026, 9, 29),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win is None
+
+
+def test_default_far_expiry_future_not_open_returns_none() -> None:
+    # REGRESSION (fails pre-fix) — the FUT twin: expiry−60d = 2026-07-31 is AFTER
+    # full_end → not open yet → None (skip), never the full range.
+    win = default_fno_minute_window(
+        date(2026, 9, 29),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=False,
+    )
+    assert win is None
+
+
+def test_default_far_expiry_boundary_lookback_start_equals_full_end() -> None:
+    # BOUNDARY (fails pre-fix): expiry−30d == full_end EXACTLY — the half-open
+    # strict window [full_end, full_end) is still empty, so the contract opens
+    # NEXT day: today's answer is None (the old code degraded to the full range).
+    win = default_fno_minute_window(
+        date(2026, 7, 31),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win is None
+
+
+def test_default_near_expiry_just_inside_full_end_unchanged() -> None:
+    # expiry−30d == full_end − 1 day (just INSIDE the envelope) → pre-fix behaviour
+    # was already correct and must stay byte-identical: the 1-day window
+    # [expiry−30d, full_end) with the STABLE expiry-anchored start.
+    win = default_fno_minute_window(
+        date(2026, 7, 30),
+        full_start=date(2020, 1, 1),
+        full_end=date(2026, 7, 1),
+        is_option=True,
+    )
+    assert win == (date(2026, 6, 30), date(2026, 7, 1))
+
+
+def test_default_window_start_is_stable_across_daily_pulls_once_open() -> None:
+    # Once the calendar reaches expiry−lookback the window OPENS with its FIXED
+    # start (expiry−30d) — advancing full_end across daily pulls moves ONLY the
+    # end, never the start (no moving anchor → no ledger-GC orphan class).
+    expiry = date(2026, 7, 31)
+    opens_on = date(2026, 7, 1)  # expiry − 30d
+    for offset in range(1, 4):  # full_end 2026-07-02 .. 2026-07-04 (window open)
+        win = default_fno_minute_window(
+            expiry,
+            full_start=date(2020, 1, 1),
+            full_end=opens_on + timedelta(days=offset),
+            is_option=True,
+        )
+        assert win == (opens_on, opens_on + timedelta(days=offset))
+
+
+def test_fno_window_opens_on_option_and_future() -> None:
+    # The ONE opens_on anchor (COMMON): option = expiry−30d, future = expiry−60d.
+    assert fno_window_opens_on(date(2026, 9, 29), is_option=True) == date(2026, 8, 30)
+    assert fno_window_opens_on(date(2026, 9, 29), is_option=False) == date(2026, 7, 31)
+
+
+def test_default_far_expiry_degenerate_envelope_falls_back_to_full() -> None:
+    # DEFENSIVE: a degenerate envelope (full_start == full_end) is NOT a
+    # not-yet-open skip — it keeps the pre-existing conservative full-range
+    # fallback (itself empty) byte-identically, never None and never a crash.
+    full = (date(2026, 7, 1), date(2026, 7, 1))
+    win = default_fno_minute_window(
+        date(2026, 9, 29), full_start=full[0], full_end=full[1], is_option=True
+    )
+    assert win == full
+
+
+def test_default_far_expiry_inverted_envelope_falls_back_to_full() -> None:
+    # DEFENSIVE (hostile-review NIT): an INVERTED envelope (full_end < full_start)
+    # likewise keeps the pre-existing conservative full-range fallback — never
+    # None, never a crash, never a widened scope.
+    full = (date(2026, 7, 2), date(2026, 7, 1))
+    win = default_fno_minute_window(
+        date(2026, 9, 29), full_start=full[0], full_end=full[1], is_option=True
     )
     assert win == full
 
