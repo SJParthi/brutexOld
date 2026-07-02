@@ -2282,3 +2282,130 @@ class TestGreeksEnrichWiring:
             )
         assert captured == [good.symbol]
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.done"] != []
+
+
+# ── DEC-WINDOW-LEDGER-RESCUE-001: the lost-ledger rescue actually rescues ─────
+
+
+class _DenseSDK(_FakeSDK):
+    """A fake SDK returning bars that span each contract's WHOLE default window.
+
+    Two bars per call — one on/before every default window's start (2023-11-24,
+    ≤ the FUT ``expiry − 60d`` start) and one ON the expiry day (2024-01-25) — so
+    the stored lake span fully covers every contract's default ``[start,
+    expiry + 1 day)`` window: ``first_date <= start`` and the bar-inclusive
+    ``last_date == expiry == window_end − 1``.
+    """
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        symbol = str(kw["groww_symbol"])
+        self.candle_symbols.append(symbol)
+        self.candle_intervals.append(str(kw["candle_interval"]))
+        self.starts.append((symbol, str(kw["start_time"])))
+        return {
+            "candles": [
+                ["2023-11-24T09:30:00", 100.0, 110.0, 90.0, 105.0, 50, 7],
+                ["2024-01-25T09:30:00", 101.0, 111.0, 91.0, 106.0, 60, 8],
+            ]
+        }
+
+
+def _parquet_sink(lake_root: Path) -> BarSink:
+    """A REAL lake sink so run 1's bars land on disk for run 2's reconcile."""
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    return ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+
+
+def test_lost_ledger_second_pull_makes_zero_vendor_calls(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """REGRESSION (b) — FAILS-BEFORE: the ledger↔lake rescue was DEAD CODE.
+
+    Run 1 pulls the NIFTY chain over each contract's DEFAULT window (no explicit
+    dates — end = ``expiry + 1 day``, fetch-exclusive) into a REAL lake; the durable
+    ledger is then DELETED (the operator's observed loss). Run 2 must make ZERO
+    F&O vendor calls for the fully-stored expired contracts: the cold-start
+    ``reconcile_fno_ledger_windows`` seeds every lake-enclosed window SUCCESS. On
+    unfixed main the enclosure test (``expiry + 1 <= expiry``) could never pass, so
+    run 2 wholesale re-fetched the whole chain.
+    """
+    from brutex.data.window_ledger_store import ledger_path
+
+    selected = registry.list_contracts(underlying="NIFTY")
+    sdk1 = _DenseSDK()
+    report1 = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,  # live-shaped: the ledger + lake are REAL (factory-injected SDK)
+        intervals=("1minute",),
+        registry=registry,
+        client_factory=lambda _root: _factory(sdk1, _parquet_sink(tmp_lake)),
+        now=_NOW,
+    )
+    assert report1.contracts_completed == 3
+    assert len(sdk1.candle_symbols) > 0  # run 1 really hit the vendor
+    # THE LOSS: the durable ledger vanishes between the two pulls.
+    ledger_file = ledger_path(tmp_lake)
+    assert ledger_file.is_file()
+    ledger_file.unlink()
+
+    sdk2 = _DenseSDK()
+    report2 = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1minute",),
+        registry=registry,
+        client_factory=lambda _root: _factory(sdk2, _parquet_sink(tmp_lake)),
+        now=_NOW,
+    )
+    # THE RESCUE: zero vendor calls — every window was seeded from the lake + skipped
+    # (the PRIMARY behavioural assert — on unfixed main this lists the wholesale
+    # re-fetch of the entire chain).
+    assert sdk2.candle_symbols == []
+    assert report2.windows == 3
+    assert report1.windows_skipped == 0  # nothing was skippable on run 1's fresh lake
+    assert report2.windows_skipped == 3
+    assert report2.contracts_completed == 3
+    # A MISSING ledger is a fresh start, not a reload FAILURE (honest distinction).
+    assert report2.ledger_load_failed is False
+    assert "skipped 3 already-pulled window(s) (no vendor hit)" in report2.note
+    assert report2.to_dict()["windows_skipped"] == 3
+
+
+def test_corrupt_ledger_reload_failure_is_announced(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """REGRESSION (d) — a corrupt (unreadable) ledger is LOUD, never silent.
+
+    The store degrades to an empty ledger (never crashes the pull) but the report
+    + note must SAY the reload failed and that a full re-verify pull ran.
+    """
+    from brutex.data.window_ledger_store import ledger_path
+
+    ledger_file = ledger_path(tmp_lake)
+    ledger_file.parent.mkdir(parents=True, exist_ok=True)
+    ledger_file.write_bytes(b"not a parquet file at all")
+    sdk = _DenseSDK()
+    selected = registry.list_contracts(underlying="NIFTY")
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, _parquet_sink(tmp_lake)),
+            now=_NOW,
+        )
+    assert report.ledger_load_failed is True
+    assert report.note.startswith(
+        "window ledger reload FAILED — running full re-verify pull (no skip); "
+    )
+    assert report.to_dict()["ledger_load_failed"] is True
+    assert any(e["event"] == "historical.pull.ledger_reload_failed" for e in logs)
+    # The pull itself still ran (full re-verify — the vendor WAS hit, never a crash).
+    assert len(sdk.candle_symbols) > 0
+    assert report.contracts_completed == 3
