@@ -97,9 +97,33 @@ class TestDwellProvider:
         )
         assert dwell() is None  # 1.0 → streak 1
         assert dwell() is None  # 1.0 → streak 2
-        assert dwell() is None  # -1.0 → predicate False, streak reset to 0
-        assert dwell() is None  # 1.0 → streak 1 again
+        # -1.0 → predicate False WITH a real value → streak reset to 0 AND the
+        # real value is surfaced (recovery edge), per DEC-PULL-STALLED-REFIRE-001.
+        assert dwell() == -1.0
+        assert dwell() is None  # 1.0 → streak 1 again (reset proven: does NOT fire)
         assert dwell() is None  # 1.0 → streak 2 (never reached 3)
+
+    def test_recovery_surfaces_real_value_not_none(self) -> None:
+        """A healthy (predicate-False) reading surfaces the REAL value so the
+        detector's BREACH→OK recovery edge can fire (DEC-PULL-STALLED-REFIRE-001).
+
+        Fails-before: the recovery branch returned ``None``, so the detector
+        skipped the rule and its state stuck at BREACH forever.
+        """
+        # samples=1 so a single breaching sample fires; then recover, then re-breach.
+        values = iter([0.0, 5.0, 0.0])  # stall (0<floor), recover (5>=floor), stall
+        dwell = DwellProvider(
+            value_provider=lambda: next(values), predicate=lambda v: v < 1.0, samples=1
+        )
+        assert dwell() == 0.0  # breach surfaced
+        assert dwell() == 5.0  # RECOVERY: real value surfaced (was None before the fix)
+        assert dwell() == 0.0  # re-breach surfaced
+
+    def test_none_still_returned_when_value_unavailable(self) -> None:
+        """``None`` is returned ONLY when the underlying value is unavailable —
+        the detector's None-skip contract for OTHER rules is preserved."""
+        dwell = DwellProvider(value_provider=lambda: None, predicate=lambda v: v < 1.0, samples=1)
+        assert dwell() is None
 
     def test_none_value_resets_streak(self) -> None:
         values: list[float | None] = [1.0, None, 1.0]
@@ -180,6 +204,37 @@ class TestRules:
         monitor.observe(ctrl, stalled)
         assert monitor.state_of("pull.stalled") == SLAState.BREACH
         assert "pull.stalled" in [c[0] for c in cb.calls]
+
+    def test_stalled_refires_after_recovery(self) -> None:
+        """stall → recover → stall must page ``pull.stalled`` TWICE, not once.
+
+        Regression for DEC-PULL-STALLED-REFIRE-001. Before the fix the
+        DwellProvider returned ``None`` on recovery, so the detector's state
+        stuck at BREACH forever: recovery was never logged and the SECOND
+        stall produced no OK→BREACH edge — the operator was paged for the
+        first dead-pull episode only. A multi-episode overnight pull
+        (429-storm / write-stall) is a plausible real trigger.
+        """
+        monitor, cb, _ = _monitor(stalled_dwell=1)
+        stalled = {"effective_rps": 0.1, "latency_ms_p95": 100.0, "in_flight": 4}
+        ctrl = {"current_rps": 5.0, "recent_hits": 0}
+
+        # Episode 1: stall → breach (page #1).
+        monitor.observe(ctrl, stalled)
+        assert monitor.state_of("pull.stalled") == SLAState.BREACH
+        # Recovery: a healthy meter surfaces a real (non-breaching) value →
+        # the BREACH→OK edge fires and state clears.
+        monitor.observe(_HEALTHY_CTRL, _HEALTHY_METER)
+        assert monitor.state_of("pull.stalled") == SLAState.OK
+        # Episode 2: stall again → breach (page #2).
+        monitor.observe(ctrl, stalled)
+        assert monitor.state_of("pull.stalled") == SLAState.BREACH
+
+        stalled_pages = [c for c in cb.calls if c[0] == "pull.stalled"]
+        assert len(stalled_pages) == 2, (
+            "stall→recover→stall must page pull.stalled TWICE; "
+            f"got {len(stalled_pages)} (fails-before: 1)"
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────
