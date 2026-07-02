@@ -14,6 +14,9 @@ use pyo3::wrap_pyfunction;
 
 use crate::bits::{IMPLEMENTED_MASK, TOTAL_CONDITIONS};
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
+use crate::greeks::{
+    DELTA_ADMISSION_FLOOR, IV_CLAMP_MAX, IV_CLAMP_MIN, T_FLOOR_YEARS, VEGA_ADMISSION_FLOOR, greeks,
+};
 use crate::indicators::ema::{compute_ema, ema_alpha, ema_seed, ema_step};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
 use crate::indicators::market_structure::{
@@ -1114,6 +1117,53 @@ impl PyMarketStructureState {
     }
 }
 
+/// Flat FFI shape of one Greeks tuple:
+/// `(iv, delta, gamma, theta, vega, rho, price, admissible)`.
+type GreeksTuple = (f64, f64, f64, f64, f64, f64, f64, bool);
+
+/// The ONE shared Black-76 Greeks seam (`DEC-GREEKS-ENGINE-PR2-001`; plan
+/// `docs/GREEKS_ENGINE_PLAN.md` §2.3 / ADR-0015 D3) — the PyO3 face of
+/// `trading_core::greeks::greeks`.
+///
+/// `sigma=Some` prices directly (live / vendor-IV path; `price` is ignored);
+/// `sigma=None` solves IV from `price` via the verified Jäckel
+/// "Let's Be Rational" + deterministic bracketed fallback, then prices the
+/// Greeks off the SAME closed form.
+///
+/// Returns `(iv, delta, gamma, theta, vega, rho, price, admissible)` — theta
+/// per calendar day (Act/365), vega per 1% IV, rho per 1% rate, `admissible`
+/// = the plan's |delta| ≥ 0.02 ∧ raw-vega ≥ 1e-6 admission floors.
+///
+/// EVERY kernel `Err` maps to a clean `ValueError` whose message keeps the
+/// machine-readable `invalid_input:` / `no_solution:` prefix — the thin
+/// `brutex/options/greeks.py` wrapper re-raises the former and maps the
+/// latter to an honest `None` (never a fabricated value, never a panic →
+/// `abort` under `panic="abort"`).
+#[pyfunction]
+#[pyo3(name = "greeks", signature = (price, sigma, forward, strike, t_years, rate, is_call))]
+fn py_greeks(
+    price: Option<f64>,
+    sigma: Option<f64>,
+    forward: f64,
+    strike: f64,
+    t_years: f64,
+    rate: f64,
+    is_call: bool,
+) -> PyResult<GreeksTuple> {
+    let out = greeks(price, sigma, forward, strike, t_years, rate, is_call)
+        .map_err(PyValueError::new_err)?;
+    Ok((
+        out.iv,
+        out.delta,
+        out.gamma,
+        out.theta,
+        out.vega,
+        out.rho,
+        out.price,
+        out.admissible,
+    ))
+}
+
 /// The Python extension module `trading_core._trading_core`.
 #[pymodule]
 fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1123,6 +1173,11 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FIB_LEVELS_LEN", FIB_LEVELS_LEN)?;
     m.add("IMPLEMENTED_MASK", IMPLEMENTED_MASK)?;
     m.add("SPEC_SCHEMA_VERSION", crate::spec::SPEC_SCHEMA_VERSION)?;
+    m.add("GREEKS_T_FLOOR_YEARS", T_FLOOR_YEARS)?;
+    m.add("GREEKS_IV_CLAMP_MIN", IV_CLAMP_MIN)?;
+    m.add("GREEKS_IV_CLAMP_MAX", IV_CLAMP_MAX)?;
+    m.add("GREEKS_DELTA_ADMISSION_FLOOR", DELTA_ADMISSION_FLOOR)?;
+    m.add("GREEKS_VEGA_ADMISSION_FLOOR", VEGA_ADMISSION_FLOOR)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(total_conditions, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_from_raw, m)?)?;
@@ -1138,6 +1193,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_weekday_from_ordinal, m)?)?;
     m.add_function(wrap_pyfunction!(py_minute_of_session, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_near_month, m)?)?;
+    m.add_function(wrap_pyfunction!(py_greeks, m)?)?;
     m.add_class::<PyVwapState>()?;
     m.add_class::<PyMarketStructureState>()?;
     Ok(())

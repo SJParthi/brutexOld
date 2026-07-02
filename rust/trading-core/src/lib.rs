@@ -36,10 +36,12 @@
 
 pub mod bits;
 pub mod evaluator;
+pub mod greeks;
 pub mod indicators;
 pub mod spec;
 
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
+pub use greeks::{GreeksOut, black76_price, greeks};
 pub use indicators::ema::{EmaState, compute_ema, ema_alpha, ema_seed, ema_step};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
 pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
