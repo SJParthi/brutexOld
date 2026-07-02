@@ -26,8 +26,8 @@ bridges, applied in order, with a no-worse-than-before fallback:
 
 1. **Sourced alias map** (``aliases`` — ``NIFTYJR`` → ``NIFTYNXT50`` /
    ``NIFTYMIDSELECT`` → ``MIDCPNIFTY``, env-extensible
-   ``BRUTEX_FNO_INDEX_ALIASES``; DEC-FNO-INDEX-ALIAS-001). For the genuine
-   abbreviations that normalization cannot bridge.
+   ``BRUTEX_FNO_INDEX_ALIASES``; DEC-POSTPULL-DATAQUALITY-BATCH-001 fix E).
+   For the genuine abbreviations that normalization cannot bridge.
 2. **Normalization** (:func:`~brutex.universe.normalize_underlying_symbol` —
    uppercase, strip ASCII space + ``-``; DEC-FNO-INDEX-MATCH-DIAG-001). The exact,
    total transform ``BAJAJ-AUTO`` → ``BAJAJAUTO`` / ``NIFTY NEXT 50`` →

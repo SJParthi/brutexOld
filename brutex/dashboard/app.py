@@ -103,6 +103,10 @@ from brutex.dashboard.fno_cascade import (
     build_fno_cascade,
     contract_to_json,
 )
+from brutex.dashboard.fno_underlying import (
+    fno_underlying_forms,
+    resolve_fno_index_aliases,
+)
 from brutex.dashboard.gated_prebuild import discover_futures_contracts, run_gated_prebuild
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
@@ -6168,9 +6172,30 @@ def _resolve_historical_contracts(
         wanted = {token for token in (t.strip() for t in contracts.split(",")) if token}
         return [row for row in registry.list_contracts() if row.contract_symbol in wanted]
     if underlying is not None:
-        return registry.list_contracts(underlying=underlying, expiry_date=expiry_date)
+        # Query EVERY F&O underlying form (alias / normalized / raw spot spelling) so an
+        # operator-typed spot name (NIFTYJR / BAJAJ-AUTO) matches the registry rows the
+        # metadata pull persisted under the PRIMARY form (NIFTYNXT50 / BAJAJAUTO), while
+        # a legacy raw-key row still matches too — DEC-PULL-FORENSIC-WAVE2-001. A
+        # canonical symbol collapses to one form (byte-identical query). De-dup by
+        # contract_symbol in case one contract was persisted under two key eras.
+        rows: list[ContractRow] = []
+        seen: set[str] = set()
+        for form in fno_underlying_forms(underlying, aliases=resolve_fno_index_aliases()):
+            for row in registry.list_contracts(underlying=form, expiry_date=expiry_date):
+                if row.contract_symbol not in seen:
+                    seen.add(row.contract_symbol)
+                    rows.append(row)
+        return rows
     if kind is not None:
-        names = {inst.symbol_name for inst in select_kind(kind)}
+        # Membership over EVERY form of each selected spot name (superset — the primary
+        # write key, the normalized bridge AND the raw spelling), so aliased/hyphenated
+        # underlyings match their persisted registry key — DEC-PULL-FORENSIC-WAVE2-001.
+        aliases = resolve_fno_index_aliases()
+        names = {
+            form
+            for inst in select_kind(kind)
+            for form in fno_underlying_forms(inst.symbol_name, aliases=aliases)
+        }
         return [row for row in registry.list_contracts() if row.underlying in names]
     if all_cached:
         return registry.list_contracts()
