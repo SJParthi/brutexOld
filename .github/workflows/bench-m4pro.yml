@@ -38,6 +38,17 @@ on:
       - "tests/bench/test_throughput_canary.py"
       - "tests/bench/test_summary_cache_o1.py"
       - "tests/bench/test_m4pro_sweep_walltime.py"
+      # DEC-O1-BENCH-GATE-COMPLETE-001 (M2): the strict 1.1x tier now gates
+      # every Golden-Rule-#5 hot path via a dedicated isolated bench; a change
+      # to any of them must re-run this workflow.
+      - "tests/bench/test_bar_lookup_o1.py"
+      - "tests/bench/test_indicator_lookup_o1.py"
+      - "tests/bench/test_bloom_o1.py"
+      - "tests/bench/test_engine_sweep_cache_o1.py"
+      - "tests/bench/test_engine_combo_mask_o1.py"
+      - "tests/bench/test_engine_results_store_o1.py"
+      - "tests/bench/test_market_structure_o1.py"
+      - "tests/bench/_o1_tiers.py"
       - ".github/workflows/bench-m4pro.yml"
       - "brutex/vocabulary/**"
       - "rust/fno-math/**"
@@ -203,9 +214,50 @@ jobs:
           # BRUTEX_M4PRO_STRICT=1 (job env) tightens every O(1) ratio gate to the
           # decreed 1.1x ceiling (DEC-O1-STRICT-TIER-001) — meaningful only on
           # this quiet self-hosted runner; shared CI keeps the robust 3-10x tier.
+          #
+          # HONEST ENVELOPE (Golden Rule #10) — DORMANCY DISCLOSURE:
+          # THIS strict 1.1x tier is DORMANT until the operator registers the
+          # self-hosted [self-hosted, macos, m4pro] runner (see the header note
+          # + `runs-on:` above). Until then this whole job sits "queued" and
+          # never executes, so the strict 1.1x gate does NOT run on any current
+          # CI. The ACTUALLY-RUNNABLE O(1) gate for EVERY bench below is the
+          # `bench` job in ci.yml, which runs a bare `pytest tests/bench` (the
+          # whole dir) on the shared ubuntu-24.04 runner at the robust ~5x tier
+          # (BRUTEX_M4PRO_STRICT unset -> ratio_ceiling/cache_tier_ceiling return
+          # their 5x default). So a real O(n) regression in any Golden-Rule-#5
+          # hot path is caught on shared CI TODAY; the strict 1.1x is the
+          # tighter second tier that activates once the M4-Pro runner is online.
+          #
+          # DEC-O1-BENCH-GATE-COMPLETE-001 (M2): the strict tier now lists EVERY
+          # Golden-Rule-#5 hot path (CLAUDE.md §2 r5) as a dedicated ISOLATED
+          # ratio gate — previously only LMDB/composite-dedup + the throughput
+          # canary ran under BRUTEX_M4PRO_STRICT=1, so the dedicated bar-lookup,
+          # indicator-lookup, u128 mask-eval, Bloom-probe, sweep-cache-digest,
+          # result-append and BOS/CHoCH benches were gated at the strict 1.1x
+          # ONLY implicitly (via the canary's dict/mask shapes) or not at all.
+          # Listed below:
+          #   (a) bar lookup             -> test_bar_lookup_o1.py
+          #   (b) indicator value        -> test_indicator_lookup_o1.py
+          #   (c) combo dedup (Bloom)    -> test_bloom_o1.py
+          #       combo dedup (digest)   -> test_engine_sweep_cache_o1.py
+          #   (d) strategy mask AND      -> test_engine_combo_mask_o1.py
+          #   (e) result append/get      -> test_engine_results_store_o1.py
+          #   (f) BOS/CHoCH per-bar (56-59) -> test_market_structure_o1.py
+          # Cross-CPU-cache-tier paths (100K-object lookups / 10K-row inserts /
+          # 10K-mask loops) route their strict ceiling through
+          # cache_tier_ceiling() (the DEC-O1-CACHE-TIER-001 measured 3x
+          # allowance) exactly like the canary's 1M-elem paths — the raw 1.1x is
+          # physically unsatisfiable across a cache cliff; hash/compute-dominated
+          # + fixed-window paths (Bloom probe, blake3 digest, BOS/CHoCH ring)
+          # hold the true 1.1x.
           pytest tests/bench/test_store_o1.py tests/bench/test_option_dedup_o1.py \
             tests/bench/test_lmdb_membership_o1.py tests/bench/test_rate_limiter_o1.py \
             tests/bench/test_summary_cache_o1.py \
+            tests/bench/test_bar_lookup_o1.py tests/bench/test_indicator_lookup_o1.py \
+            tests/bench/test_bloom_o1.py tests/bench/test_engine_sweep_cache_o1.py \
+            tests/bench/test_engine_combo_mask_o1.py \
+            tests/bench/test_engine_results_store_o1.py \
+            tests/bench/test_market_structure_o1.py \
             tests/bench/test_throughput_canary.py -q --tb=short -p no:cacheprovider
 
       - name: Print summary

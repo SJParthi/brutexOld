@@ -41,6 +41,16 @@ data "aws_ssm_parameter" "totp_secret" {
   with_decryption = false
 }
 
+# The AWS-managed default SSM key (alias/aws/ssm). Resolved ONLY when
+# allow_ssm_default_key_decrypt is true, so the minter can decrypt Groww creds
+# that were seeded under the default SSM key WITHOUT the operator re-putting them
+# under the custom key. AWS auto-creates this key the first time any SecureString
+# is created in the account, so it exists wherever the two creds already exist.
+data "aws_kms_alias" "ssm" {
+  count = var.allow_ssm_default_key_decrypt ? 1 : 0
+  name  = "alias/aws/ssm"
+}
+
 # --------------------------------------------------------------------------- #
 # Locals — the canonical ARNs the least-privilege IAM policies scope to.
 # --------------------------------------------------------------------------- #
@@ -58,6 +68,14 @@ locals {
   token_param_arn       = "arn:aws:ssm:${local.region}:${local.account_id}:parameter${local.token_param_full_name}"
 
   kms_key_arn = data.aws_kms_key.groww.arn
+
+  # The AWS-managed default SSM key's ARN, resolved only when the ViaService-scoped
+  # decrypt grant is enabled (else null → the extra statement is omitted).
+  ssm_default_key_arn = var.allow_ssm_default_key_decrypt ? data.aws_kms_alias.ssm[0].target_key_arn : null
+
+  # The SSM service principal for the kms:ViaService condition — the grant on the
+  # default SSM key works ONLY when the decrypt is driven through SSM in this region.
+  ssm_via_service = "ssm.${local.region}.amazonaws.com"
 }
 
 # --------------------------------------------------------------------------- #
@@ -80,18 +98,22 @@ resource "aws_ssm_parameter" "access_token" {
 }
 
 # --------------------------------------------------------------------------- #
-# Lambda package — the handler PLUS its third-party runtime deps (growwapi +
-# pyotp), bundled so the deployed Lambda actually IMPORTS at runtime.
+# Lambda package — the handler PLUS its ONE third-party runtime dep (pyotp),
+# bundled so the deployed Lambda actually IMPORTS at runtime.
 #
-# boto3 is already on the AWS-provided Lambda Python runtime, but growwapi +
-# pyotp are NOT — without them the handler's lazy `import pyotp` / `from growwapi
-# import GrowwAPI` would ImportError on the first real mint. So a build step
-# `pip install`s the two into a staging dir, copies the handler source alongside,
-# and `archive_file` zips the whole staging tree into the deploy zip.
+# boto3 is already on the AWS-provided Lambda Python runtime, but pyotp is NOT —
+# without it the handler's lazy `import pyotp` (TOTP computation) would
+# ImportError on the first real mint. So a build step `pip install`s pyotp into a
+# staging dir, copies the handler source alongside, and `archive_file` zips the
+# whole staging tree into the deploy zip. pyotp is a pure-Python UNIVERSAL wheel
+# (py3-none-any, zero deps), so the bundle has ZERO platform-specific artifacts
+# and builds with NO Docker (DEC-MINTER-PURE-PYTHON-001, MIGRATION.md #1069). The
+# token mint is a pure-stdlib HTTPS POST in handler.py, so growwapi (and its
+# heavy native-extension transitive tree) is NOT bundled.
 #
 # `build_lambda_package.sh` is the ONE source of the packaging steps (also run
 # by `deploy.sh` before apply). The `null_resource` re-runs it whenever the
-# handler source or the pinned dep versions change (the `triggers` hashes), and
+# handler source or the pinned pyotp version changes (the `triggers` hashes), and
 # the `archive_file` depends on it so the zip always contains a fresh build.
 # --------------------------------------------------------------------------- #
 
@@ -104,17 +126,16 @@ resource "null_resource" "build_lambda_package" {
     handler_sha  = filesha256("${path.module}/handler.py")
     init_sha     = filesha256("${path.module}/__init__.py")
     build_sha    = filesha256("${path.module}/build_lambda_package.sh")
-    dep_versions = "${var.growwapi_version}|${var.pyotp_version}"
+    dep_versions = var.pyotp_version
   }
 
   provisioner "local-exec" {
     command     = "bash build_lambda_package.sh"
     working_dir = path.module
     environment = {
-      BUILD_DIR        = local.lambda_build_dir
-      GROWWAPI_VERSION = var.growwapi_version
-      PYOTP_VERSION    = var.pyotp_version
-      LAMBDA_RUNTIME   = var.lambda_runtime
+      BUILD_DIR      = local.lambda_build_dir
+      PYOTP_VERSION  = var.pyotp_version
+      LAMBDA_RUNTIME = var.lambda_runtime
     }
   }
 }
@@ -167,13 +188,35 @@ data "aws_iam_policy_document" "minter" {
     resources = [local.token_param_arn]
   }
 
-  # KMS: decrypt the cred SecureStrings on read + encrypt the token on write —
-  # scoped to the ONE existing key.
+  # KMS on the CUSTOM key: encrypt/decrypt the token param on write (it is created
+  # under this key) + decrypt any cred already stored under this key — scoped to the
+  # ONE custom key. UNCONDITIONAL (always present).
   statement {
     sid       = "DecryptEncryptWithGrowwKey"
     effect    = "Allow"
     actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
     resources = [local.kms_key_arn]
+  }
+
+  # KMS on the DEFAULT SSM key (alias/aws/ssm): decrypt-ONLY, and ONLY via SSM
+  # (the kms:ViaService condition), so the minter can read Groww creds that were
+  # seeded under the default SSM key WITHOUT the operator re-putting them under the
+  # custom key. Present only when allow_ssm_default_key_decrypt is true. This grants
+  # nothing beyond what the aws/ssm key's own AWS-managed policy already permits any
+  # in-account principal to do THROUGH SSM — it just scopes the minter to that path.
+  dynamic "statement" {
+    for_each = var.allow_ssm_default_key_decrypt ? [1] : []
+    content {
+      sid       = "DecryptCredsViaSsmDefaultKey"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = [local.ssm_default_key_arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = [local.ssm_via_service]
+      }
+    }
   }
 
   # Emit the TokenMintSuccess metric. PutMetricData does not support
@@ -232,16 +275,25 @@ resource "aws_lambda_function" "minter" {
   timeout       = var.lambda_timeout_seconds
   memory_size   = var.lambda_memory_mb
 
-  # SERIALIZE overlapping invocations. A scheduled mint and a manual on-demand
-  # invoke can otherwise run concurrently and race the token PutParameter:
-  # mint(T1) -> mint(T2) -> put(T2) -> put(T1) persists the OLDER token T1. If
-  # Groww invalidates the older session on a re-mint (UNVERIFIED, see ADR-0014
-  # §3), readers would then auth-fail on the stale T1 until the next daily mint.
-  # `reserved_concurrent_executions = 1` guarantees at most one invocation runs
-  # at a time, so the two writes are strictly ordered (last-write-wins over a
-  # SINGLE serialized writer is always the newest token) — this makes the Groww
-  # session-model question moot for this stack (ADR-0014 §3).
-  reserved_concurrent_executions = 1
+  # OPTIONAL single-writer hardening. Setting this to 1 SERIALIZES overlapping
+  # invocations: a scheduled mint and a manual on-demand invoke can otherwise run
+  # concurrently and race the token PutParameter — mint(T1) -> mint(T2) -> put(T2)
+  # -> put(T1) persists the OLDER token T1. If Groww invalidates the older session
+  # on a re-mint (UNVERIFIED, see ADR-0014 §3), readers would then auth-fail on the
+  # stale T1 until the next daily mint. `reserved_concurrent_executions = 1`
+  # guarantees at most one invocation runs at a time, so the two writes are strictly
+  # ordered (last-write-wins over a SINGLE serialized writer is always the newest
+  # token) — making the Groww session-model question moot (ADR-0014 §3).
+  #
+  # DEFAULT is -1 (UNRESERVED — the setting is omitted) so the stack applies on a
+  # FRESH account whose total Lambda concurrency is the default 10: reserving any
+  # would leave < 10 unreserved and AWS rejects it (InvalidParameterValueException).
+  # -1 is SAFE here — the minter is the SOLE token writer, a daily single-shot cron,
+  # and its SSM write is idempotent last-writer-wins — so a concurrent double-mint is
+  # both unlikely and harmless (both write a valid fresh token). Set
+  # `-var 'lambda_reserved_concurrency=1'` to opt into the strict serialization when
+  # the account has concurrency headroom. See variables.tf for the full rationale.
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
 
   filename         = data.archive_file.minter.output_path
   source_code_hash = data.archive_file.minter.output_base64sha256
