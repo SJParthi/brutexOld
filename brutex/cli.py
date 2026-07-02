@@ -453,6 +453,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
 
+    # ── reopen-skipped (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — un-cement settles ──
+    reopen_skipped = sub.add_parser(
+        "reopen-skipped",
+        help=(
+            "Re-open SKIPPED (settled no-data) pull windows so the next pull "
+            "re-verifies them — the un-cement path for windows a vendor "
+            "soft-throttle / mis-addressed request may have faked empty"
+        ),
+    )
+    reopen_skipped.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    reopen_skipped.add_argument(
+        "--symbol",
+        default=None,
+        help="Only windows of this symbol / contract groww_symbol (default: any)",
+    )
+    reopen_skipped.add_argument(
+        "--market",
+        default=None,
+        help="Only this ledger namespace (e.g. groww / groww-option / groww-future; default: any)",
+    )
+    reopen_skipped.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Bound the re-open to the first N matching windows (default: all matching)",
+    )
+
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
@@ -1345,6 +1377,57 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
     print(
         f"[brutex] catalog reconcile — partitions={result.partitions_reconciled} "
         f"bars={result.bars_total} skipped={result.skipped} (lake={resolved})"
+    )
+    return EXIT_OK
+
+
+def cmd_reopen_skipped(
+    *,
+    lake_root: Path | None,
+    symbol: str | None,
+    market: str | None,
+    limit: int | None,
+) -> int:
+    """Re-open ``SKIPPED`` (settled no-data) ledger windows for re-verification.
+
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the operator "re-open windows" action
+    the divergence register's R2 fix demands: a ``SKIPPED`` settle is no longer
+    permanent-forever. Loads the durable window ledger, demotes every matching
+    ``SKIPPED`` row to a retryable ``FAILED`` (``empty_streak`` reset — the next
+    pull re-fetches it with the FULL fresh confirmation budget, under the
+    mass-empty breaker's guard), and persists the ledger atomically. DATA-SAFE:
+    stored lake bars are untouched; the idempotent keep-first sink absorbs the
+    re-fetch (Golden Rule #7). ``--symbol`` / ``--market`` scope the selection;
+    ``--limit`` bounds it (the bounded-sample re-verify).
+    """
+    from brutex.data.window_ledger_store import (
+        ledger_path,
+        load_window_ledger,
+        save_window_ledger,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    if not ledger_path(resolved).is_file():
+        print(
+            f"[brutex] no window ledger found at {ledger_path(resolved)} — nothing to re-open "
+            "(run a pull first, or pass the right --lake-root).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    ledger = load_window_ledger(resolved)
+    reopened = ledger.reopen_skipped(market=market, security_id=symbol, limit=limit)
+    if reopened == 0:
+        print(
+            "[brutex] reopen-skipped — 0 windows matched (nothing was SKIPPED under "
+            f"symbol={symbol or 'any'} market={market or 'any'}); ledger unchanged."
+        )
+        return EXIT_OK
+    save_window_ledger(ledger, resolved)
+    print(
+        f"[brutex] reopen-skipped — re-opened {reopened} window(s) "
+        f"(symbol={symbol or 'any'} market={market or 'any'} limit={limit or 'all'}). "
+        "Re-pull to re-verify them; genuinely-empty windows re-settle honestly, "
+        "throttle-poisoned ones recover their data."
     )
     return EXIT_OK
 
@@ -2524,6 +2607,13 @@ def cmd_fetch(
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
 
+    # The pull-wide global stops that HALT every remaining window (disk-full/OOM, a
+    # quota stop, or a tripped mass-empty circuit breaker) — distinct from a per-symbol
+    # quarantine. Mirrors the ingest spine's `_GLOBAL_STOP_ERRORS` carve-out
+    # (DEC-LAKE-WRITE-HALT-001 / quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001); each
+    # fires a best-effort CRITICAL Telegram pull-halt alert then re-raises
+    # (DEC-TELEGRAM-PULL-HALT-001).
+    from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
     from brutex.adapters.groww.pull_pipeline import (
         build_fetch_pipeline,
@@ -2550,11 +2640,12 @@ def cmd_fetch(
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
     from brutex.universe import BRUTE_FORCE_INDICES
 
-    # The pull-wide global stops that HALT every remaining window (disk-full/OOM, or a
-    # quota stop) — distinct from a per-symbol quarantine. Mirrors the ingest spine's
-    # `_GLOBAL_STOP_ERRORS` carve-out (DEC-LAKE-WRITE-HALT-001 / quota); each fires a
-    # best-effort CRITICAL Telegram pull-halt alert then re-raises (DEC-TELEGRAM-PULL-HALT-001).
-    _pull_halt_errors = (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError)
+    _pull_halt_errors = (
+        LakeWriteHalt,
+        DailyQuotaExceeded,
+        QuotaInvariantError,
+        MassEmptySettleHalt,
+    )
 
     resolved = _resolve_lake_root(lake_root)
     try:
@@ -5086,6 +5177,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.catalog_command != "reconcile":
             parser.error(f"unknown catalog subcommand: {args.catalog_command}")
         return cmd_catalog_reconcile(lake_root=args.lake_root)
+    if args.command == "reopen-skipped":
+        return cmd_reopen_skipped(
+            lake_root=args.lake_root,
+            symbol=args.symbol,
+            market=args.market,
+            limit=args.limit,
+        )
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
         if args.auth_command == "set":
             return cmd_auth_set()

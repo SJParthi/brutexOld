@@ -49,6 +49,11 @@ if TYPE_CHECKING:
     from brutex.adapters.ingest_common import RetryOutcome
     from brutex.orchestrator.audit import AuditWriter
 
+from brutex.adapters.empty_circuit_breaker import (
+    EmptySettleBreaker,
+    MassEmptySettleHalt,
+    resolve_empty_breaker,
+)
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
@@ -77,10 +82,15 @@ from brutex.orchestrator.universe_phases import RunParallel
 #: instead of being quarantined per-symbol (which would keep hammering a full disk).
 #: This is the carve-out that keeps the broad ``BruteXError`` per-symbol quarantine
 #: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
+#: ``MassEmptySettleHalt`` joins it (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a tripped
+#: mass-empty circuit breaker means EVERY remaining window is fetching into the same
+#: suspected soft-throttle / mis-addressing episode — settling on would poison the
+#: ledger pull-wide, so the pull halts loudly instead of quarantining one symbol.
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
+    MassEmptySettleHalt,
 )
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
@@ -270,6 +280,7 @@ def run_groww_spot_ingest(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -348,6 +359,17 @@ def run_groww_spot_ingest(
         byte-identical path. Mutually independent of *write_pool* (a caller would wire ONE or
         the other; the pipeline subsumes the write-only decouple). The caller OWNS the
         pipeline's lifetime and MUST :meth:`drain` it BEFORE saving the window ledger.
+    empty_breaker
+        Optional :class:`~brutex.adapters.empty_circuit_breaker.EmptySettleBreaker`
+        (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). ``None`` (the default — every
+        production caller) constructs a FRESH env-configured breaker for THIS pass via
+        :func:`~brutex.adapters.empty_circuit_breaker.resolve_empty_breaker`, so the
+        mass-empty guard is ON by default and its state can never leak across
+        pulls/passes. The ONE breaker is threaded into every pair's window workers
+        (pull-wide counting — a soft-throttle episode spans symbols); a trip raises
+        :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`, a
+        :data:`_GLOBAL_STOP_ERRORS` member — the whole pull halts loudly. Tests inject
+        a configured instance.
 
     Returns
     -------
@@ -355,6 +377,10 @@ def run_groww_spot_ingest(
         Per-pair :class:`IngestReport` for successes + the quarantined failures.
     """
     pull_id = current_pull_id()
+    # One breaker per PASS (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): resolved here — not
+    # inside ingest_spot — so ALL pairs of this pass share ONE counter (a vendor
+    # soft-throttle hits every symbol) and a fresh pass/pull always starts clean.
+    breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): when a write pool is wired, route
     # every sink.append through it so the O(month-depth) lake write runs on a background
     # shard worker, freeing the fetch connection to keep fetching. `write_pool=None`
@@ -422,6 +448,7 @@ def run_groww_spot_ingest(
                 on_window=on_window,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                empty_breaker=breaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -609,6 +636,7 @@ def run_groww_spot_ingest_with_retry(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -642,6 +670,12 @@ def run_groww_spot_ingest_with_retry(
     background consumer pool. ``None`` (default) keeps the fully-synchronous path. The
     caller drains it ONCE at pull end (after the LAST pass), so every queued window is
     processed + ledger-recorded before the final ledger flush.
+
+    *empty_breaker* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) is forwarded verbatim to
+    every pass. The production ``None`` makes EACH pass resolve its own fresh
+    env-configured breaker (per-pass counting; no state leak across passes or pulls);
+    a trip raises :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`
+    out of this function — the pull-wide halt, never a retryable residual.
 
     Returns
     -------
@@ -677,6 +711,7 @@ def run_groww_spot_ingest_with_retry(
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
             detect_completeness_gaps=detect_completeness_gaps,
+            empty_breaker=empty_breaker,
         )
 
     report = _one_pass()

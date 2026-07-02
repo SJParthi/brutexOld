@@ -65,6 +65,11 @@ from time import sleep as _time_sleep
 
 import structlog
 
+from brutex.adapters.empty_circuit_breaker import (
+    EmptySettleBreaker,
+    MassEmptySettleHalt,
+    resolve_empty_breaker,
+)
 from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClientProtocol
 from brutex.adapters.groww.constants import (
@@ -159,10 +164,14 @@ _MAX_BACKOFF_S: float = 8.0
 #: remaining contract identically and must halt, not quarantine per-contract. This
 #: keeps the broad ``BruteXError`` per-contract quarantine
 #: (DEC-GROWW-QUARANTINE-BRUTEX-001) from swallowing a pull-wide stop.
+#: ``MassEmptySettleHalt`` joins it (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a tripped
+#: mass-empty circuit breaker means every remaining contract is fetching into the
+#: same suspected soft-throttle / mis-addressing episode — halt, don't settle.
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
+    MassEmptySettleHalt,
 )
 
 #: One unit of OUTER-loop work for the parallel fan-out: a derivative
@@ -325,6 +334,7 @@ def ingest_option_contract(
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     on_raw_payload: RawPayloadHook | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -471,13 +481,26 @@ def ingest_option_contract(
             )
             empty_backoff(empty_attempt)
 
+    # Mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the spot-spine
+    # twin): feed this contract window's final fetch shape to the per-pull breaker. A
+    # final-empty window counts toward both trip rules; a trip RAISES MassEmptySettleHalt
+    # on this producer thread, which propagates as a GLOBAL stop (the pull halts loudly;
+    # the tripping window is never recorded, so it stays retryable). Observed BEFORE the
+    # fast-settle math so a poisoned window can never settle on the tripping call.
+    if empty_breaker is not None:
+        series = f"{contract.symbol}:{interval}"
+        if raw_bars:
+            empty_breaker.observe_data(series)
+        else:
+            empty_breaker.observe_empty(series, symbol=contract.symbol, window_end=clamped_end)
     # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001 — the spot-spine twin): an EMPTY
     # window confirmed empty ACROSS an in-pull retry (``fetch_count >= 2``) AND OLD enough
     # that vendor data can never appear (``clamped_end`` strictly before ``old_cutoff``) is a
     # PERMANENT gap (an expired contract's dead period) → settle SKIPPED in ONE pull. A RECENT
     # empty window (or one not re-hit) keeps the conservative across-pull EMPTY streak.
-    # Computed on the PRODUCER from the pure fetch facts so the consumer tail records the same
-    # byte-identical ``settle_empty`` it would have synchronously.
+    # Computed on the PRODUCER from the pure fetch facts; the tail RE-CHECKS the breaker at
+    # record time (``allow_settle``), so a settle computed here but recorded after a trip is
+    # still suppressed (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
     confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
     is_old = clamped_end < old_cutoff
     settle_empty = confirmed_empty_after_retry and is_old
@@ -500,6 +523,7 @@ def ingest_option_contract(
             on_success=on_success,
             pull_id=pull_id,
             fields=fields,
+            empty_breaker=empty_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED IngestReport immediately and re-paces + fetches the
@@ -522,6 +546,7 @@ def ingest_option_contract(
             on_success=on_success,
             pull_id=pull_id,
             fields=fields,
+            empty_breaker=empty_breaker,
         )
         if result_report.still_failed_windows:
             # A tail-side PartitionLockTimeout DEFERRED this contract window (a wedged peer held
@@ -580,6 +605,7 @@ def _process_option_window_tail(
     on_success: Callable[[], None] | None,
     pull_id: str,
     fields: dict[str, str],
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> IngestReport:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -603,7 +629,14 @@ def _process_option_window_tail(
     key = raw.key
     raw_bars = raw.raw_bars
     fetch_count = raw.fetch_count
-    settle_empty = raw.settle_empty
+    # Breaker re-check at RECORD time (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): once the
+    # pull's mass-empty breaker trips, NO further window may settle SKIPPED — including a
+    # settle computed on the producer before the trip but recorded after it (an
+    # async-pipeline queued tail / a sibling in-flight worker). The suppressed empty is
+    # recorded UNTRUSTED (EMPTY, no streak bump — ``suppress_settle``): fully retryable,
+    # no poisoned progress toward the across-pull promotion.
+    suppress_settle = empty_breaker is not None and not empty_breaker.allow_settle()
+    settle_empty = raw.settle_empty and not suppress_settle
     attempt = raw.attempt
     bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
     # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
@@ -687,6 +720,7 @@ def _process_option_window_tail(
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
+            suppress_settle=suppress_settle,
         )
     # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): for a FUTURES window only (options are
     # excluded — sparsity near expiry is indistinguishable from truncation), WARN if its
@@ -1263,6 +1297,31 @@ def reconcile_fno_ledger_with_lake(
     )
 
 
+def _deep_strike_expected_empty(
+    empty_retry_by_symbol: Mapping[str, int] | None,
+    full_budget: int,
+) -> Callable[[str, date], bool] | None:
+    """The breaker's expected-empty predicate from the confirmed-deep strike budget.
+
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 (register rule 4 — "use existing knowledge
+    if available"): a contract whose in-pull EMPTY-retry budget was REDUCED below
+    the full *full_budget* is a confirmed-deep far-OTM strike
+    (:func:`~brutex.adapters.groww.strike_chain_bound.build_empty_retry_budget`) —
+    the pull already PROVED it sits far outside the chain's traded band, so its
+    empty windows are expected and must not count toward a mass-empty trip.
+    ``None`` when no budget map is wired (nothing is provable — count everything,
+    the honest default). Pure + **O(1)** per probe (one dict get).
+    """
+    if empty_retry_by_symbol is None:
+        return None
+    budget = empty_retry_by_symbol
+
+    def _expected(symbol: str, _window_end: date) -> bool:
+        return budget.get(symbol, full_budget) < full_budget
+
+    return _expected
+
+
 def run_groww_option_ingest(
     client: GrowwClientProtocol,
     sink: BarSink,
@@ -1289,6 +1348,7 @@ def run_groww_option_ingest(
     capture_hook_factory: CaptureHookFactory | None = None,
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1393,6 +1453,24 @@ def run_groww_option_ingest(
     byte-identical path. The caller OWNS the pipeline's lifetime and MUST :meth:`drain` it
     BEFORE saving the window ledger.
 
+    *empty_breaker* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): ``None`` (the default —
+    every production caller) resolves a FRESH env-configured
+    :class:`~brutex.adapters.empty_circuit_breaker.EmptySettleBreaker` for THIS pass,
+    shared by every contract's window fetches, so a mass clean-empty burst (a vendor
+    soft-throttle [R2] / mis-addressed chain [R3]) RAISES
+    :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt` — a
+    :data:`_GLOBAL_STOP_ERRORS` member: the pull halts loudly instead of settling
+    poisoned windows ``SKIPPED``. Per-pass construction means breaker state can never
+    leak across pulls. Tests inject a configured instance. An expired-options chain
+    legitimately contains many all-empty deep strikes, so the PROVABLE expected-empty
+    knowledge the pull already computes — the confirmed-deep far-OTM set behind
+    *empty_retry_by_symbol* — is threaded into the resolved breaker's
+    ``expected_empty`` predicate (those windows are observed, never counted; the
+    register's "use existing knowledge" rule). In-band strikes still count, so a
+    whole-chain empty burst (the proven M&M-``&`` shape) still trips (Golden
+    Rule #10: the residual false-positive budget on genuinely-illiquid in-band
+    chains rides on the env-tunable thresholds, not a silent exclusion).
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -1400,6 +1478,19 @@ def run_groww_option_ingest(
         the quarantined failures.
     """
     pull_id = current_pull_id()
+    # One breaker per PASS (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): resolved here — not
+    # per contract — so ALL contracts of this pass share ONE counter and a fresh
+    # pass/pull always starts clean. The confirmed-deep far-OTM strike set (the
+    # reduced-budget keys of *empty_retry_by_symbol*) is PROVABLE expected-empty
+    # knowledge, threaded as the breaker's exclusion predicate so a legitimately
+    # dead deep chain never masquerades as a throttle.
+    breaker = (
+        empty_breaker
+        if empty_breaker is not None
+        else resolve_empty_breaker(
+            expected_empty=_deep_strike_expected_empty(empty_retry_by_symbol, empty_retry_attempts)
+        )
+    )
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
     # the background pool when wired, freeing the fetch connection from the serial
     # O(month-depth) write. `write_pool=None` leaves `sink` untouched (byte-identical).
@@ -1488,6 +1579,7 @@ def run_groww_option_ingest(
                 market=market,
                 on_raw_payload=contract_hook,
                 fetch_pipeline=fetch_pipeline,
+                empty_breaker=breaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}

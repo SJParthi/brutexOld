@@ -18,6 +18,7 @@ settled ``SKIPPED``). The token-lifecycle + options seams stay on ``dhan`` (J4c)
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -2216,3 +2217,81 @@ class TestEmitPullPoolSize:
         failed = [e for e in logs if e.get("event") == "pull.pool_size_emit_failed"]
         assert len(failed) == 1
         assert failed[0]["pull_id"] == "pull-boom"
+
+
+class TestMassEmptyCircuitBreaker:
+    """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the bulk pull's mass-empty halt + honest verdicts."""
+
+    def test_trip_halts_bulk_pull_with_needs_operator_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An all-empty vendor (the R2 soft-throttle shape) with a 2-consecutive breaker
+        # (env-injected — the DYNAMIC config seam): the 1day phase trips after two
+        # confirmed-empty windows → the pull HALTS with the loud, needs-operator
+        # mass_empty_halt verdict naming the counts, the minute phase is SKIPPED (the
+        # global-stop guard), and the windows settled before the trip are surfaced.
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_CONSECUTIVE", "2")
+        # A single-symbol pull is one series per phase — arm the gate at 1 for the
+        # test (production's 3-series default is what keeps a lone dead symbol from
+        # halting a pull; pinned in test_empty_circuit_breaker.py).
+        monkeypatch.setenv("BRUTEX_EMPTY_BREAKER_MIN_SERIES", "1")
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+        )
+        verdict = report.verdict
+        assert verdict.kind == "mass_empty_halt"
+        assert verdict.needs_operator is True
+        assert report.mass_empty_cause is not None
+        # The halt's own count-naming message is relayed verbatim into the action
+        # (exact counts vary with worker completion order under the real pool — the
+        # in-flight workers keep raising once tripped, which is the design).
+        assert re.search(r"\d+ of \d+ fetched windows", verdict.action)
+        assert "reopen-skipped" in verdict.action  # the re-verify path
+        # Whether a window settled BEFORE the trip depends on worker completion order
+        # under the real pool (after the trip the record-time suppression blocks every
+        # settle — pinned deterministically at the spine level). The invariant here is
+        # HONESTY: any settle that did land is counted AND named on the verdict.
+        if report.settled_skipped:
+            assert f"{report.settled_skipped} window(s)" in verdict.action
+        assert report.to_dict()["verdict"]["kind"] == "mass_empty_halt"
+
+    def test_below_threshold_settles_produce_loud_verdict_not_silence(self, tmp_path: Path) -> None:
+        # Mixed real+empty BELOW the default thresholds (the register's "mixed" case):
+        # the pull completes — but because windows were permanently settled SKIPPED,
+        # the verdict must SAY so (count + how to re-verify), never a bare
+        # "No action needed" (honest-verdict requirement 3).
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
+            adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
+        )
+        verdict = report.verdict
+        assert verdict.kind == "clean"  # completes — no halt, no failure
+        assert report.settled_skipped > 0  # the old 1day empties fast-settled
+        assert f"{report.settled_skipped} window(s)" in verdict.action
+        assert "reopen-skipped" in verdict.action
+        assert verdict.action != "No action needed."
+        assert verdict.to_dict()["settled_skipped"] == report.settled_skipped
+
+    def test_no_settles_keeps_clean_verdict_byte_identical(self, tmp_path: Path) -> None:
+        # A pull that settles nothing keeps the exact prior clean verdict — the
+        # honesty note appears ONLY when settles happened.
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert report.verdict.kind == "clean"
+        assert report.settled_skipped == 0
+        assert report.verdict.action == "No action needed."

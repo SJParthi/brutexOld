@@ -216,6 +216,14 @@ class WindowLedger:
     )
     _threshold: int = EMPTY_TERMINAL_THRESHOLD
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    #: Windows NEWLY settled ``SKIPPED`` by THIS ledger instance (DEC-EMPTY-WINDOW-
+    #: CIRCUIT-BREAKER-001 — honest-verdict requirement). A ledger instance is loaded
+    #: fresh per pull (``begin_pull_ledger``), so this counts the CURRENT pull's
+    #: settles across every path that can produce one (the old-gap fast-settle, the
+    #: across-pull EMPTY-streak promotion, the bounded degraded-settle, and
+    #: :meth:`settle_known_gap`) — a re-record of an already-``SKIPPED`` row never
+    #: double-counts. NOT serialised (a per-run tally, not history).
+    _settled_skipped_count: int = field(default=0, repr=False)
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -315,6 +323,7 @@ class WindowLedger:
         settle_empty: bool = False,
         degraded: bool = False,
         degraded_reason: str | None = None,
+        suppress_settle: bool = False,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -367,6 +376,17 @@ class WindowLedger:
         demotion only RE-OPENS the window for completion, never deletes data. ``degraded``
         is IGNORED for a ``FAILED`` (already re-pullable) or an ``EMPTY`` (no bars to be
         incomplete); the default ``False`` is byte-identical to the prior behaviour.
+
+        *suppress_settle* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) marks an ``EMPTY``
+        outcome as **UNTRUSTED** — recorded while the pull's mass-empty circuit
+        breaker is TRIPPED (a suspected vendor soft-throttle [R2] / mis-addressing
+        [R3] episode, when a clean-empty 200 is NOT evidence of no-data). The window
+        is recorded ``EMPTY`` (retryable, honest about what the vendor returned) but
+        its ``empty_streak`` is PRESERVED (not bumped — a suspect empty must not step
+        the window toward the across-pull ``SKIPPED`` promotion) and it can NEVER
+        settle ``SKIPPED`` on this record (both the fast-settle and the streak
+        promotion are gated off). IGNORED for ``SUCCESS`` / ``FAILED`` / degraded
+        outcomes; the default ``False`` is byte-identical to the prior behaviour.
         """
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
@@ -397,7 +417,11 @@ class WindowLedger:
             #     only ever settle a window seen genuinely EMPTY ``_threshold`` times.
             prior_streak = prior.empty_streak if prior is not None else 0
             if classified == EMPTY:
-                empty_streak = prior_streak + 1
+                # An UNTRUSTED empty (the pull's mass-empty breaker is tripped —
+                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) preserves the streak: a
+                # throttle-shaped empty is NOT evidence of no-data, so it must not
+                # step the window toward the across-pull SKIPPED promotion.
+                empty_streak = prior_streak if suppress_settle else prior_streak + 1
             elif degraded_success:
                 # A demoted-SUCCESS (interior gap / truncation) re-pull is BOUNDED: bump the
                 # streak so it settles SKIPPED at the threshold, exactly like a genuine EMPTY,
@@ -413,19 +437,26 @@ class WindowLedger:
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
                 # been warned each time; the stored bars are kept).
                 status = SKIPPED
-            elif classified == EMPTY and settle_empty:
+            elif classified == EMPTY and settle_empty and not suppress_settle:
                 # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
                 # empty window OLD enough that vendor data can never appear is a PERMANENT
                 # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold
                 # so the persisted row is identical to a normal across-pull settle. Only
                 # ever reached for EMPTY (a SUCCESS/FAILED ignores the hint), so it can
                 # never mask a window with data. RECENT windows (settle_empty False) keep
-                # the conservative across-pull streak below.
+                # the conservative across-pull streak below. GATED OFF while the pull's
+                # mass-empty breaker is tripped (suppress_settle — a throttle-shaped
+                # empty must never cement, DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
                 empty_streak = self._threshold
                 status = SKIPPED
-            elif classified == EMPTY and empty_streak >= self._threshold:
+            elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
+            if status == SKIPPED and (prior is None or prior.status != SKIPPED):
+                # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): count every
+                # window THIS instance newly settles SKIPPED, whatever the path (fast-settle,
+                # streak promotion, degraded accept-gap) — the verdict must SAY it.
+                self._settled_skipped_count += 1
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
                 security_id=key.security_id,
@@ -461,6 +492,10 @@ class WindowLedger:
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             bars = prior.bars if prior is not None else 0
             empty_streak = prior.empty_streak if prior is not None else 0
+            if prior is None or prior.status != SKIPPED:
+                # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a known-gap
+                # settle is a newly-SKIPPED window too — the verdict must SAY it.
+                self._settled_skipped_count += 1
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
                 security_id=key.security_id,
@@ -477,6 +512,80 @@ class WindowLedger:
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
             )
             return SKIPPED
+
+    @property
+    def newly_settled_skipped(self) -> int:
+        """Windows newly settled ``SKIPPED`` by THIS instance (per-pull) — **O(1)**.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 (honest verdicts): a pull that settled
+        ANY window as terminal ``SKIPPED`` must SAY so — the verdict layer reads this
+        after the pull and appends the count + the ``brutex reopen-skipped``
+        re-verify hint. Counts only prior-status transitions (a re-record of an
+        already-``SKIPPED`` row never double-counts), across every settle path.
+        """
+        with self._lock:
+            return self._settled_skipped_count
+
+    def reopen_skipped(
+        self,
+        *,
+        market: str | None = None,
+        security_id: str | None = None,
+        limit: int | None = None,
+        reason: str = "REOPENED",
+    ) -> int:
+        """Re-open ``SKIPPED`` windows for re-verification — returns the count re-opened.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 (un-cementable settles, register R2 fix:
+        "make SKIPPED reversible via an operator re-open action"). Every matching
+        ``SKIPPED`` row is demoted to ``FAILED`` with ``empty_streak`` RESET to 0 and
+        *reason* stamped as ``last_error`` — so :meth:`is_skippable` turns ``False``
+        and the next pull re-fetches it with the FULL fresh confirmation budget (a
+        genuinely-empty window re-settles honestly on that pull, now under the
+        breaker's guard; a throttle-poisoned one recovers its data). ``bars`` /
+        ``attempts`` / ``first_seen_at`` / ``last_attempt_at`` are preserved (no
+        fetch happened here); the stored lake bars are untouched (the idempotent
+        keep-first sink absorbs the re-fetch) — re-opening is always DATA-SAFE.
+
+        *market* / *security_id* filter the selection (``None`` = any); *limit*
+        bounds it to the FIRST *limit* rows in the deterministic
+        (market, symbol, interval, start, end) sort order — the bounded-sample
+        re-verify path. Each re-open is an **O(1)** row swap; the selection scan is
+        O(rows) once per operator action (the ``prune_superseded`` envelope, never
+        the per-window hot path). Idempotent: re-running re-opens nothing new
+        (``FAILED`` rows no longer match).
+        """
+        doomed: list[tuple[str, str, str, str, str]] = []
+        with self._lock:
+            for wk in sorted(self._by_window):
+                row = self._by_window[wk]
+                if row.status != SKIPPED:
+                    continue
+                if market is not None and row.market != market:
+                    continue
+                if security_id is not None and row.security_id != security_id:
+                    continue
+                if limit is not None and len(doomed) >= limit:
+                    break
+                doomed.append(wk)
+            for wk in doomed:
+                row = self._by_window[wk]
+                self._by_window[wk] = WindowLedgerRecord(
+                    market=row.market,
+                    security_id=row.security_id,
+                    interval=row.interval,
+                    window_start=row.window_start,
+                    window_end=row.window_end,
+                    status=FAILED,
+                    bars=row.bars,
+                    attempts=row.attempts,
+                    last_error=reason,
+                    first_seen_at=row.first_seen_at,
+                    last_attempt_at=row.last_attempt_at,
+                    empty_streak=0,
+                    in_pull_fetches=row.in_pull_fetches,
+                )
+        return len(doomed)
 
     def prune_superseded(
         self, planned_tiles: Mapping[tuple[str, str, str], Mapping[str, str]]

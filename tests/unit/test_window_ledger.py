@@ -823,3 +823,192 @@ class TestStreakTotal:
         assert ledger.streak_total() == 1
         ledger.record(k, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)  # SUCCESS
         assert ledger.streak_total() == 0
+
+
+class TestSuppressSettle:
+    """`record(suppress_settle=True)` — the UNTRUSTED empty (breaker tripped)."""
+
+    def test_suppressed_empty_never_fast_settles(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+            suppress_settle=True,
+        )
+        assert status == EMPTY  # NOT SKIPPED — the fast-settle is gated off
+        assert not ledger.is_skippable(_key())
+        assert ledger.records()[0].empty_streak == 0  # streak preserved, not bumped
+
+    def test_suppressed_empty_preserves_streak(self) -> None:
+        # Two genuine empties first (streak 2, one short of the threshold)…
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.records()[0].empty_streak == 2
+        # …then a throttle-shaped (suppressed) empty: streak stays 2 and the
+        # would-be threshold promotion does NOT fire.
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            suppress_settle=True,
+        )
+        assert status == EMPTY
+        assert ledger.records()[0].empty_streak == 2
+        assert not ledger.is_skippable(_key())
+
+    def test_suppress_ignored_for_success(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            suppress_settle=True,
+        )
+        assert status == SUCCESS  # a data-bearing window settles normally
+
+    def test_unsuppressed_threshold_promotion_still_fires(self) -> None:
+        # Sanity: WITHOUT suppression the third genuine empty promotes to SKIPPED.
+        ledger = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == SKIPPED
+
+
+class TestNewlySettledSkipped:
+    """The per-instance settled-SKIPPED tally (honest-verdict source)."""
+
+    def test_fast_settle_counts(self) -> None:
+        ledger = WindowLedger()
+        assert ledger.newly_settled_skipped == 0
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, settle_empty=True
+        )
+        assert ledger.newly_settled_skipped == 1
+
+    def test_threshold_promotion_counts_once(self) -> None:
+        ledger = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.newly_settled_skipped == 1  # only the promoting record counts
+
+    def test_known_gap_settle_counts_and_resettle_does_not(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert ledger.newly_settled_skipped == 1
+        ledger.settle_known_gap(_key(), now=_LATER, reason="DH-905")  # idempotent re-settle
+        assert ledger.newly_settled_skipped == 1  # no transition — not double-counted
+
+    def test_success_and_failed_do_not_count(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        ledger.record(
+            _key("BANKNIFTY"), raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=_NOW
+        )
+        assert ledger.newly_settled_skipped == 0
+
+    def test_fresh_instance_starts_at_zero(self) -> None:
+        # The tally is per-instance (per-pull): a round-tripped ledger starts clean.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, settle_empty=True
+        )
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.newly_settled_skipped == 0
+
+
+class TestReopenSkipped:
+    """`reopen_skipped` — the un-cement path (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001)."""
+
+    def _settled(self) -> WindowLedger:
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        ledger.record(
+            _key("BANKNIFTY"),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        return ledger
+
+    def test_reopen_uncements_old_skipped(self) -> None:
+        ledger = self._settled()
+        assert ledger.is_skippable(_key("NIFTY"))
+        count = ledger.reopen_skipped()
+        assert count == 2
+        assert not ledger.is_skippable(_key("NIFTY"))  # the next pull re-fetches
+        assert not ledger.is_skippable(_key("BANKNIFTY"))
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.empty_streak == 0  # full fresh confirmation budget
+        assert rec.last_error == "REOPENED"
+        assert rec.attempts == 1  # preserved — no fetch happened here
+
+    def test_reopen_filters_by_symbol(self) -> None:
+        ledger = self._settled()
+        assert ledger.reopen_skipped(security_id="NIFTY") == 1
+        assert not ledger.is_skippable(_key("NIFTY"))
+        assert ledger.is_skippable(_key("BANKNIFTY"))  # untouched
+
+    def test_reopen_filters_by_market(self) -> None:
+        ledger = self._settled()
+        assert ledger.reopen_skipped(market="groww-option") == 0  # no such namespace
+        assert ledger.reopen_skipped(market="dhan") == 2  # _key()'s namespace
+
+    def test_reopen_limit_bounds_the_sample(self) -> None:
+        ledger = self._settled()
+        assert ledger.reopen_skipped(limit=1) == 1  # the bounded re-verify sample
+        # Deterministic order: BANKNIFTY sorts before NIFTY.
+        assert not ledger.is_skippable(_key("BANKNIFTY"))
+        assert ledger.is_skippable(_key("NIFTY"))
+        assert ledger.reopen_skipped(limit=0) == 0  # a degenerate bound re-opens nothing
+
+    def test_reopen_skips_non_skipped_rows(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.reopen_skipped() == 0  # SUCCESS rows never re-open
+        assert ledger.is_skippable(_key())
+
+    def test_reopen_is_idempotent(self) -> None:
+        ledger = self._settled()
+        assert ledger.reopen_skipped() == 2
+        assert ledger.reopen_skipped() == 0  # FAILED rows no longer match
+
+    def test_reopened_row_round_trips(self) -> None:
+        ledger = self._settled()
+        ledger.reopen_skipped(limit=1)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.to_rows() == ledger.to_rows()
+
+    def test_reopened_window_can_resettle_honestly(self) -> None:
+        # A re-opened window that is STILL genuinely empty on the next pull re-settles
+        # through the normal machinery (here: the old-gap fast-settle) — bounded, not
+        # an endless re-open loop.
+        ledger = self._settled()
+        ledger.reopen_skipped(security_id="NIFTY")
+        status = ledger.record(
+            _key("NIFTY"),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            settle_empty=True,
+        )
+        assert status == SKIPPED

@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.ingest import IngestReport
@@ -715,6 +716,17 @@ class BulkSpotReport:
     between-round brake (DEC-AUTO-RESUME-QUOTA-001) OR a mid-round
     ``DailyQuotaExceeded`` (DEC-SPOT-QUOTA-MIDROUND-001) — drives the loud
     ``quota_exhausted`` verdict (resume after the IST-midnight reset)."""
+    mass_empty_cause: str | None = None
+    """The mass-empty circuit-breaker halt message (DEC-EMPTY-WINDOW-CIRCUIT-
+    BREAKER-001) when the pull HALTED on a suspected soft-throttle [R2] /
+    mis-addressing [R3] clean-empty burst — drives the loud, needs-operator
+    ``mass_empty_halt`` verdict naming the counts + candidate causes. ``None``
+    when the breaker never tripped."""
+    settled_skipped: int = 0
+    """Windows THIS pull newly settled as terminal ``SKIPPED`` (the per-pull
+    ledger tally) — the honest-verdict count every verdict kind must surface
+    (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001; never "No action needed" over a
+    settling pull)."""
 
     @property
     def total_symbols(self) -> int:
@@ -759,6 +771,8 @@ class BulkSpotReport:
             completed=self.total_completed,
             auth_cause=self.auth_cause,
             quota_exhausted=self.quota_exhausted,
+            mass_empty_cause=self.mass_empty_cause,
+            settled_skipped=self.settled_skipped,
         )
         if self.dry_run:
             return mark_synthetic(verdict)
@@ -1590,6 +1604,10 @@ def pull_all_spot(
         final_auth_aborted = False
         final_auth_cause: str | None = None
         final_quota_exhausted = False
+        # The mass-empty circuit-breaker halt cause (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001):
+        # set when a phase raises MassEmptySettleHalt — drives the loud, needs-operator
+        # ``mass_empty_halt`` verdict naming the counts + the likely causes.
+        final_mass_empty_cause: str | None = None
         # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
         # each interval's 1-day/1-minute outcome from its own phase's report. Both
         # phases run over EVERY requested instrument (DEC-SPOT-INTERVAL-DECOUPLE-001 —
@@ -1616,6 +1634,7 @@ def pull_all_spot(
             pass of each phase is appended to ``phase_reports`` for the rollup.
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
+            nonlocal final_mass_empty_cause
             passes: list[SpotIngestWithRetry] = []
 
             def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
@@ -1747,6 +1766,30 @@ def pull_all_spot(
                         "resume after IST midnight"
                     ),
                 )
+            except MassEmptySettleHalt as exc:
+                # The mass-empty circuit breaker TRIPPED mid-phase
+                # (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a suspected vendor soft-throttle
+                # [R2] / mis-addressing [R3] episode was answering windows with clean-empty
+                # 200s, so the spine HALTED before settling them SKIPPED. Everything already
+                # committed survives (bars via the sink, window records via the throttled
+                # flush + the outer finally); every un-settled window stays retryable. Map to
+                # the loud needs-operator ``mass_empty_halt`` verdict (naming the counts +
+                # candidate causes) instead of a generic job error.
+                final_mass_empty_cause = str(exc)
+                final_still_failed += passes[-1].report.still_failed_windows if passes else 0
+                final_auth_aborted = final_auth_aborted or (
+                    bool(passes) and passes[-1].report.auth_aborted
+                )
+                _LOG.warning(
+                    "universe.pull_all.mass_empty_halt",
+                    pull_id=pid,
+                    error=str(exc),
+                    rounds_completed=len(passes),
+                    note=(
+                        "mass clean-empty responses — pull halted before settling; "
+                        "committed work kept; un-settled windows stay retryable"
+                    ),
+                )
             # The per-symbol rollup reads each phase's FIRST pass; an absent (no pass
             # completed) phase contributes an empty report.
             phase_reports.append(
@@ -1767,15 +1810,21 @@ def pull_all_spot(
             # coupling of DEC-SPOT-1DAY-FIRST-001. Per DEC-1MINUTE-ONLY-DERIVE-1DAY-001
             # this 1-minute phase is the ONLY vendor phase (1-day is derived after).
             if minute_requested:
-                # GLOBAL-STOP GUARD: if Phase 1 ended with a dead token or a spent
-                # quota, the minute pull would fail identically — SKIP it honestly (the
-                # verdict already carries the actionable state).
-                if final_auth_aborted or final_quota_exhausted:
+                # GLOBAL-STOP GUARD: if Phase 1 ended with a dead token, a spent quota,
+                # or a tripped mass-empty breaker, the minute pull would fail (or poison)
+                # identically — SKIP it honestly (the verdict already carries the
+                # actionable state).
+                if (
+                    final_auth_aborted
+                    or final_quota_exhausted
+                    or final_mass_empty_cause is not None
+                ):
                     _LOG.warning(
                         "universe.pull_all.minute_skipped_global_stop",
                         pull_id=pid,
                         auth_aborted=final_auth_aborted,
                         quota_exhausted=final_quota_exhausted,
+                        mass_empty_halt=final_mass_empty_cause is not None,
                     )
                 else:
                     if ledger is not None:
@@ -1916,6 +1965,13 @@ def pull_all_spot(
             auth_cause=final_auth_cause,
             still_failed_windows=final_still_failed,
             quota_exhausted=final_quota_exhausted,
+            mass_empty_cause=final_mass_empty_cause,
+            # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the
+            # per-pull ledger instance counted every window THIS pull newly settled
+            # SKIPPED (fast-settle + streak promotion + degraded accept-gap), so the
+            # verdict can NAME the count + the reopen-skipped re-verify path. 0 for a
+            # dry-run (no ledger — nothing settles).
+            settled_skipped=ledger.newly_settled_skipped if ledger is not None else 0,
         )
         verdict = bulk.verdict
         _LOG.info(

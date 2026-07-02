@@ -725,6 +725,7 @@ class SyntheticSpotAdapter:
 PullVerdictKind = Literal[
     "credentials_missing",
     "auth_expired",
+    "mass_empty_halt",
     "quota_exhausted",
     "transient_residual",
     "quarantined_symbols",
@@ -737,6 +738,10 @@ PullVerdictKind = Literal[
 #: dynamic counts are carried as structured fields on :class:`PullVerdict`.
 _HEADLINE: Final[dict[str, str]] = {
     "auth_expired": "🔑 Groww auth failed mid-pull — the pull aborted.",
+    "mass_empty_halt": (
+        "🚨 Pull HALTED — mass empty-response circuit breaker tripped "
+        "(suspected vendor soft-throttle or mis-addressing)."
+    ),
     "quota_exhausted": "📊 Daily Groww quota reached — auto-resume paused for today.",
     "transient_residual": "⏳ Some windows are still pending after retries.",
     "quarantined_symbols": "✅ Pull complete — some symbols were quarantined (not on Groww).",
@@ -747,6 +752,14 @@ _ACTION: Final[dict[str, str]] = {
     "auth_expired": (
         "Re-check the Groww API key + TOTP secret, then re-pull. "
         "A retry can NEVER succeed on bad credentials — only valid credentials can."
+    ),
+    "mass_empty_halt": (
+        "The vendor answered a mass of windows with clean-but-EMPTY responses — either a "
+        "soft-throttle serving empty 200s [R2], mis-addressed requests [R3], or a genuine "
+        "pre-listing gap; the code cannot tell which, so NOTHING more was settled as "
+        "SKIPPED and every un-settled window stays retryable. Wait out a possible "
+        "throttle, verify the symbol addressing, then re-pull; if windows were settled "
+        "before the halt, `brutex reopen-skipped` re-opens them for re-verification."
     ),
     "quota_exhausted": (
         "The 100,000/day Groww quota is spent — the auto-resume paused itself "
@@ -792,6 +805,11 @@ class PullVerdict:
     no_data: int
     completed: int
     auth_cause: str | None = None
+    settled_skipped: int = 0
+    """Windows THIS pull newly settled as terminal ``SKIPPED`` (DEC-EMPTY-WINDOW-
+    CIRCUIT-BREAKER-001 honest-verdict rule). When > 0 the ``action`` text SAYS so
+    (count + the ``brutex reopen-skipped`` re-verify hint) on EVERY kind — a pull
+    that permanently settled windows may never read "No action needed"."""
 
     @property
     def needs_operator(self) -> bool:
@@ -802,10 +820,14 @@ class PullVerdict:
         finish today on its own. ``credentials_missing`` counts for the same
         reason (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): only the operator can fix
         the credentials — no retry can ever land a bar without them.
+        ``mass_empty_halt`` counts (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the pull
+        halted on a suspected soft-throttle / mis-addressing episode — blindly
+        re-pulling into the same episode is exactly what the breaker prevents.
         """
         return self.kind in (
             "credentials_missing",
             "auth_expired",
+            "mass_empty_halt",
             "quota_exhausted",
             "transient_residual",
         )
@@ -822,6 +844,7 @@ class PullVerdict:
             "no_data": self.no_data,
             "completed": self.completed,
             "auth_cause": self.auth_cause,
+            "settled_skipped": self.settled_skipped,
         }
 
 
@@ -834,6 +857,8 @@ def classify_pull(
     completed: int,
     auth_cause: str | None = None,
     quota_exhausted: bool = False,
+    mass_empty_cause: str | None = None,
+    settled_skipped: int = 0,
 ) -> PullVerdict:
     """Classify a finished pull into ONE prioritised, actionable :class:`PullVerdict`.
 
@@ -842,53 +867,133 @@ def classify_pull(
     1. **auth_expired** — the token died mid-pull (``auth_aborted``). Most urgent:
        no retry can recover until the token is regenerated. ``pending_windows``
        counts the still-failed windows + quarantined pairs left behind.
-    2. **quota_exhausted** — the day's 100,000-call quota is spent
+    2. **mass_empty_halt** — the mass-empty circuit breaker tripped
+       (``mass_empty_cause`` set, DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the vendor
+       answered a mass of windows with clean-but-empty 200s — a suspected
+       soft-throttle [R2] / mis-addressing [R3] episode. The pull HALTED before
+       cementing more windows; re-pulling blindly into the same episode is what the
+       breaker prevents, so the operator must triage first. ``mass_empty_cause``
+       (the halt's own count-naming message) is PREFIXED to the action.
+    3. **quota_exhausted** — the day's 100,000-call quota is spent
        (``quota_exhausted``) with windows still pending: the auto-resume paused
        itself rather than burn a dead quota; the operator re-pulls after the
        IST-midnight reset (DEC-AUTO-RESUME-QUOTA-001). Ranked just under a dead
        token because, like it, NO amount of immediate retrying can land a bar
        today — only the reset can.
-    3. **transient_residual** — retryable WINDOWS are still failing
+    4. **transient_residual** — retryable WINDOWS are still failing
        (``still_failed_windows`` > 0) but the token is alive: a re-pull / the
        auto-retry layer will finish them. The loud "re-pull to finish" verdict.
-    4. **quarantined_symbols** — NO retryable windows remain; the only "failures"
+    5. **quarantined_symbols** — NO retryable windows remain; the only "failures"
        are quarantined symbols (``failed_pairs`` > 0, e.g. a ticker not on Groww):
        a re-pull can NEVER recover them, so this is a COMPLETE pull with a note,
        NOT "re-pull to finish" (``needs_operator`` is False — grey, not amber).
-    5. **known_gap_only** — nothing completed and nothing failed, but the vendor
+    6. **known_gap_only** — nothing completed and nothing failed, but the vendor
        returned empty for some symbols (``no_data``): the vendor genuinely has no
        intraday for them (reference-only). Expected, not an error.
-    6. **clean** — everything that could complete did.
+    7. **clean** — everything that could complete did.
+
+    *settled_skipped* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 honest-verdict rule) is
+    the count of windows THIS pull newly settled as terminal ``SKIPPED``
+    (:attr:`~brutex.data.window_ledger.WindowLedger.newly_settled_skipped`). When
+    > 0 the verdict's ``action`` — on EVERY kind, including ``clean`` — names the
+    count and the ``brutex reopen-skipped`` re-verify path: a pull that permanently
+    settled windows may never read as a bare "No action needed".
 
     Pure + deterministic (no I/O / clock). ``auth_cause`` is preserved ONLY on
     the ``auth_expired`` verdict.
     """
     if auth_aborted:
         return _make_verdict(
-            "auth_expired", still_failed_windows, failed_pairs, no_data, completed, auth_cause
+            "auth_expired",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            auth_cause,
+            settled_skipped=settled_skipped,
         )
+    if mass_empty_cause is not None:
+        # The breaker's own message carries the counts (empty/observed/consecutive) —
+        # prefix it so the banner NAMES them (the register's "surface settle counts").
+        verdict = _make_verdict(
+            "mass_empty_halt",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
+        )
+        return replace(verdict, action=f"{mass_empty_cause} {verdict.action}")
     if quota_exhausted:
         return _make_verdict(
-            "quota_exhausted", still_failed_windows, failed_pairs, no_data, completed, None
+            "quota_exhausted",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
         )
     if still_failed_windows > 0:
         # Genuine retryable WINDOWS remain (transient 429/timeout): a re-pull / the
         # auto-retry layer will land them. Quarantined pairs (if any) ride along as a note.
         return _make_verdict(
-            "transient_residual", still_failed_windows, failed_pairs, no_data, completed, None
+            "transient_residual",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
         )
     if failed_pairs > 0:
         # No retryable windows — the ONLY "failures" are quarantined symbols (not on Groww,
         # e.g. BAJAJ-AUTO / NAM-INDIA). A re-pull can NEVER recover them, so this is a
         # COMPLETE pull with a note, NOT "re-pull to finish" (DEC-EMPTY-RESOLVED-REPORTING-001).
         return _make_verdict(
-            "quarantined_symbols", still_failed_windows, failed_pairs, no_data, completed, None
+            "quarantined_symbols",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
         )
     if completed == 0 and no_data > 0:
         return _make_verdict(
-            "known_gap_only", still_failed_windows, failed_pairs, no_data, completed, None
+            "known_gap_only",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
         )
-    return _make_verdict("clean", still_failed_windows, failed_pairs, no_data, completed, None)
+    return _make_verdict(
+        "clean",
+        still_failed_windows,
+        failed_pairs,
+        no_data,
+        completed,
+        None,
+        settled_skipped=settled_skipped,
+    )
+
+
+def _settled_skipped_note(settled_skipped: int) -> str:
+    """The honest-verdict settle note appended to EVERY verdict that settled windows.
+
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001: names the count + the re-verify path, so
+    a permanent settle is never silent (register R2 — "surface settle counts in the
+    verdict; make SKIPPED reversible"). Pure + O(1).
+    """
+    return (
+        f"NOTE: {settled_skipped} window(s) were settled as permanent no-data (SKIPPED) "
+        "this pull. If that is unexpected (a vendor soft-throttle or a mis-addressed "
+        "symbol can fake no-data), run `brutex reopen-skipped` to re-open them, then "
+        "re-pull to re-verify."
+    )
 
 
 def _make_verdict(
@@ -898,17 +1003,29 @@ def _make_verdict(
     no_data: int,
     completed: int,
     auth_cause: str | None,
+    *,
+    settled_skipped: int = 0,
 ) -> PullVerdict:
-    """Build a :class:`PullVerdict` for *kind* with the canonical headline + action."""
+    """Build a :class:`PullVerdict` for *kind* with the canonical headline + action.
+
+    When *settled_skipped* > 0 the settle note REPLACES a bare "No action needed."
+    action (never both — a settling pull is not action-free) and is APPENDED to any
+    other action text (the primary instruction stays first).
+    """
+    action = _ACTION[kind]
+    if settled_skipped > 0:
+        note = _settled_skipped_note(settled_skipped)
+        action = note if action == _ACTION["clean"] else f"{action} {note}"
     return PullVerdict(
         kind=kind,
         headline=_HEADLINE[kind],
-        action=_ACTION[kind],
+        action=action,
         pending_windows=still_failed_windows,  # WINDOWS a re-pull retries — NOT pairs
         failed_pairs=failed_pairs,
         no_data=no_data,
         completed=completed,
         auth_cause=auth_cause,
+        settled_skipped=settled_skipped,
     )
 
 

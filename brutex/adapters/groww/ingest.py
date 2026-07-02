@@ -66,6 +66,7 @@ from time import sleep as _time_sleep
 
 import structlog
 
+from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
@@ -284,6 +285,7 @@ def ingest_spot(
     on_window: WindowTick | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -344,6 +346,15 @@ def ingest_spot(
         pipeline's pull-level totals (logged at drain), not this per-series report — the
         producer cannot know them synchronously; the Parquet output + ledger settlement are
         byte-identical to the synchronous path.
+    empty_breaker
+        Optional per-pull :class:`~brutex.adapters.empty_circuit_breaker.EmptySettleBreaker`
+        (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — the mass-empty circuit breaker shared by
+        every window worker of the pass (the run-ingest layer constructs one per pass).
+        Each fetched window is observed (data vs confirmed-empty); a mass-empty burst
+        RAISES :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt` (a
+        global stop — the pull halts loudly instead of settling poisoned windows), and a
+        tripped breaker suppresses every remaining EMPTY settle at ledger-record time.
+        ``None`` (unit-test / legacy callers) observes nothing — byte-identical behaviour.
 
     Returns
     -------
@@ -413,6 +424,7 @@ def ingest_spot(
                 old_cutoff=old_cutoff,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                empty_breaker=empty_breaker,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -544,6 +556,7 @@ def _ingest_one_window(
     old_cutoff: date | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -583,6 +596,7 @@ def _ingest_one_window(
         empty_retry_attempts=empty_retry_attempts,
         empty_retry_backoff=empty_retry_backoff,
         old_cutoff=old_cutoff,
+        empty_breaker=empty_breaker,
     )
     if raw is None:
         # Producer-resolved (skip / transient / terminal-raised): never touches the tail.
@@ -597,6 +611,7 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            empty_breaker=empty_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED outcome immediately and re-paces + fetches the next
@@ -620,6 +635,7 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            empty_breaker=empty_breaker,
         )
         if result_outcome.transient:
             # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
@@ -682,6 +698,7 @@ def _fetch_window_raw(
     empty_retry_attempts: int,
     empty_retry_backoff: Callable[[int], None],
     old_cutoff: date | None,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> tuple[_WindowOutcome, _RawWindow | None]:
     """The PRODUCER half — pace + fetch + EMPTY-retry + controller feedback. STAYS on the fetch thread.
 
@@ -808,6 +825,22 @@ def _fetch_window_raw(
                 **series_fields,
             )
             empty_retry_backoff(empty_attempt)
+    # Mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): feed the window's
+    # final fetch shape to the per-pull breaker. A data-bearing window resets its
+    # consecutive-empty run (and retro-clears this series' leading pre-listing prefix); a
+    # final-empty window counts toward BOTH trip rules and — the moment either rule
+    # crosses — RAISES MassEmptySettleHalt on this producer thread, which propagates as a
+    # GLOBAL stop (the pull halts loudly; the tripping window is never recorded, so it
+    # stays retryable). Observed BEFORE the fast-settle math below so a poisoned window
+    # can never settle on the very call that trips the breaker.
+    if empty_breaker is not None:
+        series = f"{instrument.symbol_name}:{interval}"
+        if raw_bars:
+            empty_breaker.observe_data(series)
+        else:
+            empty_breaker.observe_empty(
+                series, symbol=instrument.symbol_name, window_end=window_end
+            )
     # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an EMPTY window confirmed empty
     # ACROSS an in-pull retry (``fetch_count >= 2`` — one glitch-prone fetch is not enough;
     # this also excludes the degenerate ``empty_retry_attempts <= 1`` single-fetch case) AND
@@ -815,8 +848,9 @@ def _fetch_window_raw(
     # ``old_cutoff``) is a PERMANENT gap → settle SKIPPED in ONE pull. A RECENT empty window
     # (or one not re-hit) keeps the conservative across-pull EMPTY streak. ``old_cutoff is
     # None`` (no clock threaded) disables the fast-settle. Computed on the PRODUCER from the
-    # pure fetch facts (raw bars + fetch count + clock), so the consumer's tail records the
-    # same byte-identical ``settle_empty`` it would have synchronously.
+    # pure fetch facts (raw bars + fetch count + clock); the tail RE-CHECKS the breaker at
+    # record time (``allow_settle``), so a settle computed here but recorded after a trip is
+    # still suppressed (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
     confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
     is_old = old_cutoff is not None and window_end < old_cutoff
     settle_empty = confirmed_empty_after_retry and is_old
@@ -843,6 +877,7 @@ def _process_window_tail(
     pull_id: str,
     series_fields: dict[str, str],
     detect_completeness_gaps: bool = False,
+    empty_breaker: EmptySettleBreaker | None = None,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -868,7 +903,14 @@ def _process_window_tail(
     key = raw.key
     raw_bars = raw.raw_bars
     fetch_count = raw.fetch_count
-    settle_empty = raw.settle_empty
+    # Breaker re-check at RECORD time (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): once the
+    # pull's mass-empty breaker trips, NO further window may settle SKIPPED — including a
+    # settle computed on the producer BEFORE the trip but landing here after it (an
+    # async-pipeline queued tail, or a sibling in-flight worker). The suppressed empty is
+    # recorded as UNTRUSTED (EMPTY, no streak bump — ``suppress_settle``), so it stays
+    # fully retryable with no poisoned progress toward the across-pull promotion.
+    suppress_settle = empty_breaker is not None and not empty_breaker.allow_settle()
+    settle_empty = raw.settle_empty and not suppress_settle
     # Drop pre-open / post-close bars before they enter the lake — intraday only
     # (a daily bar has no intraday time). An exempt symbol (e.g. a ~21h instrument)
     # keeps its full-day series verbatim.
@@ -1066,6 +1108,7 @@ def _process_window_tail(
             settle_empty=settle_empty,
             degraded=degraded,
             degraded_reason=degraded_reason,
+            suppress_settle=suppress_settle,
         )
     if on_success is not None:
         on_success()
