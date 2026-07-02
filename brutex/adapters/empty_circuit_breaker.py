@@ -148,20 +148,31 @@ class MassEmptySettleHalt(BruteXError):
     or a genuine pre-listing / no-data universe. Added to both runners'
     ``_GLOBAL_STOP_ERRORS`` so it propagates past the per-symbol quarantine and
     halts the whole pull (every remaining window would poison identically).
+
+    Also constructible like any plain exception (``MassEmptySettleHalt("msg")``)
+    with the counts defaulting to 0: the pipeline's drift-pin test constructs
+    every ``_GLOBAL_STOP_ERRORS`` member generically, so a global-stop class
+    that cannot be built from a bare message would break that contract (the
+    breaker's own trips always pass the keyword counts).
     """
 
     def __init__(
         self,
-        *,
-        empty_windows: int,
-        observed_windows: int,
-        consecutive_empties: int,
-        trip_rule: str,
+        *args: object,
+        empty_windows: int = 0,
+        observed_windows: int = 0,
+        consecutive_empties: int = 0,
+        trip_rule: str = "",
     ) -> None:
         self.empty_windows = empty_windows
         self.observed_windows = observed_windows
         self.consecutive_empties = consecutive_empties
         self.trip_rule = trip_rule
+        if args:
+            # Generic construction (a plain message) — standard Exception
+            # behaviour: ``str(exc)`` returns the given message.
+            super().__init__(*args)
+            return
         super().__init__(
             f"Mass-empty circuit breaker TRIPPED ({trip_rule} rule): "
             f"{empty_windows} of {observed_windows} fetched windows returned "

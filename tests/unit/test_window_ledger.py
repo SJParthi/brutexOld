@@ -878,6 +878,7 @@ class TestSuppressSettle:
     def test_unsuppressed_threshold_promotion_still_fires(self) -> None:
         # Sanity: WITHOUT suppression the third genuine empty promotes to SKIPPED.
         ledger = WindowLedger()
+        status = ""
         for _ in range(EMPTY_TERMINAL_THRESHOLD):
             status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
         assert status == SKIPPED

@@ -19,6 +19,8 @@ units live HERE so the strict per-module coverage gates scope them.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from brutex.adapters.ingest_common import (
     CREDENTIALS_REFUSAL_HEADLINE,
@@ -378,7 +380,7 @@ class TestSettledSkippedHonesty:
 
     def test_settle_note_on_every_kind(self) -> None:
         # quarantined / known-gap / quota / auth / mass-empty all carry the note.
-        cases = [
+        cases: list[dict[str, Any]] = [
             {"auth_aborted": True},
             {"quota_exhausted": True},
             {"mass_empty_cause": "tripped"},
@@ -386,7 +388,7 @@ class TestSettledSkippedHonesty:
             {"no_data": 1},
         ]
         for extra in cases:
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "auth_aborted": False,
                 "still_failed_windows": 0,
                 "failed_pairs": 0,
@@ -395,5 +397,5 @@ class TestSettledSkippedHonesty:
                 "settled_skipped": 7,
             }
             kwargs.update(extra)
-            verdict = classify_pull(**kwargs)  # type: ignore[arg-type]
+            verdict = classify_pull(**kwargs)
             assert "7 window(s)" in verdict.action, verdict.kind

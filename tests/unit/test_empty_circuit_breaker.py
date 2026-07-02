@@ -427,3 +427,24 @@ class TestMinSeriesGate:
     def test_resolver_threads_expected_empty(self) -> None:
         predicate = lambda _s, _e: True  # noqa: E731 — a tiny test predicate
         assert resolve_empty_breaker(expected_empty=predicate).expected_empty is predicate
+
+
+class TestHaltGenericConstruction:
+    """The halt is constructible like any exception (the global-stop pin contract)."""
+
+    def test_plain_message_construction(self) -> None:
+        # The pipeline drift-pin test builds every _GLOBAL_STOP_ERRORS member as
+        # ``cls("x")`` — the halt must honour standard Exception semantics there.
+        halt = MassEmptySettleHalt("x")
+        assert str(halt) == "x"
+        assert halt.empty_windows == 0
+        assert halt.observed_windows == 0
+        assert halt.consecutive_empties == 0
+        assert halt.trip_rule == ""
+
+    def test_keyword_construction_builds_the_counting_message(self) -> None:
+        halt = MassEmptySettleHalt(
+            empty_windows=4, observed_windows=5, consecutive_empties=3, trip_rule="fraction"
+        )
+        assert "4 of 5" in str(halt)
+        assert "(fraction rule)" in str(halt)
