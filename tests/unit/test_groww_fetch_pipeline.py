@@ -40,6 +40,7 @@ from brutex.adapters.groww.fetch_pipeline import (
 from brutex.adapters.groww.fetch_spill import FetchSpillArea
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
+from structlog.testing import capture_logs
 
 #: One valid spillable bar reused by the spill-overflow tests.
 _BAR = CandleBar(
@@ -1087,6 +1088,129 @@ class TestSpillOverflow:
         pipeline = FetchPipeline(workers=1, queue_maxsize=4, spill_area=area)
         pipeline.drain()
         assert not straggler.path.exists()
+        assert area.reserved_bytes == 0
+
+
+# ─────────── guarded spill rehydration (DEC-FETCH-SPILL-ISOLATION-001, audit C-3) ───────────
+
+
+class TestSpillLoadIsolation:
+    """A spill-LOAD failure defers ONE window — it can never kill the consumer thread.
+
+    THE AUDIT REPRO (C-3, MAJOR): the consumer's spill rehydration
+    (``self._spill_area.load(spilled)``) sat OUTSIDE the guarded region of ``_process_one``,
+    so a spill file deleted mid-pipeline (a concurrent pull's ``cleanup()`` on the
+    pre-namespacing SHARED ``.fetch-spill`` dir) raised ``FileNotFoundError`` straight out of
+    the consumer loop and KILLED the consumer thread SILENTLY: ``_trip`` never fired,
+    ``drain()`` returned CLEAN (``_exc is None``), and the producer could wedge FOREVER on the
+    dead shard's full-queue back-pressure (that loop only exits on ``_stopped``/``_draining``).
+    These tests FAIL against the unguarded code: the post-failure window is never processed
+    (the consumer is dead) and ``tail_transients`` stays 0.
+    """
+
+    def _wedge_then_spill_one(
+        self,
+        pipeline: FetchPipeline,
+        area: FetchSpillArea,
+        seen: list[list[CandleBar]],
+        release: threading.Event,
+    ) -> None:
+        """Wedge the single consumer, fill the 1-deep queue, then spill a third window."""
+        first_in = threading.Event()
+
+        def _slow(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=5.0)
+
+        pipeline.submit(_result("s", _slow))
+        assert first_in.wait(timeout=2.0)
+        pipeline.submit(_result("s", lambda _t: None))  # fills the queue (maxsize=1)
+        spill_done = threading.Event()
+
+        def _submit_third() -> None:
+            pipeline.submit(self._spillable("s", [_BAR], seen))
+            spill_done.set()
+
+        t = threading.Thread(target=_submit_third, daemon=True)
+        t.start()
+        assert spill_done.wait(timeout=2.0), "producer blocked — the window did not spill"
+        t.join(timeout=2.0)
+        assert area.reserved_bytes > 0  # the window's bars live on disk
+
+    def _spillable(
+        self, shard_key: str, bars: list[CandleBar], seen: list[list[CandleBar]]
+    ) -> RawFetchResult:
+        cell = list(bars)
+
+        def _process(_tail: FetchTail) -> None:
+            seen.append(list(cell))
+
+        def _rehydrate(new_bars: Sequence[CandleBar]) -> None:
+            cell[:] = new_bars
+
+        tail = FetchTail(shard_key=shard_key, process=_process, raw_bars=cell, rehydrate=_rehydrate)
+        return RawFetchResult(tail=tail)
+
+    @pytest.mark.parametrize("failure", ["deleted", "corrupt"])
+    def test_spill_load_failure_defers_window_consumer_survives(
+        self, tmp_path: Path, failure: str
+    ) -> None:
+        """Deleted / corrupt spill file → that ONE window defers; the pipeline completes.
+
+        Proves the FULL audit fix: (a) the consumer thread SURVIVES the load failure and
+        processes a later window; (b) the failed window is DEFERRED (never processed with
+        fabricated bars) + honestly counted as a tail transient; (c) nothing hangs — the
+        producer is never wedged and ``drain()`` completes clean, SURFACING the failure count
+        in its ``fetch_pipeline.drained`` totals.
+        """
+        area = FetchSpillArea(spill_dir=tmp_path / "spill", max_bytes=1 << 30)
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=area)
+        release = threading.Event()
+        seen: list[list[CandleBar]] = []
+        try:
+            self._wedge_then_spill_one(pipeline, area, seen, release)
+            # THE CONCURRENT-PULL SABOTAGE: the live spill file vanishes / turns to garbage
+            # before the consumer rehydrates it (the shared-dir cleanup race the audit ran).
+            for spill_file in (tmp_path / "spill").iterdir():
+                if failure == "deleted":
+                    spill_file.unlink()
+                else:
+                    spill_file.write_bytes(b"\x00not-json\xff")
+            with capture_logs() as logs:
+                release.set()  # un-wedge the consumer → it hits the failing spill load
+                # THE REGRESSION TEETH: a LATER window must still be processed. Against the
+                # unguarded code the consumer thread is DEAD here and this wait times out.
+                fourth_done = threading.Event()
+                fourth_processed = threading.Event()
+
+                def _submit_fourth() -> None:
+                    pipeline.submit(_result("s", lambda _t: fourth_processed.set()))
+                    fourth_done.set()
+
+                t4 = threading.Thread(target=_submit_fourth, daemon=True)
+                t4.start()
+                assert fourth_done.wait(timeout=5.0), (
+                    "producer wedged on back-pressure — the consumer thread died (audit C-3)"
+                )
+                assert fourth_processed.wait(timeout=5.0), (
+                    "post-failure window never processed — the consumer thread died (audit C-3)"
+                )
+                t4.join(timeout=2.0)
+                assert pipeline.tail_transients == 1  # the deferral is COUNTED, never silent
+                pipeline.drain()
+            # The failure was LOUD + the drain totals surface it honestly.
+            assert any(
+                e["event"] == "fetch_pipeline.spill_load_failed" and e["shard_key"] == "s"
+                for e in logs
+            )
+            drained = next(e for e in logs if e["event"] == "fetch_pipeline.drained")
+            assert drained["tail_transients"] == 1
+        finally:
+            pipeline.drain()  # idempotent (already drained on the happy path)
+        # The sabotaged window was DEFERRED — never processed off fabricated/empty bars. Its
+        # ledger row was never recorded (stays UNSETTLED) → re-fetched next pull.
+        assert seen == []
+        # The spill byte budget was released in the finally (no leak on the failure path).
         assert area.reserved_bytes == 0
 
 

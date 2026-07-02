@@ -811,6 +811,20 @@ class FetchPipeline:
         ``rehydrate`` — and the spill file is DISCARDED afterwards (the byte budget released) in a
         ``finally`` so a failed / stop-dropped tail never leaks the spill (DEC-FETCH-NONBLOCKING-HANDOFF-001).
 
+        The spill LOAD is GUARDED (DEC-FETCH-SPILL-ISOLATION-001): it is real file I/O on a
+        file an external actor may have removed (before the per-pull spill namespacing, a
+        CONCURRENT pull's drain ``cleanup()`` swept the SHARED ``<lake>/.fetch-spill`` dir —
+        deleting THIS pull's live spill files) or corrupted. Unguarded, a load failure
+        propagated out of ``_process_one`` and KILLED THE CONSUMER THREAD SILENTLY — no
+        ``_trip``, no ``_mark_completed`` — so :meth:`drain` returned CLEAN while the producer
+        could wedge forever on the dead shard's full-queue back-pressure (the loop only exits
+        on ``_stopped``/``_draining``). Now a load failure is handled like any other per-window
+        failure: logged LOUD (``fetch_pipeline.spill_load_failed``), folded as a tail-side
+        transient (so :meth:`drain`'s ``tail_transients`` surfaces the count honestly),
+        completion-accounted, and the window is DEFERRED — its ledger row was never recorded so
+        it stays UNSETTLED → re-fetched next pull (idempotent keep-first). The consumer keeps
+        running; the bars are never silently lost (they re-fetch).
+
         Once the pool has hard-stopped (a prior failure), subsequent windows are DROPPED
         without processing — a full disk fails every remaining window identically, so re-
         running the tail would just hammer it. The dropped window's ledger row stays
@@ -832,7 +846,24 @@ class FetchPipeline:
             ):
                 # REHYDRATE: reload the spilled bars + restore them into the tail's closure so
                 # ``process`` reads the real bars (not the dropped-to-empty in-memory copy).
-                tail.rehydrate(self._spill_area.load(spilled))
+                # GUARDED (DEC-FETCH-SPILL-ISOLATION-001): a load failure (deleted / corrupt
+                # spill file) must DEFER this ONE window — never kill the consumer thread.
+                # Narrow to ``Exception`` so a KeyboardInterrupt / SystemExit still propagates.
+                try:
+                    bars = self._spill_area.load(spilled)
+                except Exception as exc:  # pylint: disable=broad-exception-caught — any load failure defers the window
+                    _LOG.warning(
+                        "fetch_pipeline.spill_load_failed",
+                        error_type=type(exc).__name__,
+                        shard_key=tail.shard_key,
+                    )
+                    # Fold the deferral into the drain-surfaced totals (honest failure count)
+                    # + advance the watchdog progress clock. The window's ledger row was never
+                    # recorded → it stays UNSETTLED → re-fetched next pull (keep-first sink).
+                    self.fold_tail_transient()
+                    self._mark_completed()
+                    return
+                tail.rehydrate(bars)
             try:
                 tail.process(tail)
             except Exception as exc:  # surface ANY tail FAILURE, never swallow
