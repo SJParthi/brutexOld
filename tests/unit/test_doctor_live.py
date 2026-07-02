@@ -1621,37 +1621,6 @@ class TestDefensiveArms:
         assert len(outcome.lines) == 1  # no abort line — the burst never sustained
 
 
-# ── CLI wiring ──────────────────────────────────────────────────────────
-
-
-class TestCliWiring:
-    def test_parse_stage_selection(self) -> None:
-        from brutex.cli import parse_stage_selection
-
-        assert parse_stage_selection(None) is None
-        assert parse_stage_selection("  ") is None
-        assert parse_stage_selection("0,5, 13") == frozenset({0, 5, 13})
-        with pytest.raises(ValueError, match="got 'x'"):
-            parse_stage_selection("0,x")
-        with pytest.raises(ValueError, match="got '14'"):
-            parse_stage_selection("14")
-
-    def test_doctor_live_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from brutex import cli
-
-        seen: list[object] = []
-
-        def _fake(args: object) -> int:
-            seen.append(args)
-            return 0
-
-        monkeypatch.setattr(cli, "cmd_doctor_live", _fake)
-        assert cli.main(["doctor", "--live", "--symbol", "NSE-BANKNIFTY"]) == 0
-        assert len(seen) == 1
-
-    def test_mint_anyway_warning_is_red_and_multi_line(self) -> None:
-        from brutex.cli import MINT_ANYWAY_WARNING
-
-        assert MINT_ANYWAY_WARNING.startswith("\x1b[31m")
-        assert MINT_ANYWAY_WARNING.count("\n") >= 4
-        assert "REVOKE the shared token" in MINT_ANYWAY_WARNING
+# The CLI wiring tests (``parse_stage_selection`` / the ``doctor --live``
+# dispatch / ``MINT_ANYWAY_WARNING``) live in ``test_cli_doctor_live.py`` —
+# stem-matched to ``brutex/cli.py`` for the per-module coverage discovery gate.
