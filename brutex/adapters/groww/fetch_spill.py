@@ -52,8 +52,23 @@ scope, as in DEC-LAKE-WRITE-HALT-001). The spill files are best-effort cleaned a
 straggler is a small bounded set under the spill root, removed on the next clean drain. O(1) per
 window — one ``atomic_write_via`` / one ``json.loads`` / one ``unlink``, NOT per-bar.
 
-stdlib-only at import (``os`` / ``json`` / ``tempfile`` / ``threading`` / ``dataclasses`` /
-``datetime`` / ``decimal`` / ``pathlib``) plus the COMMON
+## Per-pull isolation (DEC-FETCH-SPILL-ISOLATION-001)
+
+The spill directory is NAMESPACED PER PULL: :meth:`FetchSpillArea.under_lake_root` builds a
+UNIQUE ``<lake_root>/.fetch-spill/pull-<pid>-<uuid>/`` subdirectory, so two concurrent pulls
+sharing one ``BRUTEX_LAKE_ROOT`` (a CLI ``brutex fetch`` + a dashboard pull) can NEVER delete
+each other's LIVE spill files — previously both used the ONE flat ``.fetch-spill`` dir and
+either pull's drain ``cleanup()`` swept EVERY file in it, including the sibling's, whose
+consumer then failed the spill load. :meth:`FetchSpillArea.cleanup` removes ONLY its own
+namespace dir, plus a conservative STALE sweep of sibling entries older than
+:data:`_STALE_SPILL_SECONDS` (a hard-killed pull's straggler dir — bounded by the spill cap —
+would otherwise accrete forever now that no other pull sweeps it). Honest envelope: the stale
+threshold is generous (24 h ≫ every bounded pipeline deadline), and even a wrongly-swept live
+file is non-fatal — the guarded spill load defers that one window to the next pull
+(``fetch_pipeline.spill_load_failed``), never losing data.
+
+stdlib-only at import (``os`` / ``json`` / ``tempfile`` / ``threading`` / ``time`` / ``uuid`` /
+``dataclasses`` / ``datetime`` / ``decimal`` / ``pathlib``) plus the COMMON
 :func:`~brutex.data.atomic_io.atomic_write_via` + :class:`~brutex.data.models.CandleBar`.
 """
 
@@ -64,6 +79,8 @@ import json
 import os
 import tempfile
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -97,10 +114,21 @@ _DEFAULT_FETCH_SPILL_MAX_BYTES: int = 256 * 1024 * 1024
 #: Environment override for the spill cap (operator escape hatch, no code change).
 FETCH_SPILL_MAX_BYTES_ENV: str = "BRUTEX_GROWW_FETCH_SPILL_MAX_BYTES"
 
-#: The on-disk spill directory name under the lake root (kept OUTSIDE ``bars/`` + ``options/`` and
-#: never a ``*.parquet``, so no lake scanner ever sees a spill file as data — mirrors the
-#: ``.locks`` sidecar of DEC-LAKE-PARTITION-FLOCK-001).
+#: The on-disk spill PARENT directory name under the lake root (kept OUTSIDE ``bars/`` +
+#: ``options/`` and never a ``*.parquet``, so no lake scanner ever sees a spill file as data —
+#: mirrors the ``.locks`` sidecar of DEC-LAKE-PARTITION-FLOCK-001). Each pull spills into its
+#: OWN unique subdirectory of this parent (DEC-FETCH-SPILL-ISOLATION-001), so concurrent pulls
+#: sharing one lake root never touch each other's live spill files.
 _SPILL_DIRNAME: str = ".fetch-spill"
+
+#: Age (seconds) past which a SIBLING spill entry (another pull's namespace dir, or a legacy
+#: flat spill file) is considered a STRAGGLER from a hard-killed pull and is swept by
+#: :meth:`FetchSpillArea.cleanup`. 24 hours is far beyond every bounded pipeline deadline
+#: (fetch deadline 45 s · write deadline 90 s · drain join 60 s — a spill file is normally
+#: consumed within seconds and the owning pull's own drain removes its dir), so no LIVE pull's
+#: spill can plausibly reach this age; without the sweep a hard-killed pull's namespace dir
+#: (bounded by the spill cap) would accrete forever now that no other pull cleans it.
+_STALE_SPILL_SECONDS: float = 24.0 * 3600.0
 
 #: The suffix the atomic-write tmp carries; stripped to derive the final spill file path.
 _TMP_SUFFIX: str = ".tmp"
@@ -151,6 +179,26 @@ def _decode_bars(data: bytes) -> list[CandleBar]:
         )
         for row in rows
     ]
+
+
+def _remove_stale_entry(entry: Path) -> None:
+    """Best-effort remove ONE stale spill straggler — a namespace dir or a legacy flat file.
+
+    A directory (a hard-killed pull's ``pull-…`` namespace) has its files unlinked then the dir
+    removed; anything else (a legacy pre-namespacing flat spill file) is unlinked. Any OS error
+    is logged + swallowed (:meth:`FetchSpillArea.cleanup`'s never-raises contract). O(files).
+    """
+    try:
+        if entry.is_dir():
+            for child in entry.iterdir():
+                child.unlink()
+            entry.rmdir()
+        else:
+            entry.unlink()
+    except OSError:
+        _LOG.warning("fetch_spill.stale_sweep_failed", path=str(entry))
+    else:
+        _LOG.info("fetch_spill.stale_swept", path=str(entry))
 
 
 def resolve_fetch_spill_max_bytes(raw: str | None = None) -> int:
@@ -220,8 +268,9 @@ class FetchSpillArea:
         Parameters
         ----------
         spill_dir
-            The directory the spill files live in (created if absent). A dedicated
-            ``.fetch-spill`` subdir under the lake root, kept outside the data partitions.
+            The directory the spill files live in (created if absent). A per-pull
+            ``.fetch-spill/pull-<pid>-<uuid>`` subdir under the lake root
+            (:meth:`under_lake_root`), kept outside the data partitions.
         max_bytes
             The hard cap on total live spill bytes (``>= 1``); overflow past it back-pressures.
         """
@@ -235,15 +284,23 @@ class FetchSpillArea:
 
     @classmethod
     def under_lake_root(cls, lake_root: Path, *, max_bytes: int | None = None) -> FetchSpillArea:
-        """Build the spill area at ``<lake_root>/.fetch-spill`` with the resolved cap.
+        """Build the spill area at a UNIQUE ``<lake_root>/.fetch-spill/pull-<pid>-<uuid>/``.
 
         The COMMON build path the live site uses; *max_bytes* defaults to
         :func:`resolve_fetch_spill_max_bytes` (env-tunable). Keeping the spill UNDER the lake root
         (a dedicated sidecar dir) means a disk-full spill is the SAME volume the lake writes hit,
         so the :class:`~brutex.data.errors.LakeWriteHalt` envelope is consistent.
+
+        The subdirectory is NAMESPACED PER PULL (DEC-FETCH-SPILL-ISOLATION-001): the old FLAT
+        ``<lake_root>/.fetch-spill`` was SHARED by every concurrent pull on the lake (CLI +
+        dashboard), so one pull's drain :meth:`cleanup` deleted the OTHER pull's live spill
+        files and its consumer failed the load. A ``pull-<pid>-<uuid>`` dir per
+        :class:`FetchSpillArea` makes cross-pull deletion impossible; :meth:`cleanup` removes
+        only this pull's own dir (plus stale hard-kill stragglers).
         """
         cap = resolve_fetch_spill_max_bytes() if max_bytes is None else max_bytes
-        return cls(spill_dir=lake_root / _SPILL_DIRNAME, max_bytes=cap)
+        namespace = f"pull-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        return cls(spill_dir=lake_root / _SPILL_DIRNAME / namespace, max_bytes=cap)
 
     @property
     def spill_dir(self) -> Path:
@@ -315,12 +372,15 @@ class FetchSpillArea:
             self._reserved = max(0, self._reserved - handle.size_bytes)
 
     def cleanup(self) -> None:
-        """Best-effort remove any straggler spill files at drain (never raises).
+        """Best-effort remove THIS pull's spill dir + stale stragglers at drain (never raises).
 
-        A spill file survives only if its window was never discarded (a hard kill mid-tail). The
-        directory is small + bounded, so a sweep at pull end keeps the spill area from accreting
-        across pulls. The reservation counter is reset. Any unlink error is logged + swallowed —
-        cleanup must never fail the pull's ``finally``.
+        A spill file survives only if its window was never discarded (a hard kill mid-tail).
+        Scoped to THIS pull's OWN namespace dir (DEC-FETCH-SPILL-ISOLATION-001) — a concurrent
+        pull's LIVE spill files are NEVER touched (the old flat shared dir let one pull's drain
+        delete the sibling pull's files, silently killing its consumer's spill load). The own
+        dir is removed after its files; the reservation counter is reset; then sibling entries
+        older than :data:`_STALE_SPILL_SECONDS` (hard-killed pulls' stragglers) are swept. Any
+        unlink error is logged + swallowed — cleanup must never fail the pull's ``finally``.
         """
         try:
             entries = list(self._dir.iterdir())
@@ -331,5 +391,39 @@ class FetchSpillArea:
                 entry.unlink()
             except OSError:
                 _LOG.warning("fetch_spill.cleanup_unlink_failed", path=str(entry))
+        with contextlib.suppress(OSError):
+            self._dir.rmdir()
         with self._lock:
             self._reserved = 0
+        self._sweep_stale_siblings()
+
+    def _sweep_stale_siblings(self) -> None:
+        """Best-effort sweep SIBLING spill entries older than the stale threshold (never raises).
+
+        Runs ONLY when this area sits inside a ``.fetch-spill`` parent (the
+        :meth:`under_lake_root` layout) — a directly-constructed area (tests / custom dirs)
+        never sweeps its arbitrary parent. A sibling entry (another pull's ``pull-…`` namespace
+        dir, or a legacy flat spill file from the pre-namespacing layout) is removed IFF its
+        mtime is at least :data:`_STALE_SPILL_SECONDS` old — a hard-killed pull's straggler, far
+        past every bounded pipeline deadline. A LIVE concurrent pull's dir is younger (its own
+        spill activity keeps the mtime fresh) and is left alone; even a wrongly-swept file is
+        non-fatal (the guarded spill load defers that one window — never lost data). O(siblings).
+        """
+        parent = self._dir.parent
+        if parent.name != _SPILL_DIRNAME:
+            return
+        now = time.time()
+        try:
+            siblings = list(parent.iterdir())
+        except OSError:
+            return
+        for entry in siblings:
+            if entry == self._dir:
+                continue  # own dir — already handled above (defensive; it was just removed)
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue  # vanished / unreadable between iterdir and stat — leave it
+            if now - mtime < _STALE_SPILL_SECONDS:
+                continue  # plausibly a LIVE concurrent pull — never touch it
+            _remove_stale_entry(entry)
