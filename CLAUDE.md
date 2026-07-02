@@ -237,7 +237,33 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fetch-parser-hardening` (**DEC-FETCH-PARSER-HARDENING-001, MIGRATION.md #1038** — PR-B of
+- **Active branch:** `claude/stoic-maxwell-km8gfe` (**DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132** — the
+  fetch-per-window CI bench gate (`tests/bench/test_fetch_per_window_guarantee.py`, #1026) now measures the PRODUCTION
+  quantity instead of a flattering lab quantity: a verified forensic audit of a real production pull measured `2.59`
+  vendor fetches per `(contract, interval)` window while the gate read `1.198` and PASSED — because its replay range
+  (30 days) tiled into ONE 30-day vendor chunk (the 1-minute tier of `docs/groww/api-reference/03-backtesting.md`),
+  whereas the REAL default windows do not fit one chunk: option `expiry−30d → expiry+1d` = 31-day span → 2 chunks
+  (DEC-FNO-LOOKBACK-SPLIT-001 #894 / the strict window law DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127), future `expiry−60d →
+  expiry+1d` = 61-day span → 3 chunks (DEC-FUTURES-LOOKBACK-60D-001). The gate measured only the empty-retry
+  amplification, structurally blind to chunk tiling, so its "8h fits" arithmetic did not hold in production. REWRITE
+  (bench-test + docs ONLY — ZERO `brutex/` source change; the pull's fetch behaviour is byte-identical): the gate now
+  pins TWO quantities — (1) the ORIGINAL single-chunk LAB quantity stays independently pinned at ≤ 1.2 (#1026's actual
+  lever, the adaptive empty-retry bounding; measured `194/162 = 1.198`, teeth test kept at baseline `2.580`), and (2) a
+  NEW PRODUCTION-shaped replay derives every window from the REAL `default_fno_minute_window` law + the REAL
+  `plan_candle_windows` chunk planner (162 options → 2 chunks each, 1 future → 3) through the real ingest spine,
+  measuring `391/163 = 2.399` fpw against a ceiling DERIVED from the replayed chain (`(162·2·1.2 + 3)/163 ≈ 2.404`)
+  with a structural floor (`≈ 2.006`) + an option-chunks-≥2 pin so the gate can never silently degrade back to the
+  flattering single-chunk shape. HONEST 8h ARITHMETIC (Golden Rule #10): at the worst-case 3 r/s (CLAUDE.md §2 Rule 6),
+  8h = 86,400 fetches covers `86,400/2.399 ≈ 36,018` windows — BELOW the audited 48,145-window production scope
+  (#1026's forensic audit), so the 8h pull does NOT fit at the honest rate; the TRUE achievable wall-clock for that
+  scope is `≈ 10.7 h`, and the gate ASSERTS the infeasibility (`86,400/fpw < 48,145`) so a genuine structural
+  improvement fails the pin LOUDLY and forces a conscious re-derivation (the forcing function the stale "1.2 / fits
+  8h" claim lacked). The 48,145 reference is the PRE-#1127 audited scope — the far-contract skip has since shrunk the
+  per-pull scope by an UNMEASURED amount (a fresh production audit would be needed to claim a number, NOT claimed).
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change; ruff/ruff-format/
+  `mypy --strict`/`pyright` clean on the touched test; the #1026 blurb below is reconciled where it claimed "≤ 1.2 /
+  FITS".
+  Prior merged: **DEC-FETCH-PARSER-HARDENING-001, MIGRATION.md #1038** — PR-B of
   the triaged fetch-path edge-case sweep (sibling of PR-A DEC-INTERIOR-GAP-DETECT-001): three CONFIRMED non-crash
   fetch-path resilience gaps closed. HONEST SEVERITY: LOW-probability vendor-corruption / resilience guards — NONE is a
   crash or a HIGH bug (the alleged non-`Mapping`-payload HIGH was DISPROVEN against the real `growwapi` SDK). SCOPE NOTE
@@ -345,7 +371,14 @@ hostile-review pass._
   regression FAILS CI), plus a teeth test that the SAME chain WITHOUT bounding is ABOVE the ceiling and stores the SAME
   bars. MEASURED before/after: baseline `2.580` fpw (8h covers 33,485 windows) → bounded `1.198` fpw (8h covers 72,148
   windows), `0.46×` the fetches, 34→34 bars (no data lost). 8h-FEASIBILITY VERDICT: FITS at 3 r/s for the measured scope
-  (~72k window coverage ≥ ~48k target; the liquid-only universe ~42k < 86,400). HONEST (Golden Rule #10): a HEURISTIC
+  (~72k window coverage ≥ ~48k target; the liquid-only universe ~42k < 86,400). [GATE-HONESTY RECONCILE —
+  DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132: the `≤ 1.2` figure + this FITS verdict were measured on a
+  replay whose windows fit ONE 30-day chunk — a LAB quantity; the production DEFAULT windows tile into 2 chunks
+  (options) / 3 (futures) and a forensic audit measured the real pull at `2.59` fpw. The gate now ALSO replays the
+  production shape (`2.399` fpw vs a chain-derived ceiling `≈ 2.404`) and the honest verdict is DOES-NOT-FIT: 8h @
+  3 r/s covers ≈ 36,018 windows < the audited 48,145-window scope (true wall-clock ≈ 10.7 h). The empty-retry lever
+  itself (this entry's actual fix) remains real + independently pinned at ≤ 1.2 on the single-chunk quantity.]
+  HONEST (Golden Rule #10): a HEURISTIC
   band not an oracle (a live strike outside the band loses 2 glitch-recovery attempts but is STILL fetched once + stored
   if it returns data); the 8h projection is `total_fetches/3 r/s`, a wall-clock LOWER bound assuming the controller
   sustains 3 r/s (Rule 6 — provable), NOT a claim every real pull finishes in 8h; the empty-RETRY is bounded, NOT a
@@ -1335,7 +1368,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/serene-hamilton-jlzt1n`
+- **Active feature branch:** `claude/stoic-maxwell-km8gfe`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
