@@ -80,7 +80,7 @@ from brutex.adapters.groww.constants import (
     OPTION_SEGMENT,
     TRACK1_SPOT_INTERVAL,
 )
-from brutex.adapters.groww.contract_bounds import default_fno_minute_window
+from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
 from brutex.adapters.groww.contracts import parse_contract_symbol
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport
@@ -178,7 +178,10 @@ class HistoricalPullReport:
       contract, every window — the completion barrier)?
     * :attr:`phase1_complete` — the contract symbols whose 1-minute pull landed clean.
     * :attr:`start_dates` — each contract's RESOLVED 1-minute window start (the explicit
-      operator start, or the per-contract ``expiry − 30 days`` default, clamped into range).
+      operator start, or the per-contract ``expiry − lookback`` default, clamped into
+      range). A NOT-YET-OPEN contract (window not reached — skipped, zero fetches) is
+      absent here and counted in :attr:`contracts_not_yet_in_window`
+      (DEC-FNO-FAR-EXPIRY-WINDOW-001).
     * :attr:`minute_requested` — always ``True`` (1-minute is the only granularity).
     * :attr:`minute_skipped` — always ``False`` (one phase; there is no barrier to skip).
 
@@ -204,6 +207,10 @@ class HistoricalPullReport:
     start_dates: dict[str, str]
     minute_requested: bool
     minute_skipped: bool
+    #: Contracts EXCLUDED from this pull because their strict default window has not
+    #: OPENED yet (``expiry − lookback`` on/after the envelope end — zero vendor calls,
+    #: zero ledger rows; DEC-FNO-FAR-EXPIRY-WINDOW-001). Always 0 under explicit dates.
+    contracts_not_yet_in_window: int = 0
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the ``pull-historical`` route + the live panel."""
@@ -212,6 +219,7 @@ class HistoricalPullReport:
             "intervals": list(self.intervals),
             "contracts_selected": self.contracts_selected,
             "contracts_completed": self.contracts_completed,
+            "contracts_not_yet_in_window": self.contracts_not_yet_in_window,
             "bars_appended": self.bars_appended,
             "windows": self.windows,
             "failed_pairs": self.failed_pairs,
@@ -864,33 +872,60 @@ def _resolve_minute_windows(
 
     DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / DEC-FUTURES-LOOKBACK-60D-001. When the operator
     passed explicit from/to dates (*explicit_dates* True) EVERY contract uses the
-    resolved ``[start, end)`` envelope verbatim (the dates OVERRIDE). Otherwise each
-    contract gets its OWN per-contract DEFAULT window — SPLIT by contract type: a
-    FUTURE (``FUT``) defaults to ``expiry − 60 days → expiry+1day`` and an OPTION
-    (``CE`` / ``PE``) to the tighter ``expiry − 30 days → expiry+1day`` — clamped into
-    ``[start, end)``
+    resolved ``[start, end)`` envelope verbatim (the dates OVERRIDE — the operator can
+    still pull ANY range they name). Otherwise each contract gets its OWN per-contract
+    DEFAULT window — SPLIT by contract type: a FUTURE (``FUT``) defaults to
+    ``expiry − 60 days → expiry+1day`` and an OPTION (``CE`` / ``PE``) to the tighter
+    ``expiry − 30 days → expiry+1day`` — clamped into ``[start, end)``
     (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`, passed
     ``is_option=contract.contract_type in {"CE", "PE"}``) — so the 1-minute fill
     targets the recent life of each contract, not blindly from 2020. A contract with no
-    ``expiry`` falls back to the full range (the helper's never-skip choice). Pure +
-    O(contracts); no lake I/O.
+    ``expiry`` falls back to the full range (the helper's never-skip choice).
+
+    **NOT-YET-OPEN contracts are OMITTED (DEC-FNO-FAR-EXPIRY-WINDOW-001 — operator
+    law):** a far-future contract whose strict ``[expiry − lookback, expiry]`` window
+    has not intersected the envelope yet (the helper returns ``None``) gets NO map
+    entry — the caller excludes it from the pull entirely (no plan row, no fetch,
+    zero vendor calls) until the calendar reaches its ``opens_on`` date. Each skip is
+    logged loudly (``fno.window_not_open`` with the contract, expiry and ``opens_on``)
+    so the operator can SEE why the contract is absent. Pure + O(contracts); no lake
+    I/O (the log is the only side effect).
 
     Returns
     -------
     dict[str, tuple[date, date]]
-        ``{contract.symbol: (start, end)}`` for EVERY selected contract.
+        ``{contract.symbol: (start, end)}`` for every contract whose window is OPEN
+        (always every contract when *explicit_dates* is True); a not-yet-open
+        contract is absent.
     """
     windows: dict[str, tuple[date, date]] = {}
     for _row, contract in rebuilt:
         if explicit_dates:
             windows[contract.symbol] = (start, end)
-        else:
-            windows[contract.symbol] = default_fno_minute_window(
-                contract.expiry,
-                full_start=start,
-                full_end=end,
-                is_option=contract.contract_type in {"CE", "PE"},
+            continue
+        is_option = contract.contract_type in {"CE", "PE"}
+        window = default_fno_minute_window(
+            contract.expiry,
+            full_start=start,
+            full_end=end,
+            is_option=is_option,
+        )
+        if window is None:
+            # The helper returns None ONLY for a real expiry (a None expiry maps to
+            # the full range), so opens_on is always computable here; the ternaries
+            # keep the type-checkers honest without an unreachable assert.
+            _LOG.info(
+                "fno.window_not_open",
+                contract=contract.symbol,
+                expiry=contract.expiry.isoformat() if contract.expiry is not None else None,
+                opens_on=(
+                    fno_window_opens_on(contract.expiry, is_option=is_option).isoformat()
+                    if contract.expiry is not None
+                    else None
+                ),
             )
+            continue
+        windows[contract.symbol] = window
     return windows
 
 
@@ -1240,21 +1275,31 @@ def pull_contract_candles(
         None if fetch_pipeline is not None else _build_write_consumer(sink, dry_run=dry_run)
     )
     rebuilt = _rebuild_contracts(contracts)
-    selected_symbols = frozenset(row.contract_symbol for row, _contract in rebuilt)
-    # Option + future legs ride DISTINCT ledger namespaces (DEC-GROWW-FUTURE-INGEST-001),
-    # so split the selection by market and ingest each bucket under its own market.
-    by_market: dict[str, list[_RebuiltContract]] = {}
-    for row, contract in rebuilt:
-        by_market.setdefault(_contract_market(row), []).append((row, contract))
 
     # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
     # dates OVERRIDE (every contract uses the resolved range); else each contract's DEFAULT
-    # ``expiry − 30 days → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
-    # but IGNORED for granularity — F&O always fetches 1-minute only.
+    # ``expiry − lookback → expiry+1day`` clamped into range. ``intervals`` is accepted + echoed
+    # but IGNORED for granularity — F&O always fetches 1-minute only. Resolved FIRST because
+    # the strict window law (DEC-FNO-FAR-EXPIRY-WINDOW-001) EXCLUDES a not-yet-open contract
+    # from the pull entirely: it must not reach the ingest at all (a map-absent symbol would
+    # otherwise fall back to the FULL range inside ``_resolve_window`` — the exact full-history
+    # over-pull the law forbids).
     explicit_dates = from_date is not None or to_date is not None
     minute_windows = _resolve_minute_windows(
         rebuilt=rebuilt, explicit_dates=explicit_dates, start=start, end=end
     )
+    # The pull workload = ONLY the contracts whose window is OPEN (every contract under
+    # explicit dates). A not-yet-open contract gets no plan row, no fetch, zero vendor
+    # calls and zero ledger rows this pull — it joins automatically once the calendar
+    # reaches its ``opens_on`` (each skip was logged by the resolver above).
+    in_window = [(row, contract) for row, contract in rebuilt if contract.symbol in minute_windows]
+    contracts_not_yet_in_window = len(rebuilt) - len(in_window)
+    selected_symbols = frozenset(row.contract_symbol for row, _contract in in_window)
+    # Option + future legs ride DISTINCT ledger namespaces (DEC-GROWW-FUTURE-INGEST-001),
+    # so split the selection by market and ingest each bucket under its own market.
+    by_market: dict[str, list[_RebuiltContract]] = {}
+    for row, contract in in_window:
+        by_market.setdefault(_contract_market(row), []).append((row, contract))
 
     # Per-contract EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001): a confirmed-deep
     # far-OTM strike (outside ITS (underlying, expiry) chain's median ± band — keyed PER
@@ -1263,7 +1308,7 @@ def pull_contract_candles(
     # fetch to confirm empty instead of three — driving fetches-per-window toward ~1.0. NO data
     # is lost (the first non-empty fetch wins). The budget is sparse (only the deep strikes), so
     # an in-band option / every future keeps the full budget. Pure + O(chain), no network/lake I/O.
-    empty_retry_budget = build_empty_retry_budget(contract for _row, contract in rebuilt)
+    empty_retry_budget = build_empty_retry_budget(contract for _row, contract in in_window)
     empty_retry_by_symbol = dict(empty_retry_budget.by_symbol) or None
 
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
@@ -1374,6 +1419,7 @@ def pull_contract_candles(
         start_dates={sym: win[0].isoformat() for sym, win in sorted(minute_windows.items())},
         minute_requested=True,
         minute_skipped=False,
+        contracts_not_yet_in_window=contracts_not_yet_in_window,
     )
 
 

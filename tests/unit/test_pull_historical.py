@@ -26,7 +26,7 @@ invariants are asserted directly:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -1550,17 +1550,8 @@ def test_resolve_minute_windows_default_splits_futures_60_options_30(
     )
 
 
-def test_resolve_minute_windows_default_far_expiry_pulls_recent_lookback(
-    registry: RegistryStore,
-) -> None:
-    """A FAR-EXPIRY contract's DEFAULT window is the recent lookback, never 2020→today.
-
-    DEC-FNO-FAR-EXPIRY-WINDOW-001 (fails pre-fix): a Sep-2026 monthly whose
-    ``expiry − lookback`` lies AFTER the resolved ``end`` used to degrade to the FULL
-    2020→today range (~80 × 30-day chunks of dead history per contract). Through the
-    real call site the CE now gets the recent 30-day span and the FUT the recent
-    60-day span, both ending at the envelope's ``end``.
-    """
+def _seed_far_expiry_pair(registry: RegistryStore) -> date:
+    """Seed a Sep-2026 CE + FUT pair (far beyond the test envelopes) — returns the expiry."""
     far_expiry = date(2026, 9, 29)
     registry.upsert_contract(
         "NSE",
@@ -1582,22 +1573,148 @@ def test_resolve_minute_windows_default_far_expiry_pulls_recent_lookback(
         run_id=_RUN_ID,
         fetched_at=_FETCHED,
     )
+    return far_expiry
+
+
+def test_resolve_minute_windows_far_expiry_not_open_skipped_and_logged(
+    registry: RegistryStore,
+) -> None:
+    """A NOT-YET-OPEN contract is OMITTED from the window map and logged — never full range.
+
+    DEC-FNO-FAR-EXPIRY-WINDOW-001 (operator law; fails pre-fix): a Sep-2026 monthly
+    whose strict ``expiry − lookback`` window lies AFTER the resolved ``end`` used to
+    degrade to the FULL 2020→today range (~80 × 30-day chunks of dead history per
+    contract). Now BOTH the CE (opens 2026-08-30) and the FUT (opens 2026-07-31) get
+    NO map entry — the pull skips them with zero vendor calls — and each skip emits
+    one honest ``fno.window_not_open`` line naming the contract + its opens_on.
+    """
+    far_expiry = _seed_far_expiry_pair(registry)
     rebuilt = hp._rebuild_contracts(
         [r for r in registry.list_contracts(underlying="NIFTY") if r.expiry_date == far_expiry]
     )
-    out = hp._resolve_minute_windows(
-        rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 7, 1)
+    with capture_logs() as logs:
+        out = hp._resolve_minute_windows(
+            rebuilt=rebuilt, explicit_dates=False, start=date(2020, 1, 1), end=date(2026, 7, 1)
+        )
+    assert out == {}  # both not-yet-open contracts omitted — no substitute window
+    events = [e for e in logs if e["event"] == "fno.window_not_open"]
+    by_contract = {e["contract"]: e for e in events}
+    assert set(by_contract) == {"NSE-NIFTY-29Sep26-21000-CE", "NSE-NIFTY-29Sep26-FUT"}
+    assert by_contract["NSE-NIFTY-29Sep26-21000-CE"]["opens_on"] == "2026-08-30"  # expiry−30d
+    assert by_contract["NSE-NIFTY-29Sep26-FUT"]["opens_on"] == "2026-07-31"  # expiry−60d
+    assert all(e["expiry"] == "2026-09-29" for e in events)
+
+
+def test_resolve_minute_windows_open_contract_start_is_stable_across_days(
+    registry: RegistryStore,
+) -> None:
+    """Once OPEN, the default window start == expiry−lookback and NEVER moves.
+
+    The near-expiry NIFTY chain (expiry 2024-01-25) resolved on three consecutive
+    simulated days keeps the SAME expiry-anchored start while only the end advances
+    — no moving anchor exists (the ledger's trailing-END GC applies as usual).
+    """
+    rebuilt = hp._rebuild_contracts(registry.list_contracts(underlying="NIFTY"))
+    ce_symbol = next(c.symbol for _r, c in rebuilt if c.contract_type == "CE")
+    starts = []
+    for offset in range(3):
+        out = hp._resolve_minute_windows(
+            rebuilt=rebuilt,
+            explicit_dates=False,
+            start=date(2020, 1, 1),
+            end=date(2024, 1, 10) + timedelta(days=offset),
+        )
+        starts.append(out[ce_symbol][0])
+        assert out[ce_symbol][1] == date(2024, 1, 10) + timedelta(days=offset)
+    assert starts == [date(2023, 12, 26)] * 3  # expiry−30d, fixed forever
+
+
+def test_pull_skips_not_yet_open_contracts_no_fetch_no_ledger(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """DEC-FNO-FAR-EXPIRY-WINDOW-001 end-to-end: a not-yet-open contract is fetched NOT AT ALL.
+
+    LIVE-shaped (dry_run=False) DEFAULT pull over the near NIFTY chain PLUS a far
+    Sep-2026 CE+FUT pair whose windows open only on 2026-08-30 / 2026-07-31 (the
+    envelope ends 2026-06-13): the vendor sees ZERO calls for the far pair (the near
+    chain is fetched normally), the persisted window ledger holds ZERO rows for it,
+    the report counts it honestly, and each skip is logged. Fails pre-fix: the pair
+    was pulled over the FULL 2020→today range (~80 chunks each).
+    """
+    from brutex.data.window_ledger_store import load_window_ledger
+
+    _seed_far_expiry_pair(registry)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")  # 3 near + 2 far
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+    far = {"NSE-NIFTY-29Sep26-21000-CE", "NSE-NIFTY-29Sep26-FUT"}
+    near = {r.contract_symbol for r in selected} - far
+    # ZERO vendor calls for the far pair; the near chain fetched normally.
+    assert set(sdk.candle_symbols) == near
+    # ZERO ledger rows for the far pair; the near chain has real persisted rows.
+    ledger_symbols = {rec.security_id for rec in load_window_ledger(tmp_lake).records()}
+    assert ledger_symbols & far == set()
+    assert near <= ledger_symbols
+    # The report is honest about the exclusion.
+    assert report.contracts_selected == 5
+    assert report.contracts_not_yet_in_window == 2
+    assert set(report.start_dates) == near
+    assert far & set(report.phase1_complete) == set()
+    assert report.to_dict()["contracts_not_yet_in_window"] == 2
+    # Each skip logged loudly with its opens_on date.
+    events = {e["contract"] for e in logs if e["event"] == "fno.window_not_open"}
+    assert events == far
+
+
+def test_pull_all_contracts_not_yet_open_is_a_clean_noop(
+    registry: RegistryStore, tmp_lake: Path
+) -> None:
+    """An ALL-not-yet-open selection completes cleanly: zero fetches, zero rows, no crash."""
+    from brutex.data.window_ledger_store import load_window_ledger
+
+    far_expiry = _seed_far_expiry_pair(registry)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = [
+        r for r in registry.list_contracts(underlying="NIFTY") if r.expiry_date == far_expiry
+    ]
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
     )
-    assert out["NSE-NIFTY-29Sep26-21000-CE"] == (date(2026, 6, 1), date(2026, 7, 1))
-    assert out["NSE-NIFTY-29Sep26-FUT"] == (date(2026, 5, 2), date(2026, 7, 1))
+    assert sdk.candle_symbols == []  # ZERO vendor calls
+    assert sink.appends == []  # nothing written
+    assert report.contracts_selected == 2
+    assert report.contracts_not_yet_in_window == 2
+    assert report.contracts_completed == 0
+    assert report.bars_appended == 0
+    assert report.windows == 0
+    assert report.start_dates == {}
+    assert load_window_ledger(tmp_lake).records() == []  # zero ledger rows
 
 
 def test_resolve_minute_windows_explicit_overrides_far_expiry(registry: RegistryStore) -> None:
     """Explicit operator dates stay BYTE-IDENTICAL even for a FAR-EXPIRY contract.
 
-    DEC-FNO-FAR-EXPIRY-WINDOW-001 must not touch the explicit-dates path: with
-    ``explicit_dates=True`` a Sep-2026 contract gets the resolved envelope verbatim,
-    never a lookback-derived window.
+    DEC-FNO-FAR-EXPIRY-WINDOW-001 (operator law): the strict-window skip applies to
+    the DEFAULT path only — with ``explicit_dates=True`` the operator can still pull
+    ANY range they name: a Sep-2026 contract gets the resolved envelope verbatim,
+    never a skip and never a lookback-derived window.
     """
     registry.upsert_contract(
         "NSE",

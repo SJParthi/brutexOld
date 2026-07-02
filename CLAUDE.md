@@ -212,14 +212,17 @@ hostile-review pass._
   Expired options + futures (Options Track / lake) use the same
   `get_historical_candles` after resolving contracts via
   `groww.get_expiries(...)` → `groww.get_contracts(...)`, also at **`1minute`
-  ONLY** with a DEFAULT window SPLIT by contract type — FUTURES `expiry −
+  ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law
+  `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry −
   60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001, MIGRATION.md #1003 —
   supersedes the 3-calendar-month default of DEC-FNO-LOOKBACK-SPLIT-001 #894),
   OPTIONS `expiry − 30 days → expiry` (explicit operator dates
-  override either default; a FAR-EXPIRY contract whose `expiry − lookback`
-  lands at/after the pull envelope's end defaults to the most RECENT
-  lookback span, never the full 2020→today range —
-  DEC-FNO-FAR-EXPIRY-WINDOW-001, MIGRATION.md #1127); the F&O `1day` is likewise
+  override either default; a NOT-YET-OPEN far-future contract — `expiry −
+  lookback` on/after the envelope end — is SKIPPED entirely, zero vendor
+  calls + zero ledger rows, logged `fno.window_not_open`, until the calendar
+  reaches `expiry − lookback`; never a substitute window and never the full
+  2020→today range — DEC-FNO-FAR-EXPIRY-WINDOW-001, MIGRATION.md #1127);
+  the F&O `1day` is likewise
   DERIVED from the pulled 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001). See §6
   for the full verified fact table.
 - **Out of scope (Track 1 engine):** Live feed, WebSocket, order
@@ -1493,7 +1496,7 @@ bruteX/
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
-| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a FAR-EXPIRY contract defaults to the most RECENT lookback span, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `dashboard/historical_pull.py` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |

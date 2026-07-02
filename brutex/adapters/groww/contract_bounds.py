@@ -126,7 +126,36 @@ __all__ = [
     "coverage_to_minute_window",
     "default_fno_minute_window",
     "derive_contract_minute_windows",
+    "fno_window_opens_on",
 ]
+
+
+def fno_window_opens_on(expiry: date, *, is_option: bool) -> date:
+    """The first envelope day a contract's DEFAULT window is OPEN — ``expiry − lookback``.
+
+    DEC-FNO-FAR-EXPIRY-WINDOW-001 (operator law). The ONE place the per-type default
+    lookback anchor is computed (CLAUDE.md §11 COMMON): an OPTION (``CE``/``PE``) opens
+    :data:`DEFAULT_OPTION_LOOKBACK_DAYS` (30) days before its expiry, a FUTURE (``FUT``)
+    :data:`DEFAULT_FUTURES_LOOKBACK_DAYS` (60) days before. Consumed by
+    :func:`default_fno_minute_window` (the window START once open — fixed, it NEVER
+    moves) and by the pull's not-yet-open skip log (the honest ``opens_on`` date the
+    operator sees for a contract that is fetched not at all yet). Pure, O(1).
+
+    Parameters
+    ----------
+    expiry
+        The contract's expiry date (its hard last tradable day).
+    is_option
+        ``True`` for a ``CE`` / ``PE`` option (30-day lookback), ``False`` for a
+        ``FUT`` future (60-day lookback).
+
+    Returns
+    -------
+    date
+        ``expiry − lookback`` — the fixed, never-moving default window start.
+    """
+    lookback_days = DEFAULT_OPTION_LOOKBACK_DAYS if is_option else DEFAULT_FUTURES_LOOKBACK_DAYS
+    return expiry - timedelta(days=lookback_days)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +301,7 @@ def default_fno_minute_window(
     full_start: date,
     full_end: date,
     is_option: bool,
-) -> tuple[date, date]:
+) -> tuple[date, date] | None:
     """The DEFAULT half-open ``[start, end)`` 1-minute window for an F&O contract.
 
     DEC-1MINUTE-ONLY-DERIVE-1DAY-001 / DEC-FUTURES-LOOKBACK-60D-001. When the operator
@@ -290,23 +319,24 @@ def default_fno_minute_window(
     Both bounds are clamped INTO the operator's resolved ``[full_start, full_end)``
     range (the historical floor → previous-day envelope), so the default never widens
     scope. A contract with NO ``expiry`` (defensive — a vendor-neutral perpetual has
-    none) or whose lookback collapses to an empty/inverted span falls back to the FULL
-    ``(full_start, full_end)`` range — the conservative never-skip choice (Golden
-    Rule #10).
+    none) or whose window falls entirely BEFORE the envelope (an already-expired
+    contract on a later sub-range) falls back to the FULL ``(full_start, full_end)``
+    range — the conservative never-skip choice (Golden Rule #10).
 
-    **FAR-EXPIRY guard (DEC-FNO-FAR-EXPIRY-WINDOW-001):** a contract whose
-    ``expiry − <lookback>`` falls ON or AFTER ``full_end`` (e.g. a September monthly
-    pulled in early July) has its whole lookback span OUTSIDE the pull envelope, so
-    the clamp above collapses it to an empty window — and the pre-fix code degraded
-    to the FULL 2020→today range (~80 × 30-day chunks of dead history per contract; a
-    verified forensic audit of a real production log measured 4 such contracts ×
-    80 chunks = 320 vendor calls = 22.5% of the entire ADANIENT pull wasted). A
-    far-expiry contract now pulls the most RECENT lookback span the envelope allows
-    instead: ``start = max(full_start, full_end − <lookback>)`` with the SAME
-    ``min(full_end, expiry + 1 day)`` end clamp — NEVER the full-history fallback.
-    The genuinely-empty spans (no ``expiry``; ``expiry`` before ``full_start``; a
-    degenerate ``full_start >= full_end`` envelope) still fall back to the full
-    range, and explicit operator dates never reach this helper at all
+    **NOT-YET-OPEN skip (DEC-FNO-FAR-EXPIRY-WINDOW-001 — operator law):** the default
+    window is STRICTLY ``[expiry − lookback, expiry] ∩ [full_start, full_end)`` —
+    never a substitute window. A far-future contract whose window has not OPENED yet
+    (``expiry − lookback`` ON/AFTER ``full_end`` — e.g. a September monthly pulled in
+    early July) returns ``None``: the caller skips it entirely — ZERO vendor calls,
+    ZERO ledger rows — until the calendar reaches ``expiry − lookback``
+    (:func:`fno_window_opens_on`), at which point the normal window with its FIXED
+    start (``expiry − lookback``, never moving across daily pulls) kicks in. The
+    pre-fix code instead degraded this case to the FULL 2020→today range (~80 ×
+    30-day chunks of dead history per contract; a verified forensic audit of a real
+    production log measured 4 such contracts × 80 chunks = 320 vendor calls = 22.5%
+    of the entire ADANIENT pull wasted). A DEGENERATE envelope
+    (``full_start >= full_end``) keeps the pre-existing full-range fallback (never
+    ``None``), and explicit operator dates never reach this helper at all
     (``historical_pull._resolve_minute_windows`` short-circuits them verbatim).
 
     Parameters
@@ -324,23 +354,25 @@ def default_fno_minute_window(
 
     Returns
     -------
-    tuple[date, date]
+    tuple[date, date] | None
         The half-open ``(start, end)`` 1-minute window, always within
-        ``[full_start, full_end)``.
+        ``[full_start, full_end)`` — or ``None`` for a NOT-YET-OPEN contract
+        (skip: fetch nothing this pull).
     """
     if expiry is None:
         return (full_start, full_end)
-    lookback_days = DEFAULT_OPTION_LOOKBACK_DAYS if is_option else DEFAULT_FUTURES_LOOKBACK_DAYS
-    lookback = timedelta(days=lookback_days)
-    lookback_start = expiry - lookback
+    lookback_start = fno_window_opens_on(expiry, is_option=is_option)
+    if lookback_start >= full_end and full_start < full_end:
+        # NOT-YET-OPEN (operator law, DEC-FNO-FAR-EXPIRY-WINDOW-001): the strict
+        # window [expiry − lookback, expiry] has not intersected the envelope yet —
+        # fetch NOTHING (the caller skips the contract: zero vendor calls, zero
+        # ledger rows) until the calendar reaches expiry − lookback. Never a
+        # substitute window; the pre-fix code degraded this to the FULL 2020→today
+        # range. A degenerate envelope (full_start >= full_end) is NOT a skip — it
+        # keeps the pre-existing conservative full-range fallback below.
+        return None
+    start = max(full_start, lookback_start)
     end = min(full_end, expiry + timedelta(days=1))
-    if lookback_start >= full_end:
-        # FAR-EXPIRY (DEC-FNO-FAR-EXPIRY-WINDOW-001): the lookback span starts at/after
-        # the envelope's end, so clamping would empty it and the old code fell back to
-        # the FULL 2020→today range. Pull the most RECENT lookback span instead.
-        start = max(full_start, full_end - lookback)
-    else:
-        start = max(full_start, lookback_start)
     if start >= end:
         return (full_start, full_end)
     return (start, end)
