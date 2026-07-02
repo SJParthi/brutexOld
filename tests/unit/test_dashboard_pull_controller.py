@@ -2502,3 +2502,80 @@ class TestDailyDeriveAfterDrain:
         daily = pl.concat([pl.read_parquet(f) for f in daily_files])
         # One derived daily bar per stored 1-minute session date — the POST-drain count.
         assert daily.height == expected_days
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-WINDOW-LEDGER-RESCUE-001 — visible skips + loud ledger-reload failure (spot)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPullAllLedgerRescueSurface:
+    """The spot bulk pull reports its settled-window skips + a failed ledger reload."""
+
+    def test_second_pull_reports_skipped_settled_windows(self, tmp_path: Path) -> None:
+        # Run 1 settles the range SUCCESS (real sink + ledger, dry_run=False with an
+        # injected synthetic adapter); run 2 skips the settled window WITHOUT a
+        # vendor hit and SAYS so — in the report, its dict, the spine INFO line,
+        # and the pull-done INFO.
+        first = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2026-02-02",
+            to_date="2026-02-13",
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert first.windows_skipped == 0  # a fresh lake has nothing skippable
+        with capture_logs() as logs:
+            second = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2026-02-02",
+                to_date="2026-02-13",
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        # One symbol × the 1-minute default interval × one 30-day tile = 1 window.
+        assert second.windows_skipped == 1
+        assert second.to_dict()["windows_skipped"] == 1
+        spine = [e for e in logs if e["event"] == "ingest.windows_skipped_settled"]
+        assert spine and spine[-1]["windows_skipped_settled"] == 1
+        done = [e for e in logs if e["event"] == "universe.pull_all.done"]
+        assert done and done[0]["windows_skipped"] == 1
+
+    def test_ledger_reload_failure_is_loud(self, tmp_path: Path) -> None:
+        # A corrupt (unreadable) persisted ledger: the pull still runs (full
+        # re-verify — never a crash) but the report + WARNING announce it.
+        from brutex.data.window_ledger_store import ledger_path
+
+        ledger_file = ledger_path(tmp_path)
+        ledger_file.parent.mkdir(parents=True, exist_ok=True)
+        ledger_file.write_bytes(b"not a parquet file at all")
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2026-02-02",
+                to_date="2026-02-03",
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        assert report.ledger_load_failed is True
+        assert report.to_dict()["ledger_load_failed"] is True
+        assert any(e["event"] == "universe.pull_all.ledger_reload_failed" for e in logs)
+        assert report.total_completed == 1  # the full re-verify pull still ran
+
+    def test_dry_run_never_reads_the_ledger(self, tmp_path: Path) -> None:
+        # A dry-run has NO ledger (begin_pull_ledger → None), so a corrupt file on
+        # disk is never read and neither rescue field fires (the honest default).
+        from brutex.data.window_ledger_store import ledger_path
+
+        ledger_file = ledger_path(tmp_path)
+        ledger_file.parent.mkdir(parents=True, exist_ok=True)
+        ledger_file.write_bytes(b"junk")
+        report = pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert report.ledger_load_failed is False
+        assert report.windows_skipped == 0
