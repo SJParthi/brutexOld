@@ -253,10 +253,13 @@ def test_dry_run_groww_adapter_protocol_surface() -> None:
 def test_cmd_fetch_dry_run_synthetic_end_to_end(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``--dry-run`` runs the full synthetic fetch→sink pipeline into the lake.
+    """``--dry-run`` runs the full synthetic fetch→sink pipeline OFF the real lake.
 
-    Also arms the retry-storm guard (>=1 minutes valid) and exercises the
-    legacy ``--window-days`` ignored-note path.
+    DEC-DRYRUN-LAKE-ISOLATION-001 regression: the synthetic bars + catalog + the
+    retry-storm audit all land on an ephemeral system-temp lake (removed at exit),
+    NEVER on the resolved production lake — while the counts are still reported.
+    Also arms the retry-storm guard (>=1 minutes valid) and exercises the legacy
+    ``--window-days`` ignored-note path.
     """
     pytest.importorskip("polars")
     pytest.importorskip("duckdb")
@@ -278,18 +281,27 @@ def test_cmd_fetch_dry_run_synthetic_end_to_end(
         captured.err
     )
     # The explicit dry-run announces itself with the LOUD synthetic label
-    # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never reads like a real pull).
+    # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never reads like a real pull)
+    # AND names the Wave-1 isolated ephemeral lake (DEC-PULL-FORENSIC-WAVE1-001).
     assert (
         "[brutex] SYNTHETIC DRY-RUN — no real data — fetch --dry-run → synthetic candles"
         in captured.err
     )
+    assert "production lake untouched" in captured.err
     assert "retry-storm guard armed — give up after 30 min" in captured.err
     assert (
         "[brutex] fetch done — windows=3 bars_appended=6 failed_pairs=0 transient=0"
     ) in captured.out
-    assert f"[brutex] lake: {tmp_path}" in captured.out
-    assert (tmp_path / "catalog.duckdb").exists()
-    assert list((tmp_path / "audit").glob("retry-storm-*.jsonl"))
+    assert f"[brutex] lake: {tmp_path} (dry-run — production lake untouched)" in captured.out
+    # The PRE-FIX behaviour wrote the synthetic catalog + retry-storm audit into
+    # the production lake root; the isolated dry-run leaves it EMPTY.
+    assert not (tmp_path / "catalog.duckdb").exists()
+    assert not (tmp_path / "audit").exists()
+    assert list(tmp_path.iterdir()) == []
+    # The ephemeral temp lake named on stderr is cleaned up after the pull.
+    ephemeral = Path(captured.err.split("(ephemeral lake: ", 1)[1].split(" — ", 1)[0])
+    assert "brutex-fetch-dryrun-lake-" in ephemeral.name
+    assert not ephemeral.exists()
 
 
 def test_cmd_fetch_dry_run_inspect_persists_nothing(
@@ -316,6 +328,189 @@ def test_cmd_fetch_dry_run_inspect_persists_nothing(
         captured.out
     )
     assert list(tmp_path.iterdir()) == []
+
+
+# ── --dry-run lake isolation (DEC-DRYRUN-LAKE-ISOLATION-001) ────────────
+
+
+def _snapshot_tree(root: Path) -> dict[str, tuple[int, int, bytes]]:
+    """Map every file under *root* to ``(size, mtime_ns, content)`` for byte-diffing."""
+    return {
+        str(p.relative_to(root)): (p.stat().st_size, p.stat().st_mtime_ns, p.read_bytes())
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def test_cmd_fetch_dry_run_leaves_production_lake_byte_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ``--dry-run`` through the real ``cmd_fetch`` path never touches the lake.
+
+    DEC-DRYRUN-LAKE-ISOLATION-001 fails-before/passes-after regression: PRE-FIX the
+    dry-run wired a REAL ``ParquetBarSink`` over the RESOLVED production lake root +
+    the real ``catalog.duckdb``, so synthetic bars poisoned real partitions (the
+    keep-first merge then dropped the real vendor bars pulled later). The
+    'production' lake is pre-seeded and snapshotted; after the dry-run it must be
+    BYTE-identical (no new, no modified files) while the run still reports its
+    fetched-bar counts.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    production = tmp_path / "production-lake"
+    seeded = production / "bars" / "NSE" / "INDEX" / "NSE-NIFTY" / "1minute" / "2024"
+    seeded.mkdir(parents=True)
+    (seeded / "01.parquet").write_bytes(b"real vendor bytes -- must survive untouched")
+    before = _snapshot_tree(production)
+    assert before  # the seed is real
+
+    rc = cli.cmd_fetch(
+        production,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=True,
+        inspect=False,
+        rows_per_chunk=2,
+    )
+    assert rc == cli.EXIT_OK
+    captured = capsys.readouterr()
+    # Reporting behaviour preserved: the synthetic pull still counts its bars…
+    assert (
+        "[brutex] fetch done — windows=3 bars_appended=6 failed_pairs=0 transient=0"
+    ) in captured.out
+    # …but the production tree is byte-for-byte untouched (PRE-FIX this grew a
+    # catalog.duckdb + synthetic bars partitions under `production`).
+    assert _snapshot_tree(production) == before
+
+
+class _RealVendorSpotAdapter(cli._DryRunGrowwSpotAdapter):
+    """Fake LIVE adapter: the SAME timestamps as the dry-run synthetic bars, REAL prices.
+
+    Reuses the deterministic synthetic generator at a distinct ``base_price`` so a
+    dry-run bar that pre-occupied the keep-first slot is detectable by price.
+    """
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Any, interval: str, start: Any, end: Any
+    ) -> Any:
+        from decimal import Decimal
+
+        from brutex.adapters.ingest_common import synthetic_spot_bars
+
+        del symbol, exchange, interval, end
+        return synthetic_spot_bars(start, count=2, base_price=Decimal("500"))
+
+
+def test_cmd_fetch_real_pull_after_dry_run_stores_real_bars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REAL pull after a ``--dry-run`` stores the REAL vendor bars, nothing pre-occupied.
+
+    DEC-DRYRUN-LAKE-ISOLATION-001 poison-proof: PRE-FIX the dry-run stored synthetic
+    bars (base price 100) into the production lake at the session timestamps; the
+    keep-first partition merge then PERMANENTLY dropped the real vendor bars (base
+    price 500) arriving later at the same ``(series, timestamp)``. Post-fix the
+    dry-run leaves the lake empty, so the subsequent real pull stores the real prices.
+    """
+    pl = pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    # 1) The dry-run (synthetic base price 100) over the same lake root + dates.
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=True,
+        inspect=False,
+        rows_per_chunk=2,
+    )
+    assert rc == cli.EXIT_OK
+    assert not list(tmp_path.rglob("*.parquet"))  # nothing pre-occupied
+
+    # 2) A REAL (non-dry) pull through the SAME cmd_fetch path — the real ingest
+    # spine + persisting sink, only the vendor adapter + creds gate faked.
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    # Post-DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 the CLI gate consumes
+    # groww_credentials_error() (None = creds OK), not the old bool present-check.
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (
+            _RealVendorSpotAdapter(bars_per_window=2),
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake), catalog=catalog),
+        ),
+    )
+    cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=2,
+        auto_retry=False,
+    )
+    stored = sorted(tmp_path.rglob("*.parquet"))
+    bars = [p for p in stored if "bars" in p.parts]
+    assert bars, "the real pull stored bars into the lake"
+    frame = pl.concat([pl.read_parquet(p) for p in bars])
+    opens = {float(v) for v in frame["open"].to_list()}
+    # The REAL vendor prices (500-base) won — PRE-FIX the dry-run's synthetic
+    # 100-base bars occupied the keep-first slots and these were dropped.
+    assert opens == {500.0, 501.0}
+
+
+def test_make_dryrun_lake_root_is_labelled_temp_dir(tmp_path: Path) -> None:
+    """The ephemeral dry-run lake is a fresh, clearly-labelled system-temp dir."""
+    import tempfile
+
+    root = cli._make_dryrun_lake_root()
+    try:
+        assert root.is_dir()
+        assert root.name.startswith("brutex-fetch-dryrun-lake-")
+        assert Path(tempfile.gettempdir()) in root.parents
+        assert tmp_path not in root.parents  # never under a caller's lake
+    finally:
+        root.rmdir()
+
+
+def _raise_boom() -> None:
+    """Raise the error the cleanup test propagates (indirection keeps the
+    post-``with`` assert visibly reachable to static analysis — ``pytest.raises``
+    swallows the error at runtime, which a direct in-block ``raise`` hides)."""
+    raise RuntimeError("boom")
+
+
+def test_ephemeral_dryrun_lake_cleanup_removes_tree(tmp_path: Path) -> None:
+    """The cleanup context removes the ephemeral tree on exit — even on error."""
+    lake = tmp_path / "ephemeral"
+    (lake / "bars").mkdir(parents=True)
+    (lake / "bars" / "junk.parquet").write_bytes(b"synthetic")
+    with pytest.raises(RuntimeError, match="boom"), cli._ephemeral_dryrun_lake_cleanup(lake):
+        _raise_boom()
+    assert not lake.exists()
+
+
+def test_ephemeral_dryrun_lake_cleanup_none_is_noop(tmp_path: Path) -> None:
+    """A ``None`` lake (live / --inspect pull) leaves the filesystem alone."""
+    marker = tmp_path / "marker"
+    marker.write_text("live lake stays")
+    with cli._ephemeral_dryrun_lake_cleanup(None):
+        pass
+    assert marker.read_text() == "live lake stays"
 
 
 # ── cmd_fetch live wiring (adapter / preflight / ingest faked) ──────────

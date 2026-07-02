@@ -133,6 +133,20 @@ class GrowwClient:
     #: (two clients differing only by meter instance stay equal; ``replace`` keeps it).
     meter: CallMeter = field(default_factory=CallMeter, compare=False, repr=False)
 
+    @property
+    def self_paces(self) -> bool:
+        """Whether this client itself admits every physical call through a REAL ``pace`` hook.
+
+        ``True`` once a shared rate bucket has been bound (a live build site's
+        ``pace=`` argument or :meth:`with_pace`); ``False`` on the no-op default.
+        The ingest spines consult this via :func:`client_self_paces` to pick ONE
+        canonical admission point per physical fetch
+        (DEC-RATE-SINGLE-ADMISSION-001): when the client self-paces, the
+        per-window ``pace()`` is dropped, so a fetch is never admitted twice
+        against the shared 500/min governor + AIMD ladder.
+        """
+        return self.pace is not _noop_pace
+
     def _resolve_sdk(self) -> GrowwSDK:
         """Return the SDK to call against — the refresher's live one, else :attr:`sdk`.
 
@@ -357,6 +371,32 @@ ClientPool` (DEC-GROWW-CLIENT-POOL-001). Frozen dataclass → :func:`replace`, n
         return replace(self, pace=pace)
 
 
+def client_self_paces(client: object) -> bool:
+    """Return whether *client* already acquires a rate-bucket token per physical call.
+
+    The ONE predicate the ingest spines use to pick the canonical admission point
+    (DEC-RATE-SINGLE-ADMISSION-001): a :class:`GrowwClient` (or a
+    :class:`~brutex.adapters.groww.pool.ClientPool`) whose ``pace`` hook is bound
+    to the shared rate bucket admits each physical attempt itself inside
+    :meth:`GrowwClient._call` — retry attempts included — so the caller must NOT
+    pace again per window: a double admission halves the achieved physical rate
+    and double-charges the 500/min governor for one fetch. An object without a
+    ``self_paces`` surface (a test fake / a non-Groww adapter's client) reads
+    ``False``, keeping the window-level pace as the fallback admission.
+
+    Parameters
+    ----------
+    client
+        Any candidate client (a :class:`GrowwClient`, a pool, a fake, or ``None``).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the client exposes a truthy ``self_paces`` attribute.
+    """
+    return bool(getattr(client, "self_paces", False))
+
+
 @runtime_checkable
 class GrowwClientProtocol(Protocol):
     """The neutral client surface the spot adapter + option enumerator depend on.
@@ -416,4 +456,10 @@ ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
         raise NotImplementedError  # structural Protocol stub — never executed
 
 
-__all__ = ["GrowwClient", "GrowwClientProtocol", "GrowwSDK", "run_with_deadline"]
+__all__ = [
+    "GrowwClient",
+    "GrowwClientProtocol",
+    "GrowwSDK",
+    "client_self_paces",
+    "run_with_deadline",
+]

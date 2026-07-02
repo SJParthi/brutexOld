@@ -250,6 +250,17 @@ def test_size_reports_connection_count() -> None:
     assert pool.size == 3
 
 
+def test_pool_self_paces_only_when_every_leaf_is_paced() -> None:
+    """``ClientPool.self_paces`` is True iff EVERY leaf carries a real pace hook.
+
+    The single-admission seam (DEC-PULL-FORENSIC-WAVE1-001): the ingest spines drop
+    the per-window admission only when NO connection can bypass the shared bucket.
+    """
+    pool = _pool_of(_RecordingSDK(), _RecordingSDK())
+    assert pool.self_paces is False  # default leaves use the no-op pace sentinel
+    assert pool.with_pace(lambda: None).self_paces is True  # all leaves re-paced
+
+
 # ── constructor guards (fail loud on misuse) ────────────────────────────────────────────
 
 

@@ -66,7 +66,7 @@ from time import sleep as _time_sleep
 import structlog
 
 from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
-from brutex.adapters.groww.client import GrowwClientProtocol
+from brutex.adapters.groww.client import GrowwClientProtocol, client_self_paces
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
@@ -352,6 +352,13 @@ def ingest_option_contract(
     COMMON): ``windows`` is 1 when the range is non-empty (0 when ``start >= end``
     after the current-day clamp), ``skipped_windows`` 1 on a ledger skip.
 
+    Rate admission (DEC-RATE-SINGLE-ADMISSION-001): when *client* already
+    self-paces (a live client whose ``pace`` hook is bound to the shared bucket —
+    the production wiring), the window-level *pace* is IGNORED: the client's
+    per-attempt acquire is the single admission per physical fetch (retry attempts
+    included). *pace* applies only for an unpaced client, so a fetch is never
+    admitted twice against the 500/min governor.
+
     Raises
     ------
     GrowwError
@@ -390,6 +397,15 @@ def ingest_option_contract(
 
     sleep = backoff if backoff is not None else _default_backoff
     empty_backoff = empty_retry_backoff if empty_retry_backoff is not None else _noop_empty_backoff
+    # SINGLE ADMISSION (DEC-RATE-SINGLE-ADMISSION-001): a live client already self-paces
+    # every physical attempt (``build_live_client`` / ``build_live_pool`` bake the shared
+    # bucket's ``pace`` into ``GrowwClient._call`` — retry attempts included), so pacing
+    # again per window here would admit each fetch TWICE — halving the achieved rate and
+    # double-charging the 500/min governor. The client is the canonical admission point;
+    # the window-level pace stays ONLY for an unpaced client (fakes / a caller that paces
+    # solely at the window level).
+    if client_self_paces(client):
+        pace = None
     attempt = 0
     # Vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001) —
     # counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
