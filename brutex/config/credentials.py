@@ -587,6 +587,41 @@ def resolve_groww_aws_credentials(
     )
 
 
+def groww_credentials_error(
+    *, aws_loader: Callable[[], GrowwFileCredentials] | None = None
+) -> str | None:
+    """Return ``None`` when the Groww AWS credentials resolve, else the fix text.
+
+    The LOUD twin of :func:`groww_credentials_present`
+    (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). The bool gate swallows the
+    :class:`CredentialsError` to a bare ``False``, which DISCARDS the error's own
+    actionable fix message (which parameter/env var is wrong + what to do) — the
+    swallow that let the dashboard silently downgrade a REAL pull to a synthetic
+    dry-run on ANY credential failure. This function preserves that text VERBATIM
+    (never re-derived — CLAUDE.md §11 COMMON) so every REAL pull surface can
+    refuse loudly with the exact fix. The message is secret-free by the loader's
+    contract (it names parameter paths, never values).
+
+    Parameters
+    ----------
+    aws_loader
+        Injectable AWS-creds reader (default: the real lazy-boto3 loader). Tests
+        pass a fake so CI needs NO real AWS.
+
+    Returns
+    -------
+    str | None
+        ``None`` when :func:`resolve_groww_aws_credentials` succeeds; otherwise
+        the raised :class:`CredentialsError`'s own message — AWS unreachable,
+        boto3 missing, or a parameter absent/blank.
+    """
+    try:
+        resolve_groww_aws_credentials(aws_loader=aws_loader)
+    except CredentialsError as exc:
+        return str(exc)
+    return None
+
+
 def groww_credentials_present(
     *, aws_loader: Callable[[], GrowwFileCredentials] | None = None
 ) -> bool:
@@ -594,8 +629,12 @@ def groww_credentials_present(
 
     Resolves the Groww credentials from AWS Parameter Store (the SOLE source,
     DEC-AWS-ONLY-CREDS-001); returns ``False`` on any :class:`CredentialsError` — AWS
-    unreachable, boto3 missing, or a parameter absent/blank — so a status surface (e.g. the
-    dashboard dry-run gate) degrades gracefully instead of raising.
+    unreachable, boto3 missing, or a parameter absent/blank — so a STATUS surface
+    degrades gracefully instead of raising. It is a status/display gate ONLY: a
+    REAL pull decision must use :func:`groww_credentials_error` (via
+    :func:`brutex.adapters.ingest_common.gate_pull_credentials`) so the failure's
+    own fix text is relayed instead of discarded
+    (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never a silent synthetic downgrade).
 
     Parameters
     ----------
@@ -603,11 +642,7 @@ def groww_credentials_present(
         Injectable AWS-creds reader (default: the real lazy-boto3 loader). Tests pass a fake
         so CI needs NO real AWS.
     """
-    try:
-        resolve_groww_aws_credentials(aws_loader=aws_loader)
-    except CredentialsError:
-        return False
-    return True
+    return groww_credentials_error(aws_loader=aws_loader) is None
 
 
 __all__ = [
@@ -623,6 +658,7 @@ __all__ = [
     "credentials_path",
     "credentials_present",
     "credentials_preview",
+    "groww_credentials_error",
     "groww_credentials_present",
     "load_token_credentials",
     "normalise_token",

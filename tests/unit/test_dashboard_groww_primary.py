@@ -1,12 +1,15 @@
 """Dashboard Groww-PRIMARY spot-pull gate (DEC-AWS-ONLY-CREDS-001).
 
-The live SPOT-pull readiness gate keys on
-:func:`brutex.config.credentials.groww_credentials_present`, which now resolves the Groww
+The live SPOT-pull gate keys on
+:func:`brutex.config.credentials.groww_credentials_error`, which resolves the Groww
 credentials from AWS Parameter Store — the SOLE source (the in-app credentials webpage +
 the env-var / local-file paths were removed). These route tests prove the gate end-to-end
-against the REAL ``groww_credentials_present`` → ``resolve_groww_aws_credentials`` path, with
+against the REAL ``groww_credentials_error`` → ``resolve_groww_aws_credentials`` path, with
 the AWS reader (``load_groww_aws_credentials``) monkeypatched to an in-memory fake so the
-test needs NO real AWS and NO network — present ⇒ live, absent (fail-fast) ⇒ dry-run.
+test needs NO real AWS and NO network — present ⇒ live; absent ⇒ a LOUD 503 REFUSAL
+relaying the CredentialsError's own fix text (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 —
+never the old silent synthetic downgrade); ``?dry_run=true`` ⇒ the explicit,
+loudly-labeled synthetic run.
 
 The injected ``pull_all_spot`` is an offline fake — NEVER a real network call —
 so the live (``dry_run=False``) branch is exercised without touching Groww.
@@ -16,6 +19,7 @@ Skipped cleanly when the ``[ui]`` extra (FastAPI) or duckdb is absent.
 from __future__ import annotations
 
 import importlib
+import threading
 import time
 from collections.abc import Iterator
 from datetime import date
@@ -158,12 +162,71 @@ def _drain_job(client: TestClient, *, timeout: float = 10.0) -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def test_spot_pull_dry_run_without_groww_creds(client: TestClient) -> None:
-    """No Groww creds → the spot pull is forced offline (dry_run=True)."""
+def test_spot_pull_refuses_loudly_without_groww_creds(client: TestClient) -> None:
+    """No Groww creds → the REAL spot pull REFUSES with the relayed fix text.
+
+    DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 (audit finding R1): the route used to
+    silently downgrade to a synthetic dry-run and report the pull GREEN with
+    counts while ZERO real bars landed. Now it must 503 with the
+    CredentialsError's own message, and the /pull-verdict banner must carry the
+    red ``credentials_missing`` needs-operator verdict.
+    """
     resp = client.post("/api/v1/universe/pull-all", params={"kind": "index"})
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    # The refusal headline + the CredentialsError's own fix text, relayed verbatim.
+    assert "Pull REFUSED — Groww credentials unavailable" in detail
+    assert "no Groww credentials in AWS Parameter Store (test)" in detail
+    # The banner slot carries the RED needs-operator refusal verdict.
+    verdict = client.get("/api/v1/universe/pull-verdict").json()
+    assert verdict["present"] is True
+    assert verdict["kind"] == "credentials_missing"
+    assert verdict["colour"] == "red"
+    assert verdict["show_retry_button"] is True  # needs_operator semantics
+    assert "no Groww credentials in AWS Parameter Store (test)" in verdict["action"]
+    # No background job was started — the refusal happens BEFORE any pull.
+    snap = client.get("/api/v1/universe/pull-progress").json()
+    assert snap["state"] == "idle"
+
+
+def test_spot_pull_explicit_dry_run_without_creds_is_loudly_synthetic(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?dry_run=true runs WITHOUT creds and is loudly labeled synthetic.
+
+    The explicit opt-in keeps working (the offline proof-of-spine), but its
+    progress title AND its finished verdict must SAY synthetic — never look
+    like a real pull (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). The fake pull is
+    gated on an Event so the RUNNING progress snapshot (whose ``detail``
+    carries the label until the job finishes) can be sampled deterministically.
+    """
+    from brutex.dashboard.pull_controller import BulkSpotReport, SymbolPullResult
+
+    release = threading.Event()
+
+    def _gated_pull_all_spot(instruments: list[Instrument], **kwargs: Any) -> BulkSpotReport:
+        assert release.wait(timeout=10.0), "test never released the gated fake pull"
+        return BulkSpotReport(
+            dry_run=kwargs["dry_run"],
+            start_date="2020-01-01",
+            end_date="2026-07-01",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=1, failed=0, no_data=0)],
+        )
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _gated_pull_all_spot)
+    resp = client.post("/api/v1/universe/pull-all", params={"kind": "index", "dry_run": "true"})
     assert resp.status_code == 200
     assert resp.json()["dry_run"] is True
+    # While RUNNING the progress title carries the loud synthetic label.
+    snap = client.get("/api/v1/universe/pull-progress").json()
+    assert snap["state"] == "running"
+    assert "SYNTHETIC DRY-RUN — no real data" in snap["detail"]
+    release.set()
     _drain_job(client)
+    # The finished verdict says synthetic loudly too (mark_synthetic).
+    verdict = client.get("/api/v1/universe/pull-verdict").json()
+    assert verdict["present"] is True
+    assert "SYNTHETIC DRY-RUN — no real data" in verdict["headline"]
 
 
 def test_spot_pull_live_with_groww_creds(client: TestClient) -> None:
@@ -184,19 +247,21 @@ def test_spot_interval_param_is_ignored_always_one_minute(client: TestClient) ->
     symbols × intervals, so EVERY value (default / ``both`` / ``1minute``) gives the SAME
     one-interval-per-symbol total — the param no longer scopes the pull.
     """
-    default = client.post("/api/v1/universe/pull-all", params={"kind": "index"})
+    default = client.post("/api/v1/universe/pull-all", params={"kind": "index", "dry_run": "true"})
     assert default.status_code == 200
     default_total = default.json()["total"]
     _drain_job(client)
     both = client.post(
-        "/api/v1/universe/pull-all", params={"kind": "index", "spot_interval": "both"}
+        "/api/v1/universe/pull-all",
+        params={"kind": "index", "spot_interval": "both", "dry_run": "true"},
     )
     assert both.status_code == 200
     # ``both`` is IGNORED — still 1-minute only → the SAME total (not doubled).
     assert both.json()["total"] == default_total
     _drain_job(client)
     minute = client.post(
-        "/api/v1/universe/pull-all", params={"kind": "index", "spot_interval": "1minute"}
+        "/api/v1/universe/pull-all",
+        params={"kind": "index", "spot_interval": "1minute", "dry_run": "true"},
     )
     assert minute.json()["total"] == default_total
     _drain_job(client)

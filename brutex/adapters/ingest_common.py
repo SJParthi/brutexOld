@@ -48,7 +48,7 @@ serve both vendors.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from time import sleep as _time_sleep
@@ -716,8 +716,14 @@ class SyntheticSpotAdapter:
 # Pull verdict (relocated from the original vendor ``pull_verdict`` module in
 # PR-J4a — the actionable, prioritised finished-pull verdict).
 # --------------------------------------------------------------------------- #
-#: The mutually-exclusive, priority-ordered outcomes of a finished pull.
+#: The mutually-exclusive, priority-ordered outcomes of a finished pull — PLUS
+#: ``credentials_missing``, the PRE-pull refusal verdict: a REAL pull that could
+#: not even start because the Groww credentials did not resolve
+#: (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). It is produced ONLY by
+#: :func:`credentials_refusal_verdict` / :func:`gate_pull_credentials`, never by
+#: :func:`classify_pull` (which classifies pulls that RAN).
 PullVerdictKind = Literal[
+    "credentials_missing",
     "auth_expired",
     "quota_exhausted",
     "transient_residual",
@@ -773,7 +779,9 @@ class PullVerdict:
     retry (the still-failed windows ONLY — NOT the quarantined pairs, which a
     re-pull can never recover; those are the separate ``failed_pairs`` field, per
     DEC-EMPTY-RESOLVED-REPORTING-001). ``auth_cause`` carries the originating
-    vendor error string ONLY for ``auth_expired`` (else ``None``).
+    error string ONLY for ``auth_expired`` (the vendor error) and
+    ``credentials_missing`` (the relayed :class:`CredentialsError` fix text,
+    DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001); else ``None``.
     """
 
     kind: PullVerdictKind
@@ -791,9 +799,16 @@ class PullVerdict:
 
         ``quota_exhausted`` counts: the day's quota is spent, so the operator must
         wait for the IST-midnight reset (or re-pull then) — the auto-resume cannot
-        finish today on its own.
+        finish today on its own. ``credentials_missing`` counts for the same
+        reason (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): only the operator can fix
+        the credentials — no retry can ever land a bar without them.
         """
-        return self.kind in ("auth_expired", "quota_exhausted", "transient_residual")
+        return self.kind in (
+            "credentials_missing",
+            "auth_expired",
+            "quota_exhausted",
+            "transient_residual",
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the pull-all route / structured log."""
@@ -895,6 +910,151 @@ def _make_verdict(
         completed=completed,
         auth_cause=auth_cause,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Loud credential refusal + explicit synthetic labeling
+# (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). The ONE credential gate every REAL
+# pull surface (dashboard routes + CLI fetch) runs before touching the vendor —
+# CLAUDE.md §11 COMMON. Before this decision the dashboard downgraded ANY
+# credential failure to a silent synthetic dry-run that reported GREEN with
+# counts while ZERO real bars landed; the CLI refused with a HARDCODED guess at
+# the cause. Now both surfaces refuse with the CredentialsError's OWN fix text
+# (relayed verbatim — DYNAMIC, no per-field hardcoding), and synthetic data
+# runs ONLY when explicitly requested, labeled unmistakably.
+# --------------------------------------------------------------------------- #
+
+#: The loud label every explicitly-requested synthetic surface carries — the
+#: progress detail, the CLI stderr line, and (via :func:`mark_synthetic`) the
+#: finished-pull verdict headline. One constant so no surface can drift into a
+#: quieter wording (CLAUDE.md §11 COMMON).
+SYNTHETIC_DRY_RUN_LABEL: Final[str] = "SYNTHETIC DRY-RUN — no real data"
+
+#: The refusal headline for a REAL pull whose credentials did not resolve.
+#: Static + test-pinnable; the dynamic fix text rides in ``action``.
+CREDENTIALS_REFUSAL_HEADLINE: Final[str] = (
+    "🔒 Pull REFUSED — Groww credentials unavailable (nothing was fetched, nothing was written)."
+)
+
+
+def label_synthetic(detail: str) -> str:
+    """Prefix *detail* with the loud synthetic label (explicit dry-run surfaces).
+
+    Used on the background-job ``detail`` string (the progress title) and the
+    CLI stderr line so an explicitly-requested synthetic run can NEVER be read
+    as a real pull. Pure + O(1).
+    """
+    return f"{SYNTHETIC_DRY_RUN_LABEL} — {detail}"
+
+
+def mark_synthetic(verdict: PullVerdict) -> PullVerdict:
+    """Return *verdict* re-labeled as the outcome of an EXPLICIT synthetic dry-run.
+
+    DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001: a dry-run's finished verdict must SAY
+    synthetic loudly — a bare "✅ Pull complete." over discarded synthetic bars
+    is exactly the fake-green this decision kills. The classification ``kind``
+    is preserved (the classifier stays the one authority); only the
+    operator-facing ``headline`` / ``action`` are prefixed/suffixed with the
+    unmistakable label. Pure + O(1).
+    """
+    return replace(
+        verdict,
+        headline=f"🧪 {SYNTHETIC_DRY_RUN_LABEL} — {verdict.headline}",
+        action=(
+            f"{verdict.action} (Explicit synthetic dry-run: the bars were generated "
+            "offline and DISCARDED — zero real bars landed in the lake. Run a real "
+            "pull with valid credentials for real data.)"
+        ),
+    )
+
+
+def credentials_refusal_verdict(reason: str) -> PullVerdict:
+    """Build the ``credentials_missing`` refusal verdict for a REAL pull.
+
+    *reason* is the :class:`~brutex.config.credentials_types.CredentialsError`'s
+    own message, relayed VERBATIM as the verdict ``action`` (and ``auth_cause``)
+    — whatever env var / SSM parameter / AWS failure it names, no per-field
+    hardcoding (DYNAMIC). ``needs_operator`` is ``True`` by construction: no
+    retry can land a bar until the operator fixes the credentials.
+
+    Parameters
+    ----------
+    reason
+        The relayed credential-failure fix text (secret-free by the loader's
+        contract).
+    """
+    return PullVerdict(
+        kind="credentials_missing",
+        headline=CREDENTIALS_REFUSAL_HEADLINE,
+        action=(
+            f"{reason} (Synthetic data runs ONLY on an explicit dry-run request — "
+            "a real pull NEVER silently degrades to synthetic.)"
+        ),
+        pending_windows=0,
+        failed_pairs=0,
+        no_data=0,
+        completed=0,
+        auth_cause=reason,
+    )
+
+
+def verdict_message(verdict: PullVerdict) -> str:
+    """One-line operator message for surfaces without a banner (CLI stderr / HTTP detail).
+
+    The single headline+action join both refusal surfaces print, so the CLI and
+    the dashboard can never phrase the same verdict differently (CLAUDE.md §11
+    COMMON). Pure + O(1).
+    """
+    return f"{verdict.headline} {verdict.action}"
+
+
+def gate_pull_credentials(
+    *,
+    dry_run_requested: bool,
+    credentials_error: Callable[[], str | None] | None = None,
+) -> PullVerdict | None:
+    """The ONE credential gate every REAL pull surface runs before touching the vendor.
+
+    Returns ``None`` when the pull may proceed: either an EXPLICIT synthetic
+    dry-run was requested (credentials are irrelevant — the resolver is never
+    called), or the Groww credentials resolve. Otherwise returns the loud
+    ``credentials_missing`` refusal verdict carrying the
+    :class:`~brutex.config.credentials_types.CredentialsError`'s own fix text —
+    the caller MUST refuse (HTTP error / non-zero exit), NEVER downgrade to
+    synthetic data (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+
+    Parameters
+    ----------
+    dry_run_requested
+        ``True`` iff the operator EXPLICITLY asked for the synthetic dry-run
+        (the ``?dry_run=true`` route param / the CLI ``--dry-run`` flag).
+    credentials_error
+        Injectable resolver returning ``None`` when the credentials resolve,
+        else the relayed fix text (default:
+        :func:`brutex.config.credentials.groww_credentials_error`). Injected so
+        the gate is 100% offline-testable and stays import-light.
+
+    Returns
+    -------
+    PullVerdict | None
+        ``None`` (proceed) or the ``credentials_missing`` refusal verdict.
+    """
+    if dry_run_requested:
+        return None
+    resolver: Callable[[], str | None]
+    if credentials_error is None:
+        # Function-local default so importing this vendor-neutral module never
+        # drags in the AWS credential chain (mirrors credentials.py's own lazy
+        # one-directional import of credentials_aws).
+        from brutex.config.credentials import groww_credentials_error
+
+        resolver = groww_credentials_error
+    else:
+        resolver = credentials_error
+    reason = resolver()
+    if reason is None:
+        return None
+    return credentials_refusal_verdict(reason)
 
 
 # --------------------------------------------------------------------------- #
@@ -1376,11 +1536,13 @@ __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
     "CONFIRMED_EMPTY_MIN_FETCHES",
     "COVERAGE_MARKET",
+    "CREDENTIALS_REFUSAL_HEADLINE",
     "DAILY_INTERVAL",
     "DEFAULT_EMPTY_RETRY_ATTEMPTS",
     "DEFAULT_MAX_ROUNDS",
     "GROWW_COVERAGE_MARKET",
     "OLD_GAP_HORIZON_DAYS",
+    "SYNTHETIC_DRY_RUN_LABEL",
     "DateWindow",
     "LoopVerdict",
     "PullVerdict",
@@ -1393,9 +1555,13 @@ __all__ = [
     "WindowDaysFor",
     "clamp_window_end",
     "classify_pull",
+    "credentials_refusal_verdict",
     "decide_until_clean",
     "drop_bars_after",
     "fetch_until_nonempty",
+    "gate_pull_credentials",
+    "label_synthetic",
+    "mark_synthetic",
     "now_ist",
     "plan_windows",
     "retry_failed_windows",
@@ -1403,5 +1569,6 @@ __all__ = [
     "summarize_conflicts",
     "synthetic_spot_bars",
     "tile_windows",
+    "verdict_message",
     "window_days_for_interval",
 ]

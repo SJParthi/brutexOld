@@ -2503,6 +2503,8 @@ def cmd_fetch(
         if not (dry_run or inspect) and not _enter_pull_singleflight(storm_stack, resolved):
             return EXIT_USER_ERROR
         if dry_run:
+            from brutex.adapters.ingest_common import label_synthetic
+
             fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
             adapter = _DryRunGrowwSpotAdapter(bars_per_window=rows_per_chunk)
             sink = (
@@ -2510,32 +2512,46 @@ def cmd_fetch(
                 if inspect
                 else ParquetBarSink(writer=ParquetWriter(lake_root=resolved), catalog=cat)
             )
-            print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
+            # Loud, unmistakable label (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001):
+            # an explicit --dry-run must never read like a real pull.
+            print(
+                f"[brutex] {label_synthetic('fetch --dry-run → synthetic candles')}",
+                file=sys.stderr,
+            )
         else:
             # Groww auth is TOTP (no legacy 24h JWT + token pre-flight): a
             # missing-creds resolve is the only up-front gate (DEC-DHAN-GROWW-REMIGRATE-001,
-            # PR-J2). Refuse loudly BEFORE burning a paced pull when creds are absent;
+            # PR-J2). Refuse loudly BEFORE burning a paced pull when creds are absent —
+            # via the ONE gate the dashboard routes also run (CLAUDE.md §11 COMMON),
+            # relaying the CredentialsError's OWN fix text verbatim instead of a
+            # hardcoded guess at the cause (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001);
             # there is no Groww token-liveness probe to invent (Golden Rule #1).
+            from brutex.adapters.ingest_common import (
+                credentials_refusal_verdict,
+                gate_pull_credentials,
+                verdict_message,
+            )
             from brutex.config.credentials import (
                 CredentialsError,
-                groww_credentials_present,
+                groww_credentials_error,
             )
 
-            if not groww_credentials_present():
-                print(
-                    "[brutex] no Groww credentials in AWS Parameter Store "
-                    "(/tickvault/prod/groww/api-key + /tickvault/prod/groww/totp-secret) — "
-                    "deploy the minter (deploy/aws_token_minter/deploy.sh) first, then re-run "
-                    "`brutex fetch`. Credentials are read ONLY from AWS (no env-var / "
-                    "local-file / webpage fallback, DEC-AWS-ONLY-CREDS-001).",
-                    file=sys.stderr,
-                )
+            refusal = gate_pull_credentials(
+                dry_run_requested=False, credentials_error=groww_credentials_error
+            )
+            if refusal is not None:
+                print(f"[brutex] {verdict_message(refusal)}", file=sys.stderr)
                 return EXIT_USER_ERROR
             fetch_instruments = _resolve_brute_force_instruments(resolved)
             try:
                 adapter, sink = _build_live_groww_spot(resolved, catalog=cat)
-            except CredentialsError as exc:  # pragma: no cover — race: creds removed mid-run
-                print(f"[brutex] {exc}", file=sys.stderr)
+            except CredentialsError as exc:
+                # Race: creds vanished between the gate and the build — the SAME
+                # loud refusal with the SAME relayed fix text (never a downgrade).
+                print(
+                    f"[brutex] {verdict_message(credentials_refusal_verdict(str(exc)))}",
+                    file=sys.stderr,
+                )
                 return EXIT_USER_ERROR
             if inspect:
                 sink = NullBarSink()

@@ -276,7 +276,12 @@ def test_cmd_fetch_dry_run_synthetic_end_to_end(
     assert "[brutex] --window-days is ignored on Groww (1-minute is tiled internally)" in (
         captured.err
     )
-    assert "[brutex] fetch --dry-run → synthetic candles" in captured.err
+    # The explicit dry-run announces itself with the LOUD synthetic label
+    # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never reads like a real pull).
+    assert (
+        "[brutex] SYNTHETIC DRY-RUN — no real data — fetch --dry-run → synthetic candles"
+        in captured.err
+    )
     assert "retry-storm guard armed — give up after 30 min" in captured.err
     assert (
         "[brutex] fetch done — windows=3 bars_appended=6 failed_pairs=0 transient=0"
@@ -378,7 +383,7 @@ def test_cmd_fetch_live_inspect_reports_failures(
         cli, "_resolve_brute_force_instruments", lambda lake: [FakeInstrument("NIFTY")]
     )
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli,
         "_build_live_groww_spot",
@@ -463,7 +468,7 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), sink))
 
     run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
@@ -533,7 +538,7 @@ def test_cmd_fetch_checkpoints_ledger_mid_pull(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
@@ -612,7 +617,7 @@ def test_cmd_fetch_inspect_ledger_checkpoint_is_noop(
         cli, "_resolve_brute_force_instruments", lambda lake: [FakeInstrument("NIFTY")]
     )
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
@@ -695,7 +700,7 @@ def test_cmd_fetch_live_persisting_pull_seeds_groww_ledger_namespace(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
@@ -743,15 +748,21 @@ def test_cmd_fetch_live_missing_groww_creds_is_user_error(
 ) -> None:
     """A live pull with NO Groww credentials refuses up front (exit 1), no network.
 
-    Groww auth is TOTP (no Dhan JWT/RenewToken pre-flight) — the creds-present
-    resolve is the only up-front gate (DEC-DHAN-GROWW-REMIGRATE-001 PR-J2). A
-    missing-creds resolve returns the user-error code BEFORE any adapter build or
-    instrument resolution, so neither is reached.
+    Groww auth is TOTP (no Dhan JWT/RenewToken pre-flight) — the creds resolve
+    is the only up-front gate (DEC-DHAN-GROWW-REMIGRATE-001 PR-J2). A failing
+    resolve returns the user-error code BEFORE any adapter build or instrument
+    resolution, and the stderr line RELAYS the CredentialsError's own fix text
+    verbatim — never a hardcoded guess at the cause, and never a silent
+    synthetic downgrade (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
     """
     pytest.importorskip("polars")
     pytest.importorskip("duckdb")
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: False)
+    monkeypatch.setattr(
+        credentials,
+        "groww_credentials_error",
+        lambda: "SSM parameter /tickvault/prod/groww/api-key is absent (test fix text)",
+    )
 
     def _never(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("must refuse before building the adapter")
@@ -771,8 +782,9 @@ def test_cmd_fetch_live_missing_groww_creds_is_user_error(
     )
     assert rc == cli.EXIT_USER_ERROR
     captured = capsys.readouterr()
-    assert "[brutex] no Groww credentials in AWS Parameter Store" in captured.err
-    assert "deploy/aws_token_minter/deploy.sh" in captured.err
+    # The COMMON refusal message: static headline + the RELAYED fix text.
+    assert "Pull REFUSED — Groww credentials unavailable" in captured.err
+    assert "SSM parameter /tickvault/prod/groww/api-key is absent (test fix text)" in captured.err
 
 
 # ── cmd_fetch --until-clean (bounded rounds, DEC-TOKEN-PREFLIGHT-001) ───
@@ -869,7 +881,7 @@ def test_cmd_fetch_alerts_then_reraises_on_lake_write_halt(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
@@ -1005,7 +1017,7 @@ def test_cmd_fetch_live_refused_when_peer_pull_holds_lock(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
@@ -1372,7 +1384,7 @@ def test_cmd_fetch_live_pull_publishes_rate_bridge(
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
     credentials = importlib.import_module("brutex.config.credentials")
-    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
     monkeypatch.setattr(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
