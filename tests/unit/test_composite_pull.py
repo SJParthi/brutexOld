@@ -461,6 +461,60 @@ def test_to_dict_all_reference_only_has_null_sub_reports(tmp_path: Path) -> None
     assert payload["skipped_count"] == 1
 
 
+# ── aliased/hyphenated underlying: write-key/read-key SYMMETRY ──────────────────
+# DEC-PULL-FORENSIC-WAVE2-001: phase (a) persists the chain under the PRIMARY F&O
+# underlying form (NIFTYJR → NIFTYNXT50, BAJAJ-AUTO → BAJAJAUTO); phase (b) must
+# re-read with the SAME resolved key — the raw spot name read back ZERO rows and the
+# freshly-enumerated chain was silently invisible (no candles pulled).
+
+
+def test_registry_read_keys_resolve_alias_normalize_and_dedup() -> None:
+    """The read keys are the PRIMARY forms, order-preserving first-wins de-duped."""
+    instruments = [
+        _instrument("NIFTYJR", 1),  # sourced alias → NIFTYNXT50
+        _instrument("BAJAJ-AUTO", 2),  # hyphen normalization → BAJAJAUTO
+        _instrument("BAJAJAUTO", 3),  # same primary as above → de-duped
+        _instrument("NIFTY", 4),  # canonical → byte-unchanged
+    ]
+    assert cp._registry_read_keys(instruments) == ("NIFTYNXT50", "BAJAJAUTO", "NIFTY")
+
+
+def test_aliased_underlying_chain_visible_to_candle_phase(tmp_path: Path) -> None:
+    """FAILS-BEFORE regression: an aliased index's fresh chain must reach phase (b).
+
+    The operator selects ``NIFTYJR``; phase (a) resolves + persists the chain under
+    the primary form ``NIFTYNXT50``. Before the fix, phase (b) re-read the registry
+    with the raw ``NIFTYJR`` → zero rows → ``historical is None`` ("no contracts
+    cached yet") despite a just-persisted chain — the whole-underlying silent no-pull.
+    """
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTYNXT50", 2024): ["2024-01-25"]},
+        contracts={
+            ("NSE", "NIFTYNXT50", "2024-01-25"): [
+                "NSE-NIFTYNXT50-25Jan24-60000-CE",
+                "NSE-NIFTYNXT50-25Jan24-FUT",
+            ]
+        },
+    )
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    report = _run(
+        [_instrument("NIFTYJR", 14)], sdk=sdk, sink=sink, registry=registry, coverage=coverage
+    )
+
+    # The chain WAS persisted under the primary key AND phase (b) found + pulled it.
+    assert report.metadata is not None
+    assert report.historical is not None, "aliased chain must be visible to phase (b)"
+    assert "no contracts cached yet" not in report.note
+    assert "get_historical_candles" in sdk.calls
+    assert sorted(sdk.candle_symbols) == [
+        "NSE-NIFTYNXT50-25Jan24-60000-CE",
+        "NSE-NIFTYNXT50-25Jan24-FUT",
+    ]
+    assert sink.appends, "the aliased underlying's bars must actually be stored"
+
+
 def test_composite_note_counts_not_yet_in_window(tmp_path: Path) -> None:
     """DEC-FNO-FAR-EXPIRY-WINDOW-001 display honesty on the composite note.
 
