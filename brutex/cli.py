@@ -665,6 +665,69 @@ def build_parser() -> argparse.ArgumentParser:
         default="add",
         help="Audit action to project for replay check (default: 'add')",
     )
+    # ── doctor --live: the Mac live-proof kit (DEC-DOCTOR-LIVE-PROOF-KIT-001) ──
+    doctor.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Run the Mac live-proof kit: walk the REAL Groww pull path stage by "
+            "stage (env → creds → totp → token → master → spot-1m → depth → vix → "
+            "bhavcopy → resample → lake → integrity → resume → rate) and stop at "
+            "the first failure with an exact, register-cross-referenced diagnosis"
+        ),
+    )
+    doctor.add_argument(
+        "--lake",
+        type=Path,
+        default=None,
+        help="Lake root for the live kit (default: resolve_lake_root())",
+    )
+    doctor.add_argument(
+        "--symbol",
+        type=str,
+        default="NSE-NIFTY",
+        help="groww_symbol the live kit probes (default: NSE-NIFTY)",
+    )
+    doctor.add_argument(
+        "--stage",
+        type=str,
+        default=None,
+        help="Comma-separated live-kit stage numbers to run (default: all, 0-13)",
+    )
+    doctor.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="Run ALL live stages instead of stopping at the first FAIL",
+    )
+    doctor.add_argument(
+        "--depth-bisect",
+        action="store_true",
+        help="Stage 6: bounded bisection (≤20 calls/index) to locate the true 1m floor",
+    )
+    doctor.add_argument(
+        "--rate-probe",
+        action="store_true",
+        help="Stage 13 opt-in: ≤60 s / ≤480-call rate probe, aborts on a throttle burst",
+    )
+    doctor.add_argument(
+        "--against-lake",
+        action="store_true",
+        help="Stages 9/11: READ the production lake instead of the quarantined subtree",
+    )
+    doctor.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit the live-kit report as JSON",
+    )
+    doctor.add_argument(
+        "--mint-anyway",
+        action="store_true",
+        help=(
+            "DANGEROUS: allow a real Groww token mint when the SSM token is absent "
+            "(may revoke the shared Lambda/TickVault token — single-active-token)"
+        ),
+    )
 
     # ── monitor (DEC-MONITOR-LOOP-001) ────────────────────────────
     monitor = sub.add_parser(
@@ -1358,6 +1421,82 @@ def cmd_doctor(
         live_subjects_file=live_subjects_file,
         replay_action_filter=replay_action_filter,
     )
+
+
+def parse_stage_selection(raw: str | None) -> frozenset[int] | None:
+    """Parse the ``--stage`` comma list (``None``/blank → all stages).
+
+    A malformed token or out-of-range stage raises :class:`ValueError` with an
+    actionable message (the dispatcher maps it to a user error, never a
+    traceback).
+    """
+    if raw is None or not raw.strip():
+        return None
+    stages: set[int] = set()
+    for token in raw.split(","):
+        text = token.strip()
+        if not text.isdigit() or not 0 <= int(text) <= 13:  # noqa: PLR2004 — stage ids are 0-13
+            raise ValueError(
+                f"--stage takes comma-separated stage numbers 0-13, got {token.strip()!r}"
+            )
+        stages.add(int(text))
+    return frozenset(stages)
+
+
+#: The red multi-line warning printed before any ``--mint-anyway`` run
+#: (kit spec §2.2 — a local mint may revoke the shared Lambda/TickVault token).
+MINT_ANYWAY_WARNING: str = (
+    "\x1b[31m"
+    "WARNING: --mint-anyway is ACTIVE.\n"
+    "  The kit may mint a REAL Groww token from this machine. Under the recorded\n"
+    "  single-active-token behaviour (UNVERIFIED — treated as true) that mint can\n"
+    "  REVOKE the shared token the minter Lambda and TickVault are using RIGHT NOW,\n"
+    "  stalling every sibling pull until the 06:05 IST re-mint.\n"
+    "  Only proceed if you know no sibling consumer is live."
+    "\x1b[0m"
+)
+
+
+def cmd_doctor_live(args: argparse.Namespace) -> int:  # pragma: no cover — real-deps composition
+    """``brutex doctor --live`` — run the Mac live-proof kit with the REAL deps.
+
+    All logic lives in :mod:`brutex.doctor_live` (fully unit-tested with
+    fakes); this wrapper only composes the real dependencies (network / git /
+    boto3 / SDK — the sandbox-blind surface), prints the report, and maps a
+    kit-internal error to exit code 3 (kit spec §2.6).
+    """
+    from brutex.doctor_live import (
+        KitInternalError,
+        KitOptions,
+        build_real_deps,
+        run_live_doctor,
+    )
+
+    try:
+        stages = parse_stage_selection(args.stage)
+    except ValueError as exc:
+        print(f"[brutex] doctor --live error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    options = KitOptions(
+        lake_root=args.lake,
+        symbol=args.symbol,
+        stages=stages,
+        keep_going=args.keep_going,
+        depth_bisect=args.depth_bisect,
+        rate_probe=args.rate_probe,
+        against_lake=args.against_lake,
+        json_output=args.json_output,
+        mint_anyway=args.mint_anyway,
+    )
+    if options.mint_anyway:
+        print(MINT_ANYWAY_WARNING, file=sys.stderr)
+    try:
+        report = run_live_doctor(build_real_deps(), options)
+    except KitInternalError as exc:
+        print(f"[brutex] doctor --live kit-internal error: {exc}", file=sys.stderr)
+        return 3
+    print(report.to_json() if options.json_output else report.format())
+    return report.exit_code
 
 
 def cmd_monitor(poll_interval: float, ticks: int) -> int:
@@ -5158,6 +5297,8 @@ def main(argv: list[str] | None = None) -> int:
             max_retry_minutes=args.max_retry_minutes,
         )
     if args.command == "doctor":
+        if args.live:
+            return cmd_doctor_live(args)
         return cmd_doctor(
             audit_file=args.audit_file,
             audit_dir=args.audit_dir,
