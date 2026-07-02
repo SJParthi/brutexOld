@@ -370,6 +370,31 @@ def test_ingest_success_with_ledger_pace_and_on_success() -> None:
     assert ledger.is_skippable(key)  # recorded SUCCESS
 
 
+def test_ingest_drops_window_pace_when_client_self_paces() -> None:
+    """A self-pacing client → the per-window pace is DROPPED (single admission).
+
+    DEC-PULL-FORENSIC-WAVE1-001: a live client already admits every physical fetch
+    through the shared bucket, so pacing again per window would double-charge the
+    500/min governor. With a self-pacing client the window ``pace`` never fires.
+    """
+    from dataclasses import replace
+
+    sdk = _FakeSDK(payload=_candles())
+    paces: list[int] = []
+    report = ingest_option_contract(
+        replace(_client(sdk), pace=lambda: None),  # a self-pacing client
+        _Sink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        pace=lambda: paces.append(1),
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1
+    assert paces == []  # window-level pace dropped — the client is the sole admission
+
+
 def test_ingest_skips_settled_window() -> None:
     sdk = _FakeSDK(payload=_candles())
     sink = _Sink()
