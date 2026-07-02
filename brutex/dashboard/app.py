@@ -1898,8 +1898,13 @@ def build_app(
                 # Mirror the SAME relayed fix text onto the persistent
                 # live-proof banner (DEC-DOCTOR-LIVE-AUTORUN-001): the banner
                 # and this 503 must agree even when credentials broke AFTER
-                # the startup preflight ran.
-                liveproof.note_credentials_refusal(verdict_message(refusal))
+                # the startup preflight ran. Belt (hostile-review MAJOR-1):
+                # a holder bug must never mask the 503 with a 500 — the
+                # refusal itself outranks its banner mirror.
+                try:
+                    liveproof.note_credentials_refusal(verdict_message(refusal))
+                except Exception as exc:  # pylint: disable=broad-exception-caught  # belt
+                    _LOG.warning("liveproof.refusal_mirror_failed", route=route, error=str(exc))
             _LOG.error(
                 "universe.pull.refused_no_credentials",
                 route=route,
@@ -1914,7 +1919,14 @@ def build_app(
             # ONE-TIME expensive probes (VIX / 2020 depth / bhavcopy).
             # Single-flight + cached-verdict guarded inside; O(1) here, never
             # blocks or touches the pull job (DEC-DOCTOR-LIVE-AUTORUN-001).
-            liveproof.on_real_pull()
+            # Belt (hostile-review MAJOR-1): the trigger must be UNABLE to
+            # raise into the admitted pull — the holder already converts a
+            # spawn failure into an honest error verdict; this guard covers
+            # any residual holder bug. The pull always proceeds.
+            try:
+                liveproof.on_real_pull()
+            except Exception as exc:  # pylint: disable=broad-exception-caught  # belt
+                _LOG.warning("liveproof.probe_trigger_failed", route=route, error=str(exc))
         return False
 
     @app.post("/api/v1/universe/pull-all")

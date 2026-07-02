@@ -256,7 +256,12 @@ def test_real_pull_without_wired_autorun_is_unchanged(
 def test_credentials_refusal_mirrors_the_same_fix_text_onto_the_banner(
     store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 503 detail and the live-proof banner carry the SAME relayed text."""
+    """The 503 detail and the live-proof banner carry the SAME relayed text.
+
+    Hostile-review MAJOR-4: a refused REAL pull attempt is a FAILURE of the
+    live pipe, so the mirrored verdict is kind ``fail`` (the red banner
+    opens) — never the grey ``not_applicable`` that used to paper over it.
+    """
     fix = "Missing Groww credentials: seed /tickvault/prod/groww/api-key (region ap-south-1)"
     monkeypatch.setattr(app_module, "groww_credentials_error", lambda: fix)
     autorun = _autorun(tmp_path)
@@ -265,8 +270,8 @@ def test_credentials_refusal_mirrors_the_same_fix_text_onto_the_banner(
         resp = client.post("/api/v1/universe/pull-all?kind=index")
     assert resp.status_code == 503
     verdict = autorun.status()["preflight"]["verdict"]
-    assert verdict["kind"] == da.KIND_NOT_APPLICABLE
-    assert verdict["headline"] == "live-proof: not applicable (no credentials)"
+    assert verdict["kind"] == da.KIND_FAIL
+    assert verdict["headline"] == da.HEADLINES[da.KIND_FAIL]
     # Agreement by construction: the banner line IS the 503 detail.
     assert verdict["lines"] == [resp.json()["detail"]]
     assert fix in resp.json()["detail"]
@@ -281,6 +286,97 @@ def test_credentials_refusal_without_autorun_still_refuses(
     with TestClient(app) as client:
         resp = client.post("/api/v1/universe/pull-all?kind=index")
     assert resp.status_code == 503
+
+
+# ── the gate must be UNABLE to raise into the pull (MAJOR-1 belt) ────────
+
+
+def test_pull_survives_a_raising_probe_trigger(
+    store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-1 belt: even a holder BUG in on_real_pull cannot break the pull.
+
+    The holder itself already contains spawn failures, so this guards the
+    residual case (an unexpected holder exception) at the app call site —
+    the admitted pull must still return 200, never a 500.
+    """
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    autorun = _autorun(tmp_path)
+
+    def _boom() -> bool:
+        raise RuntimeError("holder bug")
+
+    monkeypatch.setattr(autorun, "on_real_pull", _boom)
+    app = build_app(DashboardState(), instrument_store=store, liveproof=autorun)
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/universe/pull-all?kind=index")
+    assert resp.status_code == 200
+
+
+def test_refusal_survives_a_raising_banner_mirror(
+    store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-1 belt: a raising banner mirror never masks the 503 with a 500."""
+    fix = "Missing Groww credentials: seed the SSM parameter"
+    monkeypatch.setattr(app_module, "groww_credentials_error", lambda: fix)
+    autorun = _autorun(tmp_path)
+
+    def _boom(_fix_text: str) -> None:
+        raise RuntimeError("holder bug")
+
+    monkeypatch.setattr(autorun, "note_credentials_refusal", _boom)
+    app = build_app(DashboardState(), instrument_store=store, liveproof=autorun)
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/universe/pull-all?kind=index")
+    assert resp.status_code == 503
+    assert fix in resp.json()["detail"]
+
+
+def test_pull_proceeds_when_the_probe_thread_cannot_start(
+    store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-1 repro end-to-end: ``Thread.start`` raising never wedges the gate.
+
+    With the PRODUCTION daemon-thread seam and ``Thread.start`` raising for
+    the liveproof worker (the can't-start-new-thread condition), the old
+    code raised INTO the admitted pull (a 500) and left the probes state
+    wedged at ``running`` forever. Now: the pull returns 200, an honest
+    ``error`` verdict lands, and the NEXT pull retries the probes.
+    """
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    failures = {"on": True}
+    real_start = threading.Thread.start
+
+    def _flaky_start(self: threading.Thread) -> None:
+        if failures["on"] and self.name.startswith("brutex-liveproof"):
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _flaky_start)
+    runs: list[str] = []
+
+    def _probes() -> dl.KitReport:
+        runs.append("probe")
+        return _probes_pass_report()
+
+    autorun = _autorun(tmp_path, probes_runner=_probes, thread_starter=da.start_daemon_thread)
+    app = build_app(DashboardState(), instrument_store=store, liveproof=autorun)
+    with TestClient(app) as client:
+        first = client.post("/api/v1/universe/pull-all?kind=index")
+        assert first.status_code == 200  # the pull proceeded despite the spawn failure
+        status = autorun.status()
+        assert status["probes"]["state"] == da.STATE_IDLE  # never wedged
+        assert status["probes"]["verdict"]["kind"] == da.KIND_ERROR
+        assert runs == []
+        # Threads recover → the NEXT real pull retries the one-time probes.
+        failures["on"] = False
+        second = client.post("/api/v1/universe/pull-all?kind=index")
+        assert second.status_code == 200
+        _wait_for(lambda: autorun.status()["probes"]["state"] == da.STATE_DONE)
+    assert runs == ["probe"]
+    assert autorun.status()["probes"]["verdict"]["kind"] == da.KIND_PASS
 
 
 # ── async non-blocking startup ───────────────────────────────────────────

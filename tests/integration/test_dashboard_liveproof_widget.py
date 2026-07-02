@@ -41,6 +41,10 @@ def test_widget_script_served_and_honest() -> None:
     # The widget never re-runs the proof — it only polls the status route.
     assert "fetch(ENDPOINT" in js.text
     assert 'method: "POST"' not in js.text
+    # m1: the pill dot renders the WORST of preflight+probes — a red probes
+    # verdict can never hide behind a green preflight dot.
+    assert "worstClass(pre.cls" in js.text
+    assert "KIND_RANK" in js.text
     # Idempotent guard (only one widget ever built).
     assert "document.getElementById(WIDGET_ID)" in js.text
     assert uni.status_code == 200

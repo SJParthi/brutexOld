@@ -1951,7 +1951,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     liveproof: Any = None
     try:
         liveproof = _build_liveproof_autorun(_resolve_lake_root(lake_root))
-    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("liveproof.build_failed", error=str(exc))
     app = build_app(state, instrument_store=store, liveproof=liveproof)
     # Auto-run the CHEAP preflight stages in the holder's background daemon
@@ -1961,7 +1961,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     if liveproof is not None:
         try:
             _start_liveproof_preflight(liveproof, _log)
-        except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
             _log.warning("liveproof.launch_failed", error=str(exc))
     # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
     # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an

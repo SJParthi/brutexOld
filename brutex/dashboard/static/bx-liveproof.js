@@ -19,10 +19,14 @@
  *
  * HONEST rendering (Golden Rules #1/#10): green appears ONLY for a backend
  * verdict whose kind is "pass" (the stages truly ran against the real
- * vendor); "not_applicable" (no credentials — the sandbox/dry-run state)
- * renders grey with the backend's own headline "live-proof: not applicable
- * (no credentials)" and the relayed CredentialsError fix text — never a fake
- * green. When the autorun is not wired (present:false) or disabled via the
+ * vendor); "not_applicable" (no credentials in the NEVER-ATTEMPTED sandbox
+ * context) renders grey with the backend's own headline "live-proof: not
+ * applicable (no credentials)" and the relayed CredentialsError fix text —
+ * never a fake green. Broken credentials on a REAL pull attempt (or after
+ * live-proof history) arrive as kind "fail", so the red banner opens with
+ * the refusal text — grey never papers over a broken live pipe. The pill
+ * dot shows the WORST of the preflight and probes verdicts (worstClass).
+ * When the autorun is not wired (present:false) or disabled via the
  * BRUTEX_AUTORUN_LIVEPROOF=0 escape hatch, the widget renders NOTHING (no
  * invented state). A fetch error leaves the last render in place — the
  * widget is read-only + best-effort and never throws into the page.
@@ -53,6 +57,16 @@
     error: "bad",
     not_applicable: "na",
   };
+
+  // Severity order for the pill dot: bad > warn > na > ok. The dot shows the
+  // WORST of the preflight and probes verdicts, so a red probes verdict can
+  // never hide behind a green preflight dot (a probes verdict that does not
+  // exist yet — pending — never drags a green preflight down).
+  var KIND_RANK = { ok: 0, na: 1, warn: 2, bad: 3 };
+
+  function worstClass(a, b) {
+    return (KIND_RANK[b] || 0) > (KIND_RANK[a] || 0) ? b : a;
+  }
 
   function injectStyles() {
     if (document.getElementById("bxLiveProofStyles")) {
@@ -326,7 +340,12 @@
     var pre = verdictSummary(data.preflight, "live-proof: not yet run");
     var dot = document.getElementById("bxlpDot");
     if (dot) {
-      dot.className = "bxlp-dot " + pre.cls;
+      var dotCls = pre.cls;
+      var probesVerdict = data.probes && data.probes.verdict;
+      if (probesVerdict) {
+        dotCls = worstClass(pre.cls, KIND_CLASS[probesVerdict.kind] || "na");
+      }
+      dot.className = "bxlp-dot " + dotCls;
     }
     var text = document.getElementById("bxlpText");
     if (text) {

@@ -369,6 +369,14 @@ def test_dashboard_autoload_runs_off_the_bind_path(
 
     obs_logging = importlib.import_module("brutex.observability.logging")
     monkeypatch.setattr(obs_logging, "configure_logging", lambda **kwargs: tmp_path / "brutex.log")
+    # HERMETIC (hostile-review MAJOR-5 on DEC-DOCTOR-LIVE-AUTORUN-001): this
+    # test deliberately does NOT ride _stub_dashboard_runtime (it needs the
+    # REAL _start_instrument_autoload thread), so it must stub the live-proof
+    # builder itself — otherwise cmd_dashboard constructs a REAL holder whose
+    # preflight daemon thread resolves credentials (AWS/env seams) and, when
+    # creds exist, fires real vendor calls from a unit test.
+    monkeypatch.setattr(cli, "_build_liveproof_autorun", lambda _root: None)
+    monkeypatch.setattr(cli, "_start_auto_resume_on_boot", lambda *args, **kwargs: None)
 
     autoload_started = threading.Event()
     release = threading.Event()

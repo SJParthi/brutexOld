@@ -14,14 +14,17 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from brutex import doctor_autorun as da
 from brutex import doctor_live as dl
-from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_PER_MIN
+from brutex.adapters.groww.constants import (
+    GROWW_RATE_LIMIT_PER_MIN,
+    GROWW_RATE_LIMIT_RPS_CEILING,
+)
 from brutex.adapters.rate_common import RateController
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
 
@@ -32,6 +35,22 @@ from tests.unit.test_doctor_live import (
 )
 
 _NOW = datetime(2026, 7, 2, 9, 30, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_deps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Belt (hostile-review MAJOR-5): NO test here may compose the real deps.
+
+    ``run_kit_stages`` (and therefore the holder's default runners) resolves
+    ``build_real_deps`` LATE — a module-global lookup at call time, not a
+    default bound at import — so this stub genuinely intercepts any path
+    that would otherwise reach the network/AWS/git composition.
+    """
+
+    def _forbidden() -> dl.KitDeps:
+        raise AssertionError("unit tests must never compose the real network deps")
+
+    monkeypatch.setattr(da, "build_real_deps", _forbidden)
 
 
 def _now() -> datetime:
@@ -60,6 +79,14 @@ def _pass_preflight_report() -> dl.KitReport:
         _outcome(2, "totp", dl.STATUS_PASS, "PASS totp: ok"),
         _outcome(3, "token", dl.STATUS_PASS, "PASS token: ok"),
         _outcome(4, "master", dl.STATUS_PASS, "PASS master: ok"),
+    )
+
+
+def _pass_probes_report() -> dl.KitReport:
+    return _report(
+        _outcome(6, "depth", dl.STATUS_PASS, "PASS depth: ok"),
+        _outcome(7, "vix", dl.STATUS_PASS, "PASS vix: ok"),
+        _outcome(8, "bhavcopy", dl.STATUS_PASS, "PASS bhavcopy: ok"),
     )
 
 
@@ -145,6 +172,9 @@ def _valid_payload() -> dict[str, Any]:
         lambda p: {**p, "kind": "greenish"},
         lambda p: {**p, "kind": 5},
         lambda p: {**p, "headline": 7},
+        # headline-vs-kind cross-check: a VALID headline for the WRONG kind
+        # is tampering, not a verdict (hostile-review NIT).
+        lambda p: {**p, "headline": da.HEADLINES[da.KIND_FAIL]},
         lambda p: {**p, "checked_at_utc": None},
         lambda p: {**p, "run_id": 12},
         lambda p: {**p, "lines": "oops"},
@@ -170,6 +200,18 @@ def test_verdict_from_payload_accepts_string_run_id() -> None:
     assert rebuilt is not None and rebuilt.run_id == "lp-20260702-093000"
 
 
+def _verdict_of(kind: str, *, checked_at: str | None = None) -> da.AutorunVerdict:
+    """A minimal verdict of *kind* stamped at *checked_at* (default ``_NOW``)."""
+    return da.AutorunVerdict(
+        kind=kind,
+        headline=da.HEADLINES[kind],
+        checked_at_utc=checked_at if checked_at is not None else _NOW.isoformat(),
+        run_id=None,
+        lines=(),
+        stages=(),
+    )
+
+
 @pytest.mark.parametrize(
     ("kind", "usable"),
     [
@@ -181,16 +223,30 @@ def test_verdict_from_payload_accepts_string_run_id() -> None:
     ],
 )
 def test_cache_usable_policy(kind: str, usable: bool) -> None:
-    """pass/warn are settled answers; fail/error/not_applicable re-probe."""
-    verdict = da.AutorunVerdict(
-        kind=kind,
-        headline=da.HEADLINES[kind],
-        checked_at_utc=_NOW.isoformat(),
-        run_id=None,
-        lines=(),
-        stages=(),
-    )
-    assert da.cache_usable(verdict) is usable
+    """pass/fresh-warn are settled answers; fail/error/not_applicable re-probe."""
+    assert da.cache_usable(_verdict_of(kind), now=_NOW) is usable
+
+
+def test_cache_usable_warn_expires_after_recheck_days() -> None:
+    """m3: a warn verdict older than the re-check window re-probes; pass never."""
+    aged = _NOW + timedelta(days=da.AUTORUN_WARN_RECHECK_DAYS, seconds=1)
+    at_limit = _NOW + timedelta(days=da.AUTORUN_WARN_RECHECK_DAYS)
+    assert da.cache_usable(_verdict_of(da.KIND_WARN), now=at_limit) is True
+    assert da.cache_usable(_verdict_of(da.KIND_WARN), now=aged) is False
+    # pass stays settled regardless of age (the answer cannot improve).
+    assert da.cache_usable(_verdict_of(da.KIND_PASS), now=aged) is True
+
+
+@pytest.mark.parametrize("stamp", ["not-a-time", "2026-07-02T09:30:00"])
+def test_cache_usable_warn_with_bad_stamp_fails_closed(stamp: str) -> None:
+    """An unparseable / naive warn timestamp reads as stale → re-probe (bounded)."""
+    assert da.cache_usable(_verdict_of(da.KIND_WARN, checked_at=stamp), now=_NOW) is False
+
+
+def test_cache_usable_default_clock_path() -> None:
+    """``now=None`` uses the real UTC clock (a just-stamped warn is fresh)."""
+    fresh = _verdict_of(da.KIND_WARN, checked_at=datetime.now(UTC).isoformat())
+    assert da.cache_usable(fresh) is True
 
 
 # ── summarize_report (pure kind policy + verbatim pass-through) ─────────
@@ -328,6 +384,65 @@ def test_load_unreadable_path_is_none(tmp_path: Path) -> None:
     assert da.load_verdict(tmp_path) is None
 
 
+def test_load_invalid_utf8_cache_is_none_and_feature_stays_alive(tmp_path: Path) -> None:
+    """MAJOR-2 repro: invalid BYTES in the cache fail-closed to no-cache.
+
+    A torn write / disk corruption leaves non-UTF-8 bytes; ``read_text``
+    raises ``UnicodeDecodeError`` (a ``ValueError``, NOT an ``OSError``) —
+    the old code let it escape and KILLED the holder at construction. Now it
+    reads as absent, the feature stays alive, and the next save overwrites
+    the corrupt file with good JSON.
+    """
+    lake = tmp_path / "lake"
+    path = da.probes_cache_path(lake)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe\x00 torn \x80 write")
+    assert da.load_verdict(path) is None
+    # The holder constructs fine over the corrupt cache (feature alive)…
+    holder = _holder(tmp_path, probes_runner=_pass_probes_report)
+    assert holder.status()["probes"]["verdict"] is None
+    # …re-probes on the next pull, and the save REPLACES the corrupt bytes.
+    assert holder.on_real_pull() is True
+    reloaded = da.load_verdict(path)
+    assert reloaded is not None and reloaded.kind == da.KIND_PASS
+
+
+def test_save_verdict_is_atomic_against_a_torn_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-2: a crash mid-write can never corrupt the previous verdict.
+
+    ``save_verdict`` stages into a same-directory ``.tmp`` sibling and
+    ``os.replace``s it over the cache. Here the file write is interrupted
+    half-way (half the payload lands, then the volume dies): the REAL cache
+    must still hold the previous verdict byte-complete — with the old
+    in-place ``write_text`` the cache itself was left torn.
+    """
+    path = da.probes_cache_path(tmp_path / "lake")
+    first = da.error_verdict("first", now=_NOW)
+    da.save_verdict(path, first)
+
+    real_write_text = Path.write_text
+
+    def _torn_write(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        real_write_text(self, data[: len(data) // 2], *args, **kwargs)
+        raise OSError("volume died mid-write")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "write_text", _torn_write)
+        with pytest.raises(OSError, match="mid-write"):
+            da.save_verdict(path, da.error_verdict("second", now=_NOW))
+    assert da.load_verdict(path) == first
+
+
+def test_save_verdict_leaves_no_tmp_sibling_behind(tmp_path: Path) -> None:
+    """A successful save renames its staging file away (nothing lingers)."""
+    path = da.preflight_cache_path(tmp_path / "lake")
+    da.save_verdict(path, da.error_verdict("x", now=_NOW))
+    assert path.exists()
+    assert list(path.parent.glob("*.tmp")) == []
+
+
 def test_cache_paths_live_under_the_liveproof_area(tmp_path: Path) -> None:
     """Both caches persist under <lake>/_liveproof/autorun/."""
     lake = tmp_path / "lake"
@@ -339,10 +454,26 @@ def test_cache_paths_live_under_the_liveproof_area(tmp_path: Path) -> None:
 
 
 def test_probe_controller_factory_is_bounded() -> None:
-    """The probe controller starts at the 1 r/s floor under the 500/min governor."""
+    """The probe controller starts at the 1 r/s floor under its 20/min slice."""
     controller = da.probe_controller_factory()
     assert controller.current_rps == da.AUTORUN_PROBE_CEILING_RPS == 1.0
-    assert controller.snapshot()["ceiling_per_min"] == GROWW_RATE_LIMIT_PER_MIN
+    assert controller.snapshot()["ceiling_per_min"] == da.AUTORUN_PROBE_CEILING_PER_MIN == 20
+
+
+def test_probe_budget_composes_under_the_account_cap() -> None:
+    """MAJOR-3: pull worst-case + probe slice must fit the 500/min account cap.
+
+    The probe controller is a SEPARATE instance from the pull job's — the
+    per-minute governors do NOT share state — so composition holds only by
+    budget split: pull ≤ 8 r/s → 480/min worst-case, probes ≤ their own
+    20/min slice, and the sum may never exceed the operator-confirmed
+    account-level cap. This test pins the arithmetic against the production
+    constants so any future ceiling bump re-proves the split.
+    """
+    pull_worst_case_per_min = GROWW_RATE_LIMIT_RPS_CEILING * 60.0
+    assert pull_worst_case_per_min + da.AUTORUN_PROBE_CEILING_PER_MIN <= GROWW_RATE_LIMIT_PER_MIN
+    # And the probe slice itself is a strict LOWERING (Rule 6 — never a raise).
+    assert da.AUTORUN_PROBE_CEILING_PER_MIN < GROWW_RATE_LIMIT_PER_MIN
 
 
 def _fast_controller() -> RateController:
@@ -384,6 +515,29 @@ def test_run_kit_stages_controller_override_is_applied(tmp_path: Path) -> None:
     )
     assert built, "the override factory must build the run's controller"
     assert [outcome.name for outcome in report.outcomes] == ["creds", "token"]
+
+
+def test_run_kit_stages_default_composes_real_deps_late(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``deps_factory=None`` composes ``build_real_deps`` LATE (call-time lookup).
+
+    MAJOR-5 belt seam: the default is resolved through the module global at
+    CALL time (not bound at import), so stubbing
+    ``doctor_autorun.build_real_deps`` genuinely intercepts the production
+    composition — proven here by routing the default onto the offline fakes.
+    """
+    deps, _box = make_deps(tmp_path)
+    calls: list[str] = []
+
+    def _fake_real() -> dl.KitDeps:
+        calls.append("composed")
+        return deps
+
+    monkeypatch.setattr(da, "build_real_deps", _fake_real)
+    report = da.run_kit_stages(da.PREFLIGHT_STAGES, lake_root=tmp_path / "lake")
+    assert calls == ["composed"]
+    assert [outcome.stage for outcome in report.outcomes] == [0, 1, 2, 3, 4]
 
 
 def test_start_daemon_thread_runs_the_worker() -> None:
@@ -604,19 +758,132 @@ def test_probes_single_flight_while_running(tmp_path: Path) -> None:
     assert holder.status()["probes"]["state"] == da.STATE_DONE
 
 
-# ── note_credentials_refusal (banner ↔ 503 agreement) ────────────────────
+# ── MAJOR-1: a thread-spawn failure never wedges the state or raises ─────
 
 
-def test_refusal_note_mirrors_the_fix_text(tmp_path: Path) -> None:
-    """The refusal fix text lands on the banner verdict + the disk cache."""
+def _flaky_starter(
+    failures: dict[str, bool],
+) -> Callable[[Callable[[], None], str], None]:
+    """A starter that raises while ``failures['on']`` and runs sync after."""
+
+    def _start(fn: Callable[[], None], _name: str) -> None:
+        if failures["on"]:
+            raise RuntimeError("can't start new thread")
+        fn()
+
+    return _start
+
+
+def test_preflight_spawn_failure_rolls_back_and_records_error(tmp_path: Path) -> None:
+    """MAJOR-1: a preflight spawn failure → IDLE + honest error verdict + retry OK."""
+    failures = {"on": True}
+    holder = _holder(tmp_path, thread_starter=_flaky_starter(failures))
+    assert holder.start_preflight() is False  # no run started — honestly reported
+    status = holder.status()
+    assert status["preflight"]["state"] == da.STATE_IDLE  # never wedged RUNNING
+    assert status["preflight"]["verdict"]["kind"] == da.KIND_ERROR
+    assert status["preflight"]["verdict"]["lines"] == ["RuntimeError: can't start new thread"]
+    cached = da.load_verdict(da.preflight_cache_path(tmp_path / "lake"))
+    assert cached is not None and cached.kind == da.KIND_ERROR
+    # The failure is not terminal: the next trigger retries and succeeds.
+    failures["on"] = False
+    assert holder.start_preflight() is True
+    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_PASS
+
+
+def test_probes_spawn_failure_rolls_back_and_a_later_pull_retries(tmp_path: Path) -> None:
+    """MAJOR-1: an on_real_pull spawn failure never wedges; the NEXT pull retries."""
+    failures = {"on": True}
+    holder = _holder(
+        tmp_path, probes_runner=_pass_probes_report, thread_starter=_flaky_starter(failures)
+    )
+    assert holder.on_real_pull() is False
+    status = holder.status()
+    assert status["probes"]["state"] == da.STATE_IDLE  # NOT wedged at RUNNING
+    assert status["probes"]["verdict"]["kind"] == da.KIND_ERROR
+    cached = da.load_verdict(da.probes_cache_path(tmp_path / "lake"))
+    assert cached is not None and cached.kind == da.KIND_ERROR
+    # The error verdict is never cache_usable → the next real pull re-probes.
+    failures["on"] = False
+    assert holder.on_real_pull() is True
+    assert holder.status()["probes"]["state"] == da.STATE_DONE
+    assert holder.status()["probes"]["verdict"]["kind"] == da.KIND_PASS
+
+
+def test_real_thread_start_failure_is_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-1 repro (reviewer's shape): ``Thread.start`` itself raising is contained.
+
+    With the PRODUCTION ``start_daemon_thread`` seam and ``Thread.start``
+    monkeypatched to raise (the classic can't-start-new-thread condition),
+    ``on_real_pull`` must swallow the crash — the old code let it escape
+    into the pull gate AND left the state wedged at ``running`` forever.
+    """
+    failures = {"on": True}
+    real_start = threading.Thread.start
+
+    def _flaky_start(self: threading.Thread) -> None:
+        if failures["on"]:
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _flaky_start)
+    done = threading.Event()
+
+    def _probes() -> dl.KitReport:
+        done.set()
+        return _pass_probes_report()
+
+    holder = _holder(tmp_path, probes_runner=_probes, thread_starter=da.start_daemon_thread)
+    assert holder.on_real_pull() is False  # contained — did NOT raise
+    assert holder.status()["probes"]["state"] == da.STATE_IDLE
+    assert holder.status()["probes"]["verdict"]["kind"] == da.KIND_ERROR
+    # Threads work again → the next pull genuinely retries on a daemon thread.
+    failures["on"] = False
+    assert holder.on_real_pull() is True
+    assert done.wait(timeout=10.0)
+
+
+# ── note_credentials_refusal (banner ↔ 503 agreement — RED, never grey) ──
+
+
+def test_refusal_note_mirrors_the_fix_text_as_fail_red(tmp_path: Path) -> None:
+    """MAJOR-4: a refused REAL pull renders FAIL-red with the refusal text.
+
+    Creds broke AFTER a green preflight — an attempted live pull that could
+    not proceed IS a failure of the live pipe, so the banner goes RED (kind
+    ``fail``) with the relayed fix text, in memory and on disk.
+    """
     holder = _holder(tmp_path)
     holder.start_preflight()  # green first — creds then break mid-session
     holder.note_credentials_refusal("credentials refused — fix /tickvault/prod/groww/api-key")
     verdict = holder.status()["preflight"]["verdict"]
-    assert verdict["kind"] == da.KIND_NOT_APPLICABLE
+    assert verdict["kind"] == da.KIND_FAIL
+    assert verdict["headline"] == da.HEADLINES[da.KIND_FAIL]
     assert verdict["lines"] == ["credentials refused — fix /tickvault/prod/groww/api-key"]
     cached = da.load_verdict(da.preflight_cache_path(tmp_path / "lake"))
-    assert cached is not None and cached.kind == da.KIND_NOT_APPLICABLE
+    assert cached is not None and cached.kind == da.KIND_FAIL
+
+
+def test_refusal_note_never_downgrades_a_fail_verdict_to_grey(tmp_path: Path) -> None:
+    """MAJOR-4 repro: the red→grey overwrite must stay RED.
+
+    A FAILING preflight verdict is on the banner; a credentials refusal then
+    arrives. The old code overwrote the red verdict with the grey
+    ``not_applicable`` — hiding a genuine failure behind "not applicable".
+    Now the verdict stays kind ``fail`` (with the refusal's own fix text).
+    """
+    failing = _report(_outcome(3, "token", dl.STATUS_FAIL, "FAIL token[R7]: mint refused"))
+    holder = _holder(tmp_path, preflight_runner=lambda: failing)
+    holder.start_preflight()
+    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_FAIL
+    holder.note_credentials_refusal("credentials refused — fix the SSM parameter")
+    verdict = holder.status()["preflight"]["verdict"]
+    assert verdict["kind"] == da.KIND_FAIL  # RED stays RED
+    assert verdict["lines"] == ["credentials refused — fix the SSM parameter"]
+    cached = da.load_verdict(da.preflight_cache_path(tmp_path / "lake"))
+    assert cached is not None and cached.kind == da.KIND_FAIL
 
 
 def test_refusal_note_is_noop_when_disabled(tmp_path: Path) -> None:
@@ -634,9 +901,63 @@ def test_refusal_note_does_not_flip_a_running_state(tmp_path: Path) -> None:
     holder.start_preflight()
     holder.note_credentials_refusal("fix text")
     assert holder.status()["preflight"]["state"] == da.STATE_RUNNING
-    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_NOT_APPLICABLE
+    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_FAIL
     captured[0]()
     assert holder.status()["preflight"]["state"] == da.STATE_DONE
+
+
+# ── no-creds verdicts: grey ONLY without history (MAJOR-4c) ──────────────
+
+
+def test_creds_vanishing_after_preflight_history_is_fail_red(tmp_path: Path) -> None:
+    """MAJOR-4: creds-error over a cache with real history renders FAIL, not grey.
+
+    A previous session's preflight PASSed on this machine (the cache proves
+    it); credentials then vanish. The next startup preflight must show a RED
+    failure — grey "not applicable" would paper over the breakage.
+    """
+    lake = tmp_path / "lake"
+    da.save_verdict(da.preflight_cache_path(lake), _verdict_of(da.KIND_PASS))
+    spy_calls: list[str] = []
+
+    def _spy_runner() -> dl.KitReport:
+        spy_calls.append("ran")
+        return _pass_preflight_report()
+
+    holder = _holder(
+        tmp_path,
+        credentials_error=lambda: "Missing Groww credentials: parameter absent",
+        preflight_runner=_spy_runner,
+    )
+    assert holder.start_preflight() is True
+    verdict = holder.status()["preflight"]["verdict"]
+    assert verdict["kind"] == da.KIND_FAIL
+    assert verdict["lines"] == ["Missing Groww credentials: parameter absent"]
+    assert spy_calls == []  # still ZERO kit/vendor calls without creds
+
+
+def test_creds_vanishing_after_probes_history_is_fail_red(tmp_path: Path) -> None:
+    """MAJOR-4: the probes flow applies the same history rule (fail, not grey)."""
+    lake = tmp_path / "lake"
+    da.save_verdict(da.probes_cache_path(lake), _verdict_of(da.KIND_FAIL))
+    holder = _holder(
+        tmp_path,
+        credentials_error=lambda: "Missing Groww credentials: parameter absent",
+    )
+    assert holder.on_real_pull() is True
+    verdict = holder.status()["probes"]["verdict"]
+    assert verdict["kind"] == da.KIND_FAIL
+    assert verdict["lines"] == ["Missing Groww credentials: parameter absent"]
+
+
+def test_no_creds_without_history_stays_not_applicable(tmp_path: Path) -> None:
+    """MAJOR-4 guard: the never-attempted sandbox context KEEPS the grey verdict."""
+    holder = _holder(tmp_path, credentials_error=lambda: "no creds — sandbox")
+    holder.start_preflight()
+    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_NOT_APPLICABLE
+    # A prior grey is still "never attempted" — a re-run stays grey too.
+    holder.start_preflight()
+    assert holder.status()["preflight"]["verdict"]["kind"] == da.KIND_NOT_APPLICABLE
 
 
 # ── end-to-end through the REAL kit runner over the kit suite's fakes ────
@@ -864,7 +1185,7 @@ def _unreachable_deps() -> dl.KitDeps:
     raise AssertionError("a cached settled verdict must never re-run the kit")
 
 
-# ── secret hygiene ───────────────────────────────────────────────────────
+# ── secret hygiene (m4) ──────────────────────────────────────────────────
 
 
 def test_verdict_and_cache_never_carry_secret_values(tmp_path: Path) -> None:
@@ -873,5 +1194,88 @@ def test_verdict_and_cache_never_carry_secret_values(tmp_path: Path) -> None:
     holder.start_preflight()
     payload = json.dumps(holder.status())
     assert _SECRET not in payload
+    cache_text = da.preflight_cache_path(tmp_path / "lake").read_text(encoding="utf-8")
+    assert _SECRET not in cache_text
+
+
+def _raise_creds_missing() -> GrowwFileCredentials:
+    raise CredentialsError("Missing Groww credentials: parameter absent")
+
+
+@pytest.mark.parametrize(
+    ("override_key", "override_value"),
+    [
+        ("clock_offset_s", lambda: 94.0),  # totp FAIL lines on the verdict
+        ("resolve_creds", _raise_creds_missing),  # creds FAIL lines on the verdict
+    ],
+)
+def test_failing_run_verdict_and_cache_never_carry_secret_values(
+    tmp_path: Path, override_key: str, override_value: Callable[[], object]
+) -> None:
+    """m4 (strengthened): a FAILING totp/creds run still leaks no secret value.
+
+    The green-run hygiene test above has empty diagnostic lines — the real
+    exposure surface is a FAILING run whose totp/creds lines carry stage
+    detail. Both failing shapes must keep the secret out of the status
+    payload AND the persisted cache.
+    """
+    holder = _e2e_holder(tmp_path, lambda: make_deps(tmp_path, **{override_key: override_value})[0])
+    holder.start_preflight()
+    verdict = holder.status()["preflight"]["verdict"]
+    assert verdict["kind"] == da.KIND_FAIL
+    assert verdict["lines"], "a failing run must carry diagnostic lines"
+    payload = json.dumps(holder.status())
+    assert _SECRET not in payload
+    cache_text = da.preflight_cache_path(tmp_path / "lake").read_text(encoding="utf-8")
+    assert _SECRET not in cache_text
+
+
+def test_scrub_secrets_redacts_known_env_values() -> None:
+    """m4: any occurrence of a known credential env VALUE is redacted."""
+    env = {"BRUTEX_GROWW_TOTP_SECRET": _SECRET, "BRUTEX_GROWW_API_KEY": "groww-key-123"}
+    text = f"mint blew up on {_SECRET} with key groww-key-123"
+    scrubbed = da.scrub_secrets(text, env=env)
+    assert _SECRET not in scrubbed
+    assert "groww-key-123" not in scrubbed
+    assert da.REDACTED in scrubbed
+
+
+def test_scrub_secrets_skips_trivial_env_values() -> None:
+    """A too-short env value is never redacted (would false-positive prose)."""
+    env = {"BRUTEX_GROWW_API_KEY": "abc"}
+    assert da.scrub_secrets("abc stays as prose", env=env) == "abc stays as prose"
+
+
+def test_scrub_secrets_redacts_assignment_shapes() -> None:
+    """m4: the classic repr leak (``api_key='…', totp_secret='…'``) is redacted."""
+    text = f"GrowwFileCredentials(api_key='groww-key-123', totp_secret='{_SECRET}')"
+    scrubbed = da.scrub_secrets(text, env={})
+    assert "groww-key-123" not in scrubbed
+    assert _SECRET not in scrubbed
+    assert scrubbed.count(da.REDACTED) == 2
+
+
+def test_scrub_secrets_default_env_reads_the_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``env=None`` scrubs against the real process environment."""
+    monkeypatch.setenv("BRUTEX_GROWW_TOTP_SECRET", "SECRETVALUE123")
+    assert "SECRETVALUE123" not in da.scrub_secrets("x SECRETVALUE123 y")
+
+
+def test_error_verdict_detail_is_scrubbed_before_persist_and_ui(tmp_path: Path) -> None:
+    """m4: an exception message echoing the TOTP secret never reaches cache/UI."""
+    env = {"BRUTEX_GROWW_TOTP_SECRET": _SECRET}
+
+    def _boom() -> dl.KitReport:
+        raise RuntimeError(f"SDK refused totp_secret='{_SECRET}'")
+
+    holder = _holder(tmp_path, env=env, preflight_runner=_boom)
+    holder.start_preflight()
+    verdict = holder.status()["preflight"]["verdict"]
+    assert verdict["kind"] == da.KIND_ERROR
+    payload = json.dumps(holder.status())
+    assert _SECRET not in payload
+    assert da.REDACTED in payload
     cache_text = da.preflight_cache_path(tmp_path / "lake").read_text(encoding="utf-8")
     assert _SECRET not in cache_text
