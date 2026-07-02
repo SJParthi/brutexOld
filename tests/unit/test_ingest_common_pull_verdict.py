@@ -4,11 +4,46 @@
 (auth_expired > transient_residual > known_gap_only > clean), the priority
 ordering, ``pending_windows`` arithmetic, ``needs_operator``, ``auth_cause``
 preservation, and the JSON ``to_dict`` shape (DEC-PULL-VERDICT-001).
+
+Also the loud credential refusal + explicit synthetic labeling
+(DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): :func:`gate_pull_credentials` — the
+ONE gate every REAL pull surface runs (explicit dry-run short-circuits
+WITHOUT resolving credentials; broken credentials return the
+``credentials_missing`` refusal verdict relaying the fix text verbatim) —
+plus :func:`credentials_refusal_verdict` / :func:`verdict_message` /
+:func:`label_synthetic` / :func:`mark_synthetic`. The cross-surface pins
+(dashboard routes, CLI race, real AWS-chain permutations) live in
+``tests/unit/test_pull_loud_credential_refusal.py``; the pure gate/label
+units live HERE so the strict per-module coverage gates scope them.
 """
 
 from __future__ import annotations
 
-from brutex.adapters.ingest_common import PullVerdict, classify_pull
+import pytest
+from brutex.adapters.ingest_common import (
+    CREDENTIALS_REFUSAL_HEADLINE,
+    SYNTHETIC_DRY_RUN_LABEL,
+    PullVerdict,
+    classify_pull,
+    credentials_refusal_verdict,
+    gate_pull_credentials,
+    label_synthetic,
+    mark_synthetic,
+    verdict_message,
+)
+from brutex.config.credentials import CredentialsError, GrowwFileCredentials
+
+_FIX_TEXT = "seed /tickvault/prod/groww/api-key + totp-secret in ap-south-1 (test fix text)"
+
+
+def _good_loader() -> GrowwFileCredentials:
+    """Fake AWS loader — credentials resolve (values are FAKE, never real)."""
+    return GrowwFileCredentials(api_key="gw_key_123456", totp_secret="JBSWY3DPEHPK3PXP")
+
+
+def _bad_loader() -> GrowwFileCredentials:
+    """Fake AWS loader — fail-fast with an actionable fix message."""
+    raise CredentialsError(_FIX_TEXT)
 
 
 class TestClassifyPull:
@@ -158,3 +193,93 @@ class TestPullVerdictSerialisation:
         )
         assert clean.to_dict()["needs_operator"] is False
         assert gap.to_dict()["needs_operator"] is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Loud credential refusal — the ONE shared gate + refusal verdict +
+# synthetic labels (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001, audit finding R1)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestGatePullCredentials:
+    def test_explicit_dry_run_short_circuits_without_resolving(self) -> None:
+        calls: list[bool] = []
+
+        def _spy() -> str | None:
+            calls.append(True)
+            return _FIX_TEXT
+
+        assert gate_pull_credentials(dry_run_requested=True, credentials_error=_spy) is None
+        assert calls == []  # credentials are IRRELEVANT to an explicit dry-run
+
+    def test_good_credentials_proceed(self) -> None:
+        assert (
+            gate_pull_credentials(dry_run_requested=False, credentials_error=lambda: None) is None
+        )
+
+    def test_broken_credentials_return_the_refusal_verdict(self) -> None:
+        verdict = gate_pull_credentials(
+            dry_run_requested=False, credentials_error=lambda: _FIX_TEXT
+        )
+        assert verdict is not None
+        assert verdict.kind == "credentials_missing"
+        assert verdict.needs_operator is True
+        assert verdict.headline == CREDENTIALS_REFUSAL_HEADLINE
+        assert _FIX_TEXT in verdict.action  # relayed VERBATIM (DYNAMIC)
+        assert verdict.auth_cause == _FIX_TEXT
+        assert (verdict.pending_windows, verdict.failed_pairs, verdict.no_data) == (0, 0, 0)
+        assert verdict.completed == 0
+
+    def test_default_resolver_refuses_via_the_real_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # credentials_error=None → the gate lazily imports the REAL resolver.
+        monkeypatch.setattr("brutex.config.credentials_aws.load_groww_aws_credentials", _bad_loader)
+        verdict = gate_pull_credentials(dry_run_requested=False)
+        assert verdict is not None
+        assert _FIX_TEXT in verdict.action
+
+    def test_default_resolver_proceeds_via_the_real_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "brutex.config.credentials_aws.load_groww_aws_credentials", _good_loader
+        )
+        assert gate_pull_credentials(dry_run_requested=False) is None
+
+
+class TestRefusalVerdictAndLabels:
+    def test_verdict_message_joins_headline_and_action(self) -> None:
+        verdict = credentials_refusal_verdict(_FIX_TEXT)
+        message = verdict_message(verdict)
+        assert message.startswith(CREDENTIALS_REFUSAL_HEADLINE)
+        assert _FIX_TEXT in message
+
+    def test_refusal_verdict_to_dict_is_needs_operator(self) -> None:
+        payload = credentials_refusal_verdict(_FIX_TEXT).to_dict()
+        assert payload["kind"] == "credentials_missing"
+        assert payload["needs_operator"] is True
+        assert _FIX_TEXT in payload["action"]
+
+    def test_refusal_verdict_never_mentions_success(self) -> None:
+        verdict = credentials_refusal_verdict(_FIX_TEXT)
+        assert "REFUSED" in verdict.headline
+        assert "NEVER silently degrades" in verdict.action
+
+    def test_label_synthetic_prefixes_the_loud_label(self) -> None:
+        assert label_synthetic("index spot") == f"{SYNTHETIC_DRY_RUN_LABEL} — index spot"
+
+    def test_mark_synthetic_relabels_headline_and_action_preserving_kind(self) -> None:
+        clean = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=3,
+        )
+        marked = mark_synthetic(clean)
+        assert marked.kind == clean.kind  # the classifier stays the ONE authority
+        assert marked.headline.startswith(f"🧪 {SYNTHETIC_DRY_RUN_LABEL} — ")
+        assert clean.headline in marked.headline
+        assert "DISCARDED — zero real bars landed" in marked.action
+        assert isinstance(marked, PullVerdict)
