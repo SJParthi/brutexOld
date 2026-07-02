@@ -485,3 +485,32 @@ class TestInputMonotonicGuard:
         from brutex.data.errors import DataLakeError
 
         assert issubclass(ResampleInputError, DataLakeError)
+
+
+class TestOpenInterestCarryLastStemMatched:
+    """OI carry-last coverage INSIDE the module's stem-matched suite.
+
+    The CI touched-module discovery gate (DEC-CICD-GATE-HONESTY-001,
+    scripts/ci/coverage_gate_discovery.py) gates a touched module at 100%
+    under its STEM-MATCHED test files only — `test_fno_resample.py` (which
+    historically covered the `has_oi` aggregation branch per
+    DEC-FNO-TF-DERIVE-OI-001) does not stem-match `tf_resampler`, so the
+    branch must also be exercised HERE (caught live on this PR's first CI
+    run: 97.06%, line 249 missed under the stem set).
+    """
+
+    def test_oi_column_carried_as_last_snapshot_never_summed(self) -> None:
+        df = _df_at([0, 1, 2, 5, 6], volumes=[10, 10, 10, 10, 10]).with_columns(
+            pl.Series("open_interest", [100, 200, 300, 400, None], dtype=pl.Int64)
+        )
+        out = resample_1m_to_tf(df, 5)
+        # Bucket 1 = minutes 0-2 → LAST bar's OI (300), never 100+200+300.
+        # Bucket 2 = minutes 5-6 → last bar's OI is null → preserved null.
+        assert out.get_column("open_interest").to_list() == [300, None]
+        # Volume stays the summed FLOW — proving OI is the snapshot exception.
+        assert out.get_column("volume").to_list() == [30, 20]
+
+    def test_spot_frame_without_oi_stays_six_columns(self) -> None:
+        out = resample_1m_to_tf(_df_at([0, 1, 2]), 5)
+        assert "open_interest" not in out.columns
+        assert list(out.columns) == list(REQUIRED_COLUMNS)
