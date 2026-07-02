@@ -13,6 +13,7 @@ import math
 from brutex.dashboard.pull_rate_view import (
     CEILING_PER_MIN_LIMIT,
     CEILING_RPS_LIMIT,
+    FLOW_DONE,
     FLOW_FLOWING,
     FLOW_IDLE,
     FLOW_STALLED,
@@ -624,3 +625,176 @@ def test_merged_bridge_meter_present_default_keeps_measured_achieved() -> None:
     )
     assert merged.req_per_sec_achieved == 4.8
     assert merged.flow_state == FLOW_FLOWING
+
+
+# --------------------------------------------------------------------------- #
+# The pull-active stall gate (DEC-RATE-STALL-PULL-GATE-001): STALLED is shown
+# ONLY while a pull is ACTIVE and its req/sec flatlined — a completed pull reads
+# "done" (fresh tick) then "idle", never the red mislabel the operator saw.
+# --------------------------------------------------------------------------- #
+def _live_kwargs(**overrides: object) -> dict[str, object]:
+    """A fresh, healthy mid-pull tick — the shared base for the gate tests."""
+    base: dict[str, object] = {
+        "effective_rps": 6.4,
+        "current_rps": 8.0,
+        "recent_minute": 380,
+        "recent_429_count": 0,
+        "last_update_monotonic": 100.0,
+        "now_monotonic": 101.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_pull_finished_fresh_tick_reads_done_never_stalled() -> None:
+    """THE operator bug: 80/80 done, tick still fresh, rps at the floor → done."""
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=False,
+    )
+    assert view.flow_state == FLOW_DONE
+    assert view.stalled is False
+    assert view.active is False
+    # The last live figures are history, not a current rate — zeroed (Rule #1).
+    assert view.req_per_sec_achieved == 0.0
+    assert view.req_per_min == 0
+    assert view.seconds_since_update == 1.0  # staleness stays real
+
+
+def test_pull_finished_then_tick_ages_out_settles_to_idle() -> None:
+    """done → idle: once the last tick ages past the window the label settles."""
+    view = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 1.0),  # type: ignore[arg-type]
+        pull_active=False,
+    )
+    assert view.flow_state == FLOW_IDLE
+    assert view.stalled is False
+    assert view.active is False
+
+
+def test_pull_finished_healthy_fresh_tick_is_done_not_flowing() -> None:
+    """No pull running ⇒ even a healthy-looking fresh tick is not 'flowing'."""
+    view = build_pull_rate_view(
+        **_live_kwargs(),  # type: ignore[arg-type]
+        pull_active=False,
+    )
+    assert view.flow_state == FLOW_DONE
+    assert view.active is False
+    assert view.req_per_sec_achieved == 0.0
+
+
+def test_active_pull_fresh_tick_keeps_measured_verdicts() -> None:
+    """pull_active=True + fresh tick: the measured flowing/stalled verdict rules."""
+    flowing = build_pull_rate_view(
+        **_live_kwargs(),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    assert flowing.flow_state == FLOW_FLOWING
+    assert flowing.active is True
+    stalled = build_pull_rate_view(
+        **_live_kwargs(effective_rps=STALL_RPS_FLOOR),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    assert stalled.flow_state == FLOW_STALLED
+    assert stalled.stalled is True
+
+
+def test_active_pull_with_no_ticks_reads_stalled() -> None:
+    """pull_active=True + NO tick in the window = a flatlined pull → red stalled."""
+    view = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 5.0),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    assert view.flow_state == FLOW_STALLED
+    assert view.stalled is True
+    assert view.active is False  # no live numbers to show — zeroed
+    assert view.req_per_sec_achieved == 0.0
+    assert view.req_per_min == 0
+
+
+def test_no_signal_keeps_legacy_tick_freshness_behaviour() -> None:
+    """pull_active=None (the CLI bridge) is byte-identical to the pre-gate view."""
+    legacy_flowing = build_pull_rate_view(**_live_kwargs())  # type: ignore[arg-type]
+    explicit_none = build_pull_rate_view(
+        **_live_kwargs(),  # type: ignore[arg-type]
+        pull_active=None,
+    )
+    assert explicit_none == legacy_flowing
+    stale = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 5.0),  # type: ignore[arg-type]
+        pull_active=None,
+    )
+    assert stale.flow_state == FLOW_IDLE
+    assert stale.stalled is False
+
+
+def test_full_lifecycle_transition_sequence() -> None:
+    """flowing (active) → stalled (active flatline) → done (finished) → idle."""
+    states = [
+        build_pull_rate_view(
+            **_live_kwargs(),  # type: ignore[arg-type]
+            pull_active=True,
+        ).flow_state,
+        build_pull_rate_view(
+            **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+            pull_active=True,
+        ).flow_state,
+        build_pull_rate_view(
+            **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+            pull_active=False,
+        ).flow_state,
+        build_pull_rate_view(
+            **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 60.0),  # type: ignore[arg-type]
+            pull_active=False,
+        ).flow_state,
+    ]
+    assert states == [FLOW_FLOWING, FLOW_STALLED, FLOW_DONE, FLOW_IDLE]
+
+
+def test_merged_panel_pull_active_threads_through() -> None:
+    """The merged builder threads panel_pull_active into the winning panel view."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=12,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=1.0,
+        panel_pull_active=False,
+    )
+    assert view.flow_state == FLOW_DONE
+    assert view.stalled is False
+
+
+def test_merged_bridge_pull_active_threads_through() -> None:
+    """A fresher bridge with an explicit pull_active=False reads done, not stalled."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=500.0,
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=3,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+        bridge_pull_active=False,
+    )
+    assert view.flow_state == FLOW_DONE
+
+
+def test_merged_bridge_default_keeps_tick_freshness_fallback() -> None:
+    """The CLI bridge carries no active flag — its default stays the legacy verdict."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=0.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=500.0,
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=3,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+    )
+    assert view.flow_state == FLOW_STALLED  # unchanged pre-gate bridge behaviour

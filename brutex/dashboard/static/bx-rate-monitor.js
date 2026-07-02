@@ -41,8 +41,10 @@
  * normal collapsed view unchanged and never disturbs the existing layout.
  *
  * HONEST labelling (Golden Rule #1 + #10): when the backend reports flow_state="idle"
- * the widget shows "idle" + zeroed numbers — it NEVER shows a stale "live" figure once a
- * pull has ended. req/sec, req/min, req/10min and the MEASURED req/hour are all REAL
+ * (or "done" — the pull just finished, DEC-RATE-STALL-PULL-GATE-001) the widget shows
+ * that label + zeroed numbers on the dark light — it NEVER shows a stale "live" figure
+ * once a pull has ended, and the backend never labels a finished pull "stalled" (red is
+ * reserved for an ACTIVE pull whose req/sec flatlined). req/sec, req/min, req/10min and the MEASURED req/hour are all REAL
  * counts of issues in their window (from the rate controller's per-second issue ring);
  * the older req/hour "obs" figure carries an "obs" tag because it is the current
  * minute-rate projected to an hour, not a measured count. During the first hour of a
@@ -208,7 +210,7 @@
         id: WIDGET_ID,
         attrs: {
           "aria-live": "polite",
-          title: "Live Groww pull rate — click to expand. green flowing, red stalled, dark idle",
+          title: "Live Groww pull rate — click to expand. green flowing, red stalled (active pull flatlined), dark idle/done",
         },
       },
       [
@@ -322,6 +324,8 @@
     if (!el) {
       return;
     }
+    // "idle" and "done" (pull just finished — DEC-RATE-STALL-PULL-GATE-001) both take
+    // the dark idle styling; the state TEXT still shows the honest backend word.
     el.classList.remove("flowing", "stalled", "idle");
     el.classList.add(state === "flowing" || state === "stalled" ? state : "idle");
   }
