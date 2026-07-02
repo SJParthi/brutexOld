@@ -33,18 +33,26 @@
 #   - lint / type / test / rust-check / docs run in parallel
 #   - final "ci-ok" job depends on ALL of them; merge gate is ci-ok
 #
-# Triggered on: every push to a branch, every PR against main,
-#   and manual dispatch via workflow_dispatch
+# Triggered on: push to main, every PR against main, and manual
+#   dispatch. Feature-branch commits run ONCE via the pull_request
+#   event (NOT also via push) — see DEC-CI-COST-DEDUP-001 below.
 
 name: CI
 
 on:
+  # DEC-CI-COST-DEDUP-001: `push` runs ONLY on main. Feature branches
+  # (claude/**, feat/**, fix/**) are validated via the `pull_request`
+  # event alone. Previously they fired BOTH push AND pull_request, and
+  # because the two events land in DIFFERENT `concurrency` groups
+  # (refs/heads/<branch> vs refs/pull/<n>/merge) neither cancelled the
+  # other — so every PR commit ran the entire matrix TWICE. Running once
+  # via pull_request halves Actions minutes with NO loss of gate coverage
+  # (auto-merge.yml + pre-merge-gate.yml trigger on the CI `workflow_run`
+  # regardless of the originating event; required checks match by context
+  # name, which the pull_request run still produces).
   push:
     branches:
       - main
-      - "claude/**"
-      - "feat/**"
-      - "fix/**"
   pull_request:
     branches:
       - main
