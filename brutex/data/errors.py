@@ -29,6 +29,22 @@ class WriterError(DataLakeError):
     """
 
 
+class ResampleInputError(DataLakeError):
+    """The 1-minute input to the canonical TF resampler violates its ordering contract.
+
+    :func:`brutex.data.tf_resampler.resample_1m_to_tf` requires a null-free,
+    STRICTLY-INCREASING ``ts_utc`` column (DEC-RESAMPLER-INPUT-GUARD-001). A
+    duplicate timestamp silently DOUBLE-COUNTS the bucket's volume and can
+    pollute high/low; an out-of-order row inverts the bucket's open/close
+    (``maintain_order=True`` + ``first()``/``last()`` trust input order). This
+    typed error makes the violation LOUD at the resampler boundary — the same
+    raise-on-non-monotonic convention the feed resampler
+    (``brutex.feed.errors.ResampleError``) and the execution driver already
+    enforce — so corrupted input can never masquerade as a clean aggregate
+    (Golden Rule #1).
+    """
+
+
 class LakeWriteHalt(DataLakeError):
     """A lake write hit an UNRECOVERABLE host condition — disk full / out of memory.
 

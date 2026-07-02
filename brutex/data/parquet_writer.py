@@ -479,10 +479,17 @@ class ParquetWriter:
         # raise" rule rejected every such partial write as a conflict (the
         # BAD_REQUEST flood on re-pull). Instead, UNION the incoming bars into
         # the existing partition keyed by timestamp (O(1) dict dedup per bar):
-        # a never-seen timestamp is added, an identical one is a no-op, and only
-        # a SAME timestamp with DIFFERENT OHLCV is a true conflict (real vendor
-        # drift) → raise. This makes incremental month-filling + re-pulls
-        # idempotent (DEC-LAKE-MERGE-WRITE-001).
+        # a never-seen timestamp is added, an identical one is a no-op, and a
+        # SAME timestamp with DIFFERENT OHLCV (real vendor drift) is resolved
+        # per merge_mode — the default "keep-first" KEEPS the stored bar and
+        # RECORDS a BarConflict on the returned WriteResult (it does NOT raise;
+        # the pull always finishes — DEC-LAKE-CONFLICT-KEEPFIRST-001, surfaced
+        # downstream as the per-window `ingest.conflict.summary` WARNING +
+        # per-bar DEBUG log), while "latest-wins" (the derived 1day partition
+        # only) overwrites it. This makes incremental month-filling + re-pulls
+        # idempotent (DEC-LAKE-MERGE-WRITE-001; comment reconciled to the real
+        # behaviour by DEC-RESAMPLER-INPUT-GUARD-001's doc-drift audit — the
+        # prior "→ raise" wording described the retired rule).
         #
         # The existence-check + merge/create below is a read-modify-write, so it
         # runs under this partition's shared lock (DEC-DHAN-PARALLEL-WINDOWS-001):
