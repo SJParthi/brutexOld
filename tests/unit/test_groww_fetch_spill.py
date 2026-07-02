@@ -6,7 +6,10 @@ DEC-FETCH-NONBLOCKING-HANDOFF-001. 100% line+branch on:
 * :class:`FetchSpillArea` — round-trip spill→load→discard, the byte-budget reserve/release, the
   CAP rejection (``try_spill`` → ``None``), the disk-full LakeWriteHalt envelope (budget released),
   idempotent discard, the ``cleanup`` straggler sweep (incl. the unlink-failure log branch);
-* :class:`SpilledWindow` + :meth:`FetchSpillArea.under_lake_root` / properties.
+* :class:`SpilledWindow` + :meth:`FetchSpillArea.under_lake_root` / properties;
+* DEC-FETCH-SPILL-ISOLATION-001 — the per-pull ``pull-<pid>-<uuid>`` spill namespacing, the
+  own-dir-only ``cleanup`` (a concurrent pull's LIVE spill is NEVER touched), and the bounded
+  stale-straggler sweep (a hard-killed pull's leftover dir / a legacy flat file).
 """
 
 # Whitebox test of the spill internals (reserved-byte counter, dir) — sanctioned.
@@ -14,6 +17,9 @@ DEC-FETCH-NONBLOCKING-HANDOFF-001. 100% line+branch on:
 
 from __future__ import annotations
 
+import os
+import shutil
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -192,9 +198,115 @@ class TestFetchSpillArea:
     ) -> None:
         monkeypatch.delenv(FETCH_SPILL_MAX_BYTES_ENV, raising=False)
         area = FetchSpillArea.under_lake_root(tmp_path)
-        assert area.spill_dir == tmp_path / ".fetch-spill"
+        # Per-pull namespacing (DEC-FETCH-SPILL-ISOLATION-001): a unique subdir of .fetch-spill.
+        assert area.spill_dir.parent == tmp_path / ".fetch-spill"
+        assert area.spill_dir.name.startswith("pull-")
         assert area._max_bytes == _DEFAULT_MAX
 
     def test_under_lake_root_honours_explicit_cap(self, tmp_path: Path) -> None:
         area = FetchSpillArea.under_lake_root(tmp_path, max_bytes=12345)
         assert area._max_bytes == 12345
+
+
+def _age(path: Path, *, hours: float) -> None:
+    """Backdate *path*'s mtime by *hours* (drives the stale-straggler sweep in tests)."""
+    old = time.time() - hours * 3600.0
+    os.utime(path, (old, old))
+
+
+class TestPerPullIsolation:
+    """DEC-FETCH-SPILL-ISOLATION-001 — per-pull namespacing + own-dir-only cleanup + stale sweep.
+
+    THE AUDIT SCENARIO (C-3 trigger): two concurrent pulls (CLI + dashboard) shared ONE flat
+    ``<lake>/.fetch-spill`` dir, and either pull's drain ``cleanup()`` unlinked EVERY file in
+    it — deleting the sibling pull's LIVE spill files out from under its consumer. With the
+    per-pull namespace a cleanup can only ever touch its OWN dir (plus provably-stale
+    hard-kill stragglers).
+    """
+
+    def test_under_lake_root_namespaces_per_pull(self, tmp_path: Path) -> None:
+        a = FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX)
+        b = FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX)
+        assert a.spill_dir != b.spill_dir  # two pulls can never collide
+        assert a.spill_dir.parent == b.spill_dir.parent == tmp_path / ".fetch-spill"
+
+    def test_cleanup_never_touches_a_concurrent_pulls_live_spill(self, tmp_path: Path) -> None:
+        """THE REGRESSION PIN: one pull's cleanup leaves the sibling pull's LIVE spill intact."""
+        ours = FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX)
+        sibling = FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX)
+        live = sibling.try_spill([_bar("108.00")])
+        assert live is not None
+        ours_handle = ours.try_spill([_bar()])
+        assert ours_handle is not None
+        ours.cleanup()
+        # Our own namespace dir + files are gone; the sibling's LIVE spill file survives and
+        # is still loadable (pre-fix, the flat shared dir meant it was DELETED here).
+        assert not ours.spill_dir.exists()
+        assert live.path.is_file()
+        assert sibling.load(live) == [_bar("108.00")]
+
+    def test_cleanup_sweeps_stale_stragglers_keeps_fresh_sibling(self, tmp_path: Path) -> None:
+        parent = tmp_path / ".fetch-spill"
+        parent.mkdir()
+        stale_dir = parent / "pull-999-deadbeef0000"
+        stale_dir.mkdir()
+        (stale_dir / "w1.spill").write_bytes(b"[]")
+        empty_stale_dir = parent / "pull-998-deadbeef0001"
+        empty_stale_dir.mkdir()
+        legacy_file = parent / "old-flat-spill.pkl"
+        legacy_file.write_bytes(b"[]")
+        for path in (stale_dir, empty_stale_dir, legacy_file):
+            _age(path, hours=25.0)
+        fresh_dir = parent / "pull-111-cafecafe0000"
+        fresh_dir.mkdir()
+        (fresh_dir / "w2.spill").write_bytes(b"[]")
+        FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX).cleanup()
+        assert not stale_dir.exists()  # a hard-killed pull's straggler dir is swept
+        assert not empty_stale_dir.exists()  # an empty straggler dir is swept too
+        assert not legacy_file.exists()  # a pre-namespacing flat spill file is swept
+        assert (fresh_dir / "w2.spill").is_file()  # a plausibly-LIVE sibling is untouched
+
+    def test_stale_sweep_failure_is_logged_and_swallowed(self, tmp_path: Path) -> None:
+        # A stale dir CONTAINING A SUBDIR: child.unlink() raises an OSError → logged, no raise.
+        parent = tmp_path / ".fetch-spill"
+        parent.mkdir()
+        stubborn = parent / "pull-777-feedface0000"
+        stubborn.mkdir()
+        (stubborn / "nested").mkdir()
+        _age(stubborn, hours=25.0)
+        FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX).cleanup()  # no raise
+        assert stubborn.exists()  # left in place (best-effort), never crashes the drain
+
+    def test_stale_sweep_skips_unstatable_entry(self, tmp_path: Path) -> None:
+        # A dangling symlink: stat() raises FileNotFoundError → the entry is skipped, no raise.
+        parent = tmp_path / ".fetch-spill"
+        parent.mkdir()
+        dangling = parent / "gone"
+        dangling.symlink_to(parent / "nonexistent-target")
+        FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX).cleanup()  # no raise
+        assert dangling.is_symlink()
+
+    def test_no_stale_sweep_outside_fetch_spill_parent(self, tmp_path: Path) -> None:
+        # A directly-constructed area (arbitrary parent): the sweep must NEVER touch siblings.
+        area = FetchSpillArea(spill_dir=tmp_path / "custom", max_bytes=_DEFAULT_MAX)
+        outsider = tmp_path / "unrelated.txt"
+        outsider.write_text("keep")
+        _age(outsider, hours=48.0)
+        area.cleanup()
+        assert outsider.read_text() == "keep"
+
+    def test_cleanup_survives_missing_parent(self, tmp_path: Path) -> None:
+        area = FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX)
+        shutil.rmtree(tmp_path / ".fetch-spill")
+        area.cleanup()  # own iterdir + rmdir + the sibling sweep all degrade, never raise
+        assert area.reserved_bytes == 0
+
+    def test_stale_sweep_never_removes_own_dir_even_if_stale(self, tmp_path: Path) -> None:
+        # Whitebox: even a >threshold-old OWN dir is skipped by the sweep (the identity guard).
+        area = FetchSpillArea.under_lake_root(tmp_path, max_bytes=_DEFAULT_MAX)
+        handle = area.try_spill([_bar()])
+        assert handle is not None
+        _age(area.spill_dir, hours=48.0)
+        area._sweep_stale_siblings()
+        assert area.spill_dir.exists()
+        assert handle.path.is_file()
