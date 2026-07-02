@@ -487,13 +487,20 @@ def test_make_dryrun_lake_root_is_labelled_temp_dir(tmp_path: Path) -> None:
         root.rmdir()
 
 
+def _raise_boom() -> None:
+    """Raise the error the cleanup test propagates (indirection keeps the
+    post-``with`` assert visibly reachable to static analysis — ``pytest.raises``
+    swallows the error at runtime, which a direct in-block ``raise`` hides)."""
+    raise RuntimeError("boom")
+
+
 def test_ephemeral_dryrun_lake_cleanup_removes_tree(tmp_path: Path) -> None:
     """The cleanup context removes the ephemeral tree on exit — even on error."""
     lake = tmp_path / "ephemeral"
     (lake / "bars").mkdir(parents=True)
     (lake / "bars" / "junk.parquet").write_bytes(b"synthetic")
     with pytest.raises(RuntimeError, match="boom"), cli._ephemeral_dryrun_lake_cleanup(lake):
-        raise RuntimeError("boom")
+        _raise_boom()
     assert not lake.exists()
 
 

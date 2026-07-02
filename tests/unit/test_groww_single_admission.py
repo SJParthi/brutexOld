@@ -60,9 +60,9 @@ _NIFTY_ROW = _row(
 _INDEX = load_index_from_csv("\n".join([_HEADER, _NIFTY_ROW]) + "\n")
 
 
-# SDK-named exception fake — ``from_groww_exception`` maps it by class name to the
-# retryable ``GrowwTimeoutError`` (mirrors tests/unit/test_groww_client.py).
-class GrowwAPITimeoutException(Exception): ...
+class GrowwAPITimeoutException(Exception):
+    """SDK-named exception fake — ``from_groww_exception`` maps it by class name
+    to the retryable ``GrowwTimeoutError`` (mirrors tests/unit/test_groww_client.py)."""
 
 
 class _FakeSDK:

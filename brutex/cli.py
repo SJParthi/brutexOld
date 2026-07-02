@@ -58,7 +58,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2335,7 +2335,7 @@ def _make_dryrun_lake_root() -> Path:
 
 
 @contextlib.contextmanager
-def _ephemeral_dryrun_lake_cleanup(lake_root: Path | None) -> Iterator[None]:
+def _ephemeral_dryrun_lake_cleanup(lake_root: Path | None) -> Generator[None, None, None]:
     """Remove the ephemeral ``--dry-run`` temp lake on ANY exit (best-effort).
 
     ``None`` (a live / ``--inspect`` pull — no ephemeral lake) is a no-op. Entered
