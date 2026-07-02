@@ -14,6 +14,7 @@ local disk backend was removed, so there is no local-mint path to test.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import cast
@@ -24,6 +25,7 @@ from brutex.adapters.groww.constants import (
     GROWW_TOKEN_CACHE_PATH_ENV,
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
 )
+from brutex.adapters.groww.errors import GrowwAuthError
 from brutex.adapters.groww.reauth import SdkRefresher
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
 from brutex.adapters.groww.token_store_aws import (
@@ -111,7 +113,16 @@ class TestColdStartReadsSharedToken:
 
 
 class TestReadOnlyMintBlocked:
-    """BruteX is READ-ONLY: reaching a mint (absent shared token) fails LOUD, never silent."""
+    """The PRIMITIVE path (no re-read hook wired): a mint that IS reached is blocked at the write.
+
+    Pins the SdkRefresher PRIMITIVE's legacy last line of defence for a caller that threads
+    ONLY ``load``/``store`` (NOT the ``readonly_reread`` hook): the cold-start miss still
+    reaches the mint and the read-only store's fail-loud ``store`` blocks the WRITE. The
+    PRODUCTION wiring (``build_live_client`` — ``readonly_reread`` wired iff the store is
+    read-only) never even reaches the mint on a cold start — proven in
+    :class:`TestReadOnlyColdStartNeverMintsProductionWiring` below
+    (DEC-REAUTH-COLDSTART-READONLY-001, audit C-2).
+    """
 
     def test_absent_token_mint_fails_fast(self) -> None:
         fake = FakeAwsClient()  # no shared token minted yet
@@ -134,6 +145,48 @@ class TestReadOnlyMintBlocked:
         with pytest.raises(TokenBrokerReadOnlyError):
             _store(fake).store(_CREDS, "TOK", now_utc=_NOW)
         assert fake.parameters == {}  # nothing ever written to SSM
+
+
+class TestReadOnlyColdStartNeverMintsProductionWiring:
+    """DEC-REAUTH-COLDSTART-READONLY-001 (audit C-2) — the PRODUCTION wiring never cold-mints.
+
+    With the refresher wired EXACTLY as ``build_live_client`` wires a read-only store
+    (``readonly_reread=store.load``), a COLD START against an absent/unreachable shared
+    token bounded-retries the READ then fails LOUD with the actionable SSM-parameter error —
+    the mint seam NEVER fires. Previously the REAL Groww mint fired BEFORE the read-only
+    store blocked the WRITE (audit C-2): a stray mint may invalidate the token the OTHER
+    consumer app is actively using — vendor single-active-token behaviour UNVERIFIED, so a
+    mint is treated as dangerous. These tests FAIL against the pre-fix code (the minter
+    fires once and the raise is the write-block, not the pre-mint cold-start error).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Skip the bounded cold-start READ back-off sleeps (their values are pinned in
+        ``test_groww_reauth.py::TestReadOnlyColdStartNeverMints``)."""
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    def test_absent_token_cold_start_never_mints(self) -> None:
+        fake = FakeAwsClient()  # the Lambda has not minted the shared token yet
+        minter = _CountingMinter()
+        with pytest.raises(GrowwAuthError) as ei:
+            _readonly_refresher(_store(fake), minter)
+        assert minter.mints == 0  # THE regression teeth: the mint network call NEVER fired
+        # The pre-mint cold-start guard raised, NOT the store's mint-write block.
+        assert not isinstance(ei.value, TokenBrokerReadOnlyError)
+        message = str(ei.value)
+        assert _TOKEN_PATH in message  # names the exact SSM parameter
+        assert "deploy/aws_token_minter/deploy.sh" in message  # names the operator fix
+        assert fake.parameters == {}  # nothing was ever written to SSM
+
+    def test_unreachable_store_cold_start_never_mints(self) -> None:
+        fake = FakeAwsClient(fail_get_parameter=True)  # IAM/region/network failure ⇒ read miss
+        minter = _CountingMinter()
+        with pytest.raises(GrowwAuthError) as ei:
+            _readonly_refresher(_store(fake), minter)
+        assert minter.mints == 0
+        assert not isinstance(ei.value, TokenBrokerReadOnlyError)
+        assert fake.parameters == {}
 
 
 class TestForcedReauthWithoutReReadHookStillFailsLoud:

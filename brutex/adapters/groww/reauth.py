@@ -96,6 +96,30 @@ NEVER mints, it RE-READS the shared token:
   reauth-deadline transient, DEC-GROWW-REAUTH-DEADLINE-001) so the window quarantines +
   re-pulls LATER — never an infinite loop, never a crash. The reauth cap
   (``max_reauths`` at the call site) still bounds it.
+
+READ-ONLY COLD START NEVER MINTS (DEC-REAUTH-COLDSTART-READONLY-001) — the read-only
+guard now runs BEFORE any network mint (closes audit finding C-2, MAJOR / auth risk):
+
+* Previously the read-only-ness was enforced ONLY at the store WRITE: a COLD START
+  (:meth:`SdkRefresher.__init__` → ``_cold_start_sdks``) with the token store
+  absent/unreachable (``load`` degrades ANY failure to a miss) fell straight into
+  ``_mint_and_cache_sdks``, which fired the REAL Groww ``get_access_token`` network mint
+  FIRST and only THEN hit the read-only store's fail-loud ``store`` — the dangerous mint
+  had ALREADY happened. Under the centralized-token architecture (DEC-AWS-ONLY-CREDS-001:
+  the ``groww-token-minter`` Lambda is the SOLE minter; BruteX + TickVault are read-only
+  consumers of ONE shared SSM SecureString) a BruteX-side mint may invalidate the token
+  TickVault is actively using — the vendor's single-active-token behaviour is UNVERIFIED,
+  so a stray mint is treated as DANGEROUS (Golden Rule #1).
+* NOW: when the refresher is in read-only mode (``readonly_reread`` wired —
+  ``build_live_client`` passes it iff the resolved store reports ``readonly``, the
+  production default under DEC-AWS-ONLY-CREDS-001), the cold-start loop BOUNDED-RETRIES
+  THE READ (the SAME ``GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS`` budget + back-off, sleeping
+  outside any lock — the Lambda's ~06:05-IST mint may land any moment) and, when the
+  budget exhausts with still no readable token, FAILS LOUD with a precise, actionable
+  :class:`~brutex.adapters.groww.errors.GrowwAuthError` naming the RESOLVED SSM parameter
+  + the operator fix — it can NEVER reach the mint call. The mint path remains ONLY for
+  explicitly non-read-only configs (``readonly_reread`` is ``None`` — local dev / callers
+  injecting their own hooks), byte-identical to before.
 """
 
 from __future__ import annotations
@@ -119,9 +143,13 @@ from brutex.adapters.groww.constants import (
     GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS,
     GROWW_TOKEN_ISSUANCE_RETRY_BASE_S,
     GROWW_TOKEN_ISSUANCE_RETRY_CAP_S,
+    GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
+    GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV,
+    resolve_token_param_path,
 )
 from brutex.adapters.groww.deadline import run_with_deadline
 from brutex.adapters.groww.errors import (
+    GrowwAuthError,
     GrowwTokenIssuanceThrottled,
     GrowwTokenStillStaleError,
     from_groww_exception,
@@ -139,6 +167,45 @@ _LOG = structlog.get_logger("brutex.adapters.groww.reauth")
 def _now_utc() -> datetime:
     """The current UTC instant — the token cache's production clock (injectable in tests)."""
     return datetime.now(tz=UTC)
+
+
+def _issuance_backoff(attempt: int) -> float:
+    """The bounded cold-start back-off (seconds) before retry *attempt* + 1.
+
+    ONE formula (CLAUDE.md §11 COMMON) shared by the throttled-mint retry and the
+    read-only cold-start READ retry (DEC-REAUTH-COLDSTART-READONLY-001): exponential from
+    :data:`GROWW_TOKEN_ISSUANCE_RETRY_BASE_S`, capped at
+    :data:`GROWW_TOKEN_ISSUANCE_RETRY_CAP_S` so the total cold-start wait stays well under
+    a pull deadline. O(1).
+    """
+    return min(GROWW_TOKEN_ISSUANCE_RETRY_BASE_S * (2.0**attempt), GROWW_TOKEN_ISSUANCE_RETRY_CAP_S)
+
+
+def _readonly_cold_start_error(attempts: int) -> GrowwAuthError:
+    """The LOUD, actionable cold-start error for a read-only host with no readable token.
+
+    DEC-REAUTH-COLDSTART-READONLY-001 (audit C-2). Names the RESOLVED SSM parameter (the
+    env override :data:`GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV` is honoured, so the message
+    points at the parameter that was ACTUALLY read) + the operator fix. Raised INSTEAD of
+    ever reaching the local mint — this host is a strictly read-only consumer of the shared
+    daily token (the ``groww-token-minter`` Lambda is the SOLE minter,
+    DEC-AWS-ONLY-CREDS-001); a BruteX-side mint could invalidate the token TickVault is
+    actively using (vendor single-active-token behaviour UNVERIFIED — treated as dangerous).
+    Contains NO secret values. O(1).
+    """
+    param = resolve_token_param_path(
+        GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV, GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT
+    )
+    return GrowwAuthError(
+        f"cold start on a READ-ONLY token host: no readable shared Groww access token after "
+        f"{attempts} read attempts — AWS Parameter Store parameter {param!r} is absent or "
+        f"unreachable, and this host NEVER mints (the groww-token-minter Lambda is the sole "
+        f"minter; a local mint could invalidate the shared token another consumer is using). "
+        f"Fix: verify the minter is deployed + ran (deploy/aws_token_minter/deploy.sh; "
+        f"EventBridge mints daily ~06:05 IST), verify this host's IAM reader role grants "
+        f"ssm:GetParameter + kms:Decrypt on {param!r} in the token broker region, then re-run "
+        f"the pull once the parameter is present."
+    )
 
 
 def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs growwapi + network
@@ -200,17 +267,25 @@ class SdkRefresher:
         read-only host self-heals the 06:00-IST rotation with no restart. Same signature as
         ``token_cache_load`` (best-effort — it NEVER raises, returning ``None`` on a miss);
         a re-read that returns a NEW token is adopted, a SAME / ``None`` result raises the
-        retryable :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError`.
+        retryable :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError`. Wiring
+        this ALSO marks the refresher READ-ONLY for the COLD START
+        (DEC-REAUTH-COLDSTART-READONLY-001): a cold start with no readable token
+        bounded-retries the READ then fails LOUD — it NEVER reaches the local mint.
 
     Raises
     ------
     GrowwAuthError
         If the INITIAL token issuance fails (redacting ``safe_message`` — the secret
-        never leaks), straight from :func:`~brutex.adapters.groww.auth.get_access_token`.
+        never leaks), straight from :func:`~brutex.adapters.groww.auth.get_access_token`;
+        OR — with *readonly_reread* wired (a READ-ONLY host) — if the cold start finds no
+        readable shared token after the bounded READ retries: the loud, actionable
+        :func:`_readonly_cold_start_error` naming the resolved SSM parameter + the fix,
+        raised BEFORE any mint could fire (DEC-REAUTH-COLDSTART-READONLY-001, audit C-2).
     GrowwTokenIssuanceThrottled
         If the cold-start mint is issuance-THROTTLED with no cache to fall back to,
         after the bounded back-off budget is exhausted (a RETRYABLE subclass — the pull
-        quarantines + re-pulls; DEC-GROWW-TOKEN-DISK-CACHE-001).
+        quarantines + re-pulls; DEC-GROWW-TOKEN-DISK-CACHE-001). Non-read-only mode only
+        (a read-only cold start never mints, so it can never be issuance-throttled).
     """
 
     __slots__ = (
@@ -305,9 +380,18 @@ class SdkRefresher:
 
         1. Read the on-disk daily token. A VALID same-session token builds the SDKs with
            NO network mint (the cache hit that collapses the 3-phase storm to one mint).
-        2. On a MISS, mint a fresh token. On success, WRITE the cache (best-effort) so
-           the other phases/processes reuse it, then build the SDKs.
-        3. If the mint is issuance-THROTTLED (no cache), re-check the cache (a racing
+        2. On a MISS in READ-ONLY mode (:attr:`_readonly_reread` wired — the resolved store
+           NEVER mints, DEC-REAUTH-COLDSTART-READONLY-001 / audit C-2): bounded-RETRY the
+           READ (the Lambda's ~06:05-IST mint may land any moment) and, when the budget is
+           exhausted with still no readable token, FAIL LOUD with the actionable
+           :func:`_readonly_cold_start_error` — the mint call below is UNREACHABLE in
+           read-only mode by construction. Previously this path fired the REAL network mint
+           FIRST and only the subsequent store WRITE failed loud — the dangerous mint (which
+           may invalidate the shared token another consumer is actively using; vendor
+           single-active-token behaviour UNVERIFIED) had already happened.
+        3. On a MISS in non-read-only mode, mint a fresh token. On success, WRITE the cache
+           (best-effort) so the other phases/processes reuse it, then build the SDKs.
+        4. If the mint is issuance-THROTTLED (no cache), re-check the cache (a racing
            phase/process may have just written one) and, while the bounded attempt budget
            remains, sleep a small back-off + retry. When the budget is exhausted with no
            cache, re-raise the RETRYABLE :class:`~brutex.adapters.groww.errors.\
@@ -325,6 +409,20 @@ class SdkRefresher:
                 _LOG.info("groww.token.cache_hit", session=cached.issued_for_session.isoformat())
                 self._current_token = cached.access_token
                 return self._build_sdks(cached.access_token)
+            if self._readonly_reread is not None:
+                # READ-ONLY COLD START (DEC-REAUTH-COLDSTART-READONLY-001, audit C-2): this
+                # host NEVER mints — the guard runs BEFORE the mint call, not after it at the
+                # store write. Bounded-retry the READ, then fail LOUD + actionable.
+                if attempt == attempts - 1:
+                    raise _readonly_cold_start_error(attempts)
+                backoff = _issuance_backoff(attempt)
+                _LOG.warning(
+                    "groww.token.readonly_cold_start_retry",
+                    attempt=attempt + 1,
+                    backoff_s=backoff,
+                )
+                time.sleep(backoff)
+                continue
             try:
                 sdks, token = self._mint_and_cache_sdks()
                 self._current_token = token
@@ -336,10 +434,7 @@ class SdkRefresher:
                 # phase/process may have just written one).
                 if attempt == attempts - 1:
                     raise
-                backoff = min(
-                    GROWW_TOKEN_ISSUANCE_RETRY_BASE_S * (2.0**attempt),
-                    GROWW_TOKEN_ISSUANCE_RETRY_CAP_S,
-                )
+                backoff = _issuance_backoff(attempt)
                 _LOG.warning(
                     "groww.token.issuance_throttled_backoff",
                     attempt=attempt + 1,
