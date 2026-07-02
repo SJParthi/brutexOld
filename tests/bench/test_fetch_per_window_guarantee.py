@@ -68,7 +68,12 @@ from brutex.adapters.groww.chunks import plan_candle_windows
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
 from brutex.adapters.groww.option_ingest import run_groww_option_ingest
-from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
+from brutex.adapters.groww.strike_chain_bound import (
+    DEFAULT_DEEP_EMPTY_RETRY,
+    DEFAULT_STRIKE_BAND,
+    StrikeChainBudget,
+    build_empty_retry_budget,
+)
 from brutex.adapters.protocol import DerivativeContract
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
@@ -155,6 +160,21 @@ def _liquid_symbols(
         c.symbol
         for c in contracts
         if c.strike is None or abs(c.strike - center) <= liquid_half_width * step
+    )
+
+
+def _hermetic_budget(contracts: Sequence[DerivativeContract]) -> StrikeChainBudget:
+    """Build the empty-retry budget with the band/deep defaults passed EXPLICITLY.
+
+    Hermeticity (hostile-review polish): ``build_empty_retry_budget`` resolves ``band`` /
+    ``deep_attempts`` from ``BRUTEX_FNO_STRIKE_BAND`` / ``BRUTEX_FNO_DEEP_EMPTY_RETRY`` when
+    they are ``None``, while this gate's ceilings hardcode the 1.2 pass allowance and the
+    measured margins are deliberately razor-thin (2.3988 vs 2.4037). Passing the audited
+    defaults explicitly pins the replay to the shipped configuration, so an operator env var
+    set in the CI shell can never spuriously fail (or flatter) the gate.
+    """
+    return build_empty_retry_budget(
+        contracts, band=DEFAULT_STRIKE_BAND, deep_attempts=DEFAULT_DEEP_EMPTY_RETRY
     )
 
 
@@ -297,7 +317,7 @@ def test_empty_retry_bounding_single_chunk_pin() -> None:
     :func:`test_production_shaped_fetch_per_window_gate`.
     """
     contracts = _build_chain(n_strikes_per_side=40)
-    budget = build_empty_retry_budget(contracts)
+    budget = _hermetic_budget(contracts)
     fetches, windows, bars = _run(contracts, empty_retry_by_symbol=dict(budget.by_symbol) or None)
 
     fpw = fetches / windows
@@ -326,7 +346,7 @@ def test_baseline_without_bounding_exceeds_ceiling() -> None:
         "the chain is not representative (the gate would not have teeth)"
     )
 
-    budget = build_empty_retry_budget(contracts)
+    budget = _hermetic_budget(contracts)
     _bounded_fetches, _bounded_windows, bounded_bars = _run(
         contracts, empty_retry_by_symbol=dict(budget.by_symbol) or None
     )
@@ -377,7 +397,7 @@ def test_production_shaped_fetch_per_window_gate() -> None:
         "the single-chunk LAB shape; re-derive the ceiling + the MIGRATION.md claim"
     )
 
-    budget = build_empty_retry_budget(contracts)
+    budget = _hermetic_budget(contracts)
     fetches, windows, bars = _run(
         contracts,
         empty_retry_by_symbol=dict(budget.by_symbol) or None,
@@ -391,6 +411,14 @@ def test_production_shaped_fetch_per_window_gate() -> None:
     # (2) The derived ceiling: structural chunks × the pinned per-window pass allowance for
     # options, plus each liquid future's structural chunks once — derived from the replayed
     # chain, never a hand-picked constant (and never the flattering single-chunk 1.2).
+    #
+    # EXACTNESS PRECONDITION (hostile-review polish): weighting the summed option chunks by the
+    # flat 1.2 pass allowance is exact ONLY because the option-chunk count is UNIFORM here (all
+    # options share the one expiry `_EXPIRY` → identically 2 chunks, asserted in (1)); with a
+    # uniform chunk count, Σ(chunks·passes) ≤ chunks · Σpasses ≤ chunks · 1.2 · n_opt factors
+    # cleanly. If this chain ever mixes expiries (non-uniform chunk counts), passes and chunks
+    # correlate per contract and the flat weighting must be re-derived per chunk-count group
+    # (e.g. Σ over groups of chunks_g · 1.2 · n_g), not assumed.
     derived_ceiling = (
         sum(structural[s] for s in option_symbols) * _FPW_CEILING_SINGLE_CHUNK
         + sum(structural[s] for s in future_symbols)
