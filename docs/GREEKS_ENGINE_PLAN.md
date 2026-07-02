@@ -991,7 +991,7 @@ docs-only, operator-overridable.
 ### 15.10 Derived-timeframe propagation — CLOSE-SNAPSHOT, never aggregated (LOCKED semantics, `DEC-GREEKS-ENGINE-PR1-001`)
 
 > Operator-directed semantics lock (2026-07-02, recorded in the Phase-1 PR
-> `DEC-GREEKS-ENGINE-PR1-001`, MIGRATION.md #1091). This section LOCKS the rule
+> `DEC-GREEKS-ENGINE-PR1-001`, MIGRATION.md #1094). This section LOCKS the rule
 > only; the implementation lands with the resample-consuming surfaces
 > (Phase 2b / 3), same as the rest of §15.
 
