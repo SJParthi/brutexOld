@@ -184,7 +184,16 @@ class LakeOptionBarSource:
         base = self._lake_root / "bars" / exchange / _FNO_SEGMENT / symbol / _INTERVAL
         bars: dict[datetime, OptionBar] = {}
         if base.is_dir() and any(base.rglob("*.parquet")):
-            frame: pl.DataFrame = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+            # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): the enrich
+            # pass appends nullable Greeks columns to OPTION month partitions
+            # (plan §15.3), so one contract's tree can mix the raw 7-column and
+            # the 17-column shape; `_row_to_option_bar` reads named keys, so
+            # extra/absent overlay columns are irrelevant here.
+            frame: pl.DataFrame = pl.scan_parquet(
+                base.as_posix() + "/**/*.parquet",
+                missing_columns="insert",
+                extra_columns="ignore",
+            ).collect()
             strike_dec = Decimal(strike)
             for row in frame.iter_rows(named=True):
                 bar = _row_to_option_bar(row, side=option_type, strike=strike_dec)

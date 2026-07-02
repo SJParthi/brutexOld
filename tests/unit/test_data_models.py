@@ -6,7 +6,92 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from brutex.data.models import CandleBar, CatalogEntry, OptionBar
+from brutex.data.models import (
+    GREEKS_OVERLAY_FIELDS,
+    GREEKS_PROVENANCE_ID_BOUND,
+    CandleBar,
+    CatalogEntry,
+    FnoGreeksBar,
+    OptionBar,
+)
+
+# ────────────────────────────────────────────────────────────────────────
+# FnoGreeksBar (DEC-GREEKS-ENGINE-PR2B-001 — the Greeks-overlay bar)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _greeks_bar(**overrides: object) -> FnoGreeksBar:
+    """A fully-populated enriched bar; keyword overrides poke one field."""
+    fields: dict[str, object] = {
+        "timestamp": _ts(),
+        "open": Decimal("200.00"),
+        "high": Decimal("205.00"),
+        "low": Decimal("195.00"),
+        "close": Decimal("200.00"),
+        "volume": 10,
+        "open_interest": 100,
+        "iv": 0.125,
+        "delta": 0.53,
+        "gamma": 0.00087,
+        "theta": -8.68,
+        "vega": 14.31,
+        "rho": 3.2,
+        "spot_at_bar": Decimal("21500.00"),
+        "t_years_used": 0.0281,
+        "rate_used": 0.065,
+        "greeks_provenance_id": 1_050_000,
+    }
+    fields.update(overrides)
+    return FnoGreeksBar(**fields)  # type: ignore[arg-type]
+
+
+class TestFnoGreeksBarHappyPath:
+    def test_full_overlay_constructs_and_is_a_candlebar(self) -> None:
+        bar = _greeks_bar()
+        assert isinstance(bar, CandleBar)
+        assert bar.iv == 0.125
+        assert bar.greeks_provenance_id == 1_050_000
+
+    def test_defaults_are_all_none(self) -> None:
+        bar = FnoGreeksBar(
+            timestamp=_ts(),
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("1"),
+            close=Decimal("1.5"),
+            volume=1,
+            open_interest=None,
+        )
+        assert all(getattr(bar, name) is None for name in GREEKS_OVERLAY_FIELDS)
+
+
+class TestFnoGreeksBarValidation:
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_greek_rejected(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            _greeks_bar(iv=bad)
+
+    @pytest.mark.parametrize(
+        "field", ["iv", "delta", "gamma", "theta", "vega", "rho", "t_years_used", "rate_used"]
+    )
+    def test_every_float_field_checks_finiteness(self, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            _greeks_bar(**{field: float("nan")})
+
+    @pytest.mark.parametrize("bad_spot", [Decimal("0"), Decimal("-1")])
+    def test_non_positive_spot_rejected(self, bad_spot: Decimal) -> None:
+        with pytest.raises(ValueError, match="spot_at_bar"):
+            _greeks_bar(spot_at_bar=bad_spot)
+
+    @pytest.mark.parametrize("pid", [-1, GREEKS_PROVENANCE_ID_BOUND])
+    def test_out_of_range_provenance_rejected(self, pid: int) -> None:
+        with pytest.raises(ValueError, match="greeks_provenance_id"):
+            _greeks_bar(greeks_provenance_id=pid)
+
+    def test_price_invariants_still_enforced(self) -> None:
+        with pytest.raises(ValueError, match="high"):
+            _greeks_bar(high=Decimal("100"))  # high < low → the shared OHLC guard
+
 
 # ────────────────────────────────────────────────────────────────────────
 # CandleBar

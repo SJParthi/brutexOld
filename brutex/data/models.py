@@ -8,6 +8,9 @@ inspect them without installing P2 data-lake dependencies.
 
 * :class:`CandleBar` — one OHLCV bar (spot underlying), in the
   normalised lake layout produced by the vendor parser.
+* :class:`FnoGreeksBar` — one ENRICHED F&O option 1-minute bar: the 7 OHLCV
+  fields plus the ten nullable Greeks-overlay fields the generation-time
+  Greeks store appends (`DEC-GREEKS-GENERATION-TIME-001`, plan §15.3).
 * :class:`OptionBar` — one expired-option OHLC bar (one ``ce`` / ``pe``
   side) from the vendor's rolling-option endpoint; carries the resolved
   ``strike`` / ``spot`` / ``iv`` the rolling endpoint stamps per bar.
@@ -17,6 +20,7 @@ inspect them without installing P2 data-lake dependencies.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -119,6 +123,101 @@ class CandleBar:
             volume=self.volume,
             open_interest=self.open_interest,
         )
+
+
+#: The ten nullable Greeks-overlay columns appended after ``open_interest`` in an
+#: ENRICHED F&O 1-minute partition (`DEC-GREEKS-GENERATION-TIME-001`, plan §15.3 /
+#: ADR-0015 D11) — the ONE canonical field/column ORDER shared by
+#: :class:`FnoGreeksBar`, the :mod:`brutex.data.parquet_writer` render/read-back, and
+#: :mod:`brutex.data.fno_candle_lake` (CLAUDE.md §11 COMMON; never re-declared).
+#: ``iv``…``rho`` are FULL-precision floats (DEC-MONEY-2DP-001 forbids rounding
+#: statistical values); ``spot_at_bar`` is the ONE 2dp-snapped price;
+#: ``t_years_used`` / ``rate_used`` / ``greeks_provenance_id`` are the mandatory
+#: model-input provenance stamp (§15.3 — a bare Greek with no stamp would re-create
+#: the silent-staleness hazard §6 warns against).
+GREEKS_OVERLAY_FIELDS: Final[tuple[str, ...]] = (
+    "iv",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+    "spot_at_bar",
+    "t_years_used",
+    "rate_used",
+    "greeks_provenance_id",
+)
+
+#: Exclusive upper bound of a stored ``greeks_provenance_id`` — the value is written
+#: to a Parquet ``Int32`` column, so it must fit a signed 32-bit non-negative range.
+GREEKS_PROVENANCE_ID_BOUND: Final[int] = 2**31
+
+
+@dataclass(frozen=True, slots=True)
+class FnoGreeksBar(CandleBar):
+    """One ENRICHED F&O option 1-minute bar: OHLCV+OI plus the Greeks overlay.
+
+    The dedicated bar type of the generation-time Greeks store
+    (`DEC-GREEKS-GENERATION-TIME-001`, plan §15.3 "Bar-model note"): a frozen
+    slotted subclass of :class:`CandleBar` carrying the ten nullable overlay
+    fields (:data:`GREEKS_OVERLAY_FIELDS`), so a plain spot ``CandleBar`` never
+    carries always-``None`` Greek fields and every existing sink/writer accepts
+    it unchanged (``isinstance(bar, CandleBar)`` holds). The 7 OHLCV fields
+    reuse :func:`_validate_price_bar`; the Greek fields validate their own
+    envelope (finite-or-``None`` — a NaN / inf Greek is never stored, mirroring
+    the kernel's never-NaN contract) and skip price validation.
+
+    Attributes
+    ----------
+    iv, delta, gamma, theta, vega, rho
+        The solved Greeks — full-precision floats, or ``None`` when honestly
+        unsolvable (the stamped-NULL family of plan §15.8).
+    spot_at_bar
+        Underlying spot close at the SAME minute (₹ Decimal, 2dp-snapped at
+        the write boundary), or ``None`` when no spot minute exists.
+    t_years_used, rate_used
+        The time-to-expiry / risk-free inputs frozen into THIS bar's Greeks
+        (``None`` on a NULL-Greeks bar — no input was consumed).
+    greeks_provenance_id
+        The packed provenance stamp (:mod:`brutex.data.greeks_enrich`), the
+        staleness-detection key. ``None`` only on a never-enriched bar.
+    """
+
+    iv: float | None = None
+    delta: float | None = None
+    gamma: float | None = None
+    theta: float | None = None
+    vega: float | None = None
+    rho: float | None = None
+    spot_at_bar: Decimal | None = None
+    t_years_used: float | None = None
+    rate_used: float | None = None
+    greeks_provenance_id: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_price_bar(
+            owner="FnoGreeksBar",
+            timestamp=self.timestamp,
+            open_=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+            open_interest=self.open_interest,
+        )
+        for name in ("iv", "delta", "gamma", "theta", "vega", "rho", "t_years_used", "rate_used"):
+            value: float | None = getattr(self, name)
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"FnoGreeksBar.{name} must be finite or None, got {value!r}")
+        if self.spot_at_bar is not None and self.spot_at_bar <= 0:
+            raise ValueError(
+                f"FnoGreeksBar.spot_at_bar must be positive or None, got {self.spot_at_bar}"
+            )
+        pid = self.greeks_provenance_id
+        if pid is not None and not (0 <= pid < GREEKS_PROVENANCE_ID_BOUND):
+            raise ValueError(
+                f"FnoGreeksBar.greeks_provenance_id must be a non-negative Int32, got {pid}"
+            )
 
 
 #: The two option legs the rolling-option endpoint returns per call.
