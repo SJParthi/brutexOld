@@ -220,9 +220,28 @@ cd deploy/aws_token_minter
    are no-ops (it guards with `head-bucket` / `describe-table`). See §2b.
 3. **`terraform init`** — downloads the AWS/archive/null providers and wires the
    S3 + DynamoDB backend (via `-backend-config`).
-4. **`terraform apply`** — Terraform **shows you the full plan and stops, waiting for
+4. **Adopts pre-existing resources into the state** (`DEC-DEPLOY-AUTO-FIRST-MINT-001`)
+   — if any of the stack's 7 name-fixed resources (the `access-token` SSM param, the
+   3 IAM roles, the Lambda log group, the Lambda function, the EventBridge invoke
+   permission) already **exists in AWS but is missing from the remote state** — the
+   classic local→remote state-migration gap (§2b), or an out-of-band creation — it is
+   `terraform import`-ed automatically, so the apply never dies with
+   `ParameterAlreadyExists` / `EntityAlreadyExists` (409). Idempotent: already-in-state
+   and not-yet-created resources are honest one-line no-ops; a **failed import
+   hard-stops the deploy** with the verbatim Terraform error (it never continues into
+   a doomed apply).
+5. **`terraform apply`** — Terraform **shows you the full plan and stops, waiting for
    you to type `yes`.** Nothing is created until you confirm. This script **never**
    passes `-auto-approve` — a human confirms every apply.
+6. **First token mint** (`DEC-DEPLOY-AUTO-FIRST-MINT-001`) — invokes the
+   freshly-applied minter Lambda **once** and verifies the response reports
+   `ok: true`, printing an honest `FIRST MINT: PASS` / `FAIL` line. The shared
+   `access-token` param is therefore **live the moment the deploy finishes** — you
+   never run a manual `aws lambda invoke`, and there is no empty-token window until
+   the next 06:05 IST cron. A mint failure prints the exact error text and **exits
+   non-zero** so you SEE it. Re-running `./deploy.sh` re-mints once per deploy —
+   harmless: the Lambda is the sole token writer and the SSM write is
+   last-writer-wins (`PutParameter Overwrite=True`).
 
 **What it creates** (all in `ap-south-1`, all least-privilege):
 
@@ -326,6 +345,16 @@ the remote state. `deploy.sh` itself always runs a plain `terraform init` (never
 `-migrate-state`), so it never silently moves your state; the migration above is a
 deliberate, one-time, confirm-`yes` step.
 
+> **Didn't migrate (or can't — the laptop with the old local state is gone)?**
+> `deploy.sh` step 4 (`DEC-DEPLOY-AUTO-FIRST-MINT-001`) now **auto-adopts** the 7
+> name-fixed resources (`terraform import`s each one that exists in AWS but is
+> missing from the remote state), so the fresh-clone
+> `ParameterAlreadyExists` / `EntityAlreadyExists` conflicts self-heal and the
+> apply converges. The `-migrate-state` path above remains the cleaner option when
+> you still HAVE the local state (it carries the FULL state, not just the 7
+> adoptable resources); once the state is shared in S3 this gap cannot recur — the
+> preflight then just prints seven "already in state (no-op)" lines.
+
 > **Before / after.** *Before:* local state → a fresh clone loses it → `apply`
 > tries to re-create existing resources → `EntityAlreadyExists` conflicts. *After:*
 > state in S3 (+ DynamoDB lock) → any clone on any machine reads the same state →
@@ -387,7 +416,20 @@ full contract.)
 
 Three checks, top to bottom.
 
-### 4a. Trigger one mint on demand (don't wait for 06:05)
+### 4a. The first mint already ran — check its PASS line
+
+You do **not** trigger the first mint by hand any more: `./deploy.sh` invoked the
+Lambda itself right after the apply (step 6/6, `DEC-DEPLOY-AUTO-FIRST-MINT-001`)
+and printed the verdict:
+
+```
+FIRST MINT: PASS — {"ok": true, "attempts": 1, "token_param": ".../access-token"}
+```
+
+If it printed `FIRST MINT: FAIL`, the deploy exited **non-zero** with the exact
+error — fix the cause (usually a wrong/missing credential param, §1c) and re-run
+`./deploy.sh`. To re-mint on demand later (idempotent — the Lambda is the sole
+writer):
 
 ```bash
 cd deploy/aws_token_minter
@@ -458,7 +500,8 @@ Once deployed, this runs itself — **zero clicks per day** (project rules §11)
 
 | Symptom | Likely cause → fix |
 |---------|--------------------|
-| **BruteX: "no token in Parameter Store" / the `access-token` param does not exist** | The minter has never run. **Deploy the minter first** (§2), then invoke it once (§4a). Until the Lambda writes it, the token param does not exist. |
+| **BruteX: "no token in Parameter Store" / the `access-token` param does not exist** | The minter has never run. **Deploy the minter** (§2) — `./deploy.sh` triggers the first mint itself as its final step (`FIRST MINT: PASS`, §4a) and exits non-zero if that mint failed, so a completed deploy means the token exists. If a past deploy failed at the mint step, fix the cause and re-run `./deploy.sh` (or invoke once by hand, §4a). |
+| **`terraform apply`: `ParameterAlreadyExists` / `EntityAlreadyExists` (409) on the token param / IAM roles / log group / Lambda** | The resources exist in AWS but the remote state does not know them (a stack first deployed under the OLD local state, or created out-of-band). `./deploy.sh` step 4 now **auto-adopts** all 7 name-fixed resources (`terraform import`, idempotent — see §2 and §2b) — re-run `./deploy.sh`. If an import itself fails, the script stops with the verbatim Terraform error; fix that and re-run. |
 | **`AccessDenied` reading the token from BruteX** | The BruteX machine's AWS identity lacks `ssm:GetParameter` **or** `kms:Decrypt` on the token. Attach the `reader-brutex` role's policy (`terraform output reader_brutex_role_arn`) — it grants exactly those two, nothing else. |
 | **`AccessDenied` on `kms:Decrypt` / `KMSAccessDeniedException`** | The identity can `GetParameter` but not decrypt the SecureString. A SecureString read needs BOTH `ssm:GetParameter` and `kms:Decrypt` on `alias/tickvault-groww` (AWS reference [1]). Grant `kms:Decrypt` on that key. |
 | **`ParameterNotFound` for the token, but the api-key/totp-secret exist** | You are pointed at the wrong region, or the minter has not run yet. Check `aws configure get region` is `ap-south-1` and that §4a printed a success. |

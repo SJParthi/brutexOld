@@ -106,11 +106,41 @@ in `brutex/adapters/protocol.py`. Everything else works unchanged.
 
 ## ⚙️ Setup
 
-**Clone and run the dashboard — one command:**
+**Clone → running dashboard — one command (DEC-ONE-COMMAND-UP-001):**
 
 ```bash
 git clone https://github.com/SJParthi/bruteX.git
 cd bruteX
+./up.sh             # ANY state → running dashboard ready to pull, idempotently
+#   → open http://127.0.0.1:9080
+```
+
+`./up.sh` is idempotent and re-runnable from ANY state — a fresh clone, a
+tenth clone, a months-stale checkout, a half-broken venv. It: finds
+`python3.12` (exact per-OS install hint if absent); creates or **self-heals**
+`.venv/` (a stale/broken venv is rebuilt — user data under `~/.brutex` and the
+lake are never touched); installs the runtime + pull extras
+(`[dev,data,ui,groww,token-broker]`) and verifies the pull-critical deps
+(`boto3` / `growwapi` / `pyotp`) one PASS/FAIL line each; builds the
+`fno_math` + `trading_core` Rust kernels when missing (needs `cargo` once —
+they are required, `brutex.indicators.*` import `trading_core` at module top);
+decides the data-lake location with **zero input** (an existing lake is
+auto-detected and recorded permanently, else the default `~/.brutex/lake` is
+created — you never type a path) and enables auto-resume-on-boot, both
+recorded **once** in `~/.brutex/.env` (loaded at every boot — no per-session
+exports ever again);
+runs a self-check chain (deps → AWS identity → Groww daily token readable from
+AWS SSM, strictly read-only — **it never mints a token** — → lake root
+writable), each line PASS or the exact cause + fix; then boots the dashboard
+via the existing `python -m brutex run` entry. Re-running while the dashboard
+is up prints `already ready` and exits in about a second. Without AWS
+credentials the checks degrade honestly: the dashboard still runs, a live pull
+needs the fix each FAIL line names (`aws configure`; token minting lives in
+`deploy/aws_token_minter/`).
+
+### Appendix — manual setup (CI / debugging reference)
+
+```bash
 make run            # turnkey: venv + libs + Rust kernel + launches the server
 #   → open http://127.0.0.1:9080
 ```
