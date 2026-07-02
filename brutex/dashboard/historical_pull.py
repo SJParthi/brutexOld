@@ -587,6 +587,7 @@ def _build_note(
     failed_pairs: int,
     still_failed_windows: int,
     auth_aborted: bool,
+    contracts_not_yet_in_window: int = 0,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -594,6 +595,13 @@ def _build_note(
     the 1-minute phase's outcome — empty selection / dry-run / auth death / quarantine /
     transient residual / clean. The 1-day derivation runs after, quarantined, and never
     enters the note (its failure is logged, not surfaced as a pull outcome).
+
+    *contracts_not_yet_in_window* (DEC-FNO-FAR-EXPIRY-WINDOW-001, display honesty):
+    the clean line's ``completed/selected`` ratio counts the WHOLE selection, so a
+    clean pull with strict-law skips would read like partial failure ("8/12"); when
+    any contract was skipped as not-yet-open the ratio carries the honest breakdown
+    ("8/12 contract(s) (4 not yet in window)") so a skip is never mistaken for a
+    failure. Zero (the default) renders byte-identically to before.
     """
     if contracts_selected == 0:
         return (
@@ -617,9 +625,12 @@ def _build_note(
             f"pulled {windows} windows; {still_failed_windows} transient window(s) still "
             "failing after the re-pull rounds — re-pull to drain them (WindowLedger skips the done)"
         )
+    skipped_suffix = (
+        f" ({contracts_not_yet_in_window} not yet in window)" if contracts_not_yet_in_window else ""
+    )
     return (
-        f"pulled {windows} windows across {contracts_completed}/{contracts_selected} contract(s) "
-        "into the candle lake (rerun-safe — WindowLedger dedups)"
+        f"pulled {windows} windows across {contracts_completed}/{contracts_selected} contract(s)"
+        f"{skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
     )
 
 
@@ -1401,6 +1412,7 @@ def pull_contract_candles(
         failed_pairs=minute.failed_pairs,
         still_failed_windows=minute.still_failed_windows,
         auth_aborted=minute.auth_aborted,
+        contracts_not_yet_in_window=contracts_not_yet_in_window,
     )
     return HistoricalPullReport(
         dry_run=dry_run,

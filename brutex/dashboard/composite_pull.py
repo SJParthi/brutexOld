@@ -360,11 +360,19 @@ def pull_historical_for_underlyings(
         run_parallel=historical_run_parallel,
     )
 
+    # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law
+    # skips would read like partial failure ("8/12") — carry the honest breakdown so
+    # a not-yet-open skip is never mistaken for a failed contract.
+    skipped_suffix = (
+        f" ({historical.contracts_not_yet_in_window} not yet in window)"
+        if historical.contracts_not_yet_in_window
+        else ""
+    )
     note = (
         f"refreshed metadata for {len(tradable)} underlying(s) "
         f"({metadata.contracts_persisted} contract(s)), then pulled "
-        f"{historical.contracts_completed}/{historical.contracts_selected} contract(s) "
-        f"({historical.bars_appended} bar(s))"
+        f"{historical.contracts_completed}/{historical.contracts_selected} contract(s)"
+        f"{skipped_suffix} ({historical.bars_appended} bar(s))"
     )
     return CompositePullReport(
         dry_run=dry_run,

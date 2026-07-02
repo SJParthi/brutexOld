@@ -1383,6 +1383,38 @@ def test_build_note_branches() -> None:
     assert "into the candle lake" in clean
 
 
+def test_build_note_not_yet_in_window_breakdown() -> None:
+    """DEC-FNO-FAR-EXPIRY-WINDOW-001 display honesty: a skip never reads as a failure.
+
+    A clean pull whose selection included not-yet-open contracts would render
+    "8/12 contract(s)" — indistinguishable from 4 failures — so the clean line
+    carries the honest breakdown; zero skips renders byte-identically to before.
+    """
+    with_skips = hp._build_note(
+        dry_run=False,
+        contracts_selected=12,
+        contracts_completed=8,
+        windows=8,
+        failed_pairs=0,
+        still_failed_windows=0,
+        auth_aborted=False,
+        contracts_not_yet_in_window=4,
+    )
+    assert "8/12 contract(s) (4 not yet in window)" in with_skips
+
+    without_skips = hp._build_note(
+        dry_run=False,
+        contracts_selected=12,
+        contracts_completed=12,
+        windows=12,
+        failed_pairs=0,
+        still_failed_windows=0,
+        auth_aborted=False,
+    )
+    assert "not yet in window" not in without_skips
+    assert "12/12 contract(s) into the candle lake" in without_skips
+
+
 def test_clean_symbols_excludes_quarantine_and_still_failing() -> None:
     """``_clean_symbols`` returns only the pairs that succeeded with no residual."""
     from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport, OptionPairFailure
@@ -1671,6 +1703,7 @@ def test_pull_skips_not_yet_open_contracts_no_fetch_no_ledger(
     assert set(report.start_dates) == near
     assert far & set(report.phase1_complete) == set()
     assert report.to_dict()["contracts_not_yet_in_window"] == 2
+    assert "3/5 contract(s) (2 not yet in window)" in report.note  # display honesty
     # Each skip logged loudly with its opens_on date.
     events = {e["contract"] for e in logs if e["event"] == "fno.window_not_open"}
     assert events == far
