@@ -229,11 +229,12 @@ def test_deploy_expands_extra_args_safely_under_set_u(deploy_script_text: str) -
     pins the fix (DEC-MINTER-PURE-PYTHON-001 #1069 hostile-review MINOR).
     """
     safe = '"${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"'
-    # Both expansion sites (the ALERT_EMAIL scan loop + the terraform apply) use
-    # the empty-safe idiom.
-    assert deploy_script_text.count(safe) == 2, (
-        f"both EXTRA_ARGS expansions must use the empty-safe {safe} idiom"
+    # All three expansion sites (the ALERT_EMAIL scan loop + the adopt-preflight
+    # `terraform import` + the terraform apply) use the empty-safe idiom.
+    assert deploy_script_text.count(safe) == 3, (
+        f"all EXTRA_ARGS expansions must use the empty-safe {safe} idiom"
     )
     # The bare, empty-unsafe forms must be gone.
     assert 'in "${EXTRA_ARGS[@]}"; do' not in deploy_script_text
     assert 'apply "${EXTRA_ARGS[@]}"' not in deploy_script_text
+    assert 'import -input=false "${EXTRA_ARGS[@]}"' not in deploy_script_text
