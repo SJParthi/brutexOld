@@ -258,9 +258,10 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     ),
     "token.read_error": (
         "FAIL token[R7]: SSM token read FAILED with {error_type} — NOT 'token absent'. "
-        "Production cold-start cannot tell these apart: it would perform a REAL local Groww "
-        "mint (possibly revoking the shared token TickVault + the Lambda own) and then crash "
-        "with the MISLEADING 'deploy the minter' error. Fix the reader-side AWS failure "
+        "Production cold-start cannot tell these apart: it fails with a MISLEADING "
+        "deploy-the-minter error (and before DEC-REAUTH-COLDSTART-READONLY-001 it even "
+        "performed a REAL local Groww mint, possibly revoking the shared token TickVault + "
+        "the Lambda own). Fix the reader-side AWS failure "
         "({detail}); a KMS AccessDenied needs kms:Decrypt on the token CMK for this role. Do "
         "NOT deploy anything."
     ),
@@ -1127,8 +1128,11 @@ def _build_kit_client(deps: KitDeps, ctx: KitContext) -> GrowwClientProtocol:
         token_cache_store=_store,
         # A dead-token reauth RE-READS the (unchanged) SSM snapshot instead of
         # minting — surfacing the honest GrowwTokenStillStaleError (M1), never
-        # the kit's own mint-block error masking the vendor rejection.
-        readonly_reread=_load,
+        # the kit's own mint-block error masking the vendor rejection. Under
+        # --mint-anyway with an ABSENT token the re-read hook must stay None:
+        # DEC-REAUTH-COLDSTART-READONLY-001's read-only cold-start guard would
+        # otherwise (correctly) refuse the very mint the operator just forced.
+        readonly_reread=None if mint_allowed else _load,
     )
 
 
