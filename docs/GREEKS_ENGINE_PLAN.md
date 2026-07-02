@@ -987,3 +987,37 @@ Both converge on the one shared `greeks(...)` kernel, pinned by the NEW
 `tests/golden/fixtures/greeks_golden.json`. Per Golden Rule #10 nothing here is
 shipped: this refinement is the LOCKED TARGET for the gated build PRs, PROPOSED,
 docs-only, operator-overridable.
+
+### 15.10 Derived-timeframe propagation — CLOSE-SNAPSHOT, never aggregated (LOCKED semantics, `DEC-GREEKS-ENGINE-PR1-001`)
+
+> Operator-directed semantics lock (2026-07-02, recorded in the Phase-1 PR
+> `DEC-GREEKS-ENGINE-PR1-001`, MIGRATION.md #1081). This section LOCKS the rule
+> only; the implementation lands with the resample-consuming surfaces
+> (Phase 2b / 3), same as the rest of §15.
+
+When the 19 derived intraday TFs + `1d` are resampled from the stored
+1-minute bars (`resample_1m_to_tf` on the movers / display path;
+`spot_daily_resample` for the daily anchor — DEC-1MINUTE-ONLY-DERIVE-1DAY-001
+#853), the Greeks / IV columns propagate by **LAST-VALUE (close-snapshot)
+resampling — a derived N-minute bar's `iv/delta/gamma/theta/vega/rho` (+ the
+provenance stamp) are EXACTLY the stored values of its LAST constituent
+1-minute bar.** NEVER summed, NEVER averaged, NEVER OHLC-aggregated:
+
+- **Greeks are STATE, not FLOW.** The rule is the same one the bar's `close`
+  already obeys. It is mathematically identical to recomputing the kernel at
+  the derived bar's close instant — same option close, same same-minute spot,
+  same time-to-expiry — so it is zero-recompute, O(1) per derived bar, and
+  bit-identical across every TF (one kernel, one stored tuple, one snapshot
+  rule).
+- **NA propagates honestly.** A derived bar whose last constituent 1-minute
+  bar carries `iv = NULL` (solver non-convergence, missing spot, FUT leg —
+  §15.8) carries the SAME honest NULL + stamp; never backfilled from an
+  earlier constituent minute (that would be a stale-spot fabrication). A
+  derived bar with zero constituent bars does not exist (the resampler emits
+  no bar), so there is no fill case.
+- **IV OHLC aggregation is NOT provided.** Only the close-snapshot is
+  defined; an intrabar IV high/low/open series is explicitly out of scope
+  (no consumer, and it would invite averaging misuse).
+- **Test obligation (for the implementing PR):** property tests that for
+  random 1-minute windows, every derived-TF bar's Greeks equal its last
+  constituent 1-minute bar's Greeks, and that NA propagates.
