@@ -47,6 +47,11 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "popcount_bytes",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
+        "GREEKS_DELTA_ADMISSION_FLOOR",
+        "GREEKS_IV_CLAMP_MAX",
+        "GREEKS_IV_CLAMP_MIN",
+        "GREEKS_T_FLOOR_YEARS",
+        "GREEKS_VEGA_ADMISSION_FLOOR",
         "IMPLEMENTED_MASK",
         "MarketStructureState",
         "PIVOT_LEVELS_LEN",
@@ -63,6 +68,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "evaluate_from_raw",
         "evaluate_spec",
         "evaluate_with_levels",
+        "greeks",
         "minute_of_session",
         "resolve_near_month",
         "total_conditions",
@@ -87,6 +93,7 @@ def test_real_facade_resolves_to_kernel_objects() -> None:
     assert facade.popcount_bytes is fno_math.popcount_bytes
     assert facade.evaluate_with_levels is trading_core.evaluate_with_levels
     assert facade.compute_pivot_levels is trading_core.compute_pivot_levels
+    assert facade.greeks is trading_core.greeks
 
 
 def test_real_kernel_versions_reports_both() -> None:
