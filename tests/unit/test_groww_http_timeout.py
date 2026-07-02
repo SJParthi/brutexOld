@@ -332,3 +332,12 @@ def test_real_growwapi_exposes_the_three_request_helpers() -> None:
         helper = getattr(growwapi.GrowwAPI, method, None)
         assert helper is not None, f"growwapi.GrowwAPI lost {method!r} — the patch would no-op"
         assert callable(helper), f"growwapi.GrowwAPI.{method} is no longer callable"
+
+
+def test_request_method_alias_matches_private_source() -> None:
+    """The kit's public ``REQUEST_METHOD_NAMES`` alias never drifts from the source
+    tuple the timeout patch walks (DEC-DOCTOR-LIVE-PROOF-KIT-001, G2 shape probe)."""
+    from brutex.adapters.groww.http_timeout import _REQUEST_METHOD_NAMES, REQUEST_METHOD_NAMES
+
+    assert REQUEST_METHOD_NAMES == _REQUEST_METHOD_NAMES
+    assert REQUEST_METHOD_NAMES == ("_request_get", "_request_post", "_request_put")
